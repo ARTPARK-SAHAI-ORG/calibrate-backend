@@ -47,7 +47,7 @@ def resolve_dataset_inputs(
         if not items:
             raise HTTPException(status_code=400, detail="Dataset has no items")
 
-        resolved_texts = [i["text"] for i in items]
+        resolved_texts = [str(i["text"]) for i in items]
         resolved_audio = (
             [i["audio_path"] for i in items] if expected_type == "stt" else None
         )

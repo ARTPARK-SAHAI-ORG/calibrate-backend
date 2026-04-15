@@ -214,7 +214,7 @@ def run_tts_evaluation_task(
                     writer = csv.writer(csvfile)
                     writer.writerow(["id", "text"])
                     for idx, text in enumerate(request.texts):
-                        writer.writerow([idx, text])
+                        writer.writerow([idx, str(text)])
 
                 # Create output directory
                 output_dir = temp_path / "output"

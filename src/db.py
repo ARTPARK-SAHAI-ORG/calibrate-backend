@@ -3187,7 +3187,7 @@ def add_dataset_items(
                     item_uuid,
                     dataset_id,
                     item.get("audio_path"),
-                    item["text"],
+                    str(item["text"]),
                     order_index,
                 ),
             )
@@ -3212,7 +3212,11 @@ def get_dataset_item(item_uuid: str, dataset_id: str) -> Optional[Dict[str, Any]
             (item_uuid, dataset_id),
         )
         row = cursor.fetchone()
-        return dict(row) if row else None
+        if row is None:
+            return None
+        item = dict(row)
+        item["text"] = str(item["text"])
+        return item
 
 
 def get_dataset_items(dataset_id: str) -> List[Dict[str, Any]]:
@@ -3224,7 +3228,10 @@ def get_dataset_items(dataset_id: str) -> List[Dict[str, Any]]:
             (dataset_id,),
         )
         rows = cursor.fetchall()
-        return [dict(row) for row in rows]
+        items = [dict(row) for row in rows]
+        for item in items:
+            item["text"] = str(item["text"])
+        return items
 
 
 def get_dataset_items_by_uuids(item_uuids: List[str]) -> List[Dict[str, Any]]:
@@ -3238,7 +3245,10 @@ def get_dataset_items_by_uuids(item_uuids: List[str]) -> List[Dict[str, Any]]:
             f"SELECT * FROM dataset_items WHERE uuid IN ({placeholders}) AND deleted_at IS NULL ORDER BY order_index ASC",
             item_uuids,
         )
-        return [dict(row) for row in cursor.fetchall()]
+        items = [dict(row) for row in cursor.fetchall()]
+        for item in items:
+            item["text"] = str(item["text"])
+        return items
 
 
 def update_dataset_item(

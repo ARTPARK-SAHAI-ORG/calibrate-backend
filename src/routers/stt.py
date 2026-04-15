@@ -223,7 +223,7 @@ def run_evaluation_task(
                         s3.download_file(bucket, key, str(local_audio_path))
 
                         # Write CSV row
-                        writer.writerow([audio_id, gt_text])
+                        writer.writerow([audio_id, str(gt_text)])
 
                 # Create output directory
                 output_dir = temp_path / "output"
