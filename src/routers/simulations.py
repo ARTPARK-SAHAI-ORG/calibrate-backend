@@ -444,6 +444,7 @@ class EvaluationCriterionResult(BaseModel):
     value: float
     reasoning: str
     evaluator_uuid: Optional[str] = None
+    description: Optional[str] = None
 
 
 class SimulationEvaluatorRef(BaseModel):
@@ -451,6 +452,7 @@ class SimulationEvaluatorRef(BaseModel):
 
     evaluator_uuid: str
     name: str  # Current DB name at response time (for stable links use evaluator_uuid)
+    description: Optional[str] = None  # Current DB description at response time
 
 
 class SimulationCaseResult(BaseModel):
@@ -511,7 +513,14 @@ def _snapshot_evaluators_for_job_details(
     evaluators: List[Dict[str, Any]],
 ) -> List[Dict[str, str]]:
     """Persist ordered evaluator UUIDs on the job (same order as calibrate config)."""
-    return [{"uuid": ev["uuid"]} for ev in evaluators if ev.get("uuid")]
+    return [
+        {
+            "uuid": ev["uuid"],
+            "name": ev.get("name") or "",
+        }
+        for ev in evaluators
+        if ev.get("uuid")
+    ]
 
 
 def apply_simulation_job_evaluator_enrichment(
@@ -521,14 +530,17 @@ def apply_simulation_job_evaluator_enrichment(
     """Attach evaluator_uuid from each evaluation_results row's echoed evaluator_id."""
     snaps = details.get("evaluators") or []
     refs: List[SimulationEvaluatorRef] = []
+    current_by_uuid: Dict[str, Optional[Dict[str, Any]]] = {}
     for s in snaps:
         if isinstance(s, dict) and s.get("uuid"):
             uid = s["uuid"]
             ev = get_evaluator(uid)
+            current_by_uuid[uid] = ev
             refs.append(
                 SimulationEvaluatorRef(
                     evaluator_uuid=uid,
-                    name=ev["name"] if ev else "",
+                    name=(ev["name"] if ev else None) or s.get("name") or "",
+                    description=ev.get("description") if ev else None,
                 )
             )
     if simulation_results:
@@ -544,6 +556,11 @@ def apply_simulation_job_evaluator_enrichment(
                 echoed_id = row.get("evaluator_id")
                 if echoed_id:
                     row["evaluator_uuid"] = echoed_id
+                    ev = current_by_uuid.get(echoed_id)
+                    if echoed_id not in current_by_uuid:
+                        ev = get_evaluator(echoed_id)
+                        current_by_uuid[echoed_id] = ev
+                    row["description"] = ev.get("description") if ev else None
     top = refs if refs else None
     return top, simulation_results
 

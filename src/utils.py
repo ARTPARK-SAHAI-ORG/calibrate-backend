@@ -98,6 +98,7 @@ class EvaluatorRunEntry(BaseModel):
     metric_key: str  # key as emitted in metrics.json (derived from CLI/config at run time)
     aggregate: Dict[str, Any]
     name: Optional[str] = None  # filled on API read from DB + job snapshot
+    description: Optional[str] = None  # filled on API read from current DB row
 
 
 class ProviderResult(BaseModel):
@@ -883,11 +884,18 @@ def build_evaluator_runs_for_eval_job(
 
 def enrich_evaluator_runs_with_current_names(
     provider_results: Optional[List[Any]],
+    evaluator_snapshots: Optional[List[Dict[str, Any]]] = None,
 ) -> None:
-    """Mutates each provider result dict in place and refreshes evaluator run names."""
+    """Mutates each provider result dict in place and refreshes evaluator run metadata."""
     if not provider_results:
         return
     from db import get_evaluator
+
+    snapshot_by_uuid = {
+        s["uuid"]: s
+        for s in (evaluator_snapshots or [])
+        if isinstance(s, dict) and s.get("uuid")
+    }
 
     for pr in provider_results:
         runs_raw = pr.get("evaluator_runs")
@@ -898,11 +906,14 @@ def enrich_evaluator_runs_with_current_names(
                 continue
             uid = run.get("evaluator_uuid")
             row = get_evaluator(uid) if uid else None
+            snapshot = snapshot_by_uuid.get(uid) if uid else None
             run["name"] = (
                 (row.get("name") if row else None)
+                or (snapshot.get("name") if snapshot else None)
                 or run.get("metric_key")
                 or ""
             )
+            run["description"] = row.get("description") if row else None
 
 
 def read_leaderboard_xlsx(leaderboard_dir: Path) -> Optional[List[dict]]:

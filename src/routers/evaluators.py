@@ -69,6 +69,12 @@ class EvaluatorVersionCreate(BaseModel):
     variables: Optional[List[VariableSpec]] = None
 
 
+class EvaluatorVersionCreateRequest(EvaluatorVersionCreate):
+    """Request body for adding a version to an existing evaluator."""
+
+    make_live: bool = False
+
+
 EvaluatorTypeLiteral = Literal["tts", "stt", "llm", "simulation"]
 DataTypeLiteral = Literal["text", "audio"]
 
@@ -417,7 +423,7 @@ async def list_versions(
 @router.post("/{evaluator_uuid}/versions", response_model=VersionCreateResponse)
 async def create_version(
     evaluator_uuid: str,
-    payload: EvaluatorVersionCreate,
+    payload: EvaluatorVersionCreateRequest,
     user_id: str = Depends(get_current_user_id),
 ):
     existing = _visible_or_404(get_evaluator(evaluator_uuid), user_id)
@@ -435,6 +441,8 @@ async def create_version(
         )
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
+    if payload.make_live:
+        set_evaluator_live_version(evaluator_uuid, version["uuid"])
     return VersionCreateResponse(
         version_uuid=version["uuid"], version_number=version["version_number"]
     )

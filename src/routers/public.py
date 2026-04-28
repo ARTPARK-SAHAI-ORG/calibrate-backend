@@ -6,6 +6,7 @@ auth middleware by design so that anyone with a valid share_token can view
 the results without logging in.
 
 URL scheme:
+  GET /public/evaluators/defaults?share_token=...&types=stt,tts
   GET /public/stt/{share_token}
   GET /public/tts/{share_token}
   GET /public/test-run/{share_token}
@@ -16,10 +17,13 @@ URL scheme:
 import logging
 from typing import Any, Dict, List, Optional
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Query
 from pydantic import BaseModel
 
 from db import (
+    DEFAULT_EVALUATORS_SEED,
+    get_evaluator_by_slug,
+    get_evaluator_version,
     get_job_by_share_token,
     get_agent_test_job_by_share_token,
     get_simulation_job_by_share_token,
@@ -109,6 +113,19 @@ class PublicSimulationRunResponse(BaseModel):
     error: Optional[str] = None
 
 
+class PublicDefaultEvaluatorVersionResponse(BaseModel):
+    output_config: Optional[Dict[str, Any]] = None
+
+
+class PublicDefaultEvaluatorResponse(BaseModel):
+    uuid: str
+    name: str
+    description: Optional[str] = None
+    evaluator_type: str
+    output_type: str
+    live_version: Optional[PublicDefaultEvaluatorVersionResponse] = None
+
+
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
@@ -194,9 +211,84 @@ def _get_simulation_run_name(job: Dict[str, Any]) -> str:
     return "Run 1"
 
 
+def _ensure_valid_public_share_token(share_token: str) -> None:
+    """Allow metadata reads only for callers that already have a valid public share token."""
+    if (
+        get_job_by_share_token(share_token)
+        or get_agent_test_job_by_share_token(share_token)
+        or get_simulation_job_by_share_token(share_token)
+    ):
+        return
+    raise HTTPException(status_code=404, detail="Not found")
+
+
+def _parse_evaluator_types(types: Optional[str]) -> Optional[set[str]]:
+    if types is None or not types.strip():
+        return None
+
+    allowed = {"stt", "tts", "llm", "simulation"}
+    parsed = {item.strip() for item in types.split(",") if item.strip()}
+    invalid = parsed - allowed
+    if invalid:
+        raise HTTPException(
+            status_code=400,
+            detail=f"types must contain only: {', '.join(sorted(allowed))}",
+        )
+    return parsed
+
+
+def _public_default_evaluator_response(
+    evaluator: Dict[str, Any],
+) -> PublicDefaultEvaluatorResponse:
+    live_version = None
+    if evaluator.get("live_version_id"):
+        version = get_evaluator_version(evaluator["live_version_id"])
+        if version and version.get("evaluator_id") == evaluator["uuid"]:
+            live_version = PublicDefaultEvaluatorVersionResponse(
+                output_config=version.get("output_config")
+            )
+
+    return PublicDefaultEvaluatorResponse(
+        uuid=evaluator["uuid"],
+        name=evaluator["name"],
+        description=evaluator.get("description"),
+        evaluator_type=evaluator.get("evaluator_type", "llm"),
+        output_type=evaluator.get("output_type", "binary"),
+        live_version=live_version,
+    )
+
+
 # ---------------------------------------------------------------------------
 # Public GET endpoints (no auth)
 # ---------------------------------------------------------------------------
+
+
+@router.get(
+    "/evaluators/defaults", response_model=List[PublicDefaultEvaluatorResponse]
+)
+async def get_public_default_evaluators(
+    share_token: str = Query(..., min_length=1),
+    types: Optional[str] = Query(
+        None,
+        description="Comma-separated evaluator types: stt,tts,llm,simulation",
+    ),
+):
+    """
+    Return public-safe default evaluator metadata for callers with a valid public share token.
+
+    This intentionally omits prompts, judge models, owner metadata, and custom/private evaluators.
+    """
+    _ensure_valid_public_share_token(share_token)
+    requested_types = _parse_evaluator_types(types)
+
+    defaults: List[PublicDefaultEvaluatorResponse] = []
+    for seed in DEFAULT_EVALUATORS_SEED:
+        if requested_types is not None and seed["evaluator_type"] not in requested_types:
+            continue
+        evaluator = get_evaluator_by_slug(seed["slug"])
+        if evaluator and evaluator.get("owner_user_id") is None:
+            defaults.append(_public_default_evaluator_response(evaluator))
+    return defaults
 
 
 @router.get("/stt/{share_token}", response_model=PublicSTTResponse)
@@ -222,7 +314,9 @@ async def get_public_stt(share_token: str):
         if pr.get("metrics"):
             pr["metrics"] = normalize_metrics(pr["metrics"])
 
-    enrich_evaluator_runs_with_current_names(provider_results)
+    enrich_evaluator_runs_with_current_names(
+        provider_results, details.get("evaluators") or []
+    )
 
     # Enrich result rows with presigned audio URLs from the dataset
     audio_paths = details.get("audio_paths", [])
@@ -279,7 +373,9 @@ async def get_public_tts(share_token: str):
         if pr.get("metrics"):
             pr["metrics"] = normalize_metrics(pr["metrics"])
 
-    enrich_evaluator_runs_with_current_names(provider_results)
+    enrich_evaluator_runs_with_current_names(
+        provider_results, details.get("evaluators") or []
+    )
 
     # Regenerate presigned audio URLs for completed/failed jobs
     provider_results = _build_tts_provider_results_with_presigned_urls(

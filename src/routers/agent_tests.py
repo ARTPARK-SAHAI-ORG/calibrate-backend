@@ -194,6 +194,7 @@ class JudgeResult(BaseModel):
     """One evaluator's verdict for a response-type test case.
 
     `name` is the **current** evaluator name from the DB (refreshed at every read).
+    `description` is the current evaluator description from the DB (refreshed at every read).
     `evaluator_uuid` is None for legacy runs that pre-date the evaluator-snapshot
     capture or when the evaluator can't be resolved from the snapshot.
     Exactly one of `match` (binary) / `score` (rating) is set per entry; both are
@@ -208,6 +209,7 @@ class JudgeResult(BaseModel):
 
     evaluator_uuid: Optional[str] = None
     name: str
+    description: Optional[str] = None
     reasoning: Optional[str] = None
     match: Optional[bool] = None
     score: Optional[float] = None
@@ -643,7 +645,7 @@ def _build_calibrate_config(
     # response-type evaluators. Each entry carries enough info to reconstruct
     # the API response at read time without re-reading the (possibly edited
     # since) evaluator-version row:
-    #   - {uuid, name}: lookup keys (calibrate name -> uuid; uuid -> current DB name)
+    #   - {uuid, name}: lookup keys (descriptions are read live from the DB)
     #   - output_type: distinguishes binary vs rating in JudgeResult
     #   - variable_values: {{var}} substitutions sent to calibrate (frozen)
     #   - scale_min / scale_max: rating bounds from the pinned version's
@@ -836,17 +838,16 @@ def _enrich_test_results_with_evaluators(
 ) -> None:
     """Mutate ``test_results`` in place: convert each row's raw ``judge_results``
     dict (keyed by calibrate evaluator name) into a structured list of
-    ``{evaluator_uuid, name, reasoning, match, score, variable_values,
-    scale_min, scale_max}`` entries.
+    ``{evaluator_uuid, name, description, reasoning, match, score,
+    variable_values, scale_min, scale_max}`` entries.
 
-    ``name`` reflects the **current** evaluator name from the DB (latest).
+    ``name`` and ``description`` reflect the **current** evaluator row from the DB (latest).
     ``variable_values`` and the rating ``scale_min``/``scale_max`` come from
     the snapshot frozen at submission time, so they always match what the run
     actually used.
 
-    Idempotent: if ``judge_results`` is already a list (e.g. re-enriched), only
-    the ``name`` field is refreshed against the current DB row — the other
-    snapshot-derived fields were already attached on the first pass.
+    Idempotent: if ``judge_results`` is already a list (e.g. re-enriched), the
+    ``name`` and ``description`` fields are refreshed against the current DB row.
     """
     if not test_results:
         return
@@ -870,6 +871,7 @@ def _enrich_test_results_with_evaluators(
                 ev = get_evaluator(uid)
                 if ev and ev.get("name"):
                     entry["name"] = ev["name"]
+                entry["description"] = ev.get("description") if ev else None
             continue
 
         if not isinstance(raw, dict):
@@ -891,14 +893,17 @@ def _enrich_test_results_with_evaluators(
             meta = (uuid_to_meta.get(echoed_uid) if echoed_uid else None) or {}
             uid = echoed_uid
             current_name: Optional[str] = None
+            current_description: Optional[str] = None
             if uid:
                 ev = get_evaluator(uid)
-                if ev and ev.get("name"):
-                    current_name = ev["name"]
+                if ev:
+                    current_name = ev.get("name")
+                    current_description = ev.get("description")
             out.append(
                 {
                     "evaluator_uuid": uid,
                     "name": current_name or cal_name,
+                    "description": current_description,
                     "reasoning": entry.get("reasoning"),
                     "match": entry.get("match"),
                     "score": entry.get("score"),

@@ -122,7 +122,6 @@ def _resolve_evaluators_for_job(
             {
                 "uuid": evaluator["uuid"],
                 "name": evaluator["name"],
-                "description": evaluator.get("description"),
                 "evaluator_type": evaluator.get(
                     "evaluator_type", expected_evaluator_type
                 ),
@@ -902,7 +901,9 @@ async def get_evaluation_status(
         if provider_result.get("metrics"):
             provider_result["metrics"] = normalize_metrics(provider_result["metrics"])
 
-    enrich_evaluator_runs_with_current_names(provider_results)
+    enrich_evaluator_runs_with_current_names(
+        provider_results, details.get("evaluators") or []
+    )
 
     # Enrich each result row with a presigned audio URL from the dataset.
     # Only presign IDs that actually appear in results to avoid unnecessary

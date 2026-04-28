@@ -786,7 +786,7 @@ DEFAULT_PROMPTS_BY_PURPOSE: Dict[str, Dict[str, Any]] = {
         "system_prompt": (
             "You are a highly accurate grader.\n\n"
             "You will be given a conversation between a user and an agent along with an "
-            "evaluation criteria to use for evaluating the agent's behaviour..\n\n"
+            "evaluation criteria to use for evaluating the agent's behaviour.\n\n"
             "You need to evaluate if the agent's behaviour adheres to the evaluation "
             "criteria. \n\n"
             "Evaluation criteria:\n"
@@ -1462,6 +1462,7 @@ def _migrate_metrics_to_evaluators(
     """One-time migration: copy rows from legacy `metrics` table to `evaluators` and rewrite the
     `simulation_metrics` pivot as `simulation_evaluators`. Idempotent via `source_metric_uuid`.
     """
+
     def _legacy_metric_criteria(row: sqlite3.Row) -> str:
         return (row["description"]).strip()
 

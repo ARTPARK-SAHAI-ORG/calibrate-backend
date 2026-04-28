@@ -242,7 +242,6 @@ def _resolve_evaluators_for_tts_job(
             {
                 "uuid": evaluator["uuid"],
                 "name": evaluator["name"],
-                "description": evaluator.get("description"),
                 "evaluator_type": evaluator.get(
                     "evaluator_type", expected_evaluator_type
                 ),
@@ -953,7 +952,9 @@ async def get_tts_evaluation_status(
         if provider_result.get("metrics"):
             provider_result["metrics"] = normalize_metrics(provider_result["metrics"])
 
-    enrich_evaluator_runs_with_current_names(provider_results)
+    enrich_evaluator_runs_with_current_names(
+        provider_results, details.get("evaluators") or []
+    )
 
     # Generate presigned URLs on the fly for completed or failed jobs
     if status in (TaskStatus.DONE.value, TaskStatus.FAILED.value):
