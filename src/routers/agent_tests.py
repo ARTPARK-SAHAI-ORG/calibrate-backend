@@ -377,11 +377,16 @@ async def get_agent_test_runs(agent_uuid: str):
         )
 
         # Refresh evaluator names + uuids on per-row judge_results before serializing
+        _evaluator_cache: Dict[str, Optional[Dict[str, Any]]] = {}
         _enrich_test_results_with_evaluators(
-            job_results.get("test_results"), evaluators_snapshot
+            job_results.get("test_results"),
+            evaluators_snapshot,
+            _evaluator_cache,
         )
         _enrich_model_results_with_evaluators(
-            job_results.get("model_results"), evaluators_snapshot
+            job_results.get("model_results"),
+            evaluators_snapshot,
+            _evaluator_cache,
         )
 
         run_item = AgentTestRunListItem(
@@ -458,11 +463,16 @@ async def get_all_test_runs_for_user(
         )
 
         # Refresh evaluator names + uuids on per-row judge_results before serializing
+        _evaluator_cache: Dict[str, Optional[Dict[str, Any]]] = {}
         _enrich_test_results_with_evaluators(
-            job_results.get("test_results"), evaluators_snapshot
+            job_results.get("test_results"),
+            evaluators_snapshot,
+            _evaluator_cache,
         )
         _enrich_model_results_with_evaluators(
-            job_results.get("model_results"), evaluators_snapshot
+            job_results.get("model_results"),
+            evaluators_snapshot,
+            _evaluator_cache,
         )
 
         run_item = GlobalTestRunListItem(
@@ -832,9 +842,73 @@ def _parse_agent_test_results(results_data: Optional[List[dict]]) -> List[dict]:
     return test_results
 
 
+def _pending_test_case_result_placeholder(name: str) -> Dict[str, Any]:
+    """``TestCaseResult`` shape for rows not yet finished (explicit nulls for clients)."""
+    return {
+        "test_case_id": None,
+        "name": name,
+        "passed": None,
+        "reasoning": None,
+        "output": None,
+        "test_case": None,
+        "judge_results": None,
+    }
+
+
+def _merge_test_results_by_test_names(
+    test_names: List[str], parsed: List[dict]
+) -> List[dict]:
+    """Interleave calibrate rows with pending placeholders in suite order (same
+    fields as :func:`_pending_test_case_result_placeholder`). Used for unit-test
+    and per-model benchmark rows."""
+    if not test_names:
+        return []
+    completed = {r.get("name"): r for r in parsed if r.get("name")}
+    out: List[dict] = []
+    for name in test_names:
+        if name in completed:
+            out.append(completed[name])
+        else:
+            out.append(_pending_test_case_result_placeholder(name))
+    return out
+
+
+def _benchmark_queued_model_results(
+    models: List[str], test_names: List[str]
+) -> List[Dict[str, Any]]:
+    """Per-model result shell with placeholder ``test_results`` (queued / not started)."""
+    placeholders = [_pending_test_case_result_placeholder(n) for n in test_names]
+    return [
+        {
+            "model": model,
+            "success": None,
+            "message": "Queued...",
+            "total_tests": None,
+            "passed": None,
+            "failed": None,
+            "evaluator_summary": None,
+            "test_results": placeholders,
+        }
+        for model in models
+    ]
+
+
+def _get_evaluator_cached_for_enrichment(
+    uid: str, cache: Dict[str, Optional[Dict[str, Any]]]
+) -> Optional[Dict[str, Any]]:
+    """Single SQLite round-trip per UUID per enrichment pass (see simulations
+    ``current_by_uuid`` in ``apply_simulation_job_evaluator_enrichment``)."""
+    if uid not in cache:
+        from db import get_evaluator
+
+        cache[uid] = get_evaluator(uid)
+    return cache[uid]
+
+
 def _enrich_test_results_with_evaluators(
     test_results: Optional[List[Dict[str, Any]]],
     evaluators_by_test_id: Optional[Dict[str, List[Dict[str, Any]]]],
+    evaluator_cache: Optional[Dict[str, Optional[Dict[str, Any]]]] = None,
 ) -> None:
     """Mutate ``test_results`` in place: convert each row's raw ``judge_results``
     dict (keyed by calibrate evaluator name) into a structured list of
@@ -848,11 +922,16 @@ def _enrich_test_results_with_evaluators(
 
     Idempotent: if ``judge_results`` is already a list (e.g. re-enriched), the
     ``name`` and ``description`` fields are refreshed against the current DB row.
+
+    Pass ``evaluator_cache`` to dedupe ``get_evaluator`` across rows and across
+    nested benchmark models (same dict as ``_enrich_model_results_with_evaluators``).
     """
     if not test_results:
         return
-    from db import get_evaluator
 
+    cache: Dict[str, Optional[Dict[str, Any]]] = (
+        evaluator_cache if evaluator_cache is not None else {}
+    )
     snapshot_map = evaluators_by_test_id or {}
     for r in test_results:
         if not isinstance(r, dict):
@@ -868,7 +947,7 @@ def _enrich_test_results_with_evaluators(
                 uid = entry.get("evaluator_uuid")
                 if not uid:
                     continue
-                ev = get_evaluator(uid)
+                ev = _get_evaluator_cached_for_enrichment(uid, cache)
                 if ev and ev.get("name"):
                     entry["name"] = ev["name"]
                 entry["description"] = ev.get("description") if ev else None
@@ -895,7 +974,7 @@ def _enrich_test_results_with_evaluators(
             current_name: Optional[str] = None
             current_description: Optional[str] = None
             if uid:
-                ev = get_evaluator(uid)
+                ev = _get_evaluator_cached_for_enrichment(uid, cache)
                 if ev:
                     current_name = ev.get("name")
                     current_description = ev.get("description")
@@ -918,18 +997,22 @@ def _enrich_test_results_with_evaluators(
 def _enrich_model_results_with_evaluators(
     model_results: Optional[List[Dict[str, Any]]],
     evaluators_by_test_id: Optional[Dict[str, List[Dict[str, Any]]]],
+    evaluator_cache: Optional[Dict[str, Optional[Dict[str, Any]]]] = None,
 ) -> None:
     """Run ``_enrich_test_results_with_evaluators`` for each model's nested
     ``test_results`` list. The same snapshot applies to every model in a
     benchmark run because all models execute the same test suite."""
     if not model_results:
         return
+    cache: Dict[str, Optional[Dict[str, Any]]] = (
+        evaluator_cache if evaluator_cache is not None else {}
+    )
     for mr in model_results:
         if isinstance(mr, dict):
             _enrich_test_results_with_evaluators(
-                mr.get("test_results"), evaluators_by_test_id
+                mr.get("test_results"), evaluators_by_test_id, cache
             )
-            _enrich_evaluator_summary(mr.get("evaluator_summary"))
+            _enrich_evaluator_summary(mr.get("evaluator_summary"), cache)
 
 
 def _build_evaluator_summary(metrics_data: Optional[dict]) -> Optional[List[Dict[str, Any]]]:
@@ -982,12 +1065,15 @@ def _build_evaluator_summary(metrics_data: Optional[dict]) -> Optional[List[Dict
 
 def _enrich_evaluator_summary(
     evaluator_summary: Optional[List[Dict[str, Any]]],
+    evaluator_cache: Optional[Dict[str, Optional[Dict[str, Any]]]] = None,
 ) -> None:
     """Refresh evaluator names/descriptions in per-model aggregate summaries."""
     if not evaluator_summary:
         return
-    from db import get_evaluator
 
+    cache: Dict[str, Optional[Dict[str, Any]]] = (
+        evaluator_cache if evaluator_cache is not None else {}
+    )
     for entry in evaluator_summary:
         if not isinstance(entry, dict):
             continue
@@ -995,7 +1081,7 @@ def _enrich_evaluator_summary(
         if not uid:
             entry.setdefault("description", None)
             continue
-        ev = get_evaluator(uid)
+        ev = _get_evaluator_cached_for_enrichment(uid, cache)
         if ev and ev.get("name"):
             entry["name"] = ev["name"]
         entry["description"] = ev.get("description") if ev else None
@@ -1106,16 +1192,8 @@ def _update_agent_test_intermediate_results(
     test_results = _parse_agent_test_results(results_data)
     completed_count = len(test_results)
 
-    # Create a dict of completed tests by name
-    completed_tests = {r.get("name"): r for r in test_results if r.get("name")}
-
     # Build intermediate results: show completed tests with results, pending tests with just name
-    intermediate_results = []
-    for name in test_names:
-        if name in completed_tests:
-            intermediate_results.append(completed_tests[name])
-        else:
-            intermediate_results.append({"name": name})
+    intermediate_results = _merge_test_results_by_test_names(test_names, test_results)
 
     # Check if metrics.json exists (all tests complete)
     metrics_data = _read_agent_test_metrics_json(output_dir)
@@ -1157,7 +1235,11 @@ def run_llm_test_task(
         update_agent_test_job(
             task_id,
             status=TaskStatus.IN_PROGRESS.value,
-            results={"test_results": [{"name": name} for name in test_names]},
+            results={
+                "test_results": [
+                    _pending_test_case_result_placeholder(name) for name in test_names
+                ]
+            },
         )
 
         s3 = get_s3_client()
@@ -1506,7 +1588,11 @@ async def run_agent_test(agent_uuid: str, request: RunTestRequest):
             "calibrate_config": calibrate_config,
             "evaluators_by_test_id": evaluators_by_test_id,
         },
-        results={"test_results": [{"name": name} for name in test_names]},
+        results={
+            "test_results": [
+                _pending_test_case_result_placeholder(name) for name in test_names
+            ]
+        },
     )
 
     if can_start:
@@ -1648,6 +1734,7 @@ def _update_benchmark_intermediate_results(
     task_id: str,
     output_dir: Path,
     models: List[str],
+    test_names: List[str],
     cli_models: Optional[List[str]] = None,
 ) -> int:
     """
@@ -1655,6 +1742,7 @@ def _update_benchmark_intermediate_results(
     Returns the number of models with completed results.
 
     models: display names (original from frontend, e.g. "openai/gpt-4.1")
+    test_names: ordered suite names; pending rows are ``{name: ...}`` only, like unit tests.
     cli_models: names passed to CLI (may be stripped, e.g. "gpt-4.1"); defaults to models
     """
     if cli_models is None:
@@ -1682,6 +1770,12 @@ def _update_benchmark_intermediate_results(
                     test_case = results_data[i].get("test_case", {})
                     r["name"] = test_case.get("name")
 
+            merged = (
+                _merge_test_results_by_test_names(test_names, test_results)
+                if test_names
+                else test_results
+            )
+
             if metrics_data:
                 total = metrics_data.get("total", 0)
                 passed = metrics_data.get("passed", 0)
@@ -1695,14 +1789,14 @@ def _update_benchmark_intermediate_results(
                         "passed": passed,
                         "failed": total - passed,
                         "evaluator_summary": evaluator_summary,
-                        "test_results": test_results,
+                        "test_results": merged,
                     }
                 )
                 completed_count += 1
             elif test_results:
                 # Has partial results but no metrics yet
-                total = len(test_results)
-                passed = sum(1 for r in test_results if r.get("passed", False))
+                total = len(merged) if test_names else len(test_results)
+                passed = sum(1 for r in merged if r.get("passed", False))
                 model_results.append(
                     {
                         "model": model,
@@ -1712,7 +1806,7 @@ def _update_benchmark_intermediate_results(
                         "passed": passed,
                         "failed": total - passed,
                         "evaluator_summary": None,
-                        "test_results": test_results,
+                        "test_results": merged,
                     }
                 )
             else:
@@ -1726,7 +1820,11 @@ def _update_benchmark_intermediate_results(
                         "passed": None,
                         "failed": None,
                         "evaluator_summary": None,
-                        "test_results": None,
+                        "test_results": (
+                            _merge_test_results_by_test_names(test_names, [])
+                            if test_names
+                            else None
+                        ),
                     }
                 )
         else:
@@ -1740,7 +1838,11 @@ def _update_benchmark_intermediate_results(
                     "passed": None,
                     "failed": None,
                     "evaluator_summary": None,
-                    "test_results": None,
+                    "test_results": (
+                        _merge_test_results_by_test_names(test_names, [])
+                        if test_names
+                        else None
+                    ),
                 }
             )
 
@@ -1769,15 +1871,13 @@ def run_benchmark_task(
             f"with {len(tests)} test(s) and {len(models)} model(s)"
         )
 
-        # Initialize with pending model results
-        initial_model_results = [
-            {"model": model, "success": None, "message": "Queued..."}
-            for model in models
-        ]
+        test_names = [t.get("name") for t in tests if t.get("name")]
+
+        # Initialize with pending model results (per-model test list like unit tests)
         update_agent_test_job(
             task_id,
             status=TaskStatus.IN_PROGRESS.value,
-            results={"model_results": initial_model_results},
+            results={"model_results": _benchmark_queued_model_results(models, test_names)},
         )
 
         s3 = get_s3_client()
@@ -1860,7 +1960,7 @@ def run_benchmark_task(
                     prev_completed = 0
                     while process.poll() is None:
                         completed = _update_benchmark_intermediate_results(
-                            task_id, output_dir, models, cli_models
+                            task_id, output_dir, models, test_names, cli_models
                         )
                         if completed != prev_completed:
                             logger.info(
@@ -1871,7 +1971,7 @@ def run_benchmark_task(
 
                     # Final update after process completes
                     _update_benchmark_intermediate_results(
-                        task_id, output_dir, models, cli_models
+                        task_id, output_dir, models, test_names, cli_models
                     )
 
                 # Read stdout/stderr
@@ -1931,6 +2031,11 @@ def run_benchmark_task(
                                 test_case = results_data[i].get("test_case", {})
                                 r["name"] = test_case.get("name")
 
+                        if test_names:
+                            test_results = _merge_test_results_by_test_names(
+                                test_names, test_results
+                            )
+
                         if metrics_data:
                             total = metrics_data.get("total", 0)
                             passed = metrics_data.get("passed", 0)
@@ -1972,6 +2077,11 @@ def run_benchmark_task(
                                 model=model,
                                 success=False,
                                 message=f"No output found for model {model}",
+                                test_results=_merge_test_results_by_test_names(
+                                    test_names, []
+                                )
+                                if test_names
+                                else None,
                             )
                         )
 
@@ -2190,7 +2300,11 @@ async def run_agent_benchmark(agent_uuid: str, request: BenchmarkRequest):
             "calibrate_config": calibrate_config,
             "evaluators_by_test_id": evaluators_by_test_id,
         },
-        results={"test_results": [{"name": name} for name in test_names]},
+        results={
+            "model_results": _benchmark_queued_model_results(
+                request.models, test_names
+            )
+        },
     )
 
     if can_start:
