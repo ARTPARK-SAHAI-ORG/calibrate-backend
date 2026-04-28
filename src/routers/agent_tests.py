@@ -1,3 +1,4 @@
+import copy
 import csv
 import os
 import json
@@ -220,7 +221,9 @@ class TestCaseResult(BaseModel):
 
     name: Optional[str] = None  # Test name, present during in-progress and done states
     passed: Optional[bool] = None  # Only present when done
-    reasoning: Optional[str] = None  # LLM judge reasoning or deterministic diff; null for passing tool call tests
+    reasoning: Optional[str] = (
+        None  # LLM judge reasoning or deterministic diff; null for passing tool call tests
+    )
     output: Optional[TestOutput] = None  # Only present when done
     test_case: Optional[Dict[str, Any]] = None  # Only present when done
     # Per-evaluator verdicts for response-type tests; None for tool-call tests or
@@ -268,6 +271,7 @@ class AgentTestRunsResponse(BaseModel):
 
 class GlobalTestRunListItem(AgentTestRunListItem):
     """AgentTestRunListItem extended with agent identity for the global view."""
+
     agent_id: str
     agent_name: str
 
@@ -431,7 +435,9 @@ async def get_all_test_runs_for_user(
             agent_unit_counts[agent_id] = agent_unit_counts.get(agent_id, 0) + 1
             name_map[job["uuid"]] = f"Run {agent_unit_counts[agent_id]}"
         elif job_type == "llm-benchmark":
-            agent_benchmark_counts[agent_id] = agent_benchmark_counts.get(agent_id, 0) + 1
+            agent_benchmark_counts[agent_id] = (
+                agent_benchmark_counts.get(agent_id, 0) + 1
+            )
             name_map[job["uuid"]] = f"Benchmark {agent_benchmark_counts[agent_id]}"
         else:
             name_map[job["uuid"]] = "Job"
@@ -702,10 +708,9 @@ def _build_calibrate_config(
                 )
             evaluation["tool_calls"] = tool_calls
         elif evaluation.get("type") == "response":
+            # Legacy string criteria are promoted to a synthetic evaluator link in the
+            # first pass; overwrite with structured refs from criteria_per_test.
             evaluation["criteria"] = criteria_per_test.get(test["uuid"], [])
-            # Drop legacy free-form criteria string if it lingers from a pre-migration test
-            if isinstance(evaluation.get("criteria"), str):  # defensive
-                evaluation.pop("criteria", None)
 
         all_test_cases.append(test_config)
 
@@ -738,6 +743,21 @@ def _build_calibrate_config(
     if top_level_evaluators:
         config["evaluators"] = top_level_evaluators
     return config, evaluators_by_test_name
+
+
+def _calibrate_config_from_agent_test_job(
+    task_id: str,
+    agent: Dict[str, Any],
+    tests: List[Dict[str, Any]],
+) -> Dict[str, Any]:
+    """Load the calibrate JSON config frozen at job creation, or rebuild for legacy jobs."""
+    job = get_agent_test_job(task_id)
+    details = (job or {}).get("details") or {}
+    stored = details.get("calibrate_config")
+    if isinstance(stored, dict) and stored:
+        return copy.deepcopy(stored)
+    calibrate_config, _ = _build_calibrate_config(agent, tests)
+    return calibrate_config
 
 
 def _read_agent_test_results_json(output_dir: Path) -> Optional[List[dict]]:
@@ -1065,8 +1085,9 @@ def run_llm_test_task(
             temp_path = Path(temp_dir)
 
             try:
-                # Build calibrate config (snapshot already saved to details at create time)
-                calibrate_config, _ = _build_calibrate_config(agent, tests)
+                calibrate_config = _calibrate_config_from_agent_test_job(
+                    task_id, agent, tests
+                )
                 agent_config = agent.get("config") or {}
 
                 # Create directories
@@ -1190,14 +1211,10 @@ def run_llm_test_task(
                                 metrics_data = json.load(f)
 
                 if results_data is None and metrics_data is None:
-                    error_msg = (
-                        f"LLM test produced no output files (results.json/metrics.json not found in {output_dir})"
-                    )
+                    error_msg = f"LLM test produced no output files (results.json/metrics.json not found in {output_dir})"
                     logger.error(error_msg)
                     capture_exception_to_sentry(RuntimeError(error_msg))
-                    raise subprocess.CalledProcessError(
-                        0, run_cmd, stdout, stderr
-                    )
+                    raise subprocess.CalledProcessError(0, run_cmd, stdout, stderr)
 
                 # Parse results
                 test_results = _parse_agent_test_results(results_data)
@@ -1229,9 +1246,7 @@ def run_llm_test_task(
 
                 # Upload results to S3 (calibrate ``logs``/``results.log`` per model, run-level ``logs``, etc.)
                 results_prefix = f"agent-tests/runs/{task_id}"
-                upload_directory_tree_to_s3(
-                    s3, output_dir, s3_bucket, results_prefix
-                )
+                upload_directory_tree_to_s3(s3, output_dir, s3_bucket, results_prefix)
 
                 # Upload the config file to S3
                 config_s3_key = f"{results_prefix}/test_config.json"
@@ -1361,7 +1376,9 @@ async def run_agent_test(agent_uuid: str, request: RunTestRequest):
         for test_uuid in request.test_uuids:
             test = get_test(test_uuid)
             if not test:
-                raise HTTPException(status_code=404, detail=f"Test {test_uuid} not found")
+                raise HTTPException(
+                    status_code=404, detail=f"Test {test_uuid} not found"
+                )
             tests.append(test)
     else:
         # No test_uuids provided — run all tests linked to the agent
@@ -1390,9 +1407,9 @@ async def run_agent_test(agent_uuid: str, request: RunTestRequest):
     # Extract test names for progress tracking
     test_names = [test.get("name") for test in tests if test.get("name")]
 
-    # Snapshot evaluator UUIDs per test name (mapped to calibrate-rendered names) so
-    # `judge_results` rows can be matched back to evaluator UUIDs at API read time.
-    _, evaluators_by_test_name = _build_calibrate_config(agent, tests)
+    # Snapshot calibrate config and per-test evaluator metadata at submission so the
+    # worker (and enrichment) stay aligned even if links or live versions change later.
+    calibrate_config, evaluators_by_test_name = _build_calibrate_config(agent, tests)
 
     # Create job in database with details for recovery
     test_uuids = [t["uuid"] for t in tests]
@@ -1405,6 +1422,7 @@ async def run_agent_test(agent_uuid: str, request: RunTestRequest):
             "test_uuids": test_uuids,
             "test_names": test_names,
             "s3_bucket": s3_bucket,
+            "calibrate_config": calibrate_config,
             "evaluators_by_test_name": evaluators_by_test_name,
         },
         results={"test_results": [{"name": name} for name in test_names]},
@@ -1454,6 +1472,7 @@ async def update_test_run_visibility(
 
     if body.is_public:
         import uuid as _uuid
+
         share_token = job.get("share_token") or str(_uuid.uuid4())
     else:
         share_token = None
@@ -1679,8 +1698,9 @@ def run_benchmark_task(
             temp_path = Path(temp_dir)
 
             try:
-                # Build the calibrate config (snapshot already saved to details at create time)
-                calibrate_config, _ = _build_calibrate_config(agent, tests)
+                calibrate_config = _calibrate_config_from_agent_test_job(
+                    task_id, agent, tests
+                )
                 agent_config = agent.get("config") or {}
 
                 # Clear any model from config — models are passed via CLI flags
@@ -1704,9 +1724,13 @@ def run_benchmark_task(
                     # Frontend always sends models in openrouter format (provider/model).
                     # Strip the provider prefix for non-openrouter providers so the
                     # agent receives just the model name (e.g. "gpt-4.1" not "openai/gpt-4.1").
-                    benchmark_provider = agent_config.get("benchmark_provider", "openrouter")
+                    benchmark_provider = agent_config.get(
+                        "benchmark_provider", "openrouter"
+                    )
                     if benchmark_provider != "openrouter":
-                        cli_models = [m.split("/", 1)[-1] if "/" in m else m for m in models]
+                        cli_models = [
+                            m.split("/", 1)[-1] if "/" in m else m for m in models
+                        ]
                     else:
                         cli_models = models
                     run_cmd = (
@@ -1758,7 +1782,9 @@ def run_benchmark_task(
                         time.sleep(2)  # Poll every 2 seconds
 
                     # Final update after process completes
-                    _update_benchmark_intermediate_results(task_id, output_dir, models, cli_models)
+                    _update_benchmark_intermediate_results(
+                        task_id, output_dir, models, cli_models
+                    )
 
                 # Read stdout/stderr
                 with open(stdout_path, "r") as f:
@@ -1790,14 +1816,10 @@ def run_benchmark_task(
                 all_results = _find_all_results_in_output(output_dir)
 
                 if not all_results:
-                    error_msg = (
-                        f"Benchmark produced no output files (no results.json/metrics.json found in {output_dir})"
-                    )
+                    error_msg = f"Benchmark produced no output files (no results.json/metrics.json found in {output_dir})"
                     logger.error(error_msg)
                     capture_exception_to_sentry(RuntimeError(error_msg))
-                    raise subprocess.CalledProcessError(
-                        0, run_cmd, stdout, stderr
-                    )
+                    raise subprocess.CalledProcessError(0, run_cmd, stdout, stderr)
                 folder_names = list(all_results.keys())
                 logger.info(f"Found result folders: {folder_names}")
 
@@ -1943,7 +1965,9 @@ def run_benchmark_task(
                 try:
                     if output_dir.exists():
                         bp = f"agent-tests/benchmarks/{task_id}"
-                        upload_directory_tree_to_s3(s3, output_dir, s3_bucket, f"{bp}/outputs")
+                        upload_directory_tree_to_s3(
+                            s3, output_dir, s3_bucket, f"{bp}/outputs"
+                        )
                         failed_results["results_s3_prefix"] = bp
                 except Exception:
                     pass
@@ -1966,7 +1990,9 @@ def run_benchmark_task(
                 try:
                     if output_dir.exists():
                         bp = f"agent-tests/benchmarks/{task_id}"
-                        upload_directory_tree_to_s3(s3, output_dir, s3_bucket, f"{bp}/outputs")
+                        upload_directory_tree_to_s3(
+                            s3, output_dir, s3_bucket, f"{bp}/outputs"
+                        )
                         existing_results["results_s3_prefix"] = bp
                 except Exception:
                     pass
@@ -2056,9 +2082,7 @@ async def run_agent_benchmark(agent_uuid: str, request: BenchmarkRequest):
     # Extract test names for progress tracking
     test_names = [test.get("name") for test in tests if test.get("name")]
 
-    # Snapshot evaluator UUIDs per test name (mapped to calibrate-rendered names) so
-    # `judge_results` rows can be matched back to evaluator UUIDs at API read time.
-    _, evaluators_by_test_name = _build_calibrate_config(agent, tests)
+    calibrate_config, evaluators_by_test_name = _build_calibrate_config(agent, tests)
 
     # Create job in database with details for recovery
     test_uuids = [t["uuid"] for t in tests]
@@ -2072,6 +2096,7 @@ async def run_agent_benchmark(agent_uuid: str, request: BenchmarkRequest):
             "test_names": test_names,
             "models": request.models,
             "s3_bucket": s3_bucket,
+            "calibrate_config": calibrate_config,
             "evaluators_by_test_name": evaluators_by_test_name,
         },
         results={"test_results": [{"name": name} for name in test_names]},
@@ -2112,6 +2137,7 @@ async def update_benchmark_visibility(
 
     if body.is_public:
         import uuid as _uuid
+
         share_token = job.get("share_token") or str(_uuid.uuid4())
     else:
         share_token = None

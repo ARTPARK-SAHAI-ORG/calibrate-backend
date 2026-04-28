@@ -2762,6 +2762,32 @@ def get_evaluator_by_slug(slug: str) -> Optional[Dict[str, Any]]:
         return _parse_evaluator_row(row) if row else None
 
 
+def evaluator_name_exists(
+    name: str,
+    owner_user_id: Optional[str],
+    exclude_uuid: Optional[str] = None,
+) -> bool:
+    """True if `name` is already used in the evaluator namespace visible to a user."""
+    clauses = ["deleted_at IS NULL", "name = ?"]
+    params: List[Any] = [name]
+    if owner_user_id is None:
+        clauses.append("owner_user_id IS NULL")
+    else:
+        clauses.append("(owner_user_id = ? OR owner_user_id IS NULL)")
+        params.append(owner_user_id)
+    if exclude_uuid is not None:
+        clauses.append("uuid != ?")
+        params.append(exclude_uuid)
+
+    with get_db_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            "SELECT 1 FROM evaluators WHERE " + " AND ".join(clauses) + " LIMIT 1",
+            params,
+        )
+        return cursor.fetchone() is not None
+
+
 def get_all_evaluators(
     user_id: Optional[str] = None,
     include_defaults: bool = True,

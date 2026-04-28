@@ -274,13 +274,12 @@ def _get_audio_urls_from_s3_key(
 
 
 class EvaluatorRef(BaseModel):
-    """Reference to an evaluator attached to a simulation. `version_uuid` is optional — falls
-    back to the evaluator's live version at write time."""
+    """Reference to an evaluator attached to a simulation. The pivot pins the evaluator's live
+    version at write time."""
 
     model_config = ConfigDict(extra="forbid")
 
     evaluator_uuid: str
-    version_uuid: Optional[str] = None
     variable_values: Optional[Dict[str, Any]] = None
 
 
@@ -350,7 +349,7 @@ def _resolve_simulation_evaluator_ref(
                 f"'simulation' evaluators."
             ),
         )
-    version_uuid = ref.version_uuid or evaluator.get("live_version_id")
+    version_uuid = evaluator.get("live_version_id")
     if not version_uuid:
         raise HTTPException(
             status_code=400,

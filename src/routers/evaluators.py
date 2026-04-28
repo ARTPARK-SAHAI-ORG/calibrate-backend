@@ -20,6 +20,7 @@ from db import (
     create_evaluator_version,
     delete_evaluator,
     duplicate_evaluator,
+    evaluator_name_exists,
     get_all_evaluators,
     get_evaluator,
     get_evaluator_version,
@@ -73,7 +74,7 @@ DataTypeLiteral = Literal["text", "audio"]
 
 
 class EvaluatorCreate(BaseModel):
-    name: str
+    name: str = Field(..., min_length=1)
     description: Optional[str] = None
     evaluator_type: EvaluatorTypeLiteral = "llm"
     data_type: DataTypeLiteral = "text"
@@ -93,7 +94,7 @@ class EvaluatorCreate(BaseModel):
 
 
 class EvaluatorUpdate(BaseModel):
-    name: Optional[str] = None
+    name: Optional[str] = Field(None, min_length=1)
     description: Optional[str] = None
     evaluator_type: Optional[EvaluatorTypeLiteral] = None
     data_type: Optional[DataTypeLiteral] = None
@@ -102,7 +103,7 @@ class EvaluatorUpdate(BaseModel):
 
 
 class EvaluatorDuplicateRequest(BaseModel):
-    name: str
+    name: str = Field(..., min_length=1)
 
 
 class EvaluatorVersionResponse(BaseModel):
@@ -192,6 +193,15 @@ def _visible_or_404(evaluator: Optional[Dict[str, Any]], user_id: str) -> Dict[s
     return evaluator
 
 
+def _ensure_unique_evaluator_name(
+    name: str,
+    user_id: str,
+    exclude_uuid: Optional[str] = None,
+) -> None:
+    if evaluator_name_exists(name, owner_user_id=user_id, exclude_uuid=exclude_uuid):
+        raise HTTPException(status_code=409, detail="Evaluator name already exists")
+
+
 def _version_dict(version: Dict[str, Any]) -> Dict[str, Any]:
     """Shape an evaluator_versions row for the API response."""
     return {
@@ -235,6 +245,7 @@ def _evaluator_response(evaluator: Dict[str, Any]) -> EvaluatorResponse:
 async def create_evaluator_endpoint(
     payload: EvaluatorCreate, user_id: str = Depends(get_current_user_id)
 ):
+    _ensure_unique_evaluator_name(payload.name, user_id)
     evaluator_uuid = create_evaluator(
         name=payload.name,
         description=payload.description,
@@ -345,6 +356,8 @@ async def update_evaluator_endpoint(
 ):
     existing = _visible_or_404(get_evaluator(evaluator_uuid), user_id)
     _owner_check(existing, user_id)
+    if payload.name is not None:
+        _ensure_unique_evaluator_name(payload.name, user_id, exclude_uuid=evaluator_uuid)
     try:
         updated = update_evaluator(
             evaluator_uuid=evaluator_uuid,
@@ -380,6 +393,7 @@ async def duplicate_evaluator_endpoint(
     user_id: str = Depends(get_current_user_id),
 ):
     _visible_or_404(get_evaluator(evaluator_uuid), user_id)
+    _ensure_unique_evaluator_name(payload.name, user_id)
     new_uuid = duplicate_evaluator(evaluator_uuid, new_name=payload.name, owner_user_id=user_id)
     if not new_uuid:
         raise HTTPException(status_code=404, detail="Evaluator not found")
