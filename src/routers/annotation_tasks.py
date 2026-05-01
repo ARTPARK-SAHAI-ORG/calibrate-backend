@@ -63,6 +63,10 @@ from annotation_metrics import (
     per_item_agreement,
     trend_series,
     trend_series_human_evaluator,
+    _pairwise_agreement,
+    _scalar,
+    _classify,
+    _round_agreement,
 )
 
 
@@ -352,8 +356,20 @@ async def get_item(
     item = get_annotation_item(item_uuid)
     if not item or item.get("task_id") != task_uuid:
         raise HTTPException(status_code=404, detail="Item not found")
-    item["annotations"] = get_annotations_for_item(item_uuid)
     return item
+
+
+@router.get("/{task_uuid}/items/{item_uuid}/annotations")
+async def list_item_annotations(
+    task_uuid: str, item_uuid: str, user_id: str = Depends(get_current_user_id)
+):
+    """All human annotations across every job for one item. Sibling of
+    `/items/{item_uuid}/evaluator-runs`."""
+    _ensure_owned_task(task_uuid, user_id)
+    item = get_annotation_item(item_uuid)
+    if not item or item.get("task_id") != task_uuid:
+        raise HTTPException(status_code=404, detail="Item not found")
+    return get_annotations_for_item(item_uuid)
 
 
 # ============ Jobs ============
@@ -837,6 +853,226 @@ async def task_agreement(
             "series": hh_series,
         },
         "evaluators": evaluators_block,
+    }
+
+
+@router.get("/{task_uuid}/summary")
+async def task_summary(
+    task_uuid: str,
+    item_id: Optional[str] = Query(
+        None,
+        description="Filter rows to a single item. The full task-wide annotator union is still returned in `annotators`.",
+    ),
+    user_id: str = Depends(get_current_user_id),
+):
+    """Single denormalized view of every (item × linked-evaluator) pair with the
+    latest evaluator-run value and one cell per annotator.
+
+    Response shape:
+      {
+        "task_id": str,
+        "task_type": "stt" | "llm" | "simulation",
+        "evaluators": [{evaluator_id, name, output_type}],
+        "annotators": [{uuid, name}],   # union of annotators with ≥1 (item, evaluator)
+                                        # annotation in this task; column order
+        "rows": [
+          {
+            "item_id": str,
+            "payload": <item.payload>,             # FE derives display per task_type
+            "evaluator_id": str,
+            "evaluator_name": str,
+            "output_type": "binary" | "rating",
+            "evaluator_version_id": str | null,
+            "evaluator_version_number": int | null,
+            "evaluator_value": <scalar | null>,    # latest run on this slot
+            "evaluator_reasoning": str | null,
+            "annotations": {
+              "<annotator_uuid>": {"value": <scalar>, "reasoning": str | null} | null,
+              ...
+            }
+          }
+        ]
+      }
+
+    Cell rules:
+      - One row per (item, linked evaluator).
+      - `evaluator_value` is the latest evaluator-run for that (item, evaluator)
+        regardless of which evaluator-run job produced it. The displayed version
+        is the run's version (falls back to the evaluator's live version when no
+        run exists).
+      - Each annotator cell is that annotator's latest annotation for the slot,
+        across ALL annotation jobs (matches the agreement aggregator's
+        latest-wins-per-annotator semantics). `null` if they haven't annotated it.
+      - Row-level overall annotations (`evaluator_id IS NULL`) are not surfaced
+        here — this view is per-evaluator.
+    """
+    task = _ensure_owned_task(task_uuid, user_id)
+    items = get_annotation_items_for_task(task_uuid)
+    evaluators = get_evaluators_for_annotation_task(task_uuid)
+    runs = get_evaluator_runs_for_task(task_uuid)
+    annotations = get_annotations_for_task(task_uuid)
+
+    # Optional single-item filter. Validate it belongs to the task before
+    # narrowing so a bad id 404s instead of silently returning empty rows.
+    if item_id is not None:
+        if not any(it["uuid"] == item_id for it in items):
+            raise HTTPException(
+                status_code=404, detail="Item not found in this task"
+            )
+        items = [it for it in items if it["uuid"] == item_id]
+
+    # Latest evaluator_run per (item, evaluator).
+    latest_run: Dict[tuple, Dict[str, Any]] = {}
+    latest_run_ts: Dict[tuple, str] = {}
+    for r in runs:
+        ev_id = r.get("evaluator_id")
+        item_id = r.get("item_id")
+        if not ev_id or not item_id:
+            continue
+        ts = r.get("completed_at") or r.get("created_at") or ""
+        slot = (item_id, ev_id)
+        if slot not in latest_run_ts or ts > latest_run_ts[slot]:
+            latest_run[slot] = r
+            latest_run_ts[slot] = ts
+
+    # Latest annotation per (item, evaluator, annotator). Input is sorted by
+    # updated_at ASC so overwrite gives latest-wins.
+    latest_ann: Dict[tuple, Dict[str, Any]] = {}
+    for a in annotations:
+        annotator_id = a.get("annotator_id")
+        ev_id = a.get("evaluator_id")
+        item_id = a.get("item_id")
+        if not annotator_id or not ev_id or not item_id:
+            continue
+        latest_ann[(item_id, ev_id, annotator_id)] = a
+
+    # Annotator union — only those with ≥1 (item, evaluator) annotation visible
+    # in this view. Stable ordering by name then uuid.
+    annotator_ids = {key[2] for key in latest_ann.keys()}
+    annotators: List[Dict[str, Any]] = []
+    for aid in annotator_ids:
+        a = get_annotator(aid)
+        if a:
+            annotators.append({"uuid": a["uuid"], "name": a.get("name")})
+    annotators.sort(key=lambda x: ((x.get("name") or "").lower(), x["uuid"]))
+
+    version_cache: Dict[str, Optional[Dict[str, Any]]] = {}
+
+    def _version_meta(version_id: Optional[str]) -> Optional[Dict[str, Any]]:
+        if not version_id:
+            return None
+        if version_id in version_cache:
+            return version_cache[version_id]
+        v = get_evaluator_version(version_id)
+        meta = (
+            {"uuid": v["uuid"], "version_number": v.get("version_number")}
+            if v
+            else None
+        )
+        version_cache[version_id] = meta
+        return meta
+
+    def _scalar_and_reasoning(value: Any) -> tuple:
+        if isinstance(value, dict):
+            return value.get("value"), value.get("reasoning")
+        return value, None
+
+    rows: List[Dict[str, Any]] = []
+    for item in items:
+        for ev in evaluators:
+            ev_id = ev["uuid"]
+            run = latest_run.get((item["uuid"], ev_id))
+            run_value = run.get("value") if run else None
+            ev_value, ev_reasoning = _scalar_and_reasoning(run_value)
+
+            displayed_version_id = (
+                (run.get("evaluator_version_id") if run else None)
+                or ev.get("live_version_id")
+            )
+            version_meta = _version_meta(displayed_version_id)
+
+            ann_cells: Dict[str, Optional[Dict[str, Any]]] = {}
+            slot_human_scalars: List[Any] = []
+            for annotator in annotators:
+                a = latest_ann.get((item["uuid"], ev_id, annotator["uuid"]))
+                if a is None:
+                    ann_cells[annotator["uuid"]] = None
+                    continue
+                val, reasoning = _scalar_and_reasoning(a.get("value"))
+                ann_cells[annotator["uuid"]] = {
+                    "value": val,
+                    "reasoning": reasoning,
+                }
+                scalar = _scalar(a.get("value"))
+                if scalar is not None:
+                    slot_human_scalars.append(scalar)
+
+            # Human-vs-human pairwise mean agreement on this slot.
+            hh_mean, hh_pairs = _pairwise_agreement(slot_human_scalars)
+            human_agreement = (
+                _round_agreement(hh_mean) if hh_pairs > 0 else None
+            )
+
+            # Evaluator-vs-human: pair the evaluator value with each human and
+            # mean. Mirrors aggregate_human_evaluator_agreement's per-slot math.
+            eval_scalar = _scalar(run_value) if run_value is not None else None
+            evaluator_agreement: Optional[float] = None
+            if eval_scalar is not None and slot_human_scalars:
+                eval_kind = _classify(eval_scalar)
+                if eval_kind is not None:
+                    numerics = [
+                        v
+                        for v in (eval_scalar, *slot_human_scalars)
+                        if _classify(v) == "numeric"
+                    ]
+                    span = (max(numerics) - min(numerics)) if numerics else 1.0
+                    if span <= 0:
+                        span = 1.0
+                    total = 0.0
+                    pairs = 0
+                    for hv in slot_human_scalars:
+                        if _classify(hv) != eval_kind:
+                            continue
+                        if eval_kind in ("binary", "categorical"):
+                            total += 1.0 if eval_scalar == hv else 0.0
+                        elif eval_kind == "numeric":
+                            total += 1.0 - abs(eval_scalar - hv) / span
+                        pairs += 1
+                    if pairs > 0:
+                        evaluator_agreement = _round_agreement(total / pairs)
+
+            rows.append(
+                {
+                    "item_id": item["uuid"],
+                    "payload": item.get("payload"),
+                    "evaluator_id": ev_id,
+                    "evaluator_name": ev.get("name"),
+                    "output_type": ev.get("output_type"),
+                    "evaluator_version_id": displayed_version_id,
+                    "evaluator_version_number": (
+                        version_meta.get("version_number") if version_meta else None
+                    ),
+                    "evaluator_value": ev_value,
+                    "evaluator_reasoning": ev_reasoning,
+                    "annotations": ann_cells,
+                    "human_agreement": human_agreement,
+                    "evaluator_agreement": evaluator_agreement,
+                }
+            )
+
+    return {
+        "task_id": task_uuid,
+        "task_type": task["type"],
+        "evaluators": [
+            {
+                "evaluator_id": e["uuid"],
+                "name": e.get("name"),
+                "output_type": e.get("output_type"),
+            }
+            for e in evaluators
+        ],
+        "annotators": annotators,
+        "rows": rows,
     }
 
 

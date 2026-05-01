@@ -421,10 +421,11 @@ def _parse_results_llm(
     evaluators_resolved: List[Dict[str, Any]],
     job_uuid: str,
 ) -> List[Dict[str, Any]]:
-    """LLM outputs: <output_dir>/results.json — list of per-test-case results
-    with `metrics`. Each test case carries the input `test_case` (for `id`)
-    and a `metrics.criteria` map keyed by evaluator name. Tool-call evaluation
-    is not surfaced into evaluator_runs (this endpoint only runs response-mode
+    """LLM outputs: <output_dir>/results.json — list of per-test-case results.
+    Each entry is `{output, metrics, test_case, test_case_id?}`; per-row
+    judgements live in `metrics.judge_results = {<name>: {reasoning, match|score}}`
+    (`match` for binary, `score` for rating). Tool-call evaluation is not
+    surfaced into evaluator_runs (this endpoint only runs response-mode
     criteria evaluators)."""
     p = output_dir / "results.json"
     if not p.exists():
@@ -450,12 +451,12 @@ def _parse_results_llm(
         if not item_id:
             continue
         metrics = entry.get("metrics") or {}
-        # Calibrate's documented shape is `metrics.criteria = {name: <judgement>}`.
-        # Be defensive: also accept a flat `metrics = {name: <judgement>}`.
-        per_criterion = metrics.get("criteria") if isinstance(metrics, dict) else None
-        if not isinstance(per_criterion, dict):
-            per_criterion = metrics if isinstance(metrics, dict) else {}
-        for ev_name, judgement in per_criterion.items():
+        judge_results = (
+            metrics.get("judge_results") if isinstance(metrics, dict) else None
+        )
+        if not isinstance(judge_results, dict):
+            continue
+        for ev_name, judgement in judge_results.items():
             ev = by_name.get(ev_name)
             if not ev:
                 continue
@@ -468,21 +469,15 @@ def _parse_results_llm(
             output_type = ev["output_type"]
             value: Optional[Dict[str, Any]] = None
             if isinstance(judgement, dict):
-                # Pull the score from any of the conventional keys.
-                raw = (
-                    judgement.get("value")
-                    or judgement.get("score")
-                    or judgement.get("rating")
-                    or judgement.get("pass")
-                    or judgement.get("passed")
-                )
+                # Calibrate emits `match` for binary, `score` for rating.
+                raw = judgement.get("match")
+                if raw is None:
+                    raw = judgement.get("score")
                 if raw is not None:
                     value = {"value": _coerce_score(raw, output_type)}
                     reasoning = judgement.get("reasoning")
                     if reasoning:
                         value["reasoning"] = reasoning
-            elif judgement is not None:
-                value = {"value": _coerce_score(judgement, output_type)}
             runs.append(
                 {
                     "job_id": job_uuid,

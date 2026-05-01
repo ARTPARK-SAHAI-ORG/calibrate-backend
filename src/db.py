@@ -5771,7 +5771,13 @@ def get_jobs_for_task(task_id: str) -> List[Dict[str, Any]]:
 
 
 def get_jobs_for_task_detailed(task_id: str) -> List[Dict[str, Any]]:
-    """Jobs for a task with annotator info + item/annotation counts."""
+    """Jobs for a task with annotator info + item progress counts.
+
+    Progress is reported as `completed_item_count / item_count`, where an item
+    is "completed" when every evaluator linked to the task has a non-null
+    annotation on it for this job. Row-level overall annotations
+    (`evaluator_id IS NULL`) are not required.
+    """
     with get_db_connection() as conn:
         cursor = conn.cursor()
         cursor.execute(
@@ -5786,7 +5792,16 @@ def get_jobs_for_task_detailed(task_id: str) -> List[Dict[str, Any]]:
                 j.created_at    AS created_at,
                 j.completed_at  AS completed_at,
                 (SELECT COUNT(*) FROM annotation_job_items ji WHERE ji.job_id = j.uuid) AS item_count,
-                (SELECT COUNT(*) FROM annotations a WHERE a.job_id = j.uuid) AS annotation_count
+                (SELECT COUNT(*) FROM (
+                    SELECT a.item_id
+                      FROM annotations a
+                     WHERE a.job_id = j.uuid AND a.evaluator_id IS NOT NULL
+                     GROUP BY a.item_id
+                    HAVING COUNT(DISTINCT a.evaluator_id) >= (
+                        SELECT COUNT(*) FROM annotation_task_evaluators ate
+                         WHERE ate.task_id = j.task_id AND ate.deleted_at IS NULL
+                    )
+                )) AS completed_item_count
               FROM annotation_jobs j
               JOIN annotators an ON an.uuid = j.annotator_id
              WHERE j.task_id = ?
@@ -5833,7 +5848,11 @@ def get_jobs_for_annotator(annotator_id: str) -> List[Dict[str, Any]]:
 
 
 def get_jobs_for_annotator_detailed(annotator_id: str) -> List[Dict[str, Any]]:
-    """Jobs for an annotator with task name + item count + completed annotation count."""
+    """Jobs for an annotator with task name + item progress counts.
+
+    See `get_jobs_for_task_detailed` for the `completed_item_count` /
+    `item_count` semantics.
+    """
     with get_db_connection() as conn:
         cursor = conn.cursor()
         cursor.execute(
@@ -5847,7 +5866,16 @@ def get_jobs_for_annotator_detailed(annotator_id: str) -> List[Dict[str, Any]]:
                 j.created_at    AS created_at,
                 j.completed_at  AS completed_at,
                 (SELECT COUNT(*) FROM annotation_job_items ji WHERE ji.job_id = j.uuid) AS item_count,
-                (SELECT COUNT(*) FROM annotations a WHERE a.job_id = j.uuid) AS annotation_count
+                (SELECT COUNT(*) FROM (
+                    SELECT a.item_id
+                      FROM annotations a
+                     WHERE a.job_id = j.uuid AND a.evaluator_id IS NOT NULL
+                     GROUP BY a.item_id
+                    HAVING COUNT(DISTINCT a.evaluator_id) >= (
+                        SELECT COUNT(*) FROM annotation_task_evaluators ate
+                         WHERE ate.task_id = j.task_id AND ate.deleted_at IS NULL
+                    )
+                )) AS completed_item_count
               FROM annotation_jobs j
               JOIN annotation_tasks t ON t.uuid = j.task_id
              WHERE j.annotator_id = ? AND t.deleted_at IS NULL

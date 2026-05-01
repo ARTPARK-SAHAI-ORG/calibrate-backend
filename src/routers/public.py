@@ -34,7 +34,6 @@ from db import (
     get_annotator,
     get_job_items,
     get_annotations_for_job,
-    get_annotation_item,
     upsert_annotation,
     update_annotation_job_status,
 )
@@ -591,8 +590,12 @@ def upsert_public_annotations(token: str, payload: PublicAnnotationUpsertRequest
             status_code=400, detail="annotations must be non-empty"
         )
 
-    item = get_annotation_item(payload.item_id)
-    if not item or item.get("task_id") != job["task_id"]:
+    # Validate against the job's snapshotted items (annotation_job_items), not
+    # the source annotation_items row — the source may have been edited or
+    # soft-deleted after the job was created, but the snapshot is what the
+    # annotator is actually labeling.
+    job_items = get_job_items(job["uuid"])
+    if not any(it["uuid"] == payload.item_id for it in job_items):
         raise HTTPException(status_code=404, detail="Item not found in this job")
 
     saved_uuids: List[str] = []
