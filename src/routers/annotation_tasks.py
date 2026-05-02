@@ -272,10 +272,22 @@ class AnnotationItemPayload(BaseModel):
     # task `type`. The backend doesn't validate the shape — frontend +
     # downstream consumers (evaluator runs, agreement, etc.) interpret it.
     payload: Any
+    # Optional human annotations to seed alongside the item. Keys are
+    # evaluator UUIDs that must be currently linked to the task; values
+    # follow the same shape `upsert_annotation` accepts (e.g.
+    # `{"pass": bool, "reasoning": str}` for binary, `{"value": num,
+    # "reasoning": str}` for rating). When any item carries this,
+    # `BulkItemsRequest.annotator_id` is required.
+    annotations: Optional[Dict[str, Any]] = None
 
 
 class BulkItemsRequest(BaseModel):
     items: List[AnnotationItemPayload]
+    # Required only if any item in `items` carries `annotations`. The
+    # annotator must be owned by the requesting user. All seeded
+    # annotations are attributed to one synthesised completed job for
+    # this annotator.
+    annotator_id: Optional[str] = None
 
 
 @router.get("/{task_uuid}/items")
@@ -292,13 +304,113 @@ async def bulk_create_items(
     payload: BulkItemsRequest,
     user_id: str = Depends(get_current_user_id),
 ):
-    """Bulk-insert annotation items. Order of insertion is preserved by `id`."""
+    """Bulk-insert annotation items. Order of insertion is preserved by `id`.
+
+    Optionally seeds human annotations alongside the items: when any item
+    in the request carries `annotations`, `annotator_id` must be supplied
+    and one completed `annotation_jobs` row is synthesised for that
+    annotator covering every newly-inserted item. Annotations are upserted
+    as if the annotator had submitted them through the public form.
+    Annotations are validated against the task's *currently linked*
+    evaluator set; the task type (`stt | llm | simulation | tts`) does
+    not affect the contract — value shape is whatever the evaluator's
+    `output_type` expects (`{pass, reasoning}` for binary,
+    `{value, reasoning}` for rating)."""
     _ensure_owned_task(task_uuid, user_id)
     if not payload.items:
         raise HTTPException(status_code=400, detail="items must be non-empty")
+
+    items_with_annotations = [
+        it for it in payload.items if it.annotations is not None
+    ]
+    if items_with_annotations and not payload.annotator_id:
+        raise HTTPException(
+            status_code=400,
+            detail="annotator_id is required when any item carries `annotations`",
+        )
+
+    annotator: Optional[Dict[str, Any]] = None
+    linked_evaluator_ids: set = set()
+    if items_with_annotations:
+        annotator = get_annotator(payload.annotator_id)
+        if not annotator or annotator.get("user_id") != user_id:
+            # 404 (not 403) — avoid leaking existence
+            raise HTTPException(status_code=404, detail="Annotator not found")
+        linked_evaluator_ids = {
+            e["uuid"] for e in get_evaluators_for_annotation_task(task_uuid)
+        }
+        for idx, it in enumerate(items_with_annotations):
+            if not isinstance(it.annotations, dict):
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"items[{idx}].annotations must be an object keyed by evaluator UUID",
+                )
+            unknown = [
+                ev_id
+                for ev_id in it.annotations.keys()
+                if ev_id not in linked_evaluator_ids
+            ]
+            if unknown:
+                raise HTTPException(
+                    status_code=400,
+                    detail=(
+                        f"Evaluator(s) not linked to this task: {unknown}. "
+                        f"Link them via POST /annotation-tasks/{task_uuid}/evaluators "
+                        f"before seeding annotations."
+                    ),
+                )
+
     new_uuids = create_annotation_items(
-        task_uuid, [it.dict() for it in payload.items]
+        task_uuid,
+        [{"payload": it.payload} for it in payload.items],
     )
+
+    if items_with_annotations:
+        # One synthesised job covers every newly-inserted item, so the
+        # annotator shows up exactly once in agreement aggregates per
+        # bulk upload (rather than fragmenting across N tiny jobs).
+        # Items without `annotations` are still included in the job's
+        # snapshot — leaving their slots blank, which the auto-complete
+        # check at job-status-time treats the same as a partial form.
+        public_token = secrets.token_urlsafe(24)
+        job_uuid = create_annotation_job(
+            task_id=task_uuid,
+            annotator_id=payload.annotator_id,
+            item_uuids=new_uuids,
+            public_token=public_token,
+            status="pending",
+        )
+        any_annotation_written = False
+        for it, item_uuid in zip(payload.items, new_uuids):
+            if not it.annotations:
+                continue
+            for evaluator_id, value in it.annotations.items():
+                upsert_annotation(
+                    job_id=job_uuid,
+                    item_id=item_uuid,
+                    value=value,
+                    evaluator_id=evaluator_id,
+                )
+                any_annotation_written = True
+        # Mark the synthesised job as completed only when every item in
+        # the job has at least one annotation across the linked evaluator
+        # set — otherwise leave it pending so the auto-complete contract
+        # (every item × every evaluator) stays meaningful.
+        items_fully_annotated = all(
+            it.annotations
+            and linked_evaluator_ids.issubset(set(it.annotations.keys()))
+            for it in payload.items
+        )
+        if any_annotation_written and items_fully_annotated:
+            update_annotation_job_status(
+                job_uuid, status="completed", set_completed_at=True
+            )
+        return {
+            "item_ids": new_uuids,
+            "count": len(new_uuids),
+            "annotation_job_id": job_uuid,
+        }
+
     return {"item_ids": new_uuids, "count": len(new_uuids)}
 
 
