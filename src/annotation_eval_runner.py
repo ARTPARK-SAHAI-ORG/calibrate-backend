@@ -47,11 +47,22 @@ from utils import (
     capture_exception_to_sentry,
     get_s3_client,
     get_s3_output_config,
+    is_job_timed_out,
+    kill_process_group,
     register_job_starter,
     try_start_queued_job,
     upload_file_to_s3,
     upload_top_level_files_to_s3,
 )
+
+
+# Wall-clock-ish ceiling on a single annotation eval-only run. The runner
+# only writes `update_job` at start and at completion, so once spawned the
+# job's `updated_at` is effectively the spawn time — `is_job_timed_out`
+# becomes "elapsed since spawn ≥ ANNOTATION_EVAL_TIMEOUT_SECONDS". 5 minutes
+# is enough headroom for typical annotation evals (handful of items × a few
+# evaluators) and matches the watchdog cadence used elsewhere.
+ANNOTATION_EVAL_TIMEOUT_SECONDS = 5 * 60
 
 
 # Eval queue types this module participates in (must match `EVAL_JOB_TYPES`
@@ -140,6 +151,21 @@ def _resolve_evaluator_dicts(
             raise EvaluatorResolutionError(
                 f"Version {version_uuid} does not belong to evaluator {evaluator_id}"
             )
+        # `output_type`, `kind`, `data_type` are required identity columns on
+        # the evaluator row (set at create time, backfilled by migration). A
+        # missing value here means the row is malformed — surface it instead
+        # of silently miscoercing rating evaluators as "binary", side-by-side
+        # as "single", or audio as "text".
+        missing = [
+            field
+            for field in ("output_type", "kind", "data_type")
+            if not evaluator.get(field)
+        ]
+        if missing:
+            raise EvaluatorResolutionError(
+                f"Evaluator {evaluator_id} is missing required field(s) "
+                f"{missing}; check the evaluators table"
+            )
         # Shape that build_evaluator_cli_payload + downstream want.
         resolved.append(
             {
@@ -147,12 +173,12 @@ def _resolve_evaluator_dicts(
                 "name": evaluator["name"],
                 "judge_model": version["judge_model"],
                 "system_prompt": version["system_prompt"],
-                "output_type": evaluator.get("output_type", "binary"),
+                "output_type": evaluator["output_type"],
                 "output_config": version.get("output_config"),
                 "variables": version.get("variables"),
                 "variable_values": {},
-                "kind": evaluator.get("kind", "single"),
-                "data_type": evaluator.get("data_type", "text"),
+                "kind": evaluator["kind"],
+                "data_type": evaluator["data_type"],
                 # extra fields for our own bookkeeping (not seen by CLI):
                 "_evaluator_version_id": version_uuid,
             }
@@ -267,7 +293,13 @@ def _build_llm_dataset(
 
 def _build_simulation_dataset(items: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     """Text-simulation --eval-only: [{name, conversation_history}].
-    `name` = annotation_item.uuid so per-simulation output dirs map back."""
+
+    `name` is metadata only (per the calibrate spec — duplicate / missing
+    names are safe; calibrate uses its own internal `row_<i>` ids for output
+    directories). We pass the annotation_item.uuid as the name so it shows
+    up in the per-simulation output for human inspection, but the parser
+    maps results back via dataset_map.json + dataset order, NOT via name.
+    """
     out: List[Dict[str, Any]] = []
     for it in items:
         payload = _payload_dict(it)
@@ -524,22 +556,80 @@ def _parse_results_llm(
     return runs
 
 
+def _read_simulation_dataset_map(output_dir: Path) -> Dict[str, int]:
+    """Read calibrate's `dataset_map.json` for the simulation flow.
+
+    Returns `{row_id: 0-based-index}`. Calibrate writes one entry per input
+    dataset row. We use the index to map calibrate's internal `row_<i>`
+    directory back to the annotation_item we sent at that position.
+    """
+    p = output_dir / "dataset_map.json"
+    if not p.exists():
+        return {}
+    try:
+        with open(p, "r", encoding="utf-8") as f:
+            raw = json.load(f)
+    except Exception as e:
+        logger.warning(f"[annotation-eval] failed to parse {p}: {e}")
+        return {}
+    out: Dict[str, int] = {}
+    for row_id, entry in (raw or {}).items():
+        if not isinstance(entry, dict):
+            continue
+        idx = entry.get("index")
+        if isinstance(idx, int):
+            out[row_id] = idx
+    return out
+
+
 def _parse_results_simulation(
     output_dir: Path,
     evaluators_resolved: List[Dict[str, Any]],
     job_uuid: str,
+    items: Optional[List[Dict[str, Any]]] = None,
 ) -> List[Dict[str, Any]]:
-    """Simulation outputs: per-simulation `<output_dir>/<name>/evaluation_results.csv`
-    with one row per evaluator: name, type, value, reasoning, evaluator_id?, ...
-    `<name>` was set to annotation_item.uuid when we built the dataset."""
+    """Simulation outputs: per-simulation
+    `<output_dir>/<row_id>/evaluation_results.csv` with one row per evaluator
+    (`name, type, value, reasoning, evaluator_id?, scale_min?, scale_max?`).
+
+    Calibrate uses internal `row_<1-based-index>` ids for the subdirectories
+    (per the eval-only spec — the `name` we send is metadata only). We map
+    `row_id → 0-based-index → items[index].uuid` via `dataset_map.json` plus
+    the items list we built the dataset from. Falls back to `dataset_map`'s
+    `name` field (where we stashed the item uuid) if `items` isn't passed.
+    """
     name_to_uuid_via_config = _read_config_evaluators_map(output_dir)
     by_name: Dict[str, Dict[str, Any]] = {ev["name"]: ev for ev in evaluators_resolved}
+    row_id_to_index = _read_simulation_dataset_map(output_dir)
+
+    def _resolve_item_id(row_id: str) -> Optional[str]:
+        idx = row_id_to_index.get(row_id)
+        if idx is None:
+            return None
+        if items is not None and 0 <= idx < len(items):
+            return items[idx]["uuid"]
+        # Fallback: read the `name` field calibrate echoed into dataset_map
+        # (we set it to the item uuid in `_build_simulation_dataset`).
+        try:
+            with open(output_dir / "dataset_map.json", "r", encoding="utf-8") as f:
+                raw = json.load(f)
+            entry = (raw or {}).get(row_id) or {}
+            name = entry.get("name")
+            return name if isinstance(name, str) else None
+        except Exception:
+            return None
 
     runs: List[Dict[str, Any]] = []
     if not output_dir.exists():
         return runs
     for sim_dir in sorted(p for p in output_dir.iterdir() if p.is_dir()):
-        item_id = sim_dir.name  # uuid we set as `name`
+        item_id = _resolve_item_id(sim_dir.name)
+        if not item_id:
+            logger.warning(
+                f"[annotation-eval] no dataset_map entry for {sim_dir.name}; "
+                "skipping its evaluation_results.csv"
+            )
+            continue
         csv_path = sim_dir / "evaluation_results.csv"
         if not csv_path.exists():
             continue
@@ -593,13 +683,19 @@ def parse_results_for_task_type(
     output_dir: Path,
     evaluators_resolved: List[Dict[str, Any]],
     job_uuid: str,
+    items: Optional[List[Dict[str, Any]]] = None,
 ) -> List[Dict[str, Any]]:
+    """Dispatch per task type. `items` (in dataset order) is required for
+    simulation — calibrate uses internal `row_<i>` ids and we map back to
+    annotation_item.uuid via `dataset_map.json` + this list."""
     if task_type == "stt":
         return _parse_results_stt(output_dir, evaluators_resolved, job_uuid)
     if task_type == "llm":
         return _parse_results_llm(output_dir, evaluators_resolved, job_uuid)
     if task_type == "simulation":
-        return _parse_results_simulation(output_dir, evaluators_resolved, job_uuid)
+        return _parse_results_simulation(
+            output_dir, evaluators_resolved, job_uuid, items=items
+        )
     return []
 
 
@@ -608,15 +704,30 @@ def parse_results_for_task_type(
 # ---------------------------------------------------------------------------
 
 
+class AnnotationEvalTimeoutError(RuntimeError):
+    """Raised when the polling loop's `updated_at` watchdog fires. The outer
+    handler treats this like any other failure (mark job FAILED, drain queue,
+    upload partials)."""
+
+
 def _run_calibrate_eval_only(
     cmd: List[str],
     cwd: Path,
     log_dir: Path,
     on_started: Optional[Any] = None,
     heartbeat_seconds: int = 2,
+    job_uuid: Optional[str] = None,
+    timeout_seconds: int = ANNOTATION_EVAL_TIMEOUT_SECONDS,
 ) -> Tuple[int, str, str]:
     """Spawn the calibrate subprocess; redirect stdout/stderr to disk to avoid
-    pipe-buffer deadlocks; poll until done; return (returncode, stdout, stderr)."""
+    pipe-buffer deadlocks; poll until done; return (returncode, stdout, stderr).
+
+    If `job_uuid` is provided, each tick re-reads the job's `updated_at` and
+    raises `AnnotationEvalTimeoutError` if it hasn't advanced in
+    `timeout_seconds`. This prevents a stuck calibrate subprocess from
+    blocking the shared eval queue indefinitely. Before raising, the process
+    group is SIGTERM/SIGKILL'd via the standard helper.
+    """
     stdout_path = log_dir / "stdout.log"
     stderr_path = log_dir / "stderr.log"
     with open(stdout_path, "w") as out_f, open(stderr_path, "w") as err_f:
@@ -637,6 +748,27 @@ def _run_calibrate_eval_only(
                 logger.warning(f"on_started callback raised: {e}")
         while proc.poll() is None:
             time.sleep(heartbeat_seconds)
+            if job_uuid is None:
+                continue
+            job = get_job(job_uuid)
+            updated_at = job.get("updated_at") if job else None
+            if updated_at and is_job_timed_out(
+                updated_at, timeout_seconds=timeout_seconds
+            ):
+                logger.warning(
+                    f"[annotation-eval] job {job_uuid} timed out "
+                    f"(no progress for {timeout_seconds}s); killing pgid {proc.pid}"
+                )
+                kill_process_group(proc.pid, job_uuid)
+                # Wait briefly for the kill to propagate before reading logs.
+                try:
+                    proc.wait(timeout=5)
+                except subprocess.TimeoutExpired:
+                    pass
+                raise AnnotationEvalTimeoutError(
+                    f"calibrate --eval-only timed out after {timeout_seconds}s "
+                    "with no progress"
+                )
     try:
         with open(stdout_path, "r") as f:
             stdout = f.read()
@@ -683,8 +815,18 @@ def _extract_calibrate_error(stdout: str, stderr: str) -> str:
 def _persist_pgid(job_uuid: str, pid: int) -> None:
     """Write pid/pgid into the job's details so recovery can kill the
     orphaned subprocess if the backend dies mid-run. Uses update_job's merge
-    semantics so existing keys (evaluators, item_ids, ...) survive."""
-    update_job(job_uuid, details={"pid": pid, "pgid": pid})
+    semantics so existing keys (evaluators, item_ids, ...) survive.
+
+    `os.getpgid(pid)` resolves the actual process-group id rather than
+    assuming pid==pgid (which is true today only because the subprocess is
+    spawned with `start_new_session=True`)."""
+    try:
+        pgid = os.getpgid(pid)
+    except (ProcessLookupError, OSError):
+        # Process already exited / pgid lookup failed — fall back to pid so
+        # recovery still has *something* to try.
+        pgid = pid
+    update_job(job_uuid, details={"pid": pid, "pgid": pgid})
 
 
 def _try_upload_partial_outputs(
@@ -792,6 +934,7 @@ def _run_job(
                 cwd=tmp,
                 log_dir=output_dir,
                 on_started=lambda pid: _persist_pgid(job_uuid, pid),
+                job_uuid=job_uuid,
             )
             if rc != 0:
                 logger.error(
@@ -807,7 +950,7 @@ def _run_job(
             # authoritative — name/description on the evaluator can change
             # later and the runs still resolve correctly.
             runs_to_insert = parse_results_for_task_type(
-                task_type, output_dir, evaluators_resolved, job_uuid
+                task_type, output_dir, evaluators_resolved, job_uuid, items=items
             )
             metrics = _read_metrics_json(output_dir)
             if runs_to_insert:

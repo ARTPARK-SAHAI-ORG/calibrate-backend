@@ -1,22 +1,16 @@
-"""JWT & API-key Authentication Utilities.
+"""JWT Authentication Utilities.
 
-This module provides JWT token creation/validation and API-key verification for
-securing API endpoints.
+This module provides JWT token creation/validation for securing API endpoints.
 """
 
 import os
-import secrets
 import logging
 from datetime import datetime, timedelta
 from typing import Optional
 
-import bcrypt
 from jose import JWTError, jwt
-from fastapi import HTTPException, Depends, Request
+from fastapi import HTTPException, Depends
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
-
-API_KEY_PREFIX = "calib_"
-API_KEY_LOOKUP_PREFIX_LEN = 12  # prefix stored in DB = API_KEY_PREFIX + 6 raw chars
 
 logger = logging.getLogger(__name__)
 
@@ -166,60 +160,3 @@ async def get_optional_user_id(
     return payload.get("sub")
 
 
-# ============ API-key authentication ============
-
-
-def generate_api_key() -> tuple[str, str, str]:
-    """Generate a new API key.
-
-    Returns:
-        (raw_key, key_prefix, key_hash) — persist only prefix + hash; raw_key is shown to the
-        user exactly once.
-    """
-    raw_suffix = secrets.token_urlsafe(32)
-    raw_key = f"{API_KEY_PREFIX}{raw_suffix}"
-    key_prefix = raw_key[:API_KEY_LOOKUP_PREFIX_LEN]
-    key_hash = bcrypt.hashpw(raw_key.encode("utf-8"), bcrypt.gensalt()).decode("utf-8")
-    return raw_key, key_prefix, key_hash
-
-
-def _extract_api_key(request: Request) -> Optional[str]:
-    """Pull the API key out of the request. Accepts either X-API-Key header or
-    `Authorization: Bearer <key>` where the key starts with API_KEY_PREFIX."""
-    header_key = request.headers.get("X-API-Key")
-    if header_key:
-        return header_key.strip()
-    auth = request.headers.get("Authorization")
-    if auth and auth.lower().startswith("bearer "):
-        candidate = auth[7:].strip()
-        if candidate.startswith(API_KEY_PREFIX):
-            return candidate
-    return None
-
-
-async def get_user_from_api_key(request: Request) -> str:
-    """FastAPI dependency: verify the API key and return the owning user's UUID.
-
-    Raises 401 if the key is missing, malformed, or unknown.
-    """
-    from db import get_api_key_candidates_by_prefix, touch_api_key  # lazy import
-
-    raw_key = _extract_api_key(request)
-    if not raw_key:
-        raise HTTPException(
-            status_code=401,
-            detail="Missing API key (send X-API-Key header or Authorization: Bearer <key>)",
-        )
-    if not raw_key.startswith(API_KEY_PREFIX) or len(raw_key) < API_KEY_LOOKUP_PREFIX_LEN:
-        raise HTTPException(status_code=401, detail="Malformed API key")
-
-    lookup_prefix = raw_key[:API_KEY_LOOKUP_PREFIX_LEN]
-    candidates = get_api_key_candidates_by_prefix(lookup_prefix)
-    for candidate in candidates:
-        try:
-            if bcrypt.checkpw(raw_key.encode("utf-8"), candidate["key_hash"].encode("utf-8")):
-                touch_api_key(candidate["uuid"])
-                return candidate["user_id"]
-        except ValueError:
-            continue
-    raise HTTPException(status_code=401, detail="Invalid API key")

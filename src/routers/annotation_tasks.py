@@ -60,13 +60,13 @@ from auth_utils import get_current_user_id
 from annotation_metrics import (
     aggregate_agreement,
     aggregate_human_evaluator_agreement,
+    evaluator_human_pair_agreement,
     per_item_agreement,
     trend_series,
     trend_series_human_evaluator,
     filter_runs_to_live_versions,
     _pairwise_agreement,
     _scalar,
-    _classify,
     _round_agreement,
 )
 
@@ -555,8 +555,12 @@ async def start_evaluator_run(
 
     # Resolve the item subset.
     if payload.item_ids is None:
+        # "All items" snapshots the live set at submission time. Storing the
+        # resolved UUIDs (instead of leaving null) ensures recovery after a
+        # crash re-runs the same items the user originally submitted, even if
+        # items were added or deleted in the meantime.
         items = all_items
-        item_ids_persisted: Optional[List[str]] = None  # null = "all items"
+        item_ids_persisted: Optional[List[str]] = [it["uuid"] for it in all_items]
     else:
         if not payload.item_ids:
             raise HTTPException(
@@ -956,14 +960,14 @@ async def task_summary(
     versions_by_evaluator: Dict[str, set] = {}
     for r in runs:
         ev_id = r.get("evaluator_id")
-        item_id = r.get("item_id")
+        r_item_id = r.get("item_id")
         v_id = r.get("evaluator_version_id")
-        if not ev_id or not item_id:
+        if not ev_id or not r_item_id:
             continue
         if v_id:
             versions_by_evaluator.setdefault(ev_id, set()).add(v_id)
         ts = r.get("completed_at") or r.get("created_at") or ""
-        slot = (item_id, ev_id, v_id)
+        slot = (r_item_id, ev_id, v_id)
         if slot not in latest_run_ts or ts > latest_run_ts[slot]:
             latest_run[slot] = r
             latest_run_ts[slot] = ts
@@ -984,10 +988,10 @@ async def task_summary(
     for a in annotations:
         annotator_id = a.get("annotator_id")
         ev_id = a.get("evaluator_id")
-        item_id = a.get("item_id")
-        if not annotator_id or not ev_id or not item_id:
+        a_item_id = a.get("item_id")
+        if not annotator_id or not ev_id or not a_item_id:
             continue
-        latest_ann[(item_id, ev_id, annotator_id)] = a
+        latest_ann[(a_item_id, ev_id, annotator_id)] = a
 
     # Annotator union — only those with ≥1 (item, evaluator) annotation visible
     # in this view. Stable ordering by name then uuid.
@@ -1085,38 +1089,19 @@ async def task_summary(
 
                 # Per-row evaluator agreement: pairs THIS version's run value
                 # with every human annotation on the (item, evaluator) slot.
-                # Per-version, so each version row gets its own number.
+                # Per-version, so each version row gets its own number. Shares
+                # `evaluator_human_pair_agreement` with the task-level rollup
+                # so the two endpoints stay consistent.
                 eval_scalar = (
                     _scalar(run_value) if run_value is not None else None
                 )
                 evaluator_agreement: Optional[float] = None
                 if eval_scalar is not None and slot_human_scalars:
-                    eval_kind = _classify(eval_scalar)
-                    if eval_kind is not None:
-                        numerics = [
-                            v
-                            for v in (eval_scalar, *slot_human_scalars)
-                            if _classify(v) == "numeric"
-                        ]
-                        span = (
-                            (max(numerics) - min(numerics)) if numerics else 1.0
-                        )
-                        if span <= 0:
-                            span = 1.0
-                        total = 0.0
-                        pairs = 0
-                        for hv in slot_human_scalars:
-                            if _classify(hv) != eval_kind:
-                                continue
-                            if eval_kind in ("binary", "categorical"):
-                                total += 1.0 if eval_scalar == hv else 0.0
-                            elif eval_kind == "numeric":
-                                total += 1.0 - abs(eval_scalar - hv) / span
-                            pairs += 1
-                        if pairs > 0:
-                            evaluator_agreement = _round_agreement(
-                                total / pairs
-                            )
+                    total, pairs = evaluator_human_pair_agreement(
+                        eval_scalar, slot_human_scalars
+                    )
+                    if pairs > 0:
+                        evaluator_agreement = _round_agreement(total / pairs)
 
                 rows.append(
                     {

@@ -8,8 +8,9 @@ from db import (
     get_all_annotators,
     update_annotator,
     delete_annotator,
-    get_jobs_for_annotator,
     get_jobs_for_annotator_detailed,
+    get_job_counts_for_user_annotators,
+    get_annotations_for_user,
     get_annotations_for_annotator_overlap_slots,
 )
 from auth_utils import get_current_user_id
@@ -72,21 +73,28 @@ async def create_annotator_endpoint(
 async def list_annotators(user_id: str = Depends(get_current_user_id)):
     """List all annotators on this account with their per-annotator stats:
     `jobs_count` and `current_agreement` (pairwise mean vs other annotators).
-    Both are `null` when there's nothing to compute (no jobs / no overlap)."""
+    Both are `null` when there's nothing to compute (no jobs / no overlap).
+
+    Bulk-fetches once: annotators, job counts, and the user's full annotation
+    set. Per-annotator agreement is then a Python-side filter over the
+    shared annotation list — `aggregate_agreement_for_annotator` already
+    selects only slots where the target annotator participated, so feeding
+    it the account-wide list is equivalent to the per-annotator query.
+    """
     annotators = get_all_annotators(user_id=user_id)
+    if not annotators:
+        return []
+    jobs_count_by_annotator = get_job_counts_for_user_annotators(user_id)
+    all_annotations = get_annotations_for_user(user_id)
     out: List[Dict[str, Any]] = []
     for a in annotators:
-        jobs = get_jobs_for_annotator(a["uuid"])
-        annotations = get_annotations_for_annotator_overlap_slots(
-            user_id=user_id, annotator_id=a["uuid"]
-        )
         agreement, pairs = aggregate_agreement_for_annotator(
-            annotations, a["uuid"]
+            all_annotations, a["uuid"]
         )
         out.append(
             {
                 **a,
-                "jobs_count": len(jobs) if jobs else 0,
+                "jobs_count": jobs_count_by_annotator.get(a["uuid"], 0),
                 "current_agreement": agreement,
                 "pair_count": pairs if pairs else None,
             }

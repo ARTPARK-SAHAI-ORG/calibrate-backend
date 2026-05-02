@@ -452,23 +452,6 @@ def init_db():
 
         cursor.execute(
             """
-            CREATE TABLE IF NOT EXISTS api_keys (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                uuid TEXT NOT NULL UNIQUE,
-                user_id TEXT NOT NULL,
-                key_hash TEXT NOT NULL,
-                key_prefix TEXT NOT NULL,
-                name TEXT NOT NULL,
-                last_used_at TIMESTAMP DEFAULT NULL,
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                deleted_at TIMESTAMP DEFAULT NULL,
-                FOREIGN KEY (user_id) REFERENCES users(uuid)
-            )
-        """
-        )
-
-        cursor.execute(
-            """
             CREATE TABLE IF NOT EXISTS datasets (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 uuid TEXT NOT NULL UNIQUE,
@@ -595,6 +578,7 @@ def init_db():
                 status TEXT NOT NULL DEFAULT 'pending',
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                 completed_at TIMESTAMP,
+                deleted_at TIMESTAMP DEFAULT NULL,
                 FOREIGN KEY (task_id) REFERENCES annotation_tasks(uuid),
                 FOREIGN KEY (annotator_id) REFERENCES annotators(uuid)
             )
@@ -654,6 +638,8 @@ def init_db():
         for stmt in (
             "ALTER TABLE evaluator_runs ADD COLUMN deleted_at TIMESTAMP DEFAULT NULL",
             "ALTER TABLE jobs ADD COLUMN deleted_at TIMESTAMP DEFAULT NULL",
+            "ALTER TABLE annotation_jobs ADD COLUMN deleted_at TIMESTAMP DEFAULT NULL",
+            "ALTER TABLE annotations ADD COLUMN deleted_at TIMESTAMP DEFAULT NULL",
         ):
             try:
                 cursor.execute(stmt)
@@ -671,6 +657,7 @@ def init_db():
                 value TEXT,
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                 updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                deleted_at TIMESTAMP DEFAULT NULL,
                 UNIQUE(job_id, item_id, evaluator_id),
                 FOREIGN KEY (job_id) REFERENCES annotation_jobs(uuid),
                 FOREIGN KEY (item_id) REFERENCES annotation_items(uuid),
@@ -3547,70 +3534,6 @@ def set_test_evaluators(
         conn.commit()
 
 
-# ============ API Keys ============
-
-
-def create_api_key_row(user_id: str, name: str, key_hash: str, key_prefix: str) -> str:
-    with get_db_connection() as conn:
-        cursor = conn.cursor()
-        api_key_uuid = str(uuid.uuid4())
-        cursor.execute(
-            """
-            INSERT INTO api_keys (uuid, user_id, key_hash, key_prefix, name)
-            VALUES (?, ?, ?, ?, ?)
-            """,
-            (api_key_uuid, user_id, key_hash, key_prefix, name),
-        )
-        conn.commit()
-        return api_key_uuid
-
-
-def get_api_keys_for_user(user_id: str) -> List[Dict[str, Any]]:
-    with get_db_connection() as conn:
-        cursor = conn.cursor()
-        cursor.execute(
-            "SELECT uuid, user_id, key_prefix, name, last_used_at, created_at "
-            "FROM api_keys WHERE user_id = ? AND deleted_at IS NULL ORDER BY created_at DESC",
-            (user_id,),
-        )
-        return [dict(r) for r in cursor.fetchall()]
-
-
-def delete_api_key(api_key_uuid: str, user_id: str) -> bool:
-    with get_db_connection() as conn:
-        cursor = conn.cursor()
-        cursor.execute(
-            "UPDATE api_keys SET deleted_at = CURRENT_TIMESTAMP "
-            "WHERE uuid = ? AND user_id = ? AND deleted_at IS NULL",
-            (api_key_uuid, user_id),
-        )
-        conn.commit()
-        return cursor.rowcount > 0
-
-
-def get_api_key_candidates_by_prefix(key_prefix: str) -> List[Dict[str, Any]]:
-    """Return all active api_keys rows matching a prefix. Caller must bcrypt-verify `key_hash`."""
-    with get_db_connection() as conn:
-        cursor = conn.cursor()
-        cursor.execute(
-            "SELECT uuid, user_id, key_hash FROM api_keys "
-            "WHERE key_prefix = ? AND deleted_at IS NULL",
-            (key_prefix,),
-        )
-        return [dict(r) for r in cursor.fetchall()]
-
-
-def touch_api_key(api_key_uuid: str) -> None:
-    """Update last_used_at to CURRENT_TIMESTAMP."""
-    with get_db_connection() as conn:
-        cursor = conn.cursor()
-        cursor.execute(
-            "UPDATE api_keys SET last_used_at = CURRENT_TIMESTAMP WHERE uuid = ?",
-            (api_key_uuid,),
-        )
-        conn.commit()
-
-
 # ============ Simulations Functions ============
 
 
@@ -5410,6 +5333,15 @@ def update_annotation_task(
 
 
 def delete_annotation_task(task_uuid: str) -> bool:
+    """Soft-delete an annotation task and cascade to every child row that
+    carries a `deleted_at` column: items, evaluator links, jobs, evaluator
+    runs (via the items in this task), and the generic annotation-eval job
+    rows (matched via `details->task_id`).
+
+    `annotations` and `annotation_job_items` have no `deleted_at` of their
+    own — they're filtered transitively: every read joins through
+    `annotation_jobs` which now respects the cascade.
+    """
     with get_db_connection() as conn:
         cursor = conn.cursor()
         cursor.execute(
@@ -5417,8 +5349,42 @@ def delete_annotation_task(task_uuid: str) -> bool:
             "WHERE uuid = ? AND deleted_at IS NULL",
             (task_uuid,),
         )
+        if cursor.rowcount == 0:
+            return False
+        cursor.execute(
+            "UPDATE annotation_items SET deleted_at = CURRENT_TIMESTAMP "
+            "WHERE task_id = ? AND deleted_at IS NULL",
+            (task_uuid,),
+        )
+        cursor.execute(
+            "UPDATE annotation_task_evaluators SET deleted_at = CURRENT_TIMESTAMP "
+            "WHERE task_id = ? AND deleted_at IS NULL",
+            (task_uuid,),
+        )
+        cursor.execute(
+            "UPDATE annotation_jobs SET deleted_at = CURRENT_TIMESTAMP "
+            "WHERE task_id = ? AND deleted_at IS NULL",
+            (task_uuid,),
+        )
+        cursor.execute(
+            """
+            UPDATE evaluator_runs SET deleted_at = CURRENT_TIMESTAMP
+             WHERE deleted_at IS NULL
+               AND item_id IN (SELECT uuid FROM annotation_items WHERE task_id = ?)
+            """,
+            (task_uuid,),
+        )
+        cursor.execute(
+            """
+            UPDATE jobs SET deleted_at = CURRENT_TIMESTAMP
+             WHERE deleted_at IS NULL
+               AND type = 'annotation-eval'
+               AND json_extract(details, '$.task_id') = ?
+            """,
+            (task_uuid,),
+        )
         conn.commit()
-        return cursor.rowcount > 0
+        return True
 
 
 # ============ Annotation Task Evaluators ============
@@ -5753,7 +5719,7 @@ def get_annotation_job(job_uuid: str) -> Optional[Dict[str, Any]]:
     with get_db_connection() as conn:
         cursor = conn.cursor()
         cursor.execute(
-            "SELECT * FROM annotation_jobs WHERE uuid = ?",
+            "SELECT * FROM annotation_jobs WHERE uuid = ? AND deleted_at IS NULL",
             (job_uuid,),
         )
         row = cursor.fetchone()
@@ -5764,7 +5730,8 @@ def get_jobs_for_task(task_id: str) -> List[Dict[str, Any]]:
     with get_db_connection() as conn:
         cursor = conn.cursor()
         cursor.execute(
-            "SELECT * FROM annotation_jobs WHERE task_id = ? ORDER BY created_at DESC",
+            "SELECT * FROM annotation_jobs WHERE task_id = ? AND deleted_at IS NULL "
+            "ORDER BY created_at DESC",
             (task_id,),
         )
         return [_parse_annotation_job_row(r) for r in cursor.fetchall()]
@@ -5804,7 +5771,7 @@ def get_jobs_for_task_detailed(task_id: str) -> List[Dict[str, Any]]:
                 )) AS completed_item_count
               FROM annotation_jobs j
               JOIN annotators an ON an.uuid = j.annotator_id
-             WHERE j.task_id = ?
+             WHERE j.task_id = ? AND j.deleted_at IS NULL
              ORDER BY j.created_at DESC
             """,
             (task_id,),
@@ -5820,7 +5787,7 @@ def get_annotation_job_by_token(token: str) -> Optional[Dict[str, Any]]:
     with get_db_connection() as conn:
         cursor = conn.cursor()
         cursor.execute(
-            "SELECT * FROM annotation_jobs WHERE public_token = ?",
+            "SELECT * FROM annotation_jobs WHERE public_token = ? AND deleted_at IS NULL",
             (token,),
         )
         row = cursor.fetchone()
@@ -5828,10 +5795,21 @@ def get_annotation_job_by_token(token: str) -> Optional[Dict[str, Any]]:
 
 
 def get_annotations_for_job(job_id: str) -> List[Dict[str, Any]]:
+    """Annotations directly under one job. Filters via the parent job's
+    `deleted_at` so a soft-deleted job (e.g. cascaded from task delete)
+    returns no annotations."""
     with get_db_connection() as conn:
         cursor = conn.cursor()
         cursor.execute(
-            "SELECT * FROM annotations WHERE job_id = ? ORDER BY created_at ASC",
+            """
+            SELECT a.*
+              FROM annotations a
+              JOIN annotation_jobs j ON j.uuid = a.job_id
+             WHERE a.job_id = ?
+               AND a.deleted_at IS NULL
+               AND j.deleted_at IS NULL
+             ORDER BY a.created_at ASC
+            """,
             (job_id,),
         )
         return [_parse_annotation_row(r) for r in cursor.fetchall()]
@@ -5841,10 +5819,32 @@ def get_jobs_for_annotator(annotator_id: str) -> List[Dict[str, Any]]:
     with get_db_connection() as conn:
         cursor = conn.cursor()
         cursor.execute(
-            "SELECT * FROM annotation_jobs WHERE annotator_id = ? ORDER BY created_at DESC",
+            "SELECT * FROM annotation_jobs WHERE annotator_id = ? AND deleted_at IS NULL "
+            "ORDER BY created_at DESC",
             (annotator_id,),
         )
         return [_parse_annotation_job_row(r) for r in cursor.fetchall()]
+
+
+def get_job_counts_for_user_annotators(user_id: str) -> Dict[str, int]:
+    """`{annotator_uuid: live_job_count}` for every annotator owned by user.
+    Single-query alternative to calling `get_jobs_for_annotator` in a loop.
+    Annotators with zero jobs are returned with `0`."""
+    with get_db_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            """
+            SELECT a.uuid AS annotator_uuid,
+                   COUNT(j.uuid) AS jobs_count
+              FROM annotators a
+              LEFT JOIN annotation_jobs j
+                ON j.annotator_id = a.uuid AND j.deleted_at IS NULL
+             WHERE a.user_id = ? AND a.deleted_at IS NULL
+             GROUP BY a.uuid
+            """,
+            (user_id,),
+        )
+        return {r["annotator_uuid"]: r["jobs_count"] for r in cursor.fetchall()}
 
 
 def get_jobs_for_annotator_detailed(annotator_id: str) -> List[Dict[str, Any]]:
@@ -5878,7 +5878,9 @@ def get_jobs_for_annotator_detailed(annotator_id: str) -> List[Dict[str, Any]]:
                 )) AS completed_item_count
               FROM annotation_jobs j
               JOIN annotation_tasks t ON t.uuid = j.task_id
-             WHERE j.annotator_id = ? AND t.deleted_at IS NULL
+             WHERE j.annotator_id = ?
+               AND t.deleted_at IS NULL
+               AND j.deleted_at IS NULL
              ORDER BY j.created_at DESC
             """,
             (annotator_id,),
@@ -6037,6 +6039,8 @@ def get_annotations_for_annotator_overlap_slots(
               JOIN annotation_items ai ON ai.uuid = a.item_id
              WHERE t.user_id = ?
                AND t.deleted_at IS NULL
+               AND j.deleted_at IS NULL
+               AND a.deleted_at IS NULL
                AND ai.deleted_at IS NULL
                AND (a.item_id, COALESCE(a.evaluator_id, '')) IN (
                    SELECT a2.item_id, COALESCE(a2.evaluator_id, '')
@@ -6044,6 +6048,8 @@ def get_annotations_for_annotator_overlap_slots(
                      JOIN annotation_jobs j2 ON j2.uuid = a2.job_id
                      JOIN annotation_items ai2 ON ai2.uuid = a2.item_id
                     WHERE j2.annotator_id = ?
+                      AND j2.deleted_at IS NULL
+                      AND a2.deleted_at IS NULL
                       AND ai2.deleted_at IS NULL
                )
              ORDER BY a.updated_at ASC
@@ -6067,7 +6073,7 @@ def get_job_items(job_uuid: str) -> List[Dict[str, Any]]:
                    j.task_id       AS task_id
               FROM annotation_job_items ji
               JOIN annotation_jobs j ON j.uuid = ji.job_id
-             WHERE ji.job_id = ?
+             WHERE ji.job_id = ? AND j.deleted_at IS NULL
              ORDER BY ji.id ASC
             """,
             (job_uuid,),
@@ -6172,7 +6178,8 @@ def upsert_annotation(
 
 
 def get_annotations_for_item(item_id: str) -> List[Dict[str, Any]]:
-    """All annotations on a single item, across jobs/annotators/evaluators."""
+    """All annotations on a single item, across jobs/annotators/evaluators.
+    Excludes annotations on soft-deleted jobs (e.g. cascaded from task delete)."""
     with get_db_connection() as conn:
         cursor = conn.cursor()
         cursor.execute(
@@ -6181,6 +6188,8 @@ def get_annotations_for_item(item_id: str) -> List[Dict[str, Any]]:
               FROM annotations a
               JOIN annotation_jobs j ON j.uuid = a.job_id
              WHERE a.item_id = ?
+               AND a.deleted_at IS NULL
+               AND j.deleted_at IS NULL
              ORDER BY a.created_at ASC
             """,
             (item_id,),
@@ -6200,7 +6209,10 @@ def get_annotations_for_task(
         "  FROM annotations a "
         "  JOIN annotation_jobs j ON j.uuid = a.job_id "
         "  JOIN annotation_items ai ON ai.uuid = a.item_id "
-        " WHERE j.task_id = ? AND ai.deleted_at IS NULL "
+        " WHERE j.task_id = ? "
+        "   AND a.deleted_at IS NULL "
+        "   AND j.deleted_at IS NULL "
+        "   AND ai.deleted_at IS NULL "
     )
     params: List[Any] = [task_id]
     if since:
@@ -6231,6 +6243,8 @@ def get_annotations_for_user(
         "  JOIN annotation_items ai ON ai.uuid = a.item_id "
         " WHERE t.user_id = ? "
         "   AND t.deleted_at IS NULL "
+        "   AND j.deleted_at IS NULL "
+        "   AND a.deleted_at IS NULL "
         "   AND ai.deleted_at IS NULL "
     )
     params: List[Any] = [user_id]

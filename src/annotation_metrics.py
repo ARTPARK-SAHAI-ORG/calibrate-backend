@@ -239,6 +239,47 @@ def _latest_evaluator_value_per_slot(
     return out
 
 
+def evaluator_human_pair_agreement(
+    eval_value: Any,
+    human_values: Iterable[Any],
+) -> Tuple[float, int]:
+    """One-slot evaluator-vs-human agreement: pair the evaluator's value with
+    each human's value on the same slot and return (sum_of_scores, pair_count).
+
+    Same scoring rules as `_pairwise_agreement`:
+      - binary / categorical: 1.0 if equal, 0.0 otherwise
+      - numeric: 1 - |a - b| / span, where span spans this slot's values
+
+    Pairs of mismatched type are skipped (don't contribute to the count).
+
+    Returns the SUM (not mean) so callers aggregating across slots can weight
+    correctly: account-level mean = sum_of_sums / sum_of_counts. Single-slot
+    callers that want the mean compute `sum / count` themselves (and treat
+    count==0 as `None`).
+    """
+    eval_kind = _classify(eval_value)
+    if eval_kind is None:
+        return (0.0, 0)
+    humans = list(human_values)
+    if not humans:
+        return (0.0, 0)
+    numerics = [v for v in (eval_value, *humans) if _classify(v) == "numeric"]
+    span = (max(numerics) - min(numerics)) if numerics else 1.0
+    if span <= 0:
+        span = 1.0
+    total = 0.0
+    pairs = 0
+    for hv in humans:
+        if _classify(hv) != eval_kind:
+            continue
+        if eval_kind in ("binary", "categorical"):
+            total += 1.0 if eval_value == hv else 0.0
+        elif eval_kind == "numeric":
+            total += 1.0 - abs(eval_value - hv) / span
+        pairs += 1
+    return (total, pairs)
+
+
 def aggregate_human_evaluator_agreement(
     annotations: Iterable[Dict[str, Any]],
     evaluator_runs: Iterable[Dict[str, Any]],
@@ -281,22 +322,11 @@ def aggregate_human_evaluator_agreement(
         humans = human_by_slot.get(slot)
         if not humans:
             continue
-        eval_kind = _classify(eval_val)
-        if eval_kind is None:
-            continue
-        # Numeric span across the slot's participating values.
-        numerics = [v for v in (eval_val, *humans.values()) if _classify(v) == "numeric"]
-        span = (max(numerics) - min(numerics)) if numerics else 1.0
-        if span <= 0:
-            span = 1.0
-        for human_val in humans.values():
-            if _classify(human_val) != eval_kind:
-                continue
-            if eval_kind in ("binary", "categorical"):
-                total_weighted += 1.0 if eval_val == human_val else 0.0
-            elif eval_kind == "numeric":
-                total_weighted += 1.0 - abs(eval_val - human_val) / span
-            total_pairs += 1
+        slot_total, slot_pairs = evaluator_human_pair_agreement(
+            eval_val, humans.values()
+        )
+        total_weighted += slot_total
+        total_pairs += slot_pairs
     if total_pairs == 0:
         return (None, 0)
     return (_round_agreement(total_weighted / total_pairs), total_pairs)

@@ -205,7 +205,7 @@ def recover_pending_jobs():
                 logger.warning(f"Job {job_id} has no details, marking as failed")
                 update_job(
                     job_id,
-                    status=TaskStatus.DONE.value,
+                    status=TaskStatus.FAILED.value,
                     results={"error": "Job recovery failed: no details available"},
                 )
                 continue
@@ -221,7 +221,7 @@ def recover_pending_jobs():
                     logger.warning(f"Unknown job type: {job_type}, marking as failed")
                     update_job(
                         job_id,
-                        status=TaskStatus.DONE.value,
+                        status=TaskStatus.FAILED.value,
                         results={
                             "error": f"Job recovery failed: unknown job type {job_type}"
                         },
@@ -230,7 +230,7 @@ def recover_pending_jobs():
                 logger.error(f"Failed to recover job {job_id}: {e}")
                 update_job(
                     job_id,
-                    status=TaskStatus.DONE.value,
+                    status=TaskStatus.FAILED.value,
                     results={"error": f"Job recovery failed: {str(e)}"},
                 )
     else:
@@ -253,7 +253,7 @@ def recover_pending_jobs():
                 )
                 update_agent_test_job(
                     job_id,
-                    status=TaskStatus.DONE.value,
+                    status=TaskStatus.FAILED.value,
                     results={"error": "Job recovery failed: no details available"},
                 )
                 continue
@@ -269,7 +269,7 @@ def recover_pending_jobs():
                     )
                     update_agent_test_job(
                         job_id,
-                        status=TaskStatus.DONE.value,
+                        status=TaskStatus.FAILED.value,
                         results={
                             "error": f"Job recovery failed: unknown job type {job_type}"
                         },
@@ -278,7 +278,7 @@ def recover_pending_jobs():
                 logger.error(f"Failed to recover agent test job {job_id}: {e}")
                 update_agent_test_job(
                     job_id,
-                    status=TaskStatus.DONE.value,
+                    status=TaskStatus.FAILED.value,
                     results={"error": f"Job recovery failed: {str(e)}"},
                 )
     else:
@@ -301,7 +301,7 @@ def recover_pending_jobs():
                 )
                 update_simulation_job(
                     job_id,
-                    status=TaskStatus.DONE.value,
+                    status=TaskStatus.FAILED.value,
                     results={"error": "Job recovery failed: no details available"},
                 )
                 continue
@@ -315,7 +315,7 @@ def recover_pending_jobs():
                     )
                     update_simulation_job(
                         job_id,
-                        status=TaskStatus.DONE.value,
+                        status=TaskStatus.FAILED.value,
                         results={
                             "error": f"Job recovery failed: unknown job type {job_type}"
                         },
@@ -324,7 +324,7 @@ def recover_pending_jobs():
                 logger.error(f"Failed to recover simulation job {job_id}: {e}")
                 update_simulation_job(
                     job_id,
-                    status=TaskStatus.DONE.value,
+                    status=TaskStatus.FAILED.value,
                     results={"error": f"Job recovery failed: {str(e)}"},
                 )
     else:
