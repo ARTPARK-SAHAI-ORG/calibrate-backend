@@ -874,12 +874,197 @@ async def list_evaluator_run_jobs(
     return [_shape_eval_job_for_response(j) for j in jobs]
 
 
+def _human_agreement_for_run(
+    task_uuid: str, job_runs: List[Dict[str, Any]]
+) -> Dict[str, Any]:
+    """Build the `human_agreement` block returned alongside an evaluator-run
+    job. Restricted to slots (item_id, evaluator_id) actually exercised by
+    THIS job's runs — annotations on items/evaluators not in the run are
+    ignored even if present elsewhere on the task.
+
+    Shape:
+        {
+          "evaluators": [
+            { "evaluator_id": str, "evaluator_version_id": str|None,
+              "agreement": float|None, "pair_count": int, "item_count": int }
+          ],
+          "items": [
+            { "item_id": str, "annotator_count": int,
+              "evaluators": [{evaluator_id, agreement, pair_count}] }
+          ]
+        }
+
+    `evaluators[].agreement` reuses `aggregate_human_evaluator_agreement` —
+    so it agrees with the task-level alignment block by construction.
+    `items[]` only includes items where at least one human annotation exists
+    on an evaluator that this job ran (no humans → no row, by design)."""
+    if not job_runs:
+        return {"evaluators": [], "items": []}
+
+    item_ids_in_run = {r["item_id"] for r in job_runs if r.get("item_id")}
+    evaluator_ids_in_run = list(
+        {r["evaluator_id"] for r in job_runs if r.get("evaluator_id")}
+    )
+    if not item_ids_in_run or not evaluator_ids_in_run:
+        return {"evaluators": [], "items": []}
+
+    # Pull all task annotations once and filter to the items/evaluators in
+    # this run (cheaper than N item-scoped queries, and matches how the
+    # task-level alignment block fetches).
+    all_annotations = get_annotations_for_task(task_uuid)
+    relevant_annotations = [
+        a
+        for a in all_annotations
+        if a.get("item_id") in item_ids_in_run
+        and a.get("evaluator_id") in set(evaluator_ids_in_run)
+    ]
+
+    # Per-evaluator aggregate (across every item this job touched).
+    evaluator_blocks: List[Dict[str, Any]] = []
+    # Pre-compute version pin per evaluator from the run rows so the FE can
+    # show "agreement on evaluator X version Y vs humans" without an extra
+    # lookup. A job runs one version per evaluator by construction.
+    version_by_evaluator: Dict[str, Optional[str]] = {}
+    for r in job_runs:
+        ev_id = r.get("evaluator_id")
+        if ev_id and ev_id not in version_by_evaluator:
+            version_by_evaluator[ev_id] = r.get("evaluator_version_id")
+    for ev_id in evaluator_ids_in_run:
+        agreement, pair_count = aggregate_human_evaluator_agreement(
+            relevant_annotations, job_runs, ev_id
+        )
+        # Items with at least one human annotation on this evaluator.
+        item_count = len(
+            {
+                a["item_id"]
+                for a in relevant_annotations
+                if a.get("evaluator_id") == ev_id
+            }
+        )
+        evaluator_blocks.append(
+            {
+                "evaluator_id": ev_id,
+                "evaluator_version_id": version_by_evaluator.get(ev_id),
+                "agreement": agreement,
+                "pair_count": pair_count,
+                "item_count": item_count,
+            }
+        )
+
+    # Per-item agreement, restricted to items that have at least one human
+    # annotation on an evaluator this job ran. The whole point of this view
+    # is "where do machines and humans disagree on this run" — items with
+    # zero human signal contribute nothing.
+    annotations_by_item: Dict[str, List[Dict[str, Any]]] = {}
+    for a in relevant_annotations:
+        annotations_by_item.setdefault(a["item_id"], []).append(a)
+    runs_by_item: Dict[str, List[Dict[str, Any]]] = {}
+    for r in job_runs:
+        if r.get("item_id"):
+            runs_by_item.setdefault(r["item_id"], []).append(r)
+
+    # Resolve annotator names once for every annotator that contributed to
+    # any of the relevant items, so per-item entries can label each value.
+    annotator_uuids = sorted(
+        {
+            a.get("annotator_id")
+            for a in relevant_annotations
+            if a.get("annotator_id")
+        }
+    )
+    annotators_by_uuid = (
+        get_annotators_by_uuids(annotator_uuids) if annotator_uuids else {}
+    )
+
+    item_blocks: List[Dict[str, Any]] = []
+    for item_id, item_annotations in annotations_by_item.items():
+        per_item = per_item_agreement(
+            item_annotations,
+            runs_by_item.get(item_id, []),
+            evaluator_ids_in_run,
+        )
+        # Drop evaluator slots with zero human pair count so the FE only
+        # renders cells that actually compare to a human.
+        ev_entries = [
+            e for e in per_item.get("evaluators", []) if e.get("pair_count")
+        ]
+        if not ev_entries:
+            continue
+        # Bucket the raw human annotations on this item by evaluator so the
+        # FE can show every annotator's exact value alongside the agreement
+        # number. Annotations are already filtered to the run's slot set,
+        # so every entry here is in scope.
+        annotations_by_evaluator: Dict[str, List[Dict[str, Any]]] = {}
+        for a in item_annotations:
+            ev_id = a.get("evaluator_id")
+            if not ev_id:
+                continue
+            annotator_id = a.get("annotator_id")
+            annotator = (
+                annotators_by_uuid.get(annotator_id) if annotator_id else None
+            )
+            annotations_by_evaluator.setdefault(ev_id, []).append(
+                {
+                    "annotation_id": a.get("uuid"),
+                    "annotator_id": annotator_id,
+                    "annotator_name": (
+                        annotator.get("name") if annotator else None
+                    ),
+                    "job_id": a.get("job_id"),
+                    "value": a.get("value"),
+                    "updated_at": a.get("updated_at"),
+                }
+            )
+        # Sort each evaluator's annotations deterministically (oldest first)
+        # so the FE can render them in submission order.
+        for entries in annotations_by_evaluator.values():
+            entries.sort(key=lambda e: (e.get("updated_at") or "", e.get("annotation_id") or ""))
+        # Inline the raw annotations onto each evaluator block keyed by
+        # evaluator_id, so the agreement cell and the underlying values
+        # render together without an extra join on the FE.
+        for entry in ev_entries:
+            entry["human_annotations"] = annotations_by_evaluator.get(
+                entry["evaluator_id"], []
+            )
+        item_blocks.append(
+            {
+                "item_id": item_id,
+                "annotator_count": len(
+                    {
+                        a.get("annotator_id")
+                        for a in item_annotations
+                        if a.get("annotator_id")
+                    }
+                ),
+                "evaluators": ev_entries,
+            }
+        )
+    # Stable order: items in run-row order so the FE can scroll predictably.
+    item_order = [r["item_id"] for r in job_runs if r.get("item_id")]
+    seen: set = set()
+    ordered_item_ids: List[str] = []
+    for i in item_order:
+        if i not in seen:
+            seen.add(i)
+            ordered_item_ids.append(i)
+    pos = {i: idx for idx, i in enumerate(ordered_item_ids)}
+    item_blocks.sort(key=lambda b: pos.get(b["item_id"], len(pos)))
+
+    return {"evaluators": evaluator_blocks, "items": item_blocks}
+
+
 @router.get("/{task_uuid}/evaluator-runs/{job_uuid}")
 async def get_evaluator_run_job(
     task_uuid: str,
     job_uuid: str,
     user_id: str = Depends(get_current_user_id),
 ):
+    """Single evaluator-run job, with raw runs and human-agreement summary.
+
+    `human_agreement` is computed only on slots (item × evaluator) that this
+    job actually exercised AND that have at least one human annotation —
+    so a fresh task with no humans yet returns empty arrays (not zeros)
+    and the FE can fall back to the regular runs view."""
     _ensure_owned_task(task_uuid, user_id)
     job = get_job(job_uuid, user_id=user_id)
     if (
@@ -889,9 +1074,9 @@ async def get_evaluator_run_job(
     ):
         raise HTTPException(status_code=404, detail="Job not found")
     shaped = _shape_eval_job_for_response(job)
-    shaped["runs"] = _enrich_runs_with_live_evaluator(
-        get_evaluator_runs_for_job(job_uuid)
-    )
+    raw_runs = get_evaluator_runs_for_job(job_uuid)
+    shaped["runs"] = _enrich_runs_with_live_evaluator(raw_runs)
+    shaped["human_agreement"] = _human_agreement_for_run(task_uuid, raw_runs)
     return shaped
 
 
