@@ -59,15 +59,16 @@ from utils import (
 # No-progress watchdog window. Each poll tick samples the output_dir's file
 # count + total byte size; the heartbeat fires only when that snapshot has
 # changed since the previous tick (i.e. calibrate has actually written
-# something to disk). 5 minutes of no on-disk progress → the subprocess is
+# something to disk). 15 minutes of no on-disk progress → the subprocess is
 # considered stuck and SIGTERM/SIGKILL'd.
 #
-# This is enough grace for calibrate's startup phase (config validation,
-# loading evaluators) which produces no disk output; once judge calls start,
-# results.csv / results.json / per-row subdirs grow on every iteration so
-# the heartbeat fires steadily. A genuinely hung subprocess (e.g. waiting
-# forever on a stalled HTTP call) produces no new bytes and gets killed.
-ANNOTATION_EVAL_TIMEOUT_SECONDS = 5 * 60
+# Why 15 min and not 5: calibrate `--eval-only` may batch disk writes (e.g.
+# `results.csv` / `metrics.json` written only after a chunk of items is
+# done), and the judge LLM can be slow under load. 15 min gives a real
+# stall a clear signal without false-killing legitimate runs that just
+# write less frequently than once per tick. A genuinely hung subprocess
+# (waiting forever on a stalled HTTP call) still gets killed, just later.
+ANNOTATION_EVAL_TIMEOUT_SECONDS = 15 * 60
 
 
 def _output_dir_snapshot(output_dir: Path) -> Tuple[int, int]:

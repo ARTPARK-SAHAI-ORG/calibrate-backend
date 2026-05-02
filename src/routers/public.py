@@ -540,6 +540,30 @@ def get_public_annotation_job(token: str):
     # exactly what was assigned at job creation, regardless of subsequent
     # link/unlink on the parent task.
     evaluators = get_evaluators_for_job(job["uuid"])
+    # Enrich each evaluator with the live version's rubric, variable specs,
+    # and derived scale bounds so the FE has everything it needs to render
+    # the labelling form without a second roundtrip:
+    #   - `output_config` → scale entries (name/description/color/value)
+    #   - `scale_min` / `scale_max` → numeric bounds for rating widgets;
+    #     null for binary
+    #   - `variables` → list of `{name, default?, description?}` placeholder
+    #     specs declared by the prompt. Per-item variable values live on
+    #     `items[].payload.evaluator_variables[<evaluator_uuid>]`; the FE
+    #     pairs them with these specs to display the substituted prompt.
+    from llm_judge import _scale_bounds  # local to avoid module-load cycle
+
+    for ev in evaluators:
+        version = (
+            get_evaluator_version(ev["live_version_id"])
+            if ev.get("live_version_id")
+            else None
+        )
+        output_config = version.get("output_config") if version else None
+        scale_min, scale_max = _scale_bounds(output_config)
+        ev["output_config"] = output_config
+        ev["scale_min"] = scale_min
+        ev["scale_max"] = scale_max
+        ev["variables"] = version.get("variables") if version else None
     items = get_job_items(job["uuid"])
     annotations = get_annotations_for_job(job["uuid"])
 
