@@ -30,7 +30,8 @@ from db import (
     get_simulation_jobs_for_simulation,
     get_annotation_job_by_token,
     get_annotation_task,
-    get_evaluators_for_annotation_task,
+    get_evaluator_ids_for_job,
+    get_evaluators_for_job,
     get_annotator,
     get_job_items,
     get_annotations_for_job,
@@ -535,7 +536,10 @@ def get_public_annotation_job(token: str):
     if not task:
         raise HTTPException(status_code=404, detail="Job not found")
     annotator = get_annotator(job["annotator_id"])
-    evaluators = get_evaluators_for_annotation_task(job["task_id"])
+    # Read the SNAPSHOTTED evaluator set so the labelling form columns match
+    # exactly what was assigned at job creation, regardless of subsequent
+    # link/unlink on the parent task.
+    evaluators = get_evaluators_for_job(job["uuid"])
     items = get_job_items(job["uuid"])
     annotations = get_annotations_for_job(job["uuid"])
 
@@ -598,14 +602,14 @@ def upsert_public_annotations(token: str, payload: PublicAnnotationUpsertRequest
     if not any(it["uuid"] == payload.item_id for it in job_items):
         raise HTTPException(status_code=404, detail="Item not found in this job")
 
-    # Validate that every non-null `evaluator_id` is currently linked to the
-    # task. Without this, a token holder could upsert annotations against any
-    # evaluator UUID — polluting downstream agreement aggregates that read
-    # `annotations` joined through `annotation_jobs.task_id`. `evaluator_id IS
-    # NULL` is the row-level overall annotation case and is always allowed.
-    linked_evaluator_ids = {
-        e["uuid"] for e in get_evaluators_for_annotation_task(job["task_id"])
-    }
+    # Validate that every non-null `evaluator_id` is in the job's snapshotted
+    # evaluator set (NOT the task's current linked set — the contract is
+    # frozen at job creation). Without this, a token holder could upsert
+    # annotations against any evaluator UUID — polluting downstream agreement
+    # aggregates that read `annotations` joined through `annotation_jobs`.
+    # `evaluator_id IS NULL` is the row-level overall annotation case and is
+    # always allowed.
+    linked_evaluator_ids = set(get_evaluator_ids_for_job(job["uuid"]))
     invalid = [
         entry.evaluator_id
         for entry in payload.annotations
@@ -635,9 +639,11 @@ def upsert_public_annotations(token: str, payload: PublicAnnotationUpsertRequest
     # We re-check on every save (including post-completion edits) so the
     # status remains accurate. `completed_at` is preserved on subsequent
     # edits — it marks the first time the job was fully filled.
+    # Both the items AND the evaluator set are read from the job's snapshot
+    # so post-creation link/unlink on the parent task can't shift the
+    # completion bar under the annotator.
     job_items = get_job_items(job["uuid"])
-    evaluators = get_evaluators_for_annotation_task(job["task_id"])
-    evaluator_ids = [e["uuid"] for e in evaluators]
+    evaluator_ids = get_evaluator_ids_for_job(job["uuid"])
     annotated_pairs = {
         (a["item_id"], a.get("evaluator_id"))
         for a in get_annotations_for_job(job["uuid"])

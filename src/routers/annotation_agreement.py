@@ -4,7 +4,7 @@ from fastapi import APIRouter, Depends, Query
 
 from db import (
     get_annotations_for_user,
-    get_evaluator,
+    get_evaluators_by_uuids,
     get_evaluator_runs_for_user,
 )
 from auth_utils import get_current_user_id
@@ -55,12 +55,12 @@ async def agreement_trend(
             seen.add(ev_id)
             evaluator_ids.append(ev_id)
 
-    evaluator_meta: Dict[str, Dict[str, Any]] = {}
-    live_version_by_evaluator: Dict[str, Optional[str]] = {}
-    for ev_id in evaluator_ids:
-        ev = get_evaluator(ev_id)
-        evaluator_meta[ev_id] = ev or {}
-        live_version_by_evaluator[ev_id] = (ev or {}).get("live_version_id")
+    # One bulk fetch instead of N round-trips through `get_evaluator`.
+    evaluator_meta = get_evaluators_by_uuids(evaluator_ids)
+    live_version_by_evaluator: Dict[str, Optional[str]] = {
+        ev_id: (evaluator_meta.get(ev_id) or {}).get("live_version_id")
+        for ev_id in evaluator_ids
+    }
 
     runs = filter_runs_to_live_versions(raw_runs, live_version_by_evaluator)
 

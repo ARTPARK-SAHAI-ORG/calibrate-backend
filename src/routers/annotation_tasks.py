@@ -31,6 +31,7 @@ from db import (
     upsert_annotation,
     get_annotations_for_item,
     get_annotator,
+    get_annotators_by_uuids,
     create_job,
     get_job,
     get_generic_jobs_for_task,
@@ -905,8 +906,12 @@ async def task_summary(
     ),
     user_id: str = Depends(get_current_user_id),
 ):
-    """Single denormalized view of every (item × linked-evaluator) pair with the
-    latest evaluator-run value and one cell per annotator.
+    """Single denormalized view for the table. By default emits one row per
+    `(item × evaluator × version)` so re-running an evaluator on a new
+    version doesn't hide earlier-version results. Pass `live_only=true` to
+    collapse to one row per `(item × evaluator)` using only the evaluator's
+    live version. Each row carries the latest evaluator-run value and one
+    annotation cell per annotator.
 
     Response shape:
       {
@@ -935,11 +940,15 @@ async def task_summary(
       }
 
     Cell rules:
-      - One row per (item, linked evaluator).
-      - `evaluator_value` is the latest evaluator-run for that (item, evaluator)
-        regardless of which evaluator-run job produced it. The displayed version
-        is the run's version (falls back to the evaluator's live version when no
-        run exists).
+      - Default: one row per `(item, evaluator, version)` — a version row
+        appears for every distinct version that has runs for this evaluator
+        in the task, plus one for the live version (with `null` value if it
+        hasn't run yet). With `live_only=true`, only the live-version row is
+        emitted per `(item, evaluator)`.
+      - `evaluator_value` is the latest evaluator-run for THAT specific
+        version slot, regardless of which evaluator-run job produced it.
+      - `is_live_version` flags rows whose `evaluator_version_id` matches
+        the evaluator's current `live_version_id`.
       - Each annotator cell is that annotator's latest annotation for the slot,
         across ALL annotation jobs (matches the agreement aggregator's
         latest-wins-per-annotator semantics). `null` if they haven't annotated it.
@@ -1008,13 +1017,14 @@ async def task_summary(
         latest_ann[(a_item_id, ev_id, annotator_id)] = a
 
     # Annotator union — only those with ≥1 (item, evaluator) annotation visible
-    # in this view. Stable ordering by name then uuid.
-    annotator_ids = {key[2] for key in latest_ann.keys()}
-    annotators: List[Dict[str, Any]] = []
-    for aid in annotator_ids:
-        a = get_annotator(aid)
-        if a:
-            annotators.append({"uuid": a["uuid"], "name": a.get("name")})
+    # in this view. Stable ordering by name then uuid. Single bulk lookup
+    # replaces the per-annotator `get_annotator(aid)` round-trips.
+    annotator_ids = list({key[2] for key in latest_ann.keys()})
+    annotator_rows = get_annotators_by_uuids(annotator_ids)
+    annotators: List[Dict[str, Any]] = [
+        {"uuid": a["uuid"], "name": a.get("name")}
+        for a in annotator_rows.values()
+    ]
     annotators.sort(key=lambda x: ((x.get("name") or "").lower(), x["uuid"]))
 
     version_cache: Dict[str, Optional[Dict[str, Any]]] = {}

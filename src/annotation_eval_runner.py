@@ -56,13 +56,38 @@ from utils import (
 )
 
 
-# Wall-clock-ish ceiling on a single annotation eval-only run. The runner
-# only writes `update_job` at start and at completion, so once spawned the
-# job's `updated_at` is effectively the spawn time — `is_job_timed_out`
-# becomes "elapsed since spawn ≥ ANNOTATION_EVAL_TIMEOUT_SECONDS". 5 minutes
-# is enough headroom for typical annotation evals (handful of items × a few
-# evaluators) and matches the watchdog cadence used elsewhere.
+# No-progress watchdog window. Each poll tick samples the output_dir's file
+# count + total byte size; the heartbeat fires only when that snapshot has
+# changed since the previous tick (i.e. calibrate has actually written
+# something to disk). 5 minutes of no on-disk progress → the subprocess is
+# considered stuck and SIGTERM/SIGKILL'd.
+#
+# This is enough grace for calibrate's startup phase (config validation,
+# loading evaluators) which produces no disk output; once judge calls start,
+# results.csv / results.json / per-row subdirs grow on every iteration so
+# the heartbeat fires steadily. A genuinely hung subprocess (e.g. waiting
+# forever on a stalled HTTP call) produces no new bytes and gets killed.
 ANNOTATION_EVAL_TIMEOUT_SECONDS = 5 * 60
+
+
+def _output_dir_snapshot(output_dir: Path) -> Tuple[int, int]:
+    """Cheap progress signal: (file_count, total_size_bytes) for everything
+    under output_dir. Comparing tuples between ticks tells us whether
+    calibrate has written anything since last check."""
+    if not output_dir.exists():
+        return (0, 0)
+    count = 0
+    total_size = 0
+    for root, _dirs, files in os.walk(output_dir):
+        for fname in files:
+            count += 1
+            try:
+                total_size += (Path(root) / fname).stat().st_size
+            except OSError:
+                # File may have been removed mid-walk; ignore — next tick
+                # picks up the right number.
+                pass
+    return (count, total_size)
 
 
 # Eval queue types this module participates in (must match `EVAL_JOB_TYPES`
@@ -757,11 +782,17 @@ def _run_calibrate_eval_only(
     """Spawn the calibrate subprocess; redirect stdout/stderr to disk to avoid
     pipe-buffer deadlocks; poll until done; return (returncode, stdout, stderr).
 
-    If `job_uuid` is provided, each tick re-reads the job's `updated_at` and
-    raises `AnnotationEvalTimeoutError` if it hasn't advanced in
-    `timeout_seconds`. This prevents a stuck calibrate subprocess from
-    blocking the shared eval queue indefinitely. Before raising, the process
-    group is SIGTERM/SIGKILL'd via the standard helper.
+    If `job_uuid` is provided, each tick:
+      1. Snapshots `log_dir` (the calibrate output dir) — file count and
+         total byte size. If the snapshot changed since the last tick,
+         calibrate has written new bytes → heartbeat `update_job(job_uuid)`
+         to bump `updated_at`.
+      2. Re-reads the job's `updated_at` and raises
+         `AnnotationEvalTimeoutError` if it hasn't advanced in
+         `timeout_seconds`. With (1) in place, this fires only when the
+         disk has been silent for the full window — i.e. calibrate is
+         genuinely stuck. Before raising, the process group is SIGTERM/
+         SIGKILL'd via the standard helper.
     """
     stdout_path = log_dir / "stdout.log"
     stderr_path = log_dir / "stderr.log"
@@ -781,10 +812,27 @@ def _run_calibrate_eval_only(
                 on_started(proc.pid)
             except Exception as e:
                 logger.warning(f"on_started callback raised: {e}")
+        last_snapshot: Tuple[int, int] = _output_dir_snapshot(log_dir)
         while proc.poll() is None:
             time.sleep(heartbeat_seconds)
             if job_uuid is None:
                 continue
+            # Heartbeat ONLY when calibrate has written new bytes since the
+            # last tick. A subprocess that's hung (no disk activity) lets
+            # `updated_at` age until the timeout window below kills it.
+            if proc.poll() is None:
+                current_snapshot = _output_dir_snapshot(log_dir)
+                if current_snapshot != last_snapshot:
+                    last_snapshot = current_snapshot
+                    try:
+                        update_job(job_uuid)
+                    except Exception as e:
+                        # DB blip — log but don't fail the run; the timeout
+                        # check below catches sustained DB issues.
+                        logger.warning(
+                            f"[annotation-eval] heartbeat update_job failed "
+                            f"for {job_uuid}: {e}"
+                        )
             job = get_job(job_uuid)
             updated_at = job.get("updated_at") if job else None
             if updated_at and is_job_timed_out(

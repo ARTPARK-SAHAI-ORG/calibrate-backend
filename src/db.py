@@ -609,6 +609,19 @@ def init_db():
         except sqlite3.OperationalError:
             pass
 
+        cursor.execute(
+            """
+            CREATE TABLE IF NOT EXISTS annotation_job_evaluators (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                job_id TEXT NOT NULL,
+                evaluator_id TEXT NOT NULL,
+                UNIQUE(job_id, evaluator_id),
+                FOREIGN KEY (job_id) REFERENCES annotation_jobs(uuid),
+                FOREIGN KEY (evaluator_id) REFERENCES evaluators(uuid)
+            )
+            """
+        )
+
         # NOTE: Annotation evaluator-run jobs live in the generic `jobs` table
         # (type='annotation-eval') so they share queue capacity with the other
         # eval job types. `evaluator_runs.job_id` therefore references
@@ -2903,6 +2916,31 @@ def get_evaluator(evaluator_uuid: str) -> Optional[Dict[str, Any]]:
         )
         row = cursor.fetchone()
         return _parse_evaluator_row(row) if row else None
+
+
+def get_evaluators_by_uuids(
+    evaluator_uuids: List[str],
+) -> Dict[str, Dict[str, Any]]:
+    """Bulk variant of `get_evaluator` — single query for many UUIDs.
+    Returns `{uuid: evaluator_row}`; missing or soft-deleted UUIDs are
+    omitted from the result. Use this when a caller would otherwise loop
+    `get_evaluator(...)` per id (N+1)."""
+    if not evaluator_uuids:
+        return {}
+    unique_uuids = list({u for u in evaluator_uuids if u})
+    if not unique_uuids:
+        return {}
+    placeholders = ",".join("?" for _ in unique_uuids)
+    with get_db_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            f"SELECT * FROM evaluators "
+            f"WHERE uuid IN ({placeholders}) AND deleted_at IS NULL",
+            unique_uuids,
+        )
+        return {
+            row["uuid"]: _parse_evaluator_row(row) for row in cursor.fetchall()
+        }
 
 
 def get_evaluator_uuid_for_legacy_metric(metric_uuid: str) -> Optional[str]:
@@ -5333,14 +5371,17 @@ def update_annotation_task(
 
 
 def delete_annotation_task(task_uuid: str) -> bool:
-    """Soft-delete an annotation task and cascade to every child row that
-    carries a `deleted_at` column: items, evaluator links, jobs, evaluator
+    """Soft-delete an annotation task and cascade to its child rows that
+    carry a `deleted_at` column: items, evaluator links, jobs, evaluator
     runs (via the items in this task), and the generic annotation-eval job
     rows (matched via `details->task_id`).
 
-    `annotations` and `annotation_job_items` have no `deleted_at` of their
-    own — they're filtered transitively: every read joins through
-    `annotation_jobs` which now respects the cascade.
+    `annotations` has a `deleted_at` column too, but the cascade does NOT
+    write to it directly — annotation rows are hidden transitively because
+    every read filters `annotation_jobs.deleted_at IS NULL` on the join, and
+    the parent jobs are soft-deleted here. `annotation_job_items` and
+    `annotation_job_evaluators` have no `deleted_at` at all and rely on the
+    same parent-job filter.
     """
     with get_db_connection() as conn:
         cursor = conn.cursor()
@@ -5488,6 +5529,28 @@ def get_annotator(annotator_uuid: str) -> Optional[Dict[str, Any]]:
         )
         row = cursor.fetchone()
         return dict(row) if row else None
+
+
+def get_annotators_by_uuids(
+    annotator_uuids: List[str],
+) -> Dict[str, Dict[str, Any]]:
+    """Bulk variant of `get_annotator` — single query for many UUIDs.
+    Returns `{uuid: annotator_row}`; missing or soft-deleted UUIDs are
+    omitted. Replaces per-id loops in summary endpoints."""
+    if not annotator_uuids:
+        return {}
+    unique_uuids = list({u for u in annotator_uuids if u})
+    if not unique_uuids:
+        return {}
+    placeholders = ",".join("?" for _ in unique_uuids)
+    with get_db_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            f"SELECT * FROM annotators "
+            f"WHERE uuid IN ({placeholders}) AND deleted_at IS NULL",
+            unique_uuids,
+        )
+        return {row["uuid"]: dict(row) for row in cursor.fetchall()}
 
 
 def get_all_annotators(user_id: str) -> List[Dict[str, Any]]:
@@ -5675,10 +5738,12 @@ def create_annotation_job(
     public_token: str,
     status: str = "pending",
 ) -> str:
-    """Create one job (annotator × N rows). Items are SNAPSHOTTED onto the
-    link row at creation time — subsequent edits or soft-deletes on the
-    source `annotation_items` row do not affect the job's view of its items
-    or the auto-completion check."""
+    """Create one job (annotator × N rows). Items AND linked evaluators are
+    SNAPSHOTTED at creation time — subsequent edits/soft-deletes on the
+    source `annotation_items` row, and link/unlink on
+    `annotation_task_evaluators`, do not affect the job's view of its items
+    or the auto-completion check. The auto-complete contract is "the
+    evaluator set as it was at creation time", not the current task config."""
     if not item_uuids:
         raise ValueError("item_uuids must be non-empty")
     if len(item_uuids) != len(set(item_uuids)):
@@ -5719,8 +5784,72 @@ def create_annotation_job(
             "VALUES (?, ?, ?)",
             [(job_uuid, item_id, payload_by_uuid[item_id]) for item_id in item_uuids],
         )
+        # Snapshot the currently-linked evaluator set. Reads via
+        # `get_evaluator_ids_for_job` give the auto-complete check a stable
+        # view independent of later link/unlink on the parent task.
+        cursor.execute(
+            """
+            SELECT evaluator_id FROM annotation_task_evaluators
+             WHERE task_id = ? AND deleted_at IS NULL
+            """,
+            (task_id,),
+        )
+        evaluator_uuids = [r["evaluator_id"] for r in cursor.fetchall()]
+        if evaluator_uuids:
+            cursor.executemany(
+                "INSERT INTO annotation_job_evaluators (job_id, evaluator_id) "
+                "VALUES (?, ?)",
+                [(job_uuid, ev_id) for ev_id in evaluator_uuids],
+            )
         conn.commit()
     return job_uuid
+
+
+def get_evaluator_ids_for_job(job_uuid: str) -> List[str]:
+    """Return the snapshotted evaluator UUIDs for a job. This is what the
+    auto-completion check reads, NOT the live linked set on the parent task."""
+    with get_db_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            "SELECT evaluator_id FROM annotation_job_evaluators "
+            "WHERE job_id = ? ORDER BY id ASC",
+            (job_uuid,),
+        )
+        return [r["evaluator_id"] for r in cursor.fetchall()]
+
+
+def get_evaluators_for_job(job_uuid: str) -> List[Dict[str, Any]]:
+    """Full evaluator metadata for the SNAPSHOTTED evaluator set on a job
+    (mirrors `get_evaluators_for_annotation_task`'s row shape).
+
+    Soft-deleted evaluators are intentionally NOT filtered out — the snapshot
+    captures the contract at creation time, so the annotator's form should
+    still render the slot even if the evaluator was deleted from the task
+    afterwards. Hard-deleted evaluators (uuid no longer in the evaluators
+    table) drop out by virtue of the inner JOIN."""
+    with get_db_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            """
+            SELECT
+                e.uuid AS uuid,
+                e.name AS name,
+                e.description AS description,
+                e.evaluator_type AS evaluator_type,
+                e.data_type AS data_type,
+                e.kind AS kind,
+                e.output_type AS output_type,
+                e.owner_user_id AS owner_user_id,
+                e.slug AS slug,
+                e.live_version_id AS live_version_id
+              FROM annotation_job_evaluators je
+              JOIN evaluators e ON e.uuid = je.evaluator_id
+             WHERE je.job_id = ?
+             ORDER BY je.id ASC
+            """,
+            (job_uuid,),
+        )
+        return [dict(r) for r in cursor.fetchall()]
 
 
 def get_annotation_job(job_uuid: str) -> Optional[Dict[str, Any]]:
@@ -5770,7 +5899,9 @@ def get_jobs_for_task_detailed(task_id: str) -> List[Dict[str, Any]]:
                 (SELECT COUNT(*) FROM (
                     SELECT a.item_id
                       FROM annotations a
-                     WHERE a.job_id = j.uuid AND a.evaluator_id IS NOT NULL
+                     WHERE a.job_id = j.uuid
+                       AND a.evaluator_id IS NOT NULL
+                       AND a.deleted_at IS NULL
                      GROUP BY a.item_id
                     HAVING COUNT(DISTINCT a.evaluator_id) >= (
                         SELECT COUNT(*) FROM annotation_task_evaluators ate
@@ -5877,7 +6008,9 @@ def get_jobs_for_annotator_detailed(annotator_id: str) -> List[Dict[str, Any]]:
                 (SELECT COUNT(*) FROM (
                     SELECT a.item_id
                       FROM annotations a
-                     WHERE a.job_id = j.uuid AND a.evaluator_id IS NOT NULL
+                     WHERE a.job_id = j.uuid
+                       AND a.evaluator_id IS NOT NULL
+                       AND a.deleted_at IS NULL
                      GROUP BY a.item_id
                     HAVING COUNT(DISTINCT a.evaluator_id) >= (
                         SELECT COUNT(*) FROM annotation_task_evaluators ate
@@ -6143,7 +6276,12 @@ def upsert_annotation(
     with get_db_connection() as conn:
         cursor = conn.cursor()
         # SQLite treats NULLs as distinct in UNIQUE constraints, so handle row-level
-        # (evaluator_id IS NULL) explicitly.
+        # (evaluator_id IS NULL) explicitly. We deliberately DO match
+        # soft-deleted rows on the lookup: the table has UNIQUE(job_id,
+        # item_id, evaluator_id), so an INSERT against a tombstone would fail
+        # the constraint. Instead, upsert resurrects the row (clears
+        # `deleted_at`) and writes the new value — keeping the column
+        # consistent with how `annotation_task_evaluators` restore links.
         if evaluator_id is None:
             cursor.execute(
                 """
@@ -6165,7 +6303,7 @@ def upsert_annotation(
             cursor.execute(
                 """
                 UPDATE annotations
-                   SET value = ?, updated_at = CURRENT_TIMESTAMP
+                   SET value = ?, updated_at = CURRENT_TIMESTAMP, deleted_at = NULL
                  WHERE uuid = ?
                 """,
                 (value_json, existing["uuid"]),
