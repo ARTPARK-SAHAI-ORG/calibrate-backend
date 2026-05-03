@@ -419,6 +419,32 @@ async def bulk_create_items(
             public_token=public_token,
             status="pending",
         )
+        # Re-validate every requested evaluator_id against the job's own
+        # snapshot, not the pre-creation linked set. Concurrent
+        # link/unlink between the upstream check and `create_annotation_job`
+        # can shift the snapshot under us; without this gate we'd persist
+        # annotations on slots the job doesn't own, polluting downstream
+        # `annotations`-by-task reads. Same contract enforced by the
+        # public-form upsert endpoint in `routers/public.py`.
+        snapshot_evaluator_ids = set(get_evaluator_ids_for_job(job_uuid))
+        snapshot_mismatch: List[str] = []
+        for it in payload.items:
+            if not it.annotations:
+                continue
+            for evaluator_id in it.annotations.keys():
+                if evaluator_id not in snapshot_evaluator_ids:
+                    snapshot_mismatch.append(evaluator_id)
+        if snapshot_mismatch:
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    f"Evaluator(s) were unlinked from this task between "
+                    f"validation and job creation: {sorted(set(snapshot_mismatch))}. "
+                    f"Re-link them and retry, or drop them from the request. "
+                    f"(The annotation job {job_uuid} was created but no "
+                    f"annotations have been written.)"
+                ),
+            )
         any_annotation_written = False
         for it, item_uuid in zip(payload.items, new_uuids):
             if not it.annotations:
@@ -431,15 +457,10 @@ async def bulk_create_items(
                     evaluator_id=evaluator_id,
                 )
                 any_annotation_written = True
-        # Mark the synthesised job as completed only when every item in
-        # the job has at least one annotation across the JOB'S SNAPSHOTTED
-        # evaluator set — not the task's currently-linked set, which can
-        # drift between the validation read above and `create_annotation_job`
-        # if another request links/unlinks an evaluator concurrently. The
-        # job's snapshot is the contract every other completion check in
-        # the codebase reads from (see `get_evaluator_ids_for_job` callers
-        # in the public-form auto-complete path).
-        snapshot_evaluator_ids = set(get_evaluator_ids_for_job(job_uuid))
+        # Auto-complete contract: every item × every evaluator IN THE JOB
+        # SNAPSHOT must have a row. Same source of truth as the public-form
+        # auto-complete path (`get_evaluator_ids_for_job`) — see also the
+        # snapshot-mismatch gate above which uses the same set.
         items_fully_annotated = all(
             it.annotations
             and snapshot_evaluator_ids.issubset(set(it.annotations.keys()))
