@@ -2,7 +2,10 @@ from typing import Optional, List, Dict, Any
 from fastapi import APIRouter, HTTPException, Depends, Query
 from pydantic import BaseModel
 
+import logging
 import secrets
+
+logger = logging.getLogger(__name__)
 
 from db import (
     ANNOTATION_TASK_TYPES,
@@ -21,6 +24,7 @@ from db import (
     create_annotation_items,
     bulk_update_annotation_items,
     soft_delete_annotation_items,
+    soft_delete_annotation_job,
     get_annotation_items_for_task,
     get_annotation_item,
     create_annotation_job,
@@ -464,14 +468,34 @@ async def bulk_create_items(
                 if evaluator_id not in snapshot_evaluator_ids:
                     snapshot_mismatch.append(evaluator_id)
         if snapshot_mismatch:
+            # Roll back the just-created items + job so the request is
+            # atomic from the caller's perspective. Without this, a 409
+            # leaves orphaned items + a dangling pending job, and a
+            # client retry would duplicate items every time. Annotation
+            # rows haven't been written yet (this gate runs before the
+            # upsert loop), so soft-deleting items + job is sufficient.
+            try:
+                soft_delete_annotation_items(task_uuid, new_uuids)
+            except Exception as e:
+                logger.warning(
+                    f"[bulk-create-items] rollback: failed to soft-delete "
+                    f"items {new_uuids} after snapshot mismatch: {e}"
+                )
+            try:
+                soft_delete_annotation_job(job_uuid)
+            except Exception as e:
+                logger.warning(
+                    f"[bulk-create-items] rollback: failed to soft-delete "
+                    f"job {job_uuid} after snapshot mismatch: {e}"
+                )
             raise HTTPException(
                 status_code=409,
                 detail=(
                     f"Evaluator(s) were unlinked from this task between "
                     f"validation and job creation: {sorted(set(snapshot_mismatch))}. "
                     f"Re-link them and retry, or drop them from the request. "
-                    f"(The annotation job {job_uuid} was created but no "
-                    f"annotations have been written.)"
+                    f"(The created items and job have been rolled back; "
+                    f"safe to retry as-is.)"
                 ),
             )
         any_annotation_written = False
@@ -499,6 +523,14 @@ async def bulk_create_items(
             update_annotation_job_status(
                 job_uuid, status="completed", set_completed_at=True
             )
+        elif any_annotation_written:
+            # Partial fill: some slots filled, others left for the
+            # annotator to finish via the public form. Mirror the public
+            # upsert endpoint's "first save flips pending -> in_progress"
+            # transition so status-based consumers (jobs list, dashboards)
+            # don't see a job with real annotation data still labelled
+            # `pending`.
+            update_annotation_job_status(job_uuid, status="in_progress")
         return {
             "item_ids": new_uuids,
             "count": len(new_uuids),

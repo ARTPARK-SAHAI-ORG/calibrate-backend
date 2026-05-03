@@ -5731,6 +5731,24 @@ def soft_delete_annotation_items(
         return cursor.rowcount
 
 
+def soft_delete_annotation_job(job_uuid: str) -> bool:
+    """Soft-delete a single annotation_jobs row. Used by the bulk-upload
+    rollback path when a snapshot mismatch is detected after the job has
+    been created — leaves the row in place but flips it out of every
+    `deleted_at IS NULL` filter so it doesn't appear in lists or feed
+    downstream agreement reads. Returns True iff a live row was
+    transitioned (already-deleted UUIDs return False)."""
+    with get_db_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            "UPDATE annotation_jobs SET deleted_at = CURRENT_TIMESTAMP "
+            "WHERE uuid = ? AND deleted_at IS NULL",
+            (job_uuid,),
+        )
+        conn.commit()
+        return cursor.rowcount > 0
+
+
 def get_annotation_items_for_task(task_id: str) -> List[Dict[str, Any]]:
     with get_db_connection() as conn:
         cursor = conn.cursor()
