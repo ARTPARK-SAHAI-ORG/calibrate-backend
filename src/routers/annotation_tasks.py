@@ -80,6 +80,33 @@ def _live_version_map(evaluators: List[Dict[str, Any]]) -> Dict[str, Optional[st
     return {e["uuid"]: e.get("live_version_id") for e in evaluators}
 
 
+def _enrich_evaluators_with_live_version(
+    evaluators: List[Dict[str, Any]],
+) -> List[Dict[str, Any]]:
+    """Mutate `evaluators` in place to add live-version fields the FE
+    needs to render the labelling form / display values against the
+    correct rubric: `output_config`, `scale_min`, `scale_max`,
+    `variables`. Mirrors the public-form enrichment in `routers/public.py`
+    so the owner-side and annotator-side responses match. Versions are
+    fetched via a tiny per-call cache so a task with N evaluators that
+    happen to share a live version (rare) doesn't issue N reads."""
+    from llm_judge import _scale_bounds  # local to avoid module-load cycle
+
+    version_cache: Dict[str, Optional[Dict[str, Any]]] = {}
+    for ev in evaluators:
+        live_version_id = ev.get("live_version_id")
+        if live_version_id and live_version_id not in version_cache:
+            version_cache[live_version_id] = get_evaluator_version(live_version_id)
+        version = version_cache.get(live_version_id) if live_version_id else None
+        output_config = version.get("output_config") if version else None
+        scale_min, scale_max = _scale_bounds(output_config)
+        ev["output_config"] = output_config
+        ev["scale_min"] = scale_min
+        ev["scale_max"] = scale_max
+        ev["variables"] = version.get("variables") if version else None
+    return evaluators
+
+
 router = APIRouter(prefix="/annotation-tasks", tags=["annotation-tasks"])
 
 
@@ -185,7 +212,9 @@ async def get_annotation_task_endpoint(
     """Get an annotation task by UUID, including its linked evaluators,
     all items (each annotated with per-item agreement stats), and all jobs."""
     task = _ensure_owned_task(task_uuid, user_id)
-    evaluators = get_evaluators_for_annotation_task(task_uuid)
+    evaluators = _enrich_evaluators_with_live_version(
+        get_evaluators_for_annotation_task(task_uuid)
+    )
     task["evaluators"] = evaluators
     task["jobs"] = get_jobs_for_task_detailed(task_uuid)
 
