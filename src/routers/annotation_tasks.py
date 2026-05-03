@@ -17,6 +17,7 @@ from db import (
     get_evaluator,
     get_evaluator_version,
     get_annotations_for_task,
+    get_annotations_for_slots,
     create_annotation_items,
     bulk_update_annotation_items,
     soft_delete_annotation_items,
@@ -35,6 +36,8 @@ from db import (
     get_annotators_by_uuids,
     create_job,
     get_job,
+    snapshot_eval_job_items,
+    get_eval_job_items,
     get_generic_jobs_for_task,
     soft_delete_job,
     update_job,
@@ -274,10 +277,15 @@ class AnnotationItemPayload(BaseModel):
     payload: Any
     # Optional human annotations to seed alongside the item. Keys are
     # evaluator UUIDs that must be currently linked to the task; values
-    # follow the same shape `upsert_annotation` accepts (e.g.
-    # `{"pass": bool, "reasoning": str}` for binary, `{"value": num,
-    # "reasoning": str}` for rating). When any item carries this,
-    # `BulkItemsRequest.annotator_id` is required.
+    # follow the canonical annotation shape used by the public form and
+    # the agreement math: `{"value": <bool|number|string>, "reasoning"?:
+    # str}` for EVERY output_type — binary uses a bool in `value`,
+    # rating uses a number in `value`. The agreement helpers in
+    # `annotation_metrics._scalar` only recognise the keys `value`,
+    # `score`, `rating`, `label`, `binary`; using `pass` (or any other
+    # custom key) stores fine but silently zeroes out of the agreement
+    # aggregates. When any item carries this, `BulkItemsRequest.annotator_id`
+    # is required.
     annotations: Optional[Dict[str, Any]] = None
 
 
@@ -313,9 +321,11 @@ async def bulk_create_items(
     as if the annotator had submitted them through the public form.
     Annotations are validated against the task's *currently linked*
     evaluator set; the task type (`stt | llm | simulation | tts`) does
-    not affect the contract — value shape is whatever the evaluator's
-    `output_type` expects (`{pass, reasoning}` for binary,
-    `{value, reasoning}` for rating)."""
+    not affect the contract. Value shape is uniform across output types:
+    `{"value": <bool|number|string>, "reasoning"?: str}` — binary uses a
+    bool, rating uses a number. This matches what the public form writes
+    via `upsert_annotation`, and is the only shape `annotation_metrics`
+    will count toward agreement aggregates."""
     _ensure_owned_task(task_uuid, user_id)
     if not payload.items:
         raise HTTPException(status_code=400, detail="items must be non-empty")
@@ -359,6 +369,35 @@ async def bulk_create_items(
                         f"before seeding annotations."
                     ),
                 )
+            # Validate the value shape on every entry so a malformed dict
+            # can't slip through and silently zero out of the agreement
+            # aggregates (`annotation_metrics._scalar` only recognises
+            # the keys `value`, `score`, `rating`, `label`, `binary`).
+            # Bulk uploads are the only ingress path that doesn't go
+            # through the public form's typed widget, so the canonical
+            # check lives here.
+            for ev_id, raw in it.annotations.items():
+                if not isinstance(raw, dict):
+                    raise HTTPException(
+                        status_code=400,
+                        detail=(
+                            f"items[{idx}].annotations[{ev_id!r}] must be an object "
+                            f"like {{\"value\": <bool|number|string>, \"reasoning\"?: str}}; "
+                            f"got {type(raw).__name__}"
+                        ),
+                    )
+                if "value" not in raw:
+                    raise HTTPException(
+                        status_code=400,
+                        detail=(
+                            f"items[{idx}].annotations[{ev_id!r}] is missing required key "
+                            f"`value`. Use {{\"value\": <bool|number|string>, "
+                            f"\"reasoning\"?: str}} for every output_type — binary uses a "
+                            f"bool in `value`, rating uses a number. (The keys `pass`, "
+                            f"`score`, `rating`, `label`, `binary` will round-trip on "
+                            f"reads but won't count toward agreement aggregates.)"
+                        ),
+                    )
 
     new_uuids = create_annotation_items(
         task_uuid,
@@ -393,12 +432,17 @@ async def bulk_create_items(
                 )
                 any_annotation_written = True
         # Mark the synthesised job as completed only when every item in
-        # the job has at least one annotation across the linked evaluator
-        # set — otherwise leave it pending so the auto-complete contract
-        # (every item × every evaluator) stays meaningful.
+        # the job has at least one annotation across the JOB'S SNAPSHOTTED
+        # evaluator set — not the task's currently-linked set, which can
+        # drift between the validation read above and `create_annotation_job`
+        # if another request links/unlinks an evaluator concurrently. The
+        # job's snapshot is the contract every other completion check in
+        # the codebase reads from (see `get_evaluator_ids_for_job` callers
+        # in the public-form auto-complete path).
+        snapshot_evaluator_ids = set(get_evaluator_ids_for_job(job_uuid))
         items_fully_annotated = all(
             it.annotations
-            and linked_evaluator_ids.issubset(set(it.annotations.keys()))
+            and snapshot_evaluator_ids.issubset(set(it.annotations.keys()))
             for it in payload.items
         )
         if any_annotation_written and items_fully_annotated:
@@ -775,6 +819,12 @@ async def start_evaluator_run(
             "item_ids": item_ids_persisted,
         },
     )
+    # Snapshot the resolved item set onto the job so the runner reads
+    # frozen payloads regardless of any subsequent edit / soft-delete on
+    # the source `annotation_items` row. Order matches submission order
+    # (preserved via the loop above) so reproducibility extends to the
+    # exact byte sequence calibrate sees.
+    snapshot_eval_job_items(job_uuid, items)
 
     if can_start:
         start_annotation_eval_job(
@@ -908,16 +958,20 @@ def _human_agreement_for_run(
     if not item_ids_in_run or not evaluator_ids_in_run:
         return {"evaluators": [], "items": []}
 
-    # Pull all task annotations once and filter to the items/evaluators in
-    # this run (cheaper than N item-scoped queries, and matches how the
-    # task-level alignment block fetches).
-    all_annotations = get_annotations_for_task(task_uuid)
-    relevant_annotations = [
-        a
-        for a in all_annotations
-        if a.get("item_id") in item_ids_in_run
-        and a.get("evaluator_id") in set(evaluator_ids_in_run)
-    ]
+    # Constrain the read to this run's slots at the DB layer rather than
+    # pulling the task's entire annotation history and filtering in
+    # Python — on a large task, the run is a tiny window and the filter
+    # would dominate request latency. `include_deleted_items=True`
+    # preserves annotations on items soft-deleted AFTER this run
+    # completed (the run's `evaluator_runs` rows survive item delete; the
+    # human side has to survive too or the agreement number on the
+    # run-detail view silently shrinks).
+    relevant_annotations = get_annotations_for_slots(
+        task_uuid,
+        item_ids=list(item_ids_in_run),
+        evaluator_ids=evaluator_ids_in_run,
+        include_deleted_items=True,
+    )
 
     # Per-evaluator aggregate (across every item this job touched).
     evaluator_blocks: List[Dict[str, Any]] = []
@@ -1077,6 +1131,11 @@ async def get_evaluator_run_job(
     raw_runs = get_evaluator_runs_for_job(job_uuid)
     shaped["runs"] = _enrich_runs_with_live_evaluator(raw_runs)
     shaped["human_agreement"] = _human_agreement_for_run(task_uuid, raw_runs)
+    # Frozen item snapshot — what calibrate actually saw, regardless of
+    # any post-submit edits / soft-deletes on the source annotation_items.
+    # Empty for legacy jobs created before snapshotting (those will be
+    # backfilled on first run; see annotation_eval_runner._run_job).
+    shaped["items"] = get_eval_job_items(job_uuid)
     return shaped
 
 
