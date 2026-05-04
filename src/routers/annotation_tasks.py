@@ -36,6 +36,7 @@ from db import (
     update_annotation_job_status,
     upsert_annotation,
     get_annotations_for_item,
+    get_annotated_item_ids,
     get_annotator,
     get_annotators_by_uuids,
     create_job,
@@ -344,6 +345,70 @@ async def list_task_items(
     return get_annotation_items_for_task(task_uuid)
 
 
+class AnnotatedItemsCheckRequest(BaseModel):
+    annotator_id: str
+    names: List[str]
+
+
+@router.post("/{task_uuid}/items/annotated-check")
+async def check_annotated_items(
+    task_uuid: str,
+    payload: AnnotatedItemsCheckRequest,
+    user_id: str = Depends(get_current_user_id),
+):
+    """Pre-upload check: given a list of item names (in upload row order),
+    return which rows already exist in the task and whether the annotator
+    has previously annotated them.
+
+    Response shape:
+      {
+        "all_new": bool,
+        "existing_with_annotations": [{"index": int, "name": str}],
+        "existing_without_annotations": [{"index": int, "name": str}]
+      }
+
+    Rows whose name doesn't exist in the task are omitted from both lists.
+    """
+    _ensure_owned_task(task_uuid, user_id)
+    annotator = get_annotator(payload.annotator_id)
+    if not annotator or annotator.get("user_id") != user_id:
+        raise HTTPException(status_code=404, detail="Annotator not found")
+
+    existing_items = get_annotation_items_for_task(task_uuid)
+    name_to_uuid = {
+        it["payload"]["name"]: it["uuid"]
+        for it in existing_items
+        if isinstance(it.get("payload"), dict) and it["payload"].get("name")
+    }
+
+    matched = {
+        i: name_to_uuid[name]
+        for i, name in enumerate(payload.names)
+        if name in name_to_uuid
+    }
+
+    annotated_ids = set(
+        get_annotated_item_ids(payload.annotator_id, list(matched.values()))
+    ) if matched else set()
+
+    existing_with_annotations = [
+        {"index": i, "name": payload.names[i]}
+        for i, item_id in matched.items()
+        if item_id in annotated_ids
+    ]
+    existing_without_annotations = [
+        {"index": i, "name": payload.names[i]}
+        for i, item_id in matched.items()
+        if item_id not in annotated_ids
+    ]
+
+    return {
+        "all_new": not matched,
+        "existing_with_annotations": existing_with_annotations,
+        "existing_without_annotations": existing_without_annotations,
+    }
+
+
 @router.post("/{task_uuid}/items")
 async def bulk_create_items(
     task_uuid: str,
@@ -391,7 +456,11 @@ async def bulk_create_items(
             dupes = sorted({n for n in names_in_batch if n in seen or seen.add(n)})  # type: ignore[func-returns-value]
             raise HTTPException(
                 status_code=409,
-                detail=f"Duplicate `payload.name` value(s) within request: {dupes}",
+                detail={
+                    "code": "ITEM_NAME_DUPLICATE_IN_REQUEST",
+                    "message": f"Duplicate `payload.name` value(s) within request: {dupes}",
+                    "conflicting_names": dupes,
+                },
             )
         existing_items = get_annotation_items_for_task(task_uuid)
         existing_name_to_uuid = {
@@ -423,7 +492,11 @@ async def bulk_create_items(
         )
         raise HTTPException(
             status_code=409,
-            detail=f"`payload.name` already exists in this task: {conflicts}",
+            detail={
+                "code": "ITEM_NAME_CONFLICT",
+                "message": f"`payload.name` already exists in this task: {conflicts}",
+                "conflicting_names": conflicts,
+            },
         )
 
     annotator: Optional[Dict[str, Any]] = None
@@ -628,9 +701,50 @@ async def bulk_update_items(
     Updates not in this task (or referencing deleted items) are skipped
     silently; `updated_count` reflects rows actually changed.
     """
-    _ensure_owned_task(task_uuid, user_id)
+    task = _ensure_owned_task(task_uuid, user_id)
     if not payload.updates:
         raise HTTPException(status_code=400, detail="updates must be non-empty")
+
+    if task["type"] in _ITEM_NAME_REQUIRED_TASK_TYPES:
+        incoming_names = [
+            (u.uuid, u.payload["name"])
+            for u in payload.updates
+            if isinstance(u.payload, dict) and u.payload.get("name")
+        ]
+        if incoming_names:
+            names_in_batch = [n for _, n in incoming_names]
+            if len(names_in_batch) != len(set(names_in_batch)):
+                seen: set = set()
+                dupes = sorted({n for n in names_in_batch if n in seen or seen.add(n)})  # type: ignore[func-returns-value]
+                raise HTTPException(
+                    status_code=409,
+                    detail={
+                        "code": "ITEM_NAME_DUPLICATE_IN_REQUEST",
+                        "message": f"Duplicate `payload.name` value(s) within request: {dupes}",
+                        "conflicting_names": dupes,
+                    },
+                )
+            updating_uuids = {item_uuid for item_uuid, _ in incoming_names}
+            existing_items = get_annotation_items_for_task(task_uuid)
+            conflicts = [
+                n
+                for it in existing_items
+                if it["uuid"] not in updating_uuids
+                and isinstance(it.get("payload"), dict)
+                for n in [it["payload"].get("name")]
+                if n in set(names_in_batch)
+            ]
+            if conflicts:
+                deduped = sorted(set(conflicts))
+                raise HTTPException(
+                    status_code=409,
+                    detail={
+                        "code": "ITEM_NAME_CONFLICT",
+                        "message": f"`payload.name` already exists in this task: {deduped}",
+                        "conflicting_names": deduped,
+                    },
+                )
+
     try:
         updated_count = bulk_update_annotation_items(
             task_uuid, [u.dict() for u in payload.updates]

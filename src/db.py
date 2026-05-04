@@ -6420,6 +6420,29 @@ def upsert_annotation(
         return annotation_uuid
 
 
+def get_annotated_item_ids(annotator_id: str, item_ids: List[str]) -> List[str]:
+    """Return the subset of `item_ids` that have at least one non-deleted
+    annotation from `annotator_id`."""
+    if not item_ids:
+        return []
+    placeholders = ",".join("?" * len(item_ids))
+    with get_db_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            f"""
+            SELECT DISTINCT a.item_id
+              FROM annotations a
+              JOIN annotation_jobs j ON j.uuid = a.job_id
+             WHERE j.annotator_id = ?
+               AND a.item_id IN ({placeholders})
+               AND a.deleted_at IS NULL
+               AND j.deleted_at IS NULL
+            """,
+            (annotator_id, *item_ids),
+        )
+        return [r["item_id"] for r in cursor.fetchall()]
+
+
 def get_annotations_for_item(item_id: str) -> List[Dict[str, Any]]:
     """All annotations on a single item, across jobs/annotators/evaluators.
     Excludes annotations on soft-deleted jobs (e.g. cascaded from task delete)."""
