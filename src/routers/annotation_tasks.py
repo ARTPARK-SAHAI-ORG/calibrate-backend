@@ -303,10 +303,15 @@ async def link_evaluator_to_task(
 # ============ Items ============
 
 
+_ITEM_NAME_REQUIRED_TASK_TYPES = ("stt", "llm", "simulation")
+
+
 class AnnotationItemPayload(BaseModel):
     # `payload` is a free-form JSON value whose shape is owned by the
     # task `type`. The backend doesn't validate the shape — frontend +
     # downstream consumers (evaluator runs, agreement, etc.) interpret it.
+    # For stt/llm/simulation tasks `payload["name"]` is required and must
+    # be unique within the task.
     payload: Any
     # Optional human annotations to seed alongside the item. Keys are
     # evaluator UUIDs that must be currently linked to the task; values
@@ -359,9 +364,46 @@ async def bulk_create_items(
     bool, rating uses a number. This matches what the public form writes
     via `upsert_annotation`, and is the only shape `annotation_metrics`
     will count toward agreement aggregates."""
-    _ensure_owned_task(task_uuid, user_id)
+    task = _ensure_owned_task(task_uuid, user_id)
     if not payload.items:
         raise HTTPException(status_code=400, detail="items must be non-empty")
+
+    # matched_existing: request index → UUID of the pre-existing item with
+    # the same payload.name. Only populated for task types that require names.
+    matched_existing: Dict[int, str] = {}
+    if task["type"] in _ITEM_NAME_REQUIRED_TASK_TYPES:
+        missing = [
+            i
+            for i, it in enumerate(payload.items)
+            if not (isinstance(it.payload, dict) and it.payload.get("name"))
+        ]
+        if missing:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    f"`payload.name` is required for {task['type']} task items. "
+                    f"Missing on items at index(es): {missing}"
+                ),
+            )
+        names_in_batch = [it.payload["name"] for it in payload.items]
+        if len(names_in_batch) != len(set(names_in_batch)):
+            seen: set = set()
+            dupes = sorted({n for n in names_in_batch if n in seen or seen.add(n)})  # type: ignore[func-returns-value]
+            raise HTTPException(
+                status_code=409,
+                detail=f"Duplicate `payload.name` value(s) within request: {dupes}",
+            )
+        existing_items = get_annotation_items_for_task(task_uuid)
+        existing_name_to_uuid = {
+            it["payload"]["name"]: it["uuid"]
+            for it in existing_items
+            if isinstance(it.get("payload"), dict) and it["payload"].get("name")
+        }
+        matched_existing = {
+            i: existing_name_to_uuid[it.payload["name"]]
+            for i, it in enumerate(payload.items)
+            if it.payload["name"] in existing_name_to_uuid
+        }
 
     items_with_annotations = [
         it for it in payload.items if it.annotations is not None
@@ -370,6 +412,18 @@ async def bulk_create_items(
         raise HTTPException(
             status_code=400,
             detail="annotator_id is required when any item carries `annotations`",
+        )
+
+    # Reject name conflicts only when no annotations are being supplied.
+    # When annotations are present, existing items are folded into the new
+    # job instead (see below).
+    if matched_existing and not items_with_annotations:
+        conflicts = sorted(
+            payload.items[i].payload["name"] for i in matched_existing
+        )
+        raise HTTPException(
+            status_code=409,
+            detail=f"`payload.name` already exists in this task: {conflicts}",
         )
 
     annotator: Optional[Dict[str, Any]] = None
@@ -432,13 +486,27 @@ async def bulk_create_items(
                         ),
                     )
 
+    # Create only the items that don't already exist by name.
     new_uuids = create_annotation_items(
         task_uuid,
-        [{"payload": it.payload} for it in payload.items],
+        [
+            {"payload": it.payload}
+            for i, it in enumerate(payload.items)
+            if i not in matched_existing
+        ],
     )
 
+    # Build a per-request-index UUID map: new items get a freshly created
+    # UUID; name-matched items reuse their existing UUID.
+    new_uuid_iter = iter(new_uuids)
+    item_uuid_by_index: Dict[int, str] = {
+        i: matched_existing[i] if i in matched_existing else next(new_uuid_iter)
+        for i in range(len(payload.items))
+    }
+    all_item_uuids = list(item_uuid_by_index.values())
+
     if items_with_annotations:
-        # One synthesised job covers every newly-inserted item, so the
+        # One synthesised job covers every item (new + existing), so the
         # annotator shows up exactly once in agreement aggregates per
         # bulk upload (rather than fragmenting across N tiny jobs).
         # Items without `annotations` are still included in the job's
@@ -448,7 +516,7 @@ async def bulk_create_items(
         job_uuid = create_annotation_job(
             task_id=task_uuid,
             annotator_id=payload.annotator_id,
-            item_uuids=new_uuids,
+            item_uuids=all_item_uuids,
             public_token=public_token,
             status="pending",
         )
@@ -468,19 +536,16 @@ async def bulk_create_items(
                 if evaluator_id not in snapshot_evaluator_ids:
                     snapshot_mismatch.append(evaluator_id)
         if snapshot_mismatch:
-            # Roll back the just-created items + job so the request is
-            # atomic from the caller's perspective. Without this, a 409
-            # leaves orphaned items + a dangling pending job, and a
-            # client retry would duplicate items every time. Annotation
-            # rows haven't been written yet (this gate runs before the
-            # upsert loop), so soft-deleting items + job is sufficient.
-            try:
-                soft_delete_annotation_items(task_uuid, new_uuids)
-            except Exception as e:
-                logger.warning(
-                    f"[bulk-create-items] rollback: failed to soft-delete "
-                    f"items {new_uuids} after snapshot mismatch: {e}"
-                )
+            # Roll back only the newly-created items and the job. Existing
+            # items that were matched by name must not be soft-deleted.
+            if new_uuids:
+                try:
+                    soft_delete_annotation_items(task_uuid, new_uuids)
+                except Exception as e:
+                    logger.warning(
+                        f"[bulk-create-items] rollback: failed to soft-delete "
+                        f"items {new_uuids} after snapshot mismatch: {e}"
+                    )
             try:
                 soft_delete_annotation_job(job_uuid)
             except Exception as e:
@@ -499,9 +564,10 @@ async def bulk_create_items(
                 ),
             )
         any_annotation_written = False
-        for it, item_uuid in zip(payload.items, new_uuids):
+        for i, it in enumerate(payload.items):
             if not it.annotations:
                 continue
+            item_uuid = item_uuid_by_index[i]
             for evaluator_id, value in it.annotations.items():
                 upsert_annotation(
                     job_id=job_uuid,
@@ -532,8 +598,10 @@ async def bulk_create_items(
             # `pending`.
             update_annotation_job_status(job_uuid, status="in_progress")
         return {
-            "item_ids": new_uuids,
-            "count": len(new_uuids),
+            "item_ids": all_item_uuids,
+            "new_item_ids": new_uuids,
+            "existing_item_ids": list(matched_existing.values()),
+            "count": len(all_item_uuids),
             "annotation_job_id": job_uuid,
         }
 

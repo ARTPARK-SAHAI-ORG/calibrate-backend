@@ -3275,14 +3275,14 @@ def duplicate_evaluator(
             ),
         )
         cursor.execute(
-            "SELECT * FROM evaluator_versions WHERE evaluator_id = ? ORDER BY version_number ASC",
+            "SELECT * FROM evaluator_versions WHERE evaluator_id = ? ORDER BY version_number DESC LIMIT 1",
             (source_uuid,),
         )
-        source_versions = [_parse_evaluator_version_row(r) for r in cursor.fetchall()]
+        source_version_row = cursor.fetchone()
 
         new_live_version_uuid: Optional[str] = None
-        source_live_version = source.get("live_version_id")
-        for sv in source_versions:
+        if source_version_row:
+            sv = _parse_evaluator_version_row(source_version_row)
             nv_uuid = str(uuid.uuid4())
             cursor.execute(
                 """
@@ -3294,7 +3294,7 @@ def duplicate_evaluator(
                 (
                     nv_uuid,
                     new_uuid,
-                    sv["version_number"],
+                    1,
                     sv["judge_model"],
                     sv["system_prompt"],
                     (
@@ -3309,15 +3309,7 @@ def duplicate_evaluator(
                     ),
                 ),
             )
-            if sv["uuid"] == source_live_version:
-                new_live_version_uuid = nv_uuid
-
-        if new_live_version_uuid is None and source_versions:
-            cursor.execute(
-                "SELECT uuid FROM evaluator_versions WHERE evaluator_id = ? ORDER BY version_number DESC LIMIT 1",
-                (new_uuid,),
-            )
-            new_live_version_uuid = cursor.fetchone()["uuid"]
+            new_live_version_uuid = nv_uuid
 
         if new_live_version_uuid:
             cursor.execute(
