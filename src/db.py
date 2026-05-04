@@ -3274,10 +3274,17 @@ def duplicate_evaluator(
                 source.get("output_type", "binary"),
             ),
         )
-        cursor.execute(
-            "SELECT * FROM evaluator_versions WHERE evaluator_id = ? ORDER BY version_number DESC LIMIT 1",
-            (source_uuid,),
-        )
+        source_live_version_id = source.get("live_version_id")
+        if source_live_version_id:
+            cursor.execute(
+                "SELECT * FROM evaluator_versions WHERE uuid = ?",
+                (source_live_version_id,),
+            )
+        else:
+            cursor.execute(
+                "SELECT * FROM evaluator_versions WHERE evaluator_id = ? ORDER BY version_number DESC LIMIT 1",
+                (source_uuid,),
+            )
         source_version_row = cursor.fetchone()
 
         new_live_version_uuid: Optional[str] = None

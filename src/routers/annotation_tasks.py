@@ -436,7 +436,7 @@ async def bulk_create_items(
     missing = [
         i
         for i, it in enumerate(payload.items)
-        if not (isinstance(it.payload, dict) and it.payload.get("name"))
+        if not (isinstance(it.payload, dict) and isinstance(it.payload.get("name"), str) and it.payload["name"])
     ]
     if missing:
         raise HTTPException(
@@ -708,7 +708,7 @@ async def bulk_update_items(
     incoming_names = [
         (u.uuid, u.payload["name"])
         for u in payload.updates
-        if isinstance(u.payload, dict) and u.payload.get("name")
+        if isinstance(u.payload, dict) and isinstance(u.payload.get("name"), str) and u.payload["name"]
     ]
     if incoming_names:
         names_in_batch = [n for _, n in incoming_names]
