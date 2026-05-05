@@ -6197,6 +6197,44 @@ def get_evaluator_runs_for_user(user_id: str) -> List[Dict[str, Any]]:
         return [_parse_evaluator_run_row(r) for r in cursor.fetchall()]
 
 
+def get_evaluator_runs_for_evaluator_user_scoped(
+    evaluator_id: str,
+    user_id: str,
+    task_id: Optional[str] = None,
+    version_id: Optional[str] = None,
+) -> List[Dict[str, Any]]:
+    """All non-deleted evaluator_runs for a specific evaluator across user-owned
+    tasks, with `task_id` included in each returned row.
+
+    Optional filters:
+      - `task_id`: restrict to runs whose item belongs to this task.
+      - `version_id`: restrict to runs produced by a specific evaluator version.
+    """
+    params: list = [evaluator_id, user_id]
+    query = """
+        SELECT er.*, ai.task_id AS task_id
+          FROM evaluator_runs er
+          JOIN annotation_items ai ON ai.uuid = er.item_id
+          JOIN annotation_tasks t ON t.uuid = ai.task_id
+         WHERE er.evaluator_id = ?
+           AND t.user_id = ?
+           AND t.deleted_at IS NULL
+           AND ai.deleted_at IS NULL
+           AND er.deleted_at IS NULL
+    """
+    if task_id:
+        query += " AND ai.task_id = ?"
+        params.append(task_id)
+    if version_id:
+        query += " AND er.evaluator_version_id = ?"
+        params.append(version_id)
+    query += " ORDER BY er.id ASC"
+    with get_db_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute(query, params)
+        return [_parse_evaluator_run_row(r) for r in cursor.fetchall()]
+
+
 def get_evaluator_runs_for_item(item_uuid: str) -> List[Dict[str, Any]]:
     with get_db_connection() as conn:
         cursor = conn.cursor()
