@@ -1,6 +1,7 @@
 import copy
 import ipaddress
 import logging
+import os
 import socket
 from datetime import datetime, timezone
 from typing import Optional, List, Dict, Any, Literal
@@ -155,6 +156,57 @@ async def _verify_agent_connection(
 router = APIRouter(prefix="/agents", tags=["agents"])
 
 
+def _default_agent_config() -> Dict[str, Any]:
+    """Build the default config block for a freshly-created `type=agent`.
+
+    Each field is overridable via env var so tenants can pin different
+    defaults without a code change. Hardcoded fallbacks below are the
+    safety net when env is unset.
+    """
+    speaks_first_env = os.getenv("DEFAULT_AGENT_SPEAKS_FIRST", "false").strip().lower()
+    speaks_first = speaks_first_env in {"1", "true", "yes", "y", "on"}
+
+    try:
+        max_turns = int(os.getenv("DEFAULT_AGENT_MAX_TURNS", "50"))
+    except ValueError:
+        max_turns = 50
+
+    return {
+        "system_prompt": os.getenv(
+            "DEFAULT_AGENT_SYSTEM_PROMPT", "You are a helpful assistant."
+        ),
+        "llm": {
+            "model": os.getenv("DEFAULT_AGENT_LLM_MODEL", "google/gemini-2.5-flash"),
+        },
+        "stt": {
+            "provider": os.getenv("DEFAULT_AGENT_STT_PROVIDER", "google"),
+        },
+        "tts": {
+            "provider": os.getenv("DEFAULT_AGENT_TTS_PROVIDER", "google"),
+        },
+        "settings": {
+            "agent_speaks_first": speaks_first,
+            "max_assistant_turns": max_turns,
+        },
+    }
+
+
+def _deep_merge(base: Dict[str, Any], override: Dict[str, Any]) -> Dict[str, Any]:
+    """Recursively merge `override` into a copy of `base`. Caller wins per key.
+
+    Dict-vs-dict at the same key recurses; anything else (scalar, list, None)
+    in `override` replaces the corresponding `base` value entirely.
+    """
+    result = copy.deepcopy(base)
+    for key, ov_value in override.items():
+        base_value = result.get(key)
+        if isinstance(base_value, dict) and isinstance(ov_value, dict):
+            result[key] = _deep_merge(base_value, ov_value)
+        else:
+            result[key] = copy.deepcopy(ov_value)
+    return result
+
+
 class AgentCreate(BaseModel):
     name: str
     type: Literal["agent", "connection"] = "agent"
@@ -300,11 +352,25 @@ async def verify_agent_connection(
 async def create_agent_endpoint(
     agent: AgentCreate, user_id: str = Depends(get_current_user_id)
 ):
-    """Create a new agent."""
+    """Create a new agent.
+
+    For `type=agent`, the backend applies sensible defaults (system_prompt,
+    llm.model, stt, tts, settings) overridable via DEFAULT_AGENT_* env vars.
+    Any caller-supplied `config` is deep-merged on top, so partial overrides
+    only replace the specific fields the caller cares about.
+
+    For `type=connection`, no defaults are injected — the caller-supplied
+    config (which must eventually contain `agent_url`) is stored as-is.
+    """
+    if agent.type == "agent":
+        merged_config = _deep_merge(_default_agent_config(), agent.config or {})
+    else:
+        merged_config = agent.config
+
     agent_uuid = create_agent(
         name=agent.name,
         agent_type=agent.type,
-        config=agent.config,
+        config=merged_config,
         user_id=user_id,
     )
     return AgentCreateResponse(uuid=agent_uuid, message="Agent created successfully")
