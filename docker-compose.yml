@@ -30,6 +30,10 @@ services:
       - ELEVENLABS_API_KEY=${ELEVENLABS_API_KEY}
       - OPENROUTER_API_KEY=${OPENROUTER_API_KEY}
       - S3_OUTPUT_BUCKET=${S3_OUTPUT_BUCKET}
+      - S3_ENDPOINT_URL=${S3_ENDPOINT_URL:-}
+      - AWS_ACCESS_KEY_ID=${AWS_ACCESS_KEY_ID:-}
+      - AWS_SECRET_ACCESS_KEY=${AWS_SECRET_ACCESS_KEY:-}
+      - AWS_REGION=${AWS_REGION:-}
       - DB_ROOT_DIR=${DB_ROOT_DIR}
       - DEFAULT_USER_EMAIL=${DEFAULT_USER_EMAIL}
       - DEFAULT_USER_FIRST_NAME=${DEFAULT_USER_FIRST_NAME:-Admin}
@@ -49,3 +53,8 @@ services:
       - LANGFUSE_SECRET_KEY=${LANGFUSE_SECRET_KEY}
     volumes:
       - ${APP_FOLDER_PATH}:/appdata
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "5"
