@@ -826,11 +826,19 @@ export AWS_DEFAULT_REGION=<region>
 
 ## AWS / 1. Create the S3 bucket
 
+`us-east-1` is S3's legacy default region — it rejects `--create-bucket-configuration` while every other region requires it. The conditional below picks the right form automatically:
+
 ```bash
-aws s3api create-bucket \
-  --bucket calibrate-backend-artifacts \
-  --region $AWS_REGION \
-  --create-bucket-configuration LocationConstraint=$AWS_REGION
+if [ "$AWS_REGION" = "us-east-1" ]; then
+  aws s3api create-bucket \
+    --bucket calibrate-backend-artifacts \
+    --region us-east-1
+else
+  aws s3api create-bucket \
+    --bucket calibrate-backend-artifacts \
+    --region $AWS_REGION \
+    --create-bucket-configuration LocationConstraint=$AWS_REGION
+fi
 
 # Block all public access — the app uses presigned URLs for client access
 aws s3api put-public-access-block \
@@ -843,8 +851,6 @@ aws s3api put-bucket-versioning \
   --bucket calibrate-backend-artifacts \
   --versioning-configuration Status=Enabled
 ```
-
-> If your region is `us-east-1`, **omit** `--create-bucket-configuration` — that region rejects the flag.
 
 Optionally add a lifecycle rule to expire non-current versions after 30 days so versioning doesn't balloon costs:
 
