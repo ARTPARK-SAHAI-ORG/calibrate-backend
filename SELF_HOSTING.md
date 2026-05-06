@@ -230,6 +230,50 @@ gcloud storage hmac create \
 
 Copy the `accessId` (looks like `GOOG1E...`) and `secret` from the output. You'll need them in the `.env` in step 9.
 
+### 7f. Configure bucket CORS (required if browser uploads from a different origin)
+
+The `/presigned-url` flow returns a URL the **browser** uploads to directly with `PUT`. That request lands on `storage.googleapis.com`, not your backend — so the backend's `CORS_ALLOWED_ORIGINS` doesn't apply. You need a CORS rule **on the bucket**.
+
+You can skip this section if uploads only happen server-side (backend-to-GCS). It only matters when a browser on a different origin (e.g. `https://app.tenant.example.com`) needs to PUT to GCS directly.
+
+```bash
+cat > /tmp/gcs-cors.json <<'EOF'
+[
+  {
+    "origin": ["https://app.tenant.example.com"],
+    "method": ["GET", "PUT"],
+    "responseHeader": ["Content-Type", "Authorization", "x-goog-resumable"],
+    "maxAgeSeconds": 3600
+  }
+]
+EOF
+
+gcloud storage buckets update gs://calibrate-backend-artifacts \
+  --cors-file=/tmp/gcs-cors.json
+```
+
+To allow multiple origins (prod + staging + local dev), pass them all in the `origin` array:
+
+```json
+"origin": [
+  "https://app.tenant.example.com",
+  "https://staging.tenant.example.com",
+  "http://localhost:3000"
+]
+```
+
+Verify:
+
+```bash
+gcloud storage buckets describe gs://calibrate-backend-artifacts --format="value(cors_config)"
+```
+
+To clear CORS (e.g. before disabling browser-direct uploads):
+
+```bash
+gcloud storage buckets update gs://calibrate-backend-artifacts --clear-cors
+```
+
 ## GCP / 8. Clone the repo and build the image
 
 On the VM:
@@ -834,6 +878,42 @@ aws s3api put-bucket-lifecycle-configuration \
       "NoncurrentVersionExpiration": {"NoncurrentDays": 30}
     }]
   }'
+```
+
+### Configure bucket CORS (required if browser uploads from a different origin)
+
+The `/presigned-url` flow returns a URL the **browser** uploads to directly with `PUT`. That request lands on `s3.<region>.amazonaws.com`, not your backend — so the backend's `CORS_ALLOWED_ORIGINS` doesn't apply. You need a CORS rule **on the bucket**.
+
+Skip this if uploads only happen server-side (backend-to-S3). It only matters when a browser on a different origin (e.g. `https://app.tenant.example.com`) needs to PUT to S3 directly.
+
+```bash
+aws s3api put-bucket-cors \
+  --bucket calibrate-backend-artifacts \
+  --cors-configuration '{
+    "CORSRules": [{
+      "AllowedOrigins": [
+        "https://app.tenant.example.com"
+      ],
+      "AllowedMethods": ["GET", "PUT"],
+      "AllowedHeaders": ["*"],
+      "ExposeHeaders": ["ETag"],
+      "MaxAgeSeconds": 3600
+    }]
+  }'
+```
+
+For multiple origins (prod + staging + local dev), add them all to `AllowedOrigins`.
+
+Verify:
+
+```bash
+aws s3api get-bucket-cors --bucket calibrate-backend-artifacts
+```
+
+To clear CORS:
+
+```bash
+aws s3api delete-bucket-cors --bucket calibrate-backend-artifacts
 ```
 
 ## AWS / 2. Create an IAM role for the EC2 instance

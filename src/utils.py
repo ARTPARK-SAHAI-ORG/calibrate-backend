@@ -235,11 +235,15 @@ def is_job_timed_out(
 
 
 def get_s3_client():
-    """Get S3-compatible client. Honors S3_ENDPOINT_URL for GCS interop."""
-    endpoint_url = os.getenv("S3_ENDPOINT_URL")
-    aws_access_key_id = os.getenv("AWS_ACCESS_KEY_ID")
-    aws_secret_access_key = os.getenv("AWS_SECRET_ACCESS_KEY")
-    aws_region = os.getenv("AWS_REGION", "ap-south-1")
+    """Get S3-compatible client. Honors S3_ENDPOINT_URL for GCS interop.
+
+    Treats empty strings as unset so docker-compose passing through
+    `${AWS_REGION:-}` (etc.) doesn't override the code default with "".
+    """
+    endpoint_url = os.getenv("S3_ENDPOINT_URL") or None
+    aws_access_key_id = os.getenv("AWS_ACCESS_KEY_ID") or None
+    aws_secret_access_key = os.getenv("AWS_SECRET_ACCESS_KEY") or None
+    aws_region = os.getenv("AWS_REGION") or "ap-south-1"
 
     kwargs = {"region_name": aws_region}
     if endpoint_url:
