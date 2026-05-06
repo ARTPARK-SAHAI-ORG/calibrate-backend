@@ -18,6 +18,35 @@ from pydantic import BaseModel
 logger = logging.getLogger(__name__)
 
 
+def env_str(var: str, fallback: str) -> str:
+    """`os.getenv` with empty string treated as unset.
+
+    Compose passes `${VAR:-}` for optional fields, which arrives as "" not
+    None — `os.getenv(var, fallback)` would then return "" instead of falling
+    back. Using `or` collapses both unset and empty to the fallback.
+    """
+    return os.getenv(var) or fallback
+
+
+def env_bool(var: str, fallback: bool) -> bool:
+    """Parse a truthy/falsy env var. Empty/unset → fallback."""
+    raw = os.getenv(var)
+    if not raw:
+        return fallback
+    return raw.strip().lower() in {"1", "true", "yes", "y", "on"}
+
+
+def env_int(var: str, fallback: int) -> int:
+    """Parse an int env var. Empty/unset/unparseable → fallback."""
+    raw = os.getenv(var)
+    if not raw:
+        return fallback
+    try:
+        return int(raw)
+    except ValueError:
+        return fallback
+
+
 def capture_exception_to_sentry(exception: Exception) -> None:
     """
     Capture an exception to Sentry and mark it as unhandled.

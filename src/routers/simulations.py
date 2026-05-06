@@ -58,6 +58,9 @@ from utils import (
     PRESIGNED_URL_EXPIRY_SECONDS,
     PRESIGNED_URL_REFRESH_BUFFER_SECONDS,
     upload_file_to_s3,
+    env_bool,
+    env_int,
+    env_str,
 )
 from auth_utils import get_current_user_id
 from datetime import datetime
@@ -1079,18 +1082,22 @@ def _build_calibrate_simulation_config(
     agent_config = agent.get("config") or {}
 
     # Build personas list (same for both modes)
+    default_gender = env_str("DEFAULT_PERSONA_GENDER", "female")
+    default_language = env_str("DEFAULT_PERSONA_LANGUAGE", "english")
+    default_interruption = env_str("DEFAULT_PERSONA_INTERRUPTION_SENSITIVITY", "medium")
+
     persona_list = []
     for persona in personas:
         persona_config = persona.get("config") or {}
         persona_obj = {
             "label": persona.get("name", ""),
             "characteristics": persona.get("description") or persona.get("name"),
-            "gender": persona_config.get("gender", "female"),
-            "language": persona_config.get("language", "english"),
+            "gender": persona_config.get("gender", default_gender),
+            "language": persona_config.get("language", default_language),
         }
         if simulation_type == "voice":
             persona_obj["interruption_sensitivity"] = persona_config.get(
-                "interruption_sensitivity", "medium"
+                "interruption_sensitivity", default_interruption
             )
         if persona_obj["characteristics"]:
             persona_list.append(persona_obj)
@@ -1107,9 +1114,18 @@ def _build_calibrate_simulation_config(
     evaluators_payload = build_evaluator_cli_payload(evaluators)
 
     settings_config = agent_config.get("settings", {})
+    # Fallbacks share the same env var as `_default_agent_config()` in agents.py
+    # so an operator can pin a single value across both new-agent creation and
+    # the simulation-time fallback for legacy agents whose config is missing
+    # these fields. Hardcoded fallbacks preserve the historical sim-runtime
+    # values (True / 50) for old data; new agents always have these set explicitly.
     shared_settings = {
-        "agent_speaks_first": settings_config.get("agent_speaks_first", True),
-        "max_turns": settings_config.get("max_assistant_turns", 50),
+        "agent_speaks_first": settings_config.get(
+            "agent_speaks_first", env_bool("DEFAULT_AGENT_SPEAKS_FIRST", True)
+        ),
+        "max_turns": settings_config.get(
+            "max_assistant_turns", env_int("DEFAULT_AGENT_MAX_TURNS", 50)
+        ),
     }
 
     if agent_config.get("agent_url"):
@@ -1128,7 +1144,10 @@ def _build_calibrate_simulation_config(
 
     # Calibrate agent mode
     llm_config = agent_config.get("llm", {})
-    model = llm_config.get("model", "gpt-4.1")
+    # Shares DEFAULT_AGENT_LLM_MODEL with new-agent creation. Hardcoded fallback
+    # stays "gpt-4.1" to preserve runtime behavior for legacy agents created
+    # before agent-create defaults were wired up.
+    model = llm_config.get("model", env_str("DEFAULT_AGENT_LLM_MODEL", "gpt-4.1"))
 
     agent_tools = get_tools_for_agent(agent["uuid"])
     tool_configs = build_tool_configs(agent_tools)

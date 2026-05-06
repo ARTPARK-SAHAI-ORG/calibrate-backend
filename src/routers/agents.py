@@ -1,7 +1,6 @@
 import copy
 import ipaddress
 import logging
-import os
 import socket
 from datetime import datetime, timezone
 from typing import Optional, List, Dict, Any, Literal
@@ -9,6 +8,8 @@ from urllib.parse import urlparse
 from fastapi import APIRouter, HTTPException, Depends
 from pydantic import BaseModel
 from calibrate.connections import TextAgentConnection
+
+from utils import env_bool, env_int, env_str
 
 from db import (
     create_agent,
@@ -160,33 +161,27 @@ def _default_agent_config() -> Dict[str, Any]:
     """Build the default config block for a freshly-created `type=agent`.
 
     Each field is overridable via env var so tenants can pin different
-    defaults without a code change. Hardcoded fallbacks below are the
-    safety net when env is unset OR empty (compose passes `${VAR:-}`,
-    `.env.example` ships `VAR=`, both arrive as empty strings — treat as unset).
+    defaults without a code change. The env helpers in utils.py treat
+    empty strings as unset, so compose's `${VAR:-}` passthrough and the
+    `VAR=` placeholders in .env.example both fall through to the
+    hardcoded values below.
     """
-    speaks_first_env = (os.getenv("DEFAULT_AGENT_SPEAKS_FIRST") or "false").strip().lower()
-    speaks_first = speaks_first_env in {"1", "true", "yes", "y", "on"}
-
-    try:
-        max_turns = int(os.getenv("DEFAULT_AGENT_MAX_TURNS") or "50")
-    except ValueError:
-        max_turns = 50
-
     return {
-        "system_prompt": os.getenv("DEFAULT_AGENT_SYSTEM_PROMPT")
-        or "You are a helpful assistant.",
+        "system_prompt": env_str(
+            "DEFAULT_AGENT_SYSTEM_PROMPT", "You are a helpful assistant."
+        ),
         "llm": {
-            "model": os.getenv("DEFAULT_AGENT_LLM_MODEL") or "google/gemini-2.5-flash",
+            "model": env_str("DEFAULT_AGENT_LLM_MODEL", "google/gemini-2.5-flash"),
         },
         "stt": {
-            "provider": os.getenv("DEFAULT_AGENT_STT_PROVIDER") or "google",
+            "provider": env_str("DEFAULT_AGENT_STT_PROVIDER", "google"),
         },
         "tts": {
-            "provider": os.getenv("DEFAULT_AGENT_TTS_PROVIDER") or "google",
+            "provider": env_str("DEFAULT_AGENT_TTS_PROVIDER", "google"),
         },
         "settings": {
-            "agent_speaks_first": speaks_first,
-            "max_assistant_turns": max_turns,
+            "agent_speaks_first": env_bool("DEFAULT_AGENT_SPEAKS_FIRST", False),
+            "max_assistant_turns": env_int("DEFAULT_AGENT_MAX_TURNS", 50),
         },
     }
 
