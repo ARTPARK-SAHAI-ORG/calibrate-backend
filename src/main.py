@@ -4,9 +4,10 @@ import uuid
 import asyncio
 import subprocess
 import logging
-from typing import Literal, Optional, List, Dict
+from typing import Literal, Optional, List, Dict, Any
 from contextlib import asynccontextmanager
 
+import httpx
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -302,6 +303,50 @@ async def get_provider_status():
         )
 
     return {"success": True}
+
+
+@app.get("/openrouter/providers")
+async def list_openrouter_providers() -> Optional[Dict[str, Any]]:
+    """
+    List providers available on OpenRouter.
+
+    If `OPENROUTER_API_KEY` is not set, returns `null` (OpenRouter is disabled).
+
+    Otherwise, if `OPENROUTER_ALLOWED_PROVIDERS` is set (comma-separated provider
+    slugs), fetches the canonical list from `https://openrouter.ai/api/v1/providers`,
+    filters to that subset, and returns `{"providers": [{slug, name}, ...]}`.
+
+    If `OPENROUTER_ALLOWED_PROVIDERS` is empty/unset, all providers are supported —
+    returns `{"providers": "all"}`.
+    """
+    if not os.getenv("OPENROUTER_API_KEY"):
+        return None
+
+    allowed_env = os.getenv("OPENROUTER_ALLOWED_PROVIDERS", "")
+    allowed = {s.strip() for s in allowed_env.split(",") if s.strip()}
+
+    if not allowed:
+        return {"providers": "all"}
+
+    try:
+        async with httpx.AsyncClient(timeout=15) as client:
+            response = await client.get("https://openrouter.ai/api/v1/providers")
+            response.raise_for_status()
+            payload = response.json()
+    except httpx.HTTPError as exc:
+        raise HTTPException(
+            status_code=502,
+            detail=f"Failed to fetch OpenRouter providers: {exc}",
+        )
+
+    raw_providers = payload.get("data", []) if isinstance(payload, dict) else []
+    providers = [
+        {"slug": p.get("slug"), "name": p.get("name")}
+        for p in raw_providers
+        if p.get("slug") in allowed
+    ]
+
+    return {"providers": providers}
 
 
 @app.get("/sentry-debug")

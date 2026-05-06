@@ -76,6 +76,7 @@ jobs:
             export SARVAM_API_KEY="${{ secrets.SARVAM_API_KEY }}"
             export ELEVENLABS_API_KEY="${{ secrets.ELEVENLABS_API_KEY }}"
             export OPENROUTER_API_KEY="${{ secrets.OPENROUTER_API_KEY }}"
+            export OPENROUTER_ALLOWED_PROVIDERS="${{ vars.OPENROUTER_ALLOWED_PROVIDERS }}"
             export S3_OUTPUT_BUCKET="${{ secrets.S3_OUTPUT_BUCKET }}"
             export DB_ROOT_DIR="${{ secrets.DB_ROOT_DIR }}"
             export APP_FOLDER_PATH="${{ secrets.APP_FOLDER_PATH }}"
