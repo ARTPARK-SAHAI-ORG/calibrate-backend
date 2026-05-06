@@ -180,7 +180,10 @@ def _default_agent_config() -> Dict[str, Any]:
             "provider": env_str("DEFAULT_AGENT_TTS_PROVIDER", "google"),
         },
         "settings": {
-            "agent_speaks_first": env_bool("DEFAULT_AGENT_SPEAKS_FIRST", False),
+            # Match the simulation runtime fallback (True) so a freshly-created
+            # agent and a legacy agent missing this key behave identically when
+            # the env var is unset. Override via DEFAULT_AGENT_SPEAKS_FIRST.
+            "agent_speaks_first": env_bool("DEFAULT_AGENT_SPEAKS_FIRST", True),
             "max_assistant_turns": env_int("DEFAULT_AGENT_MAX_TURNS", 50),
         },
     }
