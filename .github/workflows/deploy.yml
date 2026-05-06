@@ -47,10 +47,17 @@ jobs:
 
       - name: Deploy to Production EC2
         uses: appleboy/ssh-action@v1.0.3
+        env:
+          # Forwarded via the action's `envs:` mechanism so the value is exported
+          # on the remote host with proper quoting. Avoids the shell-injection /
+          # corruption risk of interpolating raw secret text into a script body
+          # — system prompts can contain $, backticks, quotes, markdown, etc.
+          DEFAULT_AGENT_SYSTEM_PROMPT: ${{ secrets.DEFAULT_AGENT_SYSTEM_PROMPT }}
         with:
           host: ${{ secrets.EC2_HOST }}
           username: ${{ secrets.EC2_USER }}
           key: ${{ secrets.EC2_SSH_KEY }}
+          envs: DEFAULT_AGENT_SYSTEM_PROMPT
           script: |
             set -e  # Exit immediately if any command fails
 
@@ -83,7 +90,8 @@ jobs:
             export DEFAULT_USER_EMAIL="${{ secrets.DEFAULT_USER_EMAIL }}"
             export DEFAULT_USER_FIRST_NAME="${{ secrets.DEFAULT_USER_FIRST_NAME }}"
             export DEFAULT_USER_LAST_NAME="${{ secrets.DEFAULT_USER_LAST_NAME }}"
-            export DEFAULT_AGENT_SYSTEM_PROMPT="${{ secrets.DEFAULT_AGENT_SYSTEM_PROMPT }}"
+            # DEFAULT_AGENT_SYSTEM_PROMPT is injected via the action's `envs:` —
+            # do not export it inline (shell-significant chars in the prompt).
             export DEFAULT_AGENT_LLM_MODEL="${{ secrets.DEFAULT_AGENT_LLM_MODEL }}"
             export DEFAULT_AGENT_STT_PROVIDER="${{ secrets.DEFAULT_AGENT_STT_PROVIDER }}"
             export DEFAULT_AGENT_TTS_PROVIDER="${{ secrets.DEFAULT_AGENT_TTS_PROVIDER }}"
