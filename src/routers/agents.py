@@ -161,28 +161,28 @@ def _default_agent_config() -> Dict[str, Any]:
 
     Each field is overridable via env var so tenants can pin different
     defaults without a code change. Hardcoded fallbacks below are the
-    safety net when env is unset.
+    safety net when env is unset OR empty (compose passes `${VAR:-}`,
+    `.env.example` ships `VAR=`, both arrive as empty strings — treat as unset).
     """
-    speaks_first_env = os.getenv("DEFAULT_AGENT_SPEAKS_FIRST", "false").strip().lower()
+    speaks_first_env = (os.getenv("DEFAULT_AGENT_SPEAKS_FIRST") or "false").strip().lower()
     speaks_first = speaks_first_env in {"1", "true", "yes", "y", "on"}
 
     try:
-        max_turns = int(os.getenv("DEFAULT_AGENT_MAX_TURNS", "50"))
+        max_turns = int(os.getenv("DEFAULT_AGENT_MAX_TURNS") or "50")
     except ValueError:
         max_turns = 50
 
     return {
-        "system_prompt": os.getenv(
-            "DEFAULT_AGENT_SYSTEM_PROMPT", "You are a helpful assistant."
-        ),
+        "system_prompt": os.getenv("DEFAULT_AGENT_SYSTEM_PROMPT")
+        or "You are a helpful assistant.",
         "llm": {
-            "model": os.getenv("DEFAULT_AGENT_LLM_MODEL", "google/gemini-2.5-flash"),
+            "model": os.getenv("DEFAULT_AGENT_LLM_MODEL") or "google/gemini-2.5-flash",
         },
         "stt": {
-            "provider": os.getenv("DEFAULT_AGENT_STT_PROVIDER", "google"),
+            "provider": os.getenv("DEFAULT_AGENT_STT_PROVIDER") or "google",
         },
         "tts": {
-            "provider": os.getenv("DEFAULT_AGENT_TTS_PROVIDER", "google"),
+            "provider": os.getenv("DEFAULT_AGENT_TTS_PROVIDER") or "google",
         },
         "settings": {
             "agent_speaks_first": speaks_first,
