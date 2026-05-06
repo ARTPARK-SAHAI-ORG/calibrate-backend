@@ -1706,7 +1706,6 @@ See [src/.env.example](src/.env.example) for the canonical list. AWS-specific gu
 | `IMAGE_NAME`, `IMAGE_TAG`, `CONTAINER_NAME`, `PORT` | **yes** | Compose interpolation |
 | `APP_FOLDER_PATH` | **yes** | `/appdata` |
 | `DB_ROOT_DIR` | **yes** | `/appdata` |
-| `TMPDIR` | recommended | `/appdata/tmp` |
 | `JWT_SECRET_KEY` | **yes** | `openssl rand -base64 32` per tenant |
 | `S3_OUTPUT_BUCKET` | **yes** | Your S3 bucket name |
 | `S3_ENDPOINT_URL` | **leave empty** | AWS S3 default |
