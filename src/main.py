@@ -319,7 +319,8 @@ async def list_openrouter_providers() -> Optional[Dict[str, Any]]:
     If `OPENROUTER_ALLOWED_PROVIDERS` is empty/unset, all providers are supported —
     returns `{"providers": "all"}`.
     """
-    if not os.getenv("OPENROUTER_API_KEY"):
+    api_key = os.getenv("OPENROUTER_API_KEY")
+    if not api_key:
         return None
 
     allowed_env = os.getenv("OPENROUTER_ALLOWED_PROVIDERS", "")
@@ -330,7 +331,10 @@ async def list_openrouter_providers() -> Optional[Dict[str, Any]]:
 
     try:
         async with httpx.AsyncClient(timeout=15) as client:
-            response = await client.get("https://openrouter.ai/api/v1/providers")
+            response = await client.get(
+                "https://openrouter.ai/api/v1/providers",
+                headers={"Authorization": f"Bearer {api_key}"},
+            )
             response.raise_for_status()
             payload = response.json()
     except httpx.HTTPError as exc:
