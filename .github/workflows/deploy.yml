@@ -85,7 +85,6 @@ jobs:
             export OPENROUTER_API_KEY="${{ secrets.OPENROUTER_API_KEY }}"
             export S3_OUTPUT_BUCKET="${{ secrets.S3_OUTPUT_BUCKET }}"
             export DB_ROOT_DIR="${{ secrets.DB_ROOT_DIR }}"
-            export TMPDIR="${{ secrets.TMPDIR }}"
             export APP_FOLDER_PATH="${{ secrets.APP_FOLDER_PATH }}"
             export DEFAULT_USER_EMAIL="${{ secrets.DEFAULT_USER_EMAIL }}"
             export DEFAULT_USER_FIRST_NAME="${{ secrets.DEFAULT_USER_FIRST_NAME }}"

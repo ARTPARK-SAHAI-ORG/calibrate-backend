@@ -33,7 +33,7 @@ Everything else is ephemeral:
 - **Intermediate job artifacts** (calibrate CLI outputs, configs, generated audio, conversation `.wav`s) are written into `tempfile.TemporaryDirectory()` blocks. The backend uploads them to object storage from there; the temp dir is GC'd on context exit.
 - **Subprocess stdout/stderr logs** also use `NamedTemporaryFile`.
 
-So: **persistent disk = SQLite. Object storage = everything else.** A 20–50 GB persistent disk is plenty unless you set `TMPDIR=/appdata/tmp` to put job temp work on it as well (recommended — covered in each cloud section).
+So: **persistent disk = SQLite. Object storage = everything else.** A 20–50 GB persistent disk is plenty.
 
 ---
 
@@ -85,7 +85,7 @@ gcloud compute disks create calibrate-appdata \
 
 You'll see a warning that the disk is unformatted — **that's fine**. Formatting happens after the VM is up; don't try to format from your laptop.
 
-> **Disk sizing:** the SQLite file alone won't grow into the GB range unless you accumulate millions of dataset rows. 20 GB is enough for the DB. We use 100 GB so you can also point `TMPDIR` at the persistent disk for job temp work without filling the boot disk.
+> **Disk sizing:** the SQLite file alone won't grow into the GB range unless you accumulate millions of dataset rows. 20 GB is enough for the DB. We use 100 GB to leave room for future growth and operational headroom; resize down later with `gcloud compute disks resize` if you don't need it.
 
 ## GCP / 3. Verify firewall rules
 
@@ -305,7 +305,6 @@ PORT=80
 # Persistence
 APP_FOLDER_PATH=/appdata
 DB_ROOT_DIR=/appdata
-TMPDIR=/appdata/tmp
 
 # Auth — generate fresh, do NOT reuse from any other tenant
 JWT_SECRET_KEY=PASTE_OUTPUT_OF_openssl_rand_-base64_32
@@ -369,9 +368,6 @@ chmod 600 .env
 
 # Generate JWT secret and paste into .env
 openssl rand -base64 32
-
-# Create the TMPDIR
-mkdir -p /appdata/tmp
 ```
 
 > `PORT=80` works because the existing `default-allow-http` firewall rule already exposes port 80. Compose maps `${PORT}:8000` so the container listens on 8000 internally and the VM exposes it externally on 80. Switch to `PORT=8000` once Caddy is in front (HTTPS subsection below).
@@ -609,20 +605,6 @@ What this gives you:
 - `--on-source-disk-delete=keep-auto-snapshots` means snapshots survive even if the disk is deleted.
 - RPO = 24 hours. For tighter, use `--hourly-schedule --hours-in-cycle=6`.
 
-### Where job temp files go
-
-`tempfile.TemporaryDirectory()` follows `TMPDIR`, defaulting to `/tmp` (boot disk). Big benchmarks can stage hundreds of MB before upload. The `.env` template above sets `TMPDIR=/appdata/tmp`. Make sure the dir exists on the host:
-
-```bash
-mkdir -p /appdata/tmp
-```
-
-And the `TMPDIR` env var is plumbed through to the container — add to `docker-compose.yml`:
-
-```yaml
-- TMPDIR=${TMPDIR:-/tmp}
-```
-
 ### Error monitoring (Sentry)
 
 The architecture explicitly relies on `capture_exception_to_sentry()` for background-thread failures (CLAUDE.md: "All job failures route through `capture_exception_to_sentry()`"). Without `SENTRY_DSN`, those failures go to container stdout and nowhere else.
@@ -809,7 +791,6 @@ See [src/.env.example](src/.env.example) for the canonical list. GCP-specific gu
 | `IMAGE_NAME`, `IMAGE_TAG`, `CONTAINER_NAME`, `PORT` | **yes** | Compose interpolation |
 | `APP_FOLDER_PATH` | **yes** | `/appdata` (your mount point) |
 | `DB_ROOT_DIR` | **yes** | `/appdata` (in-container path) |
-| `TMPDIR` | recommended | `/appdata/tmp` |
 | `JWT_SECRET_KEY` | **yes** | `openssl rand -base64 32` per tenant |
 | `S3_OUTPUT_BUCKET` | **yes** | Your GCS bucket name |
 | `S3_ENDPOINT_URL` | **yes** | `https://storage.googleapis.com` |
@@ -1015,7 +996,7 @@ aws ec2 wait volume-available --volume-ids $VOLUME_ID
 echo "Volume: $VOLUME_ID"
 ```
 
-> 100 GB is generous; the SQLite file alone is small. The headroom is so you can also point `TMPDIR` at the volume for job temp work.
+> 100 GB is generous; the SQLite file alone is small. The headroom is operational room for future growth — resize down later if you don't need it.
 
 ## AWS / 5. Launch the EC2 instance
 
@@ -1159,7 +1140,6 @@ PORT=80
 # Persistence
 APP_FOLDER_PATH=/appdata
 DB_ROOT_DIR=/appdata
-TMPDIR=/appdata/tmp
 
 # Auth — generate fresh, do NOT reuse from any other tenant
 JWT_SECRET_KEY=PASTE_OUTPUT_OF_openssl_rand_-base64_32
@@ -1223,9 +1203,6 @@ chmod 600 .env
 
 # Generate JWT secret and paste into .env
 openssl rand -base64 32
-
-# Create the TMPDIR
-mkdir -p /appdata/tmp
 ```
 
 > **Critical for AWS:** leave `S3_ENDPOINT_URL`, `AWS_ACCESS_KEY_ID`, and `AWS_SECRET_ACCESS_KEY` **empty**. With those empty and the IAM instance profile attached, boto3 picks up temporary credentials from the EC2 metadata service automatically. This is more secure than long-lived static keys.
@@ -1552,20 +1529,6 @@ aws backup create-backup-selection \
 > If `AWSBackupDefaultServiceRole` doesn't exist in your account, AWS Backup auto-creates it the first time you use the console. Run the console flow once, then the CLI commands above will work.
 
 Cheaper alternative (and equally fine for SQLite): **Data Lifecycle Manager** with an EBS snapshot policy. Same daily-retention semantics, simpler IAM.
-
-### Where job temp files go
-
-`tempfile.TemporaryDirectory()` follows `TMPDIR`. The `.env` template sets `TMPDIR=/appdata/tmp`. Make sure the dir exists:
-
-```bash
-mkdir -p /appdata/tmp
-```
-
-And add to `docker-compose.yml`:
-
-```yaml
-- TMPDIR=${TMPDIR:-/tmp}
-```
 
 ### Error monitoring (Sentry)
 
