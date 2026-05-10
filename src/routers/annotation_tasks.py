@@ -948,14 +948,21 @@ async def update_annotation_job_visibility_endpoint(
             detail="Only completed labelling jobs can be shared publicly.",
         )
 
+    # Preserve the existing view_token across off→on→off cycles so a
+    # previously-distributed link keeps working when sharing is re-enabled.
+    # The public lookup already filters on `is_public = 1`, so a stored
+    # token whose `is_public` is 0 cannot be resolved — safe to keep.
     if body.is_public:
         view_token = job.get("view_token") or secrets.token_urlsafe(24)
     else:
-        view_token = None
+        view_token = job.get("view_token")
 
     update_annotation_job_visibility(job_uuid, body.is_public, view_token)
+    # Don't surface the token in the disable response — the FE shouldn't
+    # display a share URL while sharing is off.
     return AnnotationJobVisibilityResponse(
-        is_public=body.is_public, view_token=view_token
+        is_public=body.is_public,
+        view_token=view_token if body.is_public else None,
     )
 
 
@@ -1541,16 +1548,23 @@ async def update_evaluator_run_visibility(
             detail="Only completed evaluator-run jobs can be shared publicly.",
         )
 
+    # Preserve the existing share_token across off→on→off cycles so a
+    # previously-distributed link keeps working when sharing is re-enabled.
+    # `get_job_by_share_token` filters on `is_public = 1`, so a stored
+    # token whose `is_public` is 0 cannot be resolved — safe to keep.
     if body.is_public:
         import uuid as _uuid
 
         share_token = job.get("share_token") or str(_uuid.uuid4())
     else:
-        share_token = None
+        share_token = job.get("share_token")
 
     update_job_visibility(job_uuid, body.is_public, share_token)
+    # Don't surface the token in the disable response — the FE shouldn't
+    # display a share URL while sharing is off.
     return EvaluatorRunVisibilityResponse(
-        is_public=body.is_public, share_token=share_token
+        is_public=body.is_public,
+        share_token=share_token if body.is_public else None,
     )
 
 
