@@ -784,6 +784,35 @@ def init_db():
             except sqlite3.OperationalError:
                 pass
 
+        # Read-only public sharing for individual annotation_jobs (labelling
+        # job results). The existing `public_token` is the annotator's
+        # read+write credential and is generated at job creation; `view_token`
+        # is a separate, opt-in read-only credential the owner toggles on
+        # after the job is completed. Two distinct tokens + two distinct
+        # public URLs (`/public/annotation-jobs/{public_token}` vs
+        # `/public/annotation-jobs/view/{view_token}`) keep the security
+        # boundary at the routing layer instead of relying on per-handler
+        # checks.
+        try:
+            cursor.execute(
+                "ALTER TABLE annotation_jobs ADD COLUMN is_public INTEGER NOT NULL DEFAULT 0"
+            )
+        except sqlite3.OperationalError:
+            pass
+        try:
+            cursor.execute(
+                "ALTER TABLE annotation_jobs ADD COLUMN view_token TEXT DEFAULT NULL"
+            )
+        except sqlite3.OperationalError:
+            pass
+        try:
+            cursor.execute(
+                "CREATE UNIQUE INDEX IF NOT EXISTS idx_annotation_jobs_view_token "
+                "ON annotation_jobs(view_token) WHERE view_token IS NOT NULL"
+            )
+        except sqlite3.OperationalError:
+            pass
+
         conn.commit()
 
         # Create default user if not exists and update existing rows with NULL user_id
@@ -5975,6 +6004,42 @@ def get_annotation_job_by_token(token: str) -> Optional[Dict[str, Any]]:
         cursor.execute(
             "SELECT * FROM annotation_jobs WHERE public_token = ? AND deleted_at IS NULL",
             (token,),
+        )
+        row = cursor.fetchone()
+        return _parse_annotation_job_row(row) if row else None
+
+
+def update_annotation_job_visibility(
+    job_uuid: str, is_public: bool, view_token: Optional[str]
+) -> bool:
+    """Toggle read-only public sharing on an annotation_jobs row. Returns
+    True if the job was found. The annotator's `public_token` is unaffected
+    — only the separate `view_token` is touched here."""
+    with get_db_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            "UPDATE annotation_jobs SET is_public = ?, view_token = ? "
+            "WHERE uuid = ? AND deleted_at IS NULL",
+            (1 if is_public else 0, view_token, job_uuid),
+        )
+        conn.commit()
+        return cursor.rowcount > 0
+
+
+def get_annotation_job_by_view_token(
+    view_token: str,
+) -> Optional[Dict[str, Any]]:
+    """Resolve an annotation_jobs row from its read-only view_token. Always
+    filters to `is_public = 1` so the link goes dead the moment the owner
+    flips sharing back off."""
+    if not view_token:
+        return None
+    with get_db_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            "SELECT * FROM annotation_jobs "
+            "WHERE view_token = ? AND is_public = 1 AND deleted_at IS NULL",
+            (view_token,),
         )
         row = cursor.fetchone()
         return _parse_annotation_job_row(row) if row else None

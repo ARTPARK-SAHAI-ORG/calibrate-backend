@@ -34,6 +34,7 @@ from db import (
     get_job_items,
     get_evaluator_ids_for_job,
     update_annotation_job_status,
+    update_annotation_job_visibility,
     upsert_annotation,
     get_annotations_for_item,
     get_annotated_item_ids,
@@ -46,6 +47,7 @@ from db import (
     get_generic_jobs_for_task,
     soft_delete_job,
     update_job,
+    update_job_visibility,
     get_evaluator_runs_for_job,
     get_evaluator_runs_for_item,
     get_evaluator_runs_for_task,
@@ -908,6 +910,55 @@ async def get_annotation_job_endpoint(
     return job
 
 
+class AnnotationJobVisibilityRequest(BaseModel):
+    is_public: bool
+
+
+class AnnotationJobVisibilityResponse(BaseModel):
+    is_public: bool
+    view_token: Optional[str] = None
+
+
+@router.patch(
+    "/{task_uuid}/jobs/{job_uuid}/visibility",
+    response_model=AnnotationJobVisibilityResponse,
+)
+async def update_annotation_job_visibility_endpoint(
+    task_uuid: str,
+    job_uuid: str,
+    body: AnnotationJobVisibilityRequest,
+    user_id: str = Depends(get_current_user_id),
+):
+    """Toggle a *read-only* public viewer link for one annotator's labelling
+    job. The annotator's own `public_token` (read+write) is unaffected — this
+    only opts into a separate `view_token` served at
+    `GET /public/annotation-jobs/view/{view_token}`.
+
+    Gated on `status == "completed"` so half-done jobs can't be shared. The
+    `view_token` is reused across off→on→off cycles so previously-distributed
+    links keep working when re-enabled."""
+    _ensure_owned_task(task_uuid, user_id)
+    job = get_annotation_job(job_uuid)
+    if not job or job.get("task_id") != task_uuid:
+        raise HTTPException(status_code=404, detail="Job not found")
+
+    if body.is_public and job.get("status") != "completed":
+        raise HTTPException(
+            status_code=400,
+            detail="Only completed labelling jobs can be shared publicly.",
+        )
+
+    if body.is_public:
+        view_token = job.get("view_token") or secrets.token_urlsafe(24)
+    else:
+        view_token = None
+
+    update_annotation_job_visibility(job_uuid, body.is_public, view_token)
+    return AnnotationJobVisibilityResponse(
+        is_public=body.is_public, view_token=view_token
+    )
+
+
 # ============ Annotations (judgements) ============
 
 
@@ -1176,6 +1227,8 @@ def _shape_eval_job_for_response(job: Dict[str, Any]) -> Dict[str, Any]:
     out["error"] = results.get("error") if isinstance(results, dict) else None
     if out.get("status") == "done":
         out["status"] = "completed"
+    out["is_public"] = bool(out.get("is_public"))
+    out["share_token"] = out.get("share_token")
     return out
 
 
@@ -1446,6 +1499,59 @@ async def delete_evaluator_run_job(
     except Exception:
         pass
     return {"deleted_runs": runs_deleted}
+
+
+class EvaluatorRunVisibilityRequest(BaseModel):
+    is_public: bool
+
+
+class EvaluatorRunVisibilityResponse(BaseModel):
+    is_public: bool
+    share_token: Optional[str] = None
+
+
+@router.patch(
+    "/{task_uuid}/evaluator-runs/{job_uuid}/visibility",
+    response_model=EvaluatorRunVisibilityResponse,
+)
+async def update_evaluator_run_visibility(
+    task_uuid: str,
+    job_uuid: str,
+    body: EvaluatorRunVisibilityRequest,
+    user_id: str = Depends(get_current_user_id),
+):
+    """Toggle public sharing for a completed annotation evaluator-run job.
+
+    Only completed (`done`) jobs can be shared — sharing an in-flight or
+    failed job would expose partial / error state behind a stable URL.
+    Re-flipping `is_public=True` reuses the existing share_token so
+    previously-distributed links keep working."""
+    _ensure_owned_task(task_uuid, user_id)
+    job = get_job(job_uuid, user_id=user_id)
+    if (
+        not job
+        or job.get("type") != ANNOTATION_EVAL_JOB_TYPE
+        or (job.get("details") or {}).get("task_id") != task_uuid
+    ):
+        raise HTTPException(status_code=404, detail="Job not found")
+
+    if body.is_public and job.get("status") != TaskStatus.DONE.value:
+        raise HTTPException(
+            status_code=400,
+            detail="Only completed evaluator-run jobs can be shared publicly.",
+        )
+
+    if body.is_public:
+        import uuid as _uuid
+
+        share_token = job.get("share_token") or str(_uuid.uuid4())
+    else:
+        share_token = None
+
+    update_job_visibility(job_uuid, body.is_public, share_token)
+    return EvaluatorRunVisibilityResponse(
+        is_public=body.is_public, share_token=share_token
+    )
 
 
 @router.get("/{task_uuid}/items/{item_uuid}/evaluator-runs")
