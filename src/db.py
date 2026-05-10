@@ -4350,19 +4350,26 @@ def get_job_by_share_token(
 ) -> Optional[Dict[str, Any]]:
     """Get a job by its share_token, optionally restricted to a specific job type.
 
-    Always filters to is_public = 1. Pass job_type (e.g. 'stt-eval', 'tts-eval')
-    to prevent tokens from one resource kind being accepted by a different endpoint.
+    Always filters to is_public = 1 AND deleted_at IS NULL. Pass job_type
+    (e.g. 'stt-eval', 'tts-eval', 'annotation-eval') to prevent tokens from
+    one resource kind being accepted by a different endpoint. The
+    soft-delete filter is required because deleting a job (`soft_delete_job`)
+    only sets `deleted_at` and does not clear `is_public` / `share_token`,
+    so without this clause a deleted run would still be reachable through
+    the public share endpoint even after authenticated views hide it.
     """
     with get_db_connection() as conn:
         cursor = conn.cursor()
         if job_type:
             cursor.execute(
-                "SELECT * FROM jobs WHERE share_token = ? AND is_public = 1 AND type = ?",
+                "SELECT * FROM jobs WHERE share_token = ? AND is_public = 1 "
+                "AND type = ? AND deleted_at IS NULL",
                 (share_token, job_type),
             )
         else:
             cursor.execute(
-                "SELECT * FROM jobs WHERE share_token = ? AND is_public = 1",
+                "SELECT * FROM jobs WHERE share_token = ? AND is_public = 1 "
+                "AND deleted_at IS NULL",
                 (share_token,),
             )
         row = cursor.fetchone()
