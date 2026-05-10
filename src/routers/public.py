@@ -565,6 +565,15 @@ async def get_public_annotation_eval(share_token: str):
     if not job:
         raise HTTPException(status_code=404, detail="Not found")
 
+    # Defense-in-depth: never expose an in-flight or failed annotation-eval
+    # run via the public link, even if some other code path managed to flip
+    # `is_public` before the job reached `done`. The owner PATCH route at
+    # `/annotation-tasks/{task_uuid}/evaluator-runs/{job_uuid}/visibility`
+    # already enforces this gate, but other generic-jobs visibility routes
+    # (stt/tts) wouldn't catch a wrong-type UUID — so we re-assert here.
+    if job.get("status") != "done":
+        raise HTTPException(status_code=404, detail="Not found")
+
     shaped = _shape_eval_job_for_response(job)
     task_uuid = shaped.get("task_id")
     task = get_annotation_task(task_uuid) if task_uuid else None

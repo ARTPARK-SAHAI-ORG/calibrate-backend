@@ -769,18 +769,26 @@ async def update_tts_visibility(
 ):
     """Toggle public sharing for a TTS evaluation job."""
     job = get_job(task_id, user_id=user_id)
-    if not job:
+    # Type-check: this endpoint shares TTS eval jobs only. Without it, an
+    # owner could pass an annotation-eval / stt-eval UUID and bypass that
+    # route's own gating (e.g. completed-only on annotation-eval shares).
+    if not job or job.get("type") != "tts-eval":
         raise HTTPException(status_code=404, detail="Task not found")
 
+    # Preserve the existing share_token across off→on→off cycles so a
+    # previously-distributed link keeps working when sharing is re-enabled.
     if body.is_public:
         import uuid as _uuid
 
         share_token = job.get("share_token") or str(_uuid.uuid4())
     else:
-        share_token = None
+        share_token = job.get("share_token")
 
     update_job_visibility(task_id, body.is_public, share_token)
-    return VisibilityResponse(is_public=body.is_public, share_token=share_token)
+    return VisibilityResponse(
+        is_public=body.is_public,
+        share_token=share_token if body.is_public else None,
+    )
 
 
 @router.get("/evaluate/{task_id}", response_model=TaskStatusResponse)
