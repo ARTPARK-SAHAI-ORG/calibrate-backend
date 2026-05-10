@@ -93,11 +93,18 @@ def _collect_tts_intermediate_results(
     providers: list,
     task_id: str,
     s3_bucket: str,
+    expected_total: int,
 ) -> list:
     """Read whatever intermediate results are available from disk for each provider.
 
     Uploads audio files to S3 and replaces local paths with S3 keys.
     Returns a list of ProviderResult objects preserving any partial results.
+    A provider is only marked ``success=True`` when it has BOTH a complete
+    row count (``>= expected_total``) AND an aggregate ``metrics.json`` on
+    disk — same contract as the in-progress GET reader. A non-empty but
+    incomplete `results.csv` (e.g. calibrate crashed mid-run) is preserved
+    as ``success=False`` so the FE doesn't show a half-finished provider as
+    successful.
     """
     evaluator_id_by_metric_key = read_evaluators_map_from_config(output_dir)
     s3 = get_s3_client()
@@ -138,10 +145,14 @@ def _collect_tts_intermediate_results(
                 if metrics_data is not None
                 else []
             )
+            provider_done = (
+                metrics_data is not None
+                and len(results_data) >= expected_total
+            )
             provider_results.append(
                 ProviderResult(
                     provider=provider,
-                    success=True,
+                    success=True if provider_done else False,
                     metrics=metrics_data,
                     results=results_data,
                     evaluator_runs=runs or None,
@@ -587,6 +598,7 @@ def run_tts_evaluation_task(
                             request.providers,
                             task_id,
                             s3_bucket,
+                            len(request.texts),
                         )
                         if intermediate:
                             error_results["provider_results"] = [
@@ -620,6 +632,7 @@ def run_tts_evaluation_task(
                             request.providers,
                             task_id,
                             s3_bucket,
+                            len(request.texts),
                         )
                         if intermediate:
                             error_results["provider_results"] = [
@@ -820,6 +833,7 @@ async def get_tts_evaluation_status(
                             requested_providers,
                             task_id,
                             s3_bucket,
+                            len(details.get("texts") or []),
                         )
                         # Merge: keep existing successful results, add new ones from disk
                         merged_results = []

@@ -19,6 +19,7 @@ from db import (
     add_test_to_agent,
     remove_test_from_agent,
     bulk_remove_tests_from_agent,
+    bulk_delete_tests,
     get_tests_for_agent,
     get_agents_for_test,
     get_agent_test_link,
@@ -547,6 +548,66 @@ async def bulk_delete_agent_test_links(payload: AgentTestBulkDelete):
     return {
         "deleted_count": deleted_count,
         "message": f"Successfully unlinked {deleted_count} test(s) from agent",
+    }
+
+
+class AgentTestsBulkDeleteAll(BaseModel):
+    agent_uuid: str
+    # Optional safety knob: if provided, only delete tests whose UUIDs are in
+    # this set AND are linked to the agent. Lets the FE confirm the exact set
+    # the user saw on screen instead of racing against a concurrent link.
+    test_uuids: Optional[List[str]] = None
+
+
+@router.post("/bulk-delete-tests")
+async def bulk_delete_agent_tests(
+    payload: AgentTestsBulkDeleteAll,
+    user_id: str = Depends(get_current_user_id),
+):
+    """Hard-cousin of `/bulk-unlink`: instead of just unlinking, soft-delete
+    every test currently linked to the given agent (and the link rows along
+    with them). Only tests OWNED by the calling user are deleted — links to
+    tests owned by other users are left untouched, so this can't nuke a
+    shared test that another user still needs.
+
+    Pass `test_uuids` to scope deletion to a confirmed subset (the set the
+    user explicitly approved in the UI). Without it, every linked test the
+    user owns is deleted.
+    """
+    agent = get_agent(payload.agent_uuid)
+    if not agent:
+        raise HTTPException(status_code=404, detail="Agent not found")
+    if agent.get("user_id") != user_id:
+        # 404 (not 403) to avoid leaking existence — matches conventions in
+        # CLAUDE.md / architecture.md.
+        raise HTTPException(status_code=404, detail="Agent not found")
+
+    linked_tests = get_tests_for_agent(payload.agent_uuid)
+    # Only the user's own tests are eligible — preserves shared-test links
+    # owned by someone else.
+    owned_uuids = [
+        t["uuid"] for t in linked_tests if t.get("user_id") == user_id
+    ]
+    if payload.test_uuids is not None:
+        confirm = set(payload.test_uuids)
+        owned_uuids = [u for u in owned_uuids if u in confirm]
+
+    if not owned_uuids:
+        return {
+            "deleted_count": 0,
+            "message": "No tests eligible for deletion",
+        }
+
+    # bulk_delete_tests cascades to soft-delete every agent_tests link row
+    # for these test_ids — across every agent, not just this one. Intentional:
+    # the test itself is gone, so no link should survive.
+    deleted_count = bulk_delete_tests(test_uuids=owned_uuids, user_id=user_id)
+    return {
+        "deleted_count": deleted_count,
+        "deleted_test_uuids": owned_uuids[:deleted_count],
+        "message": (
+            f"Successfully deleted {deleted_count} test(s) associated with agent"
+        ),
     }
 
 

@@ -175,10 +175,18 @@ logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/stt", tags=["stt"])
 
 
-def _collect_intermediate_results(output_dir: Path, providers: list) -> list:
+def _collect_intermediate_results(
+    output_dir: Path, providers: list, expected_total: int
+) -> list:
     """Read whatever intermediate results are available from disk for each provider.
 
     Returns a list of ProviderResult objects preserving any partial results.
+    A provider is only marked ``success=True`` when it has BOTH a complete
+    row count (``>= expected_total``) AND an aggregate ``metrics.json`` on
+    disk — matching the contract used by the in-progress GET reader. Any
+    weaker signal (some rows but no metrics, or fewer rows than expected)
+    means calibrate crashed mid-run for that provider, so we surface the
+    partial rows but mark ``success=False`` to avoid lying to the FE.
     """
     evaluator_id_by_metric_key = read_evaluators_map_from_config(output_dir)
     provider_results = []
@@ -194,10 +202,14 @@ def _collect_intermediate_results(output_dir: Path, providers: list) -> list:
             else []
         )
         if results_data:
+            provider_done = (
+                metrics_data is not None
+                and len(results_data) >= expected_total
+            )
             provider_results.append(
                 ProviderResult(
                     provider=provider,
-                    success=True,
+                    success=True if provider_done else False,
                     metrics=metrics_data,
                     results=results_data,
                     evaluator_runs=runs or None,
@@ -562,7 +574,9 @@ def run_evaluation_task(
                 try:
                     if output_dir.exists():
                         intermediate = _collect_intermediate_results(
-                            output_dir, request.providers
+                            output_dir,
+                            request.providers,
+                            len(request.audio_paths),
                         )
                         if intermediate:
                             error_results["provider_results"] = [
@@ -592,7 +606,9 @@ def run_evaluation_task(
                 try:
                     if output_dir.exists():
                         intermediate = _collect_intermediate_results(
-                            output_dir, request.providers
+                            output_dir,
+                            request.providers,
+                            len(request.audio_paths),
                         )
                         if intermediate:
                             error_results["provider_results"] = [
@@ -794,6 +810,7 @@ async def get_evaluation_status(
                         intermediate = _collect_intermediate_results(
                             output_dir,
                             requested_providers,
+                            len(details.get("audio_paths") or []),
                         )
                         # Merge: keep existing successful results, add new ones from disk
                         merged_results = []
