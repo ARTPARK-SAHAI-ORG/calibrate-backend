@@ -1430,8 +1430,8 @@ The container:
 ### GitHub Actions Deployments
 
 - `.github/workflows/deploy-staging.yml` remains manually triggered via `workflow_dispatch`.
-- `.github/workflows/deploy.yml` deploys production only on pushed release tags matching `v*` (for example, `v1.2.3`). It does not expose a manual `workflow_dispatch` trigger.
-- Production deploys are tied to Git tag creation/push, not the GitHub Release `published` event. Publishing a GitHub Release for an already-pushed tag will not retrigger production deployment unless a matching tag push event occurs.
+- `.github/workflows/deploy.yml` deploys production only on the GitHub Release `published` event. It does not expose a manual `workflow_dispatch` trigger.
+- Production deploys are tied to publishing a GitHub Release, not to a raw `git push` of a `v*` tag. Pushing a tag alone will not deploy — a Release must be published (the Release can target an existing pushed tag or create a new one). Re-publishing the same Release retriggers the deploy.
 
 ### Development
 
