@@ -8,8 +8,7 @@ from db import (
     get_all_annotators,
     update_annotator,
     delete_annotator,
-    is_name_taken,
-    name_uniqueness_guard,
+    ensure_name_unique,
     get_jobs_for_annotator_detailed,
     get_job_counts_for_user_annotators,
     get_annotations_for_user,
@@ -62,15 +61,15 @@ async def create_annotator_endpoint(
     user_id: str = Depends(get_current_user_id),
 ):
     """Create a new annotator. Name must be unique per account."""
-    if is_name_taken("annotators", payload.name, user_id):
-        raise HTTPException(status_code=409, detail="Annotator name already exists")
     try:
-        with name_uniqueness_guard("Annotator"):
+        with ensure_name_unique(
+            "annotators", payload.name, user_id, entity="Annotator"
+        ):
             annotator_uuid = create_annotator(name=payload.name, user_id=user_id)
     except ValueError as e:
         # `create_annotator` raises ValueError for non-uniqueness validation
         # too (empty name, missing user_id). The uniqueness collision case
-        # is now caught by `name_uniqueness_guard` directly from the DB
+        # is now caught by `ensure_name_unique` directly from the DB
         # IntegrityError, before it gets wrapped to ValueError. Anything
         # reaching here is a genuine input-validation 400.
         raise HTTPException(status_code=400, detail=str(e))
@@ -164,12 +163,14 @@ async def update_annotator_endpoint(
     user_id: str = Depends(get_current_user_id),
 ):
     _ensure_owned_annotator(annotator_uuid, user_id)
-    if payload.name is not None and is_name_taken(
-        "annotators", payload.name, user_id, exclude_uuid=annotator_uuid
-    ):
-        raise HTTPException(status_code=409, detail="Annotator name already exists")
     try:
-        with name_uniqueness_guard("Annotator"):
+        with ensure_name_unique(
+            "annotators",
+            payload.name,
+            user_id,
+            entity="Annotator",
+            exclude_uuid=annotator_uuid,
+        ):
             updated = update_annotator(annotator_uuid=annotator_uuid, name=payload.name)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))

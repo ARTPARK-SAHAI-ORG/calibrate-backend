@@ -14,8 +14,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from db import (
     create_simulation,
-    is_name_taken,
-    name_uniqueness_guard,
+    ensure_name_unique,
     get_simulation,
     get_all_simulations,
     update_simulation,
@@ -575,8 +574,6 @@ async def create_simulation_endpoint(
     simulation: SimulationCreate, user_id: str = Depends(get_current_user_id)
 ):
     """Create a new simulation with optional linked agent, personas, scenarios, and evaluators."""
-    if is_name_taken("simulations", simulation.name, user_id):
-        raise HTTPException(status_code=409, detail="Simulation name already exists")
     # Verify agent exists if provided
     if simulation.agent_uuid:
         agent = get_agent(simulation.agent_uuid)
@@ -607,7 +604,7 @@ async def create_simulation_endpoint(
             resolved_evaluator_refs.append(_resolve_simulation_evaluator_ref(ref, user_id))
 
     # Create the simulation
-    with name_uniqueness_guard("Simulation"):
+    with ensure_name_unique("simulations", simulation.name, user_id, entity="Simulation"):
         simulation_uuid = create_simulation(
             name=simulation.name, agent_id=simulation.agent_uuid, user_id=user_id
         )
@@ -935,11 +932,6 @@ async def update_simulation_endpoint(
     if existing_simulation.get("user_id") != user_id:
         raise HTTPException(status_code=403, detail="Access denied")
 
-    if simulation.name is not None and is_name_taken(
-        "simulations", simulation.name, user_id, exclude_uuid=simulation_uuid
-    ):
-        raise HTTPException(status_code=409, detail="Simulation name already exists")
-
     # Verify agent exists if provided
     if simulation.agent_uuid is not None and simulation.agent_uuid != "":
         agent = get_agent(simulation.agent_uuid)
@@ -971,7 +963,13 @@ async def update_simulation_endpoint(
 
     # Update simulation name and/or agent if provided
     if simulation.name is not None or simulation.agent_uuid is not None:
-        with name_uniqueness_guard("Simulation"):
+        with ensure_name_unique(
+            "simulations",
+            simulation.name,
+            user_id,
+            entity="Simulation",
+            exclude_uuid=simulation_uuid,
+        ):
             # Empty string means clear the agent
             if simulation.agent_uuid == "":
                 update_simulation(

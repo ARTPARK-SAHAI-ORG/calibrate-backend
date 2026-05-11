@@ -13,8 +13,7 @@ from utils import env_bool, env_int, env_str
 
 from db import (
     create_agent,
-    is_name_taken,
-    name_uniqueness_guard,
+    ensure_name_unique,
     get_agent,
     get_all_agents,
     update_agent,
@@ -362,15 +361,12 @@ async def create_agent_endpoint(
     For `type=connection`, no defaults are injected — the caller-supplied
     config (which must eventually contain `agent_url`) is stored as-is.
     """
-    if is_name_taken("agents", agent.name, user_id):
-        raise HTTPException(status_code=409, detail="Agent name already exists")
-
     if agent.type == "agent":
         merged_config = _deep_merge(_default_agent_config(), agent.config or {})
     else:
         merged_config = agent.config
 
-    with name_uniqueness_guard("Agent"):
+    with ensure_name_unique("agents", agent.name, user_id, entity="Agent"):
         agent_uuid = create_agent(
             name=agent.name,
             agent_type=agent.type,
@@ -415,11 +411,6 @@ async def update_agent_endpoint(
     if existing_agent.get("user_id") != user_id:
         raise HTTPException(status_code=403, detail="Access denied")
 
-    if agent.name is not None and is_name_taken(
-        "agents", agent.name, user_id, exclude_uuid=agent_uuid
-    ):
-        raise HTTPException(status_code=409, detail="Agent name already exists")
-
     # If agent_url or agent_headers changed, reset all verification flags
     if agent.config is not None:
         existing_config = existing_agent.get("config") or {}
@@ -444,7 +435,9 @@ async def update_agent_endpoint(
             agent.config["benchmark_models_verified"] = agent.benchmark_models_verified
 
     # Update only provided fields
-    with name_uniqueness_guard("Agent"):
+    with ensure_name_unique(
+        "agents", agent.name, user_id, entity="Agent", exclude_uuid=agent_uuid
+    ):
         updated = update_agent(
             agent_uuid=agent_uuid,
             name=agent.name,
@@ -503,8 +496,6 @@ async def duplicate_agent_endpoint(
 
     # Use the provided name
     new_name = request.name
-    if is_name_taken("agents", new_name, user_id):
-        raise HTTPException(status_code=409, detail="Agent name already exists")
 
     # Copy the entire config (includes speaks_first, data extraction fields, llm config, etc.)
     new_config = original_agent.get("config")
@@ -518,7 +509,7 @@ async def duplicate_agent_endpoint(
         new_config.pop("benchmark_models_verified", None)
 
     # Create the new agent
-    with name_uniqueness_guard("Agent"):
+    with ensure_name_unique("agents", new_name, user_id, entity="Agent"):
         new_agent_uuid = create_agent(
             name=new_name,
             agent_type=original_agent.get("type", "agent"),

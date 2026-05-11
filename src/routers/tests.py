@@ -4,8 +4,7 @@ from pydantic import BaseModel, ConfigDict, model_validator
 
 from db import (
     create_test,
-    is_name_taken,
-    name_uniqueness_guard,
+    ensure_name_unique,
     get_test,
     get_all_tests,
     update_test,
@@ -274,10 +273,8 @@ async def create_test_endpoint(
     test: TestCreate, user_id: str = Depends(get_current_user_id)
 ):
     """Create a new test."""
-    if is_name_taken("tests", test.name, user_id):
-        raise HTTPException(status_code=409, detail="Test name already exists")
     resolved = _validate_evaluators(test.evaluators, user_id) if test.evaluators else None
-    with name_uniqueness_guard("Test"):
+    with ensure_name_unique("tests", test.name, user_id, entity="Test"):
         test_uuid = create_test(
             name=test.name,
             type=test.type,
@@ -320,18 +317,15 @@ async def update_test_endpoint(
     if existing_test.get("user_id") != user_id:
         raise HTTPException(status_code=403, detail="Access denied")
 
-    if test.name is not None and is_name_taken(
-        "tests", test.name, user_id, exclude_uuid=test_uuid
-    ):
-        raise HTTPException(status_code=409, detail="Test name already exists")
-
     resolved = _validate_evaluators(test.evaluators, user_id) if test.evaluators is not None else None
 
     has_core_updates = any(
         v is not None for v in (test.name, test.type, test.config)
     )
     if has_core_updates:
-        with name_uniqueness_guard("Test"):
+        with ensure_name_unique(
+            "tests", test.name, user_id, entity="Test", exclude_uuid=test_uuid
+        ):
             updated = update_test(
                 test_uuid=test_uuid,
                 name=test.name,

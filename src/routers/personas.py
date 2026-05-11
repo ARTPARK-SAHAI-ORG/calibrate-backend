@@ -8,8 +8,7 @@ from db import (
     get_all_personas,
     update_persona,
     delete_persona,
-    is_name_taken,
-    name_uniqueness_guard,
+    ensure_name_unique,
 )
 from auth_utils import get_current_user_id
 
@@ -48,9 +47,7 @@ async def create_persona_endpoint(
     persona: PersonaCreate, user_id: str = Depends(get_current_user_id)
 ):
     """Create a new persona."""
-    if is_name_taken("personas", persona.name, user_id):
-        raise HTTPException(status_code=409, detail="Persona name already exists")
-    with name_uniqueness_guard("Persona"):
+    with ensure_name_unique("personas", persona.name, user_id, entity="Persona"):
         persona_uuid = create_persona(
             name=persona.name,
             description=persona.description,
@@ -98,12 +95,9 @@ async def update_persona_endpoint(
     if existing_persona.get("user_id") != user_id:
         raise HTTPException(status_code=403, detail="Access denied")
 
-    if persona.name is not None and is_name_taken(
-        "personas", persona.name, user_id, exclude_uuid=persona_uuid
+    with ensure_name_unique(
+        "personas", persona.name, user_id, entity="Persona", exclude_uuid=persona_uuid
     ):
-        raise HTTPException(status_code=409, detail="Persona name already exists")
-
-    with name_uniqueness_guard("Persona"):
         updated = update_persona(
             persona_uuid=persona_uuid,
             name=persona.name,

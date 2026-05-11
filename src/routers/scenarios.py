@@ -8,8 +8,7 @@ from db import (
     get_all_scenarios,
     update_scenario,
     delete_scenario,
-    is_name_taken,
-    name_uniqueness_guard,
+    ensure_name_unique,
 )
 from auth_utils import get_current_user_id
 
@@ -45,9 +44,7 @@ async def create_scenario_endpoint(
     scenario: ScenarioCreate, user_id: str = Depends(get_current_user_id)
 ):
     """Create a new scenario."""
-    if is_name_taken("scenarios", scenario.name, user_id):
-        raise HTTPException(status_code=409, detail="Scenario name already exists")
-    with name_uniqueness_guard("Scenario"):
+    with ensure_name_unique("scenarios", scenario.name, user_id, entity="Scenario"):
         scenario_uuid = create_scenario(
             name=scenario.name,
             description=scenario.description,
@@ -94,12 +91,9 @@ async def update_scenario_endpoint(
     if existing_scenario.get("user_id") != user_id:
         raise HTTPException(status_code=403, detail="Access denied")
 
-    if scenario.name is not None and is_name_taken(
-        "scenarios", scenario.name, user_id, exclude_uuid=scenario_uuid
+    with ensure_name_unique(
+        "scenarios", scenario.name, user_id, entity="Scenario", exclude_uuid=scenario_uuid
     ):
-        raise HTTPException(status_code=409, detail="Scenario name already exists")
-
-    with name_uniqueness_guard("Scenario"):
         updated = update_scenario(
             scenario_uuid=scenario_uuid,
             name=scenario.name,

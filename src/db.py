@@ -71,6 +71,49 @@ class NameAlreadyExistsError(Exception):
 
 
 @contextmanager
+def ensure_name_unique(
+    table: str,
+    name: Optional[str],
+    user_id: Optional[str],
+    *,
+    entity: str,
+    exclude_uuid: Optional[str] = None,
+):
+    """API pre-check + DB race guard in one helper.
+
+    Wrap each create/update DB call with this. Two layers of protection,
+    one wrapper:
+
+    * Pre-check via `is_name_taken` raises `NameAlreadyExistsError`
+      (-> 409 via the global FastAPI handler) BEFORE the write — the
+      common case, friendliest UX, no wasted DB write.
+    * The DB write inside the `with` block runs under
+      `name_uniqueness_guard`, so a TOCTOU race (two creates of the
+      same name slipping past the pre-check at the same instant) hits
+      the partial unique index and surfaces as the same 409 instead
+      of a generic 500.
+
+    Pass `name=None` (e.g. an update endpoint where the caller didn't
+    touch the name field) to skip the pre-check; the guard still runs
+    in case some other code path mutates `name` before the write.
+
+    `entity` is the human-facing label rendered in the 409 detail
+    (`"<entity> name already exists"`). Use the singular display name —
+    `"Test"`, `"Agent"`, `"Annotation task"`, etc.
+
+    Replaces the older two-step pattern of an inline `is_name_taken`
+    check followed by a separate `name_uniqueness_guard` block, which
+    was duplicated across ~16 endpoints with subtle wording drift.
+    """
+    if name is not None and is_name_taken(
+        table, name, user_id, exclude_uuid=exclude_uuid
+    ):
+        raise NameAlreadyExistsError(entity)
+    with name_uniqueness_guard(entity):
+        yield
+
+
+@contextmanager
 def name_uniqueness_guard(entity_label: str):
     """Catch a `sqlite3.IntegrityError` raised by a UNIQUE-constraint
     violation inside the body and re-raise as `NameAlreadyExistsError`.
