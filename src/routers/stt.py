@@ -30,7 +30,9 @@ from utils import (
     TaskCreateResponse,
     TaskStatusResponse,
     build_evaluator_runs_for_eval_job,
+    compute_share_token_toggle,
     enrich_evaluator_runs_with_current_names,
+    load_evaluator_metric_key_map,
     post_process_provider_results,
     get_s3_client,
     get_s3_output_config,
@@ -750,26 +752,15 @@ async def update_stt_visibility(
 ):
     """Toggle public sharing for an STT evaluation job."""
     job = get_job(task_id, user_id=user_id)
-    # Type-check: this endpoint shares STT eval jobs only. Without the
-    # check, an owner could pass an annotation-eval / tts-eval UUID and
-    # bypass that route's own gating (e.g. the completed-only requirement
-    # on annotation-eval shares).
     if not job or job.get("type") != "stt-eval":
         raise HTTPException(status_code=404, detail="Task not found")
 
-    # Preserve the existing share_token across off→on→off cycles so a
-    # previously-distributed link keeps working when sharing is re-enabled.
-    if body.is_public:
-        import uuid as _uuid
-
-        share_token = job.get("share_token") or str(_uuid.uuid4())
-    else:
-        share_token = job.get("share_token")
-
-    update_job_visibility(task_id, body.is_public, share_token)
+    token_to_persist, token_to_return = compute_share_token_toggle(
+        job, body.is_public
+    )
+    update_job_visibility(task_id, body.is_public, token_to_persist)
     return VisibilityResponse(
-        is_public=body.is_public,
-        share_token=share_token if body.is_public else None,
+        is_public=body.is_public, share_token=token_to_return
     )
 
 
@@ -872,19 +863,11 @@ async def get_evaluation_status(
     provider_results = results.get("provider_results")
     # `evaluator_id_by_metric_key` lets the post-processor build
     # `evaluator_runs[]` mid-flight from a freshly-landed metrics.json.
-    # Read once from the on-disk root config; safe to be empty for jobs
-    # whose output dir is gone.
-    evaluator_id_by_metric_key: Dict[str, str] = {}
-    output_dir_root: Optional[Path] = None
+    evaluator_id_by_metric_key = load_evaluator_metric_key_map(details)
     output_dir_str = details.get("output_dir")
-    if output_dir_str:
-        try:
-            candidate = Path(output_dir_str)
-            if candidate.exists():
-                output_dir_root = candidate
-                evaluator_id_by_metric_key = read_evaluators_map_from_config(candidate)
-        except Exception:
-            pass
+    output_dir_root = Path(output_dir_str) if (
+        output_dir_str and Path(output_dir_str).exists()
+    ) else None
     if provider_results is None and status == TaskStatus.IN_PROGRESS.value:
         # Job is in progress - try to read intermediate results from disk
         expected_total = len(details.get("audio_paths", []))

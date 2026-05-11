@@ -1138,6 +1138,66 @@ def post_process_provider_results(
                     row[key] = _coerce_numeric(row[key])
 
 
+def load_evaluator_metric_key_map(details: Optional[Dict[str, Any]]) -> Dict[str, str]:
+    """Read the calibrate-side ``{metric_key: evaluator_uuid}`` map from a
+    job's on-disk ``output_dir/config.json``. Returns ``{}`` if the dir is
+    missing or the read fails — both are normal mid-flight states (job
+    queued, output_dir already cleaned up, etc.) and should not throw.
+
+    Extracted to share between STT and TTS GET handlers, which both need
+    this map to drive ``post_process_provider_results`` mid-flight.
+    """
+    if not details:
+        return {}
+    output_dir_str = details.get("output_dir")
+    if not output_dir_str:
+        return {}
+    try:
+        candidate = Path(output_dir_str)
+        if not candidate.exists():
+            return {}
+        return read_evaluators_map_from_config(candidate)
+    except Exception:
+        return {}
+
+
+def compute_share_token_toggle(
+    job: Optional[Dict[str, Any]],
+    is_public: bool,
+    *,
+    token_field: str = "share_token",
+    token_factory: Optional[Any] = None,
+) -> tuple:
+    """Shared logic for every visibility-toggle PATCH endpoint.
+
+    Returns ``(token_to_persist, token_to_return)``:
+
+    * ``token_to_persist`` keeps any existing token across off→on→off
+      cycles so a previously-distributed share URL keeps working when
+      sharing is re-enabled. (Codex P2 caught the bug where 3/4
+      handlers were NULLing the token on disable.) Lookup queries
+      already filter on ``is_public = 1``, so a stored-but-disabled
+      token cannot resolve.
+    * ``token_to_return`` is suppressed (None) when sharing is off so
+      the FE never displays a share URL while the link is dead.
+
+    ``token_factory`` defaults to ``str(uuid.uuid4())`` for parity with
+    the historical STT/TTS/annotation-eval shapes; pass
+    ``secrets.token_urlsafe(24)`` for the labelling-job ``view_token``.
+    """
+    if token_factory is None:
+        import uuid as _uuid
+
+        token_factory = lambda: str(_uuid.uuid4())
+
+    existing = (job or {}).get(token_field)
+    if is_public:
+        token_to_persist = existing or token_factory()
+    else:
+        token_to_persist = existing
+    return token_to_persist, (token_to_persist if is_public else None)
+
+
 def enrich_evaluator_runs_with_current_names(
     provider_results: Optional[List[Any]],
     evaluator_snapshots: Optional[List[Dict[str, Any]]] = None,
