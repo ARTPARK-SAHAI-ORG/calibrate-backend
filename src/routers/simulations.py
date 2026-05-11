@@ -14,6 +14,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from db import (
     create_simulation,
+    is_name_taken,
     get_simulation,
     get_all_simulations,
     update_simulation,
@@ -573,6 +574,8 @@ async def create_simulation_endpoint(
     simulation: SimulationCreate, user_id: str = Depends(get_current_user_id)
 ):
     """Create a new simulation with optional linked agent, personas, scenarios, and evaluators."""
+    if is_name_taken("simulations", simulation.name, user_id):
+        raise HTTPException(status_code=409, detail="Simulation name already exists")
     # Verify agent exists if provided
     if simulation.agent_uuid:
         agent = get_agent(simulation.agent_uuid)
@@ -929,6 +932,11 @@ async def update_simulation_endpoint(
     # Verify user owns this simulation
     if existing_simulation.get("user_id") != user_id:
         raise HTTPException(status_code=403, detail="Access denied")
+
+    if simulation.name is not None and is_name_taken(
+        "simulations", simulation.name, user_id, exclude_uuid=simulation_uuid
+    ):
+        raise HTTPException(status_code=409, detail="Simulation name already exists")
 
     # Verify agent exists if provided
     if simulation.agent_uuid is not None and simulation.agent_uuid != "":

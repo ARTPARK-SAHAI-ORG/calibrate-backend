@@ -13,6 +13,7 @@ from utils import env_bool, env_int, env_str
 
 from db import (
     create_agent,
+    is_name_taken,
     get_agent,
     get_all_agents,
     update_agent,
@@ -360,6 +361,9 @@ async def create_agent_endpoint(
     For `type=connection`, no defaults are injected — the caller-supplied
     config (which must eventually contain `agent_url`) is stored as-is.
     """
+    if is_name_taken("agents", agent.name, user_id):
+        raise HTTPException(status_code=409, detail="Agent name already exists")
+
     if agent.type == "agent":
         merged_config = _deep_merge(_default_agent_config(), agent.config or {})
     else:
@@ -408,6 +412,11 @@ async def update_agent_endpoint(
     # Verify user owns this agent
     if existing_agent.get("user_id") != user_id:
         raise HTTPException(status_code=403, detail="Access denied")
+
+    if agent.name is not None and is_name_taken(
+        "agents", agent.name, user_id, exclude_uuid=agent_uuid
+    ):
+        raise HTTPException(status_code=409, detail="Agent name already exists")
 
     # If agent_url or agent_headers changed, reset all verification flags
     if agent.config is not None:
@@ -491,6 +500,8 @@ async def duplicate_agent_endpoint(
 
     # Use the provided name
     new_name = request.name
+    if is_name_taken("agents", new_name, user_id):
+        raise HTTPException(status_code=409, detail="Agent name already exists")
 
     # Copy the entire config (includes speaks_first, data extraction fields, llm config, etc.)
     new_config = original_agent.get("config")

@@ -4,6 +4,7 @@ from pydantic import BaseModel, ConfigDict, model_validator
 
 from db import (
     create_test,
+    is_name_taken,
     get_test,
     get_all_tests,
     update_test,
@@ -272,6 +273,8 @@ async def create_test_endpoint(
     test: TestCreate, user_id: str = Depends(get_current_user_id)
 ):
     """Create a new test."""
+    if is_name_taken("tests", test.name, user_id):
+        raise HTTPException(status_code=409, detail="Test name already exists")
     resolved = _validate_evaluators(test.evaluators, user_id) if test.evaluators else None
     test_uuid = create_test(
         name=test.name,
@@ -314,6 +317,11 @@ async def update_test_endpoint(
         raise HTTPException(status_code=404, detail="Test not found")
     if existing_test.get("user_id") != user_id:
         raise HTTPException(status_code=403, detail="Access denied")
+
+    if test.name is not None and is_name_taken(
+        "tests", test.name, user_id, exclude_uuid=test_uuid
+    ):
+        raise HTTPException(status_code=409, detail="Test name already exists")
 
     resolved = _validate_evaluators(test.evaluators, user_id) if test.evaluators is not None else None
 

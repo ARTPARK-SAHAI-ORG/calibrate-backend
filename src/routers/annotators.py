@@ -8,6 +8,7 @@ from db import (
     get_all_annotators,
     update_annotator,
     delete_annotator,
+    is_name_taken,
     get_jobs_for_annotator_detailed,
     get_job_counts_for_user_annotators,
     get_annotations_for_user,
@@ -60,10 +61,16 @@ async def create_annotator_endpoint(
     user_id: str = Depends(get_current_user_id),
 ):
     """Create a new annotator. Name must be unique per account."""
+    if is_name_taken("annotators", payload.name, user_id):
+        raise HTTPException(status_code=409, detail="Annotator name already exists")
     try:
         annotator_uuid = create_annotator(name=payload.name, user_id=user_id)
     except ValueError as e:
-        raise HTTPException(status_code=400, detail=str(e))
+        # Belt-and-braces: covers a TOCTOU race where two creates land
+        # between is_name_taken and the DB insert. The DB-level partial
+        # unique index raises IntegrityError → wrapped to ValueError by
+        # the underlying create function.
+        raise HTTPException(status_code=409, detail=str(e))
     return AnnotatorCreateResponse(
         uuid=annotator_uuid, message="Annotator created successfully"
     )
@@ -154,10 +161,14 @@ async def update_annotator_endpoint(
     user_id: str = Depends(get_current_user_id),
 ):
     _ensure_owned_annotator(annotator_uuid, user_id)
+    if payload.name is not None and is_name_taken(
+        "annotators", payload.name, user_id, exclude_uuid=annotator_uuid
+    ):
+        raise HTTPException(status_code=409, detail="Annotator name already exists")
     try:
         updated = update_annotator(annotator_uuid=annotator_uuid, name=payload.name)
     except ValueError as e:
-        raise HTTPException(status_code=400, detail=str(e))
+        raise HTTPException(status_code=409, detail=str(e))
     if not updated:
         raise HTTPException(status_code=400, detail="No fields to update")
     return get_annotator(annotator_uuid)

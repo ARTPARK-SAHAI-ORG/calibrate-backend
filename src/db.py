@@ -33,6 +33,75 @@ def get_db_connection():
         conn.close()
 
 
+# Whitelist of tables guarded by the per-user unique-name partial indexes
+# (see init_db). Maps table name → ownership column name. Used by the
+# `is_name_taken` helper so routers can produce a friendly 409 BEFORE
+# hitting the IntegrityError that the DB constraint would raise. The two
+# layers are belt-and-braces: API check for the message, DB index for
+# correctness under races / direct writes / forgotten future endpoints.
+_UNIQUE_NAME_TABLES: Dict[str, str] = {
+    "tests": "user_id",
+    "agents": "user_id",
+    "tools": "user_id",
+    "personas": "user_id",
+    "scenarios": "user_id",
+    "simulations": "user_id",
+    "annotation_tasks": "user_id",
+    "annotators": "user_id",
+    "evaluators": "owner_user_id",
+}
+
+
+def is_name_taken(
+    table: str,
+    name: str,
+    user_id: Optional[str],
+    exclude_uuid: Optional[str] = None,
+) -> bool:
+    """True if a non-soft-deleted row in `table` already has this `name`
+    for this user. Pass `exclude_uuid` on update paths so the row being
+    edited doesn't conflict with itself.
+
+    For `evaluators`, `user_id=None` checks the seeded-default namespace
+    (matches the `COALESCE(owner_user_id, '__seed__')` shape used by the
+    DB index).
+
+    Whitelisted to the tables that have the matching DB-level partial
+    unique index; raises ValueError if called on anything else, so we
+    fail loudly in dev rather than silently checking the wrong column.
+    """
+    if table not in _UNIQUE_NAME_TABLES:
+        raise ValueError(
+            f"is_name_taken: '{table}' is not in the unique-name whitelist"
+        )
+    user_col = _UNIQUE_NAME_TABLES[table]
+    with get_db_connection() as conn:
+        cursor = conn.cursor()
+        if user_id is None:
+            # Seeded-default lane on evaluators (or anywhere else that
+            # admits NULL ownership). Plain `IS NULL` matches the index's
+            # `COALESCE(..., '__seed__')` because both collapse the entire
+            # NULL set into one bucket for uniqueness purposes.
+            sql = (
+                f"SELECT 1 FROM {table} "
+                f"WHERE {user_col} IS NULL AND name = ? "
+                f"AND deleted_at IS NULL"
+            )
+            params: tuple = (name,)
+        else:
+            sql = (
+                f"SELECT 1 FROM {table} "
+                f"WHERE {user_col} = ? AND name = ? "
+                f"AND deleted_at IS NULL"
+            )
+            params = (user_id, name)
+        if exclude_uuid:
+            sql += " AND uuid != ?"
+            params = (*params, exclude_uuid)
+        cursor.execute(sql + " LIMIT 1", params)
+        return cursor.fetchone() is not None
+
+
 def init_db():
     """Initialize the database and create tables if they don't exist."""
     # Ensure the data directory exists
@@ -812,6 +881,50 @@ def init_db():
             )
         except sqlite3.OperationalError:
             pass
+
+        # Per-user unique-name partial indexes. The existing `annotators`
+        # index (`idx_annotators_user_name_active`) sets the pattern: one
+        # user can't have two live (non-soft-deleted) rows with the same
+        # name. Soft-deleted rows are exempt — required so a user can
+        # re-create something they previously deleted.
+        #
+        # Belt-and-braces with the API-layer 409 checks: catches TOCTOU
+        # races between two concurrent creates, direct DB inserts (seed
+        # scripts, manual repairs), and any future endpoint that forgets
+        # the check. The DB constraint is the source of truth.
+        for stmt in (
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_tests_user_name_active "
+            "ON tests(user_id, name) WHERE deleted_at IS NULL",
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_agents_user_name_active "
+            "ON agents(user_id, name) WHERE deleted_at IS NULL",
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_tools_user_name_active "
+            "ON tools(user_id, name) WHERE deleted_at IS NULL",
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_personas_user_name_active "
+            "ON personas(user_id, name) WHERE deleted_at IS NULL",
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_scenarios_user_name_active "
+            "ON scenarios(user_id, name) WHERE deleted_at IS NULL",
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_simulations_user_name_active "
+            "ON simulations(user_id, name) WHERE deleted_at IS NULL",
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_annotation_tasks_user_name_active "
+            "ON annotation_tasks(user_id, name) WHERE deleted_at IS NULL",
+            # Evaluators have a dual ownership model: per-user (owner_user_id
+            # set) and seeded defaults (owner_user_id IS NULL, visible to
+            # everyone). SQLite treats multiple NULLs as distinct in unique
+            # indexes, so a plain (owner_user_id, name) index would let two
+            # seeded defaults share a name. COALESCE collapses NULL into a
+            # single virtual namespace so seeded defaults compete among
+            # themselves.
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_evaluators_owner_name_active "
+            "ON evaluators(COALESCE(owner_user_id, '__seed__'), name) "
+            "WHERE deleted_at IS NULL",
+        ):
+            try:
+                cursor.execute(stmt)
+            except sqlite3.OperationalError:
+                # Either the index already exists (re-run init) or existing
+                # data violates uniqueness. Latter case shouldn't occur per
+                # owner's confirmation; keep the guard for re-init safety.
+                pass
 
         conn.commit()
 

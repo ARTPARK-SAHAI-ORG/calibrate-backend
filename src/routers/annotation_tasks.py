@@ -10,6 +10,7 @@ logger = logging.getLogger(__name__)
 from db import (
     ANNOTATION_TASK_TYPES,
     create_annotation_task,
+    is_name_taken,
     get_annotation_task,
     get_all_annotation_tasks,
     update_annotation_task,
@@ -184,6 +185,10 @@ async def create_annotation_task_endpoint(
             status_code=400,
             detail=f"type must be one of {list(ANNOTATION_TASK_TYPES)}",
         )
+    if is_name_taken("annotation_tasks", payload.name, user_id):
+        raise HTTPException(
+            status_code=409, detail="Annotation task name already exists"
+        )
     if payload.evaluator_ids:
         for evaluator_id in payload.evaluator_ids:
             _ensure_owned_evaluator(evaluator_id, user_id)
@@ -258,6 +263,12 @@ async def update_annotation_task_endpoint(
     user_id: str = Depends(get_current_user_id),
 ):
     _ensure_owned_task(task_uuid, user_id)
+    if payload.name is not None and is_name_taken(
+        "annotation_tasks", payload.name, user_id, exclude_uuid=task_uuid
+    ):
+        raise HTTPException(
+            status_code=409, detail="Annotation task name already exists"
+        )
     updated = update_annotation_task(
         task_uuid=task_uuid,
         name=payload.name,

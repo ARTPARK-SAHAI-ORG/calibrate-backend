@@ -2,7 +2,7 @@ from typing import Optional, List, Dict, Any
 from fastapi import APIRouter, HTTPException, Depends
 from pydantic import BaseModel
 
-from db import create_tool, get_tool, get_all_tools, update_tool, delete_tool
+from db import create_tool, get_tool, get_all_tools, update_tool, delete_tool, is_name_taken
 from auth_utils import get_current_user_id
 
 
@@ -40,6 +40,8 @@ async def create_tool_endpoint(
     tool: ToolCreate, user_id: str = Depends(get_current_user_id)
 ):
     """Create a new tool."""
+    if is_name_taken("tools", tool.name, user_id):
+        raise HTTPException(status_code=409, detail="Tool name already exists")
     tool_uuid = create_tool(
         name=tool.name,
         description=tool.description,
@@ -83,6 +85,11 @@ async def update_tool_endpoint(
     # Verify user owns this tool
     if existing_tool.get("user_id") != user_id:
         raise HTTPException(status_code=403, detail="Access denied")
+
+    if tool.name is not None and is_name_taken(
+        "tools", tool.name, user_id, exclude_uuid=tool_uuid
+    ):
+        raise HTTPException(status_code=409, detail="Tool name already exists")
 
     # Update only provided fields
     updated = update_tool(
