@@ -52,6 +52,7 @@ from utils import (
     generate_presigned_download_url,
     get_s3_output_config,
     normalize_metrics,
+    post_process_provider_results,
     presign_audio_path,
 )
 
@@ -366,6 +367,14 @@ async def get_public_stt(share_token: str):
         provider_results, details.get("evaluators") or []
     )
 
+    # Same canonical post-processing as the authenticated endpoints — public
+    # callers see the same shape (evaluator_outputs[uuid], typed values,
+    # evaluator_runs[].aggregate) instead of the legacy flat-keyed fallback.
+    post_process_provider_results(
+        provider_results,
+        evaluator_snapshots=details.get("evaluators") or [],
+    )
+
     # Enrich result rows with presigned audio URLs from the dataset
     audio_paths = details.get("audio_paths", [])
     if audio_paths:
@@ -423,6 +432,14 @@ async def get_public_tts(share_token: str):
 
     enrich_evaluator_runs_with_current_names(
         provider_results, details.get("evaluators") or []
+    )
+
+    # Same canonical post-processing as the authenticated endpoints — public
+    # callers see the same shape (evaluator_outputs[uuid], typed values,
+    # evaluator_runs[].aggregate) instead of the legacy flat-keyed fallback.
+    post_process_provider_results(
+        provider_results,
+        evaluator_snapshots=details.get("evaluators") or [],
     )
 
     # Regenerate presigned audio URLs for completed/failed jobs

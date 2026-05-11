@@ -32,6 +32,7 @@ from utils import (
     TaskStatusResponse,
     build_evaluator_runs_for_eval_job,
     enrich_evaluator_runs_with_current_names,
+    post_process_provider_results,
     get_s3_client,
     get_s3_output_config,
     can_start_job,
@@ -891,9 +892,19 @@ async def get_tts_evaluation_status(
 
     # Build provider results
     provider_results = results.get("provider_results")
+    # `evaluator_id_by_metric_key` lets the post-processor build
+    # `evaluator_runs[]` mid-flight from a freshly-landed metrics.json.
+    evaluator_id_by_metric_key: Dict[str, str] = {}
+    output_dir_str = details.get("output_dir")
+    if output_dir_str:
+        try:
+            candidate = Path(output_dir_str)
+            if candidate.exists():
+                evaluator_id_by_metric_key = read_evaluators_map_from_config(candidate)
+        except Exception:
+            pass
     if provider_results is None and status == TaskStatus.IN_PROGRESS.value:
         # Job is in progress - try to read intermediate results from disk
-        output_dir_str = details.get("output_dir")
         expected_total = len(details.get("texts", []))
         if output_dir_str:
             output_dir = Path(output_dir_str)
@@ -976,6 +987,15 @@ async def get_tts_evaluation_status(
 
     enrich_evaluator_runs_with_current_names(
         provider_results, details.get("evaluators") or []
+    )
+
+    # Canonical post-processing: lift per-row outputs into evaluator_outputs[uuid],
+    # type-coerce values, build evaluator_runs from in-progress metrics, surface
+    # per-row judge errors. Idempotent — safe across in-progress / done / failed.
+    post_process_provider_results(
+        provider_results,
+        evaluator_snapshots=details.get("evaluators") or [],
+        evaluator_id_by_metric_key=evaluator_id_by_metric_key,
     )
 
     # Generate presigned URLs on the fly for completed or failed jobs

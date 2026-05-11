@@ -122,13 +122,21 @@ class TaskStatus(str, Enum):
 
 
 class EvaluatorRunEntry(BaseModel):
-    """One evaluator's aggregate metrics for an STT/TTS provider, paired with evaluator UUID."""
+    """One evaluator's aggregate metrics for an STT/TTS provider, paired with evaluator UUID.
+
+    Canonical aggregate location: clients should read aggregate stats from
+    here, not from the parallel ``provider_results[i].metrics[<display name>]``
+    entries (those are kept for back-compat and may be retired in a later
+    release).
+    """
 
     evaluator_uuid: str
     metric_key: str  # key as emitted in metrics.json (derived from CLI/config at run time)
     aggregate: Dict[str, Any]
     name: Optional[str] = None  # filled on API read from DB + job snapshot
     description: Optional[str] = None  # filled on API read from current DB row
+    evaluator_version_id: Optional[str] = None  # pinned at job-submit time
+    output_type: Optional[str] = None  # "binary" | "rating" — drives per-row typing
 
 
 class ProviderResult(BaseModel):
@@ -923,6 +931,211 @@ def build_evaluator_runs_for_eval_job(
             )
         )
     return runs
+
+
+# Coerced as floats. Non-evaluator columns calibrate writes as strings into
+# results.csv but that are numeric by contract. Conservative list — anything
+# unknown is left as a string so we don't silently drop a future text column.
+_NUMERIC_ROW_KEYS = frozenset(
+    {
+        "wer",
+        "cer",
+        "string_similarity",
+        "similarity",
+        "processing_time",
+        "ttfb",
+        "latency",
+        "duration",
+        "audio_duration",
+    }
+)
+
+
+def _coerce_numeric(value: Any) -> Any:
+    """Return float(value) when the string parses as numeric; otherwise unchanged."""
+    if value is None or isinstance(value, (int, float, bool)):
+        return value
+    if isinstance(value, str):
+        s = value.strip()
+        if not s or s.lower() in {"nan", "none", "null"}:
+            return None
+        try:
+            f = float(s)
+            return f
+        except ValueError:
+            return value
+    return value
+
+
+def _coerce_binary(value: Any) -> Any:
+    """Coerce a binary-evaluator value into a real bool. Strings 'true'/'false'
+    (any case) flip to bool; numeric 0/1 → bool; everything else passes through."""
+    if isinstance(value, bool):
+        return value
+    if value is None:
+        return None
+    if isinstance(value, (int, float)):
+        return bool(value)
+    if isinstance(value, str):
+        s = value.strip().lower()
+        if s in {"true", "1", "yes", "pass", "passed"}:
+            return True
+        if s in {"false", "0", "no", "fail", "failed"}:
+            return False
+    return value
+
+
+def _row_value_looks_like_error(raw_value: Any, reasoning: Any) -> bool:
+    """Heuristic: did calibrate write an error marker instead of a real judgement?
+    Patterns observed: literal string "ERROR" in the value cell, or empty value
+    with reasoning starting with 'Error' / 'Exception'."""
+    if isinstance(raw_value, str) and raw_value.strip().lower() in {"error", "err"}:
+        return True
+    if (raw_value is None or raw_value == "") and isinstance(reasoning, str):
+        head = reasoning.strip().lower()[:20]
+        if head.startswith("error") or head.startswith("exception"):
+            return True
+    return False
+
+
+def post_process_provider_results(
+    provider_results: Optional[List[Dict[str, Any]]],
+    evaluator_snapshots: Optional[List[Dict[str, Any]]] = None,
+    evaluator_id_by_metric_key: Optional[Dict[str, str]] = None,
+) -> None:
+    """Single canonical post-processor for STT/TTS provider_results before they
+    leave the API. Idempotent — safe to call on already-shaped data.
+
+    Mutations performed in place:
+
+    1. ``evaluator_runs`` populated per-provider as soon as that provider's
+       ``metrics.json`` is on disk (the in-progress path historically only
+       set this once the *whole* run finished). Built from
+       ``ordered_evaluator_metric_keys`` + the metric_key→uuid map.
+    2. Each ``evaluator_runs`` entry gets ``evaluator_version_id`` and
+       ``output_type`` filled from the job-time evaluator snapshot, so the
+       FE can render rubric-aware widgets without a second DB roundtrip.
+    3. Per-row outputs are namespaced under ``row["evaluator_outputs"][uuid]``
+       (``{value, reasoning, version_id, output_type, error?}``) by lifting
+       the flat ``<display_name>`` / ``<display_name>_reasoning`` keys.
+       Legacy flat keys are KEPT for one deprecation window — clients that
+       have migrated read from ``evaluator_outputs`` only.
+    4. Values are typed: binary → ``bool``, rating → numeric. Known numeric
+       row columns (wer/cer/string_similarity/processing_time/etc.) are
+       parsed from string to ``float`` here too.
+    5. Per-row judge failures (calibrate wrote ``"ERROR"`` instead of a real
+       value, or left it blank with an ``"Error: ..."`` reasoning) surface
+       as ``evaluator_outputs[uuid].error = True`` with the original message
+       preserved in ``.reasoning``.
+    """
+    if not provider_results:
+        return
+
+    snapshot_by_uuid: Dict[str, Dict[str, Any]] = {}
+    snapshot_by_name: Dict[str, Dict[str, Any]] = {}
+    for snap in evaluator_snapshots or []:
+        if not isinstance(snap, dict):
+            continue
+        uid = snap.get("uuid") or snap.get("evaluator_id")
+        if uid:
+            snapshot_by_uuid[str(uid)] = snap
+        nm = snap.get("name")
+        if nm:
+            # Calibrate writes columns under the *rendered* display name. Index
+            # by name so we can recover the UUID when lifting flat row keys.
+            snapshot_by_name[str(nm)] = snap
+
+    evaluator_id_by_metric_key = evaluator_id_by_metric_key or {}
+
+    for pr in provider_results:
+        # ---------- Step 1 + 5: evaluator_runs from metrics.json ----------
+        runs = pr.get("evaluator_runs")
+        metrics = pr.get("metrics")
+        if not runs and metrics is not None and evaluator_id_by_metric_key:
+            try:
+                built = build_evaluator_runs_for_eval_job(
+                    metrics, evaluator_id_by_metric_key
+                )
+                runs = [r.model_dump() for r in built] if built else None
+                if runs:
+                    pr["evaluator_runs"] = runs
+            except Exception as e:
+                logger.warning(f"post_process: failed to build evaluator_runs: {e}")
+
+        # Backfill evaluator_version_id / output_type onto each run entry from
+        # the snapshot — the metric-key map gives us UUIDs but not types.
+        for run in pr.get("evaluator_runs") or []:
+            if not isinstance(run, dict):
+                continue
+            uid = run.get("evaluator_uuid")
+            snap = snapshot_by_uuid.get(uid) if uid else None
+            if snap:
+                # `setdefault` won't overwrite an existing-but-None value
+                # (the Pydantic model dumps these as None when unset), so
+                # explicitly fill any None slot from the snapshot.
+                if run.get("evaluator_version_id") is None:
+                    run["evaluator_version_id"] = snap.get("evaluator_version_id")
+                if run.get("output_type") is None:
+                    run["output_type"] = snap.get("output_type")
+                if run.get("name") is None:
+                    run["name"] = snap.get("name")
+
+        # ---------- Steps 3 + 4 + bonus: per-row evaluator_outputs ----------
+        rows = pr.get("results") or []
+        if not rows:
+            continue
+
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            outputs = row.get("evaluator_outputs")
+            if not isinstance(outputs, dict):
+                outputs = {}
+
+            for name, snap in snapshot_by_name.items():
+                uid = snap.get("uuid") or snap.get("evaluator_id")
+                if not uid:
+                    continue
+                # Calibrate column names: "<name>" carries the value,
+                # "<name>_reasoning" carries the judge's free-text rationale.
+                if name not in row and f"{name}_reasoning" not in row:
+                    continue
+                raw_value = row.get(name)
+                reasoning = row.get(f"{name}_reasoning")
+                is_err = _row_value_looks_like_error(raw_value, reasoning)
+
+                if is_err:
+                    typed_value: Any = None
+                else:
+                    output_type = (snap.get("output_type") or "").lower()
+                    if output_type == "binary":
+                        typed_value = _coerce_binary(raw_value)
+                    elif output_type == "rating":
+                        typed_value = _coerce_numeric(raw_value)
+                    else:
+                        # Unknown/unspecified — leave as-is so we don't lossy-
+                        # convert future evaluator types we haven't met.
+                        typed_value = raw_value
+
+                entry: Dict[str, Any] = {
+                    "value": typed_value,
+                    "reasoning": reasoning,
+                    "evaluator_version_id": snap.get("evaluator_version_id"),
+                    "output_type": snap.get("output_type"),
+                    "name": name,
+                }
+                if is_err:
+                    entry["error"] = True
+                outputs[uid] = entry
+
+            if outputs:
+                row["evaluator_outputs"] = outputs
+
+            # Coerce known numeric row columns (wer/cer/...) from string→float
+            # so the FE doesn't need parallel coercion paths.
+            for key in list(row.keys()):
+                if key in _NUMERIC_ROW_KEYS:
+                    row[key] = _coerce_numeric(row[key])
 
 
 def enrich_evaluator_runs_with_current_names(
