@@ -608,17 +608,6 @@ async def get_public_annotation_eval(share_token: str):
     raw_runs = get_evaluator_runs_for_job(job["uuid"])
     details = job.get("details") or {}
 
-    # Public-safe agreement: keep aggregate counts (agreement, pair_count,
-    # annotator_count, item_count) but strip the per-row `human_annotations`
-    # array — which carries annotator UUID, annotator name, source job_id,
-    # and the raw label value/reasoning text. Those are PII / internal
-    # identifiers that the auth view is allowed to render but a public
-    # share link must not leak.
-    human_agreement = _human_agreement_for_run(task_uuid, raw_runs)
-    for item_block in human_agreement.get("items") or []:
-        for ev_entry in item_block.get("evaluators") or []:
-            ev_entry.pop("human_annotations", None)
-
     # Forward only the safe-to-share keys from the raw `details` blob. Strip
     # operational/identifying ones — `pid`, `pgid`, `s3_prefix`, `user_id`,
     # `output_dir`, etc. — that the auth view exposes but a public viewer
@@ -655,7 +644,7 @@ async def get_public_annotation_eval(share_token: str):
         item_count=details.get("item_count"),
         items=get_eval_job_items(job["uuid"]),
         runs=_enrich_runs_with_live_evaluator(raw_runs),
-        human_agreement=human_agreement,
+        human_agreement=_human_agreement_for_run(task_uuid, raw_runs),
         error=shaped.get("error"),
     )
 
