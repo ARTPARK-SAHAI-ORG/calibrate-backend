@@ -1017,9 +1017,18 @@ def post_process_provider_results(
        FE can render rubric-aware widgets without a second DB roundtrip.
     3. Per-row outputs are namespaced under ``row["evaluator_outputs"][uuid]``
        (``{value, reasoning, version_id, output_type, error?}``) by lifting
-       the flat ``<display_name>`` / ``<display_name>_reasoning`` keys.
+       the flat ``<column_name>`` / ``<column_name>_reasoning`` keys.
        Legacy flat keys are KEPT for one deprecation window — clients that
        have migrated read from ``evaluator_outputs`` only.
+
+       The lift is driven by ``evaluator_id_by_metric_key`` (calibrate's
+       authoritative ``config.json/evaluators_map``) when present — that's
+       the only string we *know* identifies an evaluator output column.
+       Falls back to the snapshot's display name when the map is missing
+       (in-progress jobs whose config.json hasn't landed, or pre-migration
+       legacy data); the fallback path is vulnerable to collisions with
+       built-in row columns (``id``, ``gt``, ``pred``, ``wer``, ...) and
+       with duplicate evaluator names, so it's a back-compat path only.
     4. Values are typed: binary → ``bool``, rating → numeric. Known numeric
        row columns (wer/cer/string_similarity/processing_time/etc.) are
        parsed from string to ``float`` here too.
@@ -1085,6 +1094,22 @@ def post_process_provider_results(
         if not rows:
             continue
 
+        # Build the {column_name -> snapshot_dict} pairs we'll lift each row
+        # against. Prefer the calibrate-authoritative `evaluators_map` when
+        # available — it's the only string we *know* identifies an evaluator
+        # output column rather than a built-in row column. Fall back to the
+        # snapshot's display name when the map is missing (in-progress reads
+        # before config.json lands, or legacy pre-map data); that fallback
+        # is vulnerable to reserved-column / duplicate-name collisions, so
+        # it's accepted only when there's no better option.
+        if evaluator_id_by_metric_key:
+            lift_pairs = [
+                (col_name, snapshot_by_uuid.get(uid))
+                for col_name, uid in evaluator_id_by_metric_key.items()
+            ]
+        else:
+            lift_pairs = list(snapshot_by_name.items())
+
         for row in rows:
             if not isinstance(row, dict):
                 continue
@@ -1092,16 +1117,18 @@ def post_process_provider_results(
             if not isinstance(outputs, dict):
                 outputs = {}
 
-            for name, snap in snapshot_by_name.items():
+            for column_name, snap in lift_pairs:
+                if not snap:
+                    continue
                 uid = snap.get("uuid") or snap.get("evaluator_id")
                 if not uid:
                     continue
-                # Calibrate column names: "<name>" carries the value,
-                # "<name>_reasoning" carries the judge's free-text rationale.
-                if name not in row and f"{name}_reasoning" not in row:
+                # Calibrate column names: "<column>" carries the value,
+                # "<column>_reasoning" carries the judge's free-text rationale.
+                if column_name not in row and f"{column_name}_reasoning" not in row:
                     continue
-                raw_value = row.get(name)
-                reasoning = row.get(f"{name}_reasoning")
+                raw_value = row.get(column_name)
+                reasoning = row.get(f"{column_name}_reasoning")
                 is_err = _row_value_looks_like_error(raw_value, reasoning)
 
                 if is_err:
@@ -1122,7 +1149,12 @@ def post_process_provider_results(
                     "reasoning": reasoning,
                     "evaluator_version_id": snap.get("evaluator_version_id"),
                     "output_type": snap.get("output_type"),
-                    "name": name,
+                    # `name` is the human-facing display name from the
+                    # snapshot, not the calibrate column key — they're
+                    # equal in practice but we surface the snapshot's
+                    # name so the FE shows what the user sees in the
+                    # evaluator list, not calibrate's internal key.
+                    "name": snap.get("name") or column_name,
                 }
                 if is_err:
                     entry["error"] = True
