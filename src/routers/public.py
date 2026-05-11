@@ -151,6 +151,13 @@ class PublicAnnotationEvalResponse(BaseModel):
     completed_at: Optional[str] = None
     updated_at: Optional[str] = None
     task: PublicAnnotationEvalTaskRef
+    # `details` mirrors the authenticated GET shape so a shared FE component
+    # can read `job.details?.evaluators` against either endpoint without
+    # branching. Only the safe-to-share keys are forwarded — operational
+    # fields (pid, pgid, s3_prefix, user_id) are intentionally stripped.
+    details: Optional[Dict[str, Any]] = None
+    # Top-level mirrors retained for the existing public consumers that
+    # were already reading them. Both shapes carry the same data.
     evaluators: Optional[List[Dict[str, Any]]] = None
     item_count: Optional[int] = None
     items: Optional[List[Dict[str, Any]]] = None
@@ -601,6 +608,24 @@ async def get_public_annotation_eval(share_token: str):
     raw_runs = get_evaluator_runs_for_job(job["uuid"])
     details = job.get("details") or {}
 
+    # Forward only the safe-to-share keys from the raw `details` blob. Strip
+    # operational/identifying ones — `pid`, `pgid`, `s3_prefix`, `user_id`,
+    # `output_dir`, etc. — that the auth view exposes but a public viewer
+    # has no business seeing. Whitelist (not blacklist) so any future
+    # addition to the runner's details dict stays private until explicitly
+    # opted in here.
+    public_details_whitelist = {
+        "task_id",
+        "evaluators",
+        "item_count",
+        "item_ids",
+        "metrics",
+        "completed_at",
+    }
+    public_details = {
+        k: v for k, v in details.items() if k in public_details_whitelist
+    }
+
     return PublicAnnotationEvalResponse(
         task_id=task_uuid,
         job_uuid=job["uuid"],
@@ -614,6 +639,7 @@ async def get_public_annotation_eval(share_token: str):
             type=task["type"],
             description=task.get("description"),
         ),
+        details=public_details,
         evaluators=details.get("evaluators"),
         item_count=details.get("item_count"),
         items=get_eval_job_items(job["uuid"]),
