@@ -2589,25 +2589,54 @@ def bulk_delete_tests(test_uuids: List[str], user_id: str) -> int:
     """Soft delete multiple tests owned by user_id.
     Also soft deletes related agent_tests entries.
     Returns the number of tests actually deleted.
+
+    Security note: the agent_tests cleanup is scoped to UUIDs the caller
+    actually owns — NOT the raw input list. Without this, a caller could
+    pass another user's test UUID alongside one of their own and have
+    every link to that other user's test soft-deleted across all agents
+    (the test row stays alive thanks to the ownership filter, but the
+    links are gone). The fix is to resolve the owned UUIDs first and
+    constrain both updates to that set.
     """
     if not test_uuids:
         return 0
 
-    placeholders = ",".join("?" for _ in test_uuids)
     with get_db_connection() as conn:
         cursor = conn.cursor()
+
+        # Step 1: resolve which of the requested UUIDs the caller actually
+        # owns and which are still alive. Both UPDATEs below are constrained
+        # to this set so unowned UUIDs can never trigger any side effect.
+        in_placeholders = ",".join("?" for _ in test_uuids)
+        cursor.execute(
+            f"SELECT uuid FROM tests "
+            f"WHERE uuid IN ({in_placeholders}) "
+            f"AND user_id = ? AND deleted_at IS NULL",
+            (*test_uuids, user_id),
+        )
+        owned_uuids = [row["uuid"] for row in cursor.fetchall()]
+        if not owned_uuids:
+            return 0
+
+        owned_placeholders = ",".join("?" for _ in owned_uuids)
+
+        # Step 2: soft-delete only the owned tests.
         cursor.execute(
             f"UPDATE tests SET deleted_at = CURRENT_TIMESTAMP "
-            f"WHERE uuid IN ({placeholders}) AND user_id = ? AND deleted_at IS NULL",
-            (*test_uuids, user_id),
+            f"WHERE uuid IN ({owned_placeholders}) AND deleted_at IS NULL",
+            owned_uuids,
         )
         deleted_count = cursor.rowcount
 
+        # Step 3: cascade to agent_tests using the SAME owned-UUID set.
+        # Skipped if step 2 deleted nothing (race: another writer already
+        # got there) — preserves prior behaviour of "no orphan link cleanup
+        # on a no-op delete".
         if deleted_count > 0:
             cursor.execute(
                 f"UPDATE agent_tests SET deleted_at = CURRENT_TIMESTAMP "
-                f"WHERE test_id IN ({placeholders}) AND deleted_at IS NULL",
-                test_uuids,
+                f"WHERE test_id IN ({owned_placeholders}) AND deleted_at IS NULL",
+                owned_uuids,
             )
             logger.info(f"Bulk soft deleted {deleted_count} tests for user {user_id}")
 
