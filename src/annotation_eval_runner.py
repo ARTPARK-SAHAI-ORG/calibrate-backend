@@ -47,6 +47,7 @@ from llm_judge import (
 from utils import (
     TaskStatus,
     capture_exception_to_sentry,
+    coerce_evaluator_score,
     get_s3_client,
     get_s3_output_config,
     is_job_timed_out,
@@ -452,39 +453,12 @@ def _read_config_evaluators_map(output_dir: Path) -> Dict[str, str]:
     return out
 
 
-def _coerce_score(raw: Any, output_type: str) -> Any:
-    """Coerce a raw value out of CSV/JSON into the right Python type per
-    output_type. Falls back to passthrough on unparseable input.
-
-    Binary handling has to cope with the full range of representations
-    calibrate emits across its three flows: bool, "True"/"False" strings,
-    "1"/"0" strings, "1.0"/"0.0" stringified floats (simulation
-    `evaluation_results.csv` does this), and bare numerics.
-    """
-    if output_type == "binary":
-        if isinstance(raw, bool):
-            return raw
-        if isinstance(raw, (int, float)):
-            return bool(raw)
-        s = str(raw).strip().lower()
-        if s in ("true", "yes", "pass"):
-            return True
-        if s in ("false", "no", "fail"):
-            return False
-        # Numeric strings — covers "1", "0", "1.0", "0.0", "1.00", etc.
-        try:
-            return bool(float(s))
-        except (TypeError, ValueError):
-            return raw
-    if output_type == "rating":
-        try:
-            return int(float(raw))
-        except (TypeError, ValueError):
-            try:
-                return float(raw)
-            except (TypeError, ValueError):
-                return raw
-    return raw
+# `_coerce_score` previously lived here as a private helper. Moved to
+# `utils.coerce_evaluator_score` so the API-facing post-processor can
+# share the same implementation — keeps binary "1.0"/"0.0" handling
+# consistent across persistence and read paths. Local alias retained
+# so the call sites below stay readable.
+_coerce_score = coerce_evaluator_score
 
 
 def _row_evaluator_value(

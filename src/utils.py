@@ -967,22 +967,49 @@ def _coerce_numeric(value: Any) -> Any:
     return value
 
 
-def _coerce_binary(value: Any) -> Any:
-    """Coerce a binary-evaluator value into a real bool. Strings 'true'/'false'
-    (any case) flip to bool; numeric 0/1 → bool; everything else passes through."""
-    if isinstance(value, bool):
-        return value
-    if value is None:
-        return None
-    if isinstance(value, (int, float)):
-        return bool(value)
-    if isinstance(value, str):
-        s = value.strip().lower()
-        if s in {"true", "1", "yes", "pass", "passed"}:
+def coerce_evaluator_score(raw: Any, output_type: str) -> Any:
+    """Coerce a raw evaluator value out of CSV/JSON into the right Python
+    type per ``output_type``. Falls back to passthrough on unparseable input.
+
+    Single source of truth shared by the API-facing post-processor
+    (`post_process_provider_results`) and the annotation-eval persistence
+    path (`annotation_eval_runner._row_evaluator_value`). Previously these
+    had divergent implementations — annotation-eval handled stringified
+    floats like ``"1.0"`` / ``"0.0"`` (which calibrate's simulation flow
+    emits), the API path didn't, so binary evaluators rendered as the
+    raw string instead of a bool on the FE. Unified here.
+
+    Binary handling has to cope with the full range of representations
+    calibrate emits across its three flows: bool, ``"True"``/``"False"``
+    strings, ``"1"``/``"0"`` strings, ``"1.0"``/``"0.0"`` stringified
+    floats, and bare numerics.
+
+    Rating returns ``int`` when the value is whole-numbered (the common
+    case — 1-5 / 1-10 scales), ``float`` when fractional, preserving
+    precision for any future fractional rating scale.
+    """
+    if output_type == "binary":
+        if isinstance(raw, bool):
+            return raw
+        if isinstance(raw, (int, float)):
+            return bool(raw)
+        s = str(raw).strip().lower()
+        if s in ("true", "yes", "pass", "passed"):
             return True
-        if s in {"false", "0", "no", "fail", "failed"}:
+        if s in ("false", "no", "fail", "failed"):
             return False
-    return value
+        # Numeric strings — covers "1", "0", "1.0", "0.0", "1.00", etc.
+        try:
+            return bool(float(s))
+        except (TypeError, ValueError):
+            return raw
+    if output_type == "rating":
+        try:
+            f = float(raw)
+        except (TypeError, ValueError):
+            return raw
+        return int(f) if f.is_integer() else f
+    return raw
 
 
 def _row_value_looks_like_error(raw_value: Any, reasoning: Any) -> bool:
@@ -1135,10 +1162,10 @@ def post_process_provider_results(
                     typed_value: Any = None
                 else:
                     output_type = (snap.get("output_type") or "").lower()
-                    if output_type == "binary":
-                        typed_value = _coerce_binary(raw_value)
-                    elif output_type == "rating":
-                        typed_value = _coerce_numeric(raw_value)
+                    if output_type in ("binary", "rating"):
+                        typed_value = coerce_evaluator_score(
+                            raw_value, output_type
+                        )
                     else:
                         # Unknown/unspecified — leave as-is so we don't lossy-
                         # convert future evaluator types we haven't met.
