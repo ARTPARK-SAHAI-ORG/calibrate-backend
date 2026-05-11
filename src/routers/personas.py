@@ -9,6 +9,7 @@ from db import (
     update_persona,
     delete_persona,
     is_name_taken,
+    name_uniqueness_guard,
 )
 from auth_utils import get_current_user_id
 
@@ -49,12 +50,13 @@ async def create_persona_endpoint(
     """Create a new persona."""
     if is_name_taken("personas", persona.name, user_id):
         raise HTTPException(status_code=409, detail="Persona name already exists")
-    persona_uuid = create_persona(
-        name=persona.name,
-        description=persona.description,
-        config=persona.config,
-        user_id=user_id,
-    )
+    with name_uniqueness_guard("Persona"):
+        persona_uuid = create_persona(
+            name=persona.name,
+            description=persona.description,
+            config=persona.config,
+            user_id=user_id,
+        )
     return PersonaCreateResponse(
         uuid=persona_uuid, message="Persona created successfully"
     )
@@ -101,12 +103,13 @@ async def update_persona_endpoint(
     ):
         raise HTTPException(status_code=409, detail="Persona name already exists")
 
-    updated = update_persona(
-        persona_uuid=persona_uuid,
-        name=persona.name,
-        description=persona.description,
-        config=persona.config,
-    )
+    with name_uniqueness_guard("Persona"):
+        updated = update_persona(
+            persona_uuid=persona_uuid,
+            name=persona.name,
+            description=persona.description,
+            config=persona.config,
+        )
 
     if not updated:
         raise HTTPException(status_code=400, detail="No fields to update")

@@ -9,6 +9,7 @@ from db import (
     update_annotator,
     delete_annotator,
     is_name_taken,
+    name_uniqueness_guard,
     get_jobs_for_annotator_detailed,
     get_job_counts_for_user_annotators,
     get_annotations_for_user,
@@ -64,13 +65,15 @@ async def create_annotator_endpoint(
     if is_name_taken("annotators", payload.name, user_id):
         raise HTTPException(status_code=409, detail="Annotator name already exists")
     try:
-        annotator_uuid = create_annotator(name=payload.name, user_id=user_id)
+        with name_uniqueness_guard("Annotator"):
+            annotator_uuid = create_annotator(name=payload.name, user_id=user_id)
     except ValueError as e:
-        # Belt-and-braces: covers a TOCTOU race where two creates land
-        # between is_name_taken and the DB insert. The DB-level partial
-        # unique index raises IntegrityError → wrapped to ValueError by
-        # the underlying create function.
-        raise HTTPException(status_code=409, detail=str(e))
+        # `create_annotator` raises ValueError for non-uniqueness validation
+        # too (empty name, missing user_id). The uniqueness collision case
+        # is now caught by `name_uniqueness_guard` directly from the DB
+        # IntegrityError, before it gets wrapped to ValueError. Anything
+        # reaching here is a genuine input-validation 400.
+        raise HTTPException(status_code=400, detail=str(e))
     return AnnotatorCreateResponse(
         uuid=annotator_uuid, message="Annotator created successfully"
     )
@@ -166,9 +169,10 @@ async def update_annotator_endpoint(
     ):
         raise HTTPException(status_code=409, detail="Annotator name already exists")
     try:
-        updated = update_annotator(annotator_uuid=annotator_uuid, name=payload.name)
+        with name_uniqueness_guard("Annotator"):
+            updated = update_annotator(annotator_uuid=annotator_uuid, name=payload.name)
     except ValueError as e:
-        raise HTTPException(status_code=409, detail=str(e))
+        raise HTTPException(status_code=400, detail=str(e))
     if not updated:
         raise HTTPException(status_code=400, detail="No fields to update")
     return get_annotator(annotator_uuid)

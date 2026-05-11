@@ -52,6 +52,54 @@ _UNIQUE_NAME_TABLES: Dict[str, str] = {
 }
 
 
+class NameAlreadyExistsError(Exception):
+    """Raised when an INSERT/UPDATE collides with one of the per-user
+    unique-name partial indexes set up in `init_db`. Carries the entity
+    label so the FastAPI exception handler in `main.py` can render
+    ``{entity_label} name already exists`` as the 409 detail.
+
+    Why a typed exception (not just HTTPException raised here): db.py is
+    an HTTP-unaware layer. Routers wrap their write call with
+    `name_uniqueness_guard("Test")` and let the global handler do the
+    HTTP shaping. Keeps db.py free of FastAPI imports and makes the
+    behaviour testable without spinning up an app.
+    """
+
+    def __init__(self, entity_label: str):
+        super().__init__(f"{entity_label} name already exists")
+        self.entity_label = entity_label
+
+
+@contextmanager
+def name_uniqueness_guard(entity_label: str):
+    """Catch a `sqlite3.IntegrityError` raised by a UNIQUE-constraint
+    violation inside the body and re-raise as `NameAlreadyExistsError`.
+    Other IntegrityErrors propagate unchanged so genuine schema bugs
+    still surface as 500s.
+
+    Usage in a router::
+
+        with name_uniqueness_guard("Test"):
+            test_uuid = create_test(...)
+
+    Closes the TOCTOU window between `is_name_taken` and the actual
+    INSERT: the API pre-check produces the friendly message in the
+    common case; this guard catches the rare race where two creates
+    of the same name slip past the pre-check and the second hits the
+    DB-level partial unique index.
+    """
+    try:
+        yield
+    except sqlite3.IntegrityError as e:
+        # SQLite's UNIQUE constraint violation message contains "UNIQUE"
+        # — be generous in matching since the exact wording can vary
+        # across SQLite versions ("UNIQUE constraint failed:" /
+        # "columns ... are not unique").
+        if "UNIQUE" in str(e).upper():
+            raise NameAlreadyExistsError(entity_label) from e
+        raise
+
+
 def is_name_taken(
     table: str,
     name: str,
@@ -5718,17 +5766,19 @@ def create_annotator(name: str, user_id: str) -> str:
             return existing["uuid"]
 
         annotator_uuid = str(uuid.uuid4())
-        try:
-            cursor.execute(
-                """
-                INSERT INTO annotators (uuid, user_id, name)
-                VALUES (?, ?, ?)
-                """,
-                (annotator_uuid, user_id, name),
-            )
-            conn.commit()
-        except sqlite3.IntegrityError as e:
-            raise ValueError(f"Annotator with name '{name}' already exists") from e
+        # IntegrityError on the partial unique index propagates upward —
+        # callers wrap with `name_uniqueness_guard("Annotator")` so a
+        # duplicate-name collision becomes a 409 via the global FastAPI
+        # handler. The previous catch-and-rewrap-as-ValueError lost the
+        # original SQLite error type, defeating the guard.
+        cursor.execute(
+            """
+            INSERT INTO annotators (uuid, user_id, name)
+            VALUES (?, ?, ?)
+            """,
+            (annotator_uuid, user_id, name),
+        )
+        conn.commit()
         logger.info(f"Created annotator with UUID: {annotator_uuid}")
         return annotator_uuid
 
@@ -5788,18 +5838,19 @@ def update_annotator(annotator_uuid: str, name: Optional[str] = None) -> bool:
         raise ValueError("annotator name must not be empty")
     with get_db_connection() as conn:
         cursor = conn.cursor()
-        try:
-            cursor.execute(
-                """
-                UPDATE annotators
-                   SET name = ?, updated_at = CURRENT_TIMESTAMP
-                 WHERE uuid = ? AND deleted_at IS NULL
-                """,
-                (name, annotator_uuid),
-            )
-            conn.commit()
-        except sqlite3.IntegrityError as e:
-            raise ValueError(f"Annotator with name '{name}' already exists") from e
+        # IntegrityError on the partial unique index propagates upward —
+        # callers wrap with `name_uniqueness_guard("Annotator")` so a
+        # duplicate-name collision becomes a 409 via the global FastAPI
+        # handler.
+        cursor.execute(
+            """
+            UPDATE annotators
+               SET name = ?, updated_at = CURRENT_TIMESTAMP
+             WHERE uuid = ? AND deleted_at IS NULL
+            """,
+            (name, annotator_uuid),
+        )
+        conn.commit()
         return cursor.rowcount > 0
 
 

@@ -5,6 +5,7 @@ from pydantic import BaseModel, ConfigDict, model_validator
 from db import (
     create_test,
     is_name_taken,
+    name_uniqueness_guard,
     get_test,
     get_all_tests,
     update_test,
@@ -276,12 +277,13 @@ async def create_test_endpoint(
     if is_name_taken("tests", test.name, user_id):
         raise HTTPException(status_code=409, detail="Test name already exists")
     resolved = _validate_evaluators(test.evaluators, user_id) if test.evaluators else None
-    test_uuid = create_test(
-        name=test.name,
-        type=test.type,
-        config=test.config,
-        user_id=user_id,
-    )
+    with name_uniqueness_guard("Test"):
+        test_uuid = create_test(
+            name=test.name,
+            type=test.type,
+            config=test.config,
+            user_id=user_id,
+        )
     if resolved:
         set_test_evaluators(test_uuid, resolved)
     return TestCreateResponse(uuid=test_uuid, message="Test created successfully")
@@ -329,12 +331,13 @@ async def update_test_endpoint(
         v is not None for v in (test.name, test.type, test.config)
     )
     if has_core_updates:
-        updated = update_test(
-            test_uuid=test_uuid,
-            name=test.name,
-            type=test.type,
-            config=test.config,
-        )
+        with name_uniqueness_guard("Test"):
+            updated = update_test(
+                test_uuid=test_uuid,
+                name=test.name,
+                type=test.type,
+                config=test.config,
+            )
         if not updated and resolved is None:
             raise HTTPException(status_code=400, detail="No fields to update")
 

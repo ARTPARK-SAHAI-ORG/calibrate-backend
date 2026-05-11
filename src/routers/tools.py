@@ -2,7 +2,7 @@ from typing import Optional, List, Dict, Any
 from fastapi import APIRouter, HTTPException, Depends
 from pydantic import BaseModel
 
-from db import create_tool, get_tool, get_all_tools, update_tool, delete_tool, is_name_taken
+from db import create_tool, get_tool, get_all_tools, update_tool, delete_tool, is_name_taken, name_uniqueness_guard
 from auth_utils import get_current_user_id
 
 
@@ -42,12 +42,13 @@ async def create_tool_endpoint(
     """Create a new tool."""
     if is_name_taken("tools", tool.name, user_id):
         raise HTTPException(status_code=409, detail="Tool name already exists")
-    tool_uuid = create_tool(
-        name=tool.name,
-        description=tool.description,
-        config=tool.config,
-        user_id=user_id,
-    )
+    with name_uniqueness_guard("Tool"):
+        tool_uuid = create_tool(
+            name=tool.name,
+            description=tool.description,
+            config=tool.config,
+            user_id=user_id,
+        )
     return ToolCreateResponse(uuid=tool_uuid, message="Tool created successfully")
 
 
@@ -92,12 +93,13 @@ async def update_tool_endpoint(
         raise HTTPException(status_code=409, detail="Tool name already exists")
 
     # Update only provided fields
-    updated = update_tool(
-        tool_uuid=tool_uuid,
-        name=tool.name,
-        description=tool.description,
-        config=tool.config,
-    )
+    with name_uniqueness_guard("Tool"):
+        updated = update_tool(
+            tool_uuid=tool_uuid,
+            name=tool.name,
+            description=tool.description,
+            config=tool.config,
+        )
 
     if not updated:
         raise HTTPException(status_code=400, detail="No fields to update")

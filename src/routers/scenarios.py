@@ -9,6 +9,7 @@ from db import (
     update_scenario,
     delete_scenario,
     is_name_taken,
+    name_uniqueness_guard,
 )
 from auth_utils import get_current_user_id
 
@@ -46,11 +47,12 @@ async def create_scenario_endpoint(
     """Create a new scenario."""
     if is_name_taken("scenarios", scenario.name, user_id):
         raise HTTPException(status_code=409, detail="Scenario name already exists")
-    scenario_uuid = create_scenario(
-        name=scenario.name,
-        description=scenario.description,
-        user_id=user_id,
-    )
+    with name_uniqueness_guard("Scenario"):
+        scenario_uuid = create_scenario(
+            name=scenario.name,
+            description=scenario.description,
+            user_id=user_id,
+        )
     return ScenarioCreateResponse(
         uuid=scenario_uuid, message="Scenario created successfully"
     )
@@ -97,11 +99,12 @@ async def update_scenario_endpoint(
     ):
         raise HTTPException(status_code=409, detail="Scenario name already exists")
 
-    updated = update_scenario(
-        scenario_uuid=scenario_uuid,
-        name=scenario.name,
-        description=scenario.description,
-    )
+    with name_uniqueness_guard("Scenario"):
+        updated = update_scenario(
+            scenario_uuid=scenario_uuid,
+            name=scenario.name,
+            description=scenario.description,
+        )
 
     if not updated:
         raise HTTPException(status_code=400, detail="No fields to update")

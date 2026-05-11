@@ -14,6 +14,7 @@ from utils import env_bool, env_int, env_str
 from db import (
     create_agent,
     is_name_taken,
+    name_uniqueness_guard,
     get_agent,
     get_all_agents,
     update_agent,
@@ -369,12 +370,13 @@ async def create_agent_endpoint(
     else:
         merged_config = agent.config
 
-    agent_uuid = create_agent(
-        name=agent.name,
-        agent_type=agent.type,
-        config=merged_config,
-        user_id=user_id,
-    )
+    with name_uniqueness_guard("Agent"):
+        agent_uuid = create_agent(
+            name=agent.name,
+            agent_type=agent.type,
+            config=merged_config,
+            user_id=user_id,
+        )
     return AgentCreateResponse(uuid=agent_uuid, message="Agent created successfully")
 
 
@@ -442,11 +444,12 @@ async def update_agent_endpoint(
             agent.config["benchmark_models_verified"] = agent.benchmark_models_verified
 
     # Update only provided fields
-    updated = update_agent(
-        agent_uuid=agent_uuid,
-        name=agent.name,
-        config=agent.config,
-    )
+    with name_uniqueness_guard("Agent"):
+        updated = update_agent(
+            agent_uuid=agent_uuid,
+            name=agent.name,
+            config=agent.config,
+        )
 
     if not updated:
         raise HTTPException(status_code=400, detail="No fields to update")
@@ -515,12 +518,13 @@ async def duplicate_agent_endpoint(
         new_config.pop("benchmark_models_verified", None)
 
     # Create the new agent
-    new_agent_uuid = create_agent(
-        name=new_name,
-        agent_type=original_agent.get("type", "agent"),
-        config=new_config,
-        user_id=user_id,
-    )
+    with name_uniqueness_guard("Agent"):
+        new_agent_uuid = create_agent(
+            name=new_name,
+            agent_type=original_agent.get("type", "agent"),
+            config=new_config,
+            user_id=user_id,
+        )
 
     # Copy all linked tools
     linked_tools = get_tools_for_agent(agent_uuid)

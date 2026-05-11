@@ -11,6 +11,7 @@ from db import (
     ANNOTATION_TASK_TYPES,
     create_annotation_task,
     is_name_taken,
+    name_uniqueness_guard,
     get_annotation_task,
     get_all_annotation_tasks,
     update_annotation_task,
@@ -193,12 +194,13 @@ async def create_annotation_task_endpoint(
         for evaluator_id in payload.evaluator_ids:
             _ensure_owned_evaluator(evaluator_id, user_id)
 
-    task_uuid = create_annotation_task(
-        name=payload.name,
-        description=payload.description,
-        type=payload.type,
-        user_id=user_id,
-    )
+    with name_uniqueness_guard("Annotation task"):
+        task_uuid = create_annotation_task(
+            name=payload.name,
+            description=payload.description,
+            type=payload.type,
+            user_id=user_id,
+        )
 
     if payload.evaluator_ids:
         for evaluator_id in payload.evaluator_ids:
@@ -269,11 +271,12 @@ async def update_annotation_task_endpoint(
         raise HTTPException(
             status_code=409, detail="Annotation task name already exists"
         )
-    updated = update_annotation_task(
-        task_uuid=task_uuid,
-        name=payload.name,
-        description=payload.description,
-    )
+    with name_uniqueness_guard("Annotation task"):
+        updated = update_annotation_task(
+            task_uuid=task_uuid,
+            name=payload.name,
+            description=payload.description,
+        )
     if not updated:
         raise HTTPException(status_code=400, detail="No fields to update")
     task = get_annotation_task(task_uuid)
