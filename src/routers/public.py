@@ -51,6 +51,7 @@ from utils import (
     enrich_evaluator_runs_with_current_names,
     generate_presigned_download_url,
     get_s3_output_config,
+    load_evaluator_metric_key_map,
     normalize_metrics,
     post_process_provider_results,
     presign_audio_path,
@@ -377,9 +378,16 @@ async def get_public_stt(share_token: str):
     # Same canonical post-processing as the authenticated endpoints — public
     # callers see the same shape (evaluator_outputs[uuid], typed values,
     # evaluator_runs[].aggregate) instead of the legacy flat-keyed fallback.
+    # `evaluator_id_by_metric_key` (read from on-disk config.json) is what
+    # makes the per-row lift safe against reserved-column collisions —
+    # without it the helper falls back to snapshot display names and an
+    # evaluator named e.g. `wer` would lift the built-in WER value into
+    # `evaluator_outputs[uuid].value`. Authenticated handlers already pass
+    # this; the public mirrors must too or they'll disagree on the same run.
     post_process_provider_results(
         provider_results,
         evaluator_snapshots=details.get("evaluators") or [],
+        evaluator_id_by_metric_key=load_evaluator_metric_key_map(details),
     )
 
     # Enrich result rows with presigned audio URLs from the dataset
@@ -444,9 +452,16 @@ async def get_public_tts(share_token: str):
     # Same canonical post-processing as the authenticated endpoints — public
     # callers see the same shape (evaluator_outputs[uuid], typed values,
     # evaluator_runs[].aggregate) instead of the legacy flat-keyed fallback.
+    # `evaluator_id_by_metric_key` (read from on-disk config.json) is what
+    # makes the per-row lift safe against reserved-column collisions —
+    # without it the helper falls back to snapshot display names and an
+    # evaluator named e.g. `wer` would lift the built-in WER value into
+    # `evaluator_outputs[uuid].value`. Authenticated handlers already pass
+    # this; the public mirrors must too or they'll disagree on the same run.
     post_process_provider_results(
         provider_results,
         evaluator_snapshots=details.get("evaluators") or [],
+        evaluator_id_by_metric_key=load_evaluator_metric_key_map(details),
     )
 
     # Regenerate presigned audio URLs for completed/failed jobs
