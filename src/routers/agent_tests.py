@@ -1460,7 +1460,10 @@ def run_llm_test_task(
                             prev_completed = completed
                         time.sleep(2)  # Poll every 2 seconds
 
-                    if aborted:
+                    # Re-check abort after natural subprocess exit: an abort
+                    # could arrive between `poll()` returning non-None and
+                    # the final update_agent_test_job below.
+                    if aborted or _is_job_aborted(task_id):
                         logger.info(
                             f"LLM test {task_id} was aborted by user, skipping final processing"
                         )
@@ -1555,6 +1558,15 @@ def run_llm_test_task(
                 config_s3_key = f"{results_prefix}/test_config.json"
                 upload_file_to_s3(s3, config_file, s3_bucket, config_s3_key)
                 logger.info(f"Uploaded config file to S3: {config_s3_key}")
+
+                # Last-chance abort check: parsing + S3 uploads above can
+                # take seconds; an abort that lands during that window
+                # must not be overwritten.
+                if _is_job_aborted(task_id):
+                    logger.info(
+                        f"LLM test {task_id} aborted before final update, skipping"
+                    )
+                    return
 
                 # Update job with results
                 update_agent_test_job(
@@ -2149,7 +2161,10 @@ def run_benchmark_task(
                             prev_completed = completed
                         time.sleep(2)  # Poll every 2 seconds
 
-                    if aborted:
+                    # Re-check abort after natural subprocess exit: an abort
+                    # could arrive between `poll()` returning non-None and
+                    # the final update_agent_test_job below.
+                    if aborted or _is_job_aborted(task_id):
                         logger.info(
                             f"Benchmark {task_id} was aborted by user, skipping final processing"
                         )
@@ -2328,6 +2343,15 @@ def run_benchmark_task(
                 if not all_succeeded:
                     failed = [r.model for r in model_results if not r.success]
                     error_msg = f"Some models failed: {', '.join(failed)}"
+
+                # Last-chance abort check: parsing + S3 uploads above can
+                # take seconds-to-minutes; an abort that lands during that
+                # window must not be overwritten.
+                if _is_job_aborted(task_id):
+                    logger.info(
+                        f"Benchmark {task_id} aborted before final update, skipping"
+                    )
+                    return
 
                 # Update job with results
                 update_agent_test_job(

@@ -441,7 +441,10 @@ def run_tts_evaluation_task(
                             # Process still running, send heartbeat to refresh updated_at
                             update_job(task_id)
 
-                    if aborted:
+                    # Re-check abort after natural subprocess exit: an abort
+                    # could arrive between `poll()` returning non-None and
+                    # the final update_job below. See STT for the long form.
+                    if aborted or _is_job_aborted(task_id):
                         logger.info(
                             f"TTS eval {task_id} was aborted by user, skipping final processing"
                         )
@@ -603,6 +606,15 @@ def run_tts_evaluation_task(
                 if not all_succeeded:
                     failed = [r.provider for r in provider_results if not r.success]
                     error_msg = f"Some providers failed: {', '.join(failed)}"
+
+                # Last-chance abort check: results parsing + S3 upload above
+                # can take seconds-to-minutes; an abort that lands during
+                # that window must not be overwritten.
+                if _is_job_aborted(task_id):
+                    logger.info(
+                        f"TTS eval {task_id} aborted before final update, skipping"
+                    )
+                    return
 
                 # Update job with results
                 update_job(

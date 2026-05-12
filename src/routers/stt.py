@@ -454,7 +454,14 @@ def run_evaluation_task(
                             # Process still running, send heartbeat to refresh updated_at
                             update_job(task_id)
 
-                    if aborted:
+                    # Re-check the abort flag after the loop exits: an abort
+                    # request may arrive AFTER the subprocess has exited
+                    # naturally (so we never set `aborted` via the inner
+                    # branch) but BEFORE the worker reaches the final
+                    # update_job below. Without this guard, the normal
+                    # completion path overwrites the abort endpoint's
+                    # status=done / error=user_aborted with success.
+                    if aborted or _is_job_aborted(task_id):
                         logger.info(
                             f"STT eval {task_id} was aborted by user, skipping final processing"
                         )
@@ -583,6 +590,15 @@ def run_evaluation_task(
                 if not all_succeeded:
                     failed = [r.provider for r in provider_results if not r.success]
                     error_msg = f"Some providers failed: {', '.join(failed)}"
+
+                # Last-chance abort check: results parsing + S3 upload above
+                # can take seconds-to-minutes, plenty of room for an abort
+                # request to arrive after the post-loop guard.
+                if _is_job_aborted(task_id):
+                    logger.info(
+                        f"STT eval {task_id} aborted before final update, skipping"
+                    )
+                    return
 
                 # Update job with results
                 update_job(
