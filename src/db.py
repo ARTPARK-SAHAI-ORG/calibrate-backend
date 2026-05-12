@@ -4839,8 +4839,12 @@ def update_agent_test_job(
     job_uuid: str,
     status: Optional[str] = None,
     results: Optional[Dict[str, Any]] = None,
+    details: Optional[Dict[str, Any]] = None,
 ) -> bool:
-    """Update an agent test job. Returns True if the job was found and updated."""
+    """Update an agent test job. Returns True if the job was found and updated.
+
+    If details is provided, it will be merged with existing details (not replaced).
+    """
     updates = []
     params = []
 
@@ -4850,6 +4854,20 @@ def update_agent_test_job(
     if results is not None:
         updates.append("results = ?")
         params.append(json.dumps(results))
+
+    if details is not None:
+        with get_db_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                "SELECT details FROM agent_test_jobs WHERE uuid = ?", (job_uuid,)
+            )
+            row = cursor.fetchone()
+            if row and row[0]:
+                existing_details = json.loads(row[0])
+                existing_details.update(details)
+                details = existing_details
+        updates.append("details = ?")
+        params.append(json.dumps(details))
 
     if not updates:
         return False
