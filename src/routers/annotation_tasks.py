@@ -1513,10 +1513,18 @@ async def abort_evaluator_run_job(
     if pid:
         kill_process_group(pid, job_uuid)
 
+    # Re-read the job before the final write. The runner has its own
+    # abort guards but may have committed `details.{metrics,s3_prefix}`
+    # or partial `results` between our initial read and now; preserve
+    # those by merging rather than overwriting.
+    fresh_job = get_job(job_uuid, user_id=user_id) or {}
+    fresh_results = dict(fresh_job.get("results") or {})
+    fresh_results["error"] = "user_aborted"
+
     update_job(
         job_uuid,
         status=TaskStatus.DONE.value,
-        results={"error": "user_aborted"},
+        results=fresh_results,
         details={"completed_at": _utcnow_str_for_abort()},
     )
 

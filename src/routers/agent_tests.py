@@ -2657,7 +2657,6 @@ async def abort_agent_test_job(
         )
 
     details = job.get("details") or {}
-    results = job.get("results") or {}
 
     # Mark aborted FIRST so the polling loop's guard fires immediately.
     update_agent_test_job(job_uuid, details={"aborted": True})
@@ -2669,6 +2668,7 @@ async def abort_agent_test_job(
     # Best-effort: upload whatever partial output the subprocess already
     # wrote to the temp directory before we killed it.
     output_dir_str = details.get("output_dir")
+    uploaded_prefix: Optional[str] = None
     if output_dir_str:
         try:
             output_dir = Path(output_dir_str)
@@ -2676,17 +2676,28 @@ async def abort_agent_test_job(
                 s3 = get_s3_client()
                 s3_bucket = get_s3_output_config()
                 if job.get("type") == "llm-benchmark":
-                    prefix = f"agent-tests/benchmarks/{job_uuid}/outputs"
+                    uploaded_prefix = f"agent-tests/benchmarks/{job_uuid}/outputs"
                 else:
-                    prefix = f"agent-tests/runs/{job_uuid}"
-                upload_directory_tree_to_s3(s3, output_dir, s3_bucket, prefix)
-                results = dict(results)
-                results.setdefault("results_s3_prefix", prefix)
+                    uploaded_prefix = f"agent-tests/runs/{job_uuid}"
+                upload_directory_tree_to_s3(
+                    s3, output_dir, s3_bucket, uploaded_prefix
+                )
         except Exception as exc:
             logger.warning(
                 f"Failed to upload partial outputs for aborted job {job_uuid}: {exc}"
             )
 
+    # Re-read results from the DB right before the final write: the
+    # worker's polling loop may have committed newer
+    # test_results/model_results between our initial snapshot above and
+    # now (kill_process_group sends SIGTERM; the subprocess takes a
+    # moment to actually die, and the polling thread can land one more
+    # `_update_*_intermediate_results` write in that window). Using the
+    # stale snapshot here would overwrite those newer partials.
+    fresh_job = get_agent_test_job(job_uuid) or {}
+    results = dict(fresh_job.get("results") or {})
+    if uploaded_prefix:
+        results.setdefault("results_s3_prefix", uploaded_prefix)
     results["error"] = "user_aborted"
 
     update_agent_test_job(

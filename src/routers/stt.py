@@ -822,7 +822,6 @@ async def abort_stt_evaluation(
         )
 
     details = job.get("details") or {}
-    results = job.get("results") or {}
 
     # Mark aborted FIRST so the polling loop's guard fires immediately.
     update_job(task_id, details={"aborted": True})
@@ -832,17 +831,10 @@ async def abort_stt_evaluation(
     if pid:
         kill_process_group(pid, task_id)
 
-    # Collect partial results from disk and merge with any existing successful ones
+    # Collect partial results from disk (best effort) and upload partials.
     requested_providers = details.get("providers", [])
     output_dir_str = details.get("output_dir")
-    existing_provider_results = results.get("provider_results", []) or []
-    existing_success_map = {
-        pr.get("provider"): pr
-        for pr in existing_provider_results
-        if pr.get("success") is True
-    }
-
-    merged_results: List[Dict[str, Any]] = []
+    intermediate_map: Dict[str, Dict[str, Any]] = {}
     if output_dir_str:
         try:
             output_dir = Path(output_dir_str)
@@ -855,21 +847,6 @@ async def abort_stt_evaluation(
                 intermediate_map = {
                     r.provider: r.model_dump() for r in intermediate
                 }
-                for provider in requested_providers:
-                    if provider in existing_success_map:
-                        merged_results.append(existing_success_map[provider])
-                    elif provider in intermediate_map:
-                        merged_results.append(intermediate_map[provider])
-                    else:
-                        merged_results.append(
-                            {
-                                "provider": provider,
-                                "success": False,
-                                "metrics": None,
-                                "results": None,
-                            }
-                        )
-                # Upload partial outputs to S3 (best effort)
                 try:
                     s3 = get_s3_client()
                     s3_bucket = details.get("s3_bucket") or get_s3_output_config()
@@ -887,6 +864,38 @@ async def abort_stt_evaluation(
             logger.warning(
                 f"Failed to collect intermediate results on abort: {exc}"
             )
+
+    # Re-read results from the DB right before the final write. The
+    # worker may have committed a fresher `provider_results` snapshot
+    # between our initial read and now (kill_process_group sends SIGTERM;
+    # the subprocess takes a moment to die, and the polling thread can
+    # land one more write in that window). Using the stale snapshot
+    # would overwrite those newer partials.
+    fresh_job = get_job(task_id, user_id=user_id) or {}
+    results = dict(fresh_job.get("results") or {})
+    existing_provider_results = results.get("provider_results", []) or []
+    existing_success_map = {
+        pr.get("provider"): pr
+        for pr in existing_provider_results
+        if pr.get("success") is True
+    }
+
+    merged_results: List[Dict[str, Any]] = []
+    if intermediate_map or existing_provider_results:
+        for provider in requested_providers:
+            if provider in existing_success_map:
+                merged_results.append(existing_success_map[provider])
+            elif provider in intermediate_map:
+                merged_results.append(intermediate_map[provider])
+            else:
+                merged_results.append(
+                    {
+                        "provider": provider,
+                        "success": False,
+                        "metrics": None,
+                        "results": None,
+                    }
+                )
 
     if not merged_results and existing_provider_results:
         merged_results = existing_provider_results
