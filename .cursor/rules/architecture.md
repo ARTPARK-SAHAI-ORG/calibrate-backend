@@ -94,7 +94,7 @@ calibrate-backend/
 
 **GitHub Actions**
 
-- **`tests.yml`** runs on **pushes to `main`**, **pull requests targeting `main`**, and as a **`workflow_call`** reusable workflow. It runs **`uv sync --frozen --group dev`** then **`uv run pytest`** (with XML coverage for Codecov). The Codecov step uses **`fail_ci_if_error: false`** so a missing or misconfigured token does not block merges; for reliable uploads (especially private repos), configure the Codecov GitHub app and/or **`CODECOV_TOKEN`** repository secret.
+- **`tests.yml`** runs on **pushes to `main`**, **pull requests targeting `main`**, and as a **`workflow_call`** reusable workflow. Before **`uv sync`**, it installs **`libasound2-dev`** on the Ubuntu runner (**`alsa/asoundlib.h`**) so **`simpleaudio`** (a transitive dependency of **`calibrate-agent`**) can compile — same class of fix as the Calibrate CLI **agentloop** CI. Then **`uv sync --frozen --group dev`**, **`uv run pytest`** (pytest **`addopts`** include **`--cov=src`**; CI adds **`--cov-report=xml`**). **Codecov** uses **`codecov/codecov-action@v5`** with **`token: ${{ secrets.CODECOV_TOKEN }}`** and **`./coverage.xml`**; **`fail_ci_if_error: false`** avoids blocking merges when the token is missing or Codecov is unavailable.
 - **`deploy.yml`** (production, on **release published**) declares a **`test`** job that **`uses: ./.github/workflows/tests.yml`** and gates **`build-and-deploy`** with **`needs: test`**. A failing test suite prevents the production image build/push and EC2 deploy from running. **`deploy-staging.yml`** does **not** invoke the test workflow; it only runs when manually triggered and goes straight to **`build-and-deploy`**.
 
 **Gotchas**
