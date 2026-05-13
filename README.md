@@ -13,6 +13,31 @@ Install dependencies using [uv](https://docs.astral.sh/uv/):
 uv sync --frozen
 ```
 
+For local development with tests:
+
+```bash
+uv sync --frozen --group dev
+```
+
+## Running tests
+
+From the **repository root** (not `src/`):
+
+```bash
+pytest tests
+```
+
+## Contributing
+
+After cloning the repo, enable the project's git hooks so the pre-commit test
+runner fires on commits to `main`:
+
+```bash
+git config core.hooksPath .githooks
+```
+
+Every contributor needs to run it once.
+
 ## Running Locally
 
 Start the development server:

@@ -1,4 +1,4 @@
-name: CI
+name: Run unit tests and upload coverage to Codecov
 
 on:
   push:

@@ -3,15 +3,8 @@ name: Deploy to Staging
 on:
   workflow_dispatch:
 
-permissions:
-  contents: read
-
 jobs:
-  test:
-    uses: ./.github/workflows/ci.yml
-
   build-and-deploy:
-    needs: test
     runs-on: ubuntu-latest
     environment: Staging
     permissions:

@@ -32,7 +32,7 @@ The backend wraps the `calibrate` CLI tool and orchestrates evaluation jobs whil
 | **Containerization** | Docker                              | Deployment                                                                                                                                                                   |
 | **CLI Tool**         | calibrate                           | Core evaluation/simulation engine                                                                                                                                            |
 | **Unit tests**       | pytest + pytest-cov                 | Small regression suite under `tests/`; dev-only deps in `pyproject.toml` `[dependency-groups] dev`                                                                           |
-| **CI**               | GitHub Actions                      | Lint-free pipeline: install via `uv`, run pytest with coverage, upload to Codecov; production release and staging deploy workflows **depend on** this passing first         |
+| **CI**               | GitHub Actions                      | Lint-free pipeline: install via `uv`, run pytest with coverage, upload to Codecov; **production** release deploy (`deploy.yml`) runs the test workflow first via **`needs: test`**. Staging (`deploy-staging.yml`) is **`workflow_dispatch`** only and does **not** gate on tests. |
 
 ---
 
@@ -66,17 +66,18 @@ calibrate-backend/
 │       ├── api_keys.py      # API key CRUD (evaluator invoke / automation)
 │       └── user_limits.py   # Per-user limits CRUD and limit queries
 ├── tests/                   # Pytest suite (repo root); imports match runtime (`from llm_judge import …`) via configured pythonpath
+├── .githooks/               # Git hooks (opt-in): `pre-commit` runs pytest on `main` only — enable with `git config core.hooksPath .githooks`
 ├── db/
 │   └── calibrate.db         # SQLite database file
 ├── pyproject.toml           # App deps + `[dependency-groups] dev` (pytest, pytest-cov) + pytest/coverage tool config
 ├── Dockerfile               # Container build configuration
 ├── docker-compose.yml       # Container orchestration
-└── .github/workflows/       # CI (`ci.yml`), deploy (`deploy.yml`, `deploy-staging.yml`), automation (e.g. Claude)
+└── .github/workflows/       # Tests (`tests.yml`), deploy (`deploy.yml`, `deploy-staging.yml`), automation (e.g. Claude)
 ```
 
 ### Automated testing and CI
 
-**Why**: Catch regressions in small, importable modules before merge and before Docker deploys; surface coverage trends via Codecov (README badge).
+**Why**: Catch regressions in small, importable modules on every **PR and push to `main`**, and block **production** Docker deploys until that suite passes; surface coverage trends via Codecov (README badge). **Staging** deploys are intentionally **not** blocked by the same gate (see **Gotchas**).
 
 **Layout and conventions**
 
@@ -85,14 +86,22 @@ calibrate-backend/
 - **Dev dependencies** are **`pytest`** and **`pytest-cov`**, declared only under **`[dependency-groups] dev`** — they are **not** installed in the production Docker image unless the image is changed to sync that group.
 - **Coverage** is configured to measure Python under **`src/`** (`[tool.coverage.run] source = ["src"]`). Local artifacts **`.coverage`** / **`coverage.xml`** are gitignored; CI generates **`coverage.xml`** for upload.
 
+**Local git hooks (same pattern as agentloop / Calibrate CLI repo)**
+
+- The repo ships **`.githooks/pre-commit`** (bash). It is **not** the Python `pre-commit` package; nothing runs until each clone runs **`git config core.hooksPath .githooks`** once (see README).
+- When **HEAD is `main`**, staged changes include **`.py` or `.json`**, and **`uv`** is on `PATH`, the hook runs **`uv run --group dev pytest -q`** from the repo root (same dev group as CI). Other branches always succeed; **`main`** with only non-Python/non-JSON staged changes skips tests.
+- Bypass only when intentional: **`git commit --no-verify`** (discouraged on `main`).
+
 **GitHub Actions**
 
-- **`ci.yml`** runs on **pushes to `main`**, **pull requests targeting `main`**, and as a **`workflow_call`** reusable workflow. It runs **`uv sync --frozen --group dev`** then **`uv run pytest`** (with XML coverage for Codecov). The Codecov step uses **`fail_ci_if_error: false`** so a missing or misconfigured token does not block merges; for reliable uploads (especially private repos), configure the Codecov GitHub app and/or **`CODECOV_TOKEN`** repository secret.
-- **`deploy.yml`** (production, on **release published**) and **`deploy-staging.yml`** (**`workflow_dispatch`**) both declare a **`test`** job that **`uses: ./.github/workflows/ci.yml`** and gate **`build-and-deploy`** with **`needs: test`**. A failing test suite prevents image build/push and remote deploy steps from running.
+- **`tests.yml`** runs on **pushes to `main`**, **pull requests targeting `main`**, and as a **`workflow_call`** reusable workflow. It runs **`uv sync --frozen --group dev`** then **`uv run pytest`** (with XML coverage for Codecov). The Codecov step uses **`fail_ci_if_error: false`** so a missing or misconfigured token does not block merges; for reliable uploads (especially private repos), configure the Codecov GitHub app and/or **`CODECOV_TOKEN`** repository secret.
+- **`deploy.yml`** (production, on **release published**) declares a **`test`** job that **`uses: ./.github/workflows/tests.yml`** and gates **`build-and-deploy`** with **`needs: test`**. A failing test suite prevents the production image build/push and EC2 deploy from running. **`deploy-staging.yml`** does **not** invoke the test workflow; it only runs when manually triggered and goes straight to **`build-and-deploy`**.
 
 **Gotchas**
 
+- **Production vs staging**: **`deploy.yml`** always runs **`tests.yml`** first (`workflow_call` + `needs: test`). **`deploy-staging.yml`** goes straight to build/push/deploy so operators can validate infra or hot-fix paths without waiting on the unit suite — accept the trade-off that a broken test run on `main` does not stop a manual staging deploy.
 - **Different CWD**: Developers run the API from **`src/`**; they run tests from the **repo root** (`uv run pytest`). Do not assume `Path.cwd()` matches between tests and runtime unless a test explicitly `chdir`s or uses paths relative to the project root.
+- **Hooks are opt-in**: CI always runs on GitHub; local **`pre-commit`** only runs for clones that set **`core.hooksPath`**. Do not assume every contributor has hooks installed.
 - **Scope**: The suite is intentionally **narrow** (e.g. pure helpers in `llm_judge`, JWT helpers in `auth_utils`). Most routers, `db.py`, and CLI-backed jobs remain **uncovered**; low aggregate coverage percentage is expected until more tests are added.
 - **JWT tests** patch **`auth_utils.JWT_SECRET_KEY`** (and related module attributes) so they do not depend on `.env` secrets and do not collide with production key rotation concerns.
 
@@ -1455,8 +1464,9 @@ The container:
 
 ### GitHub Actions Deployments
 
-- `.github/workflows/deploy-staging.yml` remains manually triggered via `workflow_dispatch`.
-- `.github/workflows/deploy.yml` deploys production only on the GitHub Release `published` event. It does not expose a manual `workflow_dispatch` trigger.
+- **Unit tests / coverage**: `.github/workflows/tests.yml` runs on **pushes to `main`**, **PRs targeting `main`**, and when **reused** by production deploy (below). Details: **Automated testing and CI** (earlier in this doc).
+- `.github/workflows/deploy-staging.yml` is manually triggered via **`workflow_dispatch`** only. It does **not** call `tests.yml`; it runs **`build-and-deploy`** immediately (see **Gotchas** → production vs staging).
+- `.github/workflows/deploy.yml` deploys production only on the GitHub Release **`published`** event. The workflow’s first job **`test`** invokes **`./.github/workflows/tests.yml`**; **`build-and-deploy`** has **`needs: test`**, so a failing suite blocks the image build and EC2 steps. It does not expose a manual **`workflow_dispatch`** trigger.
 - Production deploys are tied to publishing a GitHub Release, not to a raw `git push` of a `v*` tag. Pushing a tag alone will not deploy — a Release must be published (the Release can target an existing pushed tag or create a new one). Re-publishing the same Release retriggers the deploy.
 
 ### Development
