@@ -1,5 +1,6 @@
 # Calibrate Backend
 
+[![codecov](https://codecov.io/gh/ARTPARK-SAHAI-ORG/calibrate-backend/graph/badge.svg)](https://codecov.io/gh/ARTPARK-SAHAI-ORG/calibrate-backend)
 [![CC BY-SA 4.0][cc-by-sa-shield]][cc-by-sa]
 
 Backend for [Calibrate](https://calibrate.artpark.ai): an AI evaluation platform for non-profits
