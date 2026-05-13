@@ -31,6 +31,8 @@ The backend wraps the `calibrate` CLI tool and orchestrates evaluation jobs whil
 | **Package Manager**  | uv                                  | Python dependency management                                                                                                                                                 |
 | **Containerization** | Docker                              | Deployment                                                                                                                                                                   |
 | **CLI Tool**         | calibrate                           | Core evaluation/simulation engine                                                                                                                                            |
+| **Unit tests**       | pytest + pytest-cov                 | Small regression suite under `tests/`; dev-only deps in `pyproject.toml` `[dependency-groups] dev`                                                                           |
+| **CI**               | GitHub Actions                      | Lint-free pipeline: install via `uv`, run pytest with coverage, upload to Codecov; production release and staging deploy workflows **depend on** this passing first         |
 
 ---
 
@@ -63,12 +65,36 @@ calibrate-backend/
 │       ├── public.py        # Share-token read-only endpoints (STT/TTS/tests/benchmarks/simulations)
 │       ├── api_keys.py      # API key CRUD (evaluator invoke / automation)
 │       └── user_limits.py   # Per-user limits CRUD and limit queries
+├── tests/                   # Pytest suite (repo root); imports match runtime (`from llm_judge import …`) via configured pythonpath
 ├── db/
 │   └── calibrate.db         # SQLite database file
-├── pyproject.toml           # Python project configuration
+├── pyproject.toml           # App deps + `[dependency-groups] dev` (pytest, pytest-cov) + pytest/coverage tool config
 ├── Dockerfile               # Container build configuration
-└── docker-compose.yml       # Container orchestration
+├── docker-compose.yml       # Container orchestration
+└── .github/workflows/       # CI (`ci.yml`), deploy (`deploy.yml`, `deploy-staging.yml`), automation (e.g. Claude)
 ```
+
+### Automated testing and CI
+
+**Why**: Catch regressions in small, importable modules before merge and before Docker deploys; surface coverage trends via Codecov (README badge).
+
+**Layout and conventions**
+
+- Tests live in **`tests/`** at the **repository root**. The application still **runs with `src/` as the working directory** (`uvicorn main:app` from `cd src`), but pytest is invoked from the **repo root** so the lockfile and `pyproject.toml` stay authoritative.
+- **`[tool.pytest.ini_options]`** sets **`pythonpath = ["src"]`** so test modules use the same flat imports as production (`from llm_judge import …`, `from auth_utils import …`) without a package prefix.
+- **Dev dependencies** are **`pytest`** and **`pytest-cov`**, declared only under **`[dependency-groups] dev`** — they are **not** installed in the production Docker image unless the image is changed to sync that group.
+- **Coverage** is configured to measure Python under **`src/`** (`[tool.coverage.run] source = ["src"]`). Local artifacts **`.coverage`** / **`coverage.xml`** are gitignored; CI generates **`coverage.xml`** for upload.
+
+**GitHub Actions**
+
+- **`ci.yml`** runs on **pushes to `main`**, **pull requests targeting `main`**, and as a **`workflow_call`** reusable workflow. It runs **`uv sync --frozen --group dev`** then **`uv run pytest`** (with XML coverage for Codecov). The Codecov step uses **`fail_ci_if_error: false`** so a missing or misconfigured token does not block merges; for reliable uploads (especially private repos), configure the Codecov GitHub app and/or **`CODECOV_TOKEN`** repository secret.
+- **`deploy.yml`** (production, on **release published**) and **`deploy-staging.yml`** (**`workflow_dispatch`**) both declare a **`test`** job that **`uses: ./.github/workflows/ci.yml`** and gate **`build-and-deploy`** with **`needs: test`**. A failing test suite prevents image build/push and remote deploy steps from running.
+
+**Gotchas**
+
+- **Different CWD**: Developers run the API from **`src/`**; they run tests from the **repo root** (`uv run pytest`). Do not assume `Path.cwd()` matches between tests and runtime unless a test explicitly `chdir`s or uses paths relative to the project root.
+- **Scope**: The suite is intentionally **narrow** (e.g. pure helpers in `llm_judge`, JWT helpers in `auth_utils`). Most routers, `db.py`, and CLI-backed jobs remain **uncovered**; low aggregate coverage percentage is expected until more tests are added.
+- **JWT tests** patch **`auth_utils.JWT_SECRET_KEY`** (and related module attributes) so they do not depend on `.env` secrets and do not collide with production key rotation concerns.
 
 ---
 
