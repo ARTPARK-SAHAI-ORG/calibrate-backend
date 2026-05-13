@@ -1,0 +1,10 @@
+# See https://pre-commit.com
+repos:
+  - repo: local
+    hooks:
+      - id: pytest-on-main
+        name: pytest (main branch only)
+        entry: uv run python scripts/precommit_pytest_on_main.py
+        language: system
+        pass_filenames: false
+        stages: [pre-commit]

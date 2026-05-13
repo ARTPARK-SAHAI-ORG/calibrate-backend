@@ -1,5 +1,6 @@
 # Calibrate Backend
 
+[![codecov](https://codecov.io/gh/ARTPARK-SAHAI-ORG/calibrate-backend/graph/badge.svg)](https://codecov.io/gh/ARTPARK-SAHAI-ORG/calibrate-backend)
 [![CC BY-SA 4.0][cc-by-sa-shield]][cc-by-sa]
 
 Backend for [Calibrate](https://calibrate.artpark.ai): an AI evaluation platform for non-profits
@@ -11,6 +12,31 @@ Install dependencies using [uv](https://docs.astral.sh/uv/):
 ```bash
 uv sync --frozen
 ```
+
+For local development with tests:
+
+```bash
+uv sync --frozen --group dev
+```
+
+## Running tests
+
+From the **repository root** (not `src/`):
+
+```bash
+pytest tests
+```
+
+## Contributing
+
+After cloning the repo, enable the project's git hooks so the pre-commit test
+runner fires on commits to `main`:
+
+```bash
+git config core.hooksPath .githooks
+```
+
+Every contributor needs to run it once.
 
 ## Running Locally
 

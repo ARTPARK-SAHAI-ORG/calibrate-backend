@@ -46,7 +46,7 @@ docker build -t calibrate-backend .
 docker-compose up -d
 ```
 
-There is no test suite, linter, or formatter configured in `pyproject.toml`.
+There is a small **pytest** suite under **`tests/`** (dev deps: **`[dependency-groups] dev`** — `pytest`, `pytest-cov`). Run from repo root: **`uv run --group dev pytest`**. CI runs on push/PR to `main` (`.github/workflows/tests.yml`). Optional local hook: **`.githooks/pre-commit`** — enable with **`git config core.hooksPath .githooks`** (runs tests on **`main`** only when `.py`/`.json` are staged). There is no separate linter or formatter in `pyproject.toml`.
 
 ## Code Layout
 

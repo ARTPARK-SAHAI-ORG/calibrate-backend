@@ -1,0 +1,30 @@
+#!/usr/bin/env bash
+# Run the unit test suite before committing to main.
+# On other branches, do nothing.
+
+branch=$(git symbolic-ref --short HEAD 2>/dev/null)
+if [ "$branch" != "main" ]; then
+    exit 0
+fi
+
+# Only run tests when staged changes include .py or .json files.
+if ! git diff --cached --name-only --diff-filter=ACMR | grep -qE '\.(py|json)$'; then
+    echo "→ pre-commit: no .py or .json changes staged — skipping tests."
+    exit 0
+fi
+
+echo "→ pre-commit: running tests before committing to main..."
+
+if ! command -v uv >/dev/null 2>&1; then
+    echo "✗ uv not found on PATH — install uv or run 'uv run --group dev pytest' manually." >&2
+    exit 1
+fi
+
+if ! uv run --group dev pytest -q; then
+    echo ""
+    echo "✗ Tests failed. Commit aborted."
+    echo "  Fix the failures, or run 'git commit --no-verify' to bypass (not recommended on main)."
+    exit 1
+fi
+
+echo "✓ Tests passed."
