@@ -46,20 +46,34 @@ docker build -t calibrate-backend .
 docker-compose up -d
 ```
 
-There is a small **pytest** suite under **`tests/`** (dev deps: **`[dependency-groups] dev`** — `pytest`, `pytest-cov`). Run from repo root: **`uv run --group dev pytest`**. CI runs on push/PR to `main` (`.github/workflows/tests.yml`). Optional local hook: **`.githooks/pre-commit`** — enable with **`git config core.hooksPath .githooks`** (runs tests on **`main`** only when `.py`/`.json` are staged). There is no separate linter or formatter in `pyproject.toml`.
+A **pytest** suite lives under **`tests/`** (dev deps: **`[dependency-groups] dev`** — `pytest`, `pytest-cov`, `pre-commit`). Run from repo root: **`uv run --group dev pytest`**. Coverage is enabled by default via `pyproject.toml` (`--cov=src --cov-report=term-missing`); scope to a single file/test with **`uv run --group dev pytest tests/test_foo.py::test_bar -q`** or **`uv run --group dev pytest -k <pattern>`**. `tests/conftest.py` sets `DB_ROOT_DIR` to a tmp dir and seeds JWT/S3 env vars before importing any `src/` module, then initializes the schema once per session — individual tests use fresh UUIDs to stay isolated.
+
+CI runs on push/PR to `main` (`.github/workflows/tests.yml`) and uploads coverage to Codecov. Optional local hook: **`.githooks/pre-commit`** — enable with **`git config core.hooksPath .githooks`** (runs tests on **`main`** only when `.py`/`.json` are staged). There is no separate linter or formatter in `pyproject.toml`.
+
+## Testing Discipline (load-bearing)
+
+Treat tests as part of the feature, not an afterthought. The rules are non-negotiable:
+
+- **New feature ⇒ new tests.** Any new function, endpoint, router, helper, or branch added to `src/` must ship with tests that exercise it. Mirror the layout: `src/foo.py` → `tests/test_foo.py`; a new router endpoint extends the matching `tests/test_routers_*.py` file. If no test file fits, create one alongside the existing ones — do not bury new behavior inside an unrelated test.
+- **Modified feature ⇒ updated tests.** When you change behavior of existing code (bug fix, refactor, semantic change), update or add tests that pin the new behavior. If the existing test still passes after a real behavior change, the test is wrong — fix the test, don't silently lose the assertion.
+- **Verify before claiming done.** Before reporting any code change as working, run the tests that cover the changed code and confirm they pass. Run the *scoped* subset (the specific file or `-k` selector that hits your change), not the whole suite — full-suite runs are slow and reserved for pre-PR or pre-commit. Type checks and "the diff looks right" are not substitutes for an actual passing test run.
+- **No skipping or weakening tests to make them pass.** If a test fails after your change, the default assumption is the code is wrong, not the test. Only update an assertion when you have explicitly decided the old behavior was incorrect, and say so in the PR description.
+- **Background-thread / subprocess code needs a test seam.** Job runners spawn `calibrate` and threads — tests stub `subprocess.Popen` / monkeypatch the runner registry rather than really launching CLI processes. Follow the patterns in `test_run_tasks.py`, `test_job_recovery.py`, and `test_routers_*.py`.
 
 ## Code Layout
 
 All application code lives under `src/` and runs with `src/` as the working directory (see Dockerfile). Imports are flat (`from db import ...`, `from auth_utils import ...`) — there is no package namespace.
 
-- `src/main.py` — FastAPI app, lifespan hooks (job recovery on startup), custom HTTP-Basic-auth'd `/docs` routes, Sentry/OTEL setup
-- `src/db.py` — single-file SQLite layer (~3400 lines). All schema DDL, migrations (wrapped in `try/except sqlite3.OperationalError` — see architecture.md gotcha on `DEFAULT CURRENT_TIMESTAMP`), and CRUD. Soft deletes (`deleted_at IS NULL` filter) everywhere.
+- `src/main.py` — FastAPI app, lifespan hooks (job recovery on startup), custom HTTP-Basic-auth'd `/docs` routes, Sentry/OTEL setup, router wiring
+- `src/db.py` — single-file SQLite layer (~7000 lines). All schema DDL, migrations (wrapped in `try/except sqlite3.OperationalError` — see architecture.md gotcha on `DEFAULT CURRENT_TIMESTAMP`), and CRUD. Soft deletes (`deleted_at IS NULL` filter) everywhere.
 - `src/utils.py` — S3 helpers, presigned URLs, `build_tool_configs()`, process-group kill helpers, job-queue registry (`register_job_starter`, `can_start_*_job`, `try_start_queued_*_job`), `TaskStatus` enum, `is_job_timed_out()`, Sentry capture helper
 - `src/auth_utils.py` — JWT verification, `get_current_user_id` dependency, `require_superadmin`
 - `src/dataset_utils.py` — `resolve_dataset_inputs()` / `inject_dataset_item_ids()` shared by STT and TTS routers
 - `src/job_recovery.py` — on startup, kills orphaned process groups and restarts `in_progress` jobs
 - `src/llm_judge.py` — `{{variable}}` template rendering, OpenRouter-based judge invocation, and `build_evaluator_cli_payload()` that shapes linked evaluators into the dict sent to the calibrate CLI (STT/TTS/LLM tests/simulations all share this).
-- `src/routers/` — one file per resource. Each router registers a job starter via `register_job_starter(...)` at module load so `try_start_queued_*_job` can resume queued work.
+- `src/annotation_eval_runner.py` — background worker for annotation-task evaluator runs; routes LLM-judge work through the calibrate CLI's STT `--eval-only` mode so judge logic isn't duplicated.
+- `src/annotation_metrics.py` — human-vs-human and human-vs-evaluator agreement metrics for annotation tasks (pairwise mean agreement on shared rows; row-level overall has `evaluator_id=None`).
+- `src/routers/` — one file per resource: `auth`, `users`, `user_limits`, `datasets`, `personas`, `scenarios`, `agents`, `tools`, `agent_tools`, `tests`, `agent_tests`, `stt`, `tts`, `simulations`, `evaluators`, `annotators`, `annotation_tasks`, `annotation_agreement`, `jobs`, `public`. Each router registers a job starter via `register_job_starter(...)` at module load so `try_start_queued_*_job` can resume queued work. `public.py` bypasses auth by design — its routes are excluded from the auth middleware so anyone with a valid `share_token` can view shared results.
 
 ## Architectural Load-Bearing Facts
 
