@@ -2,7 +2,7 @@
 
 This guide walks you through self-hosting Calibrate's Backend on your infra. The self-hosting guide for the frontend can be found [here](https://github.com/ARTPARK-SAHAI-ORG/calibrate-frontend/blob/main/SELF_HOSTING.md).
 
-Pick your target cloud (AWS/GCP) and follow that section.
+Pick your target cloud (AWS/GCP) and follow that section. Before you start, make sure to `fork` this repo to your team's Github account.
 
 ## Contents
 
@@ -916,55 +916,3 @@ gcloud compute instances start calibrate-backend
 The `--device-name=appdata` is critical — it's what makes `/dev/disk/by-id/google-appdata` resolve, which `/etc/fstab` references. Without it the VM boots but `/appdata` stays unmounted.
 
 After confirming the restore is good, delete the old disk: `gcloud compute disks delete calibrate-appdata --zone=us-central1-a`.
-
-## GCP / Environment variable reference
-
-See [src/.env.example](src/.env.example) for the canonical list. GCP-specific guidance:
-
-| Var | Required? | GCP value |
-|---|---|---|
-| `IMAGE_NAME`, `IMAGE_TAG`, `CONTAINER_NAME`, `PORT` | **yes** | Compose interpolation |
-| `APP_FOLDER_PATH` | **yes** | `/appdata` (your mount point) |
-| `DB_ROOT_DIR` | **yes** | `/appdata` (in-container path) |
-| `JWT_SECRET_KEY` | **yes** | `openssl rand -base64 32` per tenant |
-| `S3_OUTPUT_BUCKET` | **yes** | Your GCS bucket name |
-| `S3_ENDPOINT_URL` | **yes** | `https://storage.googleapis.com` |
-| `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY` | **yes** | HMAC keys from step 7e |
-| `AWS_REGION` | **yes** | `auto` (GCS ignores it; boto3 needs *something*) |
-| `SUPERADMIN_EMAIL` | **yes** | For mutating user-limit endpoints |
-| `DEFAULT_USER_EMAIL` / `..._FIRST_NAME` / `..._LAST_NAME` | **yes** | Seeded user |
-| `GOOGLE_CLIENT_ID` | yes for OAuth | OAuth client ID for sign-in |
-| `OPENROUTER_API_KEY` | yes for evaluators | Used by `POST /evaluators/{uuid}/invoke` |
-| `OPENAI_API_KEY` and other provider keys | depends | Only what the tenant uses |
-| `CORS_ALLOWED_ORIGINS` | recommended | **Frontend origin(s)**, comma-separated (e.g. `https://app.tenant.example.com`). NOT the backend URL — CORS gates browser-tab origins, not the API itself |
-| `DOCS_USERNAME` / `DOCS_PASSWORD` | recommended | HTTP Basic auth on `/docs` |
-| `MAX_CONCURRENT_JOBS` etc. | optional | Tune for VM size |
-| `SENTRY_DSN` | recommended | Background-thread failures route through this |
-
-> **When adding/changing/removing env vars:** update [src/.env.example](src/.env.example), [docker-compose.yml](docker-compose.yml), and the deploy workflows together. See `.cursor/rules/env-var.md`.
-
----
-
-## Architecture decisions
-
-### Why a VM, not Cloud Run / ECS Fargate / Lambda
-
-Three properties of this app rule out serverless containers:
-
-1. **SQLite on a local volume.** Single-writer, file-system-bound. Multi-instance containers would corrupt it. (See `${APP_FOLDER_PATH}:/appdata` in `docker-compose.yml`.)
-2. **Long-running `calibrate` subprocesses with process groups** — `os.killpg`, `start_new_session=True`, 5-minute timeout checks, abort signals. Needs a real OS, not a request-scoped sandbox.
-3. **Temp-file-based intermediate results** that must persist for the lifetime of a job (CLAUDE.md: "STT/TTS intermediate results are disk-only").
-
-So the recommended deployment is a **single VM running Docker Compose** — EC2 on AWS, GCE on GCP. Identical container, identical compose file, different host.
-
-### What goes on the persistent disk
-
-Only the SQLite file (`pense.db` under `DB_ROOT_DIR`, mounted at `/appdata` inside the container).
-
-Everything else is ephemeral:
-
-- **Audio uploads** never touch the server's disk. Clients `PUT` directly to object storage via presigned URLs from `POST /presigned-url`. The DB stores only the resulting `s3://bucket/key` reference.
-- **Intermediate job artifacts** (calibrate CLI outputs, configs, generated audio, conversation `.wav`s) are written into `tempfile.TemporaryDirectory()` blocks. The backend uploads them to object storage from there; the temp dir is GC'd on context exit.
-- **Subprocess stdout/stderr logs** also use `NamedTemporaryFile`.
-
-So: **persistent disk = SQLite. Object storage = everything else.** A 20–50 GB persistent disk is plenty.
