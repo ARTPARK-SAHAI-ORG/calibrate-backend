@@ -15,7 +15,7 @@ End-to-end walkthrough on AWS (EC2 + S3). Substitute `<region>` with your AWS re
 
 > The existing AWS production deploy is fully automated by [.github/workflows/deploy.yml](.github/workflows/deploy.yml). For a brand-new tenant on AWS, you provision the infra once (steps 1–7 below), then add a GitHub Actions environment with your secrets and trigger that workflow for subsequent deploys. The first-time provisioning is the part this section walks through.
 
-## 1. Create the S3 bucket
+## Create the S3 bucket
 
 An S3 bucket is used to store the results of all your evals and media files. Create one and name it `calibrate-backend-artifacts`. Ensure to block all public access for the S3 bucket as the app uses presigned URLs for client access.
 
@@ -42,7 +42,7 @@ Update the CORS permissions for your bucket:
 
 Keep it stricter is you need to.
 
-## 2. Create an IAM role for the EC2 instance
+## Create an IAM role for the EC2 instance
 
 Go to **IAM → Roles → Create role**.
 
@@ -50,29 +50,31 @@ Go to **IAM → Roles → Create role**.
 2. **Permissions**: skip attaching managed policies for now, click Next, name it `calibrate-backend-ec2`, create.
 3. Open the role → **Add permissions → Create inline policy** → JSON tab. Paste an S3 policy scoped to `calibrate-backend-artifacts` (Get/Put/Delete/ListBucket on the bucket and `/*`). Name it `calibrate-bucket-access`.
 
-## 3. Create the security group
+## Launch an EC2 instance
 
-Go to **VPC → Security groups → Create security group** (or do it inline during EC2 launch).
+Attach the `calibrate-backend-ec2` role to the instance.
 
-1. **Name**: `calibrate-backend-sg`. **VPC**: your default VPC.
-2. **Inbound rules** → Add rule:
+Update the **Inbound rules** for the security group attached to the instance.
    - HTTP (80), Source `0.0.0.0/0`
    - HTTPS (443), Source `0.0.0.0/0`
-3. Leave outbound as default (all traffic).
 
-## 4. Create an EBS volume
+Increase the size of the volume attached to the EC2 instance. 50 GB is good enough to begin. Increase it later as usage increases. 
 
-This will be attached to the instance and the SQLite DB file will be stored on it. 100 GB is generous to begin with. Increase later as needed.
+Allocate and associate an Elastic IP with the instance too.
 
-## 5. Launch the EC2 instance
+## SSH and create the root directory for the database
 
-Attach the `calibrate-backend-ec2` role, the security group and the EBS volume created in the previous steps to the instance. Allocate and associate an Elastic IP with the instance too which will be the stable public address for your instance.
+Calibrate uses SQLite as the DB. The db file is stored on the root volume attached to the EC2. 
 
-## 6. SSH into your instance
+```
+ssh -i <your-key>.pem ubuntu@<ELASTIC_IP>
+sudo mkdir /appdata
+sudo chown -R $USER /appdata
+```
 
-## 7. Install Docker
+## Install Docker
 
-## 8. Clone the repo and build the image
+## Clone the repo and build the image
 
 ```bash
 sudo apt-get update && sudo apt-get install -y git    # or: sudo dnf install -y git
@@ -83,7 +85,7 @@ docker build -t calibrate-backend:local .
 
 Takes 5–15 minutes the first time.
 
-## 9. Create the `.env` file
+## Create the `.env` file
 
 ```bash
 cd ~/calibrate-backend
@@ -164,9 +166,11 @@ openssl rand -base64 32
 
 Update the default values given above as needed. For example, You might want to set the `SUPERADMIN_EMAIL` to an email address you own. Set the API keys for different providers (e.g. OpenRouter, OpenAI, etc.). Set the `GOOGLE_CLIENT_ID` to the same value as the one used for self-hosting the frontend.
 
+If you used a different name other than `/appdata` in the `SSH and create the root directory for the database` step, update `APP_FOLDER_PATH` and `DB_ROOT_DIR` in the `.env` file accordingly.
+
 Refer to [ENV.md](./ENV.md) for the full list of environment variables and their description.
 
-## 10. Start the app
+## Start the app
 
 ```bash
 docker compose up -d
@@ -175,19 +179,23 @@ docker compose logs -f
 
 Watch for `Uvicorn running on http://0.0.0.0:8000`. Ctrl-C the log tail.
 
-## 11. Verify it works
+## Verify it works
 
 Open `http://<INSTANCE_ELASTIC_IP>:8000/docs` on your browser. It should load the FastAPI docs for the server.
 
-## 12. Moving from HTTP to HTTPS
+## Move from HTTP to HTTPS
 
 Use nginx to route your custom domain (e.g. calibrate-backend.<yourdomain.com>) to the server. Use certbot to make the connection secure using HTTPs. 
 
-## 13. Verify everything works
+## Verify everything works
 
 Open `https://<YOUR_DOMAIN>/docs` on your browser. It should load the FastAPI docs for the server.
 
 If you frontend is set up, [create a new speech-to-text dataset](https://calibrate.artpark.ai/docs/core-concepts/speech-to-text#create-a-dataset) and upload one audio. If it uploads successfully, your S3 connection works.
+
+## Optional but recommended
+
+Set up periodic backups to S3 so that if the container crashes for some reason, the data is not lost.
 
 # Deploy on GCP
 
