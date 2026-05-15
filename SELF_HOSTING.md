@@ -195,7 +195,7 @@ Open `http://<INSTANCE_ELASTIC_IP>:8000/docs` on your browser. It should load th
 
 ## Move from HTTP to HTTPS
 
-Use nginx to route your custom domain (e.g. calibrate-backend.<yourdomain.com>) to the server. Use certbot to make the connection secure using HTTPs. 
+Use nginx to route your custom domain (e.g. calibrate-backend.<yourdomain.com>) to the server. Use certbot to make the connection secure using HTTPS. 
 
 ## Verify everything works
 
@@ -428,34 +428,7 @@ Open `http://<STATIC_IP>/docs` on your browser. It should load the FastAPI docs.
 
 ## Moving from HTTP to HTTPS
 
-Use Caddy (or nginx + certbot) to route your custom domain (e.g. `calibrate-backend.<yourdomain.com>`) to the server. Caddy is one binary, one config line per domain, automatic Let's Encrypt cert provisioning and renewal:
-
-```bash
-sudo apt-get install -y debian-keyring debian-archive-keyring apt-transport-https curl
-curl -fsSL https://dl.cloudsmith.io/public/caddy/stable/gpg.key | sudo gpg --dearmor -o /usr/share/keyrings/caddy-stable-archive-keyring.gpg
-curl -fsSL https://dl.cloudsmith.io/public/caddy/stable/debian.deb.txt | sudo tee /etc/apt/sources.list.d/caddy-stable.list
-sudo apt-get update && sudo apt-get install -y caddy
-```
-
-Move the container off port 80 so Caddy can take it for TLS termination:
-
-```bash
-sed -i 's/^PORT=80$/PORT=8000/' .env
-docker compose up -d
-```
-
-Configure and start:
-
-```bash
-sudo tee /etc/caddy/Caddyfile <<'EOF'
-calibrate-backend.<yourdomain.com> {
-    reverse_proxy localhost:8000
-}
-EOF
-sudo systemctl restart caddy
-```
-
-Keep port 80 open in the firewall — Caddy uses HTTP-01 challenges for cert renewal every 60 days.
+Use nginx to route your custom domain (e.g. calibrate-backend.<yourdomain.com>) to the server. Use certbot to make the connection secure using HTTPS. 
 
 ## Verify everything works
 
