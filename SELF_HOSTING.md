@@ -183,7 +183,7 @@ Open `http://<INSTANCE_ELASTIC_IP>:8000/docs` on your browser. It should load th
 
 Use nginx to route your custom domain (e.g. calibrate-backend.<yourdomain.com>) to the server. Use certbot to make the connection secure using HTTPs. 
 
-### 13. Verify everything works
+## 13. Verify everything works
 
 Open `https://<YOUR_DOMAIN>/docs` on your browser. It should load the FastAPI docs for the server.
 
