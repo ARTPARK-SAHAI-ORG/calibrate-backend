@@ -55,16 +55,17 @@ Go to **IAM → Roles → Create role**.
 Attach the `calibrate-backend-ec2` role to the instance.
 
 Update the **Inbound rules** for the security group attached to the instance.
-   - HTTP (80), Source `0.0.0.0/0`
-   - HTTPS (443), Source `0.0.0.0/0`
 
-Increase the size of the volume attached to the EC2 instance. 50 GB is good enough to begin. Increase it later as usage increases. 
+- HTTP (80), Source `0.0.0.0/0`
+- HTTPS (443), Source `0.0.0.0/0`
+
+Increase the size of the volume attached to the EC2 instance. 50 GB is good enough to begin. Increase it later as usage increases.
 
 Allocate and associate an Elastic IP with the instance too.
 
 ## SSH and create the root directory for the database
 
-Calibrate uses SQLite as the DB. The db file is stored on the root volume attached to the EC2. 
+Calibrate uses SQLite as the DB. The db file is stored on the root volume attached to the EC2.
 
 ```
 ssh -i <your-key>.pem ubuntu@<ELASTIC_IP>
@@ -195,7 +196,7 @@ Open `http://<INSTANCE_ELASTIC_IP>:8000/docs` on your browser. It should load th
 
 ## Move from HTTP to HTTPS
 
-Use nginx to route your custom domain (e.g. calibrate-backend.<yourdomain.com>) to the server. Use certbot to make the connection secure using HTTPS. 
+Use nginx to route your custom domain (e.g. calibrate-backend.<yourdomain.com>) to the server. Use certbot to make the connection secure using HTTPS.
 
 ## Verify everything works
 
@@ -203,9 +204,9 @@ Open `https://<YOUR_DOMAIN>/docs` on your browser. It should load the FastAPI do
 
 If you frontend is set up, [create a new speech-to-text dataset](https://calibrate.artpark.ai/docs/core-concepts/speech-to-text#create-a-dataset) and upload one audio. If it uploads successfully, your S3 connection works.
 
-## Optional but recommended
+## Set up EBS snapshots
 
-Set up periodic backups to S3 so that if the container crashes for some reason, the data is not lost.
+The SQLite DB lives on the EBS volume. If the volume gets corrupted, accidentally deleted, or the AZ goes down, you lose all tenant state. Schedule daily snapshots using the Data Lifecycle Manager or AWS Backup.
 
 # Deploy on GCP
 
@@ -215,23 +216,15 @@ End-to-end walkthrough on Google Cloud (Compute Engine + GCS). Substitute `<proj
 
 A GCS bucket is used to store the results of all your evals and media files. The codebase talks to it via the S3 protocol (boto3 with a custom endpoint), so HMAC keys are required.
 
-Go to **Cloud Storage → Buckets → Create**.
+Go to **Cloud Storage → Buckets → Create** and step through the wizard:
 
-1. **Name**: `calibrate-backend-artifacts`. **Location**: your region. **Access control**: Uniform.
-2. **Public access prevention**: enforced (the app uses presigned URLs for client access).
-3. After creation → **Protection** tab → enable **Object versioning** (recoverable from accidental overwrites/deletes).
-4. **Permissions** tab → **Configure CORS** (only needed if the browser uploads to GCS directly from a different origin):
+1. **Name**: `calibrate-backend-artifacts`.
+2. **Location type**: **Region** (not the default Multi-region). **Location**: same region you'll use for the VM.
+3. **Storage class**: Standard. Leave Hierarchical namespace and Rapid Cache unchecked.
+4. **Access control**: Uniform. **Public access prevention**: enforced.
+5. **Protection**: keep Soft delete on (default 7 days). Enable Object versioning. Leave Retention off. Encryption: default.
 
-```json
-[
-  {
-    "origin": ["*"],
-    "method": ["GET", "PUT", "POST"],
-    "responseHeader": ["Content-Type", "Authorization", "x-goog-resumable"],
-    "maxAgeSeconds": 3600
-  }
-]
-```
+Click **Create**.
 
 Keep it stricter if you need to.
 
@@ -266,8 +259,10 @@ Leave it unformatted; formatting happens on the VM after attach.
 
 Create a new Compute Engine instance. Keep the following in mind:
 
-1. **Networking → Network tags**: add `http-server` and `https-server`.
-2. **Advanced → Disks → Attach existing disk**: pick `calibrate-appdata`, set **Device name** to `appdata`.
+1. **Machine configuration**: **E2** series, `e2-standard-4` (4 vCPU, 16 GB). Cheapest option that handles the default `MAX_CONCURRENT_JOBS=1` with headroom. Bump to `e2-standard-8` if you raise concurrency or run heavy benchmarks.
+2. **Networking → Network tags**: add `http-server` and `https-server`.
+3. **Advanced → Disks → Attach existing disk**: pick `calibrate-appdata`, set **Device name** to `appdata`.
+4. **Advanced → Backups → Snapshot schedules**: Set up daily backups.
 
 ## Reserve and attach a static IP
 
@@ -428,7 +423,7 @@ Open `http://<STATIC_IP>/docs` on your browser. It should load the FastAPI docs.
 
 ## Moving from HTTP to HTTPS
 
-Use nginx to route your custom domain (e.g. calibrate-backend.<yourdomain.com>) to the server. Use certbot to make the connection secure using HTTPS. 
+Use nginx to route your custom domain (e.g. calibrate-backend.<yourdomain.com>) to the server. Use certbot to make the connection secure using HTTPS.
 
 ## Verify everything works
 
