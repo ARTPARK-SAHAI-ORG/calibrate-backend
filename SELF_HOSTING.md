@@ -208,6 +208,52 @@ If you frontend is set up, [create a new speech-to-text dataset](https://calibra
 
 The SQLite DB lives on the EBS volume. If the volume gets corrupted, accidentally deleted, or the AZ goes down, you lose all tenant state. Schedule daily snapshots using the Data Lifecycle Manager or AWS Backup.
 
+## Automate deployments with GitHub Actions
+
+The repo ships with [.github/workflows/deploy.yml](.github/workflows/deploy.yml) and [.github/workflows/deploy-staging.yml](.github/workflows/deploy-staging.yml). Both build the Docker image, push to Docker Hub, SSH onto the VM, and run `docker compose pull && up -d`.
+
+### 1. SSH key the workflow can use
+
+You already have one from launching the EC2 instance (`<your-key>.pem`). Use that, or generate a dedicated key:
+
+```bash
+# On your laptop — generate a dedicated key (don't reuse your personal one)
+ssh-keygen -t ed25519 -f ~/.ssh/calibrate-deploy -C "calibrate-deploy" -N ""
+
+# Append the public key to the EC2 instance's authorized_keys
+ssh -i <your-key>.pem ubuntu@<ELASTIC_IP> \
+  "echo '$(cat ~/.ssh/calibrate-deploy.pub)' >> ~/.ssh/authorized_keys"
+```
+
+Test from your laptop: `ssh -i ~/.ssh/calibrate-deploy ubuntu@<ELASTIC_IP>` should log you in.
+
+### 2. Set GitHub Actions environment secrets
+
+Go to **GitHub → Repo settings → Environments → New environment** named `Production` (or `Staging`). Create new secrets for the environment variables you set in the `.env` file along with the following:
+
+| Secret                                        | Value                                                                       |
+| --------------------------------------------- | --------------------------------------------------------------------------- |
+| `VM_HOST`                                     | The EC2 instance's Elastic IP                                               |
+| `VM_USER`                                     | `ubuntu` (or `ec2-user` for Amazon Linux)                                   |
+| `VM_SSH_KEY`                                  | Contents of the private key (`<your-key>.pem` or `~/.ssh/calibrate-deploy`) |
+| `DOCKERHUB_USERNAME` / `DOCKERHUB_PASSWORD`   | Docker Hub credentials for image push                                       |
+| Provider API keys (`OPENROUTER_API_KEY` etc.) | As needed                                                                   |
+| `SENTRY_*`, `LANGFUSE_*`, etc.                | Optional                                                                    |
+
+Leave `S3_ENDPOINT_URL`, `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY` empty (or unset) — the IAM instance role on the EC2 provides S3 credentials automatically.
+
+### 3. Trigger a deploy
+
+GitHub → **Actions** → **Deploy to Production** → **Run workflow** → choose the branch → Run.
+
+Watch the run. If SSH connects and `docker compose up -d` succeeds, you're set — subsequent deploys are one click.
+
+### Common gotchas
+
+- **Security group**: port 22 must be open to the GitHub Actions runner. Either keep it open to `0.0.0.0/0` or restrict to GitHub's runner IP ranges (changes periodically — keep an eye on [GitHub's meta endpoint](https://api.github.com/meta)).
+- **First deploy** still requires the manual `docker build` you did locally — the workflow expects the image already in Docker Hub. Push it once: `docker tag calibrate-backend:local <your-dockerhub-user>/calibrate-backend:latest && docker push <your-dockerhub-user>/calibrate-backend:latest`. Subsequent deploys build + push automatically.
+- **Compose project name**: the workflow uses `docker compose -p pense-production` for project isolation. If you started the container manually with a different project name, the workflow will spin up a parallel container instead of replacing yours — stop the old one with `docker compose down` once the workflow is green.
+
 # Deploy on GCP
 
 End-to-end walkthrough on Google Cloud (Compute Engine + GCS). Substitute `<project-id>` with your GCP project ID and `<region>`/`<zone>` with your target (e.g. `us-central1` / `us-central1-a`).
@@ -457,29 +503,16 @@ Test from your laptop: `ssh -i ~/.ssh/calibrate-deploy ubuntu@<STATIC_IP>` shoul
 
 ### 2. Set GitHub Actions environment secrets
 
-Go to **GitHub → Repo settings → Environments → New environment** named `Production` (or `Staging`). Add these secrets:
+Go to **GitHub → Repo settings → Environments → New environment** named `Production` (or `Staging`). Create new secrets for the environment variables you set in the `.env` file along with the following:
 
-| Secret | Value |
-|---|---|
-| `VM_HOST` | The VM's static IP |
-| `VM_USER` | `ubuntu` (or whatever username matches the SSH key) |
-| `VM_SSH_KEY` | Contents of `~/.ssh/calibrate-deploy` (the **private** key) |
-| `DOCKERHUB_USERNAME` / `DOCKERHUB_PASSWORD` | Docker Hub credentials for image push |
-| `IMAGE_NAME` / `CONTAINER_NAME` / `PORT` | Match your `.env` on the VM |
-| `APP_FOLDER_PATH` / `DB_ROOT_DIR` | `/appdata` |
-| `JWT_SECRET_KEY` | Same as on the VM |
-| `S3_ENDPOINT_URL` | `https://storage.googleapis.com` |
-| `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY` | HMAC keys |
-| `AWS_REGION` | `auto` |
-| `S3_OUTPUT_BUCKET` | Your GCS bucket name |
-| `GOOGLE_CLIENT_ID` | OAuth client ID |
-| `SUPERADMIN_EMAIL` / `DEFAULT_USER_*` | Same as on the VM |
-| `DOCS_USERNAME` / `DOCS_PASSWORD` | Same as on the VM |
-| Provider API keys (`OPENROUTER_API_KEY` etc.) | As needed |
-| `SENTRY_*`, `LANGFUSE_*`, etc. | Optional |
-| `MAX_CONCURRENT_JOBS` / `MAX_CONCURRENT_JOBS_PER_USER` / `DEFAULT_MAX_ROWS_PER_EVAL` | Match your `.env` |
-
-Plus environment **variable** (not secret): `IMAGE_TAG` = `latest` (or whatever tag you want pushed).
+| Secret                                        | Value                                                       |
+| --------------------------------------------- | ----------------------------------------------------------- |
+| `VM_HOST`                                     | The VM's static IP                                          |
+| `VM_USER`                                     | `ubuntu` (or whatever username matches the SSH key)         |
+| `VM_SSH_KEY`                                  | Contents of `~/.ssh/calibrate-deploy` (the **private** key) |
+| `DOCKERHUB_USERNAME` / `DOCKERHUB_PASSWORD`   | Docker Hub credentials for image push                       |
+| Provider API keys (`OPENROUTER_API_KEY` etc.) | As needed                                                   |
+| `SENTRY_*`, `LANGFUSE_*`, etc.                | Optional                                                    |
 
 ### 3. Trigger a deploy
 
