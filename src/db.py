@@ -6032,7 +6032,7 @@ def get_annotation_items_for_task(task_id: str) -> List[Dict[str, Any]]:
             """
             SELECT * FROM annotation_items
              WHERE task_id = ? AND deleted_at IS NULL
-             ORDER BY id ASC
+             ORDER BY id DESC
             """,
             (task_id,),
         )
