@@ -3762,11 +3762,13 @@ def get_evaluators_by_uuids(
 
 
 def get_evaluator_uuid_for_legacy_metric(metric_uuid: str) -> Optional[str]:
-    """If `metric_uuid` is a migrated legacy `metrics.uuid`, return the new evaluator row UUID.
-
-    Migration stores the old metric id in `evaluators.source_metric_uuid` and assigns a fresh
-    evaluator primary key — clients must use the evaluator UUID, not the metric UUID.
-    """
+    """On DBs where the legacy metrics→evaluators migration previously ran,
+    returns the new evaluator's UUID for a given old `metrics.uuid`. New DBs
+    have no migrated rows (the migration was removed in PR #52), so this
+    returns None. Kept for the friendly 400 error surfaced by
+    `simulations.py` when a caller passes a legacy metric UUID instead of an
+    evaluator UUID — clients on older deployments may still have the old id
+    lying around."""
     with get_db_connection() as conn:
         cursor = conn.cursor()
         cursor.execute(
