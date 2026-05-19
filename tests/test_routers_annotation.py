@@ -576,6 +576,138 @@ def test_delete_annotation_job(client):
     assert again.status_code == 404
 
 
+def test_bulk_delete_annotation_jobs(client):
+    """Bulk soft-delete labelling jobs. Verify silent-skip for foreign /
+    already-deleted / unknown UUIDs, non-empty enforcement, and that the
+    cascade through `j.deleted_at IS NULL` removes the deleted jobs'
+    annotations from agreement output."""
+    auth = _signup(client)
+    h = auth["headers"]
+    llm_ev = _llm_evaluator(client, h)
+    task_uuid = client.post(
+        "/annotation-tasks",
+        json={
+            "name": f"t-{uuid.uuid4().hex[:6]}",
+            "type": "llm",
+            "evaluator_ids": [llm_ev["uuid"]],
+        },
+        headers=h,
+    ).json()["uuid"]
+    items = client.post(
+        f"/annotation-tasks/{task_uuid}/items",
+        json={"items": [{"payload": {"name": "i1"}}]},
+        headers=h,
+    ).json()["item_ids"]
+
+    # Three annotators on the same slot, all agreeing → pre-delete agreement is 1.0
+    ann_uuids = []
+    for _ in range(3):
+        a = client.post(
+            "/annotators", json={"name": f"a-{uuid.uuid4().hex[:6]}"}, headers=h
+        ).json()
+        ann_uuids.append(a["uuid"])
+    created = client.post(
+        f"/annotation-tasks/{task_uuid}/jobs",
+        json={"annotator_ids": ann_uuids, "item_ids": items},
+        headers=h,
+    ).json()["jobs"]
+    for job in created:
+        client.post(
+            f"/public/annotation-jobs/{job['public_token']}/annotations",
+            json={
+                "item_id": items[0],
+                "annotations": [
+                    {"evaluator_id": llm_ev["uuid"], "value": {"value": True}},
+                ],
+            },
+        )
+
+    import db as db_mod
+    from annotation_metrics import aggregate_agreement
+
+    pre_pairwise, _ = aggregate_agreement(db_mod.get_annotations_for_task(task_uuid))
+    assert pre_pairwise == 1.0
+
+    # Empty payload → 400
+    empty = client.request(
+        "DELETE",
+        f"/annotation-tasks/{task_uuid}/jobs",
+        json={"job_uuids": []},
+        headers=h,
+    )
+    assert empty.status_code == 400
+
+    # Foreign task: ensure jobs in a different task are silently skipped
+    other_task = client.post(
+        "/annotation-tasks",
+        json={
+            "name": f"t-{uuid.uuid4().hex[:6]}",
+            "type": "llm",
+            "evaluator_ids": [llm_ev["uuid"]],
+        },
+        headers=h,
+    ).json()["uuid"]
+    other_items = client.post(
+        f"/annotation-tasks/{other_task}/items",
+        json={"items": [{"payload": {"name": "x"}}]},
+        headers=h,
+    ).json()["item_ids"]
+    other_ann = client.post(
+        "/annotators", json={"name": f"x-{uuid.uuid4().hex[:6]}"}, headers=h
+    ).json()
+    other_job = client.post(
+        f"/annotation-tasks/{other_task}/jobs",
+        json={"annotator_ids": [other_ann["uuid"]], "item_ids": other_items},
+        headers=h,
+    ).json()["jobs"][0]
+
+    # Delete two of the three jobs in `task_uuid`, mixed in with an unknown
+    # UUID and a foreign-task UUID. Expect deleted_count=2.
+    targets = [created[0]["uuid"], created[1]["uuid"], "missing", other_job["uuid"]]
+    bulk = client.request(
+        "DELETE",
+        f"/annotation-tasks/{task_uuid}/jobs",
+        json={"job_uuids": targets},
+        headers=h,
+    )
+    assert bulk.status_code == 200
+    assert bulk.json()["deleted_count"] == 2
+
+    # Foreign job is untouched
+    assert (
+        client.get(
+            f"/annotation-tasks/{other_task}/jobs/{other_job['uuid']}", headers=h
+        ).status_code
+        == 200
+    )
+
+    # Only one annotator left → no pairwise overlap → None.
+    post_pairwise, _ = aggregate_agreement(
+        db_mod.get_annotations_for_task(task_uuid)
+    )
+    assert post_pairwise is None
+
+    # Re-running with the same payload now transitions zero rows.
+    again = client.request(
+        "DELETE",
+        f"/annotation-tasks/{task_uuid}/jobs",
+        json={"job_uuids": targets},
+        headers=h,
+    )
+    assert again.status_code == 200
+    assert again.json()["deleted_count"] == 0
+
+    # Non-owner gets 404 on the task scope (not 403).
+    other_auth = _signup(client)
+    forbidden = client.request(
+        "DELETE",
+        f"/annotation-tasks/{task_uuid}/jobs",
+        json={"job_uuids": [created[2]["uuid"]]},
+        headers=other_auth["headers"],
+    )
+    assert forbidden.status_code == 404
+
+
 def test_annotated_check(client):
     auth = _signup(client)
     h = auth["headers"]

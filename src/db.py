@@ -6009,6 +6009,31 @@ def soft_delete_annotation_items(task_id: str, item_uuids: List[str]) -> int:
         return cursor.rowcount
 
 
+def bulk_soft_delete_annotation_jobs(task_id: str, job_uuids: List[str]) -> int:
+    """Soft-delete annotation jobs belonging to `task_id`. UUIDs not in this
+    task, or already deleted, are silently skipped — mirrors
+    `soft_delete_annotation_items`. Returns rows transitioned. The downstream
+    cascade is identical to `soft_delete_annotation_job`: each affected job's
+    annotations stop appearing in every read path that joins
+    `annotation_jobs` with `j.deleted_at IS NULL`."""
+    if not job_uuids:
+        return 0
+    placeholders = ",".join("?" for _ in job_uuids)
+    with get_db_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            f"""
+            UPDATE annotation_jobs
+               SET deleted_at = CURRENT_TIMESTAMP
+             WHERE task_id = ? AND deleted_at IS NULL
+               AND uuid IN ({placeholders})
+            """,
+            [task_id, *job_uuids],
+        )
+        conn.commit()
+        return cursor.rowcount
+
+
 def soft_delete_annotation_job(job_uuid: str) -> bool:
     """Soft-delete a single annotation_jobs row. Used by the bulk-upload
     rollback path when a snapshot mismatch is detected after the job has

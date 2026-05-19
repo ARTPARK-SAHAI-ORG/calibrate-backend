@@ -26,6 +26,7 @@ from db import (
     bulk_update_annotation_items,
     soft_delete_annotation_items,
     soft_delete_annotation_job,
+    bulk_soft_delete_annotation_jobs,
     get_annotation_items_for_task,
     get_annotation_item,
     create_annotation_job,
@@ -920,6 +921,28 @@ async def get_annotation_job_endpoint(
         raise HTTPException(status_code=404, detail="Job not found")
     job["items"] = get_job_items(job_uuid)
     return job
+
+
+class BulkDeleteJobsRequest(BaseModel):
+    job_uuids: List[str]
+
+
+@router.delete("/{task_uuid}/jobs")
+async def bulk_delete_annotation_jobs_endpoint(
+    task_uuid: str,
+    payload: BulkDeleteJobsRequest,
+    user_id: str = Depends(get_current_user_id),
+):
+    """Soft-delete one or more labelling jobs in a task. UUIDs not in this
+    task (or already deleted) are skipped silently; `deleted_count` reflects
+    how many rows actually transitioned. Cascade matches the single-delete
+    sibling: each deleted job's annotations drop out of every annotation read
+    via the `j.deleted_at IS NULL` join filter."""
+    _ensure_owned_task(task_uuid, user_id)
+    if not payload.job_uuids:
+        raise HTTPException(status_code=400, detail="job_uuids must be non-empty")
+    deleted_count = bulk_soft_delete_annotation_jobs(task_uuid, payload.job_uuids)
+    return {"deleted_count": deleted_count}
 
 
 @router.delete("/{task_uuid}/jobs/{job_uuid}")
