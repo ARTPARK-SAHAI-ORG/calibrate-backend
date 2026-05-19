@@ -2551,8 +2551,7 @@ def list_organization_members(org_uuid: str) -> List[Dict[str, Any]]:
         cursor.execute(
             """
             SELECT m.user_id, m.role, m.created_at,
-                   u.email, u.first_name, u.last_name,
-                   (u.password_hash IS NOT NULL) AS has_logged_in
+                   u.email, u.first_name, u.last_name
               FROM organization_members m
               JOIN users u ON u.uuid = m.user_id
              WHERE m.org_uuid = ? AND m.deleted_at IS NULL
@@ -2560,12 +2559,7 @@ def list_organization_members(org_uuid: str) -> List[Dict[str, Any]]:
             """,
             (org_uuid,),
         )
-        out = []
-        for r in cursor.fetchall():
-            d = dict(r)
-            d["has_logged_in"] = bool(d.get("has_logged_in"))
-            out.append(d)
-        return out
+        return [dict(r) for r in cursor.fetchall()]
 
 
 def add_organization_member(

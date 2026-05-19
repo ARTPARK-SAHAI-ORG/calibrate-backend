@@ -124,7 +124,6 @@ def test_add_existing_user_as_member(client):
     assert resp.status_code == 201
     body = resp.json()
     assert body["role"] == "admin"
-    assert body["has_logged_in"] is True
 
     # Invitee now sees the org in their list
     listing = client.get("/organizations", headers=member_auth["headers"]).json()
@@ -186,7 +185,6 @@ def test_invite_unregistered_email_creates_stub_user(client):
         headers=owner["headers"],
     )
     assert resp.status_code == 201, resp.text
-    assert resp.json()["has_logged_in"] is False
 
     # Now stub user signs up via password — should hydrate, not 409, and on
     # login they should see the pre-invited org.

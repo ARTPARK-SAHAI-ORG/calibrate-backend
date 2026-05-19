@@ -54,7 +54,6 @@ class MemberResponse(BaseModel):
     first_name: str
     last_name: str
     role: str
-    has_logged_in: bool
     created_at: str
 
 
