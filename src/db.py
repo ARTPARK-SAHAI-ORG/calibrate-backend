@@ -1042,68 +1042,12 @@ def init_db():
         except sqlite3.OperationalError:
             pass
 
-        # Per-org unique-name partial indexes. One org can't have two live
-        # (non-soft-deleted) rows with the same name. Soft-deleted rows are
-        # exempt — required so the same name can be re-used after delete.
-        #
-        # Belt-and-braces with the API-layer 409 checks: catches TOCTOU
-        # races between two concurrent creates, direct DB inserts (seed
-        # scripts, manual repairs), and any future endpoint that forgets
-        # the check. The DB constraint is the source of truth.
-        #
-        # The pre-multi-tenant indexes (idx_*_user_name_active, scoped by
-        # user_id) are dropped here so they don't keep enforcing the old
-        # per-user scope after the access boundary flips to per-org.
-        for old_idx in (
-            "idx_tests_user_name_active",
-            "idx_agents_user_name_active",
-            "idx_tools_user_name_active",
-            "idx_personas_user_name_active",
-            "idx_scenarios_user_name_active",
-            "idx_simulations_user_name_active",
-            "idx_annotation_tasks_user_name_active",
-            "idx_annotators_user_name_active",
-            "idx_evaluators_owner_name_active",
-        ):
-            try:
-                cursor.execute(f"DROP INDEX IF EXISTS {old_idx}")
-            except sqlite3.OperationalError:
-                pass
-
-        for stmt in (
-            "CREATE UNIQUE INDEX IF NOT EXISTS idx_tests_org_name_active "
-            "ON tests(org_uuid, name) WHERE deleted_at IS NULL",
-            "CREATE UNIQUE INDEX IF NOT EXISTS idx_agents_org_name_active "
-            "ON agents(org_uuid, name) WHERE deleted_at IS NULL",
-            "CREATE UNIQUE INDEX IF NOT EXISTS idx_tools_org_name_active "
-            "ON tools(org_uuid, name) WHERE deleted_at IS NULL",
-            "CREATE UNIQUE INDEX IF NOT EXISTS idx_personas_org_name_active "
-            "ON personas(org_uuid, name) WHERE deleted_at IS NULL",
-            "CREATE UNIQUE INDEX IF NOT EXISTS idx_scenarios_org_name_active "
-            "ON scenarios(org_uuid, name) WHERE deleted_at IS NULL",
-            "CREATE UNIQUE INDEX IF NOT EXISTS idx_simulations_org_name_active "
-            "ON simulations(org_uuid, name) WHERE deleted_at IS NULL",
-            "CREATE UNIQUE INDEX IF NOT EXISTS idx_annotation_tasks_org_name_active "
-            "ON annotation_tasks(org_uuid, name) WHERE deleted_at IS NULL",
-            "CREATE UNIQUE INDEX IF NOT EXISTS idx_annotators_org_name_active "
-            "ON annotators(org_uuid, name) WHERE deleted_at IS NULL",
-            # Evaluators have a dual ownership model: per-org (org_uuid set)
-            # and seeded defaults (org_uuid IS NULL, visible to everyone).
-            # SQLite treats multiple NULLs as distinct in unique indexes, so a
-            # plain (org_uuid, name) index would let two seeded defaults
-            # share a name. COALESCE collapses NULL into a single virtual
-            # namespace so seeded defaults compete among themselves.
-            "CREATE UNIQUE INDEX IF NOT EXISTS idx_evaluators_org_name_active "
-            "ON evaluators(COALESCE(org_uuid, '__seed__'), name) "
-            "WHERE deleted_at IS NULL",
-        ):
-            try:
-                cursor.execute(stmt)
-            except sqlite3.OperationalError:
-                # Either the index already exists (re-run init) or existing
-                # data violates uniqueness. Latter case shouldn't occur per
-                # owner's confirmation; keep the guard for re-init safety.
-                pass
+        # Per-org unique-name partial indexes are created BELOW, after the
+        # `ALTER TABLE ... ADD COLUMN org_uuid` migration runs. Creating them
+        # here would silently fail on a fresh / pre-multitenant DB because
+        # the `org_uuid` column doesn't exist yet (and the `OperationalError`
+        # handler would swallow the failure, leaving the DB without
+        # uniqueness protection until init_db ran a second time).
 
         conn.commit()
 
@@ -1228,6 +1172,74 @@ def init_db():
                 logger.info(
                     f"Backfilled org_uuid on {cursor.rowcount} row(s) in {table}"
                 )
+
+        # Per-org unique-name partial indexes. One org can't have two live
+        # (non-soft-deleted) rows with the same name. Soft-deleted rows are
+        # exempt — required so the same name can be re-used after delete.
+        #
+        # These run AFTER the `ALTER TABLE ... ADD COLUMN org_uuid` migration
+        # above and AFTER the personal-org backfill, so on a fresh DB the
+        # `org_uuid` column exists by the time we reference it AND every row
+        # has the column populated (no spurious uniqueness collisions).
+        #
+        # The pre-multi-tenant indexes (idx_*_user_name_active, scoped by
+        # user_id) are dropped first so they don't keep enforcing the old
+        # per-user scope after the access boundary flips to per-org.
+        #
+        # Belt-and-braces with the API-layer 409 checks: catches TOCTOU
+        # races between two concurrent creates, direct DB inserts (seed
+        # scripts, manual repairs), and any future endpoint that forgets
+        # the check. The DB constraint is the source of truth.
+        for old_idx in (
+            "idx_tests_user_name_active",
+            "idx_agents_user_name_active",
+            "idx_tools_user_name_active",
+            "idx_personas_user_name_active",
+            "idx_scenarios_user_name_active",
+            "idx_simulations_user_name_active",
+            "idx_annotation_tasks_user_name_active",
+            "idx_annotators_user_name_active",
+            "idx_evaluators_owner_name_active",
+        ):
+            try:
+                cursor.execute(f"DROP INDEX IF EXISTS {old_idx}")
+            except sqlite3.OperationalError:
+                pass
+
+        for stmt in (
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_tests_org_name_active "
+            "ON tests(org_uuid, name) WHERE deleted_at IS NULL",
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_agents_org_name_active "
+            "ON agents(org_uuid, name) WHERE deleted_at IS NULL",
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_tools_org_name_active "
+            "ON tools(org_uuid, name) WHERE deleted_at IS NULL",
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_personas_org_name_active "
+            "ON personas(org_uuid, name) WHERE deleted_at IS NULL",
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_scenarios_org_name_active "
+            "ON scenarios(org_uuid, name) WHERE deleted_at IS NULL",
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_simulations_org_name_active "
+            "ON simulations(org_uuid, name) WHERE deleted_at IS NULL",
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_annotation_tasks_org_name_active "
+            "ON annotation_tasks(org_uuid, name) WHERE deleted_at IS NULL",
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_annotators_org_name_active "
+            "ON annotators(org_uuid, name) WHERE deleted_at IS NULL",
+            # Evaluators have a dual ownership model: per-org (org_uuid set)
+            # and seeded defaults (org_uuid IS NULL, visible to everyone).
+            # SQLite treats multiple NULLs as distinct in unique indexes, so a
+            # plain (org_uuid, name) index would let two seeded defaults
+            # share a name. COALESCE collapses NULL into a single virtual
+            # namespace so seeded defaults compete among themselves.
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_evaluators_org_name_active "
+            "ON evaluators(COALESCE(org_uuid, '__seed__'), name) "
+            "WHERE deleted_at IS NULL",
+        ):
+            try:
+                cursor.execute(stmt)
+            except sqlite3.OperationalError:
+                # Either the index already exists (re-run init) or existing
+                # data violates uniqueness. Latter case shouldn't occur per
+                # owner's confirmation; keep the guard for re-init safety.
+                pass
 
         conn.commit()
 
@@ -2379,7 +2391,9 @@ def get_user(user_uuid: str) -> Optional[Dict[str, Any]]:
 
 
 def get_user_by_email(email: str) -> Optional[Dict[str, Any]]:
-    """Get a user by email."""
+    """Get a user by email. Matches the lowercase-normalized form so callers
+    can pass user-provided strings of any casing."""
+    email = (email or "").strip().lower()
     with get_db_connection() as conn:
         cursor = conn.cursor()
         cursor.execute("SELECT * FROM users WHERE email = ?", (email,))
@@ -2453,7 +2467,15 @@ def get_or_create_user(
     first_name: str,
     last_name: str,
 ) -> Dict[str, Any]:
-    """Get a user by email, or create a new one if not found."""
+    """Get a user by email, or create a new one if not found.
+
+    Email is lowercased so Google OAuth signups match any pre-existing
+    stub-user invites stored by `add_organization_member` (which also
+    lowercases). Otherwise a `User@Example.com` Google signup would miss the
+    `user@example.com` stub and the invitee would land in a new account with
+    no pre-added memberships.
+    """
+    email = (email or "").strip().lower()
     user = get_user_by_email(email)
     if user:
         # Update name if changed
@@ -2481,7 +2503,12 @@ def create_user_with_password(
     sign up later and immediately see any orgs they were pre-added to. We
     refuse to overwrite an existing password_hash to avoid an account-takeover
     vector via /signup with someone else's email.
+
+    Email is normalized to lowercase before lookup/insert so it matches the
+    same normalization done by `add_organization_member` — otherwise an
+    invitee who signs up with different casing would miss their stub row.
     """
+    email = (email or "").strip().lower()
     with get_db_connection() as conn:
         cursor = conn.cursor()
         cursor.execute(

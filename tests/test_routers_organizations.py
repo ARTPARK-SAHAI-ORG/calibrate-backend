@@ -139,6 +139,39 @@ def test_add_existing_user_as_member(client):
     assert dup.status_code == 400
 
 
+def test_invite_email_case_insensitive_hydration(client):
+    """Invite stores the email lowercased; signup must hydrate the same stub
+    even if the user types a differently-cased email."""
+    owner = _signup(client)
+    stub_email_lower = f"mixedcase-{uuid.uuid4().hex[:8]}@example.com"
+    stub_email_mixed = stub_email_lower.replace("mixedcase", "MixedCase")
+
+    org = client.post(
+        "/organizations", json={"name": "Casing"}, headers=owner["headers"]
+    ).json()
+    client.post(
+        f"/organizations/{org['uuid']}/members",
+        json={"email": stub_email_mixed},
+        headers=owner["headers"],
+    )
+
+    # Stub signs up with UPPER variation — should hydrate, not create new.
+    signup = client.post(
+        "/auth/signup",
+        json={
+            "first_name": "Mixed",
+            "last_name": "Case",
+            "email": stub_email_mixed.upper(),
+            "password": "passw0rd",
+        },
+    )
+    assert signup.status_code == 200, signup.text
+    headers = {"Authorization": f"Bearer {signup.json()['access_token']}"}
+    listing = client.get("/organizations", headers=headers).json()
+    # Pre-invited org appears alongside the personal one.
+    assert any(o["uuid"] == org["uuid"] for o in listing)
+
+
 def test_invite_unregistered_email_creates_stub_user(client):
     owner = _signup(client)
     stub_email = f"stub-{uuid.uuid4().hex[:8]}@example.com"
@@ -239,6 +272,35 @@ def test_members_list_only_visible_to_members(client):
         f"/organizations/{org['uuid']}/members", headers=outsider["headers"]
     )
     assert denied.status_code == 404
+
+
+def test_per_org_unique_indexes_exist_after_init(client):
+    """The per-org partial unique indexes (`idx_*_org_name_active`) must be
+    created on a fresh DB — i.e. they're created AFTER the `ALTER TABLE ...
+    ADD COLUMN org_uuid` migration. Earlier ordering had them run first;
+    SQLite would silently fail on `no such column: org_uuid`."""
+    import db
+
+    expected = {
+        "idx_tests_org_name_active",
+        "idx_agents_org_name_active",
+        "idx_tools_org_name_active",
+        "idx_personas_org_name_active",
+        "idx_scenarios_org_name_active",
+        "idx_simulations_org_name_active",
+        "idx_annotation_tasks_org_name_active",
+        "idx_annotators_org_name_active",
+        "idx_evaluators_org_name_active",
+    }
+    with db.get_db_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            "SELECT name FROM sqlite_master WHERE type='index' "
+            "AND name LIKE 'idx_%_org_name_active'"
+        )
+        present = {row["name"] for row in cursor.fetchall()}
+    missing = expected - present
+    assert not missing, f"missing per-org unique indexes: {sorted(missing)}"
 
 
 def test_init_db_backfill_is_idempotent(client):
