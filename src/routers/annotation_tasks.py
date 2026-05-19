@@ -932,14 +932,14 @@ class BulkDeleteJobsRequest(BaseModel):
 async def bulk_delete_annotation_jobs_endpoint(
     task_uuid: str,
     payload: BulkDeleteJobsRequest,
-    user_id: str = Depends(get_current_user_id),
+    ctx: OrgContext = Depends(get_current_org),
 ):
     """Soft-delete one or more labelling jobs in a task. UUIDs not in this
     task (or already deleted) are skipped silently; `deleted_count` reflects
     how many rows actually transitioned. Cascade matches the single-delete
     sibling: each deleted job's annotations drop out of every annotation read
     via the `j.deleted_at IS NULL` join filter."""
-    _ensure_owned_task(task_uuid, user_id)
+    _ensure_owned_task(task_uuid, ctx.org_uuid)
     if not payload.job_uuids:
         raise HTTPException(status_code=400, detail="job_uuids must be non-empty")
     deleted_count = bulk_soft_delete_annotation_jobs(task_uuid, payload.job_uuids)
@@ -950,7 +950,7 @@ async def bulk_delete_annotation_jobs_endpoint(
 async def delete_annotation_job_endpoint(
     task_uuid: str,
     job_uuid: str,
-    user_id: str = Depends(get_current_user_id),
+    ctx: OrgContext = Depends(get_current_org),
 ):
     """Soft-delete one annotator's labelling job. The annotations stay in
     place but stop appearing in every downstream read (list, agreement,
@@ -958,7 +958,7 @@ async def delete_annotation_job_endpoint(
     `annotation_jobs.deleted_at IS NULL` at the join. Eval-run jobs
     (separate `jobs` table) are NOT cascaded — delete them via
     `DELETE /{task_uuid}/evaluator-runs/{job_uuid}` if needed."""
-    _ensure_owned_task(task_uuid, user_id)
+    _ensure_owned_task(task_uuid, ctx.org_uuid)
     job = get_annotation_job(job_uuid)
     if not job or job.get("task_id") != task_uuid:
         raise HTTPException(status_code=404, detail="Job not found")
