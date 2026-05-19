@@ -1054,6 +1054,7 @@ def test_agent_tools_router(client):
     link = client.post(
         "/agent-tools",
         json={"agent_uuid": agent["uuid"], "tool_uuids": [tool["uuid"]]},
+        headers=h,
     )
     assert link.status_code == 200
 
@@ -1061,6 +1062,7 @@ def test_agent_tools_router(client):
     bad_agent = client.post(
         "/agent-tools",
         json={"agent_uuid": "missing-agent", "tool_uuids": [tool["uuid"]]},
+        headers=h,
     )
     assert bad_agent.status_code == 404
 
@@ -1068,6 +1070,7 @@ def test_agent_tools_router(client):
     bad_tool = client.post(
         "/agent-tools",
         json={"agent_uuid": agent["uuid"], "tool_uuids": ["missing-tool"]},
+        headers=h,
     )
     assert bad_tool.status_code == 404
 
@@ -1075,25 +1078,37 @@ def test_agent_tools_router(client):
     re_link = client.post(
         "/agent-tools",
         json={"agent_uuid": agent["uuid"], "tool_uuids": [tool["uuid"]]},
+        headers=h,
     )
     assert re_link.status_code == 200
 
     # GET list
-    assert client.get("/agent-tools").status_code == 200
+    assert client.get("/agent-tools", headers=h).status_code == 200
     assert (
-        client.get(f"/agent-tools/agent/{agent['uuid']}/tools").status_code == 200
+        client.get(
+            f"/agent-tools/agent/{agent['uuid']}/tools", headers=h
+        ).status_code
+        == 200
     )
-    assert client.get("/agent-tools/agent/missing/tools").status_code == 404
     assert (
-        client.get(f"/agent-tools/tool/{tool['uuid']}/agents").status_code == 200
+        client.get("/agent-tools/agent/missing/tools", headers=h).status_code == 404
     )
-    assert client.get("/agent-tools/tool/missing/agents").status_code == 404
+    assert (
+        client.get(
+            f"/agent-tools/tool/{tool['uuid']}/agents", headers=h
+        ).status_code
+        == 200
+    )
+    assert (
+        client.get("/agent-tools/tool/missing/agents", headers=h).status_code == 404
+    )
 
     # Unlink
     unlink = client.request(
         "DELETE",
         "/agent-tools",
         json={"agent_uuid": agent["uuid"], "tool_uuid": tool["uuid"]},
+        headers=h,
     )
     assert unlink.status_code == 200
     # Already gone
@@ -1101,6 +1116,7 @@ def test_agent_tools_router(client):
         "DELETE",
         "/agent-tools",
         json={"agent_uuid": agent["uuid"], "tool_uuid": tool["uuid"]},
+        headers=h,
     )
     assert again.status_code == 404
 

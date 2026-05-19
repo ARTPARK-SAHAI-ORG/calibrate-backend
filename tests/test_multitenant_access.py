@@ -96,6 +96,93 @@ def test_cross_org_cannot_see_agents(client):
     assert all(item["uuid"] != a_uuid for item in b_list)
 
 
+def test_cross_org_cannot_link_tools_or_see_agent_tool_graph(client):
+    """The /agent-tools router gates every endpoint on the caller's org.
+    Cross-org link attempts return 404; cross-org reads of the agent's tools
+    or a tool's agents return 404; the list endpoint only shows the caller's
+    own links."""
+    a = _signup(client)
+    b = _signup(client)
+
+    agent_a = client.post(
+        "/agents",
+        json={"name": f"agent-{uuid.uuid4().hex[:6]}", "type": "agent"},
+        headers=a["headers"],
+    ).json()
+    tool_a = client.post(
+        "/tools",
+        json={
+            "name": f"tool-{uuid.uuid4().hex[:6]}",
+            "description": "d",
+            "config": {"type": "structured_output", "parameters": []},
+        },
+        headers=a["headers"],
+    ).json()
+    tool_b = client.post(
+        "/tools",
+        json={
+            "name": f"tool-b-{uuid.uuid4().hex[:6]}",
+            "description": "d",
+            "config": {"type": "structured_output", "parameters": []},
+        },
+        headers=b["headers"],
+    ).json()
+
+    # a links own agent + own tool — succeeds.
+    link_resp = client.post(
+        "/agent-tools",
+        json={"agent_uuid": agent_a["uuid"], "tool_uuids": [tool_a["uuid"]]},
+        headers=a["headers"],
+    )
+    assert link_resp.status_code == 200
+
+    # b tries to link a's agent with b's tool — 404 on the agent.
+    resp = client.post(
+        "/agent-tools",
+        json={"agent_uuid": agent_a["uuid"], "tool_uuids": [tool_b["uuid"]]},
+        headers=b["headers"],
+    )
+    assert resp.status_code == 404
+
+    # a tries to link own agent with b's tool — 404 on the tool.
+    resp = client.post(
+        "/agent-tools",
+        json={"agent_uuid": agent_a["uuid"], "tool_uuids": [tool_b["uuid"]]},
+        headers=a["headers"],
+    )
+    assert resp.status_code == 404
+
+    # b can't read a's agent tools / a's tool agents.
+    assert (
+        client.get(
+            f"/agent-tools/agent/{agent_a['uuid']}/tools", headers=b["headers"]
+        ).status_code
+        == 404
+    )
+    assert (
+        client.get(
+            f"/agent-tools/tool/{tool_a['uuid']}/agents", headers=b["headers"]
+        ).status_code
+        == 404
+    )
+
+    # b can't delete a's link.
+    resp = client.request(
+        "DELETE",
+        "/agent-tools",
+        json={"agent_uuid": agent_a["uuid"], "tool_uuid": tool_a["uuid"]},
+        headers=b["headers"],
+    )
+    assert resp.status_code == 404
+
+    # b's list endpoint doesn't include a's link.
+    b_list = client.get("/agent-tools", headers=b["headers"]).json()
+    assert all(
+        not (l["agent_id"] == agent_a["uuid"] and l["tool_id"] == tool_a["uuid"])
+        for l in b_list
+    )
+
+
 def test_cross_org_cannot_see_tools(client):
     a = _signup(client)
     b = _signup(client)

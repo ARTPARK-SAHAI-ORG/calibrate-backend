@@ -3181,13 +3181,29 @@ def get_agent_tool_link(agent_id: str, tool_id: str) -> Optional[Dict[str, Any]]
         return None
 
 
-def get_all_agent_tools() -> List[Dict[str, Any]]:
-    """Get all agent-tool links."""
+def get_all_agent_tools(org_uuid: Optional[str] = None) -> List[Dict[str, Any]]:
+    """Get all agent-tool links, optionally scoped to one org via the
+    parent agent. Links are gated through the agent (the access-key entity);
+    the tool's org is verified separately at the router layer when creating."""
     with get_db_connection() as conn:
         cursor = conn.cursor()
-        cursor.execute(
-            "SELECT * FROM agent_tools WHERE deleted_at IS NULL ORDER BY created_at DESC"
-        )
+        if org_uuid is None:
+            cursor.execute(
+                "SELECT * FROM agent_tools WHERE deleted_at IS NULL "
+                "ORDER BY created_at DESC"
+            )
+        else:
+            cursor.execute(
+                """
+                SELECT at.* FROM agent_tools at
+                  JOIN agents a ON a.uuid = at.agent_id
+                 WHERE at.deleted_at IS NULL
+                   AND a.deleted_at IS NULL
+                   AND a.org_uuid = ?
+                 ORDER BY at.created_at DESC
+                """,
+                (org_uuid,),
+            )
         rows = cursor.fetchall()
         return [dict(row) for row in rows]
 
