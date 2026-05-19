@@ -2689,10 +2689,15 @@ def add_organization_member(
     existing row is hydrated and they immediately see this org.
 
     Returns the member row info. Raises ValueError if the user is already an
-    active member of this org.
+    active member of this org, or if `org_uuid` doesn't reference an existing
+    non-deleted organization (SQLite doesn't enforce FKs by default, so we
+    validate the parent row at the helper layer rather than relying on the
+    router check — keeps the guard intact for any future caller).
     """
     if role not in ("owner", "admin"):
         raise ValueError("invalid role")
+    if get_organization(org_uuid) is None:
+        raise ValueError("organization not found")
     email = (email or "").strip().lower()
     if not email or "@" not in email:
         raise ValueError("valid email required")

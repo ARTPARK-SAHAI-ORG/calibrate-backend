@@ -303,6 +303,20 @@ def test_per_org_unique_indexes_exist_after_init(client):
     assert not missing, f"missing per-org unique indexes: {sorted(missing)}"
 
 
+def test_add_organization_member_rejects_phantom_org(client):
+    """`add_organization_member` must validate that `org_uuid` references an
+    existing non-deleted org. The API path is already gated by membership, but
+    the helper itself should refuse phantom UUIDs so future callers (admin
+    scripts, backfills, new endpoints) can't quietly create orphan rows."""
+    import db
+
+    with pytest.raises(ValueError, match="organization not found"):
+        db.add_organization_member(
+            org_uuid="00000000-0000-0000-0000-000000000000",
+            email=f"phantom-{uuid.uuid4().hex[:8]}@example.com",
+        )
+
+
 def test_init_db_backfill_is_idempotent(client):
     """Re-running init_db on an already-migrated DB must not create duplicate
     personal orgs or double-tag entity rows."""
