@@ -5751,7 +5751,9 @@ def add_evaluator_to_annotation_task(task_id: str, evaluator_id: str) -> int:
         existing = cursor.fetchone()
         if existing:
             cursor.execute(
-                "UPDATE annotation_task_evaluators SET deleted_at = NULL WHERE id = ?",
+                "UPDATE annotation_task_evaluators "
+                "SET deleted_at = NULL, created_at = CURRENT_TIMESTAMP "
+                "WHERE id = ?",
                 (existing["id"],),
             )
             conn.commit()
