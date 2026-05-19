@@ -1291,7 +1291,6 @@ def init_db():
 
         # ============ Evaluator migrations + seed ============
         _seed_default_evaluators(cursor, conn)
-        _migrate_metrics_to_evaluators(cursor, conn)
         _backfill_test_evaluator_links(cursor, conn)
 
         conn.commit()
@@ -2112,117 +2111,6 @@ def _insert_seed_live_version(
         "UPDATE evaluators SET live_version_id = ?, updated_at = CURRENT_TIMESTAMP WHERE uuid = ?",
         (version_uuid, evaluator_uuid),
     )
-
-
-def _migrate_metrics_to_evaluators(
-    cursor: sqlite3.Cursor, conn: sqlite3.Connection
-) -> None:
-    """One-time migration: copy rows from legacy `metrics` table to `evaluators` and rewrite the
-    `simulation_metrics` pivot as `simulation_evaluators`. Idempotent via `source_metric_uuid`.
-    """
-
-    def _legacy_metric_criteria(row: sqlite3.Row) -> str:
-        return (row["description"]).strip()
-
-    def _simulation_prompt_for_metric(row: sqlite3.Row) -> str:
-        return DEFAULT_PROMPTS_BY_PURPOSE["simulation"]["system_prompt"].replace(
-            "<ENTER EVALUATION CRITERIA HERE>",
-            _legacy_metric_criteria(row),
-        )
-
-    try:
-        cursor.execute(
-            "SELECT uuid, name, description, config, user_id, created_at, updated_at, deleted_at "
-            "FROM metrics"
-        )
-    except sqlite3.OperationalError:
-        return
-    legacy_rows = cursor.fetchall()
-    if not legacy_rows:
-        return
-
-    cursor.execute(
-        "SELECT source_metric_uuid FROM evaluators WHERE source_metric_uuid IS NOT NULL"
-    )
-    migrated = {row["source_metric_uuid"] for row in cursor.fetchall()}
-
-    migrated_count = 0
-    for row in legacy_rows:
-        legacy_uuid = row["uuid"]
-        if legacy_uuid in migrated:
-            continue
-
-        cursor.execute(
-            "SELECT 1 FROM simulation_metrics WHERE metric_id = ? AND deleted_at IS NULL LIMIT 1",
-            (legacy_uuid,),
-        )
-        is_simulation_metric = cursor.fetchone() is not None
-        evaluator_type = "simulation" if is_simulation_metric else "llm"
-        system_prompt = (
-            _simulation_prompt_for_metric(row)
-            if is_simulation_metric
-            else _legacy_metric_criteria(row)
-        )
-
-        evaluator_uuid = str(uuid.uuid4())
-        cursor.execute(
-            """
-            INSERT INTO evaluators
-                (uuid, name, description, owner_user_id,
-                 evaluator_type, data_type, kind,
-                 output_type, source_metric_uuid,
-                 created_at, updated_at, deleted_at)
-            VALUES (?, ?, ?, ?, ?, 'text', 'single', 'binary', ?, ?, ?, ?)
-            """,
-            (
-                evaluator_uuid,
-                row["name"],
-                row["description"],
-                row["user_id"],
-                evaluator_type,
-                legacy_uuid,
-                row["created_at"],
-                row["updated_at"],
-                row["deleted_at"],
-            ),
-        )
-
-        version_uuid = str(uuid.uuid4())
-        cursor.execute(
-            """
-            INSERT INTO evaluator_versions
-                (uuid, evaluator_id, version_number, judge_model, system_prompt,
-                 output_config, variables)
-            VALUES (?, ?, 1, ?, ?, ?, NULL)
-            """,
-            (
-                version_uuid,
-                evaluator_uuid,
-                DEFAULT_TEXT_JUDGE_MODEL,
-                system_prompt,
-                json.dumps(_BINARY_CONFIG),
-            ),
-        )
-        cursor.execute(
-            "UPDATE evaluators SET live_version_id = ? WHERE uuid = ?",
-            (version_uuid, evaluator_uuid),
-        )
-
-        cursor.execute(
-            """
-            INSERT OR IGNORE INTO simulation_evaluators
-                (simulation_id, evaluator_id, evaluator_version_id, variable_values, created_at, deleted_at)
-            SELECT simulation_id, ?, ?, NULL, created_at, deleted_at
-              FROM simulation_metrics
-             WHERE metric_id = ?
-            """,
-            (evaluator_uuid, version_uuid, legacy_uuid),
-        )
-        migrated_count += 1
-
-    conn.commit()
-    if migrated_count:
-        logger.info(f"Migrated {migrated_count} metric(s) to evaluators")
 
 
 def _backfill_test_evaluator_links(
