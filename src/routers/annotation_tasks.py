@@ -70,7 +70,7 @@ from utils import (
     compute_share_token_toggle,
     try_start_queued_job,
 )
-from auth_utils import get_current_user_id
+from auth_utils import get_current_org, OrgContext
 from annotation_metrics import (
     aggregate_agreement,
     aggregate_human_evaluator_agreement,
@@ -155,21 +155,21 @@ class EvaluatorLinkRequest(BaseModel):
     evaluator_id: str
 
 
-def _ensure_owned_task(task_uuid: str, user_id: str) -> Dict[str, Any]:
+def _ensure_owned_task(task_uuid: str, org_uuid: str) -> Dict[str, Any]:
     task = get_annotation_task(task_uuid)
-    if not task or task.get("user_id") != user_id:
+    if not task or task.get("org_uuid") != org_uuid:
         # 404 (not 403) — avoid leaking existence
         raise HTTPException(status_code=404, detail="Annotation task not found")
     return task
 
 
-def _ensure_owned_evaluator(evaluator_uuid: str, user_id: str) -> Dict[str, Any]:
+def _ensure_owned_evaluator(evaluator_uuid: str, org_uuid: str) -> Dict[str, Any]:
     evaluator = get_evaluator(evaluator_uuid)
     if not evaluator:
         raise HTTPException(status_code=404, detail="Evaluator not found")
-    owner = evaluator.get("owner_user_id")
-    # owner_user_id IS NULL ⇒ seeded default (visible to everyone)
-    if owner is not None and owner != user_id:
+    owner_org = evaluator.get("org_uuid")
+    # org_uuid IS NULL ⇒ seeded default (visible to every org)
+    if owner_org is not None and owner_org != org_uuid:
         raise HTTPException(status_code=404, detail="Evaluator not found")
     return evaluator
 
@@ -177,7 +177,7 @@ def _ensure_owned_evaluator(evaluator_uuid: str, user_id: str) -> Dict[str, Any]
 @router.post("", response_model=AnnotationTaskCreateResponse)
 async def create_annotation_task_endpoint(
     payload: AnnotationTaskCreate,
-    user_id: str = Depends(get_current_user_id),
+    ctx: OrgContext = Depends(get_current_org),
 ):
     """Create a new annotation task. Optionally link evaluators in the same call."""
     if payload.type not in ANNOTATION_TASK_TYPES:
@@ -187,16 +187,17 @@ async def create_annotation_task_endpoint(
         )
     if payload.evaluator_ids:
         for evaluator_id in payload.evaluator_ids:
-            _ensure_owned_evaluator(evaluator_id, user_id)
+            _ensure_owned_evaluator(evaluator_id, ctx.org_uuid)
 
     with ensure_name_unique(
-        "annotation_tasks", payload.name, user_id, entity="Annotation task"
+        "annotation_tasks", payload.name, ctx.org_uuid, entity="Annotation task"
     ):
         task_uuid = create_annotation_task(
             name=payload.name,
             description=payload.description,
             type=payload.type,
-            user_id=user_id,
+            org_uuid=ctx.org_uuid,
+            user_id=ctx.user_id,
         )
 
     if payload.evaluator_ids:
@@ -209,9 +210,9 @@ async def create_annotation_task_endpoint(
 
 
 @router.get("", response_model=List[AnnotationTaskResponse])
-async def list_annotation_tasks(user_id: str = Depends(get_current_user_id)):
+async def list_annotation_tasks(ctx: OrgContext = Depends(get_current_org)):
     """List all annotation tasks owned by the authenticated user."""
-    tasks = get_all_annotation_tasks(user_id=user_id)
+    tasks = get_all_annotation_tasks(org_uuid=ctx.org_uuid)
     for task in tasks:
         task["evaluators"] = get_evaluators_for_annotation_task(task["uuid"])
     return tasks
@@ -219,11 +220,11 @@ async def list_annotation_tasks(user_id: str = Depends(get_current_user_id)):
 
 @router.get("/{task_uuid}", response_model=AnnotationTaskResponse)
 async def get_annotation_task_endpoint(
-    task_uuid: str, user_id: str = Depends(get_current_user_id)
+    task_uuid: str, ctx: OrgContext = Depends(get_current_org)
 ):
     """Get an annotation task by UUID, including its linked evaluators,
     all items (each annotated with per-item agreement stats), and all jobs."""
-    task = _ensure_owned_task(task_uuid, user_id)
+    task = _ensure_owned_task(task_uuid, ctx.org_uuid)
     evaluators = _enrich_evaluators_with_live_version(
         get_evaluators_for_annotation_task(task_uuid)
     )
@@ -259,13 +260,13 @@ async def get_annotation_task_endpoint(
 async def update_annotation_task_endpoint(
     task_uuid: str,
     payload: AnnotationTaskUpdate,
-    user_id: str = Depends(get_current_user_id),
+    ctx: OrgContext = Depends(get_current_org),
 ):
-    _ensure_owned_task(task_uuid, user_id)
+    _ensure_owned_task(task_uuid, ctx.org_uuid)
     with ensure_name_unique(
         "annotation_tasks",
         payload.name,
-        user_id,
+        ctx.org_uuid,
         entity="Annotation task",
         exclude_uuid=task_uuid,
     ):
@@ -283,9 +284,9 @@ async def update_annotation_task_endpoint(
 
 @router.delete("/{task_uuid}")
 async def delete_annotation_task_endpoint(
-    task_uuid: str, user_id: str = Depends(get_current_user_id)
+    task_uuid: str, ctx: OrgContext = Depends(get_current_org)
 ):
-    _ensure_owned_task(task_uuid, user_id)
+    _ensure_owned_task(task_uuid, ctx.org_uuid)
     deleted = delete_annotation_task(task_uuid)
     if not deleted:
         raise HTTPException(status_code=404, detail="Annotation task not found")
@@ -297,9 +298,9 @@ async def delete_annotation_task_endpoint(
 
 @router.get("/{task_uuid}/evaluators", response_model=List[Dict[str, Any]])
 async def list_task_evaluators(
-    task_uuid: str, user_id: str = Depends(get_current_user_id)
+    task_uuid: str, ctx: OrgContext = Depends(get_current_org)
 ):
-    _ensure_owned_task(task_uuid, user_id)
+    _ensure_owned_task(task_uuid, ctx.org_uuid)
     return get_evaluators_for_annotation_task(task_uuid)
 
 
@@ -307,10 +308,10 @@ async def list_task_evaluators(
 async def link_evaluator_to_task(
     task_uuid: str,
     payload: EvaluatorLinkRequest,
-    user_id: str = Depends(get_current_user_id),
+    ctx: OrgContext = Depends(get_current_org),
 ):
-    _ensure_owned_task(task_uuid, user_id)
-    _ensure_owned_evaluator(payload.evaluator_id, user_id)
+    _ensure_owned_task(task_uuid, ctx.org_uuid)
+    _ensure_owned_evaluator(payload.evaluator_id, ctx.org_uuid)
     add_evaluator_to_annotation_task(task_uuid, payload.evaluator_id)
     return {"message": "Evaluator linked to annotation task"}
 
@@ -351,9 +352,9 @@ class BulkItemsRequest(BaseModel):
 
 @router.get("/{task_uuid}/items")
 async def list_task_items(
-    task_uuid: str, user_id: str = Depends(get_current_user_id)
+    task_uuid: str, ctx: OrgContext = Depends(get_current_org)
 ):
-    _ensure_owned_task(task_uuid, user_id)
+    _ensure_owned_task(task_uuid, ctx.org_uuid)
     return get_annotation_items_for_task(task_uuid)
 
 
@@ -366,7 +367,7 @@ class AnnotatedItemsCheckRequest(BaseModel):
 async def check_annotated_items(
     task_uuid: str,
     payload: AnnotatedItemsCheckRequest,
-    user_id: str = Depends(get_current_user_id),
+    ctx: OrgContext = Depends(get_current_org),
 ):
     """Pre-upload check: given a list of item names (in upload row order),
     return which rows already exist in the task and whether the annotator
@@ -381,11 +382,11 @@ async def check_annotated_items(
 
     Rows whose name doesn't exist in the task are omitted from both lists.
     """
-    _ensure_owned_task(task_uuid, user_id)
+    _ensure_owned_task(task_uuid, ctx.org_uuid)
     if not payload.names:
         raise HTTPException(status_code=400, detail="names must be non-empty")
     annotator = get_annotator(payload.annotator_id)
-    if not annotator or annotator.get("user_id") != user_id:
+    if not annotator or annotator.get("org_uuid") != ctx.org_uuid:
         raise HTTPException(status_code=404, detail="Annotator not found")
 
     existing_items = get_annotation_items_for_task(task_uuid)
@@ -427,7 +428,7 @@ async def check_annotated_items(
 async def bulk_create_items(
     task_uuid: str,
     payload: BulkItemsRequest,
-    user_id: str = Depends(get_current_user_id),
+    ctx: OrgContext = Depends(get_current_org),
 ):
     """Bulk-insert annotation items. Order of insertion is preserved by `id`.
 
@@ -443,7 +444,7 @@ async def bulk_create_items(
     bool, rating uses a number. This matches what the public form writes
     via `upsert_annotation`, and is the only shape `annotation_metrics`
     will count toward agreement aggregates."""
-    task = _ensure_owned_task(task_uuid, user_id)
+    task = _ensure_owned_task(task_uuid, ctx.org_uuid)
     if not payload.items:
         raise HTTPException(status_code=400, detail="items must be non-empty")
 
@@ -517,7 +518,7 @@ async def bulk_create_items(
     linked_evaluator_ids: set = set()
     if items_with_annotations:
         annotator = get_annotator(payload.annotator_id)
-        if not annotator or annotator.get("user_id") != user_id:
+        if not annotator or annotator.get("org_uuid") != ctx.org_uuid:
             # 404 (not 403) — avoid leaking existence
             raise HTTPException(status_code=404, detail="Annotator not found")
         linked_evaluator_ids = {
@@ -708,14 +709,14 @@ class BulkUpdateItemsRequest(BaseModel):
 async def bulk_update_items(
     task_uuid: str,
     payload: BulkUpdateItemsRequest,
-    user_id: str = Depends(get_current_user_id),
+    ctx: OrgContext = Depends(get_current_org),
 ):
     """Bulk-update item `payload`s in a task.
 
     Updates not in this task (or referencing deleted items) are skipped
     silently; `updated_count` reflects rows actually changed.
     """
-    task = _ensure_owned_task(task_uuid, user_id)
+    task = _ensure_owned_task(task_uuid, ctx.org_uuid)
     if not payload.updates:
         raise HTTPException(status_code=400, detail="updates must be non-empty")
 
@@ -776,7 +777,7 @@ class BulkDeleteItemsRequest(BaseModel):
 async def bulk_delete_items(
     task_uuid: str,
     payload: BulkDeleteItemsRequest,
-    user_id: str = Depends(get_current_user_id),
+    ctx: OrgContext = Depends(get_current_org),
 ):
     """Soft-delete one or more items in a task.
 
@@ -785,7 +786,7 @@ async def bulk_delete_items(
     Items linked to existing jobs remain referenced by those jobs and their
     annotations — they just stop appearing in `GET /items`.
     """
-    _ensure_owned_task(task_uuid, user_id)
+    _ensure_owned_task(task_uuid, ctx.org_uuid)
     if not payload.item_ids:
         raise HTTPException(status_code=400, detail="item_ids must be non-empty")
     deleted_count = soft_delete_annotation_items(task_uuid, payload.item_ids)
@@ -794,9 +795,9 @@ async def bulk_delete_items(
 
 @router.get("/{task_uuid}/items/{item_uuid}")
 async def get_item(
-    task_uuid: str, item_uuid: str, user_id: str = Depends(get_current_user_id)
+    task_uuid: str, item_uuid: str, ctx: OrgContext = Depends(get_current_org)
 ):
-    _ensure_owned_task(task_uuid, user_id)
+    _ensure_owned_task(task_uuid, ctx.org_uuid)
     item = get_annotation_item(item_uuid)
     if not item or item.get("task_id") != task_uuid:
         raise HTTPException(status_code=404, detail="Item not found")
@@ -805,11 +806,11 @@ async def get_item(
 
 @router.get("/{task_uuid}/items/{item_uuid}/annotations")
 async def list_item_annotations(
-    task_uuid: str, item_uuid: str, user_id: str = Depends(get_current_user_id)
+    task_uuid: str, item_uuid: str, ctx: OrgContext = Depends(get_current_org)
 ):
     """All human annotations across every job for one item. Sibling of
     `/items/{item_uuid}/evaluator-runs`."""
-    _ensure_owned_task(task_uuid, user_id)
+    _ensure_owned_task(task_uuid, ctx.org_uuid)
     item = get_annotation_item(item_uuid)
     if not item or item.get("task_id") != task_uuid:
         raise HTTPException(status_code=404, detail="Item not found")
@@ -826,9 +827,9 @@ class CreateJobsRequest(BaseModel):
 
 @router.get("/{task_uuid}/jobs")
 async def list_task_jobs(
-    task_uuid: str, user_id: str = Depends(get_current_user_id)
+    task_uuid: str, ctx: OrgContext = Depends(get_current_org)
 ):
-    _ensure_owned_task(task_uuid, user_id)
+    _ensure_owned_task(task_uuid, ctx.org_uuid)
     return get_jobs_for_task(task_uuid)
 
 
@@ -836,12 +837,12 @@ async def list_task_jobs(
 async def create_jobs(
     task_uuid: str,
     payload: CreateJobsRequest,
-    user_id: str = Depends(get_current_user_id),
+    ctx: OrgContext = Depends(get_current_org),
 ):
     """Assign a set of items to one or more annotators. Creates ONE job per
     annotator — each with its own unique public_token. Job item sets are
     frozen after creation."""
-    _ensure_owned_task(task_uuid, user_id)
+    _ensure_owned_task(task_uuid, ctx.org_uuid)
     if not payload.annotator_ids:
         raise HTTPException(
             status_code=400, detail="annotator_ids must be non-empty"
@@ -867,7 +868,7 @@ async def create_jobs(
     annotators_by_id: Dict[str, Dict[str, Any]] = {}
     for annotator_id in payload.annotator_ids:
         annotator = get_annotator(annotator_id)
-        if not annotator or annotator.get("user_id") != user_id:
+        if not annotator or annotator.get("org_uuid") != ctx.org_uuid:
             raise HTTPException(
                 status_code=404,
                 detail=f"Annotator not found: {annotator_id}",
@@ -912,9 +913,9 @@ async def create_jobs(
 async def get_annotation_job_endpoint(
     task_uuid: str,
     job_uuid: str,
-    user_id: str = Depends(get_current_user_id),
+    ctx: OrgContext = Depends(get_current_org),
 ):
-    _ensure_owned_task(task_uuid, user_id)
+    _ensure_owned_task(task_uuid, ctx.org_uuid)
     job = get_annotation_job(job_uuid)
     if not job or job.get("task_id") != task_uuid:
         raise HTTPException(status_code=404, detail="Job not found")
@@ -939,7 +940,7 @@ async def update_annotation_job_visibility_endpoint(
     task_uuid: str,
     job_uuid: str,
     body: AnnotationJobVisibilityRequest,
-    user_id: str = Depends(get_current_user_id),
+    ctx: OrgContext = Depends(get_current_org),
 ):
     """Toggle a *read-only* public viewer link for one annotator's labelling
     job. The annotator's own `public_token` (read+write) is unaffected — this
@@ -949,7 +950,7 @@ async def update_annotation_job_visibility_endpoint(
     Gated on `status == "completed"` so half-done jobs can't be shared. The
     `view_token` is reused across off→on→off cycles so previously-distributed
     links keep working when re-enabled."""
-    _ensure_owned_task(task_uuid, user_id)
+    _ensure_owned_task(task_uuid, ctx.org_uuid)
     job = get_annotation_job(job_uuid)
     if not job or job.get("task_id") != task_uuid:
         raise HTTPException(status_code=404, detail="Job not found")
@@ -986,7 +987,7 @@ class AnnotationUpsertRequest(BaseModel):
 async def upsert_annotation_endpoint(
     task_uuid: str,
     payload: AnnotationUpsertRequest,
-    user_id: str = Depends(get_current_user_id),
+    ctx: OrgContext = Depends(get_current_org),
 ):
     """Owner-side upsert of a single annotation.
 
@@ -997,7 +998,7 @@ async def upsert_annotation_endpoint(
     same task), polluting `completed_item_count`, agreement aggregates,
     and the summary view.
     """
-    _ensure_owned_task(task_uuid, user_id)
+    _ensure_owned_task(task_uuid, ctx.org_uuid)
     job = get_annotation_job(payload.job_id)
     if not job or job.get("task_id") != task_uuid:
         raise HTTPException(status_code=404, detail="Job not found")
@@ -1049,7 +1050,7 @@ class EvaluatorRunStartRequest(BaseModel):
 async def start_evaluator_run(
     task_uuid: str,
     payload: EvaluatorRunStartRequest,
-    user_id: str = Depends(get_current_user_id),
+    ctx: OrgContext = Depends(get_current_org),
 ):
     """Run one or more evaluators on every item in this task (or a subset).
     Returns a job UUID; the actual evaluation runs asynchronously via the
@@ -1058,7 +1059,7 @@ async def start_evaluator_run(
 
     Supported task types: `stt`, `llm`, `simulation`. (Voice simulations and
     TTS are not supported in eval-only mode.)"""
-    task = _ensure_owned_task(task_uuid, user_id)
+    task = _ensure_owned_task(task_uuid, ctx.org_uuid)
     if task.get("type") not in SUPPORTED_EVAL_TASK_TYPES:
         raise HTTPException(
             status_code=400,
@@ -1124,14 +1125,15 @@ async def start_evaluator_run(
         raise HTTPException(status_code=400, detail=str(e))
 
     # Decide queue vs immediate start (shared eval queue with stt-eval/tts-eval).
-    can_start = can_start_job(EVAL_JOB_TYPES, user_id)
+    can_start = can_start_job(EVAL_JOB_TYPES, ctx.org_uuid)
     initial_status = (
         TaskStatus.IN_PROGRESS.value if can_start else TaskStatus.QUEUED.value
     )
 
     job_uuid = create_job(
         job_type=ANNOTATION_EVAL_JOB_TYPE,
-        user_id=user_id,
+        org_uuid=ctx.org_uuid,
+        user_id=ctx.user_id,
         status=initial_status,
         details={
             "task_id": task_uuid,
@@ -1158,7 +1160,7 @@ async def start_evaluator_run(
         start_annotation_eval_job(
             job_uuid=job_uuid,
             task_uuid=task_uuid,
-            user_id=user_id,
+            user_id=ctx.user_id,
             evaluators_resolved=resolved,
             item_ids=item_ids_persisted,
         )
@@ -1247,9 +1249,9 @@ def _shape_eval_job_for_response(job: Dict[str, Any]) -> Dict[str, Any]:
 
 @router.get("/{task_uuid}/evaluator-runs")
 async def list_evaluator_run_jobs(
-    task_uuid: str, user_id: str = Depends(get_current_user_id)
+    task_uuid: str, ctx: OrgContext = Depends(get_current_org)
 ):
-    _ensure_owned_task(task_uuid, user_id)
+    _ensure_owned_task(task_uuid, ctx.org_uuid)
     jobs = get_generic_jobs_for_task(task_uuid, ANNOTATION_EVAL_JOB_TYPE)
     return [_shape_eval_job_for_response(j) for j in jobs]
 
@@ -1448,7 +1450,7 @@ def _human_agreement_for_run(
 async def get_evaluator_run_job(
     task_uuid: str,
     job_uuid: str,
-    user_id: str = Depends(get_current_user_id),
+    ctx: OrgContext = Depends(get_current_org),
 ):
     """Single evaluator-run job, with raw runs and human-agreement summary.
 
@@ -1456,8 +1458,8 @@ async def get_evaluator_run_job(
     job actually exercised AND that have at least one human annotation —
     so a fresh task with no humans yet returns empty arrays (not zeros)
     and the FE can fall back to the regular runs view."""
-    _ensure_owned_task(task_uuid, user_id)
-    job = get_job(job_uuid, user_id=user_id)
+    _ensure_owned_task(task_uuid, ctx.org_uuid)
+    job = get_job(job_uuid, org_uuid=ctx.org_uuid)
     if (
         not job
         or job.get("type") != ANNOTATION_EVAL_JOB_TYPE
@@ -1480,15 +1482,15 @@ async def get_evaluator_run_job(
 async def delete_evaluator_run_job(
     task_uuid: str,
     job_uuid: str,
-    user_id: str = Depends(get_current_user_id),
+    ctx: OrgContext = Depends(get_current_org),
 ):
     """Soft-delete an evaluator-run job and all its `evaluator_runs` rows.
 
     In-flight jobs (status = 'in_progress') are not allowed to be deleted —
     let them finish (or fail) first, then delete. Queued jobs CAN be deleted
     (they were never started)."""
-    _ensure_owned_task(task_uuid, user_id)
-    job = get_job(job_uuid, user_id=user_id)
+    _ensure_owned_task(task_uuid, ctx.org_uuid)
+    job = get_job(job_uuid, org_uuid=ctx.org_uuid)
     if (
         not job
         or job.get("type") != ANNOTATION_EVAL_JOB_TYPE
@@ -1531,7 +1533,7 @@ async def update_evaluator_run_visibility(
     task_uuid: str,
     job_uuid: str,
     body: EvaluatorRunVisibilityRequest,
-    user_id: str = Depends(get_current_user_id),
+    ctx: OrgContext = Depends(get_current_org),
 ):
     """Toggle public sharing for a completed annotation evaluator-run job.
 
@@ -1539,8 +1541,8 @@ async def update_evaluator_run_visibility(
     failed job would expose partial / error state behind a stable URL.
     Re-flipping `is_public=True` reuses the existing share_token so
     previously-distributed links keep working."""
-    _ensure_owned_task(task_uuid, user_id)
-    job = get_job(job_uuid, user_id=user_id)
+    _ensure_owned_task(task_uuid, ctx.org_uuid)
+    job = get_job(job_uuid, org_uuid=ctx.org_uuid)
     if (
         not job
         or job.get("type") != ANNOTATION_EVAL_JOB_TYPE
@@ -1567,9 +1569,9 @@ async def update_evaluator_run_visibility(
 async def list_item_evaluator_runs(
     task_uuid: str,
     item_uuid: str,
-    user_id: str = Depends(get_current_user_id),
+    ctx: OrgContext = Depends(get_current_org),
 ):
-    _ensure_owned_task(task_uuid, user_id)
+    _ensure_owned_task(task_uuid, ctx.org_uuid)
     item = get_annotation_item(item_uuid)
     if not item or item.get("task_id") != task_uuid:
         raise HTTPException(status_code=404, detail="Item not found")
@@ -1616,7 +1618,7 @@ async def task_agreement(
     task_uuid: str,
     bucket: str = Query("week", pattern="^(week|month|year)$"),
     days: int = Query(90, ge=1, le=3650),
-    user_id: str = Depends(get_current_user_id),
+    ctx: OrgContext = Depends(get_current_org),
 ):
     """Human-vs-human agreement for a single task plus per-evaluator
     human-vs-evaluator alignment.
@@ -1631,7 +1633,7 @@ async def task_agreement(
     `current` numerics are mean pairwise agreement in `[0, 1]`; `null` when no
     comparable pairs exist yet.
     """
-    _ensure_owned_task(task_uuid, user_id)
+    _ensure_owned_task(task_uuid, ctx.org_uuid)
     annotations = get_annotations_for_task(task_uuid)
     linked = get_evaluators_for_annotation_task(task_uuid)
     runs = filter_runs_to_live_versions(
@@ -1669,7 +1671,7 @@ async def task_summary(
         False,
         description="When true, emit only one row per (item, evaluator) using the evaluator's live version. Non-live versions that have runs are excluded.",
     ),
-    user_id: str = Depends(get_current_user_id),
+    ctx: OrgContext = Depends(get_current_org),
 ):
     """Single denormalized view for the table. By default emits one row per
     `(item × evaluator × version)` so re-running an evaluator on a new
@@ -1720,7 +1722,7 @@ async def task_summary(
       - Row-level overall annotations (`evaluator_id IS NULL`) are not surfaced
         here — this view is per-evaluator.
     """
-    task = _ensure_owned_task(task_uuid, user_id)
+    task = _ensure_owned_task(task_uuid, ctx.org_uuid)
     items = get_annotation_items_for_task(task_uuid)
     evaluators = get_evaluators_for_annotation_task(task_uuid)
     # Per-row view: latest run wins regardless of version, and per-row
@@ -1946,9 +1948,9 @@ async def task_summary(
 async def unlink_evaluator_from_task(
     task_uuid: str,
     evaluator_uuid: str,
-    user_id: str = Depends(get_current_user_id),
+    ctx: OrgContext = Depends(get_current_org),
 ):
-    _ensure_owned_task(task_uuid, user_id)
+    _ensure_owned_task(task_uuid, ctx.org_uuid)
     removed = remove_evaluator_from_annotation_task(task_uuid, evaluator_uuid)
     if not removed:
         raise HTTPException(

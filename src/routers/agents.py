@@ -23,7 +23,7 @@ from db import (
     add_tool_to_agent,
     add_test_to_agent,
 )
-from auth_utils import get_current_user_id
+from auth_utils import get_current_org, OrgContext
 
 logger = logging.getLogger(__name__)
 
@@ -258,7 +258,7 @@ class VerifyConnectionResponse(BaseModel):
 @router.post("/verify-connection", response_model=VerifyConnectionResponse)
 async def verify_agent_connection_presave(
     request: VerifyConnectionRequest,
-    user_id: str = Depends(get_current_user_id),
+    ctx: OrgContext = Depends(get_current_org),
 ):
     """
     Verify an agent connection before saving (no agent UUID needed).
@@ -280,7 +280,7 @@ async def verify_agent_connection_presave(
 async def verify_agent_connection(
     agent_uuid: str,
     request: VerifyConnectionRequest,
-    user_id: str = Depends(get_current_user_id),
+    ctx: OrgContext = Depends(get_current_org),
 ):
     """
     Verify a saved agent's connection and persist the result in the agent config.
@@ -289,10 +289,8 @@ async def verify_agent_connection(
     - With model: model-specific check (required for each model before running a benchmark).
     """
     agent = get_agent(agent_uuid)
-    if not agent:
+    if not agent or agent.get("org_uuid") != ctx.org_uuid:
         raise HTTPException(status_code=404, detail="Agent not found")
-    if agent.get("user_id") != user_id:
-        raise HTTPException(status_code=403, detail="Access denied")
 
     agent_config = agent.get("config") or {}
     agent_url = agent_config.get("agent_url")
@@ -349,7 +347,7 @@ async def verify_agent_connection(
 
 @router.post("", response_model=AgentCreateResponse)
 async def create_agent_endpoint(
-    agent: AgentCreate, user_id: str = Depends(get_current_user_id)
+    agent: AgentCreate, ctx: OrgContext = Depends(get_current_org)
 ):
     """Create a new agent.
 
@@ -366,50 +364,43 @@ async def create_agent_endpoint(
     else:
         merged_config = agent.config
 
-    with ensure_name_unique("agents", agent.name, user_id, entity="Agent"):
+    with ensure_name_unique("agents", agent.name, ctx.org_uuid, entity="Agent"):
         agent_uuid = create_agent(
             name=agent.name,
             agent_type=agent.type,
             config=merged_config,
-            user_id=user_id,
+            org_uuid=ctx.org_uuid,
+            user_id=ctx.user_id,
         )
     return AgentCreateResponse(uuid=agent_uuid, message="Agent created successfully")
 
 
 @router.get("", response_model=List[AgentResponse])
-async def list_agents(user_id: str = Depends(get_current_user_id)):
-    """List all agents for the authenticated user."""
-    agents = get_all_agents(user_id=user_id)
+async def list_agents(ctx: OrgContext = Depends(get_current_org)):
+    """List all agents for the caller's current org."""
+    agents = get_all_agents(org_uuid=ctx.org_uuid)
     return agents
 
 
 @router.get("/{agent_uuid}", response_model=AgentResponse)
 async def get_agent_endpoint(
-    agent_uuid: str, user_id: str = Depends(get_current_user_id)
+    agent_uuid: str, ctx: OrgContext = Depends(get_current_org)
 ):
     """Get an agent by UUID."""
     agent = get_agent(agent_uuid)
-    if not agent:
+    if not agent or agent.get("org_uuid") != ctx.org_uuid:
         raise HTTPException(status_code=404, detail="Agent not found")
-    # Verify user owns this agent
-    if agent.get("user_id") != user_id:
-        raise HTTPException(status_code=403, detail="Access denied")
     return agent
 
 
 @router.put("/{agent_uuid}", response_model=AgentResponse)
 async def update_agent_endpoint(
-    agent_uuid: str, agent: AgentUpdate, user_id: str = Depends(get_current_user_id)
+    agent_uuid: str, agent: AgentUpdate, ctx: OrgContext = Depends(get_current_org)
 ):
     """Update an agent."""
-    # Check if agent exists
     existing_agent = get_agent(agent_uuid)
-    if not existing_agent:
+    if not existing_agent or existing_agent.get("org_uuid") != ctx.org_uuid:
         raise HTTPException(status_code=404, detail="Agent not found")
-
-    # Verify user owns this agent
-    if existing_agent.get("user_id") != user_id:
-        raise HTTPException(status_code=403, detail="Access denied")
 
     # If agent_url or agent_headers changed, reset all verification flags
     if agent.config is not None:
@@ -422,7 +413,6 @@ async def update_agent_endpoint(
             agent.config["connection_verified_error"] = None
             agent.config["benchmark_models_verified"] = {}
 
-    # Merge top-level verification fields into config
     if (
         agent.connection_verified is not None
         or agent.benchmark_models_verified is not None
@@ -434,9 +424,8 @@ async def update_agent_endpoint(
         if agent.benchmark_models_verified is not None:
             agent.config["benchmark_models_verified"] = agent.benchmark_models_verified
 
-    # Update only provided fields
     with ensure_name_unique(
-        "agents", agent.name, user_id, entity="Agent", exclude_uuid=agent_uuid
+        "agents", agent.name, ctx.org_uuid, entity="Agent", exclude_uuid=agent_uuid
     ):
         updated = update_agent(
             agent_uuid=agent_uuid,
@@ -447,22 +436,18 @@ async def update_agent_endpoint(
     if not updated:
         raise HTTPException(status_code=400, detail="No fields to update")
 
-    # Return updated agent
     updated_agent = get_agent(agent_uuid)
     return updated_agent
 
 
 @router.delete("/{agent_uuid}")
 async def delete_agent_endpoint(
-    agent_uuid: str, user_id: str = Depends(get_current_user_id)
+    agent_uuid: str, ctx: OrgContext = Depends(get_current_org)
 ):
     """Delete an agent."""
-    # Check if agent exists and user owns it
     existing_agent = get_agent(agent_uuid)
-    if not existing_agent:
+    if not existing_agent or existing_agent.get("org_uuid") != ctx.org_uuid:
         raise HTTPException(status_code=404, detail="Agent not found")
-    if existing_agent.get("user_id") != user_id:
-        raise HTTPException(status_code=403, detail="Access denied")
 
     deleted = delete_agent(agent_uuid)
     if not deleted:
@@ -474,7 +459,7 @@ async def delete_agent_endpoint(
 async def duplicate_agent_endpoint(
     agent_uuid: str,
     request: AgentDuplicateRequest,
-    user_id: str = Depends(get_current_user_id),
+    ctx: OrgContext = Depends(get_current_org),
 ):
     """
     Duplicate an agent with all its linked data.
@@ -485,22 +470,14 @@ async def duplicate_agent_endpoint(
     - Copy all linked tests
     - Return the new agent UUID
     """
-    # Get the original agent
     original_agent = get_agent(agent_uuid)
-    if not original_agent:
+    if not original_agent or original_agent.get("org_uuid") != ctx.org_uuid:
         raise HTTPException(status_code=404, detail="Agent not found")
 
-    # Verify user owns this agent
-    if original_agent.get("user_id") != user_id:
-        raise HTTPException(status_code=403, detail="Access denied")
-
-    # Use the provided name
     new_name = request.name
 
-    # Copy the entire config (includes speaks_first, data extraction fields, llm config, etc.)
     new_config = original_agent.get("config")
     if new_config:
-        # Deep copy the config to avoid reference issues
         new_config = copy.deepcopy(new_config)
         # Strip verification flags — the duplicated agent's connection is unverified
         new_config.pop("connection_verified", None)
@@ -508,13 +485,13 @@ async def duplicate_agent_endpoint(
         new_config.pop("connection_verified_error", None)
         new_config.pop("benchmark_models_verified", None)
 
-    # Create the new agent
-    with ensure_name_unique("agents", new_name, user_id, entity="Agent"):
+    with ensure_name_unique("agents", new_name, ctx.org_uuid, entity="Agent"):
         new_agent_uuid = create_agent(
             name=new_name,
             agent_type=original_agent.get("type", "agent"),
             config=new_config,
-            user_id=user_id,
+            org_uuid=ctx.org_uuid,
+            user_id=ctx.user_id,
         )
 
     # Copy all linked tools

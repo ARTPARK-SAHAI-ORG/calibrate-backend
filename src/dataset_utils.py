@@ -20,11 +20,12 @@ class ResolvedDatasetInputs:
 def resolve_dataset_inputs(
     *,
     dataset_id: Optional[str],
-    user_id: str,
+    org_uuid: str,
     expected_type: str,
     texts: Optional[List[str]] = None,
     audio_paths: Optional[List[str]] = None,
     dataset_name: Optional[str] = None,
+    user_id: Optional[str] = None,
 ) -> ResolvedDatasetInputs:
     """Resolve evaluation inputs from an existing dataset or inline data.
 
@@ -35,7 +36,7 @@ def resolve_dataset_inputs(
     and persisted before the evaluation starts. Ignored when *dataset_id* is set.
     """
     if dataset_id:
-        dataset = get_dataset(dataset_id, user_id=user_id)
+        dataset = get_dataset(dataset_id, org_uuid=org_uuid)
         if not dataset:
             raise HTTPException(status_code=404, detail="Dataset not found")
         if dataset["type"] != expected_type:
@@ -86,6 +87,7 @@ def resolve_dataset_inputs(
         resolved_dataset_id = create_dataset(
             name=dataset_name,
             dataset_type=expected_type,
+            org_uuid=org_uuid,
             user_id=user_id,
         )
         item_dicts: List[Dict] = []

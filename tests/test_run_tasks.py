@@ -61,8 +61,10 @@ def _make_tts_output_dir(root: Path, providers: list[str], total: int = 1):
 
 def _make_user_and_job(job_type="stt-eval"):
     user_uuid = db.create_user("R", "T", f"rt-{os.urandom(4).hex()}@x.com")
+    org_uuid = db.get_personal_org_for_user(user_uuid)["uuid"]
     job_uuid = db.create_job(
         job_type=job_type,
+        org_uuid=org_uuid,
         user_id=user_uuid,
         status="in_progress",
         details={
@@ -191,8 +193,10 @@ def test_stt_run_evaluation_task_unexpected_exception():
 
 def _make_tts_job():
     user_uuid = db.create_user("R", "T", f"rttts-{os.urandom(4).hex()}@x.com")
+    org_uuid = db.get_personal_org_for_user(user_uuid)["uuid"]
     job_uuid = db.create_job(
         job_type="tts-eval",
+        org_uuid=org_uuid,
         user_id=user_uuid,
         status="in_progress",
         details={
@@ -305,7 +309,10 @@ def test_stt_collect_intermediate_results(tmp_path):
 
 def _make_agent_test_job(job_type="llm-unit-test"):
     user_uuid = db.create_user("R", "AT", f"rtat-{os.urandom(4).hex()}@x.com")
-    agent_uuid = db.create_agent(name=f"a-{os.urandom(4).hex()}", user_id=user_uuid)
+    org_uuid = db.get_personal_org_for_user(user_uuid)["uuid"]
+    agent_uuid = db.create_agent(
+        name=f"a-{os.urandom(4).hex()}", org_uuid=org_uuid, user_id=user_uuid
+    )
     job_uuid = db.create_agent_test_job(
         agent_id=agent_uuid, job_type=job_type, status="in_progress"
     )
@@ -358,8 +365,9 @@ def test_run_benchmark_task_failure_path():
 
 def _make_sim_job():
     user_uuid = db.create_user("R", "S", f"rs-{os.urandom(4).hex()}@x.com")
+    org_uuid = db.get_personal_org_for_user(user_uuid)["uuid"]
     sim_uuid = db.create_simulation(
-        name=f"sim-{os.urandom(4).hex()}", user_id=user_uuid
+        name=f"sim-{os.urandom(4).hex()}", org_uuid=org_uuid, user_id=user_uuid
     )
     job_uuid = db.create_simulation_job(
         simulation_id=sim_uuid, job_type="text", status="in_progress"

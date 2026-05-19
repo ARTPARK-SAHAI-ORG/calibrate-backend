@@ -40,7 +40,7 @@ from utils import (
     generate_presigned_download_url,
     generate_presigned_upload_url,
     get_max_concurrent_jobs,
-    get_max_concurrent_jobs_per_user,
+    get_max_concurrent_jobs_per_org,
     get_s3_client,
     get_s3_output_config,
     is_evaluator_metric_aggregate,
@@ -324,21 +324,33 @@ def test_presign_audio_path_branches(monkeypatch):
 def test_get_max_concurrent_jobs(monkeypatch):
     monkeypatch.setenv("MAX_CONCURRENT_JOBS", "5")
     assert get_max_concurrent_jobs() == 5
-    monkeypatch.setenv("MAX_CONCURRENT_JOBS_PER_USER", "3")
-    assert get_max_concurrent_jobs_per_user() == 3
+    monkeypatch.setenv("MAX_CONCURRENT_JOBS_PER_ORG", "3")
+    assert get_max_concurrent_jobs_per_org() == 3
+    # back-compat: old env var name still honored with a deprecation warning
+    monkeypatch.delenv("MAX_CONCURRENT_JOBS_PER_ORG", raising=False)
+    monkeypatch.setenv("MAX_CONCURRENT_JOBS_PER_USER", "7")
+    assert get_max_concurrent_jobs_per_org() == 7
+
+
+def _mk_user_org(prefix: str) -> tuple[str, str]:
+    """Test helper: create a user and return (user_uuid, personal_org_uuid)."""
+    user_uuid = db.create_user(prefix, "U", f"{prefix}-{os.urandom(4).hex()}@x.com")
+    org = db.get_personal_org_for_user(user_uuid)
+    return user_uuid, org["uuid"]
 
 
 def test_register_and_try_start_queued_job(monkeypatch):
-    # Make sure we don't trip global concurrency
     monkeypatch.setenv("MAX_CONCURRENT_JOBS", "100")
-    monkeypatch.setenv("MAX_CONCURRENT_JOBS_PER_USER", "100")
+    monkeypatch.setenv("MAX_CONCURRENT_JOBS_PER_ORG", "100")
 
-    # Use a unique job_type so other tests' queued stt-eval jobs don't
-    # poison this assertion. The starter registry is global per-process.
     job_type = f"queue-test-{os.urandom(4).hex()}"
-    user_uuid = db.create_user("Q", "User", f"queue-{os.urandom(4).hex()}@x.com")
+    user_uuid, org_uuid = _mk_user_org("Q")
     job_uuid = db.create_job(
-        job_type=job_type, user_id=user_uuid, status="queued", details={}
+        job_type=job_type,
+        org_uuid=org_uuid,
+        user_id=user_uuid,
+        status="queued",
+        details={},
     )
 
     started = {"called_with": None}
@@ -350,59 +362,68 @@ def test_register_and_try_start_queued_job(monkeypatch):
     assert try_start_queued_job([job_type]) is True
     assert started["called_with"] == job_uuid
 
-    # No queued jobs left → False
     assert try_start_queued_job([job_type]) is False
 
-    # Hit the at-capacity path
     monkeypatch.setenv("MAX_CONCURRENT_JOBS", "0")
     db.create_job(
-        job_type=job_type, user_id=user_uuid, status="queued", details={}
+        job_type=job_type,
+        org_uuid=org_uuid,
+        user_id=user_uuid,
+        status="queued",
+        details={},
     )
     assert try_start_queued_job([job_type]) is False
 
-    # can_start_job branches
     monkeypatch.setenv("MAX_CONCURRENT_JOBS", "100")
-    assert can_start_job([job_type], user_uuid) in (True, False)
+    assert can_start_job([job_type], org_uuid) in (True, False)
     monkeypatch.setenv("MAX_CONCURRENT_JOBS", "0")
-    assert can_start_job([job_type], user_uuid) is False
+    assert can_start_job([job_type], org_uuid) is False
     monkeypatch.setenv("MAX_CONCURRENT_JOBS", "100")
-    monkeypatch.setenv("MAX_CONCURRENT_JOBS_PER_USER", "0")
-    assert can_start_job([job_type], user_uuid) is True
+    monkeypatch.setenv("MAX_CONCURRENT_JOBS_PER_ORG", "0")
+    assert can_start_job([job_type], org_uuid) is True
 
 
 def test_try_start_queued_job_failure_starter(monkeypatch):
     monkeypatch.setenv("MAX_CONCURRENT_JOBS", "100")
-    monkeypatch.setenv("MAX_CONCURRENT_JOBS_PER_USER", "100")
-    user_uuid = db.create_user("F", "S", f"fail-{os.urandom(4).hex()}@x.com")
+    monkeypatch.setenv("MAX_CONCURRENT_JOBS_PER_ORG", "100")
+    user_uuid, org_uuid = _mk_user_org("F")
     db.create_job(
-        job_type="stt-eval", user_id=user_uuid, status="queued", details={}
+        job_type="stt-eval",
+        org_uuid=org_uuid,
+        user_id=user_uuid,
+        status="queued",
+        details={},
     )
 
     def bad_starter(job):
         raise RuntimeError("nope")
 
     register_job_starter("stt-eval", bad_starter)
-    # Starter raises → returns False, job marked failed
     assert try_start_queued_job(["stt-eval"]) is False
 
 
 def test_try_start_queued_job_no_starter(monkeypatch):
     monkeypatch.setenv("MAX_CONCURRENT_JOBS", "100")
-    monkeypatch.setenv("MAX_CONCURRENT_JOBS_PER_USER", "100")
-    user_uuid = db.create_user("N", "S", f"nostart-{os.urandom(4).hex()}@x.com")
+    monkeypatch.setenv("MAX_CONCURRENT_JOBS_PER_ORG", "100")
+    user_uuid, org_uuid = _mk_user_org("N")
     db.create_job(
-        job_type="zzz-no-starter", user_id=user_uuid, status="queued", details={}
+        job_type="zzz-no-starter",
+        org_uuid=org_uuid,
+        user_id=user_uuid,
+        status="queued",
+        details={},
     )
-    # Make sure no starter is registered for this type
     utils._job_starters.pop("zzz-no-starter", None)
     assert try_start_queued_job(["zzz-no-starter"]) is False
 
 
 def test_try_start_queued_agent_test_job(monkeypatch):
     monkeypatch.setenv("MAX_CONCURRENT_JOBS", "100")
-    monkeypatch.setenv("MAX_CONCURRENT_JOBS_PER_USER", "100")
-    user_uuid = db.create_user("AT", "U", f"at-{os.urandom(4).hex()}@x.com")
-    agent_uuid = db.create_agent(name=f"ag-{os.urandom(4).hex()}", user_id=user_uuid)
+    monkeypatch.setenv("MAX_CONCURRENT_JOBS_PER_ORG", "100")
+    user_uuid, org_uuid = _mk_user_org("AT")
+    agent_uuid = db.create_agent(
+        name=f"ag-{os.urandom(4).hex()}", org_uuid=org_uuid, user_id=user_uuid
+    )
     job_uuid = db.create_agent_test_job(
         agent_id=agent_uuid, job_type="llm-unit-test", status="queued"
     )
@@ -423,16 +444,18 @@ def test_try_start_queued_agent_test_job(monkeypatch):
     assert try_start_queued_agent_test_job(["llm-unit-test"]) is False
 
     monkeypatch.setenv("MAX_CONCURRENT_JOBS", "100")
-    assert can_start_agent_test_job(["llm-unit-test"], user_uuid) in (True, False)
+    assert can_start_agent_test_job(["llm-unit-test"], org_uuid) in (True, False)
     monkeypatch.setenv("MAX_CONCURRENT_JOBS", "0")
-    assert can_start_agent_test_job(["llm-unit-test"], user_uuid) is False
+    assert can_start_agent_test_job(["llm-unit-test"], org_uuid) is False
 
 
 def test_try_start_queued_simulation_job(monkeypatch):
     monkeypatch.setenv("MAX_CONCURRENT_JOBS", "100")
-    monkeypatch.setenv("MAX_CONCURRENT_JOBS_PER_USER", "100")
-    user_uuid = db.create_user("S", "U", f"s-{os.urandom(4).hex()}@x.com")
-    sim_uuid = db.create_simulation(name=f"sim-{os.urandom(4).hex()}", user_id=user_uuid)
+    monkeypatch.setenv("MAX_CONCURRENT_JOBS_PER_ORG", "100")
+    user_uuid, org_uuid = _mk_user_org("S")
+    sim_uuid = db.create_simulation(
+        name=f"sim-{os.urandom(4).hex()}", org_uuid=org_uuid, user_id=user_uuid
+    )
     job_uuid = db.create_simulation_job(
         simulation_id=sim_uuid, job_type="text", status="queued"
     )
@@ -453,16 +476,18 @@ def test_try_start_queued_simulation_job(monkeypatch):
     assert try_start_queued_simulation_job(["text"]) is False
 
     monkeypatch.setenv("MAX_CONCURRENT_JOBS", "100")
-    assert can_start_simulation_job(["text"], user_uuid) in (True, False)
+    assert can_start_simulation_job(["text"], org_uuid) in (True, False)
     monkeypatch.setenv("MAX_CONCURRENT_JOBS", "0")
-    assert can_start_simulation_job(["text"], user_uuid) is False
+    assert can_start_simulation_job(["text"], org_uuid) is False
 
 
 def test_try_start_failure_paths_agent_test(monkeypatch):
     monkeypatch.setenv("MAX_CONCURRENT_JOBS", "100")
-    monkeypatch.setenv("MAX_CONCURRENT_JOBS_PER_USER", "100")
-    user_uuid = db.create_user("X", "X", f"x-{os.urandom(4).hex()}@x.com")
-    agent_uuid = db.create_agent(name=f"ag-{os.urandom(4).hex()}", user_id=user_uuid)
+    monkeypatch.setenv("MAX_CONCURRENT_JOBS_PER_ORG", "100")
+    user_uuid, org_uuid = _mk_user_org("X")
+    agent_uuid = db.create_agent(
+        name=f"ag-{os.urandom(4).hex()}", org_uuid=org_uuid, user_id=user_uuid
+    )
     db.create_agent_test_job(
         agent_id=agent_uuid, job_type="bad-starter", status="queued"
     )
@@ -476,9 +501,11 @@ def test_try_start_failure_paths_agent_test(monkeypatch):
 
 def test_try_start_failure_paths_simulation(monkeypatch):
     monkeypatch.setenv("MAX_CONCURRENT_JOBS", "100")
-    monkeypatch.setenv("MAX_CONCURRENT_JOBS_PER_USER", "100")
-    user_uuid = db.create_user("X", "X", f"y-{os.urandom(4).hex()}@x.com")
-    sim_uuid = db.create_simulation(name=f"sim-{os.urandom(4).hex()}", user_id=user_uuid)
+    monkeypatch.setenv("MAX_CONCURRENT_JOBS_PER_ORG", "100")
+    user_uuid, org_uuid = _mk_user_org("X")
+    sim_uuid = db.create_simulation(
+        name=f"sim-{os.urandom(4).hex()}", org_uuid=org_uuid, user_id=user_uuid
+    )
     db.create_simulation_job(
         simulation_id=sim_uuid, job_type="bad-sim-starter", status="queued"
     )

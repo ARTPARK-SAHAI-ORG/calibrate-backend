@@ -50,7 +50,13 @@ def test_is_name_taken_whitelist_only():
 def user():
     email = f"{_u('user')}@example.com"
     user_uuid = db.create_user("Alice", "Smith", email)
-    yield {"uuid": user_uuid, "email": email}
+    # `create_user` auto-provisions a personal org and an owner membership.
+    org = db.get_personal_org_for_user(user_uuid)
+    yield {
+        "uuid": user_uuid,
+        "email": email,
+        "org_uuid": org["uuid"] if org else None,
+    }
 
 
 def test_user_crud_and_get_or_create(user):
@@ -101,7 +107,7 @@ def test_agents_tools_and_pivot(user):
         name=_u("agent"),
         agent_type="agent",
         config={"llm": "gpt-4"},
-        user_id=user["uuid"],
+        user_id=user["uuid"], org_uuid=user["org_uuid"],
     )
     fetched = db.get_agent(agent_uuid)
     assert fetched["config"] == {"llm": "gpt-4"}
@@ -109,26 +115,26 @@ def test_agents_tools_and_pivot(user):
     # update / list / delete
     assert db.update_agent(agent_uuid, name=_u("agent2"), config={"llm": "gpt-5"})
     assert db.update_agent(agent_uuid) is False
-    assert any(a["uuid"] == agent_uuid for a in db.get_all_agents(user_id=user["uuid"]))
+    assert any(a["uuid"] == agent_uuid for a in db.get_all_agents(org_uuid=user["org_uuid"]))
     assert any(a["uuid"] == agent_uuid for a in db.get_all_agents())
 
     with pytest.raises(ValueError):
-        db.create_agent(name=_u("no-owner"), user_id=None)
+        db.create_agent(name=_u("no-owner"), org_uuid=None)
 
     tool_uuid = db.create_tool(
         name=_u("tool"),
         description="desc",
         config={"type": "structured_output", "parameters": []},
-        user_id=user["uuid"],
+        user_id=user["uuid"], org_uuid=user["org_uuid"],
     )
     assert db.get_tool(tool_uuid)["description"] == "desc"
     assert db.update_tool(tool_uuid, description="updated")
     assert db.update_tool(tool_uuid) is False
-    assert any(t["uuid"] == tool_uuid for t in db.get_all_tools(user_id=user["uuid"]))
+    assert any(t["uuid"] == tool_uuid for t in db.get_all_tools(org_uuid=user["org_uuid"]))
     assert any(t["uuid"] == tool_uuid for t in db.get_all_tools())
 
     with pytest.raises(ValueError):
-        db.create_tool(name=_u("no-owner-tool"), description="d", user_id=None)
+        db.create_tool(name=_u("no-owner-tool"), description="d", org_uuid=None)
 
     # link / unlink / re-link the agent_tools pivot
     link_id = db.add_tool_to_agent(agent_uuid, tool_uuid)
@@ -159,15 +165,15 @@ def test_agents_tools_and_pivot(user):
 
 
 def test_tests_crud_and_bulk(user):
-    t_uuid = db.create_test(name=_u("test"), type="llm", config={"k": "v"}, user_id=user["uuid"])
+    t_uuid = db.create_test(name=_u("test"), type="llm", config={"k": "v"}, user_id=user["uuid"], org_uuid=user["org_uuid"])
     assert db.get_test(t_uuid)["config"] == {"k": "v"}
     assert db.update_test(t_uuid, name=_u("renamed"), type="llm", config={"k": "v2"})
     assert db.update_test(t_uuid) is False
-    assert any(t["uuid"] == t_uuid for t in db.get_all_tests(user_id=user["uuid"]))
+    assert any(t["uuid"] == t_uuid for t in db.get_all_tests(org_uuid=user["org_uuid"]))
     assert any(t["uuid"] == t_uuid for t in db.get_all_tests())
 
     with pytest.raises(ValueError):
-        db.create_test(name=_u("no-owner-test"), type="llm", user_id=None)
+        db.create_test(name=_u("no-owner-test"), type="llm", org_uuid=None)
 
     # bulk_create_tests + collision
     bulk_uuids = db.bulk_create_tests(
@@ -175,28 +181,28 @@ def test_tests_crud_and_bulk(user):
             {"name": _u("bulk1"), "type": "llm", "config": None},
             {"name": _u("bulk2"), "type": "llm", "config": {"x": 1}},
         ],
-        user_id=user["uuid"],
+        user_id=user["uuid"], org_uuid=user["org_uuid"],
     )
     assert len(bulk_uuids) == 2
 
     # collide via pre-existing name in DB
     dup_name = _u("dup-pre")
-    db.create_test(name=dup_name, type="llm", user_id=user["uuid"])
+    db.create_test(name=dup_name, type="llm", user_id=user["uuid"], org_uuid=user["org_uuid"])
     with pytest.raises(ValueError):
         db.bulk_create_tests(
             [{"name": dup_name, "type": "llm", "config": None}],
-            user_id=user["uuid"],
+            user_id=user["uuid"], org_uuid=user["org_uuid"],
         )
     with pytest.raises(ValueError):
-        db.bulk_create_tests([{"name": "n", "type": "llm", "config": None}], user_id=None)
+        db.bulk_create_tests([{"name": "n", "type": "llm", "config": None}], org_uuid=None)
 
     # single delete + bulk delete
     assert db.delete_test(t_uuid) is True
     assert db.delete_test(t_uuid) is False
-    assert db.bulk_delete_tests(bulk_uuids, user["uuid"]) == 2
-    assert db.bulk_delete_tests([], user["uuid"]) == 0
+    assert db.bulk_delete_tests(bulk_uuids, user["org_uuid"]) == 2
+    assert db.bulk_delete_tests([], user["org_uuid"]) == 0
     # unowned UUIDs → 0
-    assert db.bulk_delete_tests([str(_uuid.uuid4())], user["uuid"]) == 0
+    assert db.bulk_delete_tests([str(_uuid.uuid4())], user["org_uuid"]) == 0
 
 
 # ---------------------------------------------------------------------------
@@ -209,32 +215,32 @@ def test_personas_scenarios(user):
         name=_u("persona"),
         description="some persona",
         config={"language": "en"},
-        user_id=user["uuid"],
+        user_id=user["uuid"], org_uuid=user["org_uuid"],
     )
     assert db.get_persona(p_uuid)["description"] == "some persona"
     assert db.update_persona(p_uuid, name=_u("persona-new"), description="d2", config={"k": 1})
     assert db.update_persona(p_uuid) is False
-    assert any(p["uuid"] == p_uuid for p in db.get_all_personas(user_id=user["uuid"]))
+    assert any(p["uuid"] == p_uuid for p in db.get_all_personas(org_uuid=user["org_uuid"]))
     assert any(p["uuid"] == p_uuid for p in db.get_all_personas())
     assert db.delete_persona(p_uuid) is True
     assert db.delete_persona(p_uuid) is False
     with pytest.raises(ValueError):
-        db.create_persona(name=_u("no-owner-p"), user_id=None)
+        db.create_persona(name=_u("no-owner-p"), org_uuid=None)
 
     s_uuid = db.create_scenario(
         name=_u("scen"),
         description="scenario",
-        user_id=user["uuid"],
+        user_id=user["uuid"], org_uuid=user["org_uuid"],
     )
     assert db.get_scenario(s_uuid)["description"] == "scenario"
     assert db.update_scenario(s_uuid, name=_u("scen-new"), description="d2")
     assert db.update_scenario(s_uuid) is False
-    assert any(s["uuid"] == s_uuid for s in db.get_all_scenarios(user_id=user["uuid"]))
+    assert any(s["uuid"] == s_uuid for s in db.get_all_scenarios(org_uuid=user["org_uuid"]))
     assert any(s["uuid"] == s_uuid for s in db.get_all_scenarios())
     assert db.delete_scenario(s_uuid) is True
     assert db.delete_scenario(s_uuid) is False
     with pytest.raises(ValueError):
-        db.create_scenario(name=_u("no-owner-s"), user_id=None)
+        db.create_scenario(name=_u("no-owner-s"), org_uuid=None)
 
 
 # ---------------------------------------------------------------------------
@@ -250,7 +256,7 @@ def test_evaluator_crud_versions_duplicate(user):
         data_type="text",
         kind="single",
         output_type="binary",
-        owner_user_id=user["uuid"],
+        owner_user_id=user["uuid"], org_uuid=user["org_uuid"],
         slug=None,
     )
     row = db.get_evaluator(ev_uuid)
@@ -263,13 +269,13 @@ def test_evaluator_crud_versions_duplicate(user):
 
     # validation errors
     with pytest.raises(ValueError):
-        db.create_evaluator(name=_u("bad-type"), evaluator_type="nope", owner_user_id=user["uuid"])
+        db.create_evaluator(name=_u("bad-type"), evaluator_type="nope", owner_user_id=user["uuid"], org_uuid=user["org_uuid"])
     with pytest.raises(ValueError):
-        db.create_evaluator(name=_u("bad-data"), data_type="nope", owner_user_id=user["uuid"])
+        db.create_evaluator(name=_u("bad-data"), data_type="nope", owner_user_id=user["uuid"], org_uuid=user["org_uuid"])
     with pytest.raises(ValueError):
-        db.create_evaluator(name=_u("bad-kind"), kind="nope", owner_user_id=user["uuid"])
+        db.create_evaluator(name=_u("bad-kind"), kind="nope", owner_user_id=user["uuid"], org_uuid=user["org_uuid"])
     with pytest.raises(ValueError):
-        db.create_evaluator(name=_u("bad-output"), output_type="nope", owner_user_id=user["uuid"])
+        db.create_evaluator(name=_u("bad-output"), output_type="nope", owner_user_id=user["uuid"], org_uuid=user["org_uuid"])
 
     # versions
     v1 = db.create_evaluator_version(
@@ -295,7 +301,7 @@ def test_evaluator_crud_versions_duplicate(user):
     rating_uuid = db.create_evaluator(
         name=_u("rating"),
         output_type="rating",
-        owner_user_id=user["uuid"],
+        owner_user_id=user["uuid"], org_uuid=user["org_uuid"],
     )
     with pytest.raises(ValueError):
         db.create_evaluator_version(rating_uuid, judge_model="m", system_prompt="p")
@@ -327,20 +333,20 @@ def test_evaluator_crud_versions_duplicate(user):
         db.create_evaluator_version("not-real-uuid", judge_model="m", system_prompt="p")
 
     # name lookup helpers
-    assert db.evaluator_name_exists(row["name"], owner_user_id=user["uuid"]) is True
-    assert db.evaluator_name_exists(row["name"], owner_user_id=user["uuid"], exclude_uuid=ev_uuid) is False
-    assert db.evaluator_name_exists("nonexistent-name-zzz", owner_user_id=None) is False
+    assert db.evaluator_name_exists(row["name"], org_uuid=user["org_uuid"]) is True
+    assert db.evaluator_name_exists(row["name"], org_uuid=user["org_uuid"], exclude_uuid=ev_uuid) is False
+    assert db.evaluator_name_exists("nonexistent-name-zzz", org_uuid=None) is False
     assert db.get_evaluator_by_slug("default-safety") is not None
     assert db.get_evaluator_by_slug("nope") is None
     assert db.legacy_metric_uuid_exists("non-existent") is False
     assert db.get_evaluator_uuid_for_legacy_metric("non-existent") is None
 
     # listing
-    user_visible = db.get_all_evaluators(user_id=user["uuid"])
+    user_visible = db.get_all_evaluators(org_uuid=user["org_uuid"])
     assert any(e["uuid"] == ev_uuid for e in user_visible)
-    own_only = db.get_all_evaluators(user_id=user["uuid"], include_defaults=False)
+    own_only = db.get_all_evaluators(org_uuid=user["org_uuid"], include_defaults=False)
     assert all(e["owner_user_id"] for e in own_only)
-    filtered = db.get_all_evaluators(user_id=user["uuid"], evaluator_type="llm", data_type="text")
+    filtered = db.get_all_evaluators(org_uuid=user["org_uuid"], evaluator_type="llm", data_type="text")
     assert all(e["evaluator_type"] == "llm" for e in filtered)
     assert db.get_all_evaluators() is not None  # admin view
 
@@ -357,10 +363,10 @@ def test_evaluator_crud_versions_duplicate(user):
         db.update_evaluator(ev_uuid, output_type="bogus")
 
     # duplicate -> new evaluator + cloned live version
-    dup_uuid = db.duplicate_evaluator(ev_uuid, new_name=_u("dup"), owner_user_id=user["uuid"])
+    dup_uuid = db.duplicate_evaluator(ev_uuid, new_name=_u("dup"), owner_user_id=user["uuid"], org_uuid=user["org_uuid"])
     assert dup_uuid is not None
     assert db.get_evaluator(dup_uuid) is not None
-    assert db.duplicate_evaluator("does-not-exist", new_name="x", owner_user_id=user["uuid"]) is None
+    assert db.duplicate_evaluator("does-not-exist", new_name="x", owner_user_id=user["uuid"], org_uuid=user["org_uuid"]) is None
 
     # delete (custom evaluators only)
     assert db.delete_evaluator(ev_uuid) is True
@@ -376,24 +382,24 @@ def test_evaluator_crud_versions_duplicate(user):
 
 
 def test_simulations_and_pivots(user):
-    agent_uuid = db.create_agent(name=_u("a-sim"), user_id=user["uuid"])
-    sim_uuid = db.create_simulation(name=_u("sim"), agent_id=agent_uuid, user_id=user["uuid"])
+    agent_uuid = db.create_agent(name=_u("a-sim"), user_id=user["uuid"], org_uuid=user["org_uuid"])
+    sim_uuid = db.create_simulation(name=_u("sim"), agent_id=agent_uuid, user_id=user["uuid"], org_uuid=user["org_uuid"])
     assert db.get_simulation(sim_uuid)["agent_id"] == agent_uuid
-    assert any(s["uuid"] == sim_uuid for s in db.get_all_simulations(user_id=user["uuid"]))
+    assert any(s["uuid"] == sim_uuid for s in db.get_all_simulations(org_uuid=user["org_uuid"]))
     assert any(s["uuid"] == sim_uuid for s in db.get_all_simulations())
 
     assert db.update_simulation(sim_uuid, name=_u("sim2"))
     assert db.update_simulation(sim_uuid) is False
-    new_agent = db.create_agent(name=_u("a2"), user_id=user["uuid"])
+    new_agent = db.create_agent(name=_u("a2"), user_id=user["uuid"], org_uuid=user["org_uuid"])
     assert db.update_simulation(sim_uuid, agent_id=new_agent)
     assert db.update_simulation(sim_uuid, clear_agent=True)
     assert db.get_simulation(sim_uuid)["agent_id"] is None
 
     with pytest.raises(ValueError):
-        db.create_simulation(name="no-owner", user_id=None)
+        db.create_simulation(name="no-owner", org_uuid=None)
 
     # persona pivot
-    persona_uuid = db.create_persona(name=_u("p"), user_id=user["uuid"])
+    persona_uuid = db.create_persona(name=_u("p"), user_id=user["uuid"], org_uuid=user["org_uuid"])
     pid = db.add_persona_to_simulation(sim_uuid, persona_uuid)
     assert isinstance(pid, int)
     assert db.get_simulation_persona_link(sim_uuid, persona_uuid)
@@ -405,7 +411,7 @@ def test_simulations_and_pivots(user):
     assert pid2 == pid
 
     # scenario pivot
-    scenario_uuid = db.create_scenario(name=_u("s"), user_id=user["uuid"])
+    scenario_uuid = db.create_scenario(name=_u("s"), user_id=user["uuid"], org_uuid=user["org_uuid"])
     sid = db.add_scenario_to_simulation(sim_uuid, scenario_uuid)
     assert db.get_simulation_scenario_link(sim_uuid, scenario_uuid)
     assert any(s["uuid"] == scenario_uuid for s in db.get_scenarios_for_simulation(sim_uuid))
@@ -439,9 +445,9 @@ def test_simulations_and_pivots(user):
 
 
 def test_agent_tests_pivot_and_test_evaluators(user):
-    agent_uuid = db.create_agent(name=_u("a-tests"), user_id=user["uuid"])
-    test_uuid = db.create_test(name=_u("t"), type="llm", user_id=user["uuid"])
-    other_test = db.create_test(name=_u("t2"), type="llm", user_id=user["uuid"])
+    agent_uuid = db.create_agent(name=_u("a-tests"), user_id=user["uuid"], org_uuid=user["org_uuid"])
+    test_uuid = db.create_test(name=_u("t"), type="llm", user_id=user["uuid"], org_uuid=user["org_uuid"])
+    other_test = db.create_test(name=_u("t2"), type="llm", user_id=user["uuid"], org_uuid=user["org_uuid"])
 
     db.add_test_to_agent(agent_uuid, test_uuid)
     db.add_test_to_agent(agent_uuid, other_test)
@@ -481,7 +487,7 @@ def test_agent_tests_pivot_and_test_evaluators(user):
     assert eid2 == eid
 
     # evaluator with no live version → set_test_evaluators raises
-    no_live = db.create_evaluator(name=_u("no-live"), owner_user_id=user["uuid"])
+    no_live = db.create_evaluator(name=_u("no-live"), owner_user_id=user["uuid"], org_uuid=user["org_uuid"])
     with pytest.raises(ValueError):
         db.set_test_evaluators(test_uuid, [{"evaluator_id": no_live}])
 
@@ -494,16 +500,16 @@ def test_agent_tests_pivot_and_test_evaluators(user):
 def test_generic_jobs_and_queue(user):
     j_uuid = db.create_job(
         job_type="stt-eval",
-        user_id=user["uuid"],
+        user_id=user["uuid"], org_uuid=user["org_uuid"],
         status="in_progress",
         details={"provider": "openai"},
     )
     assert db.get_job(j_uuid)["details"] == {"provider": "openai"}
-    assert db.get_job(j_uuid, user_id=user["uuid"]) is not None
+    assert db.get_job(j_uuid, org_uuid=user["org_uuid"]) is not None
     assert db.get_job("does-not-exist") is None
 
     queued_uuid = db.create_job(
-        job_type="stt-eval", user_id=user["uuid"], status="queued"
+        job_type="stt-eval", user_id=user["uuid"], org_uuid=user["org_uuid"], status="queued"
     )
     assert any(j["uuid"] == queued_uuid for j in db.get_queued_jobs(["stt-eval"]))
     assert db.get_queued_jobs() is not None
@@ -511,8 +517,8 @@ def test_generic_jobs_and_queue(user):
 
     assert db.count_running_jobs(["stt-eval"]) >= 1
     assert db.count_running_jobs() >= 1
-    assert db.count_running_jobs_for_user(user["uuid"], ["stt-eval"]) >= 1
-    assert db.count_running_jobs_for_user(user["uuid"]) >= 1
+    assert db.count_running_jobs_for_org(user["org_uuid"], ["stt-eval"]) >= 1
+    assert db.count_running_jobs_for_org(user["org_uuid"]) >= 1
 
     # update — status + results
     assert db.update_job(j_uuid, status="done", results={"r": 1}) is True
@@ -532,16 +538,16 @@ def test_generic_jobs_and_queue(user):
     assert db.get_job_by_share_token("tok-123") is None
 
     # all jobs / filters
-    assert any(j["uuid"] == j_uuid for j in db.get_all_jobs(user_id=user["uuid"]))
+    assert any(j["uuid"] == j_uuid for j in db.get_all_jobs(org_uuid=user["org_uuid"]))
     assert any(
-        j["uuid"] == j_uuid for j in db.get_all_jobs(user_id=user["uuid"], job_type="stt-eval")
+        j["uuid"] == j_uuid for j in db.get_all_jobs(org_uuid=user["org_uuid"], job_type="stt-eval")
     )
 
     # generic-jobs-for-task lookup (annotation-eval shape)
     task_id = str(_uuid.uuid4())
     anno_uuid = db.create_job(
         job_type="annotation-eval",
-        user_id=user["uuid"],
+        user_id=user["uuid"], org_uuid=user["org_uuid"],
         details={"task_id": task_id},
     )
     assert any(j["uuid"] == anno_uuid for j in db.get_generic_jobs_for_task(task_id, "annotation-eval"))
@@ -559,7 +565,7 @@ def test_generic_jobs_and_queue(user):
 
 
 def test_agent_test_jobs(user):
-    agent_uuid = db.create_agent(name=_u("a-atj"), user_id=user["uuid"])
+    agent_uuid = db.create_agent(name=_u("a-atj"), user_id=user["uuid"], org_uuid=user["org_uuid"])
     j_uuid = db.create_agent_test_job(
         agent_id=agent_uuid,
         job_type="llm-unit-test",
@@ -577,10 +583,10 @@ def test_agent_test_jobs(user):
     assert any(
         j["uuid"] == j_uuid for j in db.get_all_agent_test_jobs(job_type="llm-unit-test")
     )
-    assert any(j["uuid"] == j_uuid for j in db.get_agent_test_jobs_for_user(user["uuid"]))
+    assert any(j["uuid"] == j_uuid for j in db.get_agent_test_jobs_for_org(user["org_uuid"]))
     assert any(
         j["uuid"] == j_uuid
-        for j in db.get_agent_test_jobs_for_user(user["uuid"], job_type="llm-unit-test")
+        for j in db.get_agent_test_jobs_for_org(user["org_uuid"], job_type="llm-unit-test")
     )
 
     queued_uuid = db.create_agent_test_job(
@@ -595,8 +601,8 @@ def test_agent_test_jobs(user):
 
     assert db.count_running_agent_test_jobs(["llm-unit-test"]) >= 1
     assert db.count_running_agent_test_jobs() >= 1
-    assert db.count_running_agent_test_jobs_for_user(user["uuid"], ["llm-unit-test"]) >= 1
-    assert db.count_running_agent_test_jobs_for_user(user["uuid"]) >= 1
+    assert db.count_running_agent_test_jobs_for_org(user["org_uuid"], ["llm-unit-test"]) >= 1
+    assert db.count_running_agent_test_jobs_for_org(user["org_uuid"]) >= 1
 
     assert db.update_agent_test_job(j_uuid, status="done", results={"k": 1}) is True
     assert db.update_agent_test_job(j_uuid) is False
@@ -615,7 +621,7 @@ def test_agent_test_jobs(user):
 
 
 def test_simulation_jobs(user):
-    sim_uuid = db.create_simulation(name=_u("sim-jobs"), user_id=user["uuid"])
+    sim_uuid = db.create_simulation(name=_u("sim-jobs"), user_id=user["uuid"], org_uuid=user["org_uuid"])
     j_uuid = db.create_simulation_job(
         simulation_id=sim_uuid,
         job_type="text",
@@ -643,8 +649,8 @@ def test_simulation_jobs(user):
 
     assert db.count_running_simulation_jobs(["text"]) >= 1
     assert db.count_running_simulation_jobs() >= 1
-    assert db.count_running_simulation_jobs_for_user(user["uuid"], ["text"]) >= 1
-    assert db.count_running_simulation_jobs_for_user(user["uuid"]) >= 1
+    assert db.count_running_simulation_jobs_for_org(user["org_uuid"], ["text"]) >= 1
+    assert db.count_running_simulation_jobs_for_org(user["org_uuid"]) >= 1
 
     assert db.update_simulation_job(j_uuid, status="done", results={"ok": True}) is True
     assert db.update_simulation_job(j_uuid, details={"more": 1}) is True
@@ -667,15 +673,15 @@ def test_simulation_jobs(user):
 
 
 def test_datasets_and_items(user):
-    ds_uuid = db.create_dataset(name=_u("ds"), dataset_type="stt", user_id=user["uuid"])
+    ds_uuid = db.create_dataset(name=_u("ds"), dataset_type="stt", user_id=user["uuid"], org_uuid=user["org_uuid"])
     with pytest.raises(ValueError):
-        db.create_dataset(name=_u("bad-type"), dataset_type="bogus", user_id=user["uuid"])
+        db.create_dataset(name=_u("bad-type"), dataset_type="bogus", user_id=user["uuid"], org_uuid=user["org_uuid"])
 
-    assert db.get_dataset(ds_uuid, user["uuid"])["type"] == "stt"
-    assert db.get_dataset(ds_uuid, "other-user") is None
-    assert any(d["uuid"] == ds_uuid for d in db.get_all_datasets(user["uuid"]))
+    assert db.get_dataset(ds_uuid, user["org_uuid"])["type"] == "stt"
+    assert db.get_dataset(ds_uuid, "other-org") is None
+    assert any(d["uuid"] == ds_uuid for d in db.get_all_datasets(user["org_uuid"]))
     assert any(
-        d["uuid"] == ds_uuid for d in db.get_all_datasets(user["uuid"], dataset_type="stt")
+        d["uuid"] == ds_uuid for d in db.get_all_datasets(user["org_uuid"], dataset_type="stt")
     )
 
     item_ids = db.add_dataset_items(
@@ -702,8 +708,8 @@ def test_datasets_and_items(user):
     assert ds_uuid in db.get_active_dataset_ids([ds_uuid])
     assert db.get_active_dataset_ids([]) == set()
 
-    assert db.update_dataset_name(ds_uuid, user["uuid"], _u("renamed-ds")) is True
-    assert db.update_dataset_name(ds_uuid, "wrong-user", "x") is False
+    assert db.update_dataset_name(ds_uuid, user["org_uuid"], _u("renamed-ds")) is True
+    assert db.update_dataset_name(ds_uuid, "wrong-org", "x") is False
 
     assert db.update_dataset_item(item_ids[0], ds_uuid, text="updated") is True
     assert db.update_dataset_item(item_ids[0], ds_uuid, audio_path=None) is True
@@ -712,8 +718,8 @@ def test_datasets_and_items(user):
     assert db.delete_dataset_item(item_ids[0], ds_uuid) is True
     assert db.delete_dataset_item(item_ids[0], ds_uuid) is False
 
-    assert db.delete_dataset(ds_uuid, user["uuid"]) is True
-    assert db.delete_dataset(ds_uuid, user["uuid"]) is False
+    assert db.delete_dataset(ds_uuid, user["org_uuid"]) is True
+    assert db.delete_dataset(ds_uuid, user["org_uuid"]) is False
 
 
 # ---------------------------------------------------------------------------
@@ -721,24 +727,24 @@ def test_datasets_and_items(user):
 # ---------------------------------------------------------------------------
 
 
-def test_user_limits(user):
-    from routers.user_limits import UserLimits
+def test_org_limits(user):
+    from routers.org_limits import OrgLimits
 
-    limits = UserLimits(max_rows_per_eval=42)
-    row_uuid = db.create_user_limits(user["uuid"], limits)
+    limits = OrgLimits(max_rows_per_eval=42)
+    row_uuid = db.create_org_limits(user["org_uuid"], limits)
     assert isinstance(row_uuid, str)
 
-    fetched = db.get_user_limits(user["uuid"])
+    fetched = db.get_org_limits(user["org_uuid"])
     assert fetched["limits"]["max_rows_per_eval"] == 42
 
-    new_limits = UserLimits(max_rows_per_eval=99)
-    updated = db.update_user_limits(user["uuid"], new_limits)
+    new_limits = OrgLimits(max_rows_per_eval=99)
+    updated = db.update_org_limits(user["org_uuid"], new_limits)
     assert updated["limits"]["max_rows_per_eval"] == 99
-    assert db.update_user_limits("nope", new_limits) is None
+    assert db.update_org_limits("nope", new_limits) is None
 
-    assert db.delete_user_limits(user["uuid"]) is True
-    assert db.delete_user_limits(user["uuid"]) is False
-    assert db.get_user_limits(user["uuid"]) is None
+    assert db.delete_org_limits(user["org_uuid"]) is True
+    assert db.delete_org_limits(user["org_uuid"]) is False
+    assert db.get_org_limits(user["org_uuid"]) is None
 
 
 # ---------------------------------------------------------------------------
@@ -750,21 +756,21 @@ def test_annotation_pipeline(user):
     # task
     task_uuid = db.create_annotation_task(
         name=_u("anno-task"),
-        user_id=user["uuid"],
+        user_id=user["uuid"], org_uuid=user["org_uuid"],
         type="llm",
         description="d",
     )
     assert db.get_annotation_task(task_uuid)["item_count"] == 0
-    assert any(t["uuid"] == task_uuid for t in db.get_all_annotation_tasks(user["uuid"]))
+    assert any(t["uuid"] == task_uuid for t in db.get_all_annotation_tasks(user["org_uuid"]))
     by = db.get_annotation_tasks_by_uuids([task_uuid])
     assert task_uuid in by
     assert db.get_annotation_tasks_by_uuids([]) == {}
     assert db.get_annotation_tasks_by_uuids([None]) == {}  # type: ignore[arg-type]
 
     with pytest.raises(ValueError):
-        db.create_annotation_task(name="x", user_id=None, type="llm")
+        db.create_annotation_task(name="x", org_uuid=None, type="llm")
     with pytest.raises(ValueError):
-        db.create_annotation_task(name="x", user_id=user["uuid"], type="bogus")
+        db.create_annotation_task(name="x", user_id=user["uuid"], org_uuid=user["org_uuid"], type="bogus")
 
     assert db.update_annotation_task(task_uuid, name=_u("t2"), description="d2")
     assert db.update_annotation_task(task_uuid) is False
@@ -806,9 +812,9 @@ def test_annotation_pipeline(user):
     assert eid2 == eid
 
     # annotator
-    ann_uuid = db.create_annotator(name=_u("ann"), user_id=user["uuid"])
+    ann_uuid = db.create_annotator(name=_u("ann"), user_id=user["uuid"], org_uuid=user["org_uuid"])
     assert db.get_annotator(ann_uuid)
-    assert any(a["uuid"] == ann_uuid for a in db.get_all_annotators(user["uuid"]))
+    assert any(a["uuid"] == ann_uuid for a in db.get_all_annotators(user["org_uuid"]))
     ann_map = db.get_annotators_by_uuids([ann_uuid])
     assert ann_uuid in ann_map
     assert db.get_annotators_by_uuids([]) == {}
@@ -818,15 +824,15 @@ def test_annotation_pipeline(user):
     with pytest.raises(ValueError):
         db.update_annotator(ann_uuid, name="   ")
     with pytest.raises(ValueError):
-        db.create_annotator(name="", user_id=user["uuid"])
+        db.create_annotator(name="", user_id=user["uuid"], org_uuid=user["org_uuid"])
     with pytest.raises(ValueError):
-        db.create_annotator(name="x", user_id=None)
+        db.create_annotator(name="x", org_uuid=None)
 
     # soft-delete + restore (create_annotator restores on name match)
     assert db.delete_annotator(ann_uuid) is True
     assert db.delete_annotator(ann_uuid) is False
     same_name = db.get_annotator(ann_uuid) or {"name": _u("ann-recreate")}
-    restored = db.create_annotator(name=same_name.get("name", _u("ann-recreate")), user_id=user["uuid"])
+    restored = db.create_annotator(name=same_name.get("name", _u("ann-recreate")), user_id=user["uuid"], org_uuid=user["org_uuid"])
     assert restored
 
     # annotation job
@@ -843,7 +849,7 @@ def test_annotation_pipeline(user):
     assert any(
         j["uuid"] == job_uuid for j in db.get_jobs_for_annotator_detailed(restored)
     )
-    counts = db.get_job_counts_for_user_annotators(user["uuid"])
+    counts = db.get_job_counts_for_org_annotators(user["org_uuid"])
     assert counts.get(restored, 0) >= 1
     assert db.get_annotation_job_by_token("pub-tok")
     assert db.get_annotation_job_by_token(None) is None
@@ -911,11 +917,11 @@ def test_annotation_pipeline(user):
     assert db.get_annotations_for_task(
         task_uuid, since="2000-01-01 00:00:00", until="2999-01-01 00:00:00"
     )
-    assert db.get_annotations_for_user(user["uuid"])
-    assert db.get_annotations_for_user(
-        user["uuid"], since="2000-01-01 00:00:00", until="2999-01-01 00:00:00"
+    assert db.get_annotations_for_org(user["org_uuid"])
+    assert db.get_annotations_for_org(
+        user["org_uuid"], since="2000-01-01 00:00:00", until="2999-01-01 00:00:00"
     )
-    overlap = db.get_annotations_for_annotator_overlap_slots(user["uuid"], restored)
+    overlap = db.get_annotations_for_annotator_overlap_slots(user["org_uuid"], restored)
     assert isinstance(overlap, list)
 
     # evaluator_runs
@@ -935,12 +941,12 @@ def test_annotation_pipeline(user):
     assert len(run_ids) == 1
     assert db.get_evaluator_runs_for_job(job_uuid)
     assert db.get_evaluator_runs_for_task(task_uuid)
-    assert db.get_evaluator_runs_for_user(user["uuid"])
-    assert db.get_evaluator_runs_for_evaluator_user_scoped(
-        seeded["uuid"], user["uuid"]
+    assert db.get_evaluator_runs_for_org(user["org_uuid"])
+    assert db.get_evaluator_runs_for_evaluator_org_scoped(
+        seeded["uuid"], user["org_uuid"]
     )
-    assert db.get_evaluator_runs_for_evaluator_user_scoped(
-        seeded["uuid"], user["uuid"], task_id=task_uuid, version_id=v["uuid"]
+    assert db.get_evaluator_runs_for_evaluator_org_scoped(
+        seeded["uuid"], user["org_uuid"], task_id=task_uuid, version_id=v["uuid"]
     )
     assert db.get_evaluator_runs_for_item(item_ids[0])
 
@@ -950,7 +956,7 @@ def test_annotation_pipeline(user):
     # eval-job snapshot helpers
     eval_job_uuid = db.create_job(
         job_type="annotation-eval",
-        user_id=user["uuid"],
+        user_id=user["uuid"], org_uuid=user["org_uuid"],
         details={"task_id": task_uuid},
     )
     snapshot_items = [
@@ -981,13 +987,13 @@ def test_annotation_pipeline(user):
 
 def test_name_uniqueness_helpers(user):
     name = _u("uniq")
-    db.create_persona(name=name, user_id=user["uuid"])
-    assert db.is_name_taken("personas", name, user["uuid"]) is True
-    assert db.is_name_taken("personas", "definitely-not-taken-name", user["uuid"]) is False
+    db.create_persona(name=name, user_id=user["uuid"], org_uuid=user["org_uuid"])
+    assert db.is_name_taken("personas", name, user["org_uuid"]) is True
+    assert db.is_name_taken("personas", "definitely-not-taken-name", user["org_uuid"]) is False
 
     # ensure_name_unique pre-check raises a typed error
     with pytest.raises(NameAlreadyExistsError):
         with db.ensure_name_unique(
-            "personas", name, user["uuid"], entity="Persona"
+            "personas", name, user["org_uuid"], entity="Persona"
         ):
             pass  # would do an insert

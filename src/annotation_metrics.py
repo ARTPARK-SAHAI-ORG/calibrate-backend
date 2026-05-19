@@ -462,7 +462,7 @@ def trend_series_evaluator_breakdown(
     version and task simultaneously.
 
     `runs` must carry a `task_id` field (as returned by
-    `get_evaluator_runs_for_evaluator_user_scoped`).
+    `get_evaluator_runs_for_evaluator_org_scoped`).
 
     Returns:
         {

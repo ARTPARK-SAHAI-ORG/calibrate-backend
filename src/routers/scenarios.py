@@ -10,7 +10,7 @@ from db import (
     delete_scenario,
     ensure_name_unique,
 )
-from auth_utils import get_current_user_id
+from auth_utils import get_current_org, OrgContext
 
 
 router = APIRouter(prefix="/scenarios", tags=["scenarios"])
@@ -41,14 +41,15 @@ class ScenarioCreateResponse(BaseModel):
 
 @router.post("", response_model=ScenarioCreateResponse)
 async def create_scenario_endpoint(
-    scenario: ScenarioCreate, user_id: str = Depends(get_current_user_id)
+    scenario: ScenarioCreate, ctx: OrgContext = Depends(get_current_org)
 ):
     """Create a new scenario."""
-    with ensure_name_unique("scenarios", scenario.name, user_id, entity="Scenario"):
+    with ensure_name_unique("scenarios", scenario.name, ctx.org_uuid, entity="Scenario"):
         scenario_uuid = create_scenario(
             name=scenario.name,
             description=scenario.description,
-            user_id=user_id,
+            org_uuid=ctx.org_uuid,
+            user_id=ctx.user_id,
         )
     return ScenarioCreateResponse(
         uuid=scenario_uuid, message="Scenario created successfully"
@@ -56,23 +57,20 @@ async def create_scenario_endpoint(
 
 
 @router.get("", response_model=List[ScenarioResponse])
-async def list_scenarios(user_id: str = Depends(get_current_user_id)):
-    """List all scenarios for the authenticated user."""
-    scenarios = get_all_scenarios(user_id=user_id)
+async def list_scenarios(ctx: OrgContext = Depends(get_current_org)):
+    """List all scenarios for the caller's current org."""
+    scenarios = get_all_scenarios(org_uuid=ctx.org_uuid)
     return scenarios
 
 
 @router.get("/{scenario_uuid}", response_model=ScenarioResponse)
 async def get_scenario_endpoint(
-    scenario_uuid: str, user_id: str = Depends(get_current_user_id)
+    scenario_uuid: str, ctx: OrgContext = Depends(get_current_org)
 ):
     """Get a scenario by UUID."""
     scenario = get_scenario(scenario_uuid)
-    if not scenario:
+    if not scenario or scenario.get("org_uuid") != ctx.org_uuid:
         raise HTTPException(status_code=404, detail="Scenario not found")
-    # Verify user owns this scenario
-    if scenario.get("user_id") != user_id:
-        raise HTTPException(status_code=403, detail="Access denied")
     return scenario
 
 
@@ -80,19 +78,19 @@ async def get_scenario_endpoint(
 async def update_scenario_endpoint(
     scenario_uuid: str,
     scenario: ScenarioUpdate,
-    user_id: str = Depends(get_current_user_id),
+    ctx: OrgContext = Depends(get_current_org),
 ):
     """Update a scenario."""
     existing_scenario = get_scenario(scenario_uuid)
-    if not existing_scenario:
+    if not existing_scenario or existing_scenario.get("org_uuid") != ctx.org_uuid:
         raise HTTPException(status_code=404, detail="Scenario not found")
 
-    # Verify user owns this scenario
-    if existing_scenario.get("user_id") != user_id:
-        raise HTTPException(status_code=403, detail="Access denied")
-
     with ensure_name_unique(
-        "scenarios", scenario.name, user_id, entity="Scenario", exclude_uuid=scenario_uuid
+        "scenarios",
+        scenario.name,
+        ctx.org_uuid,
+        entity="Scenario",
+        exclude_uuid=scenario_uuid,
     ):
         updated = update_scenario(
             scenario_uuid=scenario_uuid,
@@ -109,15 +107,12 @@ async def update_scenario_endpoint(
 
 @router.delete("/{scenario_uuid}")
 async def delete_scenario_endpoint(
-    scenario_uuid: str, user_id: str = Depends(get_current_user_id)
+    scenario_uuid: str, ctx: OrgContext = Depends(get_current_org)
 ):
     """Delete a scenario."""
-    # Check if scenario exists and user owns it
     existing_scenario = get_scenario(scenario_uuid)
-    if not existing_scenario:
+    if not existing_scenario or existing_scenario.get("org_uuid") != ctx.org_uuid:
         raise HTTPException(status_code=404, detail="Scenario not found")
-    if existing_scenario.get("user_id") != user_id:
-        raise HTTPException(status_code=403, detail="Access denied")
 
     deleted = delete_scenario(scenario_uuid)
     if not deleted:

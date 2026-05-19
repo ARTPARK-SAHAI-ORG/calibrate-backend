@@ -4,7 +4,7 @@ from typing import List, Literal, Optional
 from fastapi import APIRouter, HTTPException, Depends
 from pydantic import BaseModel
 
-from auth_utils import get_current_user_id
+from auth_utils import get_current_org, OrgContext
 from utils import presign_audio_path
 from db import (
     create_dataset,
@@ -121,28 +121,31 @@ def _dataset_row_to_response(
 @router.post("", response_model=DatasetResponse, status_code=201)
 async def create_new_dataset(
     request: DatasetCreateRequest,
-    user_id: str = Depends(get_current_user_id),
+    ctx: OrgContext = Depends(get_current_org),
 ):
     """Create a new empty dataset."""
     dataset_uuid = create_dataset(
-        name=request.name, dataset_type=request.dataset_type, user_id=user_id
+        name=request.name,
+        dataset_type=request.dataset_type,
+        org_uuid=ctx.org_uuid,
+        user_id=ctx.user_id,
     )
-    row = get_dataset(dataset_uuid, user_id=user_id)
+    row = get_dataset(dataset_uuid, org_uuid=ctx.org_uuid)
     return _dataset_row_to_response(row, item_count=0, eval_count=0)
 
 
 @router.get("", response_model=List[DatasetResponse])
 async def list_datasets(
     dataset_type: Optional[str] = None,
-    user_id: str = Depends(get_current_user_id),
+    ctx: OrgContext = Depends(get_current_org),
 ):
-    """List all datasets for the current user, optionally filtered by type."""
+    """List all datasets for the caller's current org, optionally filtered by type."""
     if dataset_type and dataset_type not in ("stt", "tts"):
         raise HTTPException(
             status_code=400, detail="dataset_type must be 'stt' or 'tts'"
         )
 
-    rows = get_all_datasets(user_id=user_id, dataset_type=dataset_type)
+    rows = get_all_datasets(org_uuid=ctx.org_uuid, dataset_type=dataset_type)
     uuids = [row["uuid"] for row in rows]
     counts = get_dataset_item_counts(uuids)
     eval_counts = get_dataset_eval_counts(uuids)
@@ -159,10 +162,10 @@ async def list_datasets(
 @router.get("/{dataset_id}", response_model=DatasetDetailResponse)
 async def get_dataset_detail(
     dataset_id: str,
-    user_id: str = Depends(get_current_user_id),
+    ctx: OrgContext = Depends(get_current_org),
 ):
     """Get a dataset with all its items."""
-    row = get_dataset(dataset_id, user_id=user_id)
+    row = get_dataset(dataset_id, org_uuid=ctx.org_uuid)
     if not row:
         raise HTTPException(status_code=404, detail="Dataset not found")
 
@@ -184,15 +187,15 @@ async def get_dataset_detail(
 async def rename_dataset(
     dataset_id: str,
     request: DatasetRenameRequest,
-    user_id: str = Depends(get_current_user_id),
+    ctx: OrgContext = Depends(get_current_org),
 ):
     """Rename a dataset."""
-    row = get_dataset(dataset_id, user_id=user_id)
+    row = get_dataset(dataset_id, org_uuid=ctx.org_uuid)
     if not row:
         raise HTTPException(status_code=404, detail="Dataset not found")
 
-    update_dataset_name(dataset_id, user_id=user_id, name=request.name)
-    row = get_dataset(dataset_id, user_id=user_id)
+    update_dataset_name(dataset_id, org_uuid=ctx.org_uuid, name=request.name)
+    row = get_dataset(dataset_id, org_uuid=ctx.org_uuid)
     counts = get_dataset_item_counts([dataset_id])
     eval_counts = get_dataset_eval_counts([dataset_id])
     return _dataset_row_to_response(
@@ -205,14 +208,14 @@ async def rename_dataset(
 @router.delete("/{dataset_id}", status_code=204)
 async def remove_dataset(
     dataset_id: str,
-    user_id: str = Depends(get_current_user_id),
+    ctx: OrgContext = Depends(get_current_org),
 ):
     """Soft delete a dataset and all its items."""
-    row = get_dataset(dataset_id, user_id=user_id)
+    row = get_dataset(dataset_id, org_uuid=ctx.org_uuid)
     if not row:
         raise HTTPException(status_code=404, detail="Dataset not found")
 
-    delete_dataset(dataset_id, user_id=user_id)
+    delete_dataset(dataset_id, org_uuid=ctx.org_uuid)
 
 
 @router.post(
@@ -221,7 +224,7 @@ async def remove_dataset(
 async def add_items(
     dataset_id: str,
     items: List[DatasetItemIn],
-    user_id: str = Depends(get_current_user_id),
+    ctx: OrgContext = Depends(get_current_org),
 ):
     """Add one or more items to a dataset."""
     if not items:
@@ -231,7 +234,7 @@ async def add_items(
             status_code=400, detail="Cannot add more than 1000 items per request"
         )
 
-    row = get_dataset(dataset_id, user_id=user_id)
+    row = get_dataset(dataset_id, org_uuid=ctx.org_uuid)
     if not row:
         raise HTTPException(status_code=404, detail="Dataset not found")
 
@@ -248,10 +251,10 @@ async def update_item(
     dataset_id: str,
     item_uuid: str,
     request: DatasetItemUpdate,
-    user_id: str = Depends(get_current_user_id),
+    ctx: OrgContext = Depends(get_current_org),
 ):
     """Update a dataset item's text or audio_path."""
-    row = get_dataset(dataset_id, user_id=user_id)
+    row = get_dataset(dataset_id, org_uuid=ctx.org_uuid)
     if not row:
         raise HTTPException(status_code=404, detail="Dataset not found")
 
@@ -291,10 +294,10 @@ async def update_item(
 async def remove_item(
     dataset_id: str,
     item_uuid: str,
-    user_id: str = Depends(get_current_user_id),
+    ctx: OrgContext = Depends(get_current_org),
 ):
     """Soft delete a single item from a dataset."""
-    row = get_dataset(dataset_id, user_id=user_id)
+    row = get_dataset(dataset_id, org_uuid=ctx.org_uuid)
     if not row:
         raise HTTPException(status_code=404, detail="Dataset not found")
 

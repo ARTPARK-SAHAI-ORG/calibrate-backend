@@ -157,20 +157,27 @@ async def signup(request: SignupRequest):
 
     Returns a JWT access token and user info on success.
     """
+    # A row may already exist as a stub created by an org invite (no
+    # password_hash set). `create_user_with_password` hydrates that stub in
+    # place; it raises ValueError("email already registered") if the row
+    # already has a password set.
     existing = get_user_by_email(request.email)
-    if existing:
+    if existing and existing.get("password_hash"):
         raise HTTPException(status_code=409, detail="Email already taken")
 
     password_hash = bcrypt.hashpw(
         request.password.encode("utf-8"), bcrypt.gensalt()
     ).decode("utf-8")
 
-    user_uuid = create_user_with_password(
-        first_name=request.first_name,
-        last_name=request.last_name,
-        email=request.email,
-        password_hash=password_hash,
-    )
+    try:
+        user_uuid = create_user_with_password(
+            first_name=request.first_name,
+            last_name=request.last_name,
+            email=request.email,
+            password_hash=password_hash,
+        )
+    except ValueError:
+        raise HTTPException(status_code=409, detail="Email already taken")
 
     user = get_user(user_uuid)
 

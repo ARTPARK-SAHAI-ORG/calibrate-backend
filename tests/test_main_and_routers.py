@@ -268,16 +268,16 @@ def test_personas_crud(client):
         == 404
     )
 
-    # Other-user access denied (signup a second user)
+    # Other-org access returns 404 (existence-leak parity, per CLAUDE.md).
     other = _auth(client)
     forbidden = client.get(f"/personas/{p_uuid}", headers=other["headers"])
-    assert forbidden.status_code == 403
+    assert forbidden.status_code == 404
     forbidden_put = client.put(
         f"/personas/{p_uuid}", json={"name": "x"}, headers=other["headers"]
     )
-    assert forbidden_put.status_code == 403
+    assert forbidden_put.status_code == 404
     forbidden_del = client.delete(f"/personas/{p_uuid}", headers=other["headers"])
-    assert forbidden_del.status_code == 403
+    assert forbidden_del.status_code == 404
 
     delete = client.delete(f"/personas/{p_uuid}", headers=h)
     assert delete.status_code == 200
@@ -313,14 +313,14 @@ def test_scenarios_crud(client):
     )
 
     other = _auth(client)
-    assert client.get(f"/scenarios/{s_uuid}", headers=other["headers"]).status_code == 403
+    assert client.get(f"/scenarios/{s_uuid}", headers=other["headers"]).status_code == 404
     assert (
         client.put(
             f"/scenarios/{s_uuid}", json={"name": "x"}, headers=other["headers"]
         ).status_code
-        == 403
+        == 404
     )
-    assert client.delete(f"/scenarios/{s_uuid}", headers=other["headers"]).status_code == 403
+    assert client.delete(f"/scenarios/{s_uuid}", headers=other["headers"]).status_code == 404
 
     assert client.delete(f"/scenarios/{s_uuid}", headers=h).status_code == 200
     assert client.delete(f"/scenarios/{s_uuid}", headers=h).status_code == 404
@@ -368,14 +368,14 @@ def test_tools_crud(client):
         client.put("/tools/missing", json={"name": "x"}, headers=h).status_code == 404
     )
     other = _auth(client)
-    assert client.get(f"/tools/{t_uuid}", headers=other["headers"]).status_code == 403
+    assert client.get(f"/tools/{t_uuid}", headers=other["headers"]).status_code == 404
     assert (
         client.put(
             f"/tools/{t_uuid}", json={"name": "x"}, headers=other["headers"]
         ).status_code
-        == 403
+        == 404
     )
-    assert client.delete(f"/tools/{t_uuid}", headers=other["headers"]).status_code == 403
+    assert client.delete(f"/tools/{t_uuid}", headers=other["headers"]).status_code == 404
     assert client.delete(f"/tools/{t_uuid}", headers=h).status_code == 200
     assert client.delete(f"/tools/{t_uuid}", headers=h).status_code == 404
 
@@ -522,9 +522,9 @@ def test_tests_router_crud(client):
     assert client.get(f"/tests/{t_uuid}", headers=h).status_code == 200
     assert client.get("/tests/missing", headers=h).status_code == 404
 
-    # Other-user denied
+    # Other-org access returns 404 (existence-leak parity).
     other = _auth(client)
-    assert client.get(f"/tests/{t_uuid}", headers=other["headers"]).status_code == 403
+    assert client.get(f"/tests/{t_uuid}", headers=other["headers"]).status_code == 404
 
     # Update
     upd = client.put(
@@ -538,12 +538,12 @@ def test_tests_router_crud(client):
     assert (
         client.put("/tests/missing", json={"name": "x"}, headers=h).status_code == 404
     )
-    # Other-user PUT denied
+    # Other-org PUT returns 404 (existence-leak parity).
     assert (
         client.put(
             f"/tests/{t_uuid}", json={"name": "x"}, headers=other["headers"]
         ).status_code
-        == 403
+        == 404
     )
 
     # Bulk-delete validation
@@ -957,7 +957,7 @@ def test_agent_verify_and_duplicate(client):
         == 404
     )
 
-    # Other-user duplicate denied
+    # Other-org duplicate returns 404 (existence-leak parity).
     other = _auth(client)
     assert (
         client.post(
@@ -965,7 +965,7 @@ def test_agent_verify_and_duplicate(client):
             json={"name": "x"},
             headers=other["headers"],
         ).status_code
-        == 403
+        == 404
     )
 
     # PUT with no-op (just-name) → 200
@@ -977,16 +977,16 @@ def test_agent_verify_and_duplicate(client):
     assert (
         client.put("/agents/missing", json={"name": "x"}, headers=h).status_code == 404
     )
-    # other-user PUT denied
+    # other-org PUT returns 404 (existence-leak parity).
     assert (
         client.put(
             f"/agents/{a_uuid}", json={"name": "x"}, headers=other["headers"]
         ).status_code
-        == 403
+        == 404
     )
-    # other-user DELETE denied
+    # other-org DELETE returns 404 (existence-leak parity).
     assert (
-        client.delete(f"/agents/{a_uuid}", headers=other["headers"]).status_code == 403
+        client.delete(f"/agents/{a_uuid}", headers=other["headers"]).status_code == 404
     )
 
 
@@ -1002,8 +1002,10 @@ def test_jobs_router(client):
     h = auth["headers"]
 
     # Create a job directly in the DB so we have one to look up
+    user_org = db_mod.get_personal_org_for_user(auth["user_uuid"])
     j_uuid = db_mod.create_job(
         job_type="stt-eval",
+        org_uuid=user_org["uuid"],
         user_id=auth["user_uuid"],
         status="in_progress",
         details={"x": 1},
@@ -1108,12 +1110,15 @@ def test_agent_tools_router(client):
 # ---------------------------------------------------------------------------
 
 
-def test_user_limits_router(client, monkeypatch):
+def test_org_limits_router(client, monkeypatch):
+    import db as db_mod
+
     auth = _auth(client)
     h = auth["headers"]
+    user_org_uuid = db_mod.get_personal_org_for_user(auth["user_uuid"])["uuid"]
 
     # Default value path (no row yet)
-    default = client.get("/user-limits/me/max-rows-per-eval", headers=h)
+    default = client.get("/org-limits/me/max-rows-per-eval", headers=h)
     assert default.status_code == 200
     assert "max_rows_per_eval" in default.json()
 
@@ -1122,58 +1127,58 @@ def test_user_limits_router(client, monkeypatch):
 
     monkeypatch.setattr(auth_utils, "SUPERADMIN_EMAIL", auth["email"])
 
-    # Create limits for an unknown user → 404
+    # Create limits for an unknown org → 404
     bad = client.post(
-        "/user-limits",
-        json={"user_id": "nope", "limits": {"max_rows_per_eval": 50}},
+        "/org-limits",
+        json={"org_uuid": "nope", "limits": {"max_rows_per_eval": 50}},
         headers=h,
     )
     assert bad.status_code == 404
 
-    # Create limits for the current user (we know the UUID)
+    # Create limits for the caller's personal org
     create = client.post(
-        "/user-limits",
-        json={"user_id": auth["user_uuid"], "limits": {"max_rows_per_eval": 50}},
+        "/org-limits",
+        json={"org_uuid": user_org_uuid, "limits": {"max_rows_per_eval": 50}},
         headers=h,
     )
     assert create.status_code == 200
 
     # Duplicate creates conflict
     dup = client.post(
-        "/user-limits",
-        json={"user_id": auth["user_uuid"], "limits": {"max_rows_per_eval": 80}},
+        "/org-limits",
+        json={"org_uuid": user_org_uuid, "limits": {"max_rows_per_eval": 80}},
         headers=h,
     )
     assert dup.status_code == 409
 
     # GET
-    got = client.get(f"/user-limits/{auth['user_uuid']}", headers=h)
+    got = client.get(f"/org-limits/{user_org_uuid}", headers=h)
     assert got.status_code == 200
 
     # GET missing
-    assert client.get("/user-limits/nope", headers=h).status_code == 404
+    assert client.get("/org-limits/nope", headers=h).status_code == 404
 
     # PUT
     upd = client.put(
-        f"/user-limits/{auth['user_uuid']}",
+        f"/org-limits/{user_org_uuid}",
         json={"limits": {"max_rows_per_eval": 99}},
         headers=h,
     )
     assert upd.status_code == 200
     # PUT non-existent
     upd_404 = client.put(
-        "/user-limits/nope",
+        "/org-limits/nope",
         json={"limits": {"max_rows_per_eval": 99}},
         headers=h,
     )
     assert upd_404.status_code == 404
 
     # me/max-rows-per-eval now returns the configured value
-    again = client.get("/user-limits/me/max-rows-per-eval", headers=h)
+    again = client.get("/org-limits/me/max-rows-per-eval", headers=h)
     assert again.json()["max_rows_per_eval"] == 99
 
     # DELETE
-    deleted = client.delete(f"/user-limits/{auth['user_uuid']}", headers=h)
+    deleted = client.delete(f"/org-limits/{user_org_uuid}", headers=h)
     assert deleted.status_code == 200
     # Already gone
-    assert client.delete(f"/user-limits/{auth['user_uuid']}", headers=h).status_code == 404
+    assert client.delete(f"/org-limits/{user_org_uuid}", headers=h).status_code == 404

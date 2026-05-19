@@ -44,9 +44,12 @@ def _signup(client):
             "password": "passw0rd",
         },
     ).json()
+    user_uuid = body["user"]["uuid"]
+    org_uuid = db.get_personal_org_for_user(user_uuid)["uuid"]
     return {
         "headers": {"Authorization": f"Bearer {body['access_token']}"},
-        "user_uuid": body["user"]["uuid"],
+        "user_uuid": user_uuid,
+        "org_uuid": org_uuid,
     }
 
 
@@ -67,11 +70,13 @@ def test_stt_get_in_progress_reads_intermediate(client, tmp_path):
     auth = _signup(client)
     h = auth["headers"]
     user_id = auth["user_uuid"]
+    org_uuid = auth["org_uuid"]
     # Pre-seed output_dir on disk
     _seed_stt_output(tmp_path, ["openai"], total=1)
 
     job_uuid = db.create_job(
         job_type="stt-eval",
+        org_uuid=org_uuid,
         user_id=user_id,
         status="in_progress",
         details={
@@ -97,11 +102,13 @@ def test_stt_get_timeout_path(client, tmp_path):
     auth = _signup(client)
     h = auth["headers"]
     user_id = auth["user_uuid"]
+    org_uuid = auth["org_uuid"]
     _seed_stt_output(tmp_path, ["openai"], total=1)
 
     # Manually create a job and force updated_at to be old
     job_uuid = db.create_job(
         job_type="stt-eval",
+        org_uuid=org_uuid,
         user_id=user_id,
         status="in_progress",
         details={
@@ -143,9 +150,11 @@ def test_tts_get_in_progress_reads_intermediate(client, tmp_path):
     auth = _signup(client)
     h = auth["headers"]
     user_id = auth["user_uuid"]
+    org_uuid = auth["org_uuid"]
     _seed_tts_output(tmp_path, ["openai"], total=1)
     job_uuid = db.create_job(
         job_type="tts-eval",
+        org_uuid=org_uuid,
         user_id=user_id,
         status="in_progress",
         details={
@@ -173,9 +182,11 @@ def test_tts_get_timeout_path(client, tmp_path):
     auth = _signup(client)
     h = auth["headers"]
     user_id = auth["user_uuid"]
+    org_uuid = auth["org_uuid"]
     _seed_tts_output(tmp_path, ["openai"], total=1)
     job_uuid = db.create_job(
         job_type="tts-eval",
+        org_uuid=org_uuid,
         user_id=user_id,
         status="in_progress",
         details={
@@ -203,7 +214,10 @@ def test_simulation_run_status_voice_done(client):
     auth = _signup(client)
     h = auth["headers"]
     user_id = auth["user_uuid"]
-    sim_uuid = db.create_simulation(name=f"s-{uuid.uuid4().hex[:6]}", user_id=user_id)
+    org_uuid = auth["org_uuid"]
+    sim_uuid = db.create_simulation(
+        name=f"s-{uuid.uuid4().hex[:6]}", org_uuid=org_uuid, user_id=user_id
+    )
     job_uuid = db.create_simulation_job(
         simulation_id=sim_uuid, job_type="voice", status="done"
     )
@@ -240,7 +254,10 @@ def test_simulation_run_status_in_progress_timeout(client):
     auth = _signup(client)
     h = auth["headers"]
     user_id = auth["user_uuid"]
-    sim_uuid = db.create_simulation(name=f"s-{uuid.uuid4().hex[:6]}", user_id=user_id)
+    org_uuid = auth["org_uuid"]
+    sim_uuid = db.create_simulation(
+        name=f"s-{uuid.uuid4().hex[:6]}", org_uuid=org_uuid, user_id=user_id
+    )
     job_uuid = db.create_simulation_job(
         simulation_id=sim_uuid, job_type="text", status="in_progress"
     )

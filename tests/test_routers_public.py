@@ -29,6 +29,14 @@ def client(app):
 
 
 def _user(client):
+    """Sign up a fresh user and return `(user_uuid, org_uuid)`.
+
+    Most tests don't care about distinguishing the two, but the multi-tenant
+    DB layer requires `org_uuid` on every `create_*` call. Returning both keeps
+    each test self-contained.
+    """
+    import db as _db
+
     suffix = uuid.uuid4().hex[:8]
     body = client.post(
         "/auth/signup",
@@ -39,7 +47,9 @@ def _user(client):
             "password": "passw0rd",
         },
     ).json()
-    return body["user"]["uuid"]
+    user_uuid = body["user"]["uuid"]
+    org = _db.get_personal_org_for_user(user_uuid)
+    return {"user_uuid": user_uuid, "org_uuid": org["uuid"]}
 
 
 # ---------------------------------------------------------------------------
@@ -59,9 +69,12 @@ def test_public_evaluators_defaults_token_validation(client):
     just made public."""
     import db as db_mod
 
-    user_id = _user(client)
+    auth = _user(client)
+    user_id = auth["user_uuid"]
+    org_uuid = auth["org_uuid"]
     job_uuid = db_mod.create_job(
         job_type="stt-eval",
+        org_uuid=org_uuid,
         user_id=user_id,
         status="done",
         details={"providers": ["openai"], "language": "en"},
@@ -127,9 +140,12 @@ def test_public_unknown_token_404(client):
 def test_public_stt_valid_token(client):
     import db as db_mod
 
-    user_id = _user(client)
+    auth = _user(client)
+    user_id = auth["user_uuid"]
+    org_uuid = auth["org_uuid"]
     job_uuid = db_mod.create_job(
         job_type="stt-eval",
+        org_uuid=org_uuid,
         user_id=user_id,
         status="done",
         details={
@@ -150,9 +166,12 @@ def test_public_stt_valid_token(client):
 def test_public_tts_valid_token(client):
     import db as db_mod
 
-    user_id = _user(client)
+    auth = _user(client)
+    user_id = auth["user_uuid"]
+    org_uuid = auth["org_uuid"]
     job_uuid = db_mod.create_job(
         job_type="tts-eval",
+        org_uuid=org_uuid,
         user_id=user_id,
         status="done",
         details={"providers": ["openai"], "language": "en"},
@@ -167,9 +186,11 @@ def test_public_tts_valid_token(client):
 def test_public_test_run_valid_token(client):
     import db as db_mod
 
-    user_id = _user(client)
+    auth = _user(client)
+    user_id = auth["user_uuid"]
+    org_uuid = auth["org_uuid"]
     agent_uuid = db_mod.create_agent(
-        name=f"a-{uuid.uuid4().hex[:6]}", user_id=user_id
+        name=f"a-{uuid.uuid4().hex[:6]}", org_uuid=org_uuid, user_id=user_id
     )
     job_uuid = db_mod.create_agent_test_job(
         agent_id=agent_uuid, job_type="llm-unit-test", status="done"
@@ -183,9 +204,11 @@ def test_public_test_run_valid_token(client):
 def test_public_benchmark_valid_token(client):
     import db as db_mod
 
-    user_id = _user(client)
+    auth = _user(client)
+    user_id = auth["user_uuid"]
+    org_uuid = auth["org_uuid"]
     agent_uuid = db_mod.create_agent(
-        name=f"a-{uuid.uuid4().hex[:6]}", user_id=user_id
+        name=f"a-{uuid.uuid4().hex[:6]}", org_uuid=org_uuid, user_id=user_id
     )
     job_uuid = db_mod.create_agent_test_job(
         agent_id=agent_uuid, job_type="llm-benchmark", status="done"
@@ -199,9 +222,11 @@ def test_public_benchmark_valid_token(client):
 def test_public_simulation_run_valid_token(client):
     import db as db_mod
 
-    user_id = _user(client)
+    auth = _user(client)
+    user_id = auth["user_uuid"]
+    org_uuid = auth["org_uuid"]
     sim_uuid = db_mod.create_simulation(
-        name=f"sim-{uuid.uuid4().hex[:6]}", user_id=user_id
+        name=f"sim-{uuid.uuid4().hex[:6]}", org_uuid=org_uuid, user_id=user_id
     )
     job_uuid = db_mod.create_simulation_job(
         simulation_id=sim_uuid, job_type="text", status="done"
@@ -217,13 +242,19 @@ def test_public_annotation_eval_must_be_done(client):
     import db as db_mod
     from annotation_eval_runner import ANNOTATION_EVAL_JOB_TYPE
 
-    user_id = _user(client)
+    auth = _user(client)
+    user_id = auth["user_uuid"]
+    org_uuid = auth["org_uuid"]
     # Create a task to host the job
     task_uuid = db_mod.create_annotation_task(
-        name=f"t-{uuid.uuid4().hex[:6]}", type="llm", user_id=user_id
+        name=f"t-{uuid.uuid4().hex[:6]}",
+        type="llm",
+        org_uuid=org_uuid,
+        user_id=user_id,
     )
     job_uuid = db_mod.create_job(
         job_type=ANNOTATION_EVAL_JOB_TYPE,
+        org_uuid=org_uuid,
         user_id=user_id,
         status="in_progress",
         details={"task_id": task_uuid, "evaluators": []},

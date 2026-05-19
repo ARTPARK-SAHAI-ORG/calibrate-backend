@@ -13,7 +13,7 @@ from typing import Any, Dict, List, Literal, Optional
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field, model_validator
 
-from auth_utils import get_current_user_id
+from auth_utils import get_current_org, get_current_user_id, OrgContext
 from db import (
     DEFAULT_PROMPTS_BY_PURPOSE,
     create_evaluator,
@@ -160,28 +160,30 @@ class SetLiveVersionRequest(BaseModel):
 # ============ Helpers ============
 
 
-def _owner_check(evaluator: Dict[str, Any], user_id: str) -> None:
-    """Defaults (owner_user_id IS NULL) are visible to everyone but mutable by no one."""
-    if evaluator.get("owner_user_id") is None:
+def _owner_check(evaluator: Dict[str, Any], org_uuid: str) -> None:
+    """Seeded defaults (org_uuid IS NULL) are visible to every org but mutable by no one."""
+    if evaluator.get("org_uuid") is None:
         raise HTTPException(status_code=403, detail="Default evaluators cannot be modified")
-    if evaluator.get("owner_user_id") != user_id:
+    if evaluator.get("org_uuid") != org_uuid:
         raise HTTPException(status_code=404, detail="Evaluator not found")
 
 
-def _visible_or_404(evaluator: Optional[Dict[str, Any]], user_id: str) -> Dict[str, Any]:
+def _visible_or_404(
+    evaluator: Optional[Dict[str, Any]], org_uuid: str
+) -> Dict[str, Any]:
     if not evaluator:
         raise HTTPException(status_code=404, detail="Evaluator not found")
-    if evaluator.get("owner_user_id") is not None and evaluator["owner_user_id"] != user_id:
+    if evaluator.get("org_uuid") is not None and evaluator["org_uuid"] != org_uuid:
         raise HTTPException(status_code=404, detail="Evaluator not found")
     return evaluator
 
 
 def _ensure_unique_evaluator_name(
     name: str,
-    user_id: str,
+    org_uuid: str,
     exclude_uuid: Optional[str] = None,
 ) -> None:
-    if evaluator_name_exists(name, owner_user_id=user_id, exclude_uuid=exclude_uuid):
+    if evaluator_name_exists(name, org_uuid=org_uuid, exclude_uuid=exclude_uuid):
         raise HTTPException(status_code=409, detail="Evaluator name already exists")
 
 
@@ -226,9 +228,9 @@ def _evaluator_response(evaluator: Dict[str, Any]) -> EvaluatorResponse:
 
 @router.post("", response_model=EvaluatorCreateResponse)
 async def create_evaluator_endpoint(
-    payload: EvaluatorCreate, user_id: str = Depends(get_current_user_id)
+    payload: EvaluatorCreate, ctx: OrgContext = Depends(get_current_org)
 ):
-    _ensure_unique_evaluator_name(payload.name, user_id)
+    _ensure_unique_evaluator_name(payload.name, ctx.org_uuid)
     with name_uniqueness_guard("Evaluator"):
         evaluator_uuid = create_evaluator(
             name=payload.name,
@@ -237,7 +239,8 @@ async def create_evaluator_endpoint(
             data_type=payload.data_type,
             kind=payload.kind,
             output_type=payload.output_type,
-            owner_user_id=user_id,
+            owner_user_id=ctx.user_id,
+            org_uuid=ctx.org_uuid,
         )
     version_cfg = (
         payload.version.output_config.model_dump(exclude_none=True)
@@ -311,10 +314,10 @@ async def list_evaluators(
     evaluator_type: Optional[EvaluatorTypeLiteral] = None,
     data_type: Optional[DataTypeLiteral] = None,
     include_defaults: bool = True,
-    user_id: str = Depends(get_current_user_id),
+    ctx: OrgContext = Depends(get_current_org),
 ):
     evaluators = get_all_evaluators(
-        user_id=user_id,
+        org_uuid=ctx.org_uuid,
         include_defaults=include_defaults,
         evaluator_type=evaluator_type,
         data_type=data_type,
@@ -324,9 +327,9 @@ async def list_evaluators(
 
 @router.get("/{evaluator_uuid}", response_model=EvaluatorDetailResponse)
 async def get_evaluator_endpoint(
-    evaluator_uuid: str, user_id: str = Depends(get_current_user_id)
+    evaluator_uuid: str, ctx: OrgContext = Depends(get_current_org)
 ):
-    evaluator = _visible_or_404(get_evaluator(evaluator_uuid), user_id)
+    evaluator = _visible_or_404(get_evaluator(evaluator_uuid), ctx.org_uuid)
     base = _evaluator_response(evaluator)
     versions = [EvaluatorVersionResponse(**_version_dict(v)) for v in get_evaluator_versions(evaluator_uuid)]
     return EvaluatorDetailResponse(**base.model_dump(), versions=versions)
@@ -336,12 +339,14 @@ async def get_evaluator_endpoint(
 async def update_evaluator_endpoint(
     evaluator_uuid: str,
     payload: EvaluatorUpdate,
-    user_id: str = Depends(get_current_user_id),
+    ctx: OrgContext = Depends(get_current_org),
 ):
-    existing = _visible_or_404(get_evaluator(evaluator_uuid), user_id)
-    _owner_check(existing, user_id)
+    existing = _visible_or_404(get_evaluator(evaluator_uuid), ctx.org_uuid)
+    _owner_check(existing, ctx.org_uuid)
     if payload.name is not None:
-        _ensure_unique_evaluator_name(payload.name, user_id, exclude_uuid=evaluator_uuid)
+        _ensure_unique_evaluator_name(
+            payload.name, ctx.org_uuid, exclude_uuid=evaluator_uuid
+        )
     try:
         with name_uniqueness_guard("Evaluator"):
             updated = update_evaluator(
@@ -362,10 +367,10 @@ async def update_evaluator_endpoint(
 
 @router.delete("/{evaluator_uuid}")
 async def delete_evaluator_endpoint(
-    evaluator_uuid: str, user_id: str = Depends(get_current_user_id)
+    evaluator_uuid: str, ctx: OrgContext = Depends(get_current_org)
 ):
-    existing = _visible_or_404(get_evaluator(evaluator_uuid), user_id)
-    _owner_check(existing, user_id)
+    existing = _visible_or_404(get_evaluator(evaluator_uuid), ctx.org_uuid)
+    _owner_check(existing, ctx.org_uuid)
     if not delete_evaluator(evaluator_uuid):
         raise HTTPException(status_code=404, detail="Evaluator not found")
     return {"message": "Evaluator deleted"}
@@ -375,13 +380,16 @@ async def delete_evaluator_endpoint(
 async def duplicate_evaluator_endpoint(
     evaluator_uuid: str,
     payload: EvaluatorDuplicateRequest,
-    user_id: str = Depends(get_current_user_id),
+    ctx: OrgContext = Depends(get_current_org),
 ):
-    _visible_or_404(get_evaluator(evaluator_uuid), user_id)
-    _ensure_unique_evaluator_name(payload.name, user_id)
+    _visible_or_404(get_evaluator(evaluator_uuid), ctx.org_uuid)
+    _ensure_unique_evaluator_name(payload.name, ctx.org_uuid)
     with name_uniqueness_guard("Evaluator"):
         new_uuid = duplicate_evaluator(
-            evaluator_uuid, new_name=payload.name, owner_user_id=user_id
+            evaluator_uuid,
+            new_name=payload.name,
+            org_uuid=ctx.org_uuid,
+            owner_user_id=ctx.user_id,
         )
     if not new_uuid:
         raise HTTPException(status_code=404, detail="Evaluator not found")
@@ -396,9 +404,9 @@ async def duplicate_evaluator_endpoint(
 
 @router.get("/{evaluator_uuid}/versions", response_model=List[EvaluatorVersionResponse])
 async def list_versions(
-    evaluator_uuid: str, user_id: str = Depends(get_current_user_id)
+    evaluator_uuid: str, ctx: OrgContext = Depends(get_current_org)
 ):
-    _visible_or_404(get_evaluator(evaluator_uuid), user_id)
+    _visible_or_404(get_evaluator(evaluator_uuid), ctx.org_uuid)
     return [EvaluatorVersionResponse(**_version_dict(v)) for v in get_evaluator_versions(evaluator_uuid)]
 
 
@@ -406,10 +414,10 @@ async def list_versions(
 async def create_version(
     evaluator_uuid: str,
     payload: EvaluatorVersionCreateRequest,
-    user_id: str = Depends(get_current_user_id),
+    ctx: OrgContext = Depends(get_current_org),
 ):
-    existing = _visible_or_404(get_evaluator(evaluator_uuid), user_id)
-    _owner_check(existing, user_id)
+    existing = _visible_or_404(get_evaluator(evaluator_uuid), ctx.org_uuid)
+    _owner_check(existing, ctx.org_uuid)
     cfg = payload.output_config.model_dump(exclude_none=True) if payload.output_config else None
     try:
         version = create_evaluator_version(
@@ -434,10 +442,10 @@ async def create_version(
 async def mark_live(
     evaluator_uuid: str,
     payload: SetLiveVersionRequest,
-    user_id: str = Depends(get_current_user_id),
+    ctx: OrgContext = Depends(get_current_org),
 ):
-    existing = _visible_or_404(get_evaluator(evaluator_uuid), user_id)
-    _owner_check(existing, user_id)
+    existing = _visible_or_404(get_evaluator(evaluator_uuid), ctx.org_uuid)
+    _owner_check(existing, ctx.org_uuid)
     ok = set_evaluator_live_version(evaluator_uuid, payload.version_uuid)
     if not ok:
         raise HTTPException(status_code=404, detail="Version not found")
@@ -456,9 +464,9 @@ class PromptPreviewRequest(BaseModel):
 async def preview_prompt(
     evaluator_uuid: str,
     payload: PromptPreviewRequest,
-    user_id: str = Depends(get_current_user_id),
+    ctx: OrgContext = Depends(get_current_org),
 ):
-    evaluator = _visible_or_404(get_evaluator(evaluator_uuid), user_id)
+    evaluator = _visible_or_404(get_evaluator(evaluator_uuid), ctx.org_uuid)
     version_uuid = payload.version_uuid or evaluator.get("live_version_id")
     if not version_uuid:
         raise HTTPException(status_code=400, detail="Evaluator has no live version")

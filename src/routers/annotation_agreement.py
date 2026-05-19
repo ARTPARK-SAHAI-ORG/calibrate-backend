@@ -6,15 +6,15 @@ from db import (
     get_annotation_task,
     get_annotation_tasks_by_uuids,
     get_annotations_for_task,
-    get_annotations_for_user,
+    get_annotations_for_org,
     get_evaluator,
-    get_evaluator_runs_for_evaluator_user_scoped,
+    get_evaluator_runs_for_evaluator_org_scoped,
     get_evaluator_runs_for_task,
-    get_evaluator_runs_for_user,
+    get_evaluator_runs_for_org,
     get_evaluator_versions,
     get_evaluators_by_uuids,
 )
-from auth_utils import get_current_user_id
+from auth_utils import get_current_org, OrgContext
 from annotation_metrics import (
     aggregate_agreement,
     aggregate_human_evaluator_agreement,
@@ -33,11 +33,11 @@ async def agreement_trend(
     bucket: str = Query("week", pattern="^(week|month|year)$"),
     days: int = Query(90, ge=1, le=3650),
     task_id: Optional[str] = Query(None),
-    user_id: str = Depends(get_current_user_id),
+    ctx: OrgContext = Depends(get_current_org),
 ):
-    """Account-wide human-vs-human agreement trend, plus per-evaluator
+    """Org-wide human-vs-human agreement trend, plus per-evaluator
     human-vs-evaluator alignment for every evaluator that has produced at
-    least one run on the user's data.
+    least one run on the org's data.
 
     Pass `task_id` to restrict all metrics to a single annotation task.
 
@@ -47,13 +47,13 @@ async def agreement_trend(
     """
     if task_id:
         task = get_annotation_task(task_id)
-        if not task or task.get("user_id") != user_id:
+        if not task or task.get("org_uuid") != ctx.org_uuid:
             raise HTTPException(status_code=404, detail="Annotation task not found")
         annotations = get_annotations_for_task(task_id)
         raw_runs = get_evaluator_runs_for_task(task_id)
     else:
-        annotations = get_annotations_for_user(user_id)
-        raw_runs = get_evaluator_runs_for_user(user_id)
+        annotations = get_annotations_for_org(ctx.org_uuid)
+        raw_runs = get_evaluator_runs_for_org(ctx.org_uuid)
 
     hh_current, hh_pairs = aggregate_agreement(annotations)
     hh_series = trend_series(annotations, bucket=bucket, days=days)
@@ -111,7 +111,7 @@ async def evaluator_agreement_trend(
     days: int = Query(90, ge=1, le=3650),
     task_id: Optional[str] = Query(None),
     version_id: Optional[str] = Query(None),
-    user_id: str = Depends(get_current_user_id),
+    ctx: OrgContext = Depends(get_current_org),
 ):
     """Human-vs-evaluator agreement trend for one evaluator, broken down by
     version and by annotation task.
@@ -131,14 +131,14 @@ async def evaluator_agreement_trend(
 
     if task_id:
         task = get_annotation_task(task_id)
-        if not task or task.get("user_id") != user_id:
+        if not task or task.get("org_uuid") != ctx.org_uuid:
             raise HTTPException(status_code=404, detail="Annotation task not found")
         annotations = get_annotations_for_task(task_id)
     else:
-        annotations = get_annotations_for_user(user_id)
+        annotations = get_annotations_for_org(ctx.org_uuid)
 
-    runs = get_evaluator_runs_for_evaluator_user_scoped(
-        evaluator_uuid, user_id, task_id=task_id, version_id=version_id
+    runs = get_evaluator_runs_for_evaluator_org_scoped(
+        evaluator_uuid, ctx.org_uuid, task_id=task_id, version_id=version_id
     )
 
     all_versions = get_evaluator_versions(evaluator_uuid) if runs else []

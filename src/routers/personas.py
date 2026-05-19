@@ -10,7 +10,7 @@ from db import (
     delete_persona,
     ensure_name_unique,
 )
-from auth_utils import get_current_user_id
+from auth_utils import get_current_org, OrgContext
 
 
 router = APIRouter(prefix="/personas", tags=["personas"])
@@ -44,15 +44,16 @@ class PersonaCreateResponse(BaseModel):
 
 @router.post("", response_model=PersonaCreateResponse)
 async def create_persona_endpoint(
-    persona: PersonaCreate, user_id: str = Depends(get_current_user_id)
+    persona: PersonaCreate, ctx: OrgContext = Depends(get_current_org)
 ):
     """Create a new persona."""
-    with ensure_name_unique("personas", persona.name, user_id, entity="Persona"):
+    with ensure_name_unique("personas", persona.name, ctx.org_uuid, entity="Persona"):
         persona_uuid = create_persona(
             name=persona.name,
             description=persona.description,
             config=persona.config,
-            user_id=user_id,
+            org_uuid=ctx.org_uuid,
+            user_id=ctx.user_id,
         )
     return PersonaCreateResponse(
         uuid=persona_uuid, message="Persona created successfully"
@@ -60,23 +61,20 @@ async def create_persona_endpoint(
 
 
 @router.get("", response_model=List[PersonaResponse])
-async def list_personas(user_id: str = Depends(get_current_user_id)):
-    """List all personas for the authenticated user."""
-    personas = get_all_personas(user_id=user_id)
+async def list_personas(ctx: OrgContext = Depends(get_current_org)):
+    """List all personas for the caller's current org."""
+    personas = get_all_personas(org_uuid=ctx.org_uuid)
     return personas
 
 
 @router.get("/{persona_uuid}", response_model=PersonaResponse)
 async def get_persona_endpoint(
-    persona_uuid: str, user_id: str = Depends(get_current_user_id)
+    persona_uuid: str, ctx: OrgContext = Depends(get_current_org)
 ):
     """Get a persona by UUID."""
     persona = get_persona(persona_uuid)
-    if not persona:
+    if not persona or persona.get("org_uuid") != ctx.org_uuid:
         raise HTTPException(status_code=404, detail="Persona not found")
-    # Verify user owns this persona
-    if persona.get("user_id") != user_id:
-        raise HTTPException(status_code=403, detail="Access denied")
     return persona
 
 
@@ -84,19 +82,19 @@ async def get_persona_endpoint(
 async def update_persona_endpoint(
     persona_uuid: str,
     persona: PersonaUpdate,
-    user_id: str = Depends(get_current_user_id),
+    ctx: OrgContext = Depends(get_current_org),
 ):
     """Update a persona."""
     existing_persona = get_persona(persona_uuid)
-    if not existing_persona:
+    if not existing_persona or existing_persona.get("org_uuid") != ctx.org_uuid:
         raise HTTPException(status_code=404, detail="Persona not found")
 
-    # Verify user owns this persona
-    if existing_persona.get("user_id") != user_id:
-        raise HTTPException(status_code=403, detail="Access denied")
-
     with ensure_name_unique(
-        "personas", persona.name, user_id, entity="Persona", exclude_uuid=persona_uuid
+        "personas",
+        persona.name,
+        ctx.org_uuid,
+        entity="Persona",
+        exclude_uuid=persona_uuid,
     ):
         updated = update_persona(
             persona_uuid=persona_uuid,
@@ -114,15 +112,12 @@ async def update_persona_endpoint(
 
 @router.delete("/{persona_uuid}")
 async def delete_persona_endpoint(
-    persona_uuid: str, user_id: str = Depends(get_current_user_id)
+    persona_uuid: str, ctx: OrgContext = Depends(get_current_org)
 ):
     """Delete a persona."""
-    # Check if persona exists and user owns it
     existing_persona = get_persona(persona_uuid)
-    if not existing_persona:
+    if not existing_persona or existing_persona.get("org_uuid") != ctx.org_uuid:
         raise HTTPException(status_code=404, detail="Persona not found")
-    if existing_persona.get("user_id") != user_id:
-        raise HTTPException(status_code=403, detail="Access denied")
 
     deleted = delete_persona(persona_uuid)
     if not deleted:

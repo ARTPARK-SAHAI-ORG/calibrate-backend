@@ -343,7 +343,7 @@ async def get_public_default_evaluators(
         if requested_types is not None and seed["evaluator_type"] not in requested_types:
             continue
         evaluator = get_evaluator_by_slug(seed["slug"])
-        if evaluator and evaluator.get("owner_user_id") is None:
+        if evaluator and evaluator.get("org_uuid") is None:
             defaults.append(_public_default_evaluator_response(evaluator))
     return defaults
 

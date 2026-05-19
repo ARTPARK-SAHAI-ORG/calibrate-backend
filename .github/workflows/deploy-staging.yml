@@ -123,7 +123,7 @@ jobs:
             export LANGFUSE_PUBLIC_KEY="${{ secrets.LANGFUSE_PUBLIC_KEY }}"
             export LANGFUSE_SECRET_KEY="${{ secrets.LANGFUSE_SECRET_KEY }}"
             export MAX_CONCURRENT_JOBS="${{ secrets.MAX_CONCURRENT_JOBS }}"
-            export MAX_CONCURRENT_JOBS_PER_USER="${{ secrets.MAX_CONCURRENT_JOBS_PER_USER }}"
+            export MAX_CONCURRENT_JOBS_PER_ORG="${{ secrets.MAX_CONCURRENT_JOBS_PER_ORG }}"
             export DEFAULT_MAX_ROWS_PER_EVAL="${{ secrets.DEFAULT_MAX_ROWS_PER_EVAL }}"
             export SUPERADMIN_EMAIL="${{ secrets.SUPERADMIN_EMAIL }}"
 

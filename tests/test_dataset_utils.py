@@ -13,51 +13,68 @@ from dataset_utils import resolve_dataset_inputs
 
 @pytest.fixture
 def user():
+    """Return `(user_uuid, org_uuid)` for a freshly-created user.
+
+    Post-multi-tenant migration the dataset helpers scope by org rather than
+    user, but most tests don't care about the user UUID; expose both as a
+    tuple so callers can pick what they need.
+    """
     email = f"ds-{uuid.uuid4().hex[:8]}@example.com"
-    return db.create_user("D", "U", email)
+    user_uuid = db.create_user("D", "U", email)
+    org = db.get_personal_org_for_user(user_uuid)
+    return {"user_id": user_uuid, "org_uuid": org["uuid"]}
 
 
 def test_resolve_dataset_inputs_missing_dataset(user):
     with pytest.raises(HTTPException) as ex:
         resolve_dataset_inputs(
-            dataset_id="missing", user_id=user, expected_type="stt"
+            dataset_id="missing", org_uuid=user["org_uuid"], expected_type="stt"
         )
     assert ex.value.status_code == 404
 
 
 def test_resolve_dataset_inputs_type_mismatch(user):
     ds_uuid = db.create_dataset(
-        name=f"ds-{uuid.uuid4().hex[:6]}", dataset_type="tts", user_id=user
+        name=f"ds-{uuid.uuid4().hex[:6]}",
+        dataset_type="tts",
+        org_uuid=user["org_uuid"],
+        user_id=user["user_id"],
     )
     db.add_dataset_items(ds_uuid, [{"text": "hi"}])
     with pytest.raises(HTTPException) as ex:
         resolve_dataset_inputs(
-            dataset_id=ds_uuid, user_id=user, expected_type="stt"
+            dataset_id=ds_uuid, org_uuid=user["org_uuid"], expected_type="stt"
         )
     assert ex.value.status_code == 400
 
 
 def test_resolve_dataset_inputs_empty(user):
     ds_uuid = db.create_dataset(
-        name=f"ds-{uuid.uuid4().hex[:6]}", dataset_type="stt", user_id=user
+        name=f"ds-{uuid.uuid4().hex[:6]}",
+        dataset_type="stt",
+        org_uuid=user["org_uuid"],
+        user_id=user["user_id"],
     )
     with pytest.raises(HTTPException) as ex:
         resolve_dataset_inputs(
-            dataset_id=ds_uuid, user_id=user, expected_type="stt"
+            dataset_id=ds_uuid, org_uuid=user["org_uuid"], expected_type="stt"
         )
     assert ex.value.status_code == 400
 
 
 def test_resolve_dataset_inputs_stt_dataset(user):
     ds_uuid = db.create_dataset(
-        name=f"ds-{uuid.uuid4().hex[:6]}", dataset_type="stt", user_id=user
+        name=f"ds-{uuid.uuid4().hex[:6]}",
+        dataset_type="stt",
+        org_uuid=user["org_uuid"],
+        user_id=user["user_id"],
     )
     db.add_dataset_items(
         ds_uuid,
         [{"text": "hi", "audio_path": "s3://b/k1"}, {"text": "bye", "audio_path": "s3://b/k2"}],
     )
     resolved = resolve_dataset_inputs(
-        dataset_id=ds_uuid, user_id=user, expected_type="stt"
+        dataset_id=ds_uuid, org_uuid=user["org_uuid"], expected_type="stt"
     )
     assert resolved.texts == ["hi", "bye"]
     assert resolved.audio_paths == ["s3://b/k1", "s3://b/k2"]
@@ -67,11 +84,14 @@ def test_resolve_dataset_inputs_stt_dataset(user):
 
 def test_resolve_dataset_inputs_tts_dataset(user):
     ds_uuid = db.create_dataset(
-        name=f"ds-{uuid.uuid4().hex[:6]}", dataset_type="tts", user_id=user
+        name=f"ds-{uuid.uuid4().hex[:6]}",
+        dataset_type="tts",
+        org_uuid=user["org_uuid"],
+        user_id=user["user_id"],
     )
     db.add_dataset_items(ds_uuid, [{"text": "hi"}])
     resolved = resolve_dataset_inputs(
-        dataset_id=ds_uuid, user_id=user, expected_type="tts"
+        dataset_id=ds_uuid, org_uuid=user["org_uuid"], expected_type="tts"
     )
     assert resolved.audio_paths is None
     assert resolved.texts == ["hi"]
@@ -80,7 +100,8 @@ def test_resolve_dataset_inputs_tts_dataset(user):
 def test_resolve_dataset_inputs_inline_stt_creates_new(user):
     resolved = resolve_dataset_inputs(
         dataset_id=None,
-        user_id=user,
+        org_uuid=user["org_uuid"],
+        user_id=user["user_id"],
         expected_type="stt",
         texts=["a", "b"],
         audio_paths=["s3://b/1", "s3://b/2"],
@@ -88,13 +109,14 @@ def test_resolve_dataset_inputs_inline_stt_creates_new(user):
     )
     assert resolved.dataset_id is not None
     assert resolved.item_ids and len(resolved.item_ids) == 2
-    assert db.get_dataset(resolved.dataset_id, user)["type"] == "stt"
+    assert db.get_dataset(resolved.dataset_id, user["org_uuid"])["type"] == "stt"
 
 
 def test_resolve_dataset_inputs_inline_tts_creates_new(user):
     resolved = resolve_dataset_inputs(
         dataset_id=None,
-        user_id=user,
+        org_uuid=user["org_uuid"],
+        user_id=user["user_id"],
         expected_type="tts",
         texts=["a"],
         dataset_name="brand-new-tts",
@@ -107,7 +129,7 @@ def test_resolve_dataset_inputs_inline_stt_validation():
     with pytest.raises(HTTPException):
         resolve_dataset_inputs(
             dataset_id=None,
-            user_id="u",
+            org_uuid="org",
             expected_type="stt",
             texts=["hi"],
             audio_paths=None,
@@ -116,7 +138,7 @@ def test_resolve_dataset_inputs_inline_stt_validation():
     with pytest.raises(HTTPException):
         resolve_dataset_inputs(
             dataset_id=None,
-            user_id="u",
+            org_uuid="org",
             expected_type="stt",
             texts=["hi"],
             audio_paths=["a", "b"],
@@ -127,7 +149,7 @@ def test_resolve_dataset_inputs_inline_tts_requires_texts():
     with pytest.raises(HTTPException):
         resolve_dataset_inputs(
             dataset_id=None,
-            user_id="u",
+            org_uuid="org",
             expected_type="tts",
             texts=None,
         )

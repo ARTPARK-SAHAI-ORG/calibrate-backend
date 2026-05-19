@@ -35,11 +35,11 @@ from db import (
     update_agent_test_job,
     update_agent_test_job_visibility,
     get_agent_test_jobs_for_agent,
-    get_agent_test_jobs_for_user,
+    get_agent_test_jobs_for_org,
     delete_agent_test_job,
 )
 from llm_judge import build_test_evaluators_payload
-from auth_utils import get_current_user_id
+from auth_utils import get_current_org, OrgContext
 from utils import (
     TaskStatus,
     TaskCreateResponse,
@@ -417,12 +417,12 @@ async def get_agent_test_runs(agent_uuid: str):
 
 @router.get("/runs", response_model=GlobalTestRunsResponse)
 async def get_all_test_runs_for_user(
-    user_id: str = Depends(get_current_user_id),
+    ctx: OrgContext = Depends(get_current_org),
     type: Optional[str] = None,
 ):
     """
-    Get all test runs (unit tests and benchmarks) across every agent owned by
-    the authenticated user.
+    Get all test runs (unit tests and benchmarks) across every agent in the
+    caller's current org.
 
     Optional query param:
       ?type=llm-unit-test   — return only unit-test runs
@@ -431,7 +431,7 @@ async def get_all_test_runs_for_user(
     Results are ordered newest-updated-first. Each item includes ``agent_id``
     and ``agent_name`` so the frontend can group or label by agent.
     """
-    jobs = get_agent_test_jobs_for_user(user_id, job_type=type)
+    jobs = get_agent_test_jobs_for_org(ctx.org_uuid, job_type=type)
 
     # Per-agent counters for naming ("Run 1", "Benchmark 2", …).
     # We need ascending order to assign names correctly, then flip back.
@@ -565,14 +565,14 @@ class AgentTestsBulkDeleteAll(BaseModel):
 @router.post("/bulk-delete-tests")
 async def bulk_delete_agent_tests(
     payload: AgentTestsBulkDeleteAll,
-    user_id: str = Depends(get_current_user_id),
+    ctx: OrgContext = Depends(get_current_org),
 ):
     """Hard-cousin of `/bulk-unlink`: instead of just unlinking, soft-delete
-    the named tests (and the link rows along with them). Only tests OWNED
-    by the calling user are deleted — UUIDs the caller doesn't own (or
-    that aren't linked to this agent) are silently skipped, so this can't
-    nuke a shared test that another user still needs and can't be used as
-    a reconnaissance probe for another user's test UUIDs.
+    the named tests (and the link rows along with them). Only tests in the
+    caller's CURRENT ORG are deleted — UUIDs from other orgs (or that aren't
+    linked to this agent) are silently skipped, so this can't nuke a test
+    in another org and can't be used as a reconnaissance probe for foreign
+    test UUIDs.
 
     `agent_uuid` is a sanity scope: every requested UUID must be linked
     to this agent. Cross-agent deletes have to be sent as separate calls.
@@ -581,22 +581,14 @@ async def bulk_delete_agent_tests(
         raise HTTPException(status_code=400, detail="test_uuids must not be empty")
 
     agent = get_agent(payload.agent_uuid)
-    if not agent:
-        raise HTTPException(status_code=404, detail="Agent not found")
-    if agent.get("user_id") != user_id:
-        # 404 (not 403) to avoid leaking existence — matches conventions in
-        # CLAUDE.md / architecture.md.
+    if not agent or agent.get("org_uuid") != ctx.org_uuid:
         raise HTTPException(status_code=404, detail="Agent not found")
 
-    # Intersect (caller-requested) ∩ (linked to this agent) ∩ (owned by caller).
-    # Any UUID failing any of those is silently dropped — no error — so the
-    # endpoint behaves the same whether the caller named a junk UUID, a
-    # foreign-owned UUID, or a UUID linked to a different agent.
     requested = set(payload.test_uuids)
     linked_owned_uuids = [
         t["uuid"]
         for t in get_tests_for_agent(payload.agent_uuid)
-        if t.get("user_id") == user_id and t["uuid"] in requested
+        if t.get("org_uuid") == ctx.org_uuid and t["uuid"] in requested
     ]
 
     if not linked_owned_uuids:
@@ -610,7 +602,7 @@ async def bulk_delete_agent_tests(
     # for these test_ids — across every agent, not just this one. Intentional:
     # the test itself is gone, so no link should survive.
     deleted_count = bulk_delete_tests(
-        test_uuids=linked_owned_uuids, user_id=user_id
+        test_uuids=linked_owned_uuids, org_uuid=ctx.org_uuid
     )
     return {
         "deleted_count": deleted_count,
@@ -1658,11 +1650,10 @@ async def run_agent_test(agent_uuid: str, request: RunTestRequest):
     except ValueError as e:
         raise HTTPException(status_code=500, detail=str(e))
 
-    # Get user_id from agent for per-user limit check
-    user_id = agent.get("user_id")
+    # Per-org limit check uses the agent's org.
+    org_uuid = agent.get("org_uuid")
 
-    # Check if we can start immediately or need to queue
-    can_start = can_start_agent_test_job(AGENT_TEST_JOB_TYPES, user_id)
+    can_start = can_start_agent_test_job(AGENT_TEST_JOB_TYPES, org_uuid)
     initial_status = (
         TaskStatus.IN_PROGRESS.value if can_start else TaskStatus.QUEUED.value
     )
@@ -1723,7 +1714,7 @@ class VisibilityResponse(BaseModel):
 async def update_test_run_visibility(
     task_id: str,
     body: VisibilityRequest,
-    user_id: str = Depends(get_current_user_id),
+    ctx: OrgContext = Depends(get_current_org),
 ):
     """Toggle public sharing for an agent test run."""
     job = get_agent_test_job(task_id)
@@ -1734,7 +1725,7 @@ async def update_test_run_visibility(
     if not agent_id:
         raise HTTPException(status_code=404, detail="Task not found")
     agent = get_agent(agent_id)
-    if not agent or agent.get("user_id") != user_id:
+    if not agent or agent.get("org_uuid") != ctx.org_uuid:
         raise HTTPException(status_code=404, detail="Task not found")
 
     if body.is_public:
@@ -2373,11 +2364,10 @@ async def run_agent_benchmark(agent_uuid: str, request: BenchmarkRequest):
     except ValueError as e:
         raise HTTPException(status_code=500, detail=str(e))
 
-    # Get user_id from agent for per-user limit check
-    user_id = agent.get("user_id")
+    # Per-org limit check uses the agent's org.
+    org_uuid = agent.get("org_uuid")
 
-    # Check if we can start immediately or need to queue
-    can_start = can_start_agent_test_job(AGENT_TEST_JOB_TYPES, user_id)
+    can_start = can_start_agent_test_job(AGENT_TEST_JOB_TYPES, org_uuid)
     initial_status = (
         TaskStatus.IN_PROGRESS.value if can_start else TaskStatus.QUEUED.value
     )
@@ -2428,7 +2418,7 @@ async def run_agent_benchmark(agent_uuid: str, request: BenchmarkRequest):
 async def update_benchmark_visibility(
     task_id: str,
     body: VisibilityRequest,
-    user_id: str = Depends(get_current_user_id),
+    ctx: OrgContext = Depends(get_current_org),
 ):
     """Toggle public sharing for a benchmark run."""
     job = get_agent_test_job(task_id)
@@ -2439,7 +2429,7 @@ async def update_benchmark_visibility(
     if not agent_id:
         raise HTTPException(status_code=404, detail="Task not found")
     agent = get_agent(agent_id)
-    if not agent or agent.get("user_id") != user_id:
+    if not agent or agent.get("org_uuid") != ctx.org_uuid:
         raise HTTPException(status_code=404, detail="Task not found")
 
     if body.is_public:
@@ -2506,19 +2496,17 @@ async def get_benchmark_status(task_id: str):
 
 @router.delete("/job/{job_uuid}")
 async def delete_agent_test_job_endpoint(
-    job_uuid: str, user_id: str = Depends(get_current_user_id)
+    job_uuid: str, ctx: OrgContext = Depends(get_current_org)
 ):
-    """Delete an agent test job. Only the owner can delete their jobs."""
-    # Check if job exists
+    """Delete an agent test job. Only members of the parent agent's org can delete."""
     job = get_agent_test_job(job_uuid)
     if not job:
         raise HTTPException(status_code=404, detail="Job not found")
 
-    # Check ownership via agent
     agent_id = job.get("agent_id")
     if agent_id:
         agent = get_agent(agent_id)
-        if not agent or agent.get("user_id") != user_id:
+        if not agent or agent.get("org_uuid") != ctx.org_uuid:
             raise HTTPException(status_code=404, detail="Job not found")
     else:
         raise HTTPException(status_code=404, detail="Job not found")

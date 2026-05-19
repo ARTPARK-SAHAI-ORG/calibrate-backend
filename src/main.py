@@ -50,11 +50,12 @@ from routers.evaluators import router as evaluators_router
 from routers.simulations import router as simulations_router
 from routers.jobs import router as jobs_router
 from routers.datasets import router as datasets_router
-from routers.user_limits import router as user_limits_router
+from routers.org_limits import router as org_limits_router
 from routers.public import router as public_router
 from routers.annotation_tasks import router as annotation_tasks_router
 from routers.annotators import router as annotators_router
 from routers.annotation_agreement import router as annotation_agreement_router
+from routers.organizations import router as organizations_router
 from utils import (
     generate_presigned_upload_url,
     get_s3_output_config,
@@ -149,10 +150,11 @@ app.include_router(evaluators_router)
 app.include_router(simulations_router)
 app.include_router(jobs_router)
 app.include_router(datasets_router)
-app.include_router(user_limits_router)
+app.include_router(org_limits_router)
 app.include_router(annotation_tasks_router)
 app.include_router(annotators_router)
 app.include_router(annotation_agreement_router)
+app.include_router(organizations_router)
 # Public (no-auth) sharing endpoints — must be registered without any auth dependency
 app.include_router(public_router)
 

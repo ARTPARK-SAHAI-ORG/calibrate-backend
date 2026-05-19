@@ -10,11 +10,11 @@ from db import (
     delete_annotator,
     ensure_name_unique,
     get_jobs_for_annotator_detailed,
-    get_job_counts_for_user_annotators,
-    get_annotations_for_user,
+    get_job_counts_for_org_annotators,
+    get_annotations_for_org,
     get_annotations_for_annotator_overlap_slots,
 )
-from auth_utils import get_current_user_id
+from auth_utils import get_current_org, OrgContext
 from annotation_metrics import (
     aggregate_agreement_for_annotator,
     trend_series_for_annotator,
@@ -47,10 +47,9 @@ class AnnotatorCreateResponse(BaseModel):
     message: str
 
 
-def _ensure_owned_annotator(annotator_uuid: str, user_id: str):
+def _ensure_owned_annotator(annotator_uuid: str, org_uuid: str):
     annotator = get_annotator(annotator_uuid)
-    if not annotator or annotator.get("user_id") != user_id:
-        # 404 (not 403) — avoid leaking existence
+    if not annotator or annotator.get("org_uuid") != org_uuid:
         raise HTTPException(status_code=404, detail="Annotator not found")
     return annotator
 
@@ -58,20 +57,17 @@ def _ensure_owned_annotator(annotator_uuid: str, user_id: str):
 @router.post("", response_model=AnnotatorCreateResponse)
 async def create_annotator_endpoint(
     payload: AnnotatorCreate,
-    user_id: str = Depends(get_current_user_id),
+    ctx: OrgContext = Depends(get_current_org),
 ):
-    """Create a new annotator. Name must be unique per account."""
+    """Create a new annotator. Name must be unique per org."""
     try:
         with ensure_name_unique(
-            "annotators", payload.name, user_id, entity="Annotator"
+            "annotators", payload.name, ctx.org_uuid, entity="Annotator"
         ):
-            annotator_uuid = create_annotator(name=payload.name, user_id=user_id)
+            annotator_uuid = create_annotator(
+                name=payload.name, org_uuid=ctx.org_uuid, user_id=ctx.user_id
+            )
     except ValueError as e:
-        # `create_annotator` raises ValueError for non-uniqueness validation
-        # too (empty name, missing user_id). The uniqueness collision case
-        # is now caught by `ensure_name_unique` directly from the DB
-        # IntegrityError, before it gets wrapped to ValueError. Anything
-        # reaching here is a genuine input-validation 400.
         raise HTTPException(status_code=400, detail=str(e))
     return AnnotatorCreateResponse(
         uuid=annotator_uuid, message="Annotator created successfully"
@@ -79,22 +75,22 @@ async def create_annotator_endpoint(
 
 
 @router.get("", response_model=List[AnnotatorResponse])
-async def list_annotators(user_id: str = Depends(get_current_user_id)):
-    """List all annotators on this account with their per-annotator stats:
+async def list_annotators(ctx: OrgContext = Depends(get_current_org)):
+    """List all annotators on this org with their per-annotator stats:
     `jobs_count` and `current_agreement` (pairwise mean vs other annotators).
     Both are `null` when there's nothing to compute (no jobs / no overlap).
 
-    Bulk-fetches once: annotators, job counts, and the user's full annotation
+    Bulk-fetches once: annotators, job counts, and the org's full annotation
     set. Per-annotator agreement is then a Python-side filter over the
     shared annotation list — `aggregate_agreement_for_annotator` already
     selects only slots where the target annotator participated, so feeding
-    it the account-wide list is equivalent to the per-annotator query.
+    it the org-wide list is equivalent to the per-annotator query.
     """
-    annotators = get_all_annotators(user_id=user_id)
+    annotators = get_all_annotators(org_uuid=ctx.org_uuid)
     if not annotators:
         return []
-    jobs_count_by_annotator = get_job_counts_for_user_annotators(user_id)
-    all_annotations = get_annotations_for_user(user_id)
+    jobs_count_by_annotator = get_job_counts_for_org_annotators(ctx.org_uuid)
+    all_annotations = get_annotations_for_org(ctx.org_uuid)
     out: List[Dict[str, Any]] = []
     for a in annotators:
         agreement, pairs = aggregate_agreement_for_annotator(
@@ -116,17 +112,17 @@ async def get_annotator_endpoint(
     annotator_uuid: str,
     bucket: str = Query("month", pattern="^(week|month|year)$"),
     days: int = Query(365, ge=1, le=3650),
-    user_id: str = Depends(get_current_user_id),
+    ctx: OrgContext = Depends(get_current_org),
 ):
     """Annotator detail: basic info, jobs assigned to this annotator (with
     task name + item/annotation counts), latest agreement vs other annotators,
     and agreement trend series."""
-    annotator = _ensure_owned_annotator(annotator_uuid, user_id)
+    annotator = _ensure_owned_annotator(annotator_uuid, ctx.org_uuid)
 
     jobs = get_jobs_for_annotator_detailed(annotator_uuid)
 
     annotations = get_annotations_for_annotator_overlap_slots(
-        user_id=user_id, annotator_id=annotator_uuid
+        org_uuid=ctx.org_uuid, annotator_id=annotator_uuid
     )
     current, pair_count = aggregate_agreement_for_annotator(
         annotations, annotator_uuid
@@ -160,14 +156,14 @@ async def get_annotator_endpoint(
 async def update_annotator_endpoint(
     annotator_uuid: str,
     payload: AnnotatorUpdate,
-    user_id: str = Depends(get_current_user_id),
+    ctx: OrgContext = Depends(get_current_org),
 ):
-    _ensure_owned_annotator(annotator_uuid, user_id)
+    _ensure_owned_annotator(annotator_uuid, ctx.org_uuid)
     try:
         with ensure_name_unique(
             "annotators",
             payload.name,
-            user_id,
+            ctx.org_uuid,
             entity="Annotator",
             exclude_uuid=annotator_uuid,
         ):
@@ -181,9 +177,9 @@ async def update_annotator_endpoint(
 
 @router.delete("/{annotator_uuid}")
 async def delete_annotator_endpoint(
-    annotator_uuid: str, user_id: str = Depends(get_current_user_id)
+    annotator_uuid: str, ctx: OrgContext = Depends(get_current_org)
 ):
-    _ensure_owned_annotator(annotator_uuid, user_id)
+    _ensure_owned_annotator(annotator_uuid, ctx.org_uuid)
     deleted = delete_annotator(annotator_uuid)
     if not deleted:
         raise HTTPException(status_code=404, detail="Annotator not found")

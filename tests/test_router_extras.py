@@ -341,7 +341,7 @@ def test_bulk_test_upload(client):
         },
         headers=h,
     )
-    assert cross.status_code == 403
+    assert cross.status_code == 404
 
     # Bulk upload happy path
     own_agent = client.post(

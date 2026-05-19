@@ -17,7 +17,7 @@ from db import (
     get_evaluators_for_test,
     set_test_evaluators,
 )
-from auth_utils import get_current_user_id
+from auth_utils import get_current_org, OrgContext
 
 import logging
 
@@ -142,8 +142,8 @@ class BulkTestDeleteResponse(BaseModel):
     message: str
 
 
-def _validate_evaluators(refs: List[EvaluatorRef], user_id: str) -> List[Dict[str, Any]]:
-    """Validate that each referenced evaluator is visible to the user and that it has
+def _validate_evaluators(refs: List[EvaluatorRef], org_uuid: str) -> List[Dict[str, Any]]:
+    """Validate that each referenced evaluator is visible to the org and that it has
     `evaluator_type == 'llm'` (response/next-reply tests only judge LLM output, so attaching
     a stt/tts/simulation evaluator is rejected at write time). Returns db-ready refs."""
     out: List[Dict[str, Any]] = []
@@ -151,7 +151,7 @@ def _validate_evaluators(refs: List[EvaluatorRef], user_id: str) -> List[Dict[st
         evaluator = get_evaluator(ref.evaluator_uuid)
         if not evaluator:
             raise HTTPException(status_code=404, detail=f"Evaluator {ref.evaluator_uuid} not found")
-        if evaluator.get("owner_user_id") is not None and evaluator["owner_user_id"] != user_id:
+        if evaluator.get("org_uuid") is not None and evaluator["org_uuid"] != org_uuid:
             raise HTTPException(status_code=404, detail=f"Evaluator {ref.evaluator_uuid} not found")
         if evaluator.get("evaluator_type") != "llm":
             raise HTTPException(
@@ -179,13 +179,13 @@ def _with_evaluators(test_dict: Dict[str, Any]) -> Dict[str, Any]:
 
 @router.post("/bulk-delete", response_model=BulkTestDeleteResponse)
 async def bulk_delete_tests_endpoint(
-    payload: BulkTestDelete, user_id: str = Depends(get_current_user_id)
+    payload: BulkTestDelete, ctx: OrgContext = Depends(get_current_org)
 ):
-    """Bulk delete tests by UUIDs. Only deletes tests owned by the authenticated user."""
+    """Bulk delete tests by UUIDs. Only deletes tests in the caller's current org."""
     if not payload.test_uuids:
         raise HTTPException(status_code=400, detail="test_uuids must not be empty")
 
-    deleted_count = bulk_delete_tests(test_uuids=payload.test_uuids, user_id=user_id)
+    deleted_count = bulk_delete_tests(test_uuids=payload.test_uuids, org_uuid=ctx.org_uuid)
 
     return BulkTestDeleteResponse(
         deleted_count=deleted_count,
@@ -195,21 +195,19 @@ async def bulk_delete_tests_endpoint(
 
 @router.post("/bulk", response_model=BulkTestUploadResponse)
 async def bulk_upload_tests(
-    payload: BulkTestUpload, user_id: str = Depends(get_current_user_id)
+    payload: BulkTestUpload, ctx: OrgContext = Depends(get_current_org)
 ):
     """Bulk upload LLM tests. All tests must be the same type (response or tool_call)."""
     if payload.agent_uuids:
         for agent_uuid in payload.agent_uuids:
             agent = get_agent(agent_uuid)
-            if not agent:
+            if not agent or agent.get("org_uuid") != ctx.org_uuid:
                 raise HTTPException(status_code=404, detail=f"Agent {agent_uuid} not found")
-            if agent.get("user_id") != user_id:
-                raise HTTPException(status_code=403, detail=f"Access denied for agent {agent_uuid}")
 
     resolved_evaluator_refs: List[Optional[List[Dict[str, Any]]]] = []
     for t in payload.tests:
         if t.evaluators:
-            resolved_evaluator_refs.append(_validate_evaluators(t.evaluators, user_id))
+            resolved_evaluator_refs.append(_validate_evaluators(t.evaluators, ctx.org_uuid))
         else:
             resolved_evaluator_refs.append(None)
 
@@ -233,7 +231,9 @@ async def bulk_upload_tests(
         })
 
     try:
-        uuids = bulk_create_tests(tests=db_tests, user_id=user_id)
+        uuids = bulk_create_tests(
+            tests=db_tests, org_uuid=ctx.org_uuid, user_id=ctx.user_id
+        )
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
 
@@ -270,16 +270,19 @@ async def bulk_upload_tests(
 
 @router.post("", response_model=TestCreateResponse)
 async def create_test_endpoint(
-    test: TestCreate, user_id: str = Depends(get_current_user_id)
+    test: TestCreate, ctx: OrgContext = Depends(get_current_org)
 ):
     """Create a new test."""
-    resolved = _validate_evaluators(test.evaluators, user_id) if test.evaluators else None
-    with ensure_name_unique("tests", test.name, user_id, entity="Test"):
+    resolved = (
+        _validate_evaluators(test.evaluators, ctx.org_uuid) if test.evaluators else None
+    )
+    with ensure_name_unique("tests", test.name, ctx.org_uuid, entity="Test"):
         test_uuid = create_test(
             name=test.name,
             type=test.type,
             config=test.config,
-            user_id=user_id,
+            org_uuid=ctx.org_uuid,
+            user_id=ctx.user_id,
         )
     if resolved:
         set_test_evaluators(test_uuid, resolved)
@@ -287,44 +290,44 @@ async def create_test_endpoint(
 
 
 @router.get("", response_model=List[TestResponse])
-async def list_tests(user_id: str = Depends(get_current_user_id)):
-    """List all tests for the authenticated user."""
-    tests = get_all_tests(user_id=user_id)
+async def list_tests(ctx: OrgContext = Depends(get_current_org)):
+    """List all tests for the caller's current org."""
+    tests = get_all_tests(org_uuid=ctx.org_uuid)
     return [_with_evaluators(t) for t in tests]
 
 
 @router.get("/{test_uuid}", response_model=TestResponse)
 async def get_test_endpoint(
-    test_uuid: str, user_id: str = Depends(get_current_user_id)
+    test_uuid: str, ctx: OrgContext = Depends(get_current_org)
 ):
     """Get a test by UUID."""
     test = get_test(test_uuid)
-    if not test:
+    if not test or test.get("org_uuid") != ctx.org_uuid:
         raise HTTPException(status_code=404, detail="Test not found")
-    if test.get("user_id") != user_id:
-        raise HTTPException(status_code=403, detail="Access denied")
     return _with_evaluators(test)
 
 
 @router.put("/{test_uuid}", response_model=TestResponse)
 async def update_test_endpoint(
-    test_uuid: str, test: TestUpdate, user_id: str = Depends(get_current_user_id)
+    test_uuid: str, test: TestUpdate, ctx: OrgContext = Depends(get_current_org)
 ):
     """Update a test."""
     existing_test = get_test(test_uuid)
-    if not existing_test:
+    if not existing_test or existing_test.get("org_uuid") != ctx.org_uuid:
         raise HTTPException(status_code=404, detail="Test not found")
-    if existing_test.get("user_id") != user_id:
-        raise HTTPException(status_code=403, detail="Access denied")
 
-    resolved = _validate_evaluators(test.evaluators, user_id) if test.evaluators is not None else None
+    resolved = (
+        _validate_evaluators(test.evaluators, ctx.org_uuid)
+        if test.evaluators is not None
+        else None
+    )
 
     has_core_updates = any(
         v is not None for v in (test.name, test.type, test.config)
     )
     if has_core_updates:
         with ensure_name_unique(
-            "tests", test.name, user_id, entity="Test", exclude_uuid=test_uuid
+            "tests", test.name, ctx.org_uuid, entity="Test", exclude_uuid=test_uuid
         ):
             updated = update_test(
                 test_uuid=test_uuid,
@@ -343,14 +346,12 @@ async def update_test_endpoint(
 
 @router.delete("/{test_uuid}")
 async def delete_test_endpoint(
-    test_uuid: str, user_id: str = Depends(get_current_user_id)
+    test_uuid: str, ctx: OrgContext = Depends(get_current_org)
 ):
     """Delete a test."""
     existing_test = get_test(test_uuid)
-    if not existing_test:
+    if not existing_test or existing_test.get("org_uuid") != ctx.org_uuid:
         raise HTTPException(status_code=404, detail="Test not found")
-    if existing_test.get("user_id") != user_id:
-        raise HTTPException(status_code=403, detail="Access denied")
 
     deleted = delete_test(test_uuid)
     if not deleted:

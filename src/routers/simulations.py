@@ -63,7 +63,7 @@ from utils import (
     env_int,
     env_str,
 )
-from auth_utils import get_current_user_id
+from auth_utils import get_current_org, OrgContext
 from datetime import datetime
 
 # Job types that share the same queue
@@ -312,7 +312,7 @@ class SimulationUpdate(BaseModel):
 
 
 def _resolve_simulation_evaluator_ref(
-    ref: EvaluatorRef, user_id: str
+    ref: EvaluatorRef, org_uuid: str
 ) -> Dict[str, Any]:
     """Resolve and validate one simulation evaluator link. Rejects legacy `metrics.uuid` values."""
     evaluator_uuid = ref.evaluator_uuid.strip()
@@ -339,7 +339,7 @@ def _resolve_simulation_evaluator_ref(
             status_code=404,
             detail=f"Evaluator {evaluator_uuid} not found",
         )
-    if evaluator.get("owner_user_id") is not None and evaluator["owner_user_id"] != user_id:
+    if evaluator.get("org_uuid") is not None and evaluator["org_uuid"] != org_uuid:
         raise HTTPException(
             status_code=404,
             detail=f"Evaluator {evaluator_uuid} not found",
@@ -571,29 +571,26 @@ def apply_simulation_job_evaluator_enrichment(
 
 @router.post("", response_model=SimulationCreateResponse)
 async def create_simulation_endpoint(
-    simulation: SimulationCreate, user_id: str = Depends(get_current_user_id)
+    simulation: SimulationCreate, ctx: OrgContext = Depends(get_current_org)
 ):
     """Create a new simulation with optional linked agent, personas, scenarios, and evaluators."""
-    # Verify agent exists if provided
     if simulation.agent_uuid:
         agent = get_agent(simulation.agent_uuid)
-        if not agent:
+        if not agent or agent.get("org_uuid") != ctx.org_uuid:
             raise HTTPException(status_code=404, detail="Agent not found")
 
-    # Verify all personas exist
     if simulation.persona_uuids:
         for persona_uuid in simulation.persona_uuids:
             persona = get_persona(persona_uuid)
-            if not persona:
+            if not persona or persona.get("org_uuid") != ctx.org_uuid:
                 raise HTTPException(
                     status_code=404, detail=f"Persona {persona_uuid} not found"
                 )
 
-    # Verify all scenarios exist
     if simulation.scenario_uuids:
         for scenario_uuid in simulation.scenario_uuids:
             scenario = get_scenario(scenario_uuid)
-            if not scenario:
+            if not scenario or scenario.get("org_uuid") != ctx.org_uuid:
                 raise HTTPException(
                     status_code=404, detail=f"Scenario {scenario_uuid} not found"
                 )
@@ -601,12 +598,18 @@ async def create_simulation_endpoint(
     resolved_evaluator_refs: List[Dict[str, Any]] = []
     if simulation.evaluators:
         for ref in simulation.evaluators:
-            resolved_evaluator_refs.append(_resolve_simulation_evaluator_ref(ref, user_id))
+            resolved_evaluator_refs.append(
+                _resolve_simulation_evaluator_ref(ref, ctx.org_uuid)
+            )
 
-    # Create the simulation
-    with ensure_name_unique("simulations", simulation.name, user_id, entity="Simulation"):
+    with ensure_name_unique(
+        "simulations", simulation.name, ctx.org_uuid, entity="Simulation"
+    ):
         simulation_uuid = create_simulation(
-            name=simulation.name, agent_id=simulation.agent_uuid, user_id=user_id
+            name=simulation.name,
+            agent_id=simulation.agent_uuid,
+            org_uuid=ctx.org_uuid,
+            user_id=ctx.user_id,
         )
 
     # Add personas to simulation
@@ -633,9 +636,9 @@ async def create_simulation_endpoint(
 
 
 @router.get("", response_model=List[SimulationListResponse])
-async def list_simulations(user_id: str = Depends(get_current_user_id)):
-    """List all simulations for the authenticated user."""
-    simulations = get_all_simulations(user_id=user_id)
+async def list_simulations(ctx: OrgContext = Depends(get_current_org)):
+    """List all simulations for the caller's current org."""
+    simulations = get_all_simulations(org_uuid=ctx.org_uuid)
     result = []
     for sim in simulations:
         agent = None
@@ -675,7 +678,7 @@ class VisibilityResponse(BaseModel):
 async def update_simulation_run_visibility(
     task_id: str,
     body: VisibilityRequest,
-    user_id: str = Depends(get_current_user_id),
+    ctx: OrgContext = Depends(get_current_org),
 ):
     """Toggle public sharing for a simulation run."""
     job = get_simulation_job(task_id)
@@ -685,7 +688,7 @@ async def update_simulation_run_visibility(
     simulation_id = job.get("simulation_id")
     if simulation_id:
         simulation = get_simulation(simulation_id)
-        if not simulation or simulation.get("user_id") != user_id:
+        if not simulation or simulation.get("org_uuid") != ctx.org_uuid:
             raise HTTPException(status_code=404, detail="Task not found")
     else:
         raise HTTPException(status_code=404, detail="Task not found")
@@ -702,7 +705,7 @@ async def update_simulation_run_visibility(
 
 @router.get("/run/{task_id}", response_model=SimulationRunStatusResponse)
 async def get_simulation_run_status(
-    task_id: str, user_id: str = Depends(get_current_user_id)
+    task_id: str, ctx: OrgContext = Depends(get_current_org)
 ):
     """
     Get the status of a simulation run.
@@ -713,11 +716,10 @@ async def get_simulation_run_status(
     if not job:
         raise HTTPException(status_code=404, detail="Task not found")
 
-    # Verify user owns the parent simulation
     simulation_id = job.get("simulation_id")
     if simulation_id:
         simulation = get_simulation(simulation_id)
-        if not simulation or simulation.get("user_id") != user_id:
+        if not simulation or simulation.get("org_uuid") != ctx.org_uuid:
             raise HTTPException(status_code=404, detail="Task not found")
 
     status = job["status"]
@@ -827,21 +829,16 @@ async def get_simulation_run_status(
 
 @router.get("/{simulation_uuid}/runs", response_model=SimulationRunsResponse)
 async def get_simulation_runs(
-    simulation_uuid: str, user_id: str = Depends(get_current_user_id)
+    simulation_uuid: str, ctx: OrgContext = Depends(get_current_org)
 ):
     """
     Get all runs for a simulation.
 
     Returns a list of all simulation runs with their UUID, status, type, and name.
     """
-    # Verify simulation exists
     simulation = get_simulation(simulation_uuid)
-    if not simulation:
+    if not simulation or simulation.get("org_uuid") != ctx.org_uuid:
         raise HTTPException(status_code=404, detail="Simulation not found")
-
-    # Verify user owns this simulation
-    if simulation.get("user_id") != user_id:
-        raise HTTPException(status_code=403, detail="Access denied")
 
     # Get all jobs for this simulation
     jobs = get_simulation_jobs_for_simulation(simulation_uuid)
@@ -875,16 +872,12 @@ async def get_simulation_runs(
 
 @router.get("/{simulation_uuid}", response_model=SimulationDetailResponse)
 async def get_simulation_endpoint(
-    simulation_uuid: str, user_id: str = Depends(get_current_user_id)
+    simulation_uuid: str, ctx: OrgContext = Depends(get_current_org)
 ):
     """Get a simulation by UUID with all linked agent, personas, scenarios, and evaluators."""
     simulation = get_simulation(simulation_uuid)
-    if not simulation:
+    if not simulation or simulation.get("org_uuid") != ctx.org_uuid:
         raise HTTPException(status_code=404, detail="Simulation not found")
-
-    # Verify user owns this simulation
-    if simulation.get("user_id") != user_id:
-        raise HTTPException(status_code=403, detail="Access denied")
 
     # Get linked agent
     agent = None
@@ -921,37 +914,33 @@ async def get_simulation_endpoint(
 async def update_simulation_endpoint(
     simulation_uuid: str,
     simulation: SimulationUpdate,
-    user_id: str = Depends(get_current_user_id),
+    ctx: OrgContext = Depends(get_current_org),
 ):
     """Update a simulation with optional linked agent, personas, scenarios, and evaluators."""
     existing_simulation = get_simulation(simulation_uuid)
-    if not existing_simulation:
+    if (
+        not existing_simulation
+        or existing_simulation.get("org_uuid") != ctx.org_uuid
+    ):
         raise HTTPException(status_code=404, detail="Simulation not found")
 
-    # Verify user owns this simulation
-    if existing_simulation.get("user_id") != user_id:
-        raise HTTPException(status_code=403, detail="Access denied")
-
-    # Verify agent exists if provided
     if simulation.agent_uuid is not None and simulation.agent_uuid != "":
         agent = get_agent(simulation.agent_uuid)
-        if not agent:
+        if not agent or agent.get("org_uuid") != ctx.org_uuid:
             raise HTTPException(status_code=404, detail="Agent not found")
 
-    # Verify all new personas exist
     if simulation.persona_uuids is not None:
         for persona_uuid in simulation.persona_uuids:
             persona = get_persona(persona_uuid)
-            if not persona:
+            if not persona or persona.get("org_uuid") != ctx.org_uuid:
                 raise HTTPException(
                     status_code=404, detail=f"Persona {persona_uuid} not found"
                 )
 
-    # Verify all new scenarios exist
     if simulation.scenario_uuids is not None:
         for scenario_uuid in simulation.scenario_uuids:
             scenario = get_scenario(scenario_uuid)
-            if not scenario:
+            if not scenario or scenario.get("org_uuid") != ctx.org_uuid:
                 raise HTTPException(
                     status_code=404, detail=f"Scenario {scenario_uuid} not found"
                 )
@@ -959,14 +948,15 @@ async def update_simulation_endpoint(
     resolved_evaluator_refs: List[Dict[str, Any]] = []
     if simulation.evaluators is not None:
         for ref in simulation.evaluators:
-            resolved_evaluator_refs.append(_resolve_simulation_evaluator_ref(ref, user_id))
+            resolved_evaluator_refs.append(
+                _resolve_simulation_evaluator_ref(ref, ctx.org_uuid)
+            )
 
-    # Update simulation name and/or agent if provided
     if simulation.name is not None or simulation.agent_uuid is not None:
         with ensure_name_unique(
             "simulations",
             simulation.name,
-            user_id,
+            ctx.org_uuid,
             entity="Simulation",
             exclude_uuid=simulation_uuid,
         ):
@@ -1052,15 +1042,15 @@ async def update_simulation_endpoint(
 
 @router.delete("/{simulation_uuid}")
 async def delete_simulation_endpoint(
-    simulation_uuid: str, user_id: str = Depends(get_current_user_id)
+    simulation_uuid: str, ctx: OrgContext = Depends(get_current_org)
 ):
     """Delete a simulation."""
-    # Check if simulation exists and user owns it
     existing_simulation = get_simulation(simulation_uuid)
-    if not existing_simulation:
+    if (
+        not existing_simulation
+        or existing_simulation.get("org_uuid") != ctx.org_uuid
+    ):
         raise HTTPException(status_code=404, detail="Simulation not found")
-    if existing_simulation.get("user_id") != user_id:
-        raise HTTPException(status_code=403, detail="Access denied")
 
     deleted = delete_simulation(simulation_uuid)
     if not deleted:
@@ -2312,7 +2302,7 @@ def run_simulation_task(
 async def run_simulation_endpoint(
     simulation_uuid: str,
     request: RunSimulationRequest,
-    user_id: str = Depends(get_current_user_id),
+    ctx: OrgContext = Depends(get_current_org),
 ):
     """
     Run a simulation with personas, scenarios, and linked evaluators.
@@ -2324,16 +2314,10 @@ async def run_simulation_endpoint(
 
     Returns a task ID that can be used to poll for status and results.
     """
-    # Verify simulation exists
     simulation = get_simulation(simulation_uuid)
-    if not simulation:
+    if not simulation or simulation.get("org_uuid") != ctx.org_uuid:
         raise HTTPException(status_code=404, detail="Simulation not found")
 
-    # Verify user owns this simulation
-    if simulation.get("user_id") != user_id:
-        raise HTTPException(status_code=403, detail="Access denied")
-
-    # Get agent from simulation
     agent_uuid = simulation.get("agent_id")
     if not agent_uuid:
         raise HTTPException(
@@ -2383,8 +2367,7 @@ async def run_simulation_endpoint(
     except ValueError as e:
         raise HTTPException(status_code=500, detail=str(e))
 
-    # Check if we can start immediately or need to queue
-    can_start = can_start_simulation_job(SIMULATION_JOB_TYPES, user_id)
+    can_start = can_start_simulation_job(SIMULATION_JOB_TYPES, ctx.org_uuid)
     initial_status = (
         TaskStatus.IN_PROGRESS.value if can_start else TaskStatus.QUEUED.value
     )
@@ -2420,23 +2403,21 @@ async def run_simulation_endpoint(
 
 @router.post("/run/{job_uuid}/abort", response_model=SimulationRunStatusResponse)
 async def abort_simulation_run(
-    job_uuid: str, user_id: str = Depends(get_current_user_id)
+    job_uuid: str, ctx: OrgContext = Depends(get_current_org)
 ):
     """Abort a running simulation job, saving results collected so far.
 
     Kills the running process, appends an abort marker to incomplete transcripts,
     and saves the partial results with status=done. Returns the full results.
     """
-    # Check if job exists
     simulation_job = get_simulation_job(job_uuid)
     if not simulation_job:
         raise HTTPException(status_code=404, detail="Job not found")
 
-    # Check ownership via simulation
     simulation_id = simulation_job.get("simulation_id")
     if simulation_id:
         simulation = get_simulation(simulation_id)
-        if not simulation or simulation.get("user_id") != user_id:
+        if not simulation or simulation.get("org_uuid") != ctx.org_uuid:
             raise HTTPException(status_code=404, detail="Job not found")
     else:
         raise HTTPException(status_code=404, detail="Job not found")
@@ -2511,19 +2492,17 @@ async def abort_simulation_run(
 
 @router.delete("/run/{job_uuid}")
 async def delete_simulation_job_endpoint(
-    job_uuid: str, user_id: str = Depends(get_current_user_id)
+    job_uuid: str, ctx: OrgContext = Depends(get_current_org)
 ):
-    """Delete a simulation job. Only the owner can delete their jobs."""
-    # Check if job exists
+    """Delete a simulation job. Only members of the parent simulation's org can delete."""
     simulation_job = get_simulation_job(job_uuid)
     if not simulation_job:
         raise HTTPException(status_code=404, detail="Job not found")
 
-    # Check ownership via simulation
     simulation_id = simulation_job.get("simulation_id")
     if simulation_id:
         simulation = get_simulation(simulation_id)
-        if not simulation or simulation.get("user_id") != user_id:
+        if not simulation or simulation.get("org_uuid") != ctx.org_uuid:
             raise HTTPException(status_code=404, detail="Job not found")
     else:
         raise HTTPException(status_code=404, detail="Job not found")

@@ -110,7 +110,7 @@ def test_create_simulation_with_all_links(client):
     other = _signup(client)
     assert (
         client.get(f"/simulations/{sim_uuid}", headers=other["headers"]).status_code
-        == 403
+        == 404
     )
 
 
@@ -229,7 +229,7 @@ def test_update_simulation_basic(client):
             json={"name": "x"},
             headers=other["headers"],
         ).status_code
-        == 403
+        == 404
     )
     assert (
         client.put(
@@ -261,7 +261,7 @@ def test_simulation_runs_listing(client):
         client.get(
             f"/simulations/{sim_uuid}/runs", headers=other["headers"]
         ).status_code
-        == 403
+        == 404
     )
 
     # delete
@@ -278,7 +278,7 @@ def test_simulation_runs_listing(client):
         client.delete(
             f"/simulations/{create2['uuid']}", headers=other["headers"]
         ).status_code
-        == 403
+        == 404
     )
 
 
@@ -318,7 +318,7 @@ def test_run_simulation_validation_errors(client, monkeypatch):
             json={"type": "text"},
             headers=other["headers"],
         ).status_code
-        == 403
+        == 404
     )
 
     # Wire up an agent + verify "no personas" branch

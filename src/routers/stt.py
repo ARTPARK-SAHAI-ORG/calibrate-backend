@@ -22,7 +22,7 @@ from db import (
     update_job_visibility,
 )
 from dataset_utils import resolve_dataset_inputs
-from auth_utils import get_current_user_id
+from auth_utils import get_current_org, OrgContext
 from llm_judge import build_evaluator_cli_payload
 from utils import (
     TaskStatus,
@@ -57,7 +57,7 @@ EVAL_JOB_TYPES = ["stt-eval", "tts-eval", "annotation-eval"]
 
 def _resolve_evaluators_for_job(
     uuids: Optional[List[str]],
-    user_id: str,
+    org_uuid: str,
     default_slug: str,
     expected_evaluator_type: str,
 ) -> List[dict]:
@@ -94,8 +94,8 @@ def _resolve_evaluators_for_job(
                 status_code=404, detail=f"Evaluator {ref['evaluator_uuid']} not found"
             )
         if (
-            evaluator.get("owner_user_id") is not None
-            and evaluator["owner_user_id"] != user_id
+            evaluator.get("org_uuid") is not None
+            and evaluator["org_uuid"] != org_uuid
         ):
             raise HTTPException(
                 status_code=404, detail=f"Evaluator {ref['evaluator_uuid']} not found"
@@ -647,7 +647,7 @@ def run_evaluation_task(
 
 @router.post("/evaluate", response_model=TaskCreateResponse)
 async def evaluate_stt(
-    request: STTEvaluationRequest, user_id: str = Depends(get_current_user_id)
+    request: STTEvaluationRequest, ctx: OrgContext = Depends(get_current_org)
 ):
     """
     Start a background task to evaluate multiple STT providers with audio files from S3.
@@ -662,7 +662,7 @@ async def evaluate_stt(
 
     resolved = resolve_dataset_inputs(
         dataset_id=request.dataset_id,
-        user_id=user_id,
+        org_uuid=ctx.org_uuid,
         expected_type="stt",
         texts=request.texts,
         audio_paths=request.audio_paths,
@@ -677,7 +677,6 @@ async def evaluate_stt(
     request.audio_paths = audio_paths
     request.texts = texts
 
-    # Get S3 configuration from environment
     try:
         s3_bucket = get_s3_output_config()
     except ValueError as e:
@@ -685,21 +684,20 @@ async def evaluate_stt(
 
     resolved_evaluators = _resolve_evaluators_for_job(
         uuids=request.evaluator_uuids,
-        user_id=user_id,
+        org_uuid=ctx.org_uuid,
         default_slug="default-stt-transcription",
         expected_evaluator_type="stt",
     )
 
-    # Check if we can start immediately or need to queue
-    can_start = can_start_job(EVAL_JOB_TYPES, user_id)
+    can_start = can_start_job(EVAL_JOB_TYPES, ctx.org_uuid)
     initial_status = (
         TaskStatus.IN_PROGRESS.value if can_start else TaskStatus.QUEUED.value
     )
 
-    # Create job in database with details for recovery
     job_id = create_job(
         job_type="stt-eval",
-        user_id=user_id,
+        org_uuid=ctx.org_uuid,
+        user_id=ctx.user_id,
         status=initial_status,
         details={
             "audio_paths": audio_paths,
@@ -748,10 +746,10 @@ class VisibilityResponse(BaseModel):
 async def update_stt_visibility(
     task_id: str,
     body: VisibilityRequest,
-    user_id: str = Depends(get_current_user_id),
+    ctx: OrgContext = Depends(get_current_org),
 ):
     """Toggle public sharing for an STT evaluation job."""
-    job = get_job(task_id, user_id=user_id)
+    job = get_job(task_id, org_uuid=ctx.org_uuid)
     if not job or job.get("type") != "stt-eval":
         raise HTTPException(status_code=404, detail="Task not found")
 
@@ -766,14 +764,14 @@ async def update_stt_visibility(
 
 @router.get("/evaluate/{task_id}", response_model=TaskStatusResponse)
 async def get_evaluation_status(
-    task_id: str, user_id: str = Depends(get_current_user_id)
+    task_id: str, ctx: OrgContext = Depends(get_current_org)
 ):
     """
     Get the status of an STT evaluation task.
 
     Returns the current status and, if done, the provider results and leaderboard path.
     """
-    job = get_job(task_id, user_id=user_id)
+    job = get_job(task_id, org_uuid=ctx.org_uuid)
     if not job:
         raise HTTPException(status_code=404, detail="Task not found")
 

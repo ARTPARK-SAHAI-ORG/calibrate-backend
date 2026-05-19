@@ -23,7 +23,7 @@ from db import (
     update_job_visibility,
 )
 from dataset_utils import resolve_dataset_inputs
-from auth_utils import get_current_user_id
+from auth_utils import get_current_org, OrgContext
 from llm_judge import build_evaluator_cli_payload
 from utils import (
     TaskStatus,
@@ -193,7 +193,7 @@ class TTSEvaluationRequest(BaseModel):
 
 def _resolve_evaluators_for_tts_job(
     uuids: Optional[List[str]],
-    user_id: str,
+    org_uuid: str,
     default_slug: str,
     expected_evaluator_type: str,
 ) -> List[dict]:
@@ -225,8 +225,8 @@ def _resolve_evaluators_for_tts_job(
                 status_code=404, detail=f"Evaluator {ref['evaluator_uuid']} not found"
             )
         if (
-            evaluator.get("owner_user_id") is not None
-            and evaluator["owner_user_id"] != user_id
+            evaluator.get("org_uuid") is not None
+            and evaluator["org_uuid"] != org_uuid
         ):
             raise HTTPException(
                 status_code=404, detail=f"Evaluator {ref['evaluator_uuid']} not found"
@@ -671,7 +671,7 @@ def run_tts_evaluation_task(
 
 @router.post("/evaluate", response_model=TaskCreateResponse)
 async def evaluate_tts(
-    request: TTSEvaluationRequest, user_id: str = Depends(get_current_user_id)
+    request: TTSEvaluationRequest, ctx: OrgContext = Depends(get_current_org)
 ):
     """
     Start a background task to evaluate multiple TTS providers with text inputs.
@@ -686,7 +686,7 @@ async def evaluate_tts(
 
     resolved = resolve_dataset_inputs(
         dataset_id=request.dataset_id,
-        user_id=user_id,
+        org_uuid=ctx.org_uuid,
         expected_type="tts",
         texts=request.texts,
         dataset_name=request.dataset_name,
@@ -698,7 +698,6 @@ async def evaluate_tts(
 
     request.texts = texts
 
-    # Get S3 configuration from environment
     try:
         s3_bucket = get_s3_output_config()
     except ValueError as e:
@@ -706,21 +705,20 @@ async def evaluate_tts(
 
     resolved_evaluators = _resolve_evaluators_for_tts_job(
         uuids=request.evaluator_uuids,
-        user_id=user_id,
+        org_uuid=ctx.org_uuid,
         default_slug="default-tts-audio-quality",
         expected_evaluator_type="tts",
     )
 
-    # Check if we can start immediately or need to queue
-    can_start = can_start_job(EVAL_JOB_TYPES, user_id)
+    can_start = can_start_job(EVAL_JOB_TYPES, ctx.org_uuid)
     initial_status = (
         TaskStatus.IN_PROGRESS.value if can_start else TaskStatus.QUEUED.value
     )
 
-    # Create job in database with details for recovery
     job_id = create_job(
         job_type="tts-eval",
-        user_id=user_id,
+        org_uuid=ctx.org_uuid,
+        user_id=ctx.user_id,
         status=initial_status,
         details={
             "texts": texts,
@@ -768,10 +766,10 @@ class VisibilityResponse(BaseModel):
 async def update_tts_visibility(
     task_id: str,
     body: VisibilityRequest,
-    user_id: str = Depends(get_current_user_id),
+    ctx: OrgContext = Depends(get_current_org),
 ):
     """Toggle public sharing for a TTS evaluation job."""
-    job = get_job(task_id, user_id=user_id)
+    job = get_job(task_id, org_uuid=ctx.org_uuid)
     if not job or job.get("type") != "tts-eval":
         raise HTTPException(status_code=404, detail="Task not found")
 
@@ -786,14 +784,14 @@ async def update_tts_visibility(
 
 @router.get("/evaluate/{task_id}", response_model=TaskStatusResponse)
 async def get_tts_evaluation_status(
-    task_id: str, user_id: str = Depends(get_current_user_id)
+    task_id: str, ctx: OrgContext = Depends(get_current_org)
 ):
     """
     Get the status of a TTS evaluation task.
 
     Returns the current status and, if done, the provider results and leaderboard path.
     """
-    job = get_job(task_id, user_id=user_id)
+    job = get_job(task_id, org_uuid=ctx.org_uuid)
     if not job:
         raise HTTPException(status_code=404, detail="Task not found")
 

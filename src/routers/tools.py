@@ -3,7 +3,7 @@ from fastapi import APIRouter, HTTPException, Depends
 from pydantic import BaseModel
 
 from db import create_tool, get_tool, get_all_tools, update_tool, delete_tool, ensure_name_unique
-from auth_utils import get_current_user_id
+from auth_utils import get_current_org, OrgContext
 
 
 router = APIRouter(prefix="/tools", tags=["tools"])
@@ -37,57 +37,49 @@ class ToolCreateResponse(BaseModel):
 
 @router.post("", response_model=ToolCreateResponse)
 async def create_tool_endpoint(
-    tool: ToolCreate, user_id: str = Depends(get_current_user_id)
+    tool: ToolCreate, ctx: OrgContext = Depends(get_current_org)
 ):
     """Create a new tool."""
-    with ensure_name_unique("tools", tool.name, user_id, entity="Tool"):
+    with ensure_name_unique("tools", tool.name, ctx.org_uuid, entity="Tool"):
         tool_uuid = create_tool(
             name=tool.name,
             description=tool.description,
             config=tool.config,
-            user_id=user_id,
+            org_uuid=ctx.org_uuid,
+            user_id=ctx.user_id,
         )
     return ToolCreateResponse(uuid=tool_uuid, message="Tool created successfully")
 
 
 @router.get("", response_model=List[ToolResponse])
-async def list_tools(user_id: str = Depends(get_current_user_id)):
-    """List all tools for the authenticated user."""
-    tools = get_all_tools(user_id=user_id)
+async def list_tools(ctx: OrgContext = Depends(get_current_org)):
+    """List all tools for the caller's current org."""
+    tools = get_all_tools(org_uuid=ctx.org_uuid)
     return tools
 
 
 @router.get("/{tool_uuid}", response_model=ToolResponse)
 async def get_tool_endpoint(
-    tool_uuid: str, user_id: str = Depends(get_current_user_id)
+    tool_uuid: str, ctx: OrgContext = Depends(get_current_org)
 ):
     """Get a tool by UUID."""
     tool = get_tool(tool_uuid)
-    if not tool:
+    if not tool or tool.get("org_uuid") != ctx.org_uuid:
         raise HTTPException(status_code=404, detail="Tool not found")
-    # Verify user owns this tool
-    if tool.get("user_id") != user_id:
-        raise HTTPException(status_code=403, detail="Access denied")
     return tool
 
 
 @router.put("/{tool_uuid}", response_model=ToolResponse)
 async def update_tool_endpoint(
-    tool_uuid: str, tool: ToolUpdate, user_id: str = Depends(get_current_user_id)
+    tool_uuid: str, tool: ToolUpdate, ctx: OrgContext = Depends(get_current_org)
 ):
     """Update a tool."""
-    # Check if tool exists
     existing_tool = get_tool(tool_uuid)
-    if not existing_tool:
+    if not existing_tool or existing_tool.get("org_uuid") != ctx.org_uuid:
         raise HTTPException(status_code=404, detail="Tool not found")
 
-    # Verify user owns this tool
-    if existing_tool.get("user_id") != user_id:
-        raise HTTPException(status_code=403, detail="Access denied")
-
-    # Update only provided fields
     with ensure_name_unique(
-        "tools", tool.name, user_id, entity="Tool", exclude_uuid=tool_uuid
+        "tools", tool.name, ctx.org_uuid, entity="Tool", exclude_uuid=tool_uuid
     ):
         updated = update_tool(
             tool_uuid=tool_uuid,
@@ -99,22 +91,18 @@ async def update_tool_endpoint(
     if not updated:
         raise HTTPException(status_code=400, detail="No fields to update")
 
-    # Return updated tool
     updated_tool = get_tool(tool_uuid)
     return updated_tool
 
 
 @router.delete("/{tool_uuid}")
 async def delete_tool_endpoint(
-    tool_uuid: str, user_id: str = Depends(get_current_user_id)
+    tool_uuid: str, ctx: OrgContext = Depends(get_current_org)
 ):
     """Delete a tool."""
-    # Check if tool exists and user owns it
     existing_tool = get_tool(tool_uuid)
-    if not existing_tool:
+    if not existing_tool or existing_tool.get("org_uuid") != ctx.org_uuid:
         raise HTTPException(status_code=404, detail="Tool not found")
-    if existing_tool.get("user_id") != user_id:
-        raise HTTPException(status_code=403, detail="Access denied")
 
     deleted = delete_tool(tool_uuid)
     if not deleted:

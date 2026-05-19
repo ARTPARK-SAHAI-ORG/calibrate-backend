@@ -5,11 +5,12 @@ This module provides JWT token creation/validation for securing API endpoints.
 
 import os
 import logging
+from dataclasses import dataclass
 from datetime import datetime, timedelta
 from typing import Optional
 
 from jose import JWTError, jwt
-from fastapi import HTTPException, Depends
+from fastapi import HTTPException, Depends, Header
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 
 logger = logging.getLogger(__name__)
@@ -129,6 +130,61 @@ async def require_superadmin(
         raise HTTPException(status_code=403, detail="Superadmin access required")
 
     return user_id
+
+
+@dataclass
+class OrgContext:
+    """Resolved multi-tenant context for an authenticated request.
+
+    `user_id`  — the JWT subject (who is making the request; used for audit /
+                 created_by stamping).
+    `org_uuid` — the org all queries should be scoped to. Resolved from the
+                 `X-Org-UUID` request header if present; otherwise falls back
+                 to the caller's personal org (auto-provisioned at signup).
+    `role`     — the caller's role inside `org_uuid` ('owner' or 'admin').
+                 Both have full access; surfaced for endpoints that branch on
+                 it (e.g. the future "transfer ownership" UI).
+    """
+
+    user_id: str
+    org_uuid: str
+    role: str
+
+
+async def get_current_org(
+    credentials: HTTPAuthorizationCredentials = Depends(security),
+    x_org_uuid: Optional[str] = Header(default=None, alias="X-Org-UUID"),
+) -> OrgContext:
+    """Resolve `(user_id, org_uuid, role)` for the current request.
+
+    - With `X-Org-UUID` header: verify the caller is an active member of that
+      org. If not, 404 (existence-leak parity).
+    - Without the header: fall back to the caller's personal org. This keeps
+      pre-multi-tenant frontends working without changes — they always
+      operate inside the personal workspace which contains everything the
+      user owned before the migration.
+    """
+    user_id = await get_current_user_id(credentials)
+
+    # Import lazily to dodge the circular dependency (db imports nothing from
+    # auth_utils, but routers import both — keeping db out of module-load
+    # makes the dep graph robust against future moves).
+    from db import get_member_role, get_personal_org_for_user
+
+    if x_org_uuid:
+        role = get_member_role(x_org_uuid, user_id)
+        if role is None:
+            raise HTTPException(status_code=404, detail="Organization not found")
+        return OrgContext(user_id=user_id, org_uuid=x_org_uuid, role=role)
+
+    personal = get_personal_org_for_user(user_id)
+    if personal is None:
+        # Should never happen post-PR-1 backfill, but fall back gracefully.
+        raise HTTPException(
+            status_code=500,
+            detail="No personal organization for user; backfill missing",
+        )
+    return OrgContext(user_id=user_id, org_uuid=personal["uuid"], role="owner")
 
 
 # Optional dependency that doesn't require authentication
