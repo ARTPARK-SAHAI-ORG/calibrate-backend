@@ -455,6 +455,127 @@ def test_annotation_jobs_crud(client):
     assert upsert.status_code == 200
 
 
+def test_delete_annotation_job(client):
+    """Soft-delete one annotator's labelling job. Verify:
+    - 404 when the job doesn't belong to the path's task
+    - 404 when not owned by the caller
+    - happy path: job vanishes from list + detail, its annotations stop
+      contributing to inter-annotator agreement, and double-delete is 404."""
+    auth = _signup(client)
+    h = auth["headers"]
+    llm_ev = _llm_evaluator(client, h)
+    task_uuid = client.post(
+        "/annotation-tasks",
+        json={
+            "name": f"t-{uuid.uuid4().hex[:6]}",
+            "type": "llm",
+            "evaluator_ids": [llm_ev["uuid"]],
+        },
+        headers=h,
+    ).json()["uuid"]
+    items = client.post(
+        f"/annotation-tasks/{task_uuid}/items",
+        json={"items": [{"payload": {"name": "i1"}}]},
+        headers=h,
+    ).json()["item_ids"]
+
+    # Two annotators so we can observe agreement collapsing after delete.
+    ann_a = client.post(
+        "/annotators", json={"name": f"a-{uuid.uuid4().hex[:6]}"}, headers=h
+    ).json()
+    ann_b = client.post(
+        "/annotators", json={"name": f"b-{uuid.uuid4().hex[:6]}"}, headers=h
+    ).json()
+    jobs = client.post(
+        f"/annotation-tasks/{task_uuid}/jobs",
+        json={
+            "annotator_ids": [ann_a["uuid"], ann_b["uuid"]],
+            "item_ids": items,
+        },
+        headers=h,
+    ).json()["jobs"]
+    job_a = next(j for j in jobs if j["annotator_id"] == ann_a["uuid"])
+    job_b = next(j for j in jobs if j["annotator_id"] == ann_b["uuid"])
+
+    # Both annotators agree on the same slot → pairwise agreement should be 1.0.
+    for job in (job_a, job_b):
+        client.post(
+            f"/public/annotation-jobs/{job['public_token']}/annotations",
+            json={
+                "item_id": items[0],
+                "annotations": [
+                    {"evaluator_id": llm_ev["uuid"], "value": {"value": True}},
+                ],
+            },
+        )
+
+    # Sanity: pre-delete pairwise agreement is 1.0 (both annotators agreed).
+    import db as db_mod
+    from annotation_metrics import aggregate_agreement
+
+    pre = db_mod.get_annotations_for_task(task_uuid)
+    pre_pairwise, _ = aggregate_agreement(pre)
+    assert pre_pairwise == 1.0
+
+    # 404 when job UUID doesn't match path task
+    other_task = client.post(
+        "/annotation-tasks",
+        json={
+            "name": f"t-{uuid.uuid4().hex[:6]}",
+            "type": "llm",
+            "evaluator_ids": [llm_ev["uuid"]],
+        },
+        headers=h,
+    ).json()["uuid"]
+    mismatch = client.delete(
+        f"/annotation-tasks/{other_task}/jobs/{job_a['uuid']}", headers=h
+    )
+    assert mismatch.status_code == 404
+
+    # 404 when caller doesn't own the task
+    other_auth = _signup(client)
+    other = client.delete(
+        f"/annotation-tasks/{task_uuid}/jobs/{job_a['uuid']}",
+        headers=other_auth["headers"],
+    )
+    assert other.status_code == 404
+
+    # Happy path
+    ok = client.delete(
+        f"/annotation-tasks/{task_uuid}/jobs/{job_a['uuid']}", headers=h
+    )
+    assert ok.status_code == 200
+
+    # Job vanishes from list + detail
+    listing = client.get(
+        f"/annotation-tasks/{task_uuid}/jobs", headers=h
+    ).json()
+    assert all(j["uuid"] != job_a["uuid"] for j in listing)
+    gone = client.get(
+        f"/annotation-tasks/{task_uuid}/jobs/{job_a['uuid']}", headers=h
+    )
+    assert gone.status_code == 404
+
+    # Annotator B's job survives
+    survivor = client.get(
+        f"/annotation-tasks/{task_uuid}/jobs/{job_b['uuid']}", headers=h
+    )
+    assert survivor.status_code == 200
+
+    # Pairwise agreement: ann_a's contribution is gone, so the slot now has
+    # only one annotator and contributes nothing — `aggregate_agreement`
+    # returns None when there are no overlapping pairs.
+    annotations = db_mod.get_annotations_for_task(task_uuid)
+    pairwise, _ = aggregate_agreement(annotations)
+    assert pairwise is None
+
+    # Double-delete → 404
+    again = client.delete(
+        f"/annotation-tasks/{task_uuid}/jobs/{job_a['uuid']}", headers=h
+    )
+    assert again.status_code == 404
+
+
 def test_annotated_check(client):
     auth = _signup(client)
     h = auth["headers"]

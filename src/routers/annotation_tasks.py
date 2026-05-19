@@ -922,6 +922,27 @@ async def get_annotation_job_endpoint(
     return job
 
 
+@router.delete("/{task_uuid}/jobs/{job_uuid}")
+async def delete_annotation_job_endpoint(
+    task_uuid: str,
+    job_uuid: str,
+    user_id: str = Depends(get_current_user_id),
+):
+    """Soft-delete one annotator's labelling job. The annotations stay in
+    place but stop appearing in every downstream read (list, agreement,
+    evaluator-run human columns) because all those queries filter
+    `annotation_jobs.deleted_at IS NULL` at the join. Eval-run jobs
+    (separate `jobs` table) are NOT cascaded — delete them via
+    `DELETE /{task_uuid}/evaluator-runs/{job_uuid}` if needed."""
+    _ensure_owned_task(task_uuid, user_id)
+    job = get_annotation_job(job_uuid)
+    if not job or job.get("task_id") != task_uuid:
+        raise HTTPException(status_code=404, detail="Job not found")
+    if not soft_delete_annotation_job(job_uuid):
+        raise HTTPException(status_code=404, detail="Job not found")
+    return {"message": "Annotation job deleted successfully"}
+
+
 class AnnotationJobVisibilityRequest(BaseModel):
     is_public: bool
 
