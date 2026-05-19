@@ -73,6 +73,18 @@ _ORG_SCOPED_TABLES: Dict[str, str] = {
 }
 
 
+def normalize_email(email: Optional[str]) -> str:
+    """Canonical user-email form: stripped + lowercased.
+
+    Every read and write of `users.email` MUST go through this so the column
+    is case-insensitive in effect even though SQLite's default collation isn't.
+    Without it, an invite for `user@example.com` doesn't match a row stored as
+    `User@Example.com`, and a login lookup that lowercases its input doesn't
+    find the mixed-case row at all.
+    """
+    return (email or "").strip().lower()
+
+
 class NameAlreadyExistsError(Exception):
     """Raised when an INSERT/UPDATE collides with one of the per-user
     unique-name partial indexes set up in `init_db`. Carries the entity
@@ -1051,8 +1063,35 @@ def init_db():
 
         conn.commit()
 
+        # One-time normalization: lowercase any existing user emails so the
+        # case-insensitive contract of `normalize_email` holds for rows that
+        # were inserted before the helper existed. Idempotent. The UNIQUE
+        # constraint on `users.email` would block this if two pre-existing
+        # rows differ only in case — surface that loudly rather than silently
+        # half-migrate.
+        try:
+            cursor.execute(
+                "UPDATE users SET email = LOWER(email) WHERE email != LOWER(email)"
+            )
+            if cursor.rowcount > 0:
+                logger.info(
+                    f"Lowercased {cursor.rowcount} user email(s) for case-insensitive lookup"
+                )
+        except sqlite3.IntegrityError:
+            logger.error(
+                "Email lowercasing hit a UNIQUE conflict — two users likely "
+                "share an email differing only in case. Manual deduplication "
+                "required before this migration can complete."
+            )
+            raise
+        conn.commit()
+
         # Create default user if not exists and update existing rows with NULL user_id
-        cursor.execute("SELECT uuid FROM users WHERE email = ?", (DEFAULT_USER_EMAIL,))
+        default_user_email_normalized = normalize_email(DEFAULT_USER_EMAIL)
+        cursor.execute(
+            "SELECT uuid FROM users WHERE email = ?",
+            (default_user_email_normalized,),
+        )
         default_user_row = cursor.fetchone()
 
         if default_user_row:
@@ -1070,7 +1109,7 @@ def init_db():
                     default_user_uuid,
                     DEFAULT_USER_FIRST_NAME,
                     DEFAULT_USER_LAST_NAME,
-                    DEFAULT_USER_EMAIL,
+                    default_user_email_normalized,
                 ),
             )
             conn.commit()
@@ -2251,6 +2290,7 @@ def create_user(
     email: str,
 ) -> str:
     """Create a new user (with auto-provisioned personal org) and return its UUID."""
+    email = normalize_email(email)
     with get_db_connection() as conn:
         cursor = conn.cursor()
         user_uuid = str(uuid.uuid4())
@@ -2281,7 +2321,7 @@ def get_user(user_uuid: str) -> Optional[Dict[str, Any]]:
 def get_user_by_email(email: str) -> Optional[Dict[str, Any]]:
     """Get a user by email. Matches the lowercase-normalized form so callers
     can pass user-provided strings of any casing."""
-    email = (email or "").strip().lower()
+    email = normalize_email(email)
     with get_db_connection() as conn:
         cursor = conn.cursor()
         cursor.execute("SELECT * FROM users WHERE email = ?", (email,))
@@ -2318,7 +2358,7 @@ def update_user(
         params.append(last_name)
     if email is not None:
         updates.append("email = ?")
-        params.append(email)
+        params.append(normalize_email(email))
 
     if not updates:
         return False
@@ -2363,7 +2403,7 @@ def get_or_create_user(
     `user@example.com` stub and the invitee would land in a new account with
     no pre-added memberships.
     """
-    email = (email or "").strip().lower()
+    email = normalize_email(email)
     user = get_user_by_email(email)
     if user:
         # Update name if changed
@@ -2396,7 +2436,7 @@ def create_user_with_password(
     same normalization done by `add_organization_member` — otherwise an
     invitee who signs up with different casing would miss their stub row.
     """
-    email = (email or "").strip().lower()
+    email = normalize_email(email)
     with get_db_connection() as conn:
         cursor = conn.cursor()
         cursor.execute(
@@ -2580,7 +2620,7 @@ def add_organization_member(
         raise ValueError("invalid role")
     if get_organization(org_uuid) is None:
         raise ValueError("organization not found")
-    email = (email or "").strip().lower()
+    email = normalize_email(email)
     if not email or "@" not in email:
         raise ValueError("valid email required")
 

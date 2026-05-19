@@ -301,6 +301,37 @@ def test_per_org_unique_indexes_exist_after_init(client):
     assert not missing, f"missing per-org unique indexes: {sorted(missing)}"
 
 
+def test_email_normalization_round_trip(client):
+    """Every write path (signup, Google login, invite) and every read path
+    (login lookup) must agree on the same normalized email so a user
+    registered with mixed-case can be invited / looked up consistently."""
+    import db
+
+    suffix = uuid.uuid4().hex[:8]
+    mixed = f"User-{suffix}@Example.COM"
+    lowered = mixed.strip().lower()
+
+    # Helper is the single source of truth.
+    assert db.normalize_email(mixed) == lowered
+    assert db.normalize_email(f"  {mixed}  ") == lowered
+    assert db.normalize_email(None) == ""
+
+    # Signup with mixed case stores lowercased; login with any casing finds it.
+    signup = client.post(
+        "/auth/signup",
+        json={
+            "first_name": "F",
+            "last_name": "L",
+            "email": mixed,
+            "password": "passw0rd",
+        },
+    )
+    assert signup.status_code == 200
+    stored = db.get_user_by_email(mixed.upper())
+    assert stored is not None
+    assert stored["email"] == lowered
+
+
 def test_add_organization_member_rejects_phantom_org(client):
     """`add_organization_member` must validate that `org_uuid` references an
     existing non-deleted org. The API path is already gated by membership, but
