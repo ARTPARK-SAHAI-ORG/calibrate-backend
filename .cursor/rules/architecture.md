@@ -64,6 +64,9 @@ calibrate-backend/
 │       ├── jobs.py          # Job listing API (STT/TTS eval jobs)
 │       ├── public.py        # Share-token read-only endpoints (STT/TTS/tests/benchmarks/simulations)
 │       ├── api_keys.py      # API key CRUD (evaluator invoke / automation)
+│       ├── annotators.py    # Annotator CRUD (human labelers)
+│       ├── annotation_tasks.py  # Annotation tasks, items, jobs, evaluator links, agreement runs
+│       ├── annotation_agreement.py  # Inter-annotator / human-vs-evaluator agreement metrics
 │       └── user_limits.py   # Per-user limits CRUD and limit queries
 ├── tests/                   # Pytest suite (repo root); imports match runtime (`from llm_judge import …`) via configured pythonpath
 ├── .githooks/               # Git hooks (opt-in): `pre-commit` runs pytest on `main` only — enable with `git config core.hooksPath .githooks`
@@ -141,6 +144,13 @@ simulations
   ├── simulation_scenarios (many-to-many with scenarios)
   ├── simulation_evaluators (many-to-many: simulations ↔ evaluator versions)
   └── simulation_jobs
+
+annotation_tasks (user_id FK)
+  ├── annotation_task_evaluators (many-to-many: tasks ↔ evaluators; soft-delete on pivot)
+  ├── annotation_items
+  └── annotation_jobs (annotator_id FK → annotators)
+        ├── annotation_job_items (item payload snapshotted at job creation)
+        └── annotation_job_evaluators (evaluator set snapshotted at job creation; no soft-delete)
 ```
 
 ### Core Tables
@@ -163,6 +173,9 @@ simulations
 | `simulation_jobs`                   | Chat/voice simulation jobs                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                              |
 | `user_limits`                       | Per-user limits/quotas as a JSON blob (one row per user, `user_id` UNIQUE). No soft delete — hard delete only. The `limits` JSON is validated at the API layer via the `UserLimits` Pydantic model in `user_limits.py` (with `Field(gt=0, le=10000)` constraints); currently only `max_rows_per_eval` is permitted. The `create_user_limits` endpoint validates user existence explicitly via `get_user()` (returns 404) because SQLite FK constraints are not enforced (`PRAGMA foreign_keys` is off), and handles race conditions via `sqlite3.IntegrityError` catch (returns 409). `update_user_limits()` in `db.py` returns the updated row directly (update + select in one connection) to avoid extra round-trips. DB functions accept `UserLimits` type (imported via `TYPE_CHECKING` to avoid circular imports) |
 | `api_keys`                          | Per-user API keys for **`POST /evaluators/{uuid}/invoke`** (and similar automation). Stores bcrypt hash + short `key_prefix` for lookup; raw key never persisted. Soft-deleted rows excluded from lookup                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                |
+| `annotation_tasks` / `annotation_items` / `annotators` / `annotation_jobs` | Human labeling workflow: tasks own items and evaluator links; jobs assign items to an annotator via a public token. See **Annotation task evaluator ordering** below.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                   |
+
+**Annotation task evaluator ordering** (`annotation_task_evaluators` in `db.py`): The labelling UI column order comes from **`get_evaluators_for_annotation_task()`**, which sorts links with **`ORDER BY ate.created_at ASC, ate.id ASC`**. **`add_evaluator_to_annotation_task()`** soft-deletes via `deleted_at`; re-adding the same evaluator **restores** the existing pivot row and sets **`created_at = CURRENT_TIMESTAMP`**, which moves that evaluator to the end when the new timestamp is strictly later than other links (SQLite timestamps are **second-resolution**). **`remove_evaluator_from_annotation_task()`** only flips `deleted_at` — it does not delete the pivot row, so restore keeps the same **`ate.id`**. When two links share the same `created_at` second (e.g. restore and a new link in the same second), **`ate.id ASC`** is the tie-breaker: the restored row (lower `id`) sorts before a newly inserted link (higher `id`), giving stable link-order semantics without relying on undefined SQLite ordering. **`create_annotation_job()`** snapshots the live linked evaluator set into **`annotation_job_evaluators`**; reads use **`ORDER BY je.id ASC`** so job-local column order matches the snapshot insert order (jobs are unaffected by later task-level link/unlink).
 
 **Seeded default evaluators** (`db.py`): `init_db()` runs **`_seed_default_evaluators()`**, which walks **`DEFAULT_EVALUATORS_SEED`** (stable `slug`s such as `default-llm-next-reply`, `default-stt-transcription`, `default-faithfulness`, simulation defaults, etc.). It is **idempotent** on every startup: missing rows are created; existing rows get **`evaluators` metadata** (`name`, **`description`**, `evaluator_type`, …) **UPDATE**d when the seed text differs; if the **live** `evaluator_versions` row’s prompt/rubric/`variables` no longer matches the seed, a **new version** is inserted and promoted to **live** so pinned links stay reproducible. **`DEFAULT_PROMPTS_BY_PURPOSE`** stays aligned with **`GET /evaluators/default-prompt`** for LLM/STT/TTS/simulation prefills. **Copy convention**: the seed’s **evaluator-level `description`** (the short blurb in evaluator lists) intentionally **omits a trailing full stop**; nested rubric lines under **`output_config.scale`** may still end with a period where the judge wording calls for it.
 
@@ -239,6 +252,9 @@ The JWT token contains the user's UUID and is validated on every protected endpo
 - `/datasets` - Dataset CRUD, item management (add/update/delete items), `eval_count` per dataset (number of linked STT/TTS eval jobs via `json_extract` on jobs `details`)
 - `/users` - User management (read-only)
 - `/user-limits` - Per-user limits CRUD + `/me/max-rows-per-eval` query endpoint. Mutating endpoints (`POST`, `PUT`, `DELETE`) require superadmin (`require_superadmin` dependency composes `get_current_user_id` for token validation, then checks JWT email against `SUPERADMIN_EMAIL` env var); read endpoints (`GET`) require only standard JWT auth
+- `/annotators` - Annotator CRUD (human labelers; unique active name per user)
+- `/annotation-tasks` - Annotation task CRUD, items, evaluator links, jobs, public labelling tokens, evaluator-run jobs (`annotation_eval_runner.py`). Evaluator link order on a task follows **`get_evaluators_for_annotation_task()`** (see **Annotation task evaluator ordering** under Database Schema).
+- `/annotation-agreement` - Agreement metrics for a task (human–human and human–evaluator)
 
 #### Relationship Management
 
