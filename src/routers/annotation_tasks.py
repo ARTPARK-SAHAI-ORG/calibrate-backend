@@ -1742,6 +1742,10 @@ async def task_summary(
             "evaluator_version_number": int | null,
             "evaluator_value": <scalar | null>,    # latest run on this slot
             "evaluator_reasoning": str | null,
+            "evaluator_run_count": int,            # total runs for (item, evaluator)
+                                                   # across ALL versions; unaffected
+                                                   # by `live_only`
+
             "annotations": {
               "<annotator_uuid>": {"value": <scalar>, "reasoning": str | null} | null,
               ...
@@ -1792,6 +1796,10 @@ async def task_summary(
     latest_run: Dict[tuple, Dict[str, Any]] = {}
     latest_run_ts: Dict[tuple, str] = {}
     versions_by_evaluator: Dict[str, set] = {}
+    # Total runs per (item, evaluator) across ALL versions. Exposed on every
+    # row so callers can see how many labels an evaluator has produced for the
+    # item even when `live_only=true` hides non-live version rows.
+    run_count_by_item_ev: Dict[tuple, int] = {}
     for r in runs:
         ev_id = r.get("evaluator_id")
         r_item_id = r.get("item_id")
@@ -1800,6 +1808,9 @@ async def task_summary(
             continue
         if v_id:
             versions_by_evaluator.setdefault(ev_id, set()).add(v_id)
+        run_count_by_item_ev[(r_item_id, ev_id)] = (
+            run_count_by_item_ev.get((r_item_id, ev_id), 0) + 1
+        )
         ts = r.get("completed_at") or r.get("created_at") or ""
         slot = (r_item_id, ev_id, v_id)
         if slot not in latest_run_ts or ts > latest_run_ts[slot]:
@@ -1966,6 +1977,9 @@ async def task_summary(
                         ),
                         "evaluator_value": ev_value,
                         "evaluator_reasoning": ev_reasoning,
+                        "evaluator_run_count": run_count_by_item_ev.get(
+                            (item["uuid"], ev_id), 0
+                        ),
                         "annotations": ann_cells,
                         "human_agreement": human_agreement,
                         "evaluator_agreement": evaluator_agreement,
