@@ -1728,7 +1728,12 @@ async def task_summary(
       {
         "task_id": str,
         "task_type": "stt" | "llm" | "simulation",
-        "evaluators": [{evaluator_id, name, output_type}],
+        "evaluators": [{evaluator_id, name, output_type, run_count}],
+                                        # `run_count` = total evaluator-runs for
+                                        # this evaluator across ALL versions,
+                                        # over the items in scope (honors
+                                        # `item_id` filter; unaffected by
+                                        # `live_only`)
         "annotators": [{uuid, name}],   # union of annotators with ≥1 (item, evaluator)
                                         # annotation in this task; column order
         "rows": [
@@ -1742,10 +1747,6 @@ async def task_summary(
             "evaluator_version_number": int | null,
             "evaluator_value": <scalar | null>,    # latest run on this slot
             "evaluator_reasoning": str | null,
-            "evaluator_run_count": int,            # total runs for (item, evaluator)
-                                                   # across ALL versions; unaffected
-                                                   # by `live_only`
-
             "annotations": {
               "<annotator_uuid>": {"value": <scalar>, "reasoning": str | null} | null,
               ...
@@ -1796,10 +1797,12 @@ async def task_summary(
     latest_run: Dict[tuple, Dict[str, Any]] = {}
     latest_run_ts: Dict[tuple, str] = {}
     versions_by_evaluator: Dict[str, set] = {}
-    # Total runs per (item, evaluator) across ALL versions. Exposed on every
-    # row so callers can see how many labels an evaluator has produced for the
-    # item even when `live_only=true` hides non-live version rows.
-    run_count_by_item_ev: Dict[tuple, int] = {}
+    # Total runs per evaluator across ALL versions, restricted to the items
+    # currently in scope (i.e. honors the `item_id` filter). Surfaced on each
+    # entry in the top-level `evaluators` list so the FE can show the count
+    # even when `live_only=true` hides non-live version rows.
+    scoped_item_ids = {it["uuid"] for it in items}
+    run_count_by_evaluator: Dict[str, int] = {}
     for r in runs:
         ev_id = r.get("evaluator_id")
         r_item_id = r.get("item_id")
@@ -1808,9 +1811,10 @@ async def task_summary(
             continue
         if v_id:
             versions_by_evaluator.setdefault(ev_id, set()).add(v_id)
-        run_count_by_item_ev[(r_item_id, ev_id)] = (
-            run_count_by_item_ev.get((r_item_id, ev_id), 0) + 1
-        )
+        if r_item_id in scoped_item_ids:
+            run_count_by_evaluator[ev_id] = (
+                run_count_by_evaluator.get(ev_id, 0) + 1
+            )
         ts = r.get("completed_at") or r.get("created_at") or ""
         slot = (r_item_id, ev_id, v_id)
         if slot not in latest_run_ts or ts > latest_run_ts[slot]:
@@ -1977,9 +1981,6 @@ async def task_summary(
                         ),
                         "evaluator_value": ev_value,
                         "evaluator_reasoning": ev_reasoning,
-                        "evaluator_run_count": run_count_by_item_ev.get(
-                            (item["uuid"], ev_id), 0
-                        ),
                         "annotations": ann_cells,
                         "human_agreement": human_agreement,
                         "evaluator_agreement": evaluator_agreement,
@@ -1994,6 +1995,7 @@ async def task_summary(
                 "evaluator_id": e["uuid"],
                 "name": e.get("name"),
                 "output_type": e.get("output_type"),
+                "run_count": run_count_by_evaluator.get(e["uuid"], 0),
             }
             for e in evaluators
         ],
