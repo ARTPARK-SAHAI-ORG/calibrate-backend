@@ -783,14 +783,25 @@ def test_annotation_pipeline(user):
     )
     assert len(item_ids) == 2
     assert db.create_annotation_items(task_uuid, []) == []
-    assert db.get_annotation_item(item_ids[0])["payload"] == {"text": "row1"}
+    fresh = db.get_annotation_item(item_ids[0])
+    assert fresh["payload"] == {"text": "row1"}
+    # New rows get updated_at populated (equal to created_at on insert).
+    assert fresh.get("updated_at") is not None
+    assert fresh["updated_at"] == fresh["created_at"]
     assert len(db.get_annotation_items_for_task(task_uuid)) == 2
 
+    pre_edit = db.get_annotation_item(item_ids[0])
+    import time as _time
+    _time.sleep(1.1)  # SQLite CURRENT_TIMESTAMP has 1s resolution
     updated = db.bulk_update_annotation_items(
         task_uuid,
         [{"uuid": item_ids[0], "payload": {"text": "edited"}}],
     )
     assert updated == 1
+    post_edit = db.get_annotation_item(item_ids[0])
+    # Edit bumps updated_at past the row's created_at and previous updated_at.
+    assert post_edit["updated_at"] > pre_edit["updated_at"]
+    assert post_edit["updated_at"] > post_edit["created_at"]
     assert db.bulk_update_annotation_items(task_uuid, []) == 0
 
     with pytest.raises(ValueError):

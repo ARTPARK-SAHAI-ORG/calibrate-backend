@@ -788,6 +788,41 @@ def test_annotation_agreement_endpoints(client):
     assert missing_ev.status_code == 404
 
 
+def test_evaluator_value_name_mapping():
+    from routers.annotation_tasks import _evaluator_value_name
+
+    # Null value → None regardless of type.
+    assert _evaluator_value_name(None, "binary", None) is None
+
+    # Binary defaults when no scale name is provided.
+    assert _evaluator_value_name(True, "binary", None) == "Correct"
+    assert _evaluator_value_name(False, "binary", {"scale": []}) == "Wrong"
+
+    # Rating default is the stringified score.
+    assert _evaluator_value_name(3, "rating", None) == "3"
+
+    # Explicit scale `name` wins over defaults for both types.
+    binary_cfg = {
+        "scale": [
+            {"value": True, "name": "passes"},
+            {"value": False, "name": "fails"},
+        ]
+    }
+    assert _evaluator_value_name(True, "binary", binary_cfg) == "passes"
+    assert _evaluator_value_name(False, "binary", binary_cfg) == "fails"
+
+    rating_cfg = {
+        "scale": [
+            {"value": 1, "name": "Poor"},
+            {"value": 2},  # no name → fall back to stringified score
+            {"value": 3, "name": "Great"},
+        ]
+    }
+    assert _evaluator_value_name(1, "rating", rating_cfg) == "Poor"
+    assert _evaluator_value_name(2, "rating", rating_cfg) == "2"
+    assert _evaluator_value_name(3, "rating", rating_cfg) == "Great"
+
+
 def test_annotation_task_agreement_and_summary(client):
     auth = _signup(client)
     h = auth["headers"]
