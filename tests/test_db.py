@@ -791,8 +791,7 @@ def test_annotation_pipeline(user):
     assert len(db.get_annotation_items_for_task(task_uuid)) == 2
 
     pre_edit = db.get_annotation_item(item_ids[0])
-    import time as _time
-    _time.sleep(1.1)  # SQLite CURRENT_TIMESTAMP has 1s resolution
+    time.sleep(1.1)  # SQLite CURRENT_TIMESTAMP has 1s resolution
     updated = db.bulk_update_annotation_items(
         task_uuid,
         [{"uuid": item_ids[0], "payload": {"text": "edited"}}],
