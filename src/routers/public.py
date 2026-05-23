@@ -68,7 +68,9 @@ from routers.agent_tests import (
     _enrich_model_results_with_evaluators,
 )
 from routers.annotation_tasks import (
-    _enrich_runs_with_live_evaluator,
+    _build_evaluators_block_for_eval_job,
+    _strip_details_evaluators,
+    _strip_run_evaluator_blocks,
     _human_agreement_for_run,
     _shape_eval_job_for_response,
 )
@@ -640,6 +642,12 @@ async def get_public_annotation_eval(share_token: str):
     public_details = {
         k: v for k, v in details.items() if k in public_details_whitelist
     }
+    # `evaluators` is promoted to the response's top-level field — drop the
+    # slim snapshot from the forwarded `details` to keep the auth and
+    # public responses shaped the same way.
+    public_details.pop("evaluators", None)
+
+    evaluators_block = _build_evaluators_block_for_eval_job(details, raw_runs)
 
     return PublicAnnotationEvalResponse(
         task_id=task_uuid,
@@ -655,10 +663,13 @@ async def get_public_annotation_eval(share_token: str):
             description=task.get("description"),
         ),
         details=public_details,
-        evaluators=details.get("evaluators"),
+        evaluators=evaluators_block,
         item_count=details.get("item_count"),
         items=get_eval_job_items(job["uuid"]),
-        runs=_enrich_runs_with_live_evaluator(raw_runs),
+        # Per-run `evaluator` / `evaluator_version` blobs are intentionally
+        # not surfaced — `(evaluator_id, evaluator_version_id)` on each run
+        # keys back into the top-level evaluators[] block.
+        runs=_strip_run_evaluator_blocks(raw_runs),
         human_agreement=_human_agreement_for_run(task_uuid, raw_runs),
         error=shaped.get("error"),
     )

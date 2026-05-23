@@ -187,6 +187,107 @@ def test_evaluator_run_bad_evaluator_resolution(client):
     assert resp.status_code == 400
 
 
+def test_evaluator_run_detail_shape(client):
+    """GET /annotation-tasks/{uuid}/evaluator-runs/{job_uuid} exposes the
+    rubric via top-level `evaluators[].output_config.scale` (mirrors the
+    labelling-job viewer's shape), strips the slim snapshot from
+    `details.evaluators`, and removes the per-run `evaluator` /
+    `evaluator_version` blobs — those are keyed back via
+    `(evaluator_id, evaluator_version_id)` on each run row."""
+    import db as db_mod
+    from annotation_eval_runner import ANNOTATION_EVAL_JOB_TYPE
+
+    auth = _signup(client)
+    h = auth["headers"]
+    user_uuid = auth["user_uuid"]
+    org_uuid = db_mod.get_personal_org_for_user(user_uuid)["uuid"]
+    llm_ev = _llm_ev(client, h)
+    live_version_id = llm_ev["live_version_id"]
+
+    task_uuid = client.post(
+        "/annotation-tasks",
+        json={
+            "name": f"t-{uuid.uuid4().hex[:6]}",
+            "type": "llm",
+            "evaluator_ids": [llm_ev["uuid"]],
+        },
+        headers=h,
+    ).json()["uuid"]
+    item_ids = client.post(
+        f"/annotation-tasks/{task_uuid}/items",
+        json={
+            "items": [
+                {"payload": {"name": "i1", "chat_history": [], "agent_response": "x"}}
+            ]
+        },
+        headers=h,
+    ).json()["item_ids"]
+
+    # Seed a done job + one evaluator-run directly so we exercise the read
+    # path without spawning calibrate. The snapshot in `details.evaluators`
+    # is the slim shape the runner writes — we assert it's promoted to the
+    # enriched top-level `evaluators[]` and dropped from `details`.
+    job_uuid = db_mod.create_job(
+        job_type=ANNOTATION_EVAL_JOB_TYPE,
+        org_uuid=org_uuid,
+        user_id=user_uuid,
+        status="done",
+        details={
+            "task_id": task_uuid,
+            "evaluators": [
+                {
+                    "evaluator_id": llm_ev["uuid"],
+                    "evaluator_version_id": live_version_id,
+                    "name": llm_ev["name"],
+                }
+            ],
+            "item_count": 1,
+            "item_ids": item_ids,
+        },
+    )
+    db_mod.create_evaluator_runs(
+        [
+            {
+                "job_id": job_uuid,
+                "item_id": item_ids[0],
+                "evaluator_id": llm_ev["uuid"],
+                "evaluator_version_id": live_version_id,
+                "status": "completed",
+                "value": {"value": True, "reasoning": "ok"},
+            }
+        ]
+    )
+
+    got = client.get(
+        f"/annotation-tasks/{task_uuid}/evaluator-runs/{job_uuid}", headers=h
+    )
+    assert got.status_code == 200
+    body = got.json()
+
+    # Top-level evaluators[] is the new contract — full rubric exposed once.
+    assert "evaluators" in body
+    assert len(body["evaluators"]) == 1
+    ev_entry = body["evaluators"][0]
+    assert ev_entry["uuid"] == llm_ev["uuid"]
+    assert ev_entry["evaluator_version_id"] == live_version_id
+    assert ev_entry["output_type"] in ("binary", "rating")
+    assert isinstance(ev_entry.get("output_config"), dict)
+    assert isinstance(ev_entry["output_config"].get("scale"), list)
+    assert ev_entry["output_config"]["scale"]  # non-empty
+
+    # Slim snapshot is no longer surfaced inside `details` — promoted to the
+    # top-level block above.
+    assert "evaluators" not in (body.get("details") or {})
+
+    # Runs keep the FK columns but not the duplicated metadata blobs.
+    assert body["runs"]
+    run = body["runs"][0]
+    assert run["evaluator_id"] == llm_ev["uuid"]
+    assert run["evaluator_version_id"] == live_version_id
+    assert "evaluator" not in run
+    assert "evaluator_version" not in run
+
+
 def test_evaluator_run_with_specific_item_ids(client):
     auth = _signup(client)
     h = auth["headers"]

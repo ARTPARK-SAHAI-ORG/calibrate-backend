@@ -1278,6 +1278,104 @@ def _enrich_runs_with_live_evaluator(
     return out
 
 
+def _build_evaluators_block_for_eval_job(
+    job_details: Optional[Dict[str, Any]],
+    raw_runs: List[Dict[str, Any]],
+) -> List[Dict[str, Any]]:
+    """Build the top-level `evaluators[]` block returned alongside an
+    evaluator-run job detail response. Mirrors the shape used by the
+    labelling-job viewer (`GET /public/annotation-jobs/view/{token}`) so the
+    FE can read `output_config.scale` from one consistent place across both
+    surfaces. Each entry pins the evaluator-VERSION the job actually ran
+    against (from `details.evaluators` snapshot), not the live version —
+    rubric edits after the run don't retroactively rewrite what the run
+    was measured by.
+
+    Also seeds entries from the runs themselves so jobs predating the
+    snapshot (legacy `details.evaluators` absent) still get a populated
+    block.
+    """
+    from llm_judge import _scale_bounds  # local to avoid module-load cycle
+
+    snapshot = (job_details or {}).get("evaluators") or []
+    # Dedupe (evaluator_id, evaluator_version_id) slots across snapshot
+    # and runs so legacy/snapshot-less jobs still emit one entry per pinned
+    # version actually used.
+    slots: List[tuple] = []
+    seen: set = set()
+    for entry in snapshot:
+        if not isinstance(entry, dict):
+            continue
+        slot = (entry.get("evaluator_id"), entry.get("evaluator_version_id"))
+        if slot[0] and slot not in seen:
+            seen.add(slot)
+            slots.append(slot)
+    for r in raw_runs or []:
+        slot = (r.get("evaluator_id"), r.get("evaluator_version_id"))
+        if slot[0] and slot not in seen:
+            seen.add(slot)
+            slots.append(slot)
+
+    eval_cache: Dict[str, Optional[Dict[str, Any]]] = {}
+    version_cache: Dict[str, Optional[Dict[str, Any]]] = {}
+    out: List[Dict[str, Any]] = []
+    for ev_id, version_id in slots:
+        if ev_id not in eval_cache:
+            eval_cache[ev_id] = get_evaluator(ev_id)
+        ev = eval_cache.get(ev_id)
+        if not ev:
+            continue
+        if version_id and version_id not in version_cache:
+            version_cache[version_id] = get_evaluator_version(version_id)
+        version = version_cache.get(version_id) if version_id else None
+        output_config = version.get("output_config") if version else None
+        scale_min, scale_max = _scale_bounds(output_config)
+        out.append(
+            {
+                "uuid": ev["uuid"],
+                "name": ev.get("name"),
+                "description": ev.get("description"),
+                "output_type": ev.get("output_type"),
+                "evaluator_type": ev.get("evaluator_type"),
+                "data_type": ev.get("data_type"),
+                "evaluator_version_id": version_id,
+                "version_number": (
+                    version.get("version_number") if version else None
+                ),
+                "judge_model": version.get("judge_model") if version else None,
+                "output_config": output_config,
+                "scale_min": scale_min,
+                "scale_max": scale_max,
+                "variables": version.get("variables") if version else None,
+            }
+        )
+    return out
+
+
+def _strip_run_evaluator_blocks(
+    runs: List[Dict[str, Any]],
+) -> List[Dict[str, Any]]:
+    """Return the runs without the per-row `evaluator` / `evaluator_version`
+    blobs. Callers surface that metadata via the top-level `evaluators[]`
+    block instead, keyed by `(evaluator_id, evaluator_version_id)` on each
+    run row."""
+    if not runs:
+        return runs
+    return [
+        {k: v for k, v in r.items() if k not in ("evaluator", "evaluator_version")}
+        for r in runs
+    ]
+
+
+def _strip_details_evaluators(shaped: Dict[str, Any]) -> Dict[str, Any]:
+    """Drop the slim `evaluators` snapshot from `details` — promoted to the
+    response's top-level `evaluators[]` block (with rubric)."""
+    details = shaped.get("details")
+    if isinstance(details, dict) and "evaluators" in details:
+        shaped["details"] = {k: v for k, v in details.items() if k != "evaluators"}
+    return shaped
+
+
 def _shape_eval_job_for_response(job: Dict[str, Any]) -> Dict[str, Any]:
     """Adapt a generic-jobs row into the annotation-eval job response shape.
     Lifts task_id from `details` and exposes `error`/`completed_at` at the
@@ -1517,7 +1615,17 @@ async def get_evaluator_run_job(
         raise HTTPException(status_code=404, detail="Job not found")
     shaped = _shape_eval_job_for_response(job)
     raw_runs = get_evaluator_runs_for_job(job_uuid)
-    shaped["runs"] = _enrich_runs_with_live_evaluator(raw_runs)
+    # Top-level evaluators[] mirrors the labelling-job viewer shape so the
+    # FE reads `output_config.scale` from one consistent place across the
+    # two surfaces. Each entry pins the version the job ran against.
+    shaped["evaluators"] = _build_evaluators_block_for_eval_job(
+        job.get("details"), raw_runs
+    )
+    _strip_details_evaluators(shaped)
+    # Per-run `evaluator` / `evaluator_version` are intentionally NOT
+    # surfaced here — `(evaluator_id, evaluator_version_id)` on each run
+    # row keys back into the top-level evaluators[] block.
+    shaped["runs"] = _strip_run_evaluator_blocks(raw_runs)
     shaped["human_agreement"] = _human_agreement_for_run(task_uuid, raw_runs)
     # Frozen item snapshot — what calibrate actually saw, regardless of
     # any post-submit edits / soft-deletes on the source annotation_items.
