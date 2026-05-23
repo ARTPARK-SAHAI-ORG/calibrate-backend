@@ -802,6 +802,7 @@ def init_db():
                 task_id TEXT NOT NULL,
                 payload TEXT NOT NULL,
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                 deleted_at TIMESTAMP DEFAULT NULL,
                 FOREIGN KEY (task_id) REFERENCES annotation_tasks(uuid)
             )
@@ -913,11 +914,19 @@ def init_db():
             "ALTER TABLE jobs ADD COLUMN deleted_at TIMESTAMP DEFAULT NULL",
             "ALTER TABLE annotation_jobs ADD COLUMN deleted_at TIMESTAMP DEFAULT NULL",
             "ALTER TABLE annotations ADD COLUMN deleted_at TIMESTAMP DEFAULT NULL",
+            # SQLite rejects CURRENT_TIMESTAMP as a non-constant default in
+            # ADD COLUMN, so we land NULL and backfill from created_at below.
+            "ALTER TABLE annotation_items ADD COLUMN updated_at TIMESTAMP DEFAULT NULL",
         ):
             try:
                 cursor.execute(stmt)
             except sqlite3.OperationalError:
                 pass
+
+        # Backfill annotation_items.updated_at for rows predating the column.
+        cursor.execute(
+            "UPDATE annotation_items SET updated_at = created_at WHERE updated_at IS NULL"
+        )
 
         cursor.execute(
             """
@@ -6497,8 +6506,8 @@ def create_annotation_items(task_id: str, items: List[Dict[str, Any]]) -> List[s
             payload_json = json.dumps(it["payload"])
             cursor.execute(
                 """
-                INSERT INTO annotation_items (uuid, task_id, payload)
-                VALUES (?, ?, ?)
+                INSERT INTO annotation_items (uuid, task_id, payload, updated_at)
+                VALUES (?, ?, ?, CURRENT_TIMESTAMP)
                 """,
                 (item_uuid, task_id, payload_json),
             )
@@ -6536,7 +6545,7 @@ def bulk_update_annotation_items(task_id: str, updates: List[Dict[str, Any]]) ->
             cursor.execute(
                 """
                 UPDATE annotation_items
-                   SET payload = ?
+                   SET payload = ?, updated_at = CURRENT_TIMESTAMP
                  WHERE uuid = ? AND task_id = ? AND deleted_at IS NULL
                 """,
                 (json.dumps(u["payload"]), item_uuid, task_id),
