@@ -90,29 +90,9 @@ def _live_version_map(evaluators: List[Dict[str, Any]]) -> Dict[str, Optional[st
     return {e["uuid"]: e.get("live_version_id") for e in evaluators}
 
 
-def _evaluator_value_name(
-    value: Any,
-    output_type: Optional[str],
-    output_config: Optional[Dict[str, Any]],
-) -> Optional[str]:
-    """Map an evaluator-run scalar to its display name. Prefers an explicit
-    `name` from `output_config.scale`; falls back to `Correct`/`Wrong` for
-    binary true/false, and stringified score for rating."""
-    if value is None:
-        return None
-    scale = (output_config or {}).get("scale")
-    if isinstance(scale, list):
-        for entry in scale:
-            if entry.get("value") == value and entry.get("name"):
-                return entry["name"]
-    if output_type == "binary":
-        if value is True:
-            return "Correct"
-        if value is False:
-            return "Wrong"
-    if output_type == "rating" and isinstance(value, (int, float)):
-        return str(value)
-    return None
+# Re-exported for tests; canonical home is llm_judge so agent-tests/STT/TTS can
+# share the same scalar→label mapping.
+from llm_judge import evaluator_value_name as _evaluator_value_name  # noqa: E402
 
 
 def _enrich_evaluators_with_live_version(

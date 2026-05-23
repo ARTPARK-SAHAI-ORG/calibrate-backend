@@ -57,6 +57,31 @@ def _format_scale_rubric(output_config: Optional[Dict[str, Any]]) -> str:
     return "\n\nRubric:\n" + "\n".join(lines)
 
 
+def evaluator_value_name(
+    value: Any,
+    output_type: Optional[str],
+    output_config: Optional[Dict[str, Any]],
+) -> Optional[str]:
+    """Map an evaluator-run scalar to its display name. Prefers an explicit
+    `name` from `output_config.scale`; falls back to `Correct`/`Wrong` for
+    binary true/false, and stringified score for rating."""
+    if value is None:
+        return None
+    scale = (output_config or {}).get("scale")
+    if isinstance(scale, list):
+        for entry in scale:
+            if entry.get("value") == value and entry.get("name"):
+                return entry["name"]
+    if output_type == "binary":
+        if value is True:
+            return "Correct"
+        if value is False:
+            return "Wrong"
+    if output_type == "rating" and isinstance(value, (int, float)):
+        return str(value)
+    return None
+
+
 def _scale_bounds(output_config: Optional[Dict[str, Any]]) -> tuple[Optional[float], Optional[float]]:
     """For rating evaluators, derive scale_min/scale_max from output_config.scale.
 

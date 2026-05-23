@@ -38,7 +38,7 @@ from db import (
     get_agent_test_jobs_for_org,
     delete_agent_test_job,
 )
-from llm_judge import build_test_evaluators_payload
+from llm_judge import build_test_evaluators_payload, evaluator_value_name
 from auth_utils import get_current_org, OrgContext
 from utils import (
     TaskStatus,
@@ -206,6 +206,12 @@ class JudgeResult(BaseModel):
     time. `scale_min` / `scale_max` are present only for rating evaluators and
     come from the pinned version's `output_config.scale`, so the score is always
     framed against the rubric the run actually used.
+
+    `value_name` is the human-readable label for `match`/`score` resolved against
+    the rubric the run actually used (snapshot's `output_config.scale.name`).
+    Falls back to `Correct`/`Wrong` for binary or the stringified score for
+    rating when the snapshot lacks named scale entries (e.g. legacy runs
+    captured before the rubric was snapshotted).
     """
 
     evaluator_uuid: Optional[str] = None
@@ -214,6 +220,7 @@ class JudgeResult(BaseModel):
     reasoning: Optional[str] = None
     match: Optional[bool] = None
     score: Optional[float] = None
+    value_name: Optional[str] = None
     variable_values: Optional[Dict[str, Any]] = None
     scale_min: Optional[float] = None
     scale_max: Optional[float] = None
@@ -737,14 +744,19 @@ def _build_calibrate_config(
             if not ev_uuid or i >= len(refs):
                 continue
             output_type = ev.get("output_type") or "binary"
+            output_config = ev.get("output_config")
             snap_entry: Dict[str, Any] = {
                 "uuid": ev_uuid,
                 "name": refs[i].get("name", ""),
                 "output_type": output_type,
                 "variable_values": ev.get("variable_values") or {},
             }
+            # Snapshot the pinned version's rubric so `value_name` can be
+            # resolved at read time without re-reading the version row
+            # (which may have drifted). Applies to binary and rating both.
+            if isinstance(output_config, dict):
+                snap_entry["output_config"] = output_config
             if output_type == "rating":
-                output_config = ev.get("output_config")
                 if isinstance(output_config, dict):
                     scale = output_config.get("scale")
                     if isinstance(scale, list) and scale:
@@ -1006,6 +1018,14 @@ def _enrich_test_results_with_evaluators(
         if raw is None:
             continue
 
+        test_id = r.get("test_case_id")
+        snapshot = snapshot_map.get(test_id) if test_id else None
+        uuid_to_meta: Dict[str, Dict[str, Any]] = {}
+        if isinstance(snapshot, list):
+            for e in snapshot:
+                if isinstance(e, dict) and e.get("uuid"):
+                    uuid_to_meta[e["uuid"]] = e
+
         if isinstance(raw, list):
             for entry in raw:
                 if not isinstance(entry, dict):
@@ -1017,18 +1037,22 @@ def _enrich_test_results_with_evaluators(
                 if ev and ev.get("name"):
                     entry["name"] = ev["name"]
                 entry["description"] = ev.get("description") if ev else None
+                meta = uuid_to_meta.get(uid) or {}
+                snap_output_type = meta.get("output_type") or (
+                    ev.get("output_type") if ev else None
+                )
+                value = (
+                    entry.get("match")
+                    if entry.get("match") is not None
+                    else entry.get("score")
+                )
+                entry["value_name"] = evaluator_value_name(
+                    value, snap_output_type, meta.get("output_config")
+                )
             continue
 
         if not isinstance(raw, dict):
             continue
-
-        test_id = r.get("test_case_id")
-        snapshot = snapshot_map.get(test_id) if test_id else None
-        uuid_to_meta: Dict[str, Dict[str, Any]] = {}
-        if isinstance(snapshot, list):
-            for e in snapshot:
-                if isinstance(e, dict) and e.get("uuid"):
-                    uuid_to_meta[e["uuid"]] = e
 
         out: List[Dict[str, Any]] = []
         for cal_name, entry in raw.items():
@@ -1044,14 +1068,22 @@ def _enrich_test_results_with_evaluators(
                 if ev:
                     current_name = ev.get("name")
                     current_description = ev.get("description")
+            match_val = entry.get("match")
+            score_val = entry.get("score")
+            scalar = match_val if match_val is not None else score_val
             out.append(
                 {
                     "evaluator_uuid": uid,
                     "name": current_name or cal_name,
                     "description": current_description,
                     "reasoning": entry.get("reasoning"),
-                    "match": entry.get("match"),
-                    "score": entry.get("score"),
+                    "match": match_val,
+                    "score": score_val,
+                    "value_name": evaluator_value_name(
+                        scalar,
+                        meta.get("output_type"),
+                        meta.get("output_config"),
+                    ),
                     "variable_values": meta.get("variable_values") or None,
                     "scale_min": meta.get("scale_min"),
                     "scale_max": meta.get("scale_max"),

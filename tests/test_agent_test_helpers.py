@@ -141,6 +141,153 @@ def test_enrich_test_results_with_evaluators_list_judge():
     assert test_results[0]["judge_results"][0]["name"] == "Refreshed"
 
 
+def test_enrich_test_results_with_evaluators_value_name_binary():
+    """Binary judge_results pick up `value_name` from the snapshot's rubric."""
+    from routers.agent_tests import _enrich_test_results_with_evaluators
+
+    test_results = [
+        {
+            "test_case_id": "t1",
+            "judge_results": {
+                "Safety": {
+                    "evaluator_id": "ev-1",
+                    "reasoning": "ok",
+                    "match": True,
+                }
+            },
+        }
+    ]
+    snapshot = {
+        "t1": [
+            {
+                "uuid": "ev-1",
+                "name": "Safety",
+                "output_type": "binary",
+                "output_config": {
+                    "scale": [
+                        {"value": True, "name": "Safe"},
+                        {"value": False, "name": "Unsafe"},
+                    ]
+                },
+            }
+        ]
+    }
+    with patch(
+        "db.get_evaluator",
+        return_value={"uuid": "ev-1", "name": "Safety", "description": "d"},
+    ):
+        _enrich_test_results_with_evaluators(test_results, snapshot)
+    entry = test_results[0]["judge_results"][0]
+    assert entry["value_name"] == "Safe"
+
+
+def test_enrich_test_results_with_evaluators_value_name_rating():
+    """Rating judge_results resolve `value_name` via the numeric scale entry."""
+    from routers.agent_tests import _enrich_test_results_with_evaluators
+
+    test_results = [
+        {
+            "test_case_id": "t1",
+            "judge_results": {
+                "Helpfulness": {
+                    "evaluator_id": "ev-2",
+                    "reasoning": "great",
+                    "score": 4,
+                }
+            },
+        }
+    ]
+    snapshot = {
+        "t1": [
+            {
+                "uuid": "ev-2",
+                "name": "Helpfulness",
+                "output_type": "rating",
+                "scale_min": 1,
+                "scale_max": 5,
+                "output_config": {
+                    "scale": [
+                        {"value": 1, "name": "Terrible"},
+                        {"value": 4, "name": "Good"},
+                        {"value": 5, "name": "Excellent"},
+                    ]
+                },
+            }
+        ]
+    }
+    with patch(
+        "db.get_evaluator",
+        return_value={"uuid": "ev-2", "name": "Helpfulness", "description": "d"},
+    ):
+        _enrich_test_results_with_evaluators(test_results, snapshot)
+    entry = test_results[0]["judge_results"][0]
+    assert entry["value_name"] == "Good"
+
+
+def test_enrich_test_results_with_evaluators_value_name_list_path():
+    """List-shape judge_results (idempotent re-enrichment) also resolves
+    `value_name` from the snapshot — matches the dict-path behavior so the
+    field doesn't disappear on re-read."""
+    from routers.agent_tests import _enrich_test_results_with_evaluators
+
+    test_results = [
+        {
+            "test_case_id": "t1",
+            "judge_results": [
+                {"evaluator_uuid": "ev-1", "name": "Safety", "match": False},
+            ],
+        }
+    ]
+    snapshot = {
+        "t1": [
+            {
+                "uuid": "ev-1",
+                "name": "Safety",
+                "output_type": "binary",
+                "output_config": {
+                    "scale": [
+                        {"value": True, "name": "Safe"},
+                        {"value": False, "name": "Unsafe"},
+                    ]
+                },
+            }
+        ]
+    }
+    with patch(
+        "db.get_evaluator",
+        return_value={"uuid": "ev-1", "name": "Safety", "description": "d"},
+    ):
+        _enrich_test_results_with_evaluators(test_results, snapshot)
+    assert test_results[0]["judge_results"][0]["value_name"] == "Unsafe"
+
+
+def test_enrich_test_results_with_evaluators_value_name_legacy_fallback():
+    """Legacy snapshot without `output_config` falls back to Correct/Wrong
+    for binary so old runs still surface a label."""
+    from routers.agent_tests import _enrich_test_results_with_evaluators
+
+    test_results = [
+        {
+            "test_case_id": "t1",
+            "judge_results": {
+                "Safety": {
+                    "evaluator_id": "ev-1",
+                    "match": True,
+                }
+            },
+        }
+    ]
+    snapshot = {
+        "t1": [{"uuid": "ev-1", "name": "Safety", "output_type": "binary"}]
+    }
+    with patch(
+        "db.get_evaluator",
+        return_value={"uuid": "ev-1", "name": "Safety", "description": "d"},
+    ):
+        _enrich_test_results_with_evaluators(test_results, snapshot)
+    assert test_results[0]["judge_results"][0]["value_name"] == "Correct"
+
+
 def test_enrich_model_results_with_evaluators():
     from routers.agent_tests import _enrich_model_results_with_evaluators
 
