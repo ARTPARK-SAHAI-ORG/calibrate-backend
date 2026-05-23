@@ -128,9 +128,24 @@ def test_annotation_task_crud(client):
         == 404
     )
 
-    # list task evaluators
+    # list task evaluators — must mirror GET /evaluators/{uuid} detail shape
     list_ev = client.get(f"/annotation-tasks/{task_uuid}/evaluators", headers=h)
     assert list_ev.status_code == 200
+    detail_list = list_ev.json()
+    assert isinstance(detail_list, list) and detail_list
+    one = detail_list[0]
+    # Spot-check the same fields the per-evaluator detail returns: full
+    # version history + live_version (with rubric).
+    assert one["uuid"] == llm_ev["uuid"]
+    assert "versions" in one and isinstance(one["versions"], list) and one["versions"]
+    assert "live_version" in one
+    live = one["live_version"]
+    assert live is not None
+    assert "output_config" in live
+    # Compare against the canonical detail endpoint so the two shapes don't
+    # drift apart silently.
+    canonical = client.get(f"/evaluators/{llm_ev['uuid']}", headers=h).json()
+    assert set(one.keys()) == set(canonical.keys())
 
     # unlink evaluator
     unlink = client.delete(

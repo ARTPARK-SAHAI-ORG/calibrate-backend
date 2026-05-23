@@ -302,12 +302,39 @@ async def delete_annotation_task_endpoint(
 # ============ Evaluator linking ============
 
 
-@router.get("/{task_uuid}/evaluators", response_model=List[Dict[str, Any]])
+@router.get("/{task_uuid}/evaluators")
 async def list_task_evaluators(
     task_uuid: str, ctx: OrgContext = Depends(get_current_org)
 ):
+    """Return each evaluator linked to this task in the same shape as
+    `GET /evaluators/{uuid}` — i.e. full `EvaluatorDetailResponse` with
+    `live_version` and the complete `versions[]` history. Lets the FE
+    render the per-evaluator detail (rubric, prompt, judge model,
+    variable specs) without an N+1 fan-out of `/evaluators/{uuid}` calls.
+    """
+    # Lazy import to avoid a circular module-load between the two router
+    # files (annotation_tasks ↔ evaluators).
+    from routers.evaluators import (
+        EvaluatorDetailResponse,
+        EvaluatorVersionResponse,
+        _evaluator_response,
+        _version_dict,
+    )
+    from db import get_evaluator_versions
+
     _ensure_owned_task(task_uuid, ctx.org_uuid)
-    return get_evaluators_for_annotation_task(task_uuid)
+    linked = get_evaluators_for_annotation_task(task_uuid)
+    out: List[EvaluatorDetailResponse] = []
+    for ev in linked:
+        base = _evaluator_response(ev)
+        versions = [
+            EvaluatorVersionResponse(**_version_dict(v))
+            for v in get_evaluator_versions(ev["uuid"])
+        ]
+        out.append(
+            EvaluatorDetailResponse(**base.model_dump(), versions=versions)
+        )
+    return out
 
 
 @router.post("/{task_uuid}/evaluators")
