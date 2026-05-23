@@ -90,6 +90,31 @@ def _live_version_map(evaluators: List[Dict[str, Any]]) -> Dict[str, Optional[st
     return {e["uuid"]: e.get("live_version_id") for e in evaluators}
 
 
+def _evaluator_value_name(
+    value: Any,
+    output_type: Optional[str],
+    output_config: Optional[Dict[str, Any]],
+) -> Optional[str]:
+    """Map an evaluator-run scalar to its display name. Prefers an explicit
+    `name` from `output_config.scale`; falls back to `correct`/`wrong` for
+    binary true/false, and stringified score for rating."""
+    if value is None:
+        return None
+    scale = (output_config or {}).get("scale")
+    if isinstance(scale, list):
+        for entry in scale:
+            if entry.get("value") == value and entry.get("name"):
+                return entry["name"]
+    if output_type == "binary":
+        if value is True:
+            return "correct"
+        if value is False:
+            return "wrong"
+    if output_type == "rating" and isinstance(value, (int, float)):
+        return str(value)
+    return None
+
+
 def _enrich_evaluators_with_live_version(
     evaluators: List[Dict[str, Any]],
 ) -> List[Dict[str, Any]]:
@@ -1746,6 +1771,12 @@ async def task_summary(
             "evaluator_version_id": str | null,
             "evaluator_version_number": int | null,
             "evaluator_value": <scalar | null>,    # latest run on this slot
+            "evaluator_value_name": str | null,    # human-readable name for the
+                                                   # value: from output_config.scale
+                                                   # entry's `name` if set, else
+                                                   # `correct`/`wrong` for binary
+                                                   # true/false or stringified
+                                                   # score for rating
             "evaluator_reasoning": str | null,
             "annotations": {
               "<annotator_uuid>": {"value": <scalar>, "reasoning": str | null} | null,
@@ -1873,11 +1904,13 @@ async def task_summary(
                 "version_number": v.get("version_number"),
                 "scale_min": scale_min,
                 "scale_max": scale_max,
+                "output_config": v.get("output_config"),
             }
         else:
             meta = None
         version_cache[version_id] = meta
         return meta
+
 
     def _scalar_and_reasoning(value: Any) -> tuple:
         if isinstance(value, dict):
@@ -1983,6 +2016,11 @@ async def task_summary(
                             version_id == live_v if version_id else False
                         ),
                         "evaluator_value": ev_value,
+                        "evaluator_value_name": _evaluator_value_name(
+                            ev_value,
+                            ev.get("output_type"),
+                            (version_meta or {}).get("output_config"),
+                        ),
                         "evaluator_reasoning": ev_reasoning,
                         "annotations": ann_cells,
                         "human_agreement": human_agreement,
