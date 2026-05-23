@@ -795,8 +795,8 @@ def test_evaluator_value_name_mapping():
     assert _evaluator_value_name(None, "binary", None) is None
 
     # Binary defaults when no scale name is provided.
-    assert _evaluator_value_name(True, "binary", None) == "correct"
-    assert _evaluator_value_name(False, "binary", {"scale": []}) == "wrong"
+    assert _evaluator_value_name(True, "binary", None) == "Correct"
+    assert _evaluator_value_name(False, "binary", {"scale": []}) == "Wrong"
 
     # Rating default is the stringified score.
     assert _evaluator_value_name(3, "rating", None) == "3"

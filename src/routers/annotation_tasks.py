@@ -96,7 +96,7 @@ def _evaluator_value_name(
     output_config: Optional[Dict[str, Any]],
 ) -> Optional[str]:
     """Map an evaluator-run scalar to its display name. Prefers an explicit
-    `name` from `output_config.scale`; falls back to `correct`/`wrong` for
+    `name` from `output_config.scale`; falls back to `Correct`/`Wrong` for
     binary true/false, and stringified score for rating."""
     if value is None:
         return None
@@ -107,9 +107,9 @@ def _evaluator_value_name(
                 return entry["name"]
     if output_type == "binary":
         if value is True:
-            return "correct"
+            return "Correct"
         if value is False:
-            return "wrong"
+            return "Wrong"
     if output_type == "rating" and isinstance(value, (int, float)):
         return str(value)
     return None
@@ -1774,7 +1774,7 @@ async def task_summary(
             "evaluator_value_name": str | null,    # human-readable name for the
                                                    # value: from output_config.scale
                                                    # entry's `name` if set, else
-                                                   # `correct`/`wrong` for binary
+                                                   # `Correct`/`Wrong` for binary
                                                    # true/false or stringified
                                                    # score for rating
             "evaluator_reasoning": str | null,
