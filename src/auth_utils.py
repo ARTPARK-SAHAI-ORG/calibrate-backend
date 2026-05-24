@@ -110,6 +110,16 @@ async def get_current_user_id(
 SUPERADMIN_EMAIL = os.getenv("SUPERADMIN_EMAIL", "")
 
 
+def is_superadmin_user(user_id: str) -> bool:
+    """Return True if `user_id` belongs to the configured superadmin email."""
+    if not SUPERADMIN_EMAIL:
+        return False
+    from db import get_user
+
+    user = get_user(user_id)
+    return bool(user) and user.get("email", "") == SUPERADMIN_EMAIL
+
+
 async def require_superadmin(
     credentials: HTTPAuthorizationCredentials = Depends(security),
 ) -> str:
@@ -166,14 +176,21 @@ async def get_current_org(
     """
     user_id = await get_current_user_id(credentials)
 
+    payload = decode_token(credentials.credentials) or {}
+    is_superadmin = bool(SUPERADMIN_EMAIL) and payload.get("email", "") == SUPERADMIN_EMAIL
+
     # Import lazily to dodge the circular dependency (db imports nothing from
     # auth_utils, but routers import both — keeping db out of module-load
     # makes the dep graph robust against future moves).
-    from db import get_member_role, get_personal_org_for_user
+    from db import get_member_role, get_personal_org_for_user, get_organization
 
     if x_org_uuid:
         role = get_member_role(x_org_uuid, user_id)
         if role is None:
+            # Superadmin bypass: grant owner-level access to any existing org
+            # without requiring membership.
+            if is_superadmin and get_organization(x_org_uuid) is not None:
+                return OrgContext(user_id=user_id, org_uuid=x_org_uuid, role="owner")
             raise HTTPException(status_code=404, detail="Organization not found")
         return OrgContext(user_id=user_id, org_uuid=x_org_uuid, role=role)
 

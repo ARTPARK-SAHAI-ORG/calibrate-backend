@@ -267,7 +267,8 @@ def test_members_list_only_visible_to_members(client):
     assert ok.json()[0]["role"] == "owner"
 
     denied = client.get(
-        f"/organizations/{org['uuid']}/members", headers=outsider["headers"]
+        f"/organizations/{org['uuid']}/members",
+        headers=outsider["headers"],
     )
     assert denied.status_code == 404
 

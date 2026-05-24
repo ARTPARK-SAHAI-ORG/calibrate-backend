@@ -11,7 +11,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
 from typing import List, Optional
 
-from auth_utils import get_current_user_id
+from auth_utils import get_current_user_id, is_superadmin_user
 from db import (
     add_organization_member,
     create_organization,
@@ -60,13 +60,12 @@ class MemberResponse(BaseModel):
 def _require_membership(org_uuid: str, user_id: str) -> str:
     """Resolve the caller's role in `org_uuid`, 404ing if not a member.
 
-    Both owner and admin have the same permissions everywhere, so the role
-    string is returned only for the few endpoints that distinguish (e.g.
-    add/remove member, rename). 404 (not 403) keeps existence-leak parity
-    with the rest of the codebase.
+    Superadmin bypass: any existing org grants owner-level access.
     """
     role = get_member_role(org_uuid, user_id)
     if role is None:
+        if is_superadmin_user(user_id) and get_organization(org_uuid) is not None:
+            return "owner"
         raise HTTPException(status_code=404, detail="Organization not found")
     return role
 

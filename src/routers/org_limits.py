@@ -12,7 +12,7 @@ from db import (
     update_org_limits,
     delete_org_limits,
 )
-from auth_utils import get_current_org, OrgContext, require_superadmin
+from auth_utils import get_current_org, OrgContext, require_superadmin, is_superadmin_user
 
 router = APIRouter(prefix="/org-limits", tags=["org-limits"])
 
@@ -88,7 +88,7 @@ async def get_org_limits_endpoint(
     target_org_uuid: str, ctx: OrgContext = Depends(get_current_org)
 ):
     """Get limits for an org. Must be a member of the target org."""
-    if get_member_role(target_org_uuid, ctx.user_id) is None:
+    if get_member_role(target_org_uuid, ctx.user_id) is None and not is_superadmin_user(ctx.user_id):
         raise HTTPException(status_code=404, detail="Organization limits not found")
     limits = get_org_limits(target_org_uuid)
     if not limits:
