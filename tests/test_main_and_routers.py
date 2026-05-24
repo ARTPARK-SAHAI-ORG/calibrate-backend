@@ -1198,3 +1198,30 @@ def test_org_limits_router(client, monkeypatch):
     assert deleted.status_code == 200
     # Already gone
     assert client.delete(f"/org-limits/{user_org_uuid}", headers=h).status_code == 404
+
+
+def test_org_limits_get_superadmin_bypasses_membership(client, monkeypatch):
+    """GET /org-limits/{org_uuid} allows superadmin even when they're not a
+    member of the target org."""
+    import auth_utils
+    import db as db_mod
+
+    owner = _auth(client)
+    outsider = _auth(client)
+    target_org_uuid = db_mod.get_personal_org_for_user(owner["user_uuid"])["uuid"]
+
+    # Seed a limits row on owner's org as the owner-superadmin (needed since
+    # creating limits requires superadmin).
+    monkeypatch.setattr(auth_utils, "SUPERADMIN_EMAIL", owner["email"])
+    create = client.post(
+        "/org-limits",
+        json={"org_uuid": target_org_uuid, "limits": {"max_rows_per_eval": 11}},
+        headers=owner["headers"],
+    )
+    assert create.status_code == 200
+
+    # Now switch the superadmin to outsider, who is NOT a member of owner's org.
+    monkeypatch.setattr(auth_utils, "SUPERADMIN_EMAIL", outsider["email"])
+    got = client.get(f"/org-limits/{target_org_uuid}", headers=outsider["headers"])
+    assert got.status_code == 200
+    assert got.json()["limits"]["max_rows_per_eval"] == 11

@@ -273,6 +273,54 @@ def test_members_list_only_visible_to_members(client):
     assert denied.status_code == 404
 
 
+def test_superadmin_can_manage_org_without_membership(client, monkeypatch):
+    """Superadmin bypass: a user matching SUPERADMIN_EMAIL can list members,
+    add a member, and rename any existing org without being in org_members.
+    """
+    import auth_utils
+
+    owner = _signup(client)
+    outsider = _signup(client, email_prefix="superadmin")
+    invitee = _signup(client, email_prefix="invitee-by-admin")
+
+    org = client.post(
+        "/organizations", json={"name": "Customer Org"}, headers=owner["headers"]
+    ).json()
+
+    # Promote outsider to superadmin via env override.
+    monkeypatch.setattr(auth_utils, "SUPERADMIN_EMAIL", outsider["email"])
+
+    # Listing members works even though outsider is not a member.
+    listing = client.get(
+        f"/organizations/{org['uuid']}/members", headers=outsider["headers"]
+    )
+    assert listing.status_code == 200
+
+    # Adding a member works.
+    added = client.post(
+        f"/organizations/{org['uuid']}/members",
+        json={"email": invitee["email"]},
+        headers=outsider["headers"],
+    )
+    assert added.status_code == 201
+
+    # Renaming works.
+    renamed = client.patch(
+        f"/organizations/{org['uuid']}",
+        json={"name": "Customer Org Renamed"},
+        headers=outsider["headers"],
+    )
+    assert renamed.status_code == 200
+
+    # Bypass requires the org to actually exist.
+    missing = client.patch(
+        "/organizations/00000000-0000-0000-0000-000000000000",
+        json={"name": "ghost"},
+        headers=outsider["headers"],
+    )
+    assert missing.status_code == 404
+
+
 def test_per_org_unique_indexes_exist_after_init(client):
     """The per-org partial unique indexes (`idx_*_org_name_active`) must be
     created on a fresh DB — i.e. they're created AFTER the `ALTER TABLE ...
