@@ -1174,6 +1174,77 @@ def test_summary_surfaces_item_comments(client):
     }
 
 
+def test_summary_drops_comments_from_soft_deleted_annotator(client):
+    """`get_annotators_by_uuids` filters soft-deleted annotators, so any
+    `item_comments` entry keyed by a deleted UUID would have no matching
+    name in `annotators[]`. Verify the deleted annotator's comment is
+    pruned from `item_comments` instead of leaking as an orphan."""
+    auth = _signup(client)
+    h = auth["headers"]
+    llm_ev = _llm_evaluator(client, h)
+    task_uuid = client.post(
+        "/annotation-tasks",
+        json={
+            "name": f"t-{uuid.uuid4().hex[:6]}",
+            "type": "llm",
+            "evaluator_ids": [llm_ev["uuid"]],
+        },
+        headers=h,
+    ).json()["uuid"]
+    item_id = client.post(
+        f"/annotation-tasks/{task_uuid}/items",
+        json={"items": [{"payload": {"name": "i1"}}]},
+        headers=h,
+    ).json()["item_ids"][0]
+    kept = client.post(
+        "/annotators", json={"name": "kept"}, headers=h
+    ).json()
+    doomed = client.post(
+        "/annotators", json={"name": "doomed"}, headers=h
+    ).json()
+    jobs = client.post(
+        f"/annotation-tasks/{task_uuid}/jobs",
+        json={
+            "annotator_ids": [kept["uuid"], doomed["uuid"]],
+            "item_ids": [item_id],
+        },
+        headers=h,
+    ).json()["jobs"]
+    job_kept = next(j for j in jobs if j["annotator_id"] == kept["uuid"])
+    job_doomed = next(j for j in jobs if j["annotator_id"] == doomed["uuid"])
+
+    for job in (job_kept, job_doomed):
+        assert (
+            client.post(
+                f"/annotation-tasks/{task_uuid}/annotations",
+                json={
+                    "job_id": job["uuid"],
+                    "item_id": item_id,
+                    "value": {"comment": f"from {job['annotator_id']}"},
+                },
+                headers=h,
+            ).status_code
+            == 200
+        )
+
+    # Soft-delete the second annotator.
+    assert (
+        client.delete(f"/annotators/{doomed['uuid']}", headers=h).status_code
+        == 200
+    )
+
+    body = client.get(
+        f"/annotation-tasks/{task_uuid}/summary", headers=h
+    ).json()
+    annotator_uuids = {a["uuid"] for a in body["annotators"]}
+    assert doomed["uuid"] not in annotator_uuids
+    assert kept["uuid"] in annotator_uuids
+    # `kept`'s comment survives; `doomed`'s is pruned.
+    assert body["item_comments"][item_id] == {
+        kept["uuid"]: f"from {kept['uuid']}"
+    }
+
+
 def test_summary_comment_cleared_in_newer_job_wipes_older(client):
     """When the same annotator has multiple jobs on the same task (e.g. admin
     re-assigns items in a fresh batch), the (job_id, item_id, evaluator=NULL)

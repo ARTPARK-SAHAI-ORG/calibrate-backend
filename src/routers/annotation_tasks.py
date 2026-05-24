@@ -2358,11 +2358,21 @@ async def task_summary(
             }
         )
 
-    item_comments = {
-        item_id: cells
-        for item_id, cells in all_item_comments.items()
-        if item_id in scoped_item_ids
-    }
+    # Filter to surviving annotators (soft-deleted ones are dropped from
+    # `annotators[]` by `get_annotators_by_uuids`, so emitting their UUIDs
+    # in `item_comments` would create orphans the FE has no name for).
+    surviving_annotator_ids = {a["uuid"] for a in annotators}
+    item_comments: Dict[str, Dict[str, str]] = {}
+    for cmt_item_id, cells in all_item_comments.items():
+        if cmt_item_id not in scoped_item_ids:
+            continue
+        surviving_cells = {
+            aid: text
+            for aid, text in cells.items()
+            if aid in surviving_annotator_ids
+        }
+        if surviving_cells:
+            item_comments[cmt_item_id] = surviving_cells
 
     return {
         "task_id": task_uuid,
