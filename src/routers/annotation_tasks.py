@@ -1634,17 +1634,26 @@ def _human_agreement_for_run(
             continue
         # Bucket the raw human annotations on this item by evaluator so the
         # FE can show every annotator's exact value alongside the agreement
-        # number. Annotations are already filtered to the run's slot set,
-        # so every entry here is in scope.
-        annotations_by_evaluator: Dict[str, List[Dict[str, Any]]] = {}
+        # number. Annotations are already filtered to the run's slot set.
+        #
+        # **Latest-wins per (evaluator, annotator)** — matches the summary
+        # endpoint's semantics ([`task_summary`](annotation_tasks.py)). If
+        # the same annotator labeled the same slot across multiple
+        # annotation jobs, only the most recent submission surfaces in
+        # `human_annotations[]`. Input is sorted by `updated_at ASC`
+        # (`get_annotations_for_slots`), so dict-overwrite per
+        # `(ev_id, annotator_id)` gives latest-wins.
+        latest_by_slot: Dict[tuple, Dict[str, Any]] = {}
         for a in item_annotations:
             ev_id = a.get("evaluator_id")
-            if not ev_id:
-                continue
             annotator_id = a.get("annotator_id")
-            annotator = (
-                annotators_by_uuid.get(annotator_id) if annotator_id else None
-            )
+            if not ev_id or not annotator_id:
+                continue
+            latest_by_slot[(ev_id, annotator_id)] = a
+
+        annotations_by_evaluator: Dict[str, List[Dict[str, Any]]] = {}
+        for (ev_id, annotator_id), a in latest_by_slot.items():
+            annotator = annotators_by_uuid.get(annotator_id) if annotator_id else None
             raw_value = a.get("value")
             reasoning = (
                 raw_value.get("reasoning")
@@ -1665,7 +1674,7 @@ def _human_agreement_for_run(
                 }
             )
         # Sort each evaluator's annotations deterministically (oldest first)
-        # so the FE can render them in submission order.
+        # so the FE can render them in a stable order.
         for entries in annotations_by_evaluator.values():
             entries.sort(key=lambda e: (e.get("updated_at") or "", e.get("annotation_id") or ""))
         # Inline the raw annotations onto each evaluator block keyed by

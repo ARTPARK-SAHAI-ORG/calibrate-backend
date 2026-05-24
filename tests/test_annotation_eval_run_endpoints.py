@@ -337,6 +337,82 @@ def test_build_evaluators_block_keeps_stub_for_deleted_evaluator():
     assert block[0]["output_type"] is None
 
 
+def test_human_agreement_for_run_latest_wins_per_annotator():
+    """Eval-run detail's `human_annotations[]` block is latest-wins per
+    (item, evaluator, annotator) — matches the summary endpoint. If the
+    same annotator labeled the same slot in multiple annotation jobs,
+    only the most recent submission surfaces."""
+    from routers.annotation_tasks import _human_agreement_for_run
+    from unittest.mock import patch
+
+    # Two annotators each labeled the same (item, evaluator) slot
+    # twice — once in an older job, once in a newer one. Input is
+    # sorted updated_at ASC to match what get_annotations_for_slots
+    # returns.
+    annotations = [
+        {
+            "uuid": "ann-aman-old",
+            "item_id": "item-1",
+            "evaluator_id": "ev-1",
+            "annotator_id": "aman",
+            "job_id": "job-old",
+            "value": {"value": False, "reasoning": "first try"},
+            "updated_at": "2026-05-01 10:00:00",
+        },
+        {
+            "uuid": "ann-pri-only",
+            "item_id": "item-1",
+            "evaluator_id": "ev-1",
+            "annotator_id": "pri",
+            "job_id": "job-old",
+            "value": {"value": True, "reasoning": "p1"},
+            "updated_at": "2026-05-01 11:00:00",
+        },
+        {
+            "uuid": "ann-aman-new",
+            "item_id": "item-1",
+            "evaluator_id": "ev-1",
+            "annotator_id": "aman",
+            "job_id": "job-new",
+            "value": {"value": True, "reasoning": "changed my mind"},
+            "updated_at": "2026-05-02 09:00:00",
+        },
+    ]
+    job_runs = [
+        {
+            "uuid": "run-1",
+            "item_id": "item-1",
+            "evaluator_id": "ev-1",
+            "evaluator_version_id": "v-1",
+            "value": {"value": True, "reasoning": "ok"},
+        }
+    ]
+    with patch(
+        "routers.annotation_tasks.get_annotations_for_slots",
+        return_value=annotations,
+    ), patch(
+        "routers.annotation_tasks.get_annotators_by_uuids",
+        return_value={
+            "aman": {"uuid": "aman", "name": "aman"},
+            "pri": {"uuid": "pri", "name": "pri"},
+        },
+    ):
+        result = _human_agreement_for_run("task-1", job_runs)
+
+    items = result["items"]
+    assert len(items) == 1
+    ev_entries = items[0]["evaluators"]
+    assert len(ev_entries) == 1
+    human_ann = ev_entries[0]["human_annotations"]
+    # aman appears once (the newer 'job-new' submission); pri once.
+    by_annotator = {h["annotator_id"]: h for h in human_ann}
+    assert len(human_ann) == 2
+    assert by_annotator["aman"]["annotation_id"] == "ann-aman-new"
+    assert by_annotator["aman"]["job_id"] == "job-new"
+    assert by_annotator["aman"]["reasoning"] == "changed my mind"
+    assert by_annotator["pri"]["annotation_id"] == "ann-pri-only"
+
+
 def test_build_evaluators_block_applies_binary_default_for_null_rubric():
     """Binary evaluator whose pinned version has output_config=null
     surfaces the Correct/Wrong default — consistent with the other
