@@ -2017,7 +2017,12 @@ async def task_summary(
             "human_agreement": float|null,
             "evaluator_agreement": float|null
           }
-        ]
+        ],
+        "item_comments": {
+          "<item_uuid>": {
+            "<annotator_uuid>": str   # latest free-text comment
+          }
+        }
       }
 
     Cell rules:
@@ -2035,8 +2040,14 @@ async def task_summary(
       - Each annotator cell is that annotator's latest annotation for the slot,
         across ALL annotation jobs (matches the agreement aggregator's
         latest-wins-per-annotator semantics). `null` if they haven't annotated it.
-      - Row-level overall annotations (`evaluator_id IS NULL`) are not surfaced
-        here — this view is per-evaluator.
+      - Row-level overall annotations (`evaluator_id IS NULL`) are surfaced
+        in the top-level `item_comments` block — one free-text string per
+        (item, annotator) pulled from `value["comment"]`. They are
+        orthogonal to evaluators, so they live outside `rows[]`. Only
+        items/annotators with a non-empty comment appear (the block is
+        sparse). Latest-wins per (item, annotator) on `updated_at`. The
+        `annotators[]` union includes annotators that contributed comments
+        even if they never wrote a per-evaluator annotation.
     """
     task = _ensure_owned_task(task_uuid, ctx.org_uuid)
     items = get_annotation_items_for_task(task_uuid)
@@ -2104,18 +2115,39 @@ async def task_summary(
     # Latest annotation per (item, evaluator, annotator). Input is sorted by
     # updated_at ASC so overwrite gives latest-wins.
     latest_ann: Dict[tuple, Dict[str, Any]] = {}
+    # Row-level (evaluator_id IS NULL) annotations carry per-(item, annotator)
+    # free-text comments. Same latest-wins-on-updated_at semantics; we read the
+    # string out of `value["comment"]` and skip anything that isn't a non-empty
+    # string so a future shape change can't crash the response. Built task-wide
+    # so the annotator union stays consistent with the per-evaluator path —
+    # the per-item filter is applied later, only to the response block.
+    all_item_comments: Dict[str, Dict[str, str]] = {}
     for a in annotations:
         annotator_id = a.get("annotator_id")
         ev_id = a.get("evaluator_id")
         a_item_id = a.get("item_id")
-        if not annotator_id or not ev_id or not a_item_id:
+        if not annotator_id or not a_item_id:
+            continue
+        if ev_id is None:
+            value = a.get("value")
+            if not isinstance(value, dict):
+                continue
+            comment = value.get("comment")
+            if not isinstance(comment, str) or not comment:
+                continue
+            all_item_comments.setdefault(a_item_id, {})[annotator_id] = comment
             continue
         latest_ann[(a_item_id, ev_id, annotator_id)] = a
 
-    # Annotator union — only those with ≥1 (item, evaluator) annotation visible
-    # in this view. Stable ordering by name then uuid. Single bulk lookup
-    # replaces the per-annotator `get_annotator(aid)` round-trips.
-    annotator_ids = list({key[2] for key in latest_ann.keys()})
+    # Annotator union — those with ≥1 (item, evaluator) annotation OR ≥1
+    # free-text comment anywhere in this task. Stays task-wide even when
+    # `item_id` is set, matching the docstring contract. Stable ordering by
+    # name then uuid. Single bulk lookup replaces the per-annotator
+    # `get_annotator(aid)` round-trips.
+    annotator_ids = list(
+        {key[2] for key in latest_ann.keys()}
+        | {aid for cells in all_item_comments.values() for aid in cells.keys()}
+    )
     annotator_rows = get_annotators_by_uuids(annotator_ids)
     annotators: List[Dict[str, Any]] = [
         {"uuid": a["uuid"], "name": a.get("name")}
@@ -2310,12 +2342,19 @@ async def task_summary(
             }
         )
 
+    item_comments = {
+        item_id: cells
+        for item_id, cells in all_item_comments.items()
+        if item_id in scoped_item_ids
+    }
+
     return {
         "task_id": task_uuid,
         "task_type": task["type"],
         "evaluators": evaluators_block,
         "annotators": annotators,
         "rows": rows,
+        "item_comments": item_comments,
     }
 
 
