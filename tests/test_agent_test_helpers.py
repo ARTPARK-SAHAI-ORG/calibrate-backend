@@ -391,6 +391,41 @@ def test_build_evaluators_block_for_test_run_legacy_row_fallback():
     assert block[0]["output_config"]["scale"][0]["name"] == "Correct"
 
 
+def test_enrich_test_results_with_evaluators_dict_output_type_live_fallback():
+    """Dict-path enrichment must fall back to the LIVE evaluator's
+    output_type when the snapshot lacks it — otherwise value_name comes
+    out null on legacy runs whose snapshot didn't capture output_type."""
+    from routers.agent_tests import _enrich_test_results_with_evaluators
+
+    test_results = [
+        {
+            "test_case_id": "t1",
+            "judge_results": {
+                "Safety": {
+                    "evaluator_id": "ev-1",
+                    "match": True,
+                }
+            },
+        }
+    ]
+    # Snapshot has the evaluator but no output_type — simulates a legacy
+    # capture that pre-dates the field.
+    snapshot = {"t1": [{"uuid": "ev-1"}]}
+    with patch(
+        "db.get_evaluator",
+        return_value={
+            "uuid": "ev-1",
+            "name": "Safety",
+            "description": "d",
+            "output_type": "binary",
+        },
+    ):
+        _enrich_test_results_with_evaluators(test_results, snapshot)
+    # Live evaluator's output_type kicks in and the binary fallback
+    # resolves the label.
+    assert test_results[0]["judge_results"][0]["value_name"] == "Correct"
+
+
 def test_enrich_test_results_with_evaluators_value_name_legacy_fallback():
     """Legacy snapshot without `output_config` falls back to Correct/Wrong
     for binary so old runs still surface a label."""

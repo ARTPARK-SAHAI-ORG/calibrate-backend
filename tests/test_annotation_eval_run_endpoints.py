@@ -288,6 +288,35 @@ def test_evaluator_run_detail_shape(client):
     assert "evaluator_version" not in run
 
 
+def test_build_evaluators_block_keeps_stub_for_deleted_evaluator():
+    """When an evaluator is soft-deleted after the job ran, the block
+    still emits a stub entry so rows[] references stay resolvable on
+    the FE — fields the soft-delete strips (description, output_type,
+    rubric) come back as null + a `deleted: true` flag."""
+    from routers.annotation_tasks import _build_evaluators_block_for_eval_job
+    from unittest.mock import patch
+
+    job_details = {
+        "evaluators": [
+            {
+                "evaluator_id": "ev-gone",
+                "evaluator_version_id": None,
+                "name": "Snapshot Name",
+            }
+        ]
+    }
+    raw_runs = [
+        {"evaluator_id": "ev-gone", "evaluator_version_id": None}
+    ]
+    with patch("routers.annotation_tasks.get_evaluator", return_value=None):
+        block = _build_evaluators_block_for_eval_job(job_details, raw_runs)
+    assert len(block) == 1
+    assert block[0]["uuid"] == "ev-gone"
+    assert block[0]["name"] == "Snapshot Name"
+    assert block[0]["deleted"] is True
+    assert block[0]["output_type"] is None
+
+
 def test_evaluator_run_with_specific_item_ids(client):
     auth = _signup(client)
     h = auth["headers"]

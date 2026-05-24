@@ -467,8 +467,15 @@ async def duplicate_evaluator_endpoint(
 async def list_versions(
     evaluator_uuid: str, ctx: OrgContext = Depends(get_current_org)
 ):
-    _visible_or_404(get_evaluator(evaluator_uuid), ctx.org_uuid)
-    return [EvaluatorVersionResponse(**_version_dict(v)) for v in get_evaluator_versions(evaluator_uuid)]
+    evaluator = _visible_or_404(get_evaluator(evaluator_uuid), ctx.org_uuid)
+    # Pass `output_type` so binary versions stored with a null
+    # output_config surface the Correct/Wrong default — consistent with
+    # the detail / list / annotation-tasks evaluator endpoints.
+    output_type = evaluator.get("output_type", "binary")
+    return [
+        EvaluatorVersionResponse(**_version_dict(v, output_type))
+        for v in get_evaluator_versions(evaluator_uuid)
+    ]
 
 
 @router.post("/{evaluator_uuid}/versions", response_model=VersionCreateResponse)

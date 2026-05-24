@@ -335,6 +335,10 @@ def test_run_agent_benchmark_queued_path(client, monkeypatch):
     task_id = resp.json()["task_id"]
     got = client.get(f"/agent-tests/benchmark/{task_id}")
     assert got.status_code == 200
+    # `evaluators[]` block is now exposed on the benchmark status response
+    # the same way it is on the unit-test status — confirm the field is
+    # at least present (may be empty for a queued/never-run job).
+    assert "evaluators" in got.json()
     assert client.get("/agent-tests/benchmark/missing").status_code == 404
 
     # Visibility toggle

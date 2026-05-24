@@ -1358,6 +1358,15 @@ def _build_evaluators_block_for_eval_job(
             seen.add(slot)
             slots.append(slot)
 
+    # Look up the slim snapshot name as a final fallback for soft-deleted
+    # evaluators (get_evaluator filters deleted_at IS NULL).
+    snapshot_name_by_uuid: Dict[str, str] = {}
+    for entry in snapshot:
+        if isinstance(entry, dict) and entry.get("evaluator_id"):
+            snapshot_name_by_uuid.setdefault(
+                entry["evaluator_id"], entry.get("name") or ""
+            )
+
     eval_cache: Dict[str, Optional[Dict[str, Any]]] = {}
     version_cache: Dict[str, Optional[Dict[str, Any]]] = {}
     out: List[Dict[str, Any]] = []
@@ -1365,8 +1374,10 @@ def _build_evaluators_block_for_eval_job(
         if ev_id not in eval_cache:
             eval_cache[ev_id] = get_evaluator(ev_id)
         ev = eval_cache.get(ev_id)
-        if not ev:
-            continue
+        # If the evaluator was soft-deleted we still want a stub entry so
+        # rows[] consumers can resolve the slot — otherwise the FE sees
+        # `evaluator_id` references with no matching block entry. Fields
+        # we can't recover (description, output_type, rubric) stay null.
         if version_id and version_id not in version_cache:
             version_cache[version_id] = get_evaluator_version(version_id)
         version = version_cache.get(version_id) if version_id else None
@@ -1374,12 +1385,13 @@ def _build_evaluators_block_for_eval_job(
         scale_min, scale_max = _scale_bounds(output_config)
         out.append(
             {
-                "uuid": ev["uuid"],
-                "name": ev.get("name"),
-                "description": ev.get("description"),
-                "output_type": ev.get("output_type"),
-                "evaluator_type": ev.get("evaluator_type"),
-                "data_type": ev.get("data_type"),
+                "uuid": ev_id,
+                "name": (ev.get("name") if ev else None)
+                or snapshot_name_by_uuid.get(ev_id),
+                "description": ev.get("description") if ev else None,
+                "output_type": ev.get("output_type") if ev else None,
+                "evaluator_type": ev.get("evaluator_type") if ev else None,
+                "data_type": ev.get("data_type") if ev else None,
                 "evaluator_version_id": version_id,
                 "version_number": (
                     version.get("version_number") if version else None
@@ -1389,6 +1401,7 @@ def _build_evaluators_block_for_eval_job(
                 "scale_min": scale_min,
                 "scale_max": scale_max,
                 "variables": version.get("variables") if version else None,
+                "deleted": ev is None,
             }
         )
     return out

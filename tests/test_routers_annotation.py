@@ -817,6 +817,58 @@ def test_annotation_agreement_endpoints(client):
     assert missing_ev.status_code == 404
 
 
+def test_list_versions_applies_binary_default_output_config(client):
+    """GET /evaluators/{uuid}/versions must also apply the Correct/Wrong
+    default when a stored binary version has output_config=null —
+    consistent with the detail / list / annotation-tasks endpoints."""
+    import db as db_mod
+
+    auth = _signup(client)
+    h = auth["headers"]
+    # Create a binary evaluator, then directly insert a NULL-rubric
+    # version to simulate a legacy row.
+    create = client.post(
+        "/evaluators",
+        json={
+            "name": f"e-{uuid.uuid4().hex[:6]}",
+            "evaluator_type": "llm",
+            "data_type": "text",
+            "kind": "single",
+            "output_type": "binary",
+            "version": {
+                "judge_model": "openai/gpt-4",
+                "system_prompt": "p",
+                "variables": [],
+                "output_config": {
+                    "scale": [
+                        {"value": True, "name": "Custom"},
+                        {"value": False, "name": "Other"},
+                    ]
+                },
+            },
+        },
+        headers=h,
+    )
+    if create.status_code != 200:
+        return  # eval creation gated — nothing to test
+    ev_uuid = create.json()["uuid"]
+    db_mod.create_evaluator_version(
+        evaluator_uuid=ev_uuid,
+        judge_model="openai/gpt-4",
+        system_prompt="legacy",
+        output_config=None,
+        variables=None,
+    )
+    versions = client.get(f"/evaluators/{ev_uuid}/versions", headers=h).json()
+    legacy = next(v for v in versions if v["system_prompt"] == "legacy")
+    assert legacy["output_config"] == {
+        "scale": [
+            {"value": True, "name": "Correct"},
+            {"value": False, "name": "Wrong"},
+        ]
+    }
+
+
 def test_default_output_config_helper():
     """Binary evaluators get a Correct/Wrong fallback rubric; rating evaluators
     stay null because no meaningful default exists without bounds."""

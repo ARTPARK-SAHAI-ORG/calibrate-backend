@@ -1175,12 +1175,17 @@ def _enrich_test_results_with_evaluators(
             echoed_uid = entry.get("evaluator_id")
             meta = (uuid_to_meta.get(echoed_uid) if echoed_uid else None) or {}
             uid = echoed_uid
-            # We don't bake evaluator name/description onto each row anymore
-            # — the FE reads them from the top-level evaluators[] block via
-            # `evaluator_uuid`. We still warm the cache here so the block
-            # builder can reuse it without re-querying.
+            # Warm the cache so the block builder can reuse it. Also use
+            # the live evaluator's output_type as a fallback when the
+            # snapshot lacks it (legacy jobs) — matches the list-path
+            # behavior so `value_name` resolves consistently across both
+            # enrichment paths.
+            ev: Optional[Dict[str, Any]] = None
             if uid:
-                _get_evaluator_cached_for_enrichment(uid, cache)
+                ev = _get_evaluator_cached_for_enrichment(uid, cache)
+            snap_output_type = meta.get("output_type") or (
+                ev.get("output_type") if ev else None
+            )
             match_val = entry.get("match")
             score_val = entry.get("score")
             scalar = match_val if match_val is not None else score_val
@@ -1192,7 +1197,7 @@ def _enrich_test_results_with_evaluators(
                     "score": score_val,
                     "value_name": evaluator_value_name(
                         scalar,
-                        meta.get("output_type"),
+                        snap_output_type,
                         meta.get("output_config"),
                     ),
                     "variable_values": meta.get("variable_values") or None,
@@ -1960,6 +1965,10 @@ class ModelResult(BaseModel):
 class BenchmarkStatusResponse(BaseModel):
     task_id: str
     status: str
+    # Top-level evaluator block — see TestRunStatusResponse.evaluators.
+    # Shared by every model's test_results since all models run the
+    # same suite.
+    evaluators: Optional[List[Dict[str, Any]]] = None
     model_results: Optional[List[ModelResult]] = None
     leaderboard_summary: Optional[List[Dict[str, Any]]] = None
     results_s3_prefix: Optional[str] = None
@@ -2623,15 +2632,21 @@ async def get_benchmark_status(task_id: str):
     #         # Try to start the next queued job
     #         try_start_queued_agent_test_job(AGENT_TEST_JOB_TYPES)
 
+    evaluators_snapshot = details.get("evaluators_by_test_id") or {}
+    evaluator_cache: Dict[str, Optional[Dict[str, Any]]] = {}
     _enrich_model_results_with_evaluators(
-        results.get("model_results"),
-        details.get("evaluators_by_test_id")
-        or {},
+        results.get("model_results"), evaluators_snapshot, evaluator_cache
+    )
+    evaluators_block = _build_evaluators_block_for_test_run(
+        evaluators_snapshot,
+        model_results=results.get("model_results"),
+        evaluator_cache=evaluator_cache,
     )
 
     return BenchmarkStatusResponse(
         task_id=task_id,
         status=status,
+        evaluators=evaluators_block or None,
         model_results=results.get("model_results"),
         leaderboard_summary=results.get("leaderboard_summary"),
         results_s3_prefix=results.get("results_s3_prefix"),
