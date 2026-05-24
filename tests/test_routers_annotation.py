@@ -191,6 +191,97 @@ def test_annotation_task_crud(client):
     )
 
 
+def test_annotation_task_evaluator_ordering(client):
+    """PUT /annotation-tasks/{uuid}/evaluators/order re-numbers the display
+    order, and every surface that lists task evaluators honors it."""
+    auth = _signup(client)
+    h = auth["headers"]
+    evaluators = client.get("/evaluators", headers=h).json()
+    llm_evs = [e for e in evaluators if e.get("evaluator_type") == "llm"]
+    # Need at least two evaluators to assert ordering meaningfully.
+    assert len(llm_evs) >= 2, "expected ≥2 seeded LLM evaluators"
+    ev_a, ev_b = llm_evs[0], llm_evs[1]
+
+    create = client.post(
+        "/annotation-tasks",
+        json={
+            "name": f"order-{uuid.uuid4().hex[:6]}",
+            "type": "llm",
+            "evaluator_ids": [ev_a["uuid"], ev_b["uuid"]],
+        },
+        headers=h,
+    )
+    assert create.status_code == 200
+    task_uuid = create.json()["uuid"]
+
+    # Initial order matches link order on create.
+    detail = client.get(f"/annotation-tasks/{task_uuid}", headers=h).json()
+    assert [e["uuid"] for e in detail["evaluators"]] == [
+        ev_a["uuid"],
+        ev_b["uuid"],
+    ]
+
+    # Flip the order.
+    reorder = client.put(
+        f"/annotation-tasks/{task_uuid}/evaluators/order",
+        json={"evaluator_ids": [ev_b["uuid"], ev_a["uuid"]]},
+        headers=h,
+    )
+    assert reorder.status_code == 200
+    assert [e["uuid"] for e in reorder.json()["evaluators"]] == [
+        ev_b["uuid"],
+        ev_a["uuid"],
+    ]
+
+    # Detail endpoint reflects the new order.
+    detail2 = client.get(f"/annotation-tasks/{task_uuid}", headers=h).json()
+    assert [e["uuid"] for e in detail2["evaluators"]] == [
+        ev_b["uuid"],
+        ev_a["uuid"],
+    ]
+
+    # /evaluators (detail-shape) endpoint also reflects the new order.
+    list_ev = client.get(
+        f"/annotation-tasks/{task_uuid}/evaluators", headers=h
+    ).json()
+    assert [e["uuid"] for e in list_ev] == [ev_b["uuid"], ev_a["uuid"]]
+
+    # Mismatched set → 400.
+    bad = client.put(
+        f"/annotation-tasks/{task_uuid}/evaluators/order",
+        json={"evaluator_ids": [ev_a["uuid"]]},
+        headers=h,
+    )
+    assert bad.status_code == 400
+
+    # Other user → 404 (existence not leaked).
+    other = _signup(client)
+    forbidden = client.put(
+        f"/annotation-tasks/{task_uuid}/evaluators/order",
+        json={"evaluator_ids": [ev_b["uuid"], ev_a["uuid"]]},
+        headers=other["headers"],
+    )
+    assert forbidden.status_code == 404
+
+    # Newly-linked evaluator appends at the end (does NOT jump to front).
+    third = next(
+        e for e in llm_evs if e["uuid"] not in {ev_a["uuid"], ev_b["uuid"]}
+    ) if len(llm_evs) >= 3 else None
+    if third is not None:
+        link = client.post(
+            f"/annotation-tasks/{task_uuid}/evaluators",
+            json={"evaluator_id": third["uuid"]},
+            headers=h,
+        )
+        assert link.status_code == 200
+        detail3 = client.get(f"/annotation-tasks/{task_uuid}", headers=h).json()
+        assert [e["uuid"] for e in detail3["evaluators"]] == [
+            ev_b["uuid"],
+            ev_a["uuid"],
+            third["uuid"],
+        ]
+
+
 def test_annotation_items_crud(client):
     auth = _signup(client)
     h = auth["headers"]

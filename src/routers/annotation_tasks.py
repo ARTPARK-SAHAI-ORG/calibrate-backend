@@ -17,6 +17,7 @@ from db import (
     delete_annotation_task,
     add_evaluator_to_annotation_task,
     remove_evaluator_from_annotation_task,
+    reorder_evaluators_for_annotation_task,
     get_evaluators_for_annotation_task,
     get_evaluator,
     get_evaluator_version,
@@ -159,6 +160,13 @@ class AnnotationTaskCreateResponse(BaseModel):
 
 class EvaluatorLinkRequest(BaseModel):
     evaluator_id: str
+
+
+class EvaluatorOrderRequest(BaseModel):
+    # Full ordered list of currently-linked evaluator UUIDs. Must match the
+    # active linked set exactly — this endpoint reorders, it does not
+    # link/unlink. Send `[]` only if the task has no linked evaluators.
+    evaluator_ids: List[str]
 
 
 def _ensure_owned_task(task_uuid: str, org_uuid: str) -> Dict[str, Any]:
@@ -362,6 +370,35 @@ async def link_evaluator_to_task(
     _ensure_owned_evaluator(payload.evaluator_id, ctx.org_uuid)
     add_evaluator_to_annotation_task(task_uuid, payload.evaluator_id)
     return {"message": "Evaluator linked to annotation task"}
+
+
+@router.put("/{task_uuid}/evaluators/order")
+async def reorder_task_evaluators(
+    task_uuid: str,
+    payload: EvaluatorOrderRequest,
+    ctx: OrgContext = Depends(get_current_org),
+):
+    """Re-number the display order of evaluators linked to a task.
+
+    `evaluator_ids` MUST be the full ordered list of currently-active
+    evaluators on the task — same set, no duplicates. This endpoint reorders
+    only; it does not link or unlink. Mismatch returns 400.
+
+    The new order is read by every surface that lists task evaluators
+    (`GET /annotation-tasks/{uuid}`, `GET /annotation-tasks/{uuid}/evaluators`,
+    per-item summary, `/agreement`, `/summary`, item-edit). Existing job
+    snapshots are NOT re-ordered — by design, since a job's evaluator order is
+    frozen at creation time.
+    """
+    _ensure_owned_task(task_uuid, ctx.org_uuid)
+    try:
+        reorder_evaluators_for_annotation_task(task_uuid, payload.evaluator_ids)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    return {
+        "message": "Evaluator order updated",
+        "evaluators": get_evaluators_for_annotation_task(task_uuid),
+    }
 
 
 # ============ Items ============

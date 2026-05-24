@@ -777,6 +777,11 @@ def init_db():
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 task_id TEXT NOT NULL,
                 evaluator_id TEXT NOT NULL,
+                -- Explicit display order. New links append (MAX(position)+1
+                -- among active rows for the task). Reorder via
+                -- `reorder_evaluators_for_annotation_task` /
+                -- `PUT /annotation-tasks/{uuid}/evaluators/order`.
+                position INTEGER DEFAULT NULL,
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                 deleted_at TIMESTAMP DEFAULT NULL,
                 UNIQUE(task_id, evaluator_id),
@@ -868,6 +873,11 @@ def init_db():
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 job_id TEXT NOT NULL,
                 evaluator_id TEXT NOT NULL,
+                -- Snapshotted from the parent task's `annotation_task_evaluators.position`
+                -- at job creation time. Drives the order evaluators appear in
+                -- the annotator's job view; later reordering on the task does
+                -- NOT propagate to existing job snapshots.
+                position INTEGER DEFAULT NULL,
                 UNIQUE(job_id, evaluator_id),
                 FOREIGN KEY (job_id) REFERENCES annotation_jobs(uuid),
                 FOREIGN KEY (evaluator_id) REFERENCES evaluators(uuid)
@@ -909,6 +919,13 @@ def init_db():
             # SQLite rejects CURRENT_TIMESTAMP as a non-constant default in
             # ADD COLUMN, so we land NULL and backfill from created_at below.
             "ALTER TABLE annotation_items ADD COLUMN updated_at TIMESTAMP DEFAULT NULL",
+            # Explicit display order for the evaluators attached to an
+            # annotation task. NULL on legacy rows; backfilled from `id` so
+            # current (insertion) order is preserved. See
+            # `get_evaluators_for_annotation_task` / `get_evaluators_for_job`
+            # for the read-side ORDER BY.
+            "ALTER TABLE annotation_task_evaluators ADD COLUMN position INTEGER DEFAULT NULL",
+            "ALTER TABLE annotation_job_evaluators ADD COLUMN position INTEGER DEFAULT NULL",
         ):
             try:
                 cursor.execute(stmt)
@@ -918,6 +935,15 @@ def init_db():
         # Backfill annotation_items.updated_at for rows predating the column.
         cursor.execute(
             "UPDATE annotation_items SET updated_at = created_at WHERE updated_at IS NULL"
+        )
+
+        # Backfill `position` from `id` so existing pivots keep their current
+        # (insertion) order. Idempotent: only touches NULL rows.
+        cursor.execute(
+            "UPDATE annotation_task_evaluators SET position = id WHERE position IS NULL"
+        )
+        cursor.execute(
+            "UPDATE annotation_job_evaluators SET position = id WHERE position IS NULL"
         )
 
         cursor.execute(
@@ -6296,8 +6322,30 @@ def delete_annotation_task(task_uuid: str) -> bool:
 # ============ Annotation Task Evaluators ============
 
 
+def _next_evaluator_position(cursor: sqlite3.Cursor, task_id: str) -> int:
+    """Return MAX(position)+1 among active links for this task, or 1 if none.
+
+    Used by `add_evaluator_to_annotation_task` (and the restore path) so newly
+    attached evaluators always land at the end of the display order.
+    """
+    cursor.execute(
+        """
+        SELECT COALESCE(MAX(position), 0) + 1 AS next_pos
+          FROM annotation_task_evaluators
+         WHERE task_id = ? AND deleted_at IS NULL
+        """,
+        (task_id,),
+    )
+    row = cursor.fetchone()
+    return int(row["next_pos"]) if row else 1
+
+
 def add_evaluator_to_annotation_task(task_id: str, evaluator_id: str) -> int:
-    """Link an evaluator to an annotation task. Restores soft-deleted links if present."""
+    """Link an evaluator to an annotation task. Restores soft-deleted links if present.
+
+    New (or restored) links are appended to the task's display order via the
+    pivot's `position` column. Existing active links keep their position.
+    """
     with get_db_connection() as conn:
         cursor = conn.cursor()
         cursor.execute(
@@ -6309,20 +6357,22 @@ def add_evaluator_to_annotation_task(task_id: str, evaluator_id: str) -> int:
         )
         existing = cursor.fetchone()
         if existing:
+            next_pos = _next_evaluator_position(cursor, task_id)
             cursor.execute(
                 "UPDATE annotation_task_evaluators "
-                "SET deleted_at = NULL, created_at = CURRENT_TIMESTAMP "
+                "SET deleted_at = NULL, created_at = CURRENT_TIMESTAMP, position = ? "
                 "WHERE id = ?",
-                (existing["id"],),
+                (next_pos, existing["id"]),
             )
             conn.commit()
             return existing["id"]
+        next_pos = _next_evaluator_position(cursor, task_id)
         cursor.execute(
             """
-            INSERT INTO annotation_task_evaluators (task_id, evaluator_id)
-            VALUES (?, ?)
+            INSERT INTO annotation_task_evaluators (task_id, evaluator_id, position)
+            VALUES (?, ?, ?)
             """,
-            (task_id, evaluator_id),
+            (task_id, evaluator_id, next_pos),
         )
         conn.commit()
         return cursor.lastrowid
@@ -6340,6 +6390,53 @@ def remove_evaluator_from_annotation_task(task_id: str, evaluator_id: str) -> bo
         )
         conn.commit()
         return cursor.rowcount > 0
+
+
+def reorder_evaluators_for_annotation_task(
+    task_id: str, ordered_evaluator_ids: List[str]
+) -> None:
+    """Atomically re-number `position` on the active evaluator links for a task.
+
+    `ordered_evaluator_ids` MUST be the full set of currently-active evaluator
+    UUIDs for the task — same length, same membership, no duplicates. The
+    function does not link/unlink; it only re-numbers. Mismatch raises
+    `ValueError` so the router can return 400.
+
+    Positions are assigned 1..N in the given order. Soft-deleted links are
+    left alone (they have no position to update). Existing job snapshots
+    (`annotation_job_evaluators.position`) are intentionally NOT touched —
+    snapshots are frozen at job-creation time.
+    """
+    if len(set(ordered_evaluator_ids)) != len(ordered_evaluator_ids):
+        raise ValueError("ordered_evaluator_ids contains duplicates")
+    with get_db_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            """
+            SELECT evaluator_id FROM annotation_task_evaluators
+             WHERE task_id = ? AND deleted_at IS NULL
+            """,
+            (task_id,),
+        )
+        current = {r["evaluator_id"] for r in cursor.fetchall()}
+        provided = set(ordered_evaluator_ids)
+        if current != provided:
+            missing = current - provided
+            extra = provided - current
+            raise ValueError(
+                "ordered_evaluator_ids must match the currently-linked set "
+                f"(missing={sorted(missing)}, extra={sorted(extra)})"
+            )
+        for idx, evaluator_id in enumerate(ordered_evaluator_ids, start=1):
+            cursor.execute(
+                """
+                UPDATE annotation_task_evaluators
+                   SET position = ?
+                 WHERE task_id = ? AND evaluator_id = ? AND deleted_at IS NULL
+                """,
+                (idx, task_id, evaluator_id),
+            )
+        conn.commit()
 
 
 def create_annotator(name: str, org_uuid: str, user_id: Optional[str] = None) -> str:
@@ -6687,20 +6784,28 @@ def create_annotation_job(
         )
         # Snapshot the currently-linked evaluator set. Reads via
         # `get_evaluator_ids_for_job` give the auto-complete check a stable
-        # view independent of later link/unlink on the parent task.
+        # view independent of later link/unlink on the parent task. The
+        # parent task's display order (`position`) is snapshotted into the
+        # job pivot so the annotator's form keeps the order in place at
+        # job-creation time — reordering on the task afterwards does NOT
+        # propagate to existing jobs.
         cursor.execute(
             """
-            SELECT evaluator_id FROM annotation_task_evaluators
+            SELECT evaluator_id, position FROM annotation_task_evaluators
              WHERE task_id = ? AND deleted_at IS NULL
+             ORDER BY position ASC, id ASC
             """,
             (task_id,),
         )
-        evaluator_uuids = [r["evaluator_id"] for r in cursor.fetchall()]
-        if evaluator_uuids:
+        snapshot_rows = cursor.fetchall()
+        if snapshot_rows:
             cursor.executemany(
-                "INSERT INTO annotation_job_evaluators (job_id, evaluator_id) "
-                "VALUES (?, ?)",
-                [(job_uuid, ev_id) for ev_id in evaluator_uuids],
+                "INSERT INTO annotation_job_evaluators "
+                "(job_id, evaluator_id, position) VALUES (?, ?, ?)",
+                [
+                    (job_uuid, r["evaluator_id"], idx)
+                    for idx, r in enumerate(snapshot_rows, start=1)
+                ],
             )
         conn.commit()
     return job_uuid
@@ -6713,7 +6818,7 @@ def get_evaluator_ids_for_job(job_uuid: str) -> List[str]:
         cursor = conn.cursor()
         cursor.execute(
             "SELECT evaluator_id FROM annotation_job_evaluators "
-            "WHERE job_id = ? ORDER BY id ASC",
+            "WHERE job_id = ? ORDER BY position ASC, id ASC",
             (job_uuid,),
         )
         return [r["evaluator_id"] for r in cursor.fetchall()]
@@ -6746,7 +6851,10 @@ def get_evaluators_for_job(job_uuid: str) -> List[Dict[str, Any]]:
               FROM annotation_job_evaluators je
               JOIN evaluators e ON e.uuid = je.evaluator_id
              WHERE je.job_id = ?
-             ORDER BY je.id ASC
+             -- Honor the snapshotted display order from the parent task at
+             -- job-creation time. `id` fallback covers any legacy rows
+             -- inserted before the `position` column existed.
+             ORDER BY je.position ASC, je.id ASC
             """,
             (job_uuid,),
         )
@@ -7537,13 +7645,17 @@ def get_evaluators_for_annotation_task(task_id: str) -> List[Dict[str, Any]]:
                 e.owner_user_id AS owner_user_id,
                 e.slug AS slug,
                 e.live_version_id AS live_version_id,
-                ate.created_at AS linked_at
+                ate.created_at AS linked_at,
+                ate.position AS position
               FROM annotation_task_evaluators ate
               JOIN evaluators e ON e.uuid = ate.evaluator_id
              WHERE ate.task_id = ?
                AND ate.deleted_at IS NULL
                AND e.deleted_at IS NULL
-             ORDER BY ate.created_at ASC, ate.id ASC
+             -- Order by explicit display position; fall back to id for any
+             -- rows that haven't been backfilled yet (NULLs sort LAST in
+             -- SQLite ASC, but the init_db backfill should leave none NULL).
+             ORDER BY ate.position ASC, ate.id ASC
             """,
             (task_id,),
         )
