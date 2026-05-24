@@ -899,6 +899,33 @@ def test_annotation_pipeline(user):
         task_uuid, [seeded["uuid"], other["uuid"]]
     )
 
+    # Reorder must IGNORE pivot rows whose evaluator has been soft-deleted on
+    # the `evaluators` table. `delete_evaluator` doesn't cascade to the pivot
+    # (the link's `deleted_at` stays NULL), but `get_evaluators_for_annotation_task`
+    # JOINs and filters `e.deleted_at IS NULL` — so clients can't see those
+    # UUIDs. If the validator counted them, every task with a deleted-but-still-
+    # linked evaluator would 400 forever. Custom evaluator (org-owned) so
+    # delete_evaluator is allowed; seeded defaults are protected.
+    custom_ev = db.create_evaluator(
+        name=_u("ev-soft-delete"),
+        owner_user_id=user["uuid"],
+        org_uuid=user["org_uuid"],
+    )
+    db.add_evaluator_to_annotation_task(task_uuid, custom_ev)
+    visible_before = [
+        e["uuid"] for e in db.get_evaluators_for_annotation_task(task_uuid)
+    ]
+    assert custom_ev in visible_before
+    assert db.delete_evaluator(custom_ev) is True
+    visible_after = [
+        e["uuid"] for e in db.get_evaluators_for_annotation_task(task_uuid)
+    ]
+    # FE no longer sees the deleted evaluator on the task.
+    assert custom_ev not in visible_after
+    # Reorder using only the FE-visible ids must succeed (validator must
+    # exclude the deleted evaluator from its "current" set).
+    db.reorder_evaluators_for_annotation_task(task_uuid, visible_after)
+
     # annotator
     ann_uuid = db.create_annotator(name=_u("ann"), user_id=user["uuid"], org_uuid=user["org_uuid"])
     assert db.get_annotator(ann_uuid)

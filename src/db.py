@@ -6411,10 +6411,21 @@ def reorder_evaluators_for_annotation_task(
         raise ValueError("ordered_evaluator_ids contains duplicates")
     with get_db_connection() as conn:
         cursor = conn.cursor()
+        # Validate against the set the caller can actually see: pivot links
+        # whose evaluator row is itself still active. Evaluator soft-delete
+        # does NOT cascade to `annotation_task_evaluators.deleted_at`, so a
+        # pivot row can outlive its evaluator — `get_evaluators_for_annotation_task`
+        # JOINs and filters `e.deleted_at IS NULL`, hiding those rows from
+        # clients. If we validated against the raw pivot instead, clients
+        # would get 400s referencing UUIDs they were never told about.
         cursor.execute(
             """
-            SELECT evaluator_id FROM annotation_task_evaluators
-             WHERE task_id = ? AND deleted_at IS NULL
+            SELECT ate.evaluator_id
+              FROM annotation_task_evaluators ate
+              JOIN evaluators e ON e.uuid = ate.evaluator_id
+             WHERE ate.task_id = ?
+               AND ate.deleted_at IS NULL
+               AND e.deleted_at IS NULL
             """,
             (task_id,),
         )
