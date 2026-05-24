@@ -912,6 +912,45 @@ def test_annotation_task_agreement_and_summary(client):
         headers=h,
     )
     assert summary_filtered.status_code == 200
+
+    # ---- Top-level evaluators[] / row shape contract --------------------
+    body = summary_filtered.json()
+    assert "evaluators" in body and len(body["evaluators"]) == 1
+    ev_entry = body["evaluators"][0]
+    # Enriched per-evaluator block carries identity + every version's rubric.
+    assert ev_entry["uuid"] == llm_ev["uuid"]
+    assert ev_entry["output_type"] in ("binary", "rating")
+    assert "description" in ev_entry
+    assert "live_version_id" in ev_entry
+    assert isinstance(ev_entry["versions"], list) and ev_entry["versions"]
+    # `live_version_index` indexes into versions[] (or None if no live).
+    if ev_entry["live_version_id"]:
+        assert isinstance(ev_entry["live_version_index"], int)
+        live_v = ev_entry["versions"][ev_entry["live_version_index"]]
+        assert live_v["is_live"] is True
+        assert live_v["uuid"] == ev_entry["live_version_id"]
+    # Rubric exposed once per version (binary defaults to Correct/Wrong).
+    for v in ev_entry["versions"]:
+        if ev_entry["output_type"] == "binary" and v["uuid"] is not None:
+            assert v["output_config"] is not None
+            assert v["output_config"]["scale"]
+
+    # Rows are minimal — evaluator-level / version-level fields live on the
+    # top-level evaluators[] block and MUST NOT be duplicated per row.
+    for row in body["rows"]:
+        assert row["evaluator_id"] == llm_ev["uuid"]
+        for forbidden in (
+            "evaluator_name",
+            "output_type",
+            "evaluator_version_number",
+            "scale_min",
+            "scale_max",
+            "is_live_version",
+        ):
+            assert forbidden not in row, (
+                f"row should not duplicate {forbidden} — read it from "
+                f"evaluators[] via evaluator_id/evaluator_version_id"
+            )
     # Missing item id → 404
     missing_summary = client.get(
         f"/annotation-tasks/{task_uuid}/summary",

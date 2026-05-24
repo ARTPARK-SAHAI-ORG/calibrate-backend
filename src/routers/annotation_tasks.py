@@ -1883,35 +1883,63 @@ async def task_summary(
       {
         "task_id": str,
         "task_type": "stt" | "llm" | "simulation",
-        "evaluators": [{evaluator_id, name, output_type, run_count}],
-                                        # `run_count` = total evaluator-runs for
-                                        # this evaluator across ALL versions,
-                                        # over the items in scope (honors
-                                        # `item_id` filter; unaffected by
-                                        # `live_only`)
-        "annotators": [{uuid, name}],   # union of annotators with ≥1 (item, evaluator)
-                                        # annotation in this task; column order
+        "evaluators": [
+          {
+            "uuid": str,
+            "name": str, "description": str|null,
+            "output_type": "binary" | "rating",
+            "evaluator_type": str, "data_type": str,
+            "live_version_id": str|null,
+            "live_version_index": int|null,         # array position of the
+                                                    # live version inside
+                                                    # `versions[]`, or null
+                                                    # when no live version
+                                                    # / no match
+            "versions": [
+              {
+                "uuid": str|null,                   # null only for the
+                                                    # placeholder slot when
+                                                    # the evaluator has no
+                                                    # runs + no live version
+                "version_number": int|null,
+                "output_config": {scale: [...]}|null,  # binary defaults to
+                                                       # Correct/Wrong when
+                                                       # unset; rating stays
+                                                       # null
+                "scale_min": float|null,
+                "scale_max": float|null,
+                "is_live": bool
+              }
+            ],
+            "run_count": int,                       # total evaluator-runs
+                                                    # across ALL versions,
+                                                    # restricted to items in
+                                                    # scope (honors
+                                                    # `item_id`; ignores
+                                                    # `live_only`)
+          }
+        ],
+        "annotators": [{uuid, name}],               # union of annotators with
+                                                    # ≥1 (item, evaluator)
+                                                    # annotation in this task
         "rows": [
           {
             "item_id": str,
-            "payload": <item.payload>,             # FE derives display per task_type
-            "evaluator_id": str,
-            "evaluator_name": str,
-            "output_type": "binary" | "rating",
-            "evaluator_version_id": str | null,
-            "evaluator_version_number": int | null,
-            "evaluator_value": <scalar | null>,    # latest run on this slot
-            "evaluator_value_name": str | null,    # human-readable name for the
-                                                   # value: from output_config.scale
-                                                   # entry's `name` if set, else
-                                                   # `Correct`/`Wrong` for binary
-                                                   # true/false or stringified
-                                                   # score for rating
-            "evaluator_reasoning": str | null,
+            "payload": <item.payload>,              # FE derives display per task_type
+            "evaluator_id": str,                    # FK into evaluators[].uuid
+            "evaluator_version_id": str|null,       # FK into evaluators[].versions[].uuid
+            "evaluator_value": <scalar|null>,       # latest run on this slot
+            "evaluator_value_name": str|null,       # resolved label per row
+                                                    # (FE could re-derive
+                                                    # from output_config but
+                                                    # we precompute it)
+            "evaluator_reasoning": str|null,
             "annotations": {
-              "<annotator_uuid>": {"value": <scalar>, "reasoning": str | null} | null,
+              "<annotator_uuid>": {"value": <scalar>, "reasoning": str|null} | null,
               ...
-            }
+            },
+            "human_agreement": float|null,
+            "evaluator_agreement": float|null
           }
         ]
       }
@@ -1924,8 +1952,10 @@ async def task_summary(
         emitted per `(item, evaluator)`.
       - `evaluator_value` is the latest evaluator-run for THAT specific
         version slot, regardless of which evaluator-run job produced it.
-      - `is_live_version` flags rows whose `evaluator_version_id` matches
-        the evaluator's current `live_version_id`.
+      - To check whether a row is on the live version, compare
+        `evaluator_version_id` to the matching evaluator's `live_version_id`
+        (or use `live_version_index` to index `versions[]` and read `is_live`).
+        That flag is intentionally NOT duplicated on every row.
       - Each annotator cell is that annotator's latest annotation for the slot,
         across ALL annotation jobs (matches the agreement aggregator's
         latest-wins-per-annotator semantics). `null` if they haven't annotated it.
@@ -2123,28 +2153,12 @@ async def task_summary(
                     {
                         "item_id": item["uuid"],
                         "payload": item.get("payload"),
+                        # Reference into the top-level `evaluators[]` block
+                        # — name/description/output_type and the version's
+                        # rubric (output_config, scale_min/max, is_live)
+                        # live there, not duplicated on every row.
                         "evaluator_id": ev_id,
-                        "evaluator_name": ev.get("name"),
-                        "output_type": ev.get("output_type"),
                         "evaluator_version_id": version_id,
-                        "evaluator_version_number": (
-                            version_meta.get("version_number")
-                            if version_meta
-                            else None
-                        ),
-                        "scale_min": (
-                            version_meta.get("scale_min")
-                            if version_meta
-                            else None
-                        ),
-                        "scale_max": (
-                            version_meta.get("scale_max")
-                            if version_meta
-                            else None
-                        ),
-                        "is_live_version": (
-                            version_id == live_v if version_id else False
-                        ),
                         "evaluator_value": ev_value,
                         "evaluator_value_name": _evaluator_value_name(
                             ev_value,
@@ -2158,18 +2172,72 @@ async def task_summary(
                     }
                 )
 
+    # Build the enriched top-level `evaluators[]` block — one entry per
+    # linked evaluator with the per-version rubric inlined so the FE has
+    # everything to render row labels without joining per-row metadata.
+    from llm_judge import default_output_config
+
+    evaluators_block: List[Dict[str, Any]] = []
+    for ev in evaluators:
+        ev_id = ev["uuid"]
+        live_v = ev.get("live_version_id")
+        version_ids = _version_row_keys(ev_id, live_v)
+        versions_payload: List[Dict[str, Any]] = []
+        live_version_index: Optional[int] = None
+        for v_id in version_ids:
+            if v_id is None:
+                # Placeholder for evaluators with no live version + no runs
+                # — keep the slot so the table can still render an empty
+                # evaluator column.
+                versions_payload.append(
+                    {
+                        "uuid": None,
+                        "version_number": None,
+                        "output_config": default_output_config(
+                            ev.get("output_type")
+                        ),
+                        "scale_min": None,
+                        "scale_max": None,
+                        "is_live": False,
+                    }
+                )
+                continue
+            meta = _version_meta(v_id) or {}
+            output_config = meta.get("output_config")
+            if output_config is None:
+                output_config = default_output_config(ev.get("output_type"))
+            is_live = v_id == live_v
+            if is_live:
+                live_version_index = len(versions_payload)
+            versions_payload.append(
+                {
+                    "uuid": v_id,
+                    "version_number": meta.get("version_number"),
+                    "output_config": output_config,
+                    "scale_min": meta.get("scale_min"),
+                    "scale_max": meta.get("scale_max"),
+                    "is_live": is_live,
+                }
+            )
+        evaluators_block.append(
+            {
+                "uuid": ev_id,
+                "name": ev.get("name"),
+                "description": ev.get("description"),
+                "output_type": ev.get("output_type"),
+                "evaluator_type": ev.get("evaluator_type"),
+                "data_type": ev.get("data_type"),
+                "live_version_id": live_v,
+                "live_version_index": live_version_index,
+                "versions": versions_payload,
+                "run_count": run_count_by_evaluator.get(ev_id, 0),
+            }
+        )
+
     return {
         "task_id": task_uuid,
         "task_type": task["type"],
-        "evaluators": [
-            {
-                "evaluator_id": e["uuid"],
-                "name": e.get("name"),
-                "output_type": e.get("output_type"),
-                "run_count": run_count_by_evaluator.get(e["uuid"], 0),
-            }
-            for e in evaluators
-        ],
+        "evaluators": evaluators_block,
         "annotators": annotators,
         "rows": rows,
     }
