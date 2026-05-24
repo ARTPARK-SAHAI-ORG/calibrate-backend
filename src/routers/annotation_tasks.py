@@ -334,8 +334,9 @@ async def list_task_evaluators(
         if not ev:
             continue
         base = _evaluator_response(ev)
+        ev_output_type = ev.get("output_type", "binary")
         versions = [
-            EvaluatorVersionResponse(**_version_dict(v))
+            EvaluatorVersionResponse(**_version_dict(v, ev_output_type))
             for v in get_evaluator_versions(ev["uuid"])
         ]
         out.append(

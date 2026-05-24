@@ -147,6 +147,14 @@ def test_annotation_task_crud(client):
     canonical = client.get(f"/evaluators/{llm_ev['uuid']}", headers=h).json()
     assert set(one.keys()) == set(canonical.keys())
 
+    # Versions never expose a null output_config for binary evaluators —
+    # they get the Correct/Wrong default when stored as null. Rating
+    # versions may still be null (no enumerable default without bounds).
+    for v in one["versions"]:
+        if one["output_type"] == "binary":
+            assert v["output_config"] is not None
+            assert v["output_config"].get("scale")
+
     # unlink evaluator
     unlink = client.delete(
         f"/annotation-tasks/{task_uuid}/evaluators/{llm_ev['uuid']}", headers=h
@@ -801,6 +809,27 @@ def test_annotation_agreement_endpoints(client):
         "/annotation-agreement/evaluator/missing/trend", headers=h
     )
     assert missing_ev.status_code == 404
+
+
+def test_default_output_config_helper():
+    """Binary evaluators get a Correct/Wrong fallback rubric; rating evaluators
+    stay null because no meaningful default exists without bounds."""
+    from llm_judge import default_output_config
+
+    cfg = default_output_config("binary")
+    assert cfg == {
+        "scale": [
+            {"value": True, "name": "Correct"},
+            {"value": False, "name": "Wrong"},
+        ]
+    }
+    # Mutating returned config must not bleed into subsequent calls.
+    cfg["scale"][0]["name"] = "X"
+    assert default_output_config("binary")["scale"][0]["name"] == "Correct"
+
+    assert default_output_config("rating") is None
+    assert default_output_config(None) is None
+    assert default_output_config("unknown") is None
 
 
 def test_evaluator_value_name_mapping():

@@ -57,6 +57,26 @@ def _format_scale_rubric(output_config: Optional[Dict[str, Any]]) -> str:
     return "\n\nRubric:\n" + "\n".join(lines)
 
 
+_DEFAULT_BINARY_OUTPUT_CONFIG: Dict[str, Any] = {
+    "scale": [
+        {"value": True, "name": "Correct"},
+        {"value": False, "name": "Wrong"},
+    ]
+}
+
+
+def default_output_config(output_type: Optional[str]) -> Optional[Dict[str, Any]]:
+    """Sensible default `output_config` for versions that don't carry their
+    own rubric. Binary → Correct/Wrong scale (mirrors the
+    `evaluator_value_name` fallback). Rating returns None because no meaningful
+    default scale exists without bounds — `evaluator_value_name` falls back to
+    `str(value)` there, which the FE can replicate. Returns a deep-ish copy so
+    callers can mutate it without leaking back into the constant."""
+    if output_type == "binary":
+        return {"scale": [dict(e) for e in _DEFAULT_BINARY_OUTPUT_CONFIG["scale"]]}
+    return None
+
+
 def evaluator_value_name(
     value: Any,
     output_type: Optional[str],

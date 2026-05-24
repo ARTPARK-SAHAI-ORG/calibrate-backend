@@ -187,14 +187,26 @@ def _ensure_unique_evaluator_name(
         raise HTTPException(status_code=409, detail="Evaluator name already exists")
 
 
-def _version_dict(version: Dict[str, Any]) -> Dict[str, Any]:
-    """Shape an evaluator_versions row for the API response."""
+def _version_dict(
+    version: Dict[str, Any],
+    output_type: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Shape an evaluator_versions row for the API response. When `output_config`
+    is missing on the stored row, fill in the evaluator's default rubric for
+    the given `output_type` so consumers don't have to handle a null scale —
+    binary rows get Correct/Wrong, rating rows stay null (the FE falls back to
+    `str(value)`)."""
+    from llm_judge import default_output_config
+
+    output_config = version.get("output_config")
+    if output_config is None:
+        output_config = default_output_config(output_type)
     return {
         "uuid": version["uuid"],
         "version_number": version["version_number"],
         "judge_model": version["judge_model"],
         "system_prompt": version["system_prompt"],
-        "output_config": version.get("output_config"),
+        "output_config": output_config,
         "variables": version.get("variables"),
         "created_at": version["created_at"],
     }
@@ -202,10 +214,13 @@ def _version_dict(version: Dict[str, Any]) -> Dict[str, Any]:
 
 def _evaluator_response(evaluator: Dict[str, Any]) -> EvaluatorResponse:
     live_version = None
+    output_type = evaluator.get("output_type", "binary")
     if evaluator.get("live_version_id"):
         v = get_evaluator_version(evaluator["live_version_id"])
         if v:
-            live_version = EvaluatorVersionResponse(**_version_dict(v))
+            live_version = EvaluatorVersionResponse(
+                **_version_dict(v, output_type)
+            )
     return EvaluatorResponse(
         uuid=evaluator["uuid"],
         name=evaluator["name"],
@@ -331,7 +346,11 @@ async def get_evaluator_endpoint(
 ):
     evaluator = _visible_or_404(get_evaluator(evaluator_uuid), ctx.org_uuid)
     base = _evaluator_response(evaluator)
-    versions = [EvaluatorVersionResponse(**_version_dict(v)) for v in get_evaluator_versions(evaluator_uuid)]
+    output_type = evaluator.get("output_type", "binary")
+    versions = [
+        EvaluatorVersionResponse(**_version_dict(v, output_type))
+        for v in get_evaluator_versions(evaluator_uuid)
+    ]
     return EvaluatorDetailResponse(**base.model_dump(), versions=versions)
 
 
