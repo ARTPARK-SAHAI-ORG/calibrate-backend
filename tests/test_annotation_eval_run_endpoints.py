@@ -317,6 +317,50 @@ def test_build_evaluators_block_keeps_stub_for_deleted_evaluator():
     assert block[0]["output_type"] is None
 
 
+def test_build_evaluators_block_applies_binary_default_for_null_rubric():
+    """Binary evaluator whose pinned version has output_config=null
+    surfaces the Correct/Wrong default — consistent with the other
+    evaluator-returning endpoints. Without this, legacy annotation
+    eval-run jobs would expose `output_config=null` and the FE would
+    have nothing to render labels with (per-run evaluator_version
+    blobs were also removed in this PR)."""
+    from routers.annotation_tasks import _build_evaluators_block_for_eval_job
+    from unittest.mock import patch
+
+    job_details = {
+        "evaluators": [
+            {
+                "evaluator_id": "ev-1",
+                "evaluator_version_id": "v-legacy",
+                "name": "Safety",
+            }
+        ]
+    }
+    raw_runs = [{"evaluator_id": "ev-1", "evaluator_version_id": "v-legacy"}]
+    with patch(
+        "routers.annotation_tasks.get_evaluator",
+        return_value={
+            "uuid": "ev-1",
+            "name": "Safety",
+            "description": "d",
+            "output_type": "binary",
+            "evaluator_type": "llm",
+            "data_type": "text",
+        },
+    ), patch(
+        "routers.annotation_tasks.get_evaluator_version",
+        return_value={"uuid": "v-legacy", "version_number": 1, "output_config": None},
+    ):
+        block = _build_evaluators_block_for_eval_job(job_details, raw_runs)
+    assert len(block) == 1
+    assert block[0]["output_config"] == {
+        "scale": [
+            {"value": True, "name": "Correct"},
+            {"value": False, "name": "Wrong"},
+        ]
+    }
+
+
 def test_evaluator_run_with_specific_item_ids(client):
     auth = _signup(client)
     h = auth["headers"]

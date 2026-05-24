@@ -1337,7 +1337,7 @@ def _build_evaluators_block_for_eval_job(
     snapshot (legacy `details.evaluators` absent) still get a populated
     block.
     """
-    from llm_judge import _scale_bounds  # local to avoid module-load cycle
+    from llm_judge import _scale_bounds, default_output_config  # local to avoid module-load cycle
 
     snapshot = (job_details or {}).get("evaluators") or []
     # Dedupe (evaluator_id, evaluator_version_id) slots across snapshot
@@ -1382,6 +1382,13 @@ def _build_evaluators_block_for_eval_job(
             version_cache[version_id] = get_evaluator_version(version_id)
         version = version_cache.get(version_id) if version_id else None
         output_config = version.get("output_config") if version else None
+        # Apply the Correct/Wrong fallback for binary evaluators whose
+        # pinned version has a null rubric — consistent with the other
+        # evaluator-returning endpoints in this PR (evaluator detail,
+        # versions list, summary, agent-test block builder).
+        ev_output_type = ev.get("output_type") if ev else None
+        if output_config is None:
+            output_config = default_output_config(ev_output_type)
         scale_min, scale_max = _scale_bounds(output_config)
         out.append(
             {
