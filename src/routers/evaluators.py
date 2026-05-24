@@ -155,10 +155,13 @@ class EvaluatorResponse(EvaluatorResponseBase):
 
 
 class EvaluatorDetailResponse(EvaluatorResponseBase):
-    # Detail shape: `versions[]` is the full history; `live_version_id`
-    # picks the live one out of it. No inlined `live_version` — the FE
-    # indexes by uuid into `versions[]`.
+    # Detail shape: `versions[]` is the full history; `live_version_index`
+    # is the direct array position of the live version (None when the
+    # evaluator has no live version, or when the live id doesn't resolve
+    # to anything in `versions[]`). Clients should prefer the index over
+    # scanning `versions[]` by uuid.
     versions: List[EvaluatorVersionResponse]
+    live_version_index: Optional[int] = None
 
 
 class EvaluatorCreateResponse(BaseModel):
@@ -228,6 +231,20 @@ def _version_dict(
         "variables": version.get("variables"),
         "created_at": version["created_at"],
     }
+
+
+def _live_version_index(
+    versions: List[EvaluatorVersionResponse],
+    live_version_id: Optional[str],
+) -> Optional[int]:
+    """Position of the live version in `versions[]`, or None if no live
+    version is set or the id doesn't match any entry."""
+    if not live_version_id:
+        return None
+    for i, v in enumerate(versions):
+        if v.uuid == live_version_id:
+            return i
+    return None
 
 
 def _evaluator_response(evaluator: Dict[str, Any]) -> EvaluatorResponse:
@@ -370,9 +387,12 @@ async def get_evaluator_endpoint(
         for v in get_evaluator_versions(evaluator_uuid)
     ]
     # base carries `live_version` (list shape); drop it here — detail uses
-    # `versions[]` + `live_version_id` so we don't duplicate the version.
+    # `versions[]` + `live_version_id`/`live_version_index` so we don't
+    # duplicate the version.
     return EvaluatorDetailResponse(
-        **base.model_dump(exclude={"live_version"}), versions=versions
+        **base.model_dump(exclude={"live_version"}),
+        versions=versions,
+        live_version_index=_live_version_index(versions, base.live_version_id),
     )
 
 

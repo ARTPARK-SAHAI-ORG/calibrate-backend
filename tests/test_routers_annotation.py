@@ -139,14 +139,14 @@ def test_annotation_task_crud(client):
     assert one["uuid"] == llm_ev["uuid"]
     assert "versions" in one and isinstance(one["versions"], list) and one["versions"]
     # Detail shape intentionally has NO inline `live_version` — clients
-    # resolve it by indexing `live_version_id` into `versions[]`.
+    # resolve it via `live_version_index` (or `live_version_id`) into
+    # `versions[]`. The index is the cheap path; the id is the fallback
+    # for when the id-list relationship needs to be re-verified.
     assert "live_version" not in one
     assert one["live_version_id"]
-    live = next(
-        (v for v in one["versions"] if v["uuid"] == one["live_version_id"]),
-        None,
-    )
-    assert live is not None
+    assert isinstance(one["live_version_index"], int)
+    live = one["versions"][one["live_version_index"]]
+    assert live["uuid"] == one["live_version_id"]
     assert "output_config" in live
     # Compare against the canonical detail endpoint so the two shapes don't
     # drift apart silently.

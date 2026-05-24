@@ -318,6 +318,7 @@ async def list_task_evaluators(
         EvaluatorDetailResponse,
         EvaluatorVersionResponse,
         _evaluator_response,
+        _live_version_index,
         _version_dict,
     )
     from db import get_evaluator_versions
@@ -341,7 +342,11 @@ async def list_task_evaluators(
         ]
         out.append(
             EvaluatorDetailResponse(
-                **base.model_dump(exclude={"live_version"}), versions=versions
+                **base.model_dump(exclude={"live_version"}),
+                versions=versions,
+                live_version_index=_live_version_index(
+                    versions, base.live_version_id
+                ),
             )
         )
     return out
