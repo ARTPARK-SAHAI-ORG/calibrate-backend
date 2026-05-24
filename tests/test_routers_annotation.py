@@ -1174,6 +1174,83 @@ def test_summary_surfaces_item_comments(client):
     }
 
 
+def test_summary_comment_cleared_in_newer_job_wipes_older(client):
+    """When the same annotator has multiple jobs on the same task (e.g. admin
+    re-assigns items in a fresh batch), the (job_id, item_id, evaluator=NULL)
+    unique key keeps each job's row separate. A cleared/invalid comment in
+    the *newer* job must erase the older job's valid comment from
+    item_comments — otherwise the UI would show stale text after a clear."""
+    auth = _signup(client)
+    h = auth["headers"]
+    llm_ev = _llm_evaluator(client, h)
+    task_uuid = client.post(
+        "/annotation-tasks",
+        json={
+            "name": f"t-{uuid.uuid4().hex[:6]}",
+            "type": "llm",
+            "evaluator_ids": [llm_ev["uuid"]],
+        },
+        headers=h,
+    ).json()["uuid"]
+    item_id = client.post(
+        f"/annotation-tasks/{task_uuid}/items",
+        json={"items": [{"payload": {"name": "i1"}}]},
+        headers=h,
+    ).json()["item_ids"][0]
+    annotator = client.post(
+        "/annotators", json={"name": "rater"}, headers=h
+    ).json()
+
+    # Two separate jobs for the same annotator on the same item.
+    job_old = client.post(
+        f"/annotation-tasks/{task_uuid}/jobs",
+        json={"annotator_ids": [annotator["uuid"]], "item_ids": [item_id]},
+        headers=h,
+    ).json()["jobs"][0]
+    job_new = client.post(
+        f"/annotation-tasks/{task_uuid}/jobs",
+        json={"annotator_ids": [annotator["uuid"]], "item_ids": [item_id]},
+        headers=h,
+    ).json()["jobs"][0]
+    assert job_old["uuid"] != job_new["uuid"]
+
+    # Older job: valid comment.
+    assert (
+        client.post(
+            f"/annotation-tasks/{task_uuid}/annotations",
+            json={
+                "job_id": job_old["uuid"],
+                "item_id": item_id,
+                "value": {"comment": "old comment"},
+            },
+            headers=h,
+        ).status_code
+        == 200
+    )
+    # Newer job: cleared comment (empty string is the UI's "remove" signal).
+    assert (
+        client.post(
+            f"/annotation-tasks/{task_uuid}/annotations",
+            json={
+                "job_id": job_new["uuid"],
+                "item_id": item_id,
+                "value": {"comment": ""},
+            },
+            headers=h,
+        ).status_code
+        == 200
+    )
+
+    body = client.get(
+        f"/annotation-tasks/{task_uuid}/summary", headers=h
+    ).json()
+    # Newer "clear" must wipe the older "old comment" — item drops from
+    # item_comments entirely once the last cell is gone.
+    assert item_id not in body["item_comments"], (
+        "newer cleared comment did not erase older valid one"
+    )
+
+
 def test_evaluator_runs_endpoints(client, monkeypatch):
     auth = _signup(client)
     h = auth["headers"]

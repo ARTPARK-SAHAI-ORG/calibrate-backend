@@ -2116,11 +2116,18 @@ async def task_summary(
     # updated_at ASC so overwrite gives latest-wins.
     latest_ann: Dict[tuple, Dict[str, Any]] = {}
     # Row-level (evaluator_id IS NULL) annotations carry per-(item, annotator)
-    # free-text comments. Same latest-wins-on-updated_at semantics; we read the
-    # string out of `value["comment"]` and skip anything that isn't a non-empty
-    # string so a future shape change can't crash the response. Built task-wide
-    # so the annotator union stays consistent with the per-evaluator path —
-    # the per-item filter is applied later, only to the response block.
+    # free-text comments. Same latest-wins-on-updated_at semantics as
+    # `latest_ann`, but crucially: a newer cleared/invalid comment ERASES an
+    # older valid one. This matters when the same annotator has multiple
+    # jobs on the same task — the unique row key is (job_id, item_id,
+    # evaluator_id), so each job keeps its own row and a "clear" in the
+    # newer job must not let the older job's "looks bad" survive in the
+    # response. We read the string out of `value["comment"]` and treat
+    # anything that isn't a non-empty string as a clear; this also guards
+    # against future shape changes that would otherwise crash the response.
+    # Built task-wide so the annotator union stays consistent with the
+    # per-evaluator path — the per-item filter is applied later, only to
+    # the response block.
     all_item_comments: Dict[str, Dict[str, str]] = {}
     for a in annotations:
         annotator_id = a.get("annotator_id")
@@ -2130,12 +2137,21 @@ async def task_summary(
             continue
         if ev_id is None:
             value = a.get("value")
-            if not isinstance(value, dict):
-                continue
-            comment = value.get("comment")
-            if not isinstance(comment, str) or not comment:
-                continue
-            all_item_comments.setdefault(a_item_id, {})[annotator_id] = comment
+            comment: Optional[str] = None
+            if isinstance(value, dict):
+                raw = value.get("comment")
+                if isinstance(raw, str) and raw:
+                    comment = raw
+            if comment is not None:
+                all_item_comments.setdefault(a_item_id, {})[annotator_id] = comment
+            else:
+                # Newer cleared/invalid comment wipes any older one so the
+                # response reflects the annotator's latest intent.
+                cells = all_item_comments.get(a_item_id)
+                if cells is not None:
+                    cells.pop(annotator_id, None)
+                    if not cells:
+                        all_item_comments.pop(a_item_id, None)
             continue
         latest_ann[(a_item_id, ev_id, annotator_id)] = a
 
