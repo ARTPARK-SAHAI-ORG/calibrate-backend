@@ -849,8 +849,7 @@ def test_list_versions_applies_binary_default_output_config(client):
         },
         headers=h,
     )
-    if create.status_code != 200:
-        return  # eval creation gated — nothing to test
+    assert create.status_code == 200, create.text
     ev_uuid = create.json()["uuid"]
     db_mod.create_evaluator_version(
         evaluator_uuid=ev_uuid,
