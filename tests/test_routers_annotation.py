@@ -138,8 +138,14 @@ def test_annotation_task_crud(client):
     # version history + live_version (with rubric).
     assert one["uuid"] == llm_ev["uuid"]
     assert "versions" in one and isinstance(one["versions"], list) and one["versions"]
-    assert "live_version" in one
-    live = one["live_version"]
+    # Detail shape intentionally has NO inline `live_version` — clients
+    # resolve it by indexing `live_version_id` into `versions[]`.
+    assert "live_version" not in one
+    assert one["live_version_id"]
+    live = next(
+        (v for v in one["versions"] if v["uuid"] == one["live_version_id"]),
+        None,
+    )
     assert live is not None
     assert "output_config" in live
     # Compare against the canonical detail endpoint so the two shapes don't

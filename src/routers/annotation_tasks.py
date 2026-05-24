@@ -340,7 +340,9 @@ async def list_task_evaluators(
             for v in get_evaluator_versions(ev["uuid"])
         ]
         out.append(
-            EvaluatorDetailResponse(**base.model_dump(), versions=versions)
+            EvaluatorDetailResponse(
+                **base.model_dump(exclude={"live_version"}), versions=versions
+            )
         )
     return out
 

@@ -123,7 +123,17 @@ class EvaluatorVersionResponse(BaseModel):
     created_at: str
 
 
-class EvaluatorResponse(BaseModel):
+class EvaluatorResponseBase(BaseModel):
+    """Identity + classification fields shared by every evaluator response.
+
+    `live_version_id` is the FK pointer to the current live version. List
+    views inline the full version on `live_version` because there's no
+    `versions[]` to look it up in. Detail views skip the inlined block and
+    expose `versions[]` instead — clients resolve the live version by
+    matching `live_version_id` to a version entry's `uuid` (avoids
+    duplicating the same version payload twice in the same response).
+    """
+
     uuid: str
     name: str
     description: Optional[str] = None
@@ -136,10 +146,18 @@ class EvaluatorResponse(BaseModel):
     live_version_id: Optional[str] = None
     created_at: str
     updated_at: str
+
+
+class EvaluatorResponse(EvaluatorResponseBase):
+    # List shape: no `versions[]` here, so we inline the live version for
+    # the FE.
     live_version: Optional[EvaluatorVersionResponse] = None
 
 
-class EvaluatorDetailResponse(EvaluatorResponse):
+class EvaluatorDetailResponse(EvaluatorResponseBase):
+    # Detail shape: `versions[]` is the full history; `live_version_id`
+    # picks the live one out of it. No inlined `live_version` — the FE
+    # indexes by uuid into `versions[]`.
     versions: List[EvaluatorVersionResponse]
 
 
@@ -351,7 +369,11 @@ async def get_evaluator_endpoint(
         EvaluatorVersionResponse(**_version_dict(v, output_type))
         for v in get_evaluator_versions(evaluator_uuid)
     ]
-    return EvaluatorDetailResponse(**base.model_dump(), versions=versions)
+    # base carries `live_version` (list shape); drop it here — detail uses
+    # `versions[]` + `live_version_id` so we don't duplicate the version.
+    return EvaluatorDetailResponse(
+        **base.model_dump(exclude={"live_version"}), versions=versions
+    )
 
 
 @router.put("/{evaluator_uuid}", response_model=EvaluatorResponse)
