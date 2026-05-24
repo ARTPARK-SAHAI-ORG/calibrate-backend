@@ -1029,17 +1029,22 @@ def test_summary_surfaces_item_comments(client):
         },
         headers=h,
     ).json()["uuid"]
+    # Five items: two carry real comments, three carry one malformed shape
+    # each so every guard branch in the comment reader fires under coverage.
     items = client.post(
         f"/annotation-tasks/{task_uuid}/items",
         json={
             "items": [
                 {"payload": {"name": "i1"}},
                 {"payload": {"name": "i2"}},
+                {"payload": {"name": "i3-empty-string"}},
+                {"payload": {"name": "i4-non-string"}},
+                {"payload": {"name": "i5-non-dict"}},
             ]
         },
         headers=h,
     ).json()["item_ids"]
-    item_a, item_b = items
+    item_a, item_b, item_empty, item_non_string, item_non_dict = items
 
     # Two annotators. `ann_rater` writes both an evaluator annotation AND a
     # comment so it should appear in `annotators[]` via the per-evaluator
@@ -1109,14 +1114,22 @@ def test_summary_surfaces_item_comments(client):
             == 200
         )
 
-    # Malformed comment shapes must be ignored, not crash the response.
-    for bad_value in ({"comment": ""}, {"comment": None}, {"note": "x"}, None):
+    # Malformed comment shapes must be ignored, not crash the response. One
+    # shape per item so the upsert keeps each row distinct (otherwise they
+    # collapse onto a single (job, item, evaluator=NULL) slot and only the
+    # final value persists, leaving the other guard branches uncovered).
+    malformed_by_item = {
+        item_empty: {"comment": ""},      # empty-string guard
+        item_non_string: {"comment": None},  # non-string guard
+        item_non_dict: None,              # non-dict guard
+    }
+    for malformed_item, bad_value in malformed_by_item.items():
         assert (
             client.post(
                 f"/annotation-tasks/{task_uuid}/annotations",
                 json={
                     "job_id": job_rater["uuid"],
-                    "item_id": item_b,
+                    "item_id": malformed_item,
                     "value": bad_value,
                 },
                 headers=h,
@@ -1139,8 +1152,12 @@ def test_summary_surfaces_item_comments(client):
     assert item_comments[item_a][ann_rater["uuid"]] == "final take"
     assert item_comments[item_a][ann_commenter["uuid"]] == "from commenter"
     assert item_comments[item_b] == {ann_commenter["uuid"]: "on item b"}
-    # Malformed shapes (empty string, missing key, None value) didn't leak.
-    assert ann_rater["uuid"] not in item_comments.get(item_b, {})
+    # Each malformed shape exercises a different guard branch in the reader
+    # and must produce an empty cell for that item (the key simply absent).
+    for malformed_item in (item_empty, item_non_string, item_non_dict):
+        assert malformed_item not in item_comments, (
+            f"malformed shape on {malformed_item!r} leaked into item_comments"
+        )
 
     # ---- Filtered by item_id ----------------------------------------------
     filtered = client.get(
