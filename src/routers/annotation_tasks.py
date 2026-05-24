@@ -323,9 +323,16 @@ async def list_task_evaluators(
     from db import get_evaluator_versions
 
     _ensure_owned_task(task_uuid, ctx.org_uuid)
+    # `get_evaluators_for_annotation_task` projects a slim column set with a
+    # `linked_at` alias on the pivot — it omits the evaluator row's own
+    # `created_at`/`updated_at`. Refetch the canonical evaluator row so
+    # `_evaluator_response` has every field it expects.
     linked = get_evaluators_for_annotation_task(task_uuid)
     out: List[EvaluatorDetailResponse] = []
-    for ev in linked:
+    for stub in linked:
+        ev = get_evaluator(stub["uuid"])
+        if not ev:
+            continue
         base = _evaluator_response(ev)
         versions = [
             EvaluatorVersionResponse(**_version_dict(v))
