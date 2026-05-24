@@ -1035,9 +1035,9 @@ def _build_evaluators_block_for_test_run(
         evaluator_cache if evaluator_cache is not None else {}
     )
 
-    # uuid → snapshot entry (last one wins; snapshots for the same evaluator
-    # across test cases carry the same rubric — only `variable_values` varies
-    # and that's per-row, not block-level).
+    # uuid → snapshot entry (first one wins via setdefault; snapshots for
+    # the same evaluator across test cases carry the same rubric — only
+    # `variable_values` varies and that's per-row, not block-level).
     by_uuid: Dict[str, Dict[str, Any]] = {}
     for entries in (evaluators_by_test_id or {}).values():
         if not isinstance(entries, list):
