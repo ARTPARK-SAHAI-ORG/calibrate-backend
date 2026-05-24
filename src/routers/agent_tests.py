@@ -194,36 +194,36 @@ class TestOutput(BaseModel):
 class JudgeResult(BaseModel):
     """One evaluator's verdict for a response-type test case.
 
-    `name` is the **current** evaluator name from the DB (refreshed at every read).
-    `description` is the current evaluator description from the DB (refreshed at every read).
-    `evaluator_uuid` is None for legacy runs that pre-date the evaluator-snapshot
-    capture or when the evaluator can't be resolved from the snapshot.
-    Exactly one of `match` (binary) / `score` (rating) is set per entry; both are
-    None for tool-call tests, but tool-call tests don't carry `judge_results`.
+    Per-row data only — anything constant across rows for the same evaluator
+    (name, description, output_type, output_config, scale_min/max) lives on
+    the response-level `evaluators[]` block; look it up by `evaluator_uuid`.
 
-    `variable_values` are the {{var}} substitutions used for this evaluator on
-    this test case, frozen from `test_evaluators.variable_values` at submission
-    time. `scale_min` / `scale_max` are present only for rating evaluators and
-    come from the pinned version's `output_config.scale`, so the score is always
-    framed against the rubric the run actually used.
+    `evaluator_uuid` is None for legacy runs that pre-date the evaluator-
+    snapshot capture or when the evaluator can't be resolved from the
+    snapshot.
 
-    `value_name` is the human-readable label for `match`/`score` resolved against
-    the rubric the run actually used (snapshot's `output_config.scale.name`).
-    Falls back to `Correct`/`Wrong` for binary or the stringified score for
-    rating when the snapshot lacks named scale entries (e.g. legacy runs
-    captured before the rubric was snapshotted).
+    Exactly one of `match` (binary) / `score` (rating) is set per entry;
+    both are None for tool-call tests, but tool-call tests don't carry
+    `judge_results`.
+
+    `variable_values` are the {{var}} substitutions used for this evaluator
+    on this test case, frozen from `test_evaluators.variable_values` at
+    submission time — stays on the row because it varies per test case.
+
+    `value_name` is the human-readable label for `match`/`score` resolved
+    against the rubric the run actually used (snapshot's
+    `output_config.scale.name`). Falls back to `Correct`/`Wrong` for binary
+    or the stringified score for rating when the snapshot lacks named
+    scale entries (e.g. legacy runs captured before the rubric was
+    snapshotted).
     """
 
     evaluator_uuid: Optional[str] = None
-    name: str
-    description: Optional[str] = None
     reasoning: Optional[str] = None
     match: Optional[bool] = None
     score: Optional[float] = None
     value_name: Optional[str] = None
     variable_values: Optional[Dict[str, Any]] = None
-    scale_min: Optional[float] = None
-    scale_max: Optional[float] = None
 
 
 class TestCaseResult(BaseModel):
@@ -248,6 +248,10 @@ class TestRunStatusResponse(BaseModel):
     total_tests: Optional[int] = None
     passed: Optional[int] = None
     failed: Optional[int] = None
+    # Top-level evaluator block — name/description/output_type/rubric
+    # shared across every judge_results row. Per-row entries reference
+    # back via `evaluator_uuid` so the rubric isn't duplicated per test.
+    evaluators: Optional[List[Dict[str, Any]]] = None
     results: Optional[List[TestCaseResult]] = None
     results_s3_prefix: Optional[str] = None
     error: bool = False
@@ -261,6 +265,8 @@ class AgentTestRunListItem(BaseModel):
     status: str
     type: str
     updated_at: str
+    # Top-level evaluator block — see TestRunStatusResponse.evaluators.
+    evaluators: Optional[List[Dict[str, Any]]] = None
     # Unit test results (for llm-unit-test type)
     total_tests: Optional[int] = None
     passed: Optional[int] = None
@@ -396,6 +402,12 @@ async def get_agent_test_runs(agent_uuid: str):
             evaluators_snapshot,
             _evaluator_cache,
         )
+        evaluators_block = _build_evaluators_block_for_test_run(
+            evaluators_snapshot,
+            test_results=job_results.get("test_results"),
+            model_results=job_results.get("model_results"),
+            evaluator_cache=_evaluator_cache,
+        )
 
         run_item = AgentTestRunListItem(
             uuid=job["uuid"],
@@ -403,6 +415,7 @@ async def get_agent_test_runs(agent_uuid: str):
             status=job["status"],
             type=job_type,
             updated_at=job.get("updated_at", job.get("created_at", "")),
+            evaluators=evaluators_block or None,
             # Unit test results
             total_tests=job_results.get("total_tests"),
             passed=job_results.get("passed"),
@@ -482,6 +495,12 @@ async def get_all_test_runs_for_user(
             evaluators_snapshot,
             _evaluator_cache,
         )
+        evaluators_block = _build_evaluators_block_for_test_run(
+            evaluators_snapshot,
+            test_results=job_results.get("test_results"),
+            model_results=job_results.get("model_results"),
+            evaluator_cache=_evaluator_cache,
+        )
 
         run_item = GlobalTestRunListItem(
             uuid=job["uuid"],
@@ -489,6 +508,7 @@ async def get_all_test_runs_for_user(
             status=job["status"],
             type=job.get("type", ""),
             updated_at=job.get("updated_at", job.get("created_at", "")),
+            evaluators=evaluators_block or None,
             # Unit test fields
             total_tests=job_results.get("total_tests"),
             passed=job_results.get("passed"),
@@ -983,6 +1003,99 @@ def _get_evaluator_cached_for_enrichment(
     return cache[uid]
 
 
+_REDUNDANT_JUDGE_RESULT_KEYS = ("name", "description", "scale_min", "scale_max")
+
+
+def _build_evaluators_block_for_test_run(
+    evaluators_by_test_id: Optional[Dict[str, List[Dict[str, Any]]]],
+    test_results: Optional[List[Dict[str, Any]]] = None,
+    model_results: Optional[List[Dict[str, Any]]] = None,
+    evaluator_cache: Optional[Dict[str, Optional[Dict[str, Any]]]] = None,
+) -> List[Dict[str, Any]]:
+    """Build the top-level `evaluators[]` block for an agent-test / benchmark
+    response: one entry per unique evaluator UUID, carrying the
+    `name`/`description`/`output_type`/`output_config`/scale bounds that
+    would otherwise be duplicated across every judge_results row.
+
+    Sources, in order of preference:
+      1. `evaluators_by_test_id` snapshot — fixed at submission time, so
+         `output_config` reflects the rubric the run actually used.
+      2. `test_results` / `model_results` — fallback for legacy runs whose
+         snapshot is missing the evaluator (we still want SOMETHING in the
+         block so the FE doesn't 'unknown evaluator' the row).
+      3. `get_evaluator(uuid)` — for current name/description (the snapshot
+         only carried the calibrate-aligned name, not the live one).
+
+    Binary evaluators with no rubric snapshot get the Correct/Wrong default
+    (via `default_output_config`) so the FE always has a scale to render.
+    """
+    from llm_judge import default_output_config
+
+    cache: Dict[str, Optional[Dict[str, Any]]] = (
+        evaluator_cache if evaluator_cache is not None else {}
+    )
+
+    # uuid → snapshot entry (last one wins; snapshots for the same evaluator
+    # across test cases carry the same rubric — only `variable_values` varies
+    # and that's per-row, not block-level).
+    by_uuid: Dict[str, Dict[str, Any]] = {}
+    for entries in (evaluators_by_test_id or {}).values():
+        if not isinstance(entries, list):
+            continue
+        for e in entries:
+            if isinstance(e, dict) and e.get("uuid"):
+                by_uuid.setdefault(e["uuid"], e)
+
+    # Fallback: pick up evaluator UUIDs that appear on rows but not in the
+    # snapshot (legacy runs).
+    def _scan_rows(rows: Optional[List[Dict[str, Any]]]) -> None:
+        if not rows:
+            return
+        for r in rows:
+            if not isinstance(r, dict):
+                continue
+            jr = r.get("judge_results")
+            if isinstance(jr, list):
+                iterator = (e for e in jr if isinstance(e, dict))
+                uid_key = "evaluator_uuid"
+            elif isinstance(jr, dict):
+                iterator = (e for e in jr.values() if isinstance(e, dict))
+                uid_key = "evaluator_id"
+            else:
+                continue
+            for e in iterator:
+                uid = e.get(uid_key)
+                if uid and uid not in by_uuid:
+                    by_uuid[uid] = {"uuid": uid}
+
+    _scan_rows(test_results)
+    for mr in model_results or []:
+        if isinstance(mr, dict):
+            _scan_rows(mr.get("test_results"))
+
+    block: List[Dict[str, Any]] = []
+    for uid, snap in by_uuid.items():
+        ev = _get_evaluator_cached_for_enrichment(uid, cache)
+        output_type = snap.get("output_type") or (
+            ev.get("output_type") if ev else None
+        )
+        output_config = snap.get("output_config")
+        if output_config is None:
+            output_config = default_output_config(output_type)
+        block.append(
+            {
+                "uuid": uid,
+                "name": (ev.get("name") if ev else None) or snap.get("name"),
+                "description": ev.get("description") if ev else None,
+                "output_type": output_type,
+                "output_config": output_config,
+                "scale_min": snap.get("scale_min"),
+                "scale_max": snap.get("scale_max"),
+            }
+        )
+    return block
+
+
 def _enrich_test_results_with_evaluators(
     test_results: Optional[List[Dict[str, Any]]],
     evaluators_by_test_id: Optional[Dict[str, List[Dict[str, Any]]]],
@@ -1033,11 +1146,8 @@ def _enrich_test_results_with_evaluators(
                 uid = entry.get("evaluator_uuid")
                 if not uid:
                     continue
-                ev = _get_evaluator_cached_for_enrichment(uid, cache)
-                if ev and ev.get("name"):
-                    entry["name"] = ev["name"]
-                entry["description"] = ev.get("description") if ev else None
                 meta = uuid_to_meta.get(uid) or {}
+                ev = _get_evaluator_cached_for_enrichment(uid, cache)
                 snap_output_type = meta.get("output_type") or (
                     ev.get("output_type") if ev else None
                 )
@@ -1049,6 +1159,10 @@ def _enrich_test_results_with_evaluators(
                 entry["value_name"] = evaluator_value_name(
                     value, snap_output_type, meta.get("output_config")
                 )
+                # Drop fields that have been promoted to the top-level
+                # evaluators[] block so the row stays minimal.
+                for k in _REDUNDANT_JUDGE_RESULT_KEYS:
+                    entry.pop(k, None)
             continue
 
         if not isinstance(raw, dict):
@@ -1061,21 +1175,18 @@ def _enrich_test_results_with_evaluators(
             echoed_uid = entry.get("evaluator_id")
             meta = (uuid_to_meta.get(echoed_uid) if echoed_uid else None) or {}
             uid = echoed_uid
-            current_name: Optional[str] = None
-            current_description: Optional[str] = None
+            # We don't bake evaluator name/description onto each row anymore
+            # — the FE reads them from the top-level evaluators[] block via
+            # `evaluator_uuid`. We still warm the cache here so the block
+            # builder can reuse it without re-querying.
             if uid:
-                ev = _get_evaluator_cached_for_enrichment(uid, cache)
-                if ev:
-                    current_name = ev.get("name")
-                    current_description = ev.get("description")
+                _get_evaluator_cached_for_enrichment(uid, cache)
             match_val = entry.get("match")
             score_val = entry.get("score")
             scalar = match_val if match_val is not None else score_val
             out.append(
                 {
                     "evaluator_uuid": uid,
-                    "name": current_name or cal_name,
-                    "description": current_description,
                     "reasoning": entry.get("reasoning"),
                     "match": match_val,
                     "score": score_val,
@@ -1085,8 +1196,6 @@ def _enrich_test_results_with_evaluators(
                         meta.get("output_config"),
                     ),
                     "variable_values": meta.get("variable_values") or None,
-                    "scale_min": meta.get("scale_min"),
-                    "scale_max": meta.get("scale_max"),
                 }
             )
         r["judge_results"] = out
@@ -1804,10 +1913,15 @@ async def get_agent_test_run_status(task_id: str):
     #         # Try to start the next queued job
     #         try_start_queued_agent_test_job(AGENT_TEST_JOB_TYPES)
 
+    evaluators_snapshot = details.get("evaluators_by_test_id") or {}
+    evaluator_cache: Dict[str, Optional[Dict[str, Any]]] = {}
     _enrich_test_results_with_evaluators(
-        results.get("test_results"),
-        details.get("evaluators_by_test_id")
-        or {},
+        results.get("test_results"), evaluators_snapshot, evaluator_cache
+    )
+    evaluators_block = _build_evaluators_block_for_test_run(
+        evaluators_snapshot,
+        test_results=results.get("test_results"),
+        evaluator_cache=evaluator_cache,
     )
 
     return TestRunStatusResponse(
@@ -1816,6 +1930,7 @@ async def get_agent_test_run_status(task_id: str):
         total_tests=results.get("total_tests"),
         passed=results.get("passed"),
         failed=results.get("failed"),
+        evaluators=evaluators_block or None,
         results=results.get("test_results"),
         results_s3_prefix=results.get("results_s3_prefix"),
         error=bool(results.get("error")),

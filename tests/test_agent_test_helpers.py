@@ -95,7 +95,9 @@ def test_enrich_test_results_with_evaluators_none():
 
 
 def test_enrich_test_results_with_evaluators_dict_judge():
-    """judge_results is the raw dict shape calibrate emits."""
+    """judge_results is the raw dict shape calibrate emits — converted to
+    a minimal list (per-row data only; name/description live on the
+    top-level evaluators[] block)."""
     from routers.agent_tests import _enrich_test_results_with_evaluators
 
     test_results = [
@@ -118,18 +120,33 @@ def test_enrich_test_results_with_evaluators_dict_judge():
         return_value={"uuid": "ev-1", "name": "Safety NEW", "description": "d"},
     ):
         _enrich_test_results_with_evaluators(test_results, snapshot)
-    assert test_results[0]["judge_results"][0]["name"] == "Safety NEW"
+    entry = test_results[0]["judge_results"][0]
+    assert entry["evaluator_uuid"] == "ev-1"
+    assert entry["match"] is True
+    assert entry["reasoning"] == "ok"
+    # Evaluator-level fields are promoted to the top-level evaluators[]
+    # block; they MUST NOT be duplicated on each row.
+    for k in ("name", "description", "scale_min", "scale_max"):
+        assert k not in entry, f"{k} should not be on judge_results row"
 
 
 def test_enrich_test_results_with_evaluators_list_judge():
-    """Idempotent when judge_results is already a structured list."""
+    """Idempotent when judge_results is already a structured list. The list
+    path also strips evaluator-level fields if a legacy row carries them."""
     from routers.agent_tests import _enrich_test_results_with_evaluators
 
     test_results = [
         {
             "test_case_id": "t1",
             "judge_results": [
-                {"evaluator_uuid": "ev-1", "name": "Stale"},
+                {
+                    "evaluator_uuid": "ev-1",
+                    "name": "Stale",
+                    "description": "old",
+                    "scale_min": 1,
+                    "scale_max": 5,
+                    "match": True,
+                },
             ],
         }
     ]
@@ -138,7 +155,10 @@ def test_enrich_test_results_with_evaluators_list_judge():
         return_value={"uuid": "ev-1", "name": "Refreshed", "description": "d"},
     ):
         _enrich_test_results_with_evaluators(test_results, None)
-    assert test_results[0]["judge_results"][0]["name"] == "Refreshed"
+    entry = test_results[0]["judge_results"][0]
+    assert entry["evaluator_uuid"] == "ev-1"
+    for k in ("name", "description", "scale_min", "scale_max"):
+        assert k not in entry
 
 
 def test_enrich_test_results_with_evaluators_value_name_binary():
@@ -259,6 +279,116 @@ def test_enrich_test_results_with_evaluators_value_name_list_path():
     ):
         _enrich_test_results_with_evaluators(test_results, snapshot)
     assert test_results[0]["judge_results"][0]["value_name"] == "Unsafe"
+
+
+def test_build_evaluators_block_for_test_run_dedupes_and_enriches():
+    """Block dedupes evaluators across test cases, pulls
+    name/description from the live DB, and falls back to the snapshot's
+    name when the DB lookup misses (or returns None)."""
+    from routers.agent_tests import _build_evaluators_block_for_test_run
+
+    snapshot = {
+        "t1": [
+            {
+                "uuid": "ev-1",
+                "name": "Safety",
+                "output_type": "binary",
+                "output_config": {
+                    "scale": [
+                        {"value": True, "name": "Safe"},
+                        {"value": False, "name": "Unsafe"},
+                    ]
+                },
+            },
+            {
+                "uuid": "ev-2",
+                "name": "Helpfulness",
+                "output_type": "rating",
+                "scale_min": 1,
+                "scale_max": 5,
+                "output_config": {
+                    "scale": [{"value": 5, "name": "Great"}]
+                },
+            },
+        ],
+        # Same evaluator appears again under another test — dedup expected.
+        "t2": [
+            {
+                "uuid": "ev-1",
+                "name": "Safety",
+                "output_type": "binary",
+                "output_config": {
+                    "scale": [
+                        {"value": True, "name": "Safe"},
+                        {"value": False, "name": "Unsafe"},
+                    ]
+                },
+            },
+        ],
+    }
+    fake_db = {
+        "ev-1": {"uuid": "ev-1", "name": "Safety LIVE", "description": "d1"},
+        "ev-2": {"uuid": "ev-2", "name": "Helpfulness LIVE", "description": "d2"},
+    }
+    with patch("db.get_evaluator", side_effect=lambda u: fake_db.get(u)):
+        block = _build_evaluators_block_for_test_run(snapshot)
+    assert len(block) == 2
+    by_uuid = {e["uuid"]: e for e in block}
+    assert by_uuid["ev-1"]["name"] == "Safety LIVE"
+    assert by_uuid["ev-1"]["output_type"] == "binary"
+    assert by_uuid["ev-1"]["output_config"]["scale"][0]["name"] == "Safe"
+    assert by_uuid["ev-2"]["scale_min"] == 1
+    assert by_uuid["ev-2"]["scale_max"] == 5
+
+
+def test_build_evaluators_block_for_test_run_default_output_config():
+    """Binary evaluators without a snapshotted output_config still get a
+    Correct/Wrong scale via the shared default."""
+    from routers.agent_tests import _build_evaluators_block_for_test_run
+
+    snapshot = {
+        "t1": [{"uuid": "ev-1", "name": "Anything", "output_type": "binary"}]
+    }
+    with patch("db.get_evaluator", return_value={"uuid": "ev-1", "name": "x", "description": None}):
+        block = _build_evaluators_block_for_test_run(snapshot)
+    assert block[0]["output_config"]["scale"] == [
+        {"value": True, "name": "Correct"},
+        {"value": False, "name": "Wrong"},
+    ]
+
+
+def test_build_evaluators_block_for_test_run_legacy_row_fallback():
+    """Legacy run with no snapshot still emits a block entry for the
+    evaluator referenced by judge_results so the FE doesn't see an unknown
+    evaluator_uuid."""
+    from routers.agent_tests import _build_evaluators_block_for_test_run
+
+    test_results = [
+        {
+            "test_case_id": "t1",
+            "judge_results": {
+                "Safety": {"evaluator_id": "ev-legacy", "match": True},
+            },
+        }
+    ]
+    with patch(
+        "db.get_evaluator",
+        return_value={
+            "uuid": "ev-legacy",
+            "name": "Legacy",
+            "description": "d",
+            "output_type": "binary",
+        },
+    ):
+        block = _build_evaluators_block_for_test_run(
+            None, test_results=test_results
+        )
+    assert len(block) == 1
+    assert block[0]["uuid"] == "ev-legacy"
+    assert block[0]["name"] == "Legacy"
+    assert block[0]["output_type"] == "binary"
+    # Default binary scale was injected.
+    assert block[0]["output_config"]["scale"][0]["name"] == "Correct"
 
 
 def test_enrich_test_results_with_evaluators_value_name_legacy_fallback():
