@@ -1460,9 +1460,56 @@ def _shape_eval_job_for_response(job: Dict[str, Any]) -> Dict[str, Any]:
 async def list_evaluator_run_jobs(
     task_uuid: str, ctx: OrgContext = Depends(get_current_org)
 ):
+    """Slim list of evaluator-run jobs for the task. Each row carries
+    just the identifiers + status + counts + updated_at; the FE looks up
+    each row's evaluators via the top-level `evaluators[]` block by
+    `(evaluator_id, evaluator_version_id)`. Status `"done"` is normalized
+    to `"completed"` to match the detail endpoint."""
     _ensure_owned_task(task_uuid, ctx.org_uuid)
     jobs = get_generic_jobs_for_task(task_uuid, ANNOTATION_EVAL_JOB_TYPE)
-    return [_shape_eval_job_for_response(j) for j in jobs]
+
+    # Aggregate the per-job snapshots into one combined block so the FE
+    # only needs to fetch evaluator/version metadata once per unique
+    # (evaluator_id, evaluator_version_id) pair across the list.
+    combined_snapshot: List[Dict[str, Any]] = []
+    seen_slots: set = set()
+    for j in jobs:
+        for entry in (j.get("details") or {}).get("evaluators") or []:
+            if not isinstance(entry, dict):
+                continue
+            slot = (entry.get("evaluator_id"), entry.get("evaluator_version_id"))
+            if slot[0] and slot not in seen_slots:
+                seen_slots.add(slot)
+                combined_snapshot.append(entry)
+    evaluators_block = _build_evaluators_block_for_eval_job(
+        {"evaluators": combined_snapshot}, []
+    )
+
+    runs: List[Dict[str, Any]] = []
+    for j in jobs:
+        details = j.get("details") or {}
+        status = j.get("status")
+        if status == "done":
+            status = "completed"
+        row_evals = [
+            {
+                "evaluator_id": e.get("evaluator_id"),
+                "evaluator_version_id": e.get("evaluator_version_id"),
+            }
+            for e in (details.get("evaluators") or [])
+            if isinstance(e, dict) and e.get("evaluator_id")
+        ]
+        runs.append(
+            {
+                "uuid": j["uuid"],
+                "status": status,
+                "item_count": details.get("item_count"),
+                "updated_at": j.get("updated_at"),
+                "evaluators": row_evals,
+            }
+        )
+
+    return {"evaluators": evaluators_block, "runs": runs}
 
 
 def _human_agreement_for_run(

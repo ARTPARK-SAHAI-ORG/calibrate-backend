@@ -111,12 +111,32 @@ def test_evaluator_run_lifecycle(client, monkeypatch):
         start.assert_called_once()
     assert resp2.status_code == 200
 
-    # List
+    # List — slim shape: {evaluators[], runs[{uuid, status, item_count,
+    # updated_at, evaluators}]}. Per-row fluff (details, results, user_id,
+    # org_uuid, created_at, completed_at, error, share_token, ...) is
+    # stripped; evaluator identity/version lives on the top-level block.
     listing = client.get(
         f"/annotation-tasks/{task_uuid}/evaluator-runs", headers=h
     )
     assert listing.status_code == 200
-    assert len(listing.json()) >= 2
+    body = listing.json()
+    assert isinstance(body, dict)
+    assert "evaluators" in body and "runs" in body
+    assert len(body["runs"]) >= 2
+    row = body["runs"][0]
+    assert set(row.keys()) == {
+        "uuid",
+        "status",
+        "item_count",
+        "updated_at",
+        "evaluators",
+    }
+    # Per-row evaluators are FK references only.
+    if row["evaluators"]:
+        assert set(row["evaluators"][0].keys()) == {
+            "evaluator_id",
+            "evaluator_version_id",
+        }
 
     # GET job
     got = client.get(
