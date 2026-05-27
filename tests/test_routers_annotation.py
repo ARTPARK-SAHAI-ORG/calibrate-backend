@@ -1793,3 +1793,71 @@ def test_annotation_task_summary_sort(client):
         ).status_code
         == 422
     )
+
+
+def test_summary_item_comments_scoped_to_page(client):
+    """`item_comments` ships only entries for items on the current page (same
+    set as `rows`). Off-page items' comments are not included, so the FE
+    doesn't over-fetch. For CSV export, pass `?limit=<total>` to collect
+    every page's comments in one request."""
+    auth = _signup(client)
+    h = auth["headers"]
+    llm_ev = _llm_evaluator(client, h)
+    task_uuid = client.post(
+        "/annotation-tasks",
+        json={
+            "name": f"t-{uuid.uuid4().hex[:6]}",
+            "type": "llm",
+            "evaluator_ids": [llm_ev["uuid"]],
+        },
+        headers=h,
+    ).json()["uuid"]
+
+    # 4 items; we'll comment on every one so we can verify which ones the
+    # page includes vs excludes.
+    item_ids = client.post(
+        f"/annotation-tasks/{task_uuid}/items",
+        json={"items": [{"payload": {"name": f"i{i}"}} for i in range(4)]},
+        headers=h,
+    ).json()["item_ids"]
+
+    ann = client.post("/annotators", json={"name": "a"}, headers=h).json()
+    jobs = client.post(
+        f"/annotation-tasks/{task_uuid}/jobs",
+        json={"annotator_ids": [ann["uuid"]], "item_ids": item_ids},
+        headers=h,
+    ).json()["jobs"]
+    job_id = jobs[0]["uuid"]
+    for it_id in item_ids:
+        client.post(
+            f"/annotation-tasks/{task_uuid}/annotations",
+            json={
+                "job_id": job_id,
+                "item_id": it_id,
+                "value": {"comment": f"note for {it_id}"},
+            },
+            headers=h,
+        )
+
+    # Page 1: 2 items, 2 comments (only for paged items).
+    p1 = client.get(
+        f"/annotation-tasks/{task_uuid}/summary?limit=2&offset=0", headers=h
+    ).json()
+    assert p1["pagination"]["total"] == 4
+    p1_row_items = {r["item_id"] for r in p1["rows"]}
+    assert len(p1_row_items) == 2
+    assert set(p1["item_comments"].keys()) == p1_row_items
+
+    # Page 2: the other 2 items, disjoint from page 1's comments.
+    p2 = client.get(
+        f"/annotation-tasks/{task_uuid}/summary?limit=2&offset=2", headers=h
+    ).json()
+    p2_row_items = {r["item_id"] for r in p2["rows"]}
+    assert set(p2["item_comments"].keys()) == p2_row_items
+    assert p1_row_items.isdisjoint(p2_row_items)
+
+    # Export path: one request with limit=total gets every comment.
+    full = client.get(
+        f"/annotation-tasks/{task_uuid}/summary?limit=1000", headers=h
+    ).json()
+    assert set(full["item_comments"].keys()) == set(item_ids)

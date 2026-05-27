@@ -2068,7 +2068,13 @@ async def task_summary(
             "evaluator_agreement": float|null
           }
         ],
-        "item_comments": {
+        "item_comments": {                          # Scoped to the items on
+                                                    # the CURRENT PAGE (same
+                                                    # set as `rows`). For an
+                                                    # export, pass
+                                                    # `?limit=<total>` to
+                                                    # collect every page in
+                                                    # one shot.
           "<item_uuid>": {
             "<annotator_uuid>": str   # latest free-text comment
           }
@@ -2111,7 +2117,11 @@ async def task_summary(
         items/annotators with a non-empty comment appear (the block is
         sparse). Latest-wins per (item, annotator) on `updated_at`. The
         `annotators[]` union includes annotators that contributed comments
-        even if they never wrote a per-evaluator annotation.
+        even if they never wrote a per-evaluator annotation — the union
+        stays task-wide (not page-scoped) so column headers don't shift
+        between pages. The `item_comments` block itself, however, IS scoped
+        to the current page (matches `rows`); for export, pass
+        `?limit=<total>`.
     """
     task = _ensure_owned_task(task_uuid, ctx.org_uuid)
     items = get_annotation_items_for_task(task_uuid)
@@ -2446,10 +2456,16 @@ async def task_summary(
     # Filter to surviving annotators (soft-deleted ones are dropped from
     # `annotators[]` by `get_annotators_by_uuids`, so emitting their UUIDs
     # in `item_comments` would create orphans the FE has no name for).
+    # Scope is `paged_items` (NOT the broader `scoped_item_ids`) so the
+    # comments block tracks the rows on the current page rather than
+    # shipping comments for off-page items the FE wouldn't render. To
+    # collect comments for the full filtered scope (e.g. CSV export),
+    # request `?limit=<total>` — the cap is set high enough for that.
+    paged_item_ids = {it["uuid"] for it in paged_items}
     surviving_annotator_ids = {a["uuid"] for a in annotators}
     item_comments: Dict[str, Dict[str, str]] = {}
     for cmt_item_id, cells in all_item_comments.items():
-        if cmt_item_id not in scoped_item_ids:
+        if cmt_item_id not in paged_item_ids:
             continue
         surviving_cells = {
             aid: text
