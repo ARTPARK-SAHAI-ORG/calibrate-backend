@@ -2157,9 +2157,16 @@ async def task_summary(
     total_items = len(items)
 
     # Sort the in-scope items before pagination so paging is stable across
-    # requests. Mechanics (incl. `uuid` secondary key for identical-timestamp
-    # tiebreak) live in `pagination.make_sort_params`.
-    items = sort.apply(items)
+    # requests. Mechanics live in `pagination.make_sort_params`.
+    #
+    # Tiebreaker is the autoincrement `id`, NOT the default `uuid`. Reason:
+    # `POST /annotation-tasks/{uuid}/items` bulk-inserts whole batches in a
+    # single second, so `created_at` collides across the entire batch (sqlite
+    # CURRENT_TIMESTAMP is second-resolution). A `uuid` tiebreaker would
+    # shuffle the batch into arbitrary order; `id` preserves insertion order,
+    # which matches `get_annotation_items_for_task`'s historical
+    # `ORDER BY id DESC` and is what users actually expect after a bulk add.
+    items = sort.apply(items, secondary_key="id")
     paged_items = items[pagination.offset : pagination.offset + pagination.limit]
 
     # Latest evaluator_run per (item, evaluator, version). One row in the

@@ -1706,7 +1706,9 @@ def test_annotation_task_summary_search(client):
 
 def test_annotation_task_summary_sort(client):
     """`?sort_by=updated_at&order=asc|desc` orders items, applied before pagination
-    so paging through a sorted list is stable."""
+    so paging through a sorted list is stable. Tiebreaker is the autoincrement
+    `id`, which preserves insertion order even when a whole batch lands in
+    the same second."""
     import time
 
     auth = _signup(client)
@@ -1722,32 +1724,40 @@ def test_annotation_task_summary_sort(client):
         headers=h,
     ).json()["uuid"]
 
-    # Create three items with distinct created_at by spacing inserts (sqlite
-    # CURRENT_TIMESTAMP is second-resolution).
+    # Bulk-add three items in ONE request. This is the realistic shape — the
+    # FE uploads a batch via the items POST and all rows share a
+    # second-resolution `created_at`. The sort must fall back to `id` (NOT
+    # `uuid`) so insertion order is preserved.
     names = ["first", "second", "third"]
-    item_ids = []
-    for n in names:
-        r = client.post(
-            f"/annotation-tasks/{task_uuid}/items",
-            json={"items": [{"payload": {"name": n}}]},
-            headers=h,
-        ).json()
-        item_ids.append(r["item_ids"][0])
-        time.sleep(1.05)
+    item_ids = client.post(
+        f"/annotation-tasks/{task_uuid}/items",
+        json={"items": [{"payload": {"name": n}} for n in names]},
+        headers=h,
+    ).json()["item_ids"]
 
-    # Touch the second one so its updated_at jumps to "newest by update".
+    # Default sort (created_at desc, id desc tiebreak) — newest-inserted of
+    # the batch comes first, in reverse insertion order across the whole
+    # batch. This pins the bulk-add behavior that the previous `uuid`
+    # tiebreaker silently broke.
+    default = client.get(
+        f"/annotation-tasks/{task_uuid}/summary", headers=h
+    ).json()
+    assert [r["payload"]["name"] for r in default["rows"]] == [
+        "third",
+        "second",
+        "first",
+    ]
+
+    # Touch one item so its `updated_at` jumps past the others'. Sleep before
+    # the PUT so the new timestamp is in a strictly later second than the
+    # bulk-insert second — that lets us assert updated_at sort works
+    # independently of the id-tiebreaker that protects bulk-insert order.
+    time.sleep(1.05)
     client.put(
         f"/annotation-tasks/{task_uuid}/items",
         json={"updates": [{"uuid": item_ids[1], "payload": {"name": "second-edited"}}]},
         headers=h,
     )
-
-    # Default sort (created_at desc) — newest creation first.
-    default = client.get(
-        f"/annotation-tasks/{task_uuid}/summary", headers=h
-    ).json()
-    default_order = [r["payload"]["name"] for r in default["rows"]]
-    assert default_order[0] == "third"  # last created
 
     # updated_at desc — the edited row floats to the top.
     upd_desc = client.get(
