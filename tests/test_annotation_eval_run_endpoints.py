@@ -90,7 +90,10 @@ def test_evaluator_run_lifecycle(client, monkeypatch):
     ):
         resp = client.post(
             f"/annotation-tasks/{task_uuid}/evaluator-runs",
-            json={"evaluators": [{"evaluator_id": llm_ev["uuid"]}]},
+            json={
+                "evaluators": [{"evaluator_id": llm_ev["uuid"]}],
+                "select_all": True,
+            },
             headers=h,
         )
     assert resp.status_code == 200
@@ -105,7 +108,10 @@ def test_evaluator_run_lifecycle(client, monkeypatch):
     ) as start:
         resp2 = client.post(
             f"/annotation-tasks/{task_uuid}/evaluator-runs",
-            json={"evaluators": [{"evaluator_id": llm_ev["uuid"]}]},
+            json={
+                "evaluators": [{"evaluator_id": llm_ev["uuid"]}],
+                "select_all": True,
+            },
             headers=h,
         )
         start.assert_called_once()
@@ -201,7 +207,10 @@ def test_evaluator_run_bad_evaluator_resolution(client):
     other_ev = next(e for e in evaluators if e.get("evaluator_type") == "stt")
     resp = client.post(
         f"/annotation-tasks/{task_uuid}/evaluator-runs",
-        json={"evaluators": [{"evaluator_id": other_ev["uuid"]}]},
+        json={
+            "evaluators": [{"evaluator_id": other_ev["uuid"]}],
+            "select_all": True,
+        },
         headers=h,
     )
     assert resp.status_code == 400

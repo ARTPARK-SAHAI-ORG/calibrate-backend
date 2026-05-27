@@ -416,6 +416,72 @@ def test_annotation_items_crud(client):
     assert bd.status_code == 200
 
 
+def test_bulk_delete_items_select_all(client):
+    """`select_all=True` (with optional `q` filter) replaces the per-row
+    item_ids list — useful for FE 'select all matching filter' actions."""
+    auth = _signup(client)
+    h = auth["headers"]
+    llm_ev = _llm_evaluator(client, h)
+    task_uuid = client.post(
+        "/annotation-tasks",
+        json={
+            "name": f"t-{uuid.uuid4().hex[:6]}",
+            "type": "llm",
+            "evaluator_ids": [llm_ev["uuid"]],
+        },
+        headers=h,
+    ).json()["uuid"]
+    client.post(
+        f"/annotation-tasks/{task_uuid}/items",
+        json={
+            "items": [
+                {"payload": {"name": "alpha-1"}},
+                {"payload": {"name": "alpha-2"}},
+                {"payload": {"name": "beta-1"}},
+            ]
+        },
+        headers=h,
+    )
+
+    # `q` matches no items — 400.
+    no_match = client.request(
+        "DELETE",
+        f"/annotation-tasks/{task_uuid}/items",
+        json={"select_all": True, "q": "zzzzz"},
+        headers=h,
+    )
+    assert no_match.status_code == 400
+
+    # `select_all=True` + `q="alpha"` → 2 items deleted.
+    resp = client.request(
+        "DELETE",
+        f"/annotation-tasks/{task_uuid}/items",
+        json={"select_all": True, "q": "alpha"},
+        headers=h,
+    )
+    assert resp.status_code == 200
+    assert resp.json()["deleted_count"] == 2
+
+    # `select_all=True` with no q → remaining 1 item deleted.
+    resp_all = client.request(
+        "DELETE",
+        f"/annotation-tasks/{task_uuid}/items",
+        json={"select_all": True},
+        headers=h,
+    )
+    assert resp_all.status_code == 200
+    assert resp_all.json()["deleted_count"] == 1
+
+    # Empty body (no item_ids, select_all=false default) → 400.
+    nothing = client.request(
+        "DELETE",
+        f"/annotation-tasks/{task_uuid}/items",
+        json={},
+        headers=h,
+    )
+    assert nothing.status_code == 400
+
+
 def test_annotation_jobs_crud(client):
     auth = _signup(client)
     h = auth["headers"]
@@ -561,6 +627,164 @@ def test_annotation_jobs_crud(client):
         headers=h,
     )
     assert upsert.status_code == 200
+
+
+def test_create_jobs_select_all(client):
+    """`select_all=True` on POST /jobs expands the assignment target to every
+    matching item; `q` narrows the set the same way the FE search field
+    does."""
+    auth = _signup(client)
+    h = auth["headers"]
+    llm_ev = _llm_evaluator(client, h)
+    task_uuid = client.post(
+        "/annotation-tasks",
+        json={
+            "name": f"t-{uuid.uuid4().hex[:6]}",
+            "type": "llm",
+            "evaluator_ids": [llm_ev["uuid"]],
+        },
+        headers=h,
+    ).json()["uuid"]
+    items = client.post(
+        f"/annotation-tasks/{task_uuid}/items",
+        json={
+            "items": [
+                {"payload": {"name": "alpha-1"}},
+                {"payload": {"name": "alpha-2"}},
+                {"payload": {"name": "beta-1"}},
+            ]
+        },
+        headers=h,
+    ).json()["item_ids"]
+    assert len(items) == 3
+    annotator = client.post(
+        "/annotators", json={"name": f"ann-{uuid.uuid4().hex[:6]}"}, headers=h
+    ).json()
+
+    # `select_all=True` with no q → assigns all 3 items.
+    resp_all = client.post(
+        f"/annotation-tasks/{task_uuid}/jobs",
+        json={
+            "annotator_ids": [annotator["uuid"]],
+            "select_all": True,
+        },
+        headers=h,
+    )
+    assert resp_all.status_code == 200
+    job_all = resp_all.json()["jobs"][0]
+    assert job_all["item_count"] == 3
+    assert set(job_all["item_ids"]) == set(items)
+
+    # `select_all=True` + `q="alpha"` → assigns only the 2 alpha items.
+    annotator2 = client.post(
+        "/annotators", json={"name": f"ann2-{uuid.uuid4().hex[:6]}"}, headers=h
+    ).json()
+    resp_q = client.post(
+        f"/annotation-tasks/{task_uuid}/jobs",
+        json={
+            "annotator_ids": [annotator2["uuid"]],
+            "select_all": True,
+            "q": "alpha",
+        },
+        headers=h,
+    )
+    assert resp_q.status_code == 200
+    job_q = resp_q.json()["jobs"][0]
+    assert job_q["item_count"] == 2
+
+    # `select_all=True` + `q` matching nothing → 400.
+    miss = client.post(
+        f"/annotation-tasks/{task_uuid}/jobs",
+        json={
+            "annotator_ids": [annotator["uuid"]],
+            "select_all": True,
+            "q": "zzzzz",
+        },
+        headers=h,
+    )
+    assert miss.status_code == 400
+
+    # Default (select_all=false) with no item_ids → 400.
+    none = client.post(
+        f"/annotation-tasks/{task_uuid}/jobs",
+        json={"annotator_ids": [annotator["uuid"]]},
+        headers=h,
+    )
+    assert none.status_code == 400
+
+
+def test_evaluator_run_select_all_and_q(client):
+    """`select_all=True` (with optional `q`) replaces the previous null-means-all
+    convention on POST /evaluator-runs."""
+    auth = _signup(client)
+    h = auth["headers"]
+    llm_ev = _llm_evaluator(client, h)
+    task_uuid = client.post(
+        "/annotation-tasks",
+        json={
+            "name": f"t-{uuid.uuid4().hex[:6]}",
+            "type": "llm",
+            "evaluator_ids": [llm_ev["uuid"]],
+        },
+        headers=h,
+    ).json()["uuid"]
+    client.post(
+        f"/annotation-tasks/{task_uuid}/items",
+        json={
+            "items": [
+                {"payload": {"name": "alpha-1", "chat_history": [], "agent_response": "x"}},
+                {"payload": {"name": "beta-1", "chat_history": [], "agent_response": "x"}},
+            ]
+        },
+        headers=h,
+    )
+
+    # No select_all + no item_ids → 400 (was: null meant "all").
+    bare = client.post(
+        f"/annotation-tasks/{task_uuid}/evaluator-runs",
+        json={"evaluators": [{"evaluator_id": llm_ev["uuid"]}]},
+        headers=h,
+    )
+    assert bare.status_code == 400
+
+    # `select_all=True` → runs on every item.
+    with patch("routers.annotation_tasks.can_start_job", return_value=False):
+        resp = client.post(
+            f"/annotation-tasks/{task_uuid}/evaluator-runs",
+            json={
+                "evaluators": [{"evaluator_id": llm_ev["uuid"]}],
+                "select_all": True,
+            },
+            headers=h,
+        )
+    assert resp.status_code == 200
+    assert resp.json()["item_count"] == 2
+
+    # `select_all=True` + `q="alpha"` → runs on only the alpha item.
+    with patch("routers.annotation_tasks.can_start_job", return_value=False):
+        resp_q = client.post(
+            f"/annotation-tasks/{task_uuid}/evaluator-runs",
+            json={
+                "evaluators": [{"evaluator_id": llm_ev["uuid"]}],
+                "select_all": True,
+                "q": "alpha",
+            },
+            headers=h,
+        )
+    assert resp_q.status_code == 200
+    assert resp_q.json()["item_count"] == 1
+
+    # `select_all=True` + q with no match → 400.
+    miss = client.post(
+        f"/annotation-tasks/{task_uuid}/evaluator-runs",
+        json={
+            "evaluators": [{"evaluator_id": llm_ev["uuid"]}],
+            "select_all": True,
+            "q": "zzzzz",
+        },
+        headers=h,
+    )
+    assert miss.status_code == 400
 
 
 def test_delete_annotation_job(client):

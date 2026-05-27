@@ -864,8 +864,46 @@ async def bulk_update_items(
     return {"updated_count": updated_count}
 
 
+def _resolve_target_item_ids(
+    task_uuid: str,
+    *,
+    select_all: bool,
+    item_ids: List[str],
+    q: Optional[str],
+) -> List[str]:
+    """Resolve the target item set for a bulk action that supports a
+    `select_all` toggle.
+
+    - `select_all=True`: returns every non-deleted item UUID in the task,
+      optionally filtered by case-insensitive substring on `payload.name`
+      (same field/match rule as the summary endpoint's `?q=`). The explicit
+      `item_ids` list is ignored — `select_all` is the source of truth so
+      stale checkboxes can't sneak through.
+    - `select_all=False`: returns `item_ids` verbatim; `q` is ignored.
+
+    Returns the raw resolved list (may be empty). Callers decide whether
+    "empty" is a 400 or a no-op in their context.
+    """
+    if not select_all:
+        return list(item_ids)
+    items = get_annotation_items_for_task(task_uuid)
+    if q and q.strip():
+        needle = q.strip().lower()
+        items = [
+            it
+            for it in items
+            if isinstance((it.get("payload") or {}).get("name"), str)
+            and needle in it["payload"]["name"].lower()
+        ]
+    return [it["uuid"] for it in items]
+
+
 class BulkDeleteItemsRequest(BaseModel):
-    item_ids: List[str]
+    # When `select_all=True`, `item_ids` is ignored and the target set is
+    # derived from the task (optionally filtered by `q` on `payload.name`).
+    item_ids: List[str] = []
+    select_all: bool = False
+    q: Optional[str] = None
 
 
 @router.delete("/{task_uuid}/items")
@@ -880,11 +918,27 @@ async def bulk_delete_items(
     `deleted_count` reflects how many rows actually transitioned to deleted.
     Items linked to existing jobs remain referenced by those jobs and their
     annotations — they just stop appearing in `GET /items`.
+
+    Use `select_all=True` (optionally with `q`) to act on every item in the
+    task matching the current search filter; in that mode `item_ids` is
+    ignored.
     """
     _ensure_owned_task(task_uuid, ctx.org_uuid)
-    if not payload.item_ids:
-        raise HTTPException(status_code=400, detail="item_ids must be non-empty")
-    deleted_count = soft_delete_annotation_items(task_uuid, payload.item_ids)
+    target_ids = _resolve_target_item_ids(
+        task_uuid,
+        select_all=payload.select_all,
+        item_ids=payload.item_ids,
+        q=payload.q,
+    )
+    if not target_ids:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "no items selected (provide item_ids, or select_all=true with "
+                "a filter that matches at least one item)"
+            ),
+        )
+    deleted_count = soft_delete_annotation_items(task_uuid, target_ids)
     return {"deleted_count": deleted_count}
 
 
@@ -917,7 +971,11 @@ async def list_item_annotations(
 
 class CreateJobsRequest(BaseModel):
     annotator_ids: List[str]
-    item_ids: List[str]
+    # When `select_all=True`, `item_ids` is ignored and the target set is
+    # derived from the task (optionally filtered by `q` on `payload.name`).
+    item_ids: List[str] = []
+    select_all: bool = False
+    q: Optional[str] = None
 
 
 @router.get("/{task_uuid}/jobs")
@@ -936,20 +994,38 @@ async def create_jobs(
 ):
     """Assign a set of items to one or more annotators. Creates ONE job per
     annotator — each with its own unique public_token. Job item sets are
-    frozen after creation."""
+    frozen after creation.
+
+    Use `select_all=True` (optionally with `q`) to assign every item in the
+    task matching the current search filter; in that mode `item_ids` is
+    ignored."""
     _ensure_owned_task(task_uuid, ctx.org_uuid)
     if not payload.annotator_ids:
         raise HTTPException(
             status_code=400, detail="annotator_ids must be non-empty"
         )
-    if not payload.item_ids:
-        raise HTTPException(status_code=400, detail="item_ids must be non-empty")
-    if len(payload.item_ids) != len(set(payload.item_ids)):
+    target_ids = _resolve_target_item_ids(
+        task_uuid,
+        select_all=payload.select_all,
+        item_ids=payload.item_ids,
+        q=payload.q,
+    )
+    if not target_ids:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "no items selected (provide item_ids, or select_all=true with "
+                "a filter that matches at least one item)"
+            ),
+        )
+    if len(target_ids) != len(set(target_ids)):
         # Duplicate item_ids would violate UNIQUE(job_id, item_id) on
         # annotation_job_items and surface as a 500. Surface as a clean 400.
+        # `select_all` expansion can't produce dupes (it scans DISTINCT rows),
+        # so this only fires on caller-supplied lists.
         seen: set = set()
         duplicates: List[str] = []
-        for i in payload.item_ids:
+        for i in target_ids:
             if i in seen:
                 duplicates.append(i)
             else:
@@ -970,11 +1046,13 @@ async def create_jobs(
             )
         annotators_by_id[annotator_id] = annotator
 
-    # Validate items (all must belong to this task).
+    # Validate items (all must belong to this task). `select_all` expansion
+    # is already scoped to this task, so this only fires on caller-supplied
+    # lists — but the check stays for both paths to keep one error shape.
     valid_item_ids = {
         it["uuid"] for it in get_annotation_items_for_task(task_uuid)
     }
-    invalid = [i for i in payload.item_ids if i not in valid_item_ids]
+    invalid = [i for i in target_ids if i not in valid_item_ids]
     if invalid:
         raise HTTPException(
             status_code=400,
@@ -987,7 +1065,7 @@ async def create_jobs(
         job_uuid = create_annotation_job(
             task_id=task_uuid,
             annotator_id=annotator_id,
-            item_uuids=payload.item_ids,
+            item_uuids=target_ids,
             public_token=public_token,
         )
         jobs_created.append(
@@ -996,8 +1074,8 @@ async def create_jobs(
                 "public_token": public_token,
                 "annotator_id": annotator_id,
                 "annotator_name": annotators_by_id[annotator_id]["name"],
-                "item_ids": payload.item_ids,
-                "item_count": len(payload.item_ids),
+                "item_ids": target_ids,
+                "item_count": len(target_ids),
                 "status": "pending",
             }
         )
@@ -1179,9 +1257,13 @@ class EvaluatorRunRequestEntry(BaseModel):
 
 class EvaluatorRunStartRequest(BaseModel):
     evaluators: List[EvaluatorRunRequestEntry]
-    # Optional subset. Omit/null = run on every item in the task.
-    # Empty array is rejected (400) — most likely an accidental empty submit.
-    item_ids: Optional[List[str]] = None
+    # `select_all=True` (optionally filtered by `q` on `payload.name`) is the
+    # explicit "run on every matching item" toggle — mirrors the same flag on
+    # DELETE /items and POST /jobs so the FE has one shape across bulk
+    # actions. When False, `item_ids` must be non-empty.
+    item_ids: List[str] = []
+    select_all: bool = False
+    q: Optional[str] = None
 
 
 @router.post("/{task_uuid}/evaluator-runs")
@@ -1215,18 +1297,37 @@ async def start_evaluator_run(
         raise HTTPException(status_code=400, detail="task has no items")
 
     # Resolve the item subset.
-    if payload.item_ids is None:
-        # "All items" snapshots the live set at submission time. Storing the
-        # resolved UUIDs (instead of leaving null) ensures recovery after a
-        # crash re-runs the same items the user originally submitted, even if
-        # items were added or deleted in the meantime.
-        items = all_items
-        item_ids_persisted: Optional[List[str]] = [it["uuid"] for it in all_items]
+    #
+    # `select_all=True` snapshots the live (q-filtered) set at submission
+    # time. Storing the resolved UUIDs (instead of leaving null) ensures
+    # recovery after a crash re-runs the same items the user originally
+    # submitted, even if items were added or deleted in the meantime.
+    if payload.select_all:
+        target_ids = _resolve_target_item_ids(
+            task_uuid,
+            select_all=True,
+            item_ids=[],
+            q=payload.q,
+        )
+        if not target_ids:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    "no items selected (select_all=true matched no items — "
+                    "check the q filter)"
+                ),
+            )
+        items_by_id = {it["uuid"]: it for it in all_items}
+        items = [items_by_id[i] for i in target_ids]
+        item_ids_persisted: List[str] = target_ids
     else:
         if not payload.item_ids:
             raise HTTPException(
                 status_code=400,
-                detail="item_ids must be non-empty if provided (omit the field to run on all items)",
+                detail=(
+                    "item_ids must be non-empty when select_all=false "
+                    "(or pass select_all=true to run on every matching item)"
+                ),
             )
         valid_ids = {it["uuid"] for it in all_items}
         invalid = [i for i in payload.item_ids if i not in valid_ids]
