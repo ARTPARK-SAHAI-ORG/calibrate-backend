@@ -73,6 +73,16 @@ from utils import (
     try_start_queued_job,
 )
 from auth_utils import get_current_org, OrgContext
+from pagination import PaginationParams, make_search_params, make_sort_params
+
+# Per-endpoint sort/search allowlists for the summary view. Built at module
+# load time so FastAPI's dependency-graph introspection sees stable types.
+_SummarySort = make_sort_params(
+    sortable=["created_at", "updated_at"],
+    default="created_at",
+    default_order="desc",
+)
+_SummarySearch = make_search_params(searchable=["payload.name"])
 from annotation_metrics import (
     aggregate_agreement,
     aggregate_human_evaluator_agreement,
@@ -1984,6 +1994,9 @@ async def task_summary(
         description="When true, emit only one row per (item, evaluator) using the evaluator's live version. Non-live versions that have runs are excluded.",
     ),
     ctx: OrgContext = Depends(get_current_org),
+    search: _SummarySearch = Depends(),
+    sort: _SummarySort = Depends(),
+    pagination: PaginationParams = Depends(),
 ):
     """Single denormalized view for the table. By default emits one row per
     `(item × evaluator × version)` so re-running an evaluator on a new
@@ -2028,8 +2041,8 @@ async def task_summary(
                                                     # across ALL versions,
                                                     # restricted to items in
                                                     # scope (honors
-                                                    # `item_id`; ignores
-                                                    # `live_only`)
+                                                    # `item_id` and `q`;
+                                                    # ignores `live_only`)
           }
         ],
         "annotators": [{uuid, name}],               # union of annotators with
@@ -2055,10 +2068,30 @@ async def task_summary(
             "evaluator_agreement": float|null
           }
         ],
-        "item_comments": {
+        "item_comments": {                          # Scoped to the items on
+                                                    # the CURRENT PAGE (same
+                                                    # set as `rows`). For an
+                                                    # export, pass
+                                                    # `?limit=<total>` to
+                                                    # collect every page in
+                                                    # one shot.
           "<item_uuid>": {
             "<annotator_uuid>": str   # latest free-text comment
           }
+        },
+        "pagination": {                             # Pagination is at the
+                                                    # ITEM level — each item
+                                                    # expands into >=1 row
+                                                    # (one per evaluator x
+                                                    # version slot).
+          "total": int,                             # total items in scope
+                                                    # (honors item_id + q;
+                                                    # NOT the annotator
+                                                    # union, which stays
+                                                    # task-wide so column
+                                                    # headers don't shift)
+          "limit": int,
+          "offset": int
         }
       }
 
@@ -2084,7 +2117,11 @@ async def task_summary(
         items/annotators with a non-empty comment appear (the block is
         sparse). Latest-wins per (item, annotator) on `updated_at`. The
         `annotators[]` union includes annotators that contributed comments
-        even if they never wrote a per-evaluator annotation.
+        even if they never wrote a per-evaluator annotation — the union
+        stays task-wide (not page-scoped) so column headers don't shift
+        between pages. The `item_comments` block itself, however, IS scoped
+        to the current page (matches `rows`); for export, pass
+        `?limit=<total>`.
     """
     task = _ensure_owned_task(task_uuid, ctx.org_uuid)
     items = get_annotation_items_for_task(task_uuid)
@@ -2106,6 +2143,32 @@ async def task_summary(
             )
         items = [it for it in items if it["uuid"] == item_id]
 
+    # Substring search on `payload.name` (the only required string field on
+    # items — enforced by the items POST validator). Applied AFTER `item_id`
+    # so a single-item lookup that also passes `q` still narrows correctly.
+    # Mechanics live in `pagination.make_search_params`.
+    items = search.apply(items)
+
+    # `items` is now the full scope (task-wide or filtered by item_id/q).
+    # Keep it untouched for scoped_item_ids / annotator union / run_count
+    # so the top-level evaluators[] and annotators[] blocks stay stable
+    # across pages (consistent column headers in the FE table). Pagination
+    # only slices which items get expanded into `rows`.
+    total_items = len(items)
+
+    # Sort the in-scope items before pagination so paging is stable across
+    # requests. Mechanics live in `pagination.make_sort_params`.
+    #
+    # Tiebreaker is the autoincrement `id`, NOT the default `uuid`. Reason:
+    # `POST /annotation-tasks/{uuid}/items` bulk-inserts whole batches in a
+    # single second, so `created_at` collides across the entire batch (sqlite
+    # CURRENT_TIMESTAMP is second-resolution). A `uuid` tiebreaker would
+    # shuffle the batch into arbitrary order; `id` preserves insertion order,
+    # which matches `get_annotation_items_for_task`'s historical
+    # `ORDER BY id DESC` and is what users actually expect after a bulk add.
+    items = sort.apply(items, secondary_key="id")
+    paged_items = items[pagination.offset : pagination.offset + pagination.limit]
+
     # Latest evaluator_run per (item, evaluator, version). One row in the
     # response per distinct version that has run, so re-running on a new
     # version doesn't hide the previous version's results.
@@ -2113,9 +2176,11 @@ async def task_summary(
     latest_run_ts: Dict[tuple, str] = {}
     versions_by_evaluator: Dict[str, set] = {}
     # Total runs per evaluator across ALL versions, restricted to the items
-    # currently in scope (i.e. honors the `item_id` filter). Surfaced on each
-    # entry in the top-level `evaluators` list so the FE can show the count
-    # even when `live_only=true` hides non-live version rows.
+    # currently in scope (honors `item_id` and `q`; ignores pagination so the
+    # count reflects the full filtered scope, not just the current page).
+    # Surfaced on each entry in the top-level `evaluators` list so the FE
+    # can show the count even when `live_only=true` hides non-live version
+    # rows.
     scoped_item_ids = {it["uuid"] for it in items}
     run_count_by_evaluator: Dict[str, int] = {}
     for r in runs:
@@ -2259,7 +2324,7 @@ async def task_summary(
         return sorted(versions, key=_sort_key)
 
     rows: List[Dict[str, Any]] = []
-    for item in items:
+    for item in paged_items:
         # Annotations are not version-scoped (the table has no
         # `evaluator_version_id`), so the same per-evaluator annotation cells
         # are reused across every version row for that (item, evaluator).
@@ -2398,10 +2463,16 @@ async def task_summary(
     # Filter to surviving annotators (soft-deleted ones are dropped from
     # `annotators[]` by `get_annotators_by_uuids`, so emitting their UUIDs
     # in `item_comments` would create orphans the FE has no name for).
+    # Scope is `paged_items` (NOT the broader `scoped_item_ids`) so the
+    # comments block tracks the rows on the current page rather than
+    # shipping comments for off-page items the FE wouldn't render. To
+    # collect comments for the full filtered scope (e.g. CSV export),
+    # request `?limit=<total>` — the cap is set high enough for that.
+    paged_item_ids = {it["uuid"] for it in paged_items}
     surviving_annotator_ids = {a["uuid"] for a in annotators}
     item_comments: Dict[str, Dict[str, str]] = {}
     for cmt_item_id, cells in all_item_comments.items():
-        if cmt_item_id not in scoped_item_ids:
+        if cmt_item_id not in paged_item_ids:
             continue
         surviving_cells = {
             aid: text
@@ -2418,6 +2489,11 @@ async def task_summary(
         "annotators": annotators,
         "rows": rows,
         "item_comments": item_comments,
+        "pagination": {
+            "total": total_items,
+            "limit": pagination.limit,
+            "offset": pagination.offset,
+        },
     }
 
 
