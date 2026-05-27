@@ -38,7 +38,12 @@ from typing import Any, Dict, List, Literal, Optional, Type
 from fastapi import HTTPException, Query
 
 DEFAULT_LIMIT = 50
-MAX_LIMIT = 200
+# Cap is intentionally very high (1M) so "give me everything" use cases like
+# CSV export can pass `limit=<total>` without a multi-request loop on the FE.
+# The cap exists only as a guard against pathological values (e.g. integer
+# overflow attempts); it is not a per-request payload budget — handlers
+# remain responsible for their own size/perf characteristics.
+MAX_LIMIT = 1_000_000
 
 
 class PaginationParams:

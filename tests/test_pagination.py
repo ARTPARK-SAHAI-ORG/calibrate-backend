@@ -31,6 +31,17 @@ def test_pagination_assigns_values():
     assert p.offset == 10
 
 
+def test_pagination_max_limit_is_export_friendly():
+    """The cap is intentionally huge (1M) so FE "export all" flows can
+    pass `limit=total` in a single request. If you ever lower this,
+    update the CLAUDE.md bullet and warn FE consumers that depend on
+    single-shot fetches — there are real ones (CSV export from the
+    annotation-task summary view)."""
+    from pagination import MAX_LIMIT
+
+    assert MAX_LIMIT >= 1_000_000
+
+
 # ---------------------------------------------------------------------------
 # make_sort_params
 # ---------------------------------------------------------------------------
