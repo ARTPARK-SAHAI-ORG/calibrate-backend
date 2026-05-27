@@ -2159,9 +2159,11 @@ async def task_summary(
     latest_run_ts: Dict[tuple, str] = {}
     versions_by_evaluator: Dict[str, set] = {}
     # Total runs per evaluator across ALL versions, restricted to the items
-    # currently in scope (i.e. honors the `item_id` filter). Surfaced on each
-    # entry in the top-level `evaluators` list so the FE can show the count
-    # even when `live_only=true` hides non-live version rows.
+    # currently in scope (honors `item_id` and `q`; ignores pagination so the
+    # count reflects the full filtered scope, not just the current page).
+    # Surfaced on each entry in the top-level `evaluators` list so the FE
+    # can show the count even when `live_only=true` hides non-live version
+    # rows.
     scoped_item_ids = {it["uuid"] for it in items}
     run_count_by_evaluator: Dict[str, int] = {}
     for r in runs:
