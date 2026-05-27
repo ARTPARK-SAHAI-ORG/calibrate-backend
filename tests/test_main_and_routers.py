@@ -563,6 +563,94 @@ def test_tests_router_crud(client):
     )
 
 
+def test_tests_router_type_validation(client):
+    auth = _auth(client)
+    h = auth["headers"]
+
+    evaluators = client.get("/evaluators", headers=h).json()
+    llm_ev = next(e for e in evaluators if e.get("evaluator_type") == "llm")
+
+    # Unknown `type` rejected by Pydantic Literal — 422.
+    bad_type = client.post(
+        "/tests",
+        json={
+            "name": f"t-{uuid.uuid4().hex[:6]}",
+            "type": "garbage",
+            "config": None,
+        },
+        headers=h,
+    )
+    assert bad_type.status_code == 422
+
+    # Create a user-owned simulation evaluator (no seeded simulation defaults).
+    sim_ev = client.post(
+        "/evaluators",
+        json={
+            "name": f"sim-{uuid.uuid4().hex[:6]}",
+            "description": "d",
+            "evaluator_type": "simulation",
+            "data_type": "text",
+            "kind": "single",
+            "output_type": "binary",
+            "version": {
+                "judge_model": "openai/gpt-4",
+                "system_prompt": "Judge the conversation",
+            },
+        },
+        headers=h,
+    )
+    assert sim_ev.status_code == 200
+    sim_ev_uuid = sim_ev.json()["uuid"]
+
+    # conversation + simulation evaluator → 200
+    conv_create = client.post(
+        "/tests",
+        json={
+            "name": f"conv-{uuid.uuid4().hex[:6]}",
+            "type": "conversation",
+            "config": None,
+            "evaluators": [{"evaluator_uuid": sim_ev_uuid}],
+        },
+        headers=h,
+    )
+    assert conv_create.status_code == 200
+    conv_uuid = conv_create.json()["uuid"]
+
+    # conversation + llm evaluator → 400
+    conv_bad = client.post(
+        "/tests",
+        json={
+            "name": f"conv-bad-{uuid.uuid4().hex[:6]}",
+            "type": "conversation",
+            "config": None,
+            "evaluators": [{"evaluator_uuid": llm_ev["uuid"]}],
+        },
+        headers=h,
+    )
+    assert conv_bad.status_code == 400
+
+    # response + simulation evaluator → 400
+    resp_bad = client.post(
+        "/tests",
+        json={
+            "name": f"resp-bad-{uuid.uuid4().hex[:6]}",
+            "type": "response",
+            "config": None,
+            "evaluators": [{"evaluator_uuid": sim_ev_uuid}],
+        },
+        headers=h,
+    )
+    assert resp_bad.status_code == 400
+
+    # Update existing conversation test with an llm evaluator → 400
+    upd_bad = client.put(
+        f"/tests/{conv_uuid}",
+        json={"evaluators": [{"evaluator_uuid": llm_ev["uuid"]}]},
+        headers=h,
+    )
+    assert upd_bad.status_code == 400
+
+
 # ---------------------------------------------------------------------------
 # Annotators router
 # ---------------------------------------------------------------------------

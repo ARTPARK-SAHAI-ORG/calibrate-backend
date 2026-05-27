@@ -27,6 +27,18 @@ logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/tests", tags=["tests"])
 
 
+TestType = Literal["response", "tool_call", "conversation"]
+
+# Each test type pins the evaluator_type it accepts. `conversation` tests judge whole
+# simulated conversations, so only `simulation` evaluators apply; `response`/`tool_call`
+# tests judge a single LLM reply, so only `llm` evaluators apply.
+REQUIRED_EVALUATOR_TYPE_BY_TEST_TYPE: Dict[str, str] = {
+    "response": "llm",
+    "tool_call": "llm",
+    "conversation": "simulation",
+}
+
+
 class EvaluatorRef(BaseModel):
     """Reference to an evaluator attached to a test. The pinned version is always the
     evaluator's live version at write time (`set_test_evaluators` in `db.py`)."""
@@ -39,14 +51,14 @@ class EvaluatorRef(BaseModel):
 
 class TestCreate(BaseModel):
     name: str
-    type: str
+    type: TestType
     config: Optional[Dict[str, Any]] = None
     evaluators: Optional[List[EvaluatorRef]] = None
 
 
 class TestUpdate(BaseModel):
     name: Optional[str] = None
-    type: Optional[str] = None
+    type: Optional[TestType] = None
     config: Optional[Dict[str, Any]] = None
     evaluators: Optional[List[EvaluatorRef]] = None
 
@@ -90,7 +102,7 @@ class BulkTestItem(BaseModel):
 
 
 class BulkTestUpload(BaseModel):
-    type: Literal["response", "tool_call"]
+    type: TestType
     tests: List[BulkTestItem]
     agent_uuids: Optional[List[str]] = None
     language: Optional[str] = None
@@ -122,6 +134,11 @@ class BulkTestUpload(BaseModel):
             elif self.type == "tool_call":
                 if not t.tool_calls:
                     raise ValueError(f"Test '{t.name}' must have 'tool_calls' for tool_call type")
+            elif self.type == "conversation":
+                if not t.evaluators:
+                    raise ValueError(
+                        f"Test '{t.name}' must have at least one evaluator for conversation type"
+                    )
 
         return self
 
@@ -142,10 +159,17 @@ class BulkTestDeleteResponse(BaseModel):
     message: str
 
 
-def _validate_evaluators(refs: List[EvaluatorRef], org_uuid: str) -> List[Dict[str, Any]]:
-    """Validate that each referenced evaluator is visible to the org and that it has
-    `evaluator_type == 'llm'` (response/next-reply tests only judge LLM output, so attaching
-    a stt/tts/simulation evaluator is rejected at write time). Returns db-ready refs."""
+def _validate_evaluators(
+    refs: List[EvaluatorRef], org_uuid: str, test_type: str
+) -> List[Dict[str, Any]]:
+    """Validate that each referenced evaluator is visible to the org and that its
+    `evaluator_type` matches the test's type (`response`/`tool_call` ⇒ `llm`,
+    `conversation` ⇒ `simulation`). Returns db-ready refs."""
+    required_evaluator_type = REQUIRED_EVALUATOR_TYPE_BY_TEST_TYPE.get(test_type)
+    if required_evaluator_type is None:
+        raise HTTPException(
+            status_code=400, detail=f"Unknown test type '{test_type}'"
+        )
     out: List[Dict[str, Any]] = []
     for ref in refs:
         evaluator = get_evaluator(ref.evaluator_uuid)
@@ -153,12 +177,13 @@ def _validate_evaluators(refs: List[EvaluatorRef], org_uuid: str) -> List[Dict[s
             raise HTTPException(status_code=404, detail=f"Evaluator {ref.evaluator_uuid} not found")
         if evaluator.get("org_uuid") is not None and evaluator["org_uuid"] != org_uuid:
             raise HTTPException(status_code=404, detail=f"Evaluator {ref.evaluator_uuid} not found")
-        if evaluator.get("evaluator_type") != "llm":
+        if evaluator.get("evaluator_type") != required_evaluator_type:
             raise HTTPException(
                 status_code=400,
                 detail=(
                     f"Evaluator {ref.evaluator_uuid} has evaluator_type="
-                    f"'{evaluator.get('evaluator_type')}'. LLM tests only accept 'llm' evaluators."
+                    f"'{evaluator.get('evaluator_type')}'. Tests of type "
+                    f"'{test_type}' only accept '{required_evaluator_type}' evaluators."
                 ),
             )
         out.append(
@@ -207,7 +232,9 @@ async def bulk_upload_tests(
     resolved_evaluator_refs: List[Optional[List[Dict[str, Any]]]] = []
     for t in payload.tests:
         if t.evaluators:
-            resolved_evaluator_refs.append(_validate_evaluators(t.evaluators, ctx.org_uuid))
+            resolved_evaluator_refs.append(
+                _validate_evaluators(t.evaluators, ctx.org_uuid, payload.type)
+            )
         else:
             resolved_evaluator_refs.append(None)
 
@@ -274,7 +301,9 @@ async def create_test_endpoint(
 ):
     """Create a new test."""
     resolved = (
-        _validate_evaluators(test.evaluators, ctx.org_uuid) if test.evaluators else None
+        _validate_evaluators(test.evaluators, ctx.org_uuid, test.type)
+        if test.evaluators
+        else None
     )
     with ensure_name_unique("tests", test.name, ctx.org_uuid, entity="Test"):
         test_uuid = create_test(
@@ -316,8 +345,9 @@ async def update_test_endpoint(
     if not existing_test or existing_test.get("org_uuid") != ctx.org_uuid:
         raise HTTPException(status_code=404, detail="Test not found")
 
+    effective_type = test.type if test.type is not None else existing_test.get("type")
     resolved = (
-        _validate_evaluators(test.evaluators, ctx.org_uuid)
+        _validate_evaluators(test.evaluators, ctx.org_uuid, effective_type)
         if test.evaluators is not None
         else None
     )
