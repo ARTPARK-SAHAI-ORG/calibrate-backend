@@ -73,6 +73,16 @@ from utils import (
     try_start_queued_job,
 )
 from auth_utils import get_current_org, OrgContext
+from pagination import PaginationParams, make_search_params, make_sort_params
+
+# Per-endpoint sort/search allowlists for the summary view. Built at module
+# load time so FastAPI's dependency-graph introspection sees stable types.
+_SummarySort = make_sort_params(
+    sortable=["created_at", "updated_at"],
+    default="created_at",
+    default_order="desc",
+)
+_SummarySearch = make_search_params(searchable=["payload.name"])
 from annotation_metrics import (
     aggregate_agreement,
     aggregate_human_evaluator_agreement,
@@ -1984,6 +1994,9 @@ async def task_summary(
         description="When true, emit only one row per (item, evaluator) using the evaluator's live version. Non-live versions that have runs are excluded.",
     ),
     ctx: OrgContext = Depends(get_current_org),
+    search: _SummarySearch = Depends(),
+    sort: _SummarySort = Depends(),
+    pagination: PaginationParams = Depends(),
 ):
     """Single denormalized view for the table. By default emits one row per
     `(item × evaluator × version)` so re-running an evaluator on a new
@@ -2028,8 +2041,8 @@ async def task_summary(
                                                     # across ALL versions,
                                                     # restricted to items in
                                                     # scope (honors
-                                                    # `item_id`; ignores
-                                                    # `live_only`)
+                                                    # `item_id` and `q`;
+                                                    # ignores `live_only`)
           }
         ],
         "annotators": [{uuid, name}],               # union of annotators with
@@ -2059,6 +2072,20 @@ async def task_summary(
           "<item_uuid>": {
             "<annotator_uuid>": str   # latest free-text comment
           }
+        },
+        "pagination": {                             # Pagination is at the
+                                                    # ITEM level — each item
+                                                    # expands into >=1 row
+                                                    # (one per evaluator x
+                                                    # version slot).
+          "total": int,                             # total items in scope
+                                                    # (honors item_id + q;
+                                                    # NOT the annotator
+                                                    # union, which stays
+                                                    # task-wide so column
+                                                    # headers don't shift)
+          "limit": int,
+          "offset": int
         }
       }
 
@@ -2105,6 +2132,25 @@ async def task_summary(
                 status_code=404, detail="Item not found in this task"
             )
         items = [it for it in items if it["uuid"] == item_id]
+
+    # Substring search on `payload.name` (the only required string field on
+    # items — enforced by the items POST validator). Applied AFTER `item_id`
+    # so a single-item lookup that also passes `q` still narrows correctly.
+    # Mechanics live in `pagination.make_search_params`.
+    items = search.apply(items)
+
+    # `items` is now the full scope (task-wide or filtered by item_id/q).
+    # Keep it untouched for scoped_item_ids / annotator union / run_count
+    # so the top-level evaluators[] and annotators[] blocks stay stable
+    # across pages (consistent column headers in the FE table). Pagination
+    # only slices which items get expanded into `rows`.
+    total_items = len(items)
+
+    # Sort the in-scope items before pagination so paging is stable across
+    # requests. Mechanics (incl. `uuid` secondary key for identical-timestamp
+    # tiebreak) live in `pagination.make_sort_params`.
+    items = sort.apply(items)
+    paged_items = items[pagination.offset : pagination.offset + pagination.limit]
 
     # Latest evaluator_run per (item, evaluator, version). One row in the
     # response per distinct version that has run, so re-running on a new
@@ -2259,7 +2305,7 @@ async def task_summary(
         return sorted(versions, key=_sort_key)
 
     rows: List[Dict[str, Any]] = []
-    for item in items:
+    for item in paged_items:
         # Annotations are not version-scoped (the table has no
         # `evaluator_version_id`), so the same per-evaluator annotation cells
         # are reused across every version row for that (item, evaluator).
@@ -2418,6 +2464,11 @@ async def task_summary(
         "annotators": annotators,
         "rows": rows,
         "item_comments": item_comments,
+        "pagination": {
+            "total": total_items,
+            "limit": pagination.limit,
+            "offset": pagination.offset,
+        },
     }
 
 

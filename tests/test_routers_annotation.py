@@ -1554,3 +1554,242 @@ def test_annotation_eval_unsupported_task_type(client):
             headers=h,
         )
         assert resp.status_code == 400
+
+
+def test_annotation_task_summary_pagination(client):
+    """Pagination at item level: rows page, evaluators/annotators block + total stay
+    task-wide so column headers don't shift between pages."""
+    auth = _signup(client)
+    h = auth["headers"]
+    llm_ev = _llm_evaluator(client, h)
+    task_uuid = client.post(
+        "/annotation-tasks",
+        json={
+            "name": f"t-{uuid.uuid4().hex[:6]}",
+            "type": "llm",
+            "evaluator_ids": [llm_ev["uuid"]],
+        },
+        headers=h,
+    ).json()["uuid"]
+
+    # Seed 5 items
+    item_ids = client.post(
+        f"/annotation-tasks/{task_uuid}/items",
+        json={"items": [{"payload": {"name": f"item-{i}"}} for i in range(5)]},
+        headers=h,
+    ).json()["item_ids"]
+    assert len(item_ids) == 5
+
+    # Page 1 of 2
+    p1 = client.get(
+        f"/annotation-tasks/{task_uuid}/summary?limit=2&offset=0", headers=h
+    )
+    assert p1.status_code == 200
+    body1 = p1.json()
+    assert body1["pagination"] == {"total": 5, "limit": 2, "offset": 0}
+    # 1 evaluator × 2 items × 1 version slot = 2 rows
+    assert len(body1["rows"]) == 2
+    p1_items = {r["item_id"] for r in body1["rows"]}
+    assert len(p1_items) == 2
+
+    # Page 2
+    p2 = client.get(
+        f"/annotation-tasks/{task_uuid}/summary?limit=2&offset=2", headers=h
+    ).json()
+    assert p2["pagination"]["offset"] == 2
+    p2_items = {r["item_id"] for r in p2["rows"]}
+    assert p1_items.isdisjoint(p2_items)
+
+    # Top-level evaluators[] block stable across pages (column headers don't shift)
+    assert [e["uuid"] for e in body1["evaluators"]] == [
+        e["uuid"] for e in p2["evaluators"]
+    ]
+
+    # Out-of-range offset → empty rows but total still correct
+    empty = client.get(
+        f"/annotation-tasks/{task_uuid}/summary?limit=2&offset=10", headers=h
+    ).json()
+    assert empty["pagination"]["total"] == 5
+    assert empty["rows"] == []
+
+    # item_id filter narrows total to 1; pagination semantics preserved
+    one = client.get(
+        f"/annotation-tasks/{task_uuid}/summary?item_id={item_ids[0]}", headers=h
+    ).json()
+    assert one["pagination"]["total"] == 1
+
+    # Bad pagination params → 422
+    assert (
+        client.get(
+            f"/annotation-tasks/{task_uuid}/summary?limit=0", headers=h
+        ).status_code
+        == 422
+    )
+    assert (
+        client.get(
+            f"/annotation-tasks/{task_uuid}/summary?offset=-1", headers=h
+        ).status_code
+        == 422
+    )
+
+
+def test_annotation_task_summary_search(client):
+    """`?q=` does case-insensitive substring search on payload.name, narrows
+    scope (total + run_count + annotators), and composes with pagination."""
+    auth = _signup(client)
+    h = auth["headers"]
+    llm_ev = _llm_evaluator(client, h)
+    task_uuid = client.post(
+        "/annotation-tasks",
+        json={
+            "name": f"t-{uuid.uuid4().hex[:6]}",
+            "type": "llm",
+            "evaluator_ids": [llm_ev["uuid"]],
+        },
+        headers=h,
+    ).json()["uuid"]
+
+    payloads = [
+        {"name": "alpha-one"},
+        {"name": "alpha-two"},
+        {"name": "beta-one"},
+        {"name": "Gamma-Three"},
+    ]
+    client.post(
+        f"/annotation-tasks/{task_uuid}/items",
+        json={"items": [{"payload": p} for p in payloads]},
+        headers=h,
+    )
+
+    # Substring match — 2 alphas
+    r = client.get(
+        f"/annotation-tasks/{task_uuid}/summary?q=alpha", headers=h
+    ).json()
+    assert r["pagination"]["total"] == 2
+    names = {row["payload"]["name"] for row in r["rows"]}
+    assert names == {"alpha-one", "alpha-two"}
+
+    # Case-insensitive
+    r_upper = client.get(
+        f"/annotation-tasks/{task_uuid}/summary?q=GAMMA", headers=h
+    ).json()
+    assert r_upper["pagination"]["total"] == 1
+    assert r_upper["rows"][0]["payload"]["name"] == "Gamma-Three"
+
+    # Composes with pagination — page through search results
+    page1 = client.get(
+        f"/annotation-tasks/{task_uuid}/summary?q=alpha&limit=1&offset=0",
+        headers=h,
+    ).json()
+    page2 = client.get(
+        f"/annotation-tasks/{task_uuid}/summary?q=alpha&limit=1&offset=1",
+        headers=h,
+    ).json()
+    assert page1["pagination"]["total"] == 2 and page2["pagination"]["total"] == 2
+    assert len(page1["rows"]) == 1 and len(page2["rows"]) == 1
+    assert page1["rows"][0]["item_id"] != page2["rows"][0]["item_id"]
+
+    # No matches → empty rows, total 0, but evaluators block still present
+    none = client.get(
+        f"/annotation-tasks/{task_uuid}/summary?q=zzzzz", headers=h
+    ).json()
+    assert none["pagination"]["total"] == 0
+    assert none["rows"] == []
+    assert len(none["evaluators"]) == 1  # column headers stable
+
+    # Empty / whitespace-only q is a no-op (returns full task)
+    blank = client.get(
+        f"/annotation-tasks/{task_uuid}/summary?q=%20%20", headers=h
+    ).json()
+    assert blank["pagination"]["total"] == 4
+
+
+def test_annotation_task_summary_sort(client):
+    """`?sort_by=updated_at&order=asc|desc` orders items, applied before pagination
+    so paging through a sorted list is stable."""
+    import time
+
+    auth = _signup(client)
+    h = auth["headers"]
+    llm_ev = _llm_evaluator(client, h)
+    task_uuid = client.post(
+        "/annotation-tasks",
+        json={
+            "name": f"t-{uuid.uuid4().hex[:6]}",
+            "type": "llm",
+            "evaluator_ids": [llm_ev["uuid"]],
+        },
+        headers=h,
+    ).json()["uuid"]
+
+    # Create three items with distinct created_at by spacing inserts (sqlite
+    # CURRENT_TIMESTAMP is second-resolution).
+    names = ["first", "second", "third"]
+    item_ids = []
+    for n in names:
+        r = client.post(
+            f"/annotation-tasks/{task_uuid}/items",
+            json={"items": [{"payload": {"name": n}}]},
+            headers=h,
+        ).json()
+        item_ids.append(r["item_ids"][0])
+        time.sleep(1.05)
+
+    # Touch the second one so its updated_at jumps to "newest by update".
+    client.put(
+        f"/annotation-tasks/{task_uuid}/items",
+        json={"updates": [{"uuid": item_ids[1], "payload": {"name": "second-edited"}}]},
+        headers=h,
+    )
+
+    # Default sort (created_at desc) — newest creation first.
+    default = client.get(
+        f"/annotation-tasks/{task_uuid}/summary", headers=h
+    ).json()
+    default_order = [r["payload"]["name"] for r in default["rows"]]
+    assert default_order[0] == "third"  # last created
+
+    # updated_at desc — the edited row floats to the top.
+    upd_desc = client.get(
+        f"/annotation-tasks/{task_uuid}/summary?sort_by=updated_at&order=desc",
+        headers=h,
+    ).json()
+    assert upd_desc["rows"][0]["payload"]["name"] == "second-edited"
+
+    # updated_at asc — edited row sinks to the bottom.
+    upd_asc = client.get(
+        f"/annotation-tasks/{task_uuid}/summary?sort_by=updated_at&order=asc",
+        headers=h,
+    ).json()
+    assert upd_asc["rows"][-1]["payload"]["name"] == "second-edited"
+
+    # Sort composes with pagination — paging through sorted results yields the
+    # same total order with no overlap and no gaps.
+    p1 = client.get(
+        f"/annotation-tasks/{task_uuid}/summary?sort_by=updated_at&order=asc&limit=2&offset=0",
+        headers=h,
+    ).json()
+    p2 = client.get(
+        f"/annotation-tasks/{task_uuid}/summary?sort_by=updated_at&order=asc&limit=2&offset=2",
+        headers=h,
+    ).json()
+    paged_names = [r["payload"]["name"] for r in p1["rows"]] + [
+        r["payload"]["name"] for r in p2["rows"]
+    ]
+    full_names = [r["payload"]["name"] for r in upd_asc["rows"]]
+    assert paged_names == full_names
+
+    # Bad sort_by → 422 (allowlist enforced by Literal)
+    assert (
+        client.get(
+            f"/annotation-tasks/{task_uuid}/summary?sort_by=password", headers=h
+        ).status_code
+        == 422
+    )
+    # Bad order → 422
+    assert (
+        client.get(
+            f"/annotation-tasks/{task_uuid}/summary?order=sideways", headers=h
+        ).status_code
+        == 422
+    )
