@@ -468,6 +468,42 @@ def test_conversation_only_run_skips_connection_guard(client, monkeypatch):
     )
 
 
+def test_mismatched_conversation_row_still_guarded(client, monkeypatch):
+    """A test with row type=conversation but config.evaluation.type=response is
+    still dispatched as a response by calibrate (which calls the agent), so the
+    connection-verification guard must NOT be skipped for it."""
+    import db
+
+    auth = _signup(client)
+    h = auth["headers"]
+    agent = _create_agent(client, h)
+    db.update_agent(
+        agent["uuid"],
+        config={"agent_url": "http://agent.local/run", "connection_verified": False},
+    )
+    sim_ev = _create_simulation_evaluator(client, h)["uuid"]
+    # Schema lets config be arbitrary while row `type` is immutable, so this
+    # divergent state is reachable via the API.
+    mismatched = client.post(
+        "/tests",
+        json={
+            "name": f"mm-{uuid.uuid4().hex[:6]}",
+            "type": "conversation",
+            "config": {"history": [], "evaluation": {"type": "response"}},
+            "evaluators": [{"evaluator_uuid": sim_ev}],
+        },
+        headers=h,
+    ).json()
+
+    monkeypatch.setenv("S3_OUTPUT_BUCKET", "test-bucket")
+    resp = client.post(
+        f"/agent-tests/agent/{agent['uuid']}/run",
+        json={"test_uuids": [mismatched["uuid"]]},
+    )
+    assert resp.status_code == 400
+    assert "not verified" in resp.json()["detail"].lower()
+
+
 def test_run_agent_test_missing_s3_config_500(client, monkeypatch):
     auth = _signup(client)
     h = auth["headers"]

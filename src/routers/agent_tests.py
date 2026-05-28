@@ -1478,11 +1478,20 @@ def _update_agent_test_intermediate_results(
 
 
 def _is_conversation_test(test: Dict[str, Any]) -> bool:
-    """True if a test is conversation-type (checks both the row `type` and the
-    stored `config.evaluation.type`, which are kept in sync at write time)."""
+    """True only when BOTH the row `type` and the stored
+    `config.evaluation.type` are ``"conversation"``.
+
+    These are kept in sync at write time, but `PUT /tests` accepts an arbitrary
+    `config` dict while the row `type` is immutable, so they *can* diverge. The
+    sole caller (the run endpoint's connection-verification skip) must fail
+    safe: calibrate dispatches each row on `config.evaluation.type`, so a
+    `type="conversation"` test whose `evaluation.type` is `response`/`tool_call`
+    DOES invoke the agent. Requiring both fields guarantees we only skip the
+    agent-connection guard when the run genuinely never calls the agent;
+    any mismatch keeps the guard in force."""
     cfg = test.get("config") or {}
     evaluation = cfg.get("evaluation") or {}
-    return test.get("type") == "conversation" or evaluation.get("type") == "conversation"
+    return test.get("type") == "conversation" and evaluation.get("type") == "conversation"
 
 
 def run_llm_test_task(
