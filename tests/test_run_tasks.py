@@ -359,7 +359,8 @@ def test_run_benchmark_task_failure_path():
 
 
 # ---------------------------------------------------------------------------
-# Conversation tests — run_conversation_test_task (routed via run_llm_test_task)
+# Conversation tests — run through the same `calibrate llm` path as response
+# tests (run_llm_test_task); calibrate dispatches per row on evaluation.type.
 # ---------------------------------------------------------------------------
 
 
@@ -395,14 +396,64 @@ def _make_conversation_test(db_mod, org_uuid, user_uuid, name="Conv"):
     return test_uuid, ev_uuid
 
 
-def _write_conversation_eval_output(output_dir: Path, evaluator_id: str, value="true"):
-    """Mimic `calibrate simulations --eval-only`: one per-row subdir holding an
-    evaluation_results.csv."""
-    row_dir = output_dir / "row_1"
-    row_dir.mkdir(parents=True, exist_ok=True)
-    with open(row_dir / "evaluation_results.csv", "w") as f:
-        f.write("name,type,value,reasoning,evaluator_id\n")
-        f.write(f"Judge,binary,{value},looks good,{evaluator_id}\n")
+def _write_conversation_llm_output(output_dir: Path, test_uuid: str, ev_name: str):
+    """Mimic `calibrate llm` output for a conversation test case: per-model
+    results.json + metrics.json (same shape as response tests). Conversation
+    rows carry no `output` key and `passed` is computed by calibrate."""
+    model_dir = output_dir / "gpt-4.1"
+    model_dir.mkdir(parents=True, exist_ok=True)
+    with open(model_dir / "results.json", "w") as f:
+        json.dump(
+            [
+                {
+                    "metrics": {
+                        "passed": True,
+                        "reasoning": "All evaluators passed",
+                        "judge_results": {
+                            ev_name: {"reasoning": "ok", "match": True}
+                        },
+                    },
+                    "test_case": {
+                        "id": test_uuid,
+                        "history": [],
+                        "evaluation": {"type": "conversation"},
+                    },
+                    "test_case_id": test_uuid,
+                }
+            ],
+            f,
+        )
+    with open(model_dir / "metrics.json", "w") as f:
+        json.dump({"total": 1, "passed": 1, "criteria": {}, "tool_calls": {}}, f)
+
+
+def test_build_calibrate_config_includes_conversation_tests():
+    """Conversation tests must land in the top-level evaluators list AND get
+    per-test-case `evaluation.criteria` refs, exactly like response tests."""
+    from routers.agent_tests import _build_calibrate_config
+
+    user_uuid = db.create_user("R", "BC", f"rbc-{os.urandom(4).hex()}@x.com")
+    org_uuid = db.get_personal_org_for_user(user_uuid)["uuid"]
+    agent_uuid = db.create_agent(
+        name=f"a-{os.urandom(4).hex()}", org_uuid=org_uuid, user_id=user_uuid
+    )
+    test_uuid, ev_uuid = _make_conversation_test(db, org_uuid, user_uuid)
+    agent = db.get_agent(agent_uuid)
+    test = db.get_test(test_uuid)
+
+    config, evaluators_by_test_id = _build_calibrate_config(agent, [test])
+
+    # Top-level evaluators list carries the linked simulation evaluator.
+    assert config.get("evaluators"), config
+    ev_names = {e["name"] for e in config["evaluators"]}
+    # The test case keeps evaluation.type == conversation and references the
+    # evaluator by name in criteria (calibrate dispatches on the type).
+    case = next(c for c in config["test_cases"] if c["id"] == test_uuid)
+    assert case["evaluation"]["type"] == "conversation"
+    assert case["evaluation"]["criteria"]
+    assert case["evaluation"]["criteria"][0]["name"] in ev_names
+    # Snapshot is built for the read path.
+    assert test_uuid in evaluators_by_test_id
 
 
 def test_run_conversation_test_task_success():
@@ -415,6 +466,7 @@ def test_run_conversation_test_task_success():
     )
     test_uuid, ev_uuid = _make_conversation_test(db, org_uuid, user_uuid)
     test = db.get_test(test_uuid)
+    ev_name = db.get_evaluator(ev_uuid)["name"]
     job_uuid = db.create_agent_test_job(
         agent_id=agent_uuid, job_type="llm-unit-test", status="in_progress"
     )
@@ -424,7 +476,7 @@ def test_run_conversation_test_task_success():
     def fake_popen(*args, **kwargs):
         output_dir = Path(kwargs["cwd"]) / "output"
         if output_dir.exists():
-            _write_conversation_eval_output(output_dir, ev_uuid, value="true")
+            _write_conversation_llm_output(output_dir, test_uuid, ev_name)
         return process
 
     with patch(
@@ -432,6 +484,8 @@ def test_run_conversation_test_task_success():
     ), patch(
         "routers.agent_tests.get_s3_client", return_value=MagicMock()
     ), patch("routers.agent_tests.upload_directory_tree_to_s3"), patch(
+        "routers.agent_tests.upload_file_to_s3"
+    ), patch(
         "routers.agent_tests.try_start_queued_agent_test_job"
     ), patch(
         "routers.agent_tests.time.sleep"
@@ -447,11 +501,6 @@ def test_run_conversation_test_task_success():
     row = results["test_results"][0]
     assert row["passed"] is True
     assert row["test_case_id"] == test_uuid
-    # judge_results carries the per-evaluator verdict keyed by name.
-    assert row["judge_results"]
-    judged = list(row["judge_results"].values())[0]
-    assert judged["evaluator_id"] == ev_uuid
-    assert judged["match"] is True
 
 
 def test_run_conversation_test_task_calibrate_failure():

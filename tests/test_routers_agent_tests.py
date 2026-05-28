@@ -348,15 +348,18 @@ def test_run_conversation_test_queued_path(client, monkeypatch):
     assert resp.json()["status"] == "queued"
     task_id = resp.json()["task_id"]
 
-    # The frozen job details should carry the conversation marker + payloads so
-    # the worker (and queue recovery) can run the eval-only flow.
+    # Conversation tests flow through the normal calibrate-llm config: the
+    # frozen calibrate_config carries the conversation test case (with its
+    # evaluation.type + criteria) and the top-level evaluators list.
     import db
 
     job = db.get_agent_test_job(task_id)
     details = job["details"]
-    assert details.get("is_conversation") is True
-    assert conv["uuid"] in details["conversation_payloads"]
-    assert details["conversation_payloads"][conv["uuid"]]["evaluators"]
+    cfg = details["calibrate_config"]
+    assert cfg.get("evaluators"), cfg
+    case = next(c for c in cfg["test_cases"] if c["id"] == conv["uuid"])
+    assert case["evaluation"]["type"] == "conversation"
+    assert case["evaluation"]["criteria"]
     assert conv["uuid"] in details["evaluators_by_test_id"]
 
     # Status endpoint serializes fine for a conversation run.
@@ -368,7 +371,9 @@ def test_run_conversation_test_queued_path(client, monkeypatch):
     assert client.delete(f"/agent-tests/job/{task_id}", headers=h).status_code == 200
 
 
-def test_run_mixed_conversation_and_response_rejected(client, monkeypatch):
+def test_run_mixed_conversation_and_response_allowed(client, monkeypatch):
+    """The calibrate CLI dispatches per test case on evaluation.type, so a run
+    may mix conversation with response tests in a single job."""
     auth = _signup(client)
     h = auth["headers"]
     agent = _create_agent(client, h)
@@ -376,15 +381,28 @@ def test_run_mixed_conversation_and_response_rejected(client, monkeypatch):
     conv = _create_conversation_test(client, h)
 
     monkeypatch.setenv("S3_OUTPUT_BUCKET", "test-bucket")
-    resp = client.post(
-        f"/agent-tests/agent/{agent['uuid']}/run",
-        json={"test_uuids": [response_test["uuid"], conv["uuid"]]},
-    )
-    assert resp.status_code == 400
-    assert "mix" in resp.json()["detail"].lower()
+    with patch(
+        "routers.agent_tests.can_start_agent_test_job", return_value=False
+    ), patch("threading.Thread"):
+        resp = client.post(
+            f"/agent-tests/agent/{agent['uuid']}/run",
+            json={"test_uuids": [response_test["uuid"], conv["uuid"]]},
+        )
+    assert resp.status_code == 200, resp.text
+    task_id = resp.json()["task_id"]
+
+    import db
+
+    cfg = db.get_agent_test_job(task_id)["details"]["calibrate_config"]
+    types = {c["evaluation"]["type"] for c in cfg["test_cases"]}
+    assert types == {"response", "conversation"}
+
+    assert client.delete(f"/agent-tests/job/{task_id}", headers=h).status_code == 200
 
 
-def test_benchmark_rejects_conversation_tests(client, monkeypatch):
+def test_benchmark_allows_conversation_tests(client, monkeypatch):
+    """Conversation rows ignore the benchmarked model, but a benchmark that
+    includes them is still accepted (handled by the same calibrate-llm path)."""
     auth = _signup(client)
     h = auth["headers"]
     agent = _create_agent(client, h)
@@ -395,12 +413,16 @@ def test_benchmark_rejects_conversation_tests(client, monkeypatch):
     )
 
     monkeypatch.setenv("S3_OUTPUT_BUCKET", "test-bucket")
-    resp = client.post(
-        f"/agent-tests/agent/{agent['uuid']}/benchmark",
-        json={"models": ["openai/gpt-4"]},
-    )
-    assert resp.status_code == 400
-    assert "conversation" in resp.json()["detail"].lower()
+    with patch(
+        "routers.agent_tests.can_start_agent_test_job", return_value=False
+    ), patch("threading.Thread"):
+        resp = client.post(
+            f"/agent-tests/agent/{agent['uuid']}/benchmark",
+            json={"models": ["openai/gpt-4"]},
+        )
+    assert resp.status_code == 200, resp.text
+    task_id = resp.json()["task_id"]
+    assert client.delete(f"/agent-tests/job/{task_id}", headers=h).status_code == 200
 
 
 def test_run_agent_benchmark_validation(client):
