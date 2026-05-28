@@ -300,6 +300,16 @@ async def create_test_endpoint(
     test: TestCreate, ctx: OrgContext = Depends(get_current_org)
 ):
     """Create a new test."""
+    # Conversation tests have no evaluator fallback (unlike `response`, which can
+    # synthesize the default LLM judge from legacy string criteria) — without a
+    # linked simulation evaluator a run produces an empty calibrate config with
+    # nothing to judge. Require at least one up front. (The bulk endpoint already
+    # enforces this; this closes the single-create gap.)
+    if test.type == "conversation" and not test.evaluators:
+        raise HTTPException(
+            status_code=400,
+            detail="Conversation tests require at least one evaluator.",
+        )
     resolved = (
         _validate_evaluators(test.evaluators, ctx.org_uuid, test.type)
         if test.evaluators
@@ -358,6 +368,18 @@ async def update_test_endpoint(
                 f"Test type is immutable; cannot change from "
                 f"'{existing_type}' to '{test.type}'. Create a new test instead."
             ),
+        )
+
+    # Conversation tests must keep at least one evaluator (see create-endpoint
+    # note). Reject an update that would clear them all.
+    if (
+        existing_type == "conversation"
+        and test.evaluators is not None
+        and len(test.evaluators) == 0
+    ):
+        raise HTTPException(
+            status_code=400,
+            detail="Conversation tests require at least one evaluator; cannot remove all.",
         )
 
     resolved = (

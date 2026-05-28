@@ -432,6 +432,67 @@ def test_update_test_with_evaluators(client):
     assert upd.status_code == 200
 
 
+def _create_simulation_evaluator(client, h):
+    return client.post(
+        "/evaluators",
+        json={
+            "name": f"sim-ev-{uuid.uuid4().hex[:6]}",
+            "evaluator_type": "simulation",
+            "output_type": "binary",
+            "version": {
+                "judge_model": "openai/gpt-4.1",
+                "system_prompt": "Judge the whole conversation.",
+            },
+        },
+        headers=h,
+    ).json()
+
+
+def test_create_conversation_test_requires_evaluator(client):
+    """A conversation test created without evaluators is rejected (it has no
+    LLM fallback, so it would otherwise run with nothing to judge with)."""
+    auth = _signup(client)
+    h = auth["headers"]
+    resp = client.post(
+        "/tests",
+        json={
+            "name": f"conv-{uuid.uuid4().hex[:6]}",
+            "type": "conversation",
+            "config": {"history": [], "evaluation": {"type": "conversation"}},
+        },
+        headers=h,
+    )
+    assert resp.status_code == 400
+    assert "evaluator" in resp.json()["detail"].lower()
+
+
+def test_update_conversation_test_cannot_clear_evaluators(client):
+    """Clearing all evaluators from a conversation test is rejected; a response
+    test (which has a fallback) may still be cleared."""
+    auth = _signup(client)
+    h = auth["headers"]
+    sim_ev = _create_simulation_evaluator(client, h)["uuid"]
+    create = client.post(
+        "/tests",
+        json={
+            "name": f"conv-{uuid.uuid4().hex[:6]}",
+            "type": "conversation",
+            "config": {"history": [], "evaluation": {"type": "conversation"}},
+            "evaluators": [{"evaluator_uuid": sim_ev}],
+        },
+        headers=h,
+    ).json()
+    assert create.get("uuid"), create
+
+    cleared = client.put(
+        f"/tests/{create['uuid']}",
+        json={"evaluators": []},
+        headers=h,
+    )
+    assert cleared.status_code == 400
+    assert "evaluator" in cleared.json()["detail"].lower()
+
+
 # ---------------------------------------------------------------------------
 # Agents router — verify-connection + duplicate flow
 # ---------------------------------------------------------------------------
