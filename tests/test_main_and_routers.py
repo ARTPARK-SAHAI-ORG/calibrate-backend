@@ -650,6 +650,22 @@ def test_tests_router_type_validation(client):
     )
     assert upd_bad.status_code == 400
 
+    # Type is immutable: changing it on an existing test → 400.
+    type_change = client.put(
+        f"/tests/{conv_uuid}",
+        json={"type": "response"},
+        headers=h,
+    )
+    assert type_change.status_code == 400
+
+    # Echoing the same type back is a harmless no-op → 200.
+    same_type = client.put(
+        f"/tests/{conv_uuid}",
+        json={"type": "conversation"},
+        headers=h,
+    )
+    assert same_type.status_code == 200
+
 
 # ---------------------------------------------------------------------------
 # Annotators router

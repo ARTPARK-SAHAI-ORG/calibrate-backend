@@ -345,9 +345,23 @@ async def update_test_endpoint(
     if not existing_test or existing_test.get("org_uuid") != ctx.org_uuid:
         raise HTTPException(status_code=404, detail="Test not found")
 
-    effective_type = test.type if test.type is not None else existing_test.get("type")
+    # A test's `type` is immutable after creation. Allowing a change would
+    # strand already-linked evaluators whose `evaluator_type` was validated
+    # against the original type (e.g. a `response` test's `llm` evaluator
+    # surviving a switch to `conversation`, which only accepts `simulation`).
+    # Echoing back the same value is a no-op; a different value is rejected.
+    existing_type = existing_test.get("type")
+    if test.type is not None and test.type != existing_type:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"Test type is immutable; cannot change from "
+                f"'{existing_type}' to '{test.type}'. Create a new test instead."
+            ),
+        )
+
     resolved = (
-        _validate_evaluators(test.evaluators, ctx.org_uuid, effective_type)
+        _validate_evaluators(test.evaluators, ctx.org_uuid, existing_type)
         if test.evaluators is not None
         else None
     )

@@ -870,6 +870,7 @@ def _resolve_target_item_ids(
     select_all: bool,
     item_ids: List[str],
     q: Optional[str],
+    items: Optional[List[Dict[str, Any]]] = None,
 ) -> List[str]:
     """Resolve the target item set for a bulk action that supports a
     `select_all` toggle.
@@ -881,12 +882,17 @@ def _resolve_target_item_ids(
       stale checkboxes can't sneak through.
     - `select_all=False`: returns `item_ids` verbatim; `q` is ignored.
 
+    Pass `items` to reuse an already-loaded task item list (avoids a second
+    `get_annotation_items_for_task` round-trip); omitted ⇒ fetched lazily and
+    only when `select_all=True`.
+
     Returns the raw resolved list (may be empty). Callers decide whether
     "empty" is a 400 or a no-op in their context.
     """
     if not select_all:
         return list(item_ids)
-    items = get_annotation_items_for_task(task_uuid)
+    if items is None:
+        items = get_annotation_items_for_task(task_uuid)
     if q and q.strip():
         needle = q.strip().lower()
         items = [
@@ -1308,6 +1314,7 @@ async def start_evaluator_run(
             select_all=True,
             item_ids=[],
             q=payload.q,
+            items=all_items,  # reuse the list already fetched above
         )
         if not target_ids:
             raise HTTPException(
