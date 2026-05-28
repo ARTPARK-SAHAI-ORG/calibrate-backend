@@ -425,6 +425,66 @@ def test_benchmark_allows_conversation_tests(client, monkeypatch):
     assert client.delete(f"/agent-tests/job/{task_id}", headers=h).status_code == 200
 
 
+def test_conversation_only_run_skips_connection_guard(client, monkeypatch):
+    """An unverified agent-connection agent blocks response tests (they call the
+    agent) but NOT a conversation-only run (judges a stored transcript)."""
+    import db
+
+    auth = _signup(client)
+    h = auth["headers"]
+    agent = _create_agent(client, h)
+    # Turn it into an agent-connection agent that hasn't been verified.
+    db.update_agent(
+        agent["uuid"],
+        config={"agent_url": "http://agent.local/run", "connection_verified": False},
+    )
+
+    response_test = _create_test(client, h)
+    conv = _create_conversation_test(client, h)
+    monkeypatch.setenv("S3_OUTPUT_BUCKET", "test-bucket")
+
+    # Response test → connection must be verified → 400.
+    blocked = client.post(
+        f"/agent-tests/agent/{agent['uuid']}/run",
+        json={"test_uuids": [response_test["uuid"]]},
+    )
+    assert blocked.status_code == 400
+    assert "not verified" in blocked.json()["detail"].lower()
+
+    # Conversation-only run → guard skipped → queues fine.
+    with patch(
+        "routers.agent_tests.can_start_agent_test_job", return_value=False
+    ), patch("threading.Thread"):
+        ok = client.post(
+            f"/agent-tests/agent/{agent['uuid']}/run",
+            json={"test_uuids": [conv["uuid"]]},
+        )
+    assert ok.status_code == 200, ok.text
+    assert (
+        client.delete(
+            f"/agent-tests/job/{ok.json()['task_id']}", headers=h
+        ).status_code
+        == 200
+    )
+
+
+def test_run_agent_test_missing_s3_config_500(client, monkeypatch):
+    auth = _signup(client)
+    h = auth["headers"]
+    agent = _create_agent(client, h)
+    conv = _create_conversation_test(client, h)
+
+    with patch(
+        "routers.agent_tests.get_s3_output_config",
+        side_effect=ValueError("no bucket configured"),
+    ):
+        resp = client.post(
+            f"/agent-tests/agent/{agent['uuid']}/run",
+            json={"test_uuids": [conv["uuid"]]},
+        )
+    assert resp.status_code == 500
+
+
 def test_run_agent_benchmark_validation(client):
     auth = _signup(client)
     h = auth["headers"]

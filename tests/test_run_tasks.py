@@ -456,6 +456,54 @@ def test_build_calibrate_config_includes_conversation_tests():
     assert test_uuid in evaluators_by_test_id
 
 
+def test_build_calibrate_config_tool_call_branch():
+    """Exercise the tool_call branch of _build_calibrate_config (and the
+    `elif type in (response, conversation)` false-path) alongside a conversation
+    test in the same config."""
+    from routers.agent_tests import _build_calibrate_config
+
+    user_uuid = db.create_user("R", "TC", f"rtc-{os.urandom(4).hex()}@x.com")
+    org_uuid = db.get_personal_org_for_user(user_uuid)["uuid"]
+    agent_uuid = db.create_agent(
+        name=f"a-{os.urandom(4).hex()}", org_uuid=org_uuid, user_id=user_uuid
+    )
+    tool_test_uuid = db.create_test(
+        name=f"tc-{os.urandom(4).hex()}",
+        type="tool_call",
+        config={
+            "history": [{"role": "user", "content": "book it"}],
+            "evaluation": {
+                "type": "tool_call",
+                "tool_calls": [{"tool": "book", "arguments": {"id": 1}}],
+            },
+        },
+        org_uuid=org_uuid,
+        user_id=user_uuid,
+    )
+    conv_uuid, _ = _make_conversation_test(db, org_uuid, user_uuid)
+    # A test whose evaluation.type is neither tool_call nor response/conversation
+    # exercises the defensive fall-through (passed through untouched).
+    other_uuid = db.create_test(
+        name=f"other-{os.urandom(4).hex()}",
+        type="response",
+        config={"history": [], "evaluation": {"type": "other"}},
+        org_uuid=org_uuid,
+        user_id=user_uuid,
+    )
+    agent = db.get_agent(agent_uuid)
+    tests = [
+        db.get_test(tool_test_uuid),
+        db.get_test(conv_uuid),
+        db.get_test(other_uuid),
+    ]
+
+    config, _ = _build_calibrate_config(agent, tests)
+    by_type = {c["evaluation"]["type"]: c for c in config["test_cases"]}
+    assert by_type["tool_call"]["evaluation"]["tool_calls"][0]["tool"] == "book"
+    assert by_type["conversation"]["evaluation"]["criteria"]
+    assert "other" in by_type  # unknown type appended without criteria/tool_calls
+
+
 def test_run_conversation_test_task_success():
     from routers.agent_tests import run_llm_test_task
 
