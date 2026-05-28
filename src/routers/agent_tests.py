@@ -723,13 +723,20 @@ def _build_calibrate_config(
     # differ only in how calibrate judges each row (response ⇒ judge a generated
     # reply; conversation ⇒ judge the supplied transcript), which calibrate
     # decides from `evaluation.type` — the evaluator payload is identical.
+    #
+    # The IMMUTABLE row `type` is authoritative here, not `config.evaluation.type`:
+    # `PUT /tests` keeps the row `type` fixed but accepts an arbitrary `config`
+    # dict, so a stored `evaluation.type` can drift from what the test actually
+    # is (and what its evaluators were validated against). We dispatch on the row
+    # type and normalize `evaluation.type` to it below, so a drifted config can
+    # never make calibrate judge the wrong way.
     tests_with_evaluators: List[Dict[str, Any]] = []
     for test in tests:
         test_config = test.get("config")
         if not test_config:
             continue
         evaluation = test_config.get("evaluation", {})
-        if evaluation.get("type") not in ("response", "conversation"):
+        if test.get("type") not in ("response", "conversation"):
             continue
 
         linked_evaluators = get_evaluators_for_test(test["uuid"])
@@ -813,7 +820,15 @@ def _build_calibrate_config(
         test_config["id"] = test["uuid"]
         evaluation = test_config.get("evaluation", {})
 
-        if evaluation.get("type") == "tool_call":
+        # The immutable row `type` wins over a possibly-drifted
+        # `config.evaluation.type` (see first-pass note). Normalize the value
+        # calibrate dispatches on so it always matches what the test is and what
+        # its evaluators were validated against.
+        row_type = test.get("type")
+        evaluation["type"] = row_type
+        test_config["evaluation"] = evaluation
+
+        if row_type == "tool_call":
             tool_calls = []
             for tool_call in evaluation.get("tool_calls", []):
                 tool_calls.append(
@@ -827,7 +842,7 @@ def _build_calibrate_config(
                     }
                 )
             evaluation["tool_calls"] = tool_calls
-        elif evaluation.get("type") in ("response", "conversation"):
+        elif row_type in ("response", "conversation"):
             # Reference the top-level evaluators by name (with per-test {{var}}
             # arguments). For `response`, legacy string criteria were promoted to a
             # synthetic evaluator link in the first pass; either way we overwrite
@@ -1478,20 +1493,15 @@ def _update_agent_test_intermediate_results(
 
 
 def _is_conversation_test(test: Dict[str, Any]) -> bool:
-    """True only when BOTH the row `type` and the stored
-    `config.evaluation.type` are ``"conversation"``.
+    """True when the immutable row `type` is ``"conversation"``.
 
-    These are kept in sync at write time, but `PUT /tests` accepts an arbitrary
-    `config` dict while the row `type` is immutable, so they *can* diverge. The
-    sole caller (the run endpoint's connection-verification skip) must fail
-    safe: calibrate dispatches each row on `config.evaluation.type`, so a
-    `type="conversation"` test whose `evaluation.type` is `response`/`tool_call`
-    DOES invoke the agent. Requiring both fields guarantees we only skip the
-    agent-connection guard when the run genuinely never calls the agent;
-    any mismatch keeps the guard in force."""
-    cfg = test.get("config") or {}
-    evaluation = cfg.get("evaluation") or {}
-    return test.get("type") == "conversation" and evaluation.get("type") == "conversation"
+    The row `type` is authoritative: `_build_calibrate_config` normalizes each
+    test case's `evaluation.type` to the row `type` before handing it to
+    calibrate, so a conversation-typed test is always judged as a transcript
+    (never invokes the agent) regardless of a possibly-drifted stored
+    `config.evaluation.type`. The sole caller (the run endpoint's
+    connection-verification skip) can therefore trust the row type alone."""
+    return test.get("type") == "conversation"
 
 
 def run_llm_test_task(

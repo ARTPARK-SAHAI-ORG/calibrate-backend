@@ -481,12 +481,14 @@ def test_build_calibrate_config_tool_call_branch():
         user_id=user_uuid,
     )
     conv_uuid, _ = _make_conversation_test(db, org_uuid, user_uuid)
-    # A test whose evaluation.type is neither tool_call nor response/conversation
-    # exercises the defensive fall-through (passed through untouched).
+    # A test whose (row) type is neither tool_call nor response/conversation
+    # exercises the defensive fall-through (appended untouched). The db layer
+    # doesn't constrain `type`, so this state is reachable even though the API
+    # Literal wouldn't allow it.
     other_uuid = db.create_test(
         name=f"other-{os.urandom(4).hex()}",
-        type="response",
-        config={"history": [], "evaluation": {"type": "other"}},
+        type="weird",
+        config={"history": [], "evaluation": {"type": "weird"}},
         org_uuid=org_uuid,
         user_id=user_uuid,
     )
@@ -501,7 +503,10 @@ def test_build_calibrate_config_tool_call_branch():
     by_type = {c["evaluation"]["type"]: c for c in config["test_cases"]}
     assert by_type["tool_call"]["evaluation"]["tool_calls"][0]["tool"] == "book"
     assert by_type["conversation"]["evaluation"]["criteria"]
-    assert "other" in by_type  # unknown type appended without criteria/tool_calls
+    # Dispatch follows the row type (normalized), and unknown types fall through
+    # appended without criteria/tool_calls.
+    assert "weird" in by_type
+    assert "criteria" not in by_type["weird"]["evaluation"]
 
 
 def test_run_conversation_test_task_success():

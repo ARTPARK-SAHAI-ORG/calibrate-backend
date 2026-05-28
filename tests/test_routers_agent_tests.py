@@ -468,10 +468,11 @@ def test_conversation_only_run_skips_connection_guard(client, monkeypatch):
     )
 
 
-def test_mismatched_conversation_row_still_guarded(client, monkeypatch):
-    """A test with row type=conversation but config.evaluation.type=response is
-    still dispatched as a response by calibrate (which calls the agent), so the
-    connection-verification guard must NOT be skipped for it."""
+def test_drifted_config_eval_type_follows_immutable_row_type(client, monkeypatch):
+    """The immutable row `type` is authoritative. A conversation-typed test
+    whose stored config.evaluation.type has drifted to "response" is normalized
+    back to conversation at CLI handoff (judged as a transcript, no agent call),
+    so the connection-verification guard is correctly skipped for it."""
     import db
 
     auth = _signup(client)
@@ -484,7 +485,7 @@ def test_mismatched_conversation_row_still_guarded(client, monkeypatch):
     sim_ev = _create_simulation_evaluator(client, h)["uuid"]
     # Schema lets config be arbitrary while row `type` is immutable, so this
     # divergent state is reachable via the API.
-    mismatched = client.post(
+    drifted = client.post(
         "/tests",
         json={
             "name": f"mm-{uuid.uuid4().hex[:6]}",
@@ -496,12 +497,21 @@ def test_mismatched_conversation_row_still_guarded(client, monkeypatch):
     ).json()
 
     monkeypatch.setenv("S3_OUTPUT_BUCKET", "test-bucket")
-    resp = client.post(
-        f"/agent-tests/agent/{agent['uuid']}/run",
-        json={"test_uuids": [mismatched["uuid"]]},
-    )
-    assert resp.status_code == 400
-    assert "not verified" in resp.json()["detail"].lower()
+    with patch(
+        "routers.agent_tests.can_start_agent_test_job", return_value=False
+    ), patch("threading.Thread"):
+        resp = client.post(
+            f"/agent-tests/agent/{agent['uuid']}/run",
+            json={"test_uuids": [drifted["uuid"]]},
+        )
+    # Not blocked — row type wins, so no agent call → guard skipped.
+    assert resp.status_code == 200, resp.text
+    task_id = resp.json()["task_id"]
+    # And the built calibrate config dispatches it as conversation.
+    cfg = db.get_agent_test_job(task_id)["details"]["calibrate_config"]
+    case = next(c for c in cfg["test_cases"] if c["id"] == drifted["uuid"])
+    assert case["evaluation"]["type"] == "conversation"
+    assert client.delete(f"/agent-tests/job/{task_id}", headers=h).status_code == 200
 
 
 def test_run_agent_test_missing_s3_config_500(client, monkeypatch):
