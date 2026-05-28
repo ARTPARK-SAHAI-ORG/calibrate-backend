@@ -666,6 +666,41 @@ def test_tests_router_type_validation(client):
     )
     assert same_type.status_code == 200
 
+    # Bulk upload of a conversation test without evaluators → 422 (the
+    # model validator requires at least one evaluator for conversation type).
+    bulk_no_ev = client.post(
+        "/tests/bulk",
+        json={
+            "type": "conversation",
+            "tests": [
+                {
+                    "name": f"bulk-conv-{uuid.uuid4().hex[:6]}",
+                    "conversation_history": [{"role": "user", "content": "hi"}],
+                }
+            ],
+        },
+        headers=h,
+    )
+    assert bulk_no_ev.status_code == 422
+
+
+def test_validate_evaluators_rejects_unknown_test_type():
+    """Defensive guard: an evaluator-validation call for a test type not in
+    the compatibility map 400s before touching any evaluator. Reachable only
+    via a legacy/corrupt stored `type` (the API Literal blocks it at the
+    request layer), so exercise the helper directly."""
+    from fastapi import HTTPException
+    from routers.tests import EvaluatorRef, _validate_evaluators
+
+    with pytest.raises(HTTPException) as exc:
+        _validate_evaluators(
+            [EvaluatorRef(evaluator_uuid="whatever")],
+            org_uuid="org-1",
+            test_type="bogus-type",
+        )
+    assert exc.value.status_code == 400
+    assert "Unknown test type" in exc.value.detail
+
 
 # ---------------------------------------------------------------------------
 # Annotators router
