@@ -425,15 +425,15 @@ def test_benchmark_allows_conversation_tests(client, monkeypatch):
     assert client.delete(f"/agent-tests/job/{task_id}", headers=h).status_code == 200
 
 
-def test_conversation_only_run_skips_connection_guard(client, monkeypatch):
-    """An unverified agent-connection agent blocks response tests (they call the
-    agent) but NOT a conversation-only run (judges a stored transcript)."""
+def test_unverified_connection_blocks_all_test_types(client, monkeypatch):
+    """Every test type runs the agent (conversation tests are live too), so an
+    unverified agent-connection agent blocks response AND conversation runs."""
     import db
 
     auth = _signup(client)
     h = auth["headers"]
     agent = _create_agent(client, h)
-    # Turn it into an agent-connection agent that hasn't been verified.
+    # Agent-connection agent that hasn't been verified.
     db.update_agent(
         agent["uuid"],
         config={"agent_url": "http://agent.local/run", "connection_verified": False},
@@ -443,45 +443,26 @@ def test_conversation_only_run_skips_connection_guard(client, monkeypatch):
     conv = _create_conversation_test(client, h)
     monkeypatch.setenv("S3_OUTPUT_BUCKET", "test-bucket")
 
-    # Response test → connection must be verified → 400.
-    blocked = client.post(
-        f"/agent-tests/agent/{agent['uuid']}/run",
-        json={"test_uuids": [response_test["uuid"]]},
-    )
-    assert blocked.status_code == 400
-    assert "not verified" in blocked.json()["detail"].lower()
-
-    # Conversation-only run → guard skipped → queues fine.
-    with patch(
-        "routers.agent_tests.can_start_agent_test_job", return_value=False
-    ), patch("threading.Thread"):
-        ok = client.post(
+    for test_uuid in (response_test["uuid"], conv["uuid"]):
+        blocked = client.post(
             f"/agent-tests/agent/{agent['uuid']}/run",
-            json={"test_uuids": [conv["uuid"]]},
+            json={"test_uuids": [test_uuid]},
         )
-    assert ok.status_code == 200, ok.text
-    assert (
-        client.delete(
-            f"/agent-tests/job/{ok.json()['task_id']}", headers=h
-        ).status_code
-        == 200
-    )
+        assert blocked.status_code == 400, blocked.text
+        assert "not verified" in blocked.json()["detail"].lower()
 
 
 def test_drifted_config_eval_type_follows_immutable_row_type(client, monkeypatch):
-    """The immutable row `type` is authoritative. A conversation-typed test
-    whose stored config.evaluation.type has drifted to "response" is normalized
-    back to conversation at CLI handoff (judged as a transcript, no agent call),
-    so the connection-verification guard is correctly skipped for it."""
+    """The immutable row `type` is authoritative: a conversation-typed test whose
+    stored config.evaluation.type has drifted to "response" is normalized back to
+    conversation at CLI handoff, so calibrate dispatches it as a conversation."""
     import db
 
     auth = _signup(client)
     h = auth["headers"]
+    # Plain (calibrate-agent-mode) agent — no agent_url, so the connection guard
+    # doesn't apply and we can inspect the built config.
     agent = _create_agent(client, h)
-    db.update_agent(
-        agent["uuid"],
-        config={"agent_url": "http://agent.local/run", "connection_verified": False},
-    )
     sim_ev = _create_simulation_evaluator(client, h)["uuid"]
     # Schema lets config be arbitrary while row `type` is immutable, so this
     # divergent state is reachable via the API.
@@ -504,10 +485,9 @@ def test_drifted_config_eval_type_follows_immutable_row_type(client, monkeypatch
             f"/agent-tests/agent/{agent['uuid']}/run",
             json={"test_uuids": [drifted["uuid"]]},
         )
-    # Not blocked — row type wins, so no agent call → guard skipped.
     assert resp.status_code == 200, resp.text
     task_id = resp.json()["task_id"]
-    # And the built calibrate config dispatches it as conversation.
+    # The built calibrate config normalizes evaluation.type to the row type.
     cfg = db.get_agent_test_job(task_id)["details"]["calibrate_config"]
     case = next(c for c in cfg["test_cases"] if c["id"] == drifted["uuid"])
     assert case["evaluation"]["type"] == "conversation"

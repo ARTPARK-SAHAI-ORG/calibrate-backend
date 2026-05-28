@@ -1480,28 +1480,17 @@ def _update_agent_test_intermediate_results(
 
 # ============ Conversation tests ============
 #
-# A conversation-type test judges a *fixed* transcript (stored in
-# `config.history`) with `simulation` evaluators — there is no agent to invoke
-# and nothing to generate. The calibrate CLI handles conversation rows through
-# the *same* `calibrate llm` command and output shape as response/tool_call
-# tests: a top-level `evaluators` list plus per-test-case
-# `evaluation = {type: "conversation", criteria: [{name, arguments?}]}`. Each
-# row's `evaluation.type` tells calibrate how to judge it (response ⇒ generate
-# then judge the reply; conversation ⇒ judge the supplied `history`; tool_call ⇒
-# diff tool calls), so conversation tests flow through the normal
-# `_build_calibrate_config` / `run_llm_test_task` path — see `_build_calibrate_config`.
-
-
-def _is_conversation_test(test: Dict[str, Any]) -> bool:
-    """True when the immutable row `type` is ``"conversation"``.
-
-    The row `type` is authoritative: `_build_calibrate_config` normalizes each
-    test case's `evaluation.type` to the row `type` before handing it to
-    calibrate, so a conversation-typed test is always judged as a transcript
-    (never invokes the agent) regardless of a possibly-drifted stored
-    `config.evaluation.type`. The sole caller (the run endpoint's
-    connection-verification skip) can therefore trust the row type alone."""
-    return test.get("type") == "conversation"
+# A conversation-type test runs in LIVE mode through the *same* `calibrate llm`
+# command and output shape as response/tool_call tests: a top-level `evaluators`
+# list plus per-test-case `evaluation = {type: "conversation", criteria:
+# [{name, arguments?}]}`, with `history` ending at the user turn the agent
+# should answer. Each row's `evaluation.type` tells calibrate how to handle it:
+#   - response   ⇒ run the agent, judge only its generated reply
+#   - conversation ⇒ run the agent, append its reply, judge the FULL conversation
+#   - tool_call  ⇒ run the agent, diff the tool calls
+# All three invoke the agent, so conversation tests flow through the normal
+# `_build_calibrate_config` / `run_llm_test_task` path and are subject to the
+# same agent-connection-verified guard — see `_build_calibrate_config`.
 
 
 def run_llm_test_task(
@@ -1815,7 +1804,17 @@ async def run_agent_test(agent_uuid: str, request: RunTestRequest):
     if not agent:
         raise HTTPException(status_code=404, detail="Agent not found")
 
+    # Guard: agent connection must be verified before running tests. Every test
+    # type runs the agent — response/tool_call generate the reply to judge, and
+    # conversation tests run in live mode too (calibrate runs the agent on the
+    # `history`, appends the generated reply, then the simulation judge scores
+    # the full conversation). So the guard applies uniformly.
     agent_config = agent.get("config") or {}
+    if agent_config.get("agent_url") and not agent_config.get("connection_verified"):
+        raise HTTPException(
+            status_code=400,
+            detail="Agent connection not verified. Call POST /agents/{agent_uuid}/verify-connection first.",
+        )
 
     if request.test_uuids:
         # Verify all specified tests exist
@@ -1835,22 +1834,6 @@ async def run_agent_test(agent_uuid: str, request: RunTestRequest):
                 status_code=400,
                 detail="No tests linked to this agent. Link tests first or provide test_uuids.",
             )
-
-    # Conversation tests judge a stored transcript and never call the agent.
-    # Response/tool_call tests do. The agent-connection-verified guard therefore
-    # only applies when the run includes at least one non-conversation test;
-    # a conversation-only run skips it. (Mixing types in one run is fine — the
-    # calibrate CLI dispatches per test case on `evaluation.type`.)
-    all_conversation = bool(tests) and all(_is_conversation_test(t) for t in tests)
-    if (
-        not all_conversation
-        and agent_config.get("agent_url")
-        and not agent_config.get("connection_verified")
-    ):
-        raise HTTPException(
-            status_code=400,
-            detail="Agent connection not verified. Call POST /agents/{agent_uuid}/verify-connection first.",
-        )
 
     # Get S3 configuration
     try:

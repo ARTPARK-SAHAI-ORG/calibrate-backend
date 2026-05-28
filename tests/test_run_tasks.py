@@ -399,13 +399,15 @@ def _make_conversation_test(db_mod, org_uuid, user_uuid, name="Conv"):
 def _write_conversation_llm_output(output_dir: Path, test_uuid: str, ev_name: str):
     """Mimic `calibrate llm` output for a conversation test case: per-model
     results.json + metrics.json (same shape as response tests). Conversation
-    rows carry no `output` key and `passed` is computed by calibrate."""
+    runs live — the agent's generated reply is in `output.response` and the full
+    conversation is judged; `passed` is computed by calibrate."""
     model_dir = output_dir / "gpt-4.1"
     model_dir.mkdir(parents=True, exist_ok=True)
     with open(model_dir / "results.json", "w") as f:
         json.dump(
             [
                 {
+                    "output": {"response": "It shipped yesterday.", "tool_calls": []},
                     "metrics": {
                         "passed": True,
                         "reasoning": "All evaluators passed",
