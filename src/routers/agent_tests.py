@@ -741,7 +741,14 @@ def _build_calibrate_config(
 
         linked_evaluators = get_evaluators_for_test(test["uuid"])
 
-        if not linked_evaluators:
+        # Legacy string-criteria fallback is RESPONSE-ONLY: it synthesizes the
+        # `default-llm-next-reply` LLM evaluator, which must never be attached to
+        # a conversation test (those are validated to use `simulation`
+        # evaluators). A conversation test can reach here with no linked
+        # evaluators (the create path only validates refs when provided), so
+        # gating on the row type keeps the evaluator-type contract intact —
+        # such a test simply contributes no evaluators.
+        if not linked_evaluators and test.get("type") == "response":
             legacy_criteria = evaluation.get("criteria")
             if isinstance(legacy_criteria, str) and legacy_criteria.strip():
                 synth = _synthetic_default_llm_link(legacy_criteria)

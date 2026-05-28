@@ -458,6 +458,39 @@ def test_build_calibrate_config_includes_conversation_tests():
     assert test_uuid in evaluators_by_test_id
 
 
+def test_conversation_test_no_legacy_llm_evaluator_fallback():
+    """The legacy string-criteria fallback synthesizes the default-llm-next-reply
+    LLM evaluator and must be RESPONSE-ONLY. A conversation test with no linked
+    evaluators but a stringy `evaluation.criteria` must NOT pick it up (that would
+    judge a transcript with an LLM next-reply prompt, violating the
+    evaluator-type contract)."""
+    from routers.agent_tests import _build_calibrate_config
+
+    user_uuid = db.create_user("R", "NF", f"rnf-{os.urandom(4).hex()}@x.com")
+    org_uuid = db.get_personal_org_for_user(user_uuid)["uuid"]
+    agent_uuid = db.create_agent(
+        name=f"a-{os.urandom(4).hex()}", org_uuid=org_uuid, user_id=user_uuid
+    )
+    # Conversation test, no evaluators linked, with a legacy string criteria.
+    conv_uuid = db.create_test(
+        name=f"convnf-{os.urandom(4).hex()}",
+        type="conversation",
+        config={"history": [], "evaluation": {"type": "conversation", "criteria": "be nice"}},
+        org_uuid=org_uuid,
+        user_id=user_uuid,
+    )
+    agent = db.get_agent(agent_uuid)
+    config, evaluators_by_test_id = _build_calibrate_config(agent, [db.get_test(conv_uuid)])
+
+    # No synthetic LLM evaluator attached; the string criteria is overwritten
+    # with an empty structured-refs list.
+    assert not config.get("evaluators")
+    assert conv_uuid not in evaluators_by_test_id
+    case = next(c for c in config["test_cases"] if c["id"] == conv_uuid)
+    assert case["evaluation"]["type"] == "conversation"
+    assert case["evaluation"]["criteria"] == []
+
+
 def test_build_calibrate_config_tool_call_branch():
     """Exercise the tool_call branch of _build_calibrate_config (and the
     `elif type in (response, conversation)` false-path) alongside a conversation
