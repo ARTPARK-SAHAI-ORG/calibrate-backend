@@ -63,6 +63,44 @@ def _create_test(client, h, name=None):
     ).json()
 
 
+def _create_simulation_evaluator(client, h, name=None):
+    """Create a simulation-type evaluator (no default is seeded for this type)."""
+    return client.post(
+        "/evaluators",
+        json={
+            "name": name or f"sim-ev-{uuid.uuid4().hex[:6]}",
+            "evaluator_type": "simulation",
+            "output_type": "binary",
+            "version": {
+                "judge_model": "openai/gpt-4.1",
+                "system_prompt": "Judge the whole conversation.",
+            },
+        },
+        headers=h,
+    ).json()
+
+
+def _create_conversation_test(client, h, name=None, sim_ev_uuid=None):
+    if sim_ev_uuid is None:
+        sim_ev_uuid = _create_simulation_evaluator(client, h)["uuid"]
+    return client.post(
+        "/tests",
+        json={
+            "name": name or f"conv-{uuid.uuid4().hex[:6]}",
+            "type": "conversation",
+            "config": {
+                "history": [
+                    {"role": "user", "content": "hi"},
+                    {"role": "assistant", "content": "hello"},
+                ],
+                "evaluation": {"type": "conversation"},
+            },
+            "evaluators": [{"evaluator_uuid": sim_ev_uuid}],
+        },
+        headers=h,
+    ).json()
+
+
 # ---------------------------------------------------------------------------
 # Link CRUD
 # ---------------------------------------------------------------------------
@@ -288,6 +326,81 @@ def test_run_agent_test_queued_path(client, monkeypatch):
         client.delete(f"/agent-tests/job/{task_id}", headers=h).status_code == 404
     )
     assert client.delete("/agent-tests/job/missing", headers=h).status_code == 404
+
+
+def test_run_conversation_test_queued_path(client, monkeypatch):
+    auth = _signup(client)
+    h = auth["headers"]
+    agent = _create_agent(client, h)
+    conv = _create_conversation_test(client, h)
+    assert conv.get("uuid"), conv
+    client.post(
+        "/agent-tests",
+        json={"agent_uuid": agent["uuid"], "test_uuids": [conv["uuid"]]},
+    )
+
+    monkeypatch.setenv("S3_OUTPUT_BUCKET", "test-bucket")
+    with patch(
+        "routers.agent_tests.can_start_agent_test_job", return_value=False
+    ), patch("threading.Thread"):
+        resp = client.post(f"/agent-tests/agent/{agent['uuid']}/run", json={})
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["status"] == "queued"
+    task_id = resp.json()["task_id"]
+
+    # The frozen job details should carry the conversation marker + payloads so
+    # the worker (and queue recovery) can run the eval-only flow.
+    import db
+
+    job = db.get_agent_test_job(task_id)
+    details = job["details"]
+    assert details.get("is_conversation") is True
+    assert conv["uuid"] in details["conversation_payloads"]
+    assert details["conversation_payloads"][conv["uuid"]]["evaluators"]
+    assert conv["uuid"] in details["evaluators_by_test_id"]
+
+    # Status endpoint serializes fine for a conversation run.
+    got = client.get(f"/agent-tests/run/{task_id}")
+    assert got.status_code == 200
+
+    # Clean up the queued job so it doesn't pollute the shared session DB
+    # (try_start_queued_agent_test_job picks the oldest queued job).
+    assert client.delete(f"/agent-tests/job/{task_id}", headers=h).status_code == 200
+
+
+def test_run_mixed_conversation_and_response_rejected(client, monkeypatch):
+    auth = _signup(client)
+    h = auth["headers"]
+    agent = _create_agent(client, h)
+    response_test = _create_test(client, h)
+    conv = _create_conversation_test(client, h)
+
+    monkeypatch.setenv("S3_OUTPUT_BUCKET", "test-bucket")
+    resp = client.post(
+        f"/agent-tests/agent/{agent['uuid']}/run",
+        json={"test_uuids": [response_test["uuid"], conv["uuid"]]},
+    )
+    assert resp.status_code == 400
+    assert "mix" in resp.json()["detail"].lower()
+
+
+def test_benchmark_rejects_conversation_tests(client, monkeypatch):
+    auth = _signup(client)
+    h = auth["headers"]
+    agent = _create_agent(client, h)
+    conv = _create_conversation_test(client, h)
+    client.post(
+        "/agent-tests",
+        json={"agent_uuid": agent["uuid"], "test_uuids": [conv["uuid"]]},
+    )
+
+    monkeypatch.setenv("S3_OUTPUT_BUCKET", "test-bucket")
+    resp = client.post(
+        f"/agent-tests/agent/{agent['uuid']}/benchmark",
+        json={"models": ["openai/gpt-4"]},
+    )
+    assert resp.status_code == 400
+    assert "conversation" in resp.json()["detail"].lower()
 
 
 def test_run_agent_benchmark_validation(client):

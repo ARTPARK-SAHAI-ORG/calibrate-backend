@@ -43,6 +43,7 @@ from auth_utils import get_current_org, OrgContext
 from utils import (
     TaskStatus,
     TaskCreateResponse,
+    coerce_evaluator_score,
     get_s3_client,
     get_s3_output_config,
     can_start_agent_test_job,
@@ -1455,6 +1456,365 @@ def _update_agent_test_intermediate_results(
     return completed_count
 
 
+# ============ Conversation tests ============
+#
+# A conversation-type test judges a *fixed* transcript (stored in
+# `config.history`) with `simulation` evaluators — there is no agent to invoke
+# and nothing to generate. We reuse calibrate's `simulations -t text
+# --eval-only` mode (the same path the annotation eval-runner uses) which takes
+# a `[{name, conversation_history}]` dataset plus a `{evaluators: [...]}` config
+# and emits one `evaluation_results.csv` per dataset row.
+#
+# Because the eval-only flow applies *every* evaluator in the config to *every*
+# dataset row, and each test pins its own evaluator set, we run one calibrate
+# invocation per conversation test (1-row dataset each) rather than batching.
+
+
+def _is_conversation_test(test: Dict[str, Any]) -> bool:
+    """True if a test is conversation-type (checks both the row `type` and the
+    stored `config.evaluation.type`, which are kept in sync at write time)."""
+    cfg = test.get("config") or {}
+    evaluation = cfg.get("evaluation") or {}
+    return test.get("type") == "conversation" or evaluation.get("type") == "conversation"
+
+
+def _build_conversation_run_data(
+    tests: List[Dict[str, Any]],
+) -> tuple[Dict[str, Dict[str, Any]], Dict[str, List[Dict[str, Any]]]]:
+    """Freeze, at submission time, what each conversation test needs to run.
+
+    Returns ``(payloads_by_test_id, evaluators_by_test_id)``.
+
+    ``payloads_by_test_id[test_uuid]`` = ``{name, history, evaluators}`` where
+    ``evaluators`` is the calibrate-ready list from ``build_evaluator_cli_payload``
+    (variables pre-rendered — simulation flows have no per-row arguments).
+
+    ``evaluators_by_test_id`` mirrors the response-test snapshot shape
+    (``{uuid, name, output_type, output_config, variable_values, scale_min?,
+    scale_max?}``) so the shared read-path enrichment + ``evaluators[]`` block
+    builder work unchanged.
+    """
+    from llm_judge import build_evaluator_cli_payload
+
+    payloads: Dict[str, Dict[str, Any]] = {}
+    snapshot: Dict[str, List[Dict[str, Any]]] = {}
+    for test in tests:
+        test_uuid = test["uuid"]
+        cfg = test.get("config") or {}
+        history = cfg.get("history") or []
+        linked = get_evaluators_for_test(test_uuid)
+        payloads[test_uuid] = {
+            "name": test.get("name"),
+            "history": history,
+            "evaluators": build_evaluator_cli_payload(linked),
+        }
+        entries: List[Dict[str, Any]] = []
+        for ev in linked:
+            output_type = ev.get("output_type") or "binary"
+            output_config = ev.get("output_config")
+            snap_entry: Dict[str, Any] = {
+                "uuid": ev.get("uuid"),
+                "name": ev.get("name"),
+                "output_type": output_type,
+                "variable_values": ev.get("variable_values") or {},
+            }
+            if isinstance(output_config, dict):
+                snap_entry["output_config"] = output_config
+                if output_type == "rating":
+                    scale = output_config.get("scale")
+                    if isinstance(scale, list) and scale:
+                        numeric_values = [
+                            e.get("value")
+                            for e in scale
+                            if isinstance(e, dict)
+                            and isinstance(e.get("value"), (int, float))
+                            and not isinstance(e.get("value"), bool)
+                        ]
+                        if numeric_values:
+                            snap_entry["scale_min"] = min(numeric_values)
+                            snap_entry["scale_max"] = max(numeric_values)
+            entries.append(snap_entry)
+        if entries:
+            snapshot[test_uuid] = entries
+    return payloads, snapshot
+
+
+def _parse_conversation_eval_output(
+    output_dir: Path,
+    evaluators_snapshot: List[Dict[str, Any]],
+) -> tuple[Dict[str, Dict[str, Any]], Optional[bool]]:
+    """Fold one conversation test's calibrate eval-only output into the raw
+    ``judge_results`` dict shape the shared read-path enrichment expects.
+
+    Simulation eval-only writes ``<output_dir>/<row>/evaluation_results.csv``
+    with columns ``name, type, value, reasoning, evaluator_id``. With a 1-row
+    dataset there is exactly one such file. Each row becomes
+    ``{<evaluator name>: {reasoning, match|score, evaluator_id}}`` — ``match``
+    for binary, ``score`` for rating, matching the calibrate-llm convention so
+    ``_enrich_test_results_with_evaluators`` handles it identically.
+
+    Returns ``(judge_results, passed)``. ``passed`` is True iff every binary
+    evaluator returned True; ``None`` when the test has no binary evaluator
+    (rating-only ⇒ pass/fail is not applicable).
+    """
+    output_type_by_uuid = {
+        e["uuid"]: (e.get("output_type") or "binary")
+        for e in evaluators_snapshot
+        if e.get("uuid")
+    }
+
+    csv_path: Optional[Path] = None
+    for root, _dirs, files in os.walk(output_dir):
+        if "evaluation_results.csv" in files:
+            csv_path = Path(root) / "evaluation_results.csv"
+            break
+
+    judge_results: Dict[str, Dict[str, Any]] = {}
+    if csv_path is None:
+        return judge_results, None
+
+    binary_values: List[bool] = []
+    with open(csv_path, "r", encoding="utf-8") as f:
+        reader = csv.DictReader(f)
+        for row in reader:
+            ev_name = (row.get("name") or "").strip()
+            if not ev_name:
+                continue
+            evaluator_id = row.get("evaluator_id") or None
+            output_type = (
+                output_type_by_uuid.get(evaluator_id) if evaluator_id else None
+            ) or (row.get("type") or "binary")
+            raw = row.get("value")
+            entry: Dict[str, Any] = {
+                "reasoning": row.get("reasoning") or None,
+                "evaluator_id": evaluator_id,
+            }
+            score_key = "match" if output_type == "binary" else "score"
+            if raw in (None, ""):
+                entry[score_key] = None
+            elif output_type == "binary":
+                val = coerce_evaluator_score(raw, "binary")
+                entry["match"] = val
+                if isinstance(val, bool):
+                    binary_values.append(val)
+            else:
+                entry["score"] = coerce_evaluator_score(raw, "rating")
+            judge_results[ev_name] = entry
+
+    passed = all(binary_values) if binary_values else None
+    return judge_results, passed
+
+
+def run_conversation_test_task(
+    task_id: str,
+    agent: Dict[str, Any],
+    tests: List[Dict[str, Any]],
+    s3_bucket: str,
+):
+    """Run conversation-type tests: judge each test's supplied transcript with
+    its linked simulation evaluators via ``calibrate simulations -t text
+    --eval-only`` (one invocation per test). Results land in the same
+    ``test_results`` / ``judge_results`` shape as response-type runs so the
+    shared read-path serialization works unchanged. A single test's calibrate
+    failure is recorded on that row and the run continues; the job is only
+    marked FAILED when every test fails."""
+    try:
+        logger.info(
+            f"Running conversation test task {task_id} for agent {agent['uuid']} "
+            f"with {len(tests)} test(s)"
+        )
+
+        # Prefer the payloads/snapshot frozen at submission; rebuild live for
+        # legacy jobs (queue recovery of a job created before this field existed).
+        job = get_agent_test_job(task_id)
+        details = (job.get("details") or {}) if job else {}
+        payloads = details.get("conversation_payloads")
+        snapshot = details.get("evaluators_by_test_id") or {}
+        if not payloads:
+            payloads, snapshot = _build_conversation_run_data(tests)
+
+        results_by_uuid: Dict[str, Dict[str, Any]] = {}
+
+        def _ordered_results() -> List[Dict[str, Any]]:
+            out: List[Dict[str, Any]] = []
+            for t in tests:
+                uid = t["uuid"]
+                out.append(
+                    results_by_uuid.get(uid)
+                    or _pending_test_case_result_placeholder(t.get("name"))
+                )
+            return out
+
+        update_agent_test_job(
+            task_id,
+            status=TaskStatus.IN_PROGRESS.value,
+            results={"test_results": _ordered_results()},
+        )
+
+        s3 = get_s3_client()
+        results_prefix = f"agent-tests/runs/{task_id}"
+        any_success = False
+        last_error: Optional[str] = None
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_path = Path(temp_dir)
+
+            for test in tests:
+                test_uuid = test["uuid"]
+                payload = payloads.get(test_uuid) or {}
+                history = (
+                    payload.get("history")
+                    or (test.get("config") or {}).get("history")
+                    or []
+                )
+                evaluators_payload = payload.get("evaluators") or []
+                test_snapshot = snapshot.get(test_uuid) or []
+                test_case = {
+                    "id": test_uuid,
+                    "name": test.get("name"),
+                    "history": history,
+                    "evaluation": {"type": "conversation"},
+                }
+
+                test_dir = temp_path / test_uuid
+                input_dir = test_dir / "input"
+                output_dir = test_dir / "output"
+                input_dir.mkdir(parents=True, exist_ok=True)
+                output_dir.mkdir(parents=True, exist_ok=True)
+
+                dataset_path = input_dir / "dataset.json"
+                with open(dataset_path, "w", encoding="utf-8") as f:
+                    json.dump(
+                        [{"name": test_uuid, "conversation_history": history}],
+                        f,
+                        ensure_ascii=False,
+                    )
+                config_path = input_dir / "config.json"
+                with open(config_path, "w", encoding="utf-8") as f:
+                    json.dump({"evaluators": evaluators_payload}, f, ensure_ascii=False)
+
+                run_cmd = [
+                    "calibrate",
+                    "simulations",
+                    "-t",
+                    "text",
+                    "-c",
+                    str(config_path),
+                    "--eval-only",
+                    "--dataset",
+                    str(dataset_path),
+                    "-o",
+                    str(output_dir),
+                ]
+                logger.info(f"Running conversation test command: {' '.join(run_cmd)}")
+
+                stdout_path = output_dir / "stdout.log"
+                stderr_path = output_dir / "stderr.log"
+                try:
+                    with (
+                        open(stdout_path, "w") as stdout_f,
+                        open(stderr_path, "w") as stderr_f,
+                    ):
+                        process = subprocess.Popen(
+                            run_cmd,
+                            stdout=stdout_f,
+                            stderr=stderr_f,
+                            text=True,
+                            start_new_session=True,
+                            cwd=str(test_dir),
+                        )
+                        while process.poll() is None:
+                            time.sleep(2)
+
+                    with open(stderr_path, "r") as f:
+                        stderr = f.read()
+
+                    if process.returncode != 0:
+                        raise subprocess.CalledProcessError(
+                            process.returncode, run_cmd, "", stderr
+                        )
+
+                    judge_results, passed = _parse_conversation_eval_output(
+                        output_dir, test_snapshot
+                    )
+                    results_by_uuid[test_uuid] = {
+                        "name": test.get("name"),
+                        "test_case_id": test_uuid,
+                        "passed": passed,
+                        "reasoning": None,
+                        "output": {"response": None, "tool_calls": None},
+                        "test_case": test_case,
+                        "judge_results": judge_results or None,
+                    }
+                    any_success = True
+                except subprocess.CalledProcessError as e:
+                    traceback.print_exc()
+                    capture_exception_to_sentry(e)
+                    last_error = (
+                        f"Conversation test '{test.get('name')}' failed: "
+                        f"{e.stderr if hasattr(e, 'stderr') else str(e)}"
+                    )
+                    results_by_uuid[test_uuid] = {
+                        "name": test.get("name"),
+                        "test_case_id": test_uuid,
+                        "passed": None,
+                        "reasoning": last_error,
+                        "output": {"response": None, "tool_calls": None},
+                        "test_case": test_case,
+                        "judge_results": None,
+                    }
+
+                update_agent_test_job(
+                    task_id,
+                    status=TaskStatus.IN_PROGRESS.value,
+                    results={"test_results": _ordered_results()},
+                )
+
+            final_results = _ordered_results()
+            total_tests = len(tests)
+            passed_count = sum(1 for r in final_results if r.get("passed") is True)
+            failed_count = sum(1 for r in final_results if r.get("passed") is False)
+
+            try:
+                upload_directory_tree_to_s3(s3, temp_path, s3_bucket, results_prefix)
+            except Exception:
+                pass
+
+            status = (
+                TaskStatus.DONE.value if any_success else TaskStatus.FAILED.value
+            )
+            update_agent_test_job(
+                task_id,
+                status=status,
+                results={
+                    "total_tests": total_tests,
+                    "passed": passed_count,
+                    "failed": failed_count,
+                    "test_results": final_results,
+                    "results_s3_prefix": results_prefix,
+                    "error": None if any_success else (last_error or "All conversation tests failed"),
+                },
+            )
+            logger.info(
+                f"Conversation test task {task_id} completed: "
+                f"{passed_count}/{total_tests} passed"
+            )
+
+    except Exception as e:
+        traceback.print_exc()
+        capture_exception_to_sentry(e)
+        existing_job = get_agent_test_job(task_id)
+        existing_results = (existing_job.get("results") or {}) if existing_job else {}
+        existing_results["error"] = f"Task failed: {str(e)}"
+        update_agent_test_job(
+            task_id,
+            status=TaskStatus.FAILED.value,
+            results=existing_results,
+        )
+    finally:
+        try_start_queued_agent_test_job(AGENT_TEST_JOB_TYPES)
+
+
 def run_llm_test_task(
     task_id: str,
     agent: Dict[str, Any],
@@ -1462,6 +1822,14 @@ def run_llm_test_task(
     s3_bucket: str,
 ):
     """Run the LLM tests in the background using a single CLI command with intermediate updates."""
+    # Conversation-type tests judge a fixed transcript with simulation
+    # evaluators via a different calibrate subcommand; route them out before the
+    # `calibrate llm` path below. (Routing here covers the run endpoint, queue
+    # starter, and job recovery — all funnel through this function.)
+    if tests and all(_is_conversation_test(t) for t in tests):
+        run_conversation_test_task(task_id, agent, tests, s3_bucket)
+        return
+
     try:
         logger.info(
             f"Running LLM test task {task_id} for agent {agent['uuid']} with {len(tests)} test(s)"
@@ -1763,13 +2131,7 @@ async def run_agent_test(agent_uuid: str, request: RunTestRequest):
     if not agent:
         raise HTTPException(status_code=404, detail="Agent not found")
 
-    # Guard: agent connection must be verified before running tests
     agent_config = agent.get("config") or {}
-    if agent_config.get("agent_url") and not agent_config.get("connection_verified"):
-        raise HTTPException(
-            status_code=400,
-            detail="Agent connection not verified. Call POST /agents/{agent_uuid}/verify-connection first.",
-        )
 
     if request.test_uuids:
         # Verify all specified tests exist
@@ -1790,6 +2152,33 @@ async def run_agent_test(agent_uuid: str, request: RunTestRequest):
                 detail="No tests linked to this agent. Link tests first or provide test_uuids.",
             )
 
+    # Conversation tests judge a fixed transcript with simulation evaluators —
+    # they use a different calibrate subcommand and don't invoke the agent, so
+    # a run can't mix them with response/tool_call tests.
+    conversation_flags = [_is_conversation_test(t) for t in tests]
+    if any(conversation_flags) and not all(conversation_flags):
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "A run cannot mix conversation tests with response/tool_call "
+                "tests. Run each type separately."
+            ),
+        )
+    is_conversation_run = all(conversation_flags)
+
+    # Guard: agent connection must be verified before running tests that invoke
+    # the agent. Conversation tests judge a stored transcript and never call the
+    # agent, so the verification guard doesn't apply.
+    if (
+        not is_conversation_run
+        and agent_config.get("agent_url")
+        and not agent_config.get("connection_verified")
+    ):
+        raise HTTPException(
+            status_code=400,
+            detail="Agent connection not verified. Call POST /agents/{agent_uuid}/verify-connection first.",
+        )
+
     # Get S3 configuration
     try:
         s3_bucket = get_s3_output_config()
@@ -1807,24 +2196,34 @@ async def run_agent_test(agent_uuid: str, request: RunTestRequest):
     # Extract test names for progress tracking
     test_names = [test.get("name") for test in tests if test.get("name")]
 
-    # Snapshot calibrate config and per-test evaluator metadata at submission so the
-    # worker (and enrichment) stay aligned even if links or live versions change later.
-    calibrate_config, evaluators_by_test_id = _build_calibrate_config(agent, tests)
+    # Snapshot per-test evaluator metadata at submission so the worker (and
+    # enrichment) stay aligned even if links or live versions change later.
+    test_uuids = [t["uuid"] for t in tests]
+    details: Dict[str, Any] = {
+        "agent_uuid": agent_uuid,
+        "test_uuids": test_uuids,
+        "test_names": test_names,
+        "s3_bucket": s3_bucket,
+    }
+    if is_conversation_run:
+        conversation_payloads, evaluators_by_test_id = _build_conversation_run_data(
+            tests
+        )
+        details["calibrate_config"] = None
+        details["evaluators_by_test_id"] = evaluators_by_test_id
+        details["conversation_payloads"] = conversation_payloads
+        details["is_conversation"] = True
+    else:
+        calibrate_config, evaluators_by_test_id = _build_calibrate_config(agent, tests)
+        details["calibrate_config"] = calibrate_config
+        details["evaluators_by_test_id"] = evaluators_by_test_id
 
     # Create job in database with details for recovery
-    test_uuids = [t["uuid"] for t in tests]
     job_id = create_agent_test_job(
         agent_id=agent_uuid,
         job_type="llm-unit-test",
         status=initial_status,
-        details={
-            "agent_uuid": agent_uuid,
-            "test_uuids": test_uuids,
-            "test_names": test_names,
-            "s3_bucket": s3_bucket,
-            "calibrate_config": calibrate_config,
-            "evaluators_by_test_id": evaluators_by_test_id,
-        },
+        details=details,
         results={
             "test_results": [
                 _pending_test_case_result_placeholder(name) for name in test_names
@@ -2512,6 +2911,18 @@ async def run_agent_benchmark(agent_uuid: str, request: BenchmarkRequest):
         raise HTTPException(
             status_code=400,
             detail="No tests linked to this agent. Link tests first.",
+        )
+
+    # Conversation tests judge a fixed transcript and never invoke a model, so
+    # benchmarking them across models is meaningless.
+    if any(_is_conversation_test(t) for t in tests):
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "Conversation tests judge a fixed transcript and can't be "
+                "benchmarked across models. Remove conversation tests from this "
+                "agent or run them via POST /agent-tests/agent/{agent_uuid}/run."
+            ),
         )
 
     # Get S3 configuration
