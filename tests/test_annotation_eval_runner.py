@@ -271,7 +271,7 @@ def test_calibrate_command_for_task_type():
     assert out_stt[:3] == ["calibrate", "stt", "--eval-only"]
     out_llm = runner.calibrate_command_for_task_type("llm", p, p, p)
     assert out_llm[:2] == ["calibrate", "llm"]
-    out_sim = runner.calibrate_command_for_task_type("simulation", p, p, p)
+    out_sim = runner.calibrate_command_for_task_type("conversation", p, p, p)
     assert out_sim[:2] == ["calibrate", "simulations"]
     with pytest.raises(runner.DatasetBuildError):
         runner.calibrate_command_for_task_type("unknown", p, p, p)

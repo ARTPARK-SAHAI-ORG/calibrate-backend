@@ -976,6 +976,13 @@ def init_db():
         except sqlite3.OperationalError:
             pass
 
+        # Migration: the annotation-task `type` value `simulation` was renamed to
+        # `conversation` (to match the `tests.type` naming for full-conversation
+        # judging). Convert existing rows. Idempotent.
+        cursor.execute(
+            "UPDATE annotation_tasks SET type = 'conversation' WHERE type = 'simulation'"
+        )
+
         # Add deleted_at column to existing tables if not present (migration)
         tables_to_migrate = [
             "agents",
@@ -6144,7 +6151,7 @@ def _parse_annotation_task_row(row: sqlite3.Row) -> Dict[str, Any]:
     return dict(row)
 
 
-ANNOTATION_TASK_TYPES = ("llm", "stt", "tts", "simulation")
+ANNOTATION_TASK_TYPES = ("llm", "stt", "tts", "conversation")
 
 
 def create_annotation_task(

@@ -1760,7 +1760,7 @@ def test_annotation_eval_unsupported_task_type(client):
     import db as db_mod
 
     task_types = set(db_mod.ANNOTATION_TASK_TYPES)
-    # SUPPORTED_EVAL_TASK_TYPES is {stt, llm, simulation}; tts is excluded
+    # SUPPORTED_EVAL_TASK_TYPES is {stt, llm, conversation}; tts is excluded
     if "tts" in task_types:
         llm_ev = _llm_evaluator(client, h)
         task_uuid = client.post(

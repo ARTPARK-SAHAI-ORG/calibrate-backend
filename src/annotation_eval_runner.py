@@ -105,7 +105,7 @@ ANNOTATION_EVAL_JOB_TYPE = "annotation-eval"
 # --eval-only modes. `tts` is omitted because annotation tasks don't store
 # audio S3 keys today; `voice` simulation isn't supported by the CLI in
 # eval-only mode.
-SUPPORTED_EVAL_TASK_TYPES = ("stt", "llm", "simulation")
+SUPPORTED_EVAL_TASK_TYPES = ("stt", "llm", "conversation")
 
 logger = logging.getLogger(__name__)
 
@@ -386,11 +386,11 @@ def build_dataset_for_task_type(
         return _build_stt_dataset(items)
     if task_type == "llm":
         return _build_llm_dataset(items, evaluators_resolved)
-    if task_type == "simulation":
+    if task_type == "conversation":
         return _build_simulation_dataset(items)
     raise DatasetBuildError(
         f"Evaluator runs are not supported for task type {task_type!r} "
-        "(supported: stt, llm, simulation)"
+        "(supported: stt, llm, conversation)"
     )
 
 
@@ -412,7 +412,7 @@ def calibrate_command_for_task_type(
             "--dataset", str(dataset_path),
             "-o", str(output_dir),
         ]
-    if task_type == "simulation":
+    if task_type == "conversation":
         return [
             "calibrate", "simulations",
             "-t", "text",
@@ -761,7 +761,7 @@ def parse_results_for_task_type(
         return _parse_results_stt(output_dir, evaluators_resolved, job_uuid)
     if task_type == "llm":
         return _parse_results_llm(output_dir, evaluators_resolved, job_uuid)
-    if task_type == "simulation":
+    if task_type == "conversation":
         return _parse_results_simulation(
             output_dir, evaluators_resolved, job_uuid, items=items
         )
