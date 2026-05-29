@@ -76,7 +76,7 @@ class EvaluatorVersionCreateRequest(EvaluatorVersionCreate):
     make_live: bool = False
 
 
-EvaluatorTypeLiteral = Literal["tts", "stt", "llm", "simulation"]
+EvaluatorTypeLiteral = Literal["tts", "stt", "llm", "conversation"]
 DataTypeLiteral = Literal["text", "audio"]
 
 
@@ -315,10 +315,10 @@ async def create_evaluator_endpoint(
 
 class DefaultPromptResponse(BaseModel):
     """Canonical default prompt for a given purpose. Used by the frontend to prefill the
-    create-evaluator form. The `name` field is null for `purpose=simulation` because there's
-    no seeded simulation evaluator — the prompt is just a template."""
+    create-evaluator form. The `name` field is null for `purpose=conversation` because there's
+    no seeded conversation evaluator — the prompt is just a template."""
 
-    purpose: Literal["llm", "stt", "tts", "simulation"]
+    purpose: Literal["llm", "stt", "tts", "conversation"]
     name: Optional[str] = None
     system_prompt: str
     judge_model: str
@@ -332,14 +332,14 @@ class DefaultPromptResponse(BaseModel):
 
 @router.get("/default-prompt", response_model=DefaultPromptResponse)
 async def get_default_prompt(
-    purpose: Literal["llm", "stt", "tts", "simulation"],
+    purpose: Literal["llm", "stt", "tts", "conversation"],
     _user_id: str = Depends(get_current_user_id),
 ):
     """Return the canonical default prompt + suggested config for a given purpose.
 
-    For `llm`, `stt`, `tts` this matches the seeded default evaluator. For `simulation`
+    For `llm`, `stt`, `tts` this matches the seeded default evaluator. For `conversation`
     there is no seeded evaluator — the response gives a template the frontend can use
-    to prefill a "create simulation evaluator" form (the user replaces the literal
+    to prefill a "create conversation evaluator" form (the user replaces the literal
     `<ENTER EVALUATION CRITERIA HERE>` placeholder in the prompt with their criteria).
     """
     if purpose not in DEFAULT_PROMPTS_BY_PURPOSE:

@@ -30,12 +30,12 @@ router = APIRouter(prefix="/tests", tags=["tests"])
 TestType = Literal["response", "tool_call", "conversation"]
 
 # Each test type pins the evaluator_type it accepts. `conversation` tests judge whole
-# simulated conversations, so only `simulation` evaluators apply; `response`/`tool_call`
+# simulated conversations, so only `conversation` evaluators apply; `response`/`tool_call`
 # tests judge a single LLM reply, so only `llm` evaluators apply.
 REQUIRED_EVALUATOR_TYPE_BY_TEST_TYPE: Dict[str, str] = {
     "response": "llm",
     "tool_call": "llm",
-    "conversation": "simulation",
+    "conversation": "conversation",
 }
 
 

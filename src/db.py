@@ -620,6 +620,18 @@ def init_db():
         except sqlite3.OperationalError:
             pass
 
+        # Migration: the evaluator_type value `simulation` (whole-conversation
+        # judging) was renamed to `conversation` to match `tests.type` and the
+        # annotation-task `type`. Convert existing rows. Idempotent; runs before
+        # `_seed_default_evaluators` so seeded sim evaluators reconcile cleanly.
+        try:
+            cursor.execute(
+                "UPDATE evaluators SET evaluator_type = 'conversation' "
+                "WHERE evaluator_type = 'simulation'"
+            )
+        except sqlite3.OperationalError:
+            pass
+
         # Backfill `data_type` from `evaluator_type` for rows that just got the column
         # re-added (where every row defaulted to 'text'): TTS evaluators consume audio;
         # the rest consume text. Only touches rows that match the canonical default
@@ -1398,12 +1410,12 @@ _BINARY_CONFIG = {
 # Canonical default system prompts per *purpose*. Returned by
 # `GET /evaluators/default-prompt?purpose=...` for the frontend to prefill the
 # create-evaluator form. The seeded LLM/STT/TTS evaluators below also use these.
-# The simulation purpose prompt embeds a literal `<ENTER EVALUATION CRITERIA HERE>`
+# The conversation purpose prompt embeds a literal `<ENTER EVALUATION CRITERIA HERE>`
 # placeholder the user replaces directly when adapting the form into their own
-# simulation evaluator (the seeded simulation defaults below have their criteria
+# conversation evaluator (the seeded conversation defaults below have their criteria
 # baked in instead).
 DEFAULT_PROMPTS_BY_PURPOSE: Dict[str, Dict[str, Any]] = {
-    # `purpose=llm` and `purpose=simulation` both use a literal
+    # `purpose=llm` and `purpose=conversation` both use a literal
     # `<ENTER EVALUATION CRITERIA HERE>` placeholder rather than a `{{criteria}}` variable —
     # the API is meant for users prefilling a fresh evaluator form, where they paste their
     # criteria directly into the prompt. The seeded `default-llm-next-reply` evaluator that
@@ -1507,11 +1519,11 @@ DEFAULT_PROMPTS_BY_PURPOSE: Dict[str, Dict[str, Any]] = {
         },
         "variables": [],
     },
-    # Simulation: no seeded evaluator. The prompt is a template the user adapts when
-    # creating their own simulation evaluator. The literal "<ENTER EVALUATION CRITERIA HERE>"
+    # Conversation: prompt template for adapting into a whole-conversation
+    # evaluator. The literal "<ENTER EVALUATION CRITERIA HERE>"
     # placeholder is intentional — the user replaces it with their criteria text directly,
     # rather than via the {{var}} mechanism (matches calibrate's simulation prompt convention).
-    "simulation": {
+    "conversation": {
         "name": None,
         "system_prompt": (
             "You are a highly accurate grader.\n\n"
@@ -1526,7 +1538,7 @@ DEFAULT_PROMPTS_BY_PURPOSE: Dict[str, Dict[str, Any]] = {
             "conversation."
         ),
         "judge_model": DEFAULT_TEXT_JUDGE_MODEL,
-        "evaluator_type": "simulation",
+        "evaluator_type": "conversation",
         "data_type": "text",
         "kind": "single",
         "output_type": "binary",
@@ -1888,7 +1900,7 @@ DEFAULT_EVALUATORS_SEED = [
         "slug": "default-sim-goal-completion",
         "name": "Goal Completion",
         "description": "Judges whether the agent successfully helped the user achieve their goal in the conversation",
-        "evaluator_type": "simulation",
+        "evaluator_type": "conversation",
         "data_type": "text",
         "kind": "single",
         "output_type": "binary",
@@ -1929,7 +1941,7 @@ DEFAULT_EVALUATORS_SEED = [
         "slug": "default-sim-empathy-tone",
         "name": "Empathy & Tone",
         "description": "Rates how empathetic and appropriate the agent's tone was throughout the conversation",
-        "evaluator_type": "simulation",
+        "evaluator_type": "conversation",
         "data_type": "text",
         "kind": "single",
         "output_type": "rating",
@@ -1988,7 +2000,7 @@ DEFAULT_EVALUATORS_SEED = [
         "slug": "default-sim-persona-adherence",
         "name": "Persona Adherence",
         "description": "Judges whether the agent stayed consistently in its assigned role/persona throughout the conversation",
-        "evaluator_type": "simulation",
+        "evaluator_type": "conversation",
         "data_type": "text",
         "kind": "single",
         "output_type": "binary",
@@ -3702,7 +3714,7 @@ def _validate_output(output_type: str, output_config: Optional[Dict[str, Any]]) 
         raise ValueError("output_config.scale must be a list")
 
 
-VALID_EVALUATOR_TYPES = ("tts", "stt", "llm", "simulation")
+VALID_EVALUATOR_TYPES = ("tts", "stt", "llm", "conversation")
 VALID_DATA_TYPES = ("text", "audio")
 
 
