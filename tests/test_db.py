@@ -37,6 +37,42 @@ def test_init_db_is_idempotent():
     db.init_db()
 
 
+def test_simulation_to_conversation_migration():
+    """init_db() converts the legacy `simulation` value to `conversation` for
+    both `evaluators.evaluator_type` and `annotation_tasks.type`. Rows are
+    inserted raw to bypass the API-layer validators that now reject the old
+    value."""
+    user_uuid = db.create_user("M", "G", _u("mig") + "@example.com")
+    ev_uuid = _uuid.uuid4().hex
+    task_uuid = _uuid.uuid4().hex
+    with db.get_db_connection() as conn:
+        cur = conn.cursor()
+        cur.execute(
+            "INSERT INTO evaluators (uuid, name, evaluator_type) "
+            "VALUES (?, ?, 'simulation')",
+            (ev_uuid, _u("legacy-ev")),
+        )
+        cur.execute(
+            "INSERT INTO annotation_tasks (uuid, user_id, name, type) "
+            "VALUES (?, ?, ?, 'simulation')",
+            (task_uuid, user_uuid, _u("legacy-task")),
+        )
+        conn.commit()
+
+    db.init_db()  # idempotent — runs the rename migrations
+
+    with db.get_db_connection() as conn:
+        cur = conn.cursor()
+        ev_type = cur.execute(
+            "SELECT evaluator_type FROM evaluators WHERE uuid = ?", (ev_uuid,)
+        ).fetchone()[0]
+        task_type = cur.execute(
+            "SELECT type FROM annotation_tasks WHERE uuid = ?", (task_uuid,)
+        ).fetchone()[0]
+    assert ev_type == "conversation"
+    assert task_type == "conversation"
+
+
 def test_is_name_taken_whitelist_only():
     with pytest.raises(ValueError):
         db.is_name_taken("not_a_table", "n", "u")

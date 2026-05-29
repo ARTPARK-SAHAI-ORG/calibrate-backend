@@ -624,13 +624,12 @@ def init_db():
         # judging) was renamed to `conversation` to match `tests.type` and the
         # annotation-task `type`. Convert existing rows. Idempotent; runs before
         # `_seed_default_evaluators` so seeded sim evaluators reconcile cleanly.
-        try:
-            cursor.execute(
-                "UPDATE evaluators SET evaluator_type = 'conversation' "
-                "WHERE evaluator_type = 'simulation'"
-            )
-        except sqlite3.OperationalError:
-            pass
+        # No try/except needed — `evaluator_type` always exists by this point
+        # (CREATE TABLE / the rename+add block above guarantee it).
+        cursor.execute(
+            "UPDATE evaluators SET evaluator_type = 'conversation' "
+            "WHERE evaluator_type = 'simulation'"
+        )
 
         # Backfill `data_type` from `evaluator_type` for rows that just got the column
         # re-added (where every row defaulted to 'text'): TTS evaluators consume audio;
