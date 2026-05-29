@@ -344,13 +344,13 @@ def _resolve_simulation_evaluator_ref(
             status_code=404,
             detail=f"Evaluator {evaluator_uuid} not found",
         )
-    if evaluator.get("evaluator_type") != "simulation":
+    if evaluator.get("evaluator_type") != "conversation":
         raise HTTPException(
             status_code=400,
             detail=(
                 f"Evaluator {evaluator_uuid} has evaluator_type="
                 f"'{evaluator.get('evaluator_type')}'. Simulations only accept "
-                f"'simulation' evaluators."
+                f"'conversation' evaluators."
             ),
         )
     version_uuid = evaluator.get("live_version_id")
@@ -387,7 +387,7 @@ class EvaluatorResponse(BaseModel):
     uuid: str
     name: str
     description: Optional[str] = None
-    evaluator_type: str = "simulation"
+    evaluator_type: str = "conversation"
     data_type: str = "text"
     kind: str = "single"
     output_type: str = "binary"

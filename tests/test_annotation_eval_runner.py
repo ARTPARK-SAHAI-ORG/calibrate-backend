@@ -260,6 +260,17 @@ def test_build_dataset_dispatch_unknown_task_type():
         runner.build_dataset_for_task_type("unknown", [], [])
 
 
+def test_build_dataset_dispatch_conversation():
+    # The `conversation` task type routes to the simulation-shaped dataset builder.
+    out = runner.build_dataset_for_task_type(
+        "conversation",
+        [{"uuid": "i1", "payload": {"transcript": [{"role": "user", "content": "x"}]}}],
+        [],
+    )
+    assert out[0]["name"] == "i1"
+    assert out[0]["conversation_history"] == [{"role": "user", "content": "x"}]
+
+
 # ---------------------------------------------------------------------------
 # calibrate_command_for_task_type
 # ---------------------------------------------------------------------------
@@ -271,7 +282,7 @@ def test_calibrate_command_for_task_type():
     assert out_stt[:3] == ["calibrate", "stt", "--eval-only"]
     out_llm = runner.calibrate_command_for_task_type("llm", p, p, p)
     assert out_llm[:2] == ["calibrate", "llm"]
-    out_sim = runner.calibrate_command_for_task_type("simulation", p, p, p)
+    out_sim = runner.calibrate_command_for_task_type("conversation", p, p, p)
     assert out_sim[:2] == ["calibrate", "simulations"]
     with pytest.raises(runner.DatasetBuildError):
         runner.calibrate_command_for_task_type("unknown", p, p, p)
@@ -532,6 +543,22 @@ def test_parse_results_for_task_type_dispatch(tmp_path):
         )
         == []
     )
+
+
+def test_parse_results_for_task_type_dispatch_conversation(tmp_path):
+    # The `conversation` task type routes to the simulation results parser.
+    (tmp_path / "dataset_map.json").write_text(
+        json.dumps({"row_1": {"index": 0, "name": "from-name"}})
+    )
+    sim_dir = tmp_path / "row_1"
+    sim_dir.mkdir()
+    (sim_dir / "evaluation_results.csv").write_text(
+        "name,type,value,reasoning,evaluator_id\nSafety,binary,1,ok,ev-1\n"
+    )
+    runs = runner.parse_results_for_task_type(
+        "conversation", tmp_path, [_ev_resolved()], "job-1", items=None
+    )
+    assert runs[0]["item_id"] == "from-name"
 
 
 # ---------------------------------------------------------------------------

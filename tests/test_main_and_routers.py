@@ -588,7 +588,7 @@ def test_tests_router_type_validation(client):
         json={
             "name": f"sim-{uuid.uuid4().hex[:6]}",
             "description": "d",
-            "evaluator_type": "simulation",
+            "evaluator_type": "conversation",
             "data_type": "text",
             "kind": "single",
             "output_type": "binary",

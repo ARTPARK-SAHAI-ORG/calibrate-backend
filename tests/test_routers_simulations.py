@@ -163,6 +163,24 @@ def test_create_simulation_with_invalid_evaluator(client):
     assert resp.status_code == 404
 
 
+def test_create_simulation_rejects_non_conversation_evaluator(client):
+    # Simulations only accept `conversation` evaluators; linking an `llm` one → 400.
+    auth = _signup(client)
+    h = auth["headers"]
+    evaluators = client.get("/evaluators", headers=h).json()
+    llm_ev = next(e for e in evaluators if e.get("evaluator_type") == "llm")
+    resp = client.post(
+        "/simulations",
+        json={
+            "name": f"sim-{uuid.uuid4().hex[:6]}",
+            "evaluators": [{"evaluator_uuid": llm_ev["uuid"]}],
+        },
+        headers=h,
+    )
+    assert resp.status_code == 400
+    assert "conversation" in resp.json()["detail"]
+
+
 def test_update_simulation_basic(client):
     auth = _signup(client)
     h = auth["headers"]

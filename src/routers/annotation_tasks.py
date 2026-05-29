@@ -419,7 +419,7 @@ class AnnotationItemPayload(BaseModel):
     # `payload` is a free-form JSON value whose shape is owned by the
     # task `type`. The backend doesn't validate the shape — frontend +
     # downstream consumers (evaluator runs, agreement, etc.) interpret it.
-    # For stt/llm/simulation tasks `payload["name"]` is required and must
+    # For stt/llm/conversation tasks `payload["name"]` is required and must
     # be unique within the task.
     payload: Any
     # Optional human annotations to seed alongside the item. Keys are
@@ -533,7 +533,7 @@ async def bulk_create_items(
     annotator covering every newly-inserted item. Annotations are upserted
     as if the annotator had submitted them through the public form.
     Annotations are validated against the task's *currently linked*
-    evaluator set; the task type (`stt | llm | simulation | tts`) does
+    evaluator set; the task type (`stt | llm | conversation | tts`) does
     not affect the contract. Value shape is uniform across output types:
     `{"value": <bool|number|string>, "reasoning"?: str}` — binary uses a
     bool, rating uses a number. This matches what the public form writes
@@ -2116,7 +2116,7 @@ async def task_summary(
     Response shape:
       {
         "task_id": str,
-        "task_type": "stt" | "llm" | "simulation",
+        "task_type": "stt" | "llm" | "conversation",
         "evaluators": [
           {
             "uuid": str,

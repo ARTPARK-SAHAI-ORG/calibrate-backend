@@ -368,7 +368,7 @@ def _make_conversation_test(db_mod, org_uuid, user_uuid, name="Conv"):
     """Create a conversation-type test linked to a simulation evaluator."""
     ev_uuid = db_mod.create_evaluator(
         name=f"sim-ev-{os.urandom(4).hex()}",
-        evaluator_type="simulation",
+        evaluator_type="conversation",
         output_type="binary",
         owner_user_id=user_uuid,
         org_uuid=org_uuid,

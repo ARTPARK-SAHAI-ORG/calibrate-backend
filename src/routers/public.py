@@ -293,7 +293,7 @@ def _parse_evaluator_types(types: Optional[str]) -> Optional[set[str]]:
     if types is None or not types.strip():
         return None
 
-    allowed = {"stt", "tts", "llm", "simulation"}
+    allowed = {"stt", "tts", "llm", "conversation"}
     parsed = {item.strip() for item in types.split(",") if item.strip()}
     invalid = parsed - allowed
     if invalid:
@@ -337,7 +337,7 @@ async def get_public_default_evaluators(
     share_token: str = Query(..., min_length=1),
     types: Optional[str] = Query(
         None,
-        description="Comma-separated evaluator types: stt,tts,llm,simulation",
+        description="Comma-separated evaluator types: stt,tts,llm,conversation",
     ),
 ):
     """

@@ -437,7 +437,7 @@ def _create_simulation_evaluator(client, h):
         "/evaluators",
         json={
             "name": f"sim-ev-{uuid.uuid4().hex[:6]}",
-            "evaluator_type": "simulation",
+            "evaluator_type": "conversation",
             "output_type": "binary",
             "version": {
                 "judge_model": "openai/gpt-4.1",
