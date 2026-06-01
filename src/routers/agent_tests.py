@@ -184,6 +184,13 @@ class RunTestRequest(BaseModel):
 class ToolCallOutput(BaseModel):
     tool: str
     arguments: Optional[Dict[str, Any]] = None
+    # Tool execution result, surfaced only for agent-connection tests where the
+    # external agent actually runs the tool and echoes its return value. Any
+    # JSON value (object/list/string/number/...). Absent for calibrate-agent
+    # mode (tools are declared, never executed) and for agents that don't echo
+    # it. calibrate passes this through verbatim in `output.tool_calls`; without
+    # this field the response_model would drop it on serialization.
+    output: Optional[Any] = None
 
 
 class TestOutput(BaseModel):
