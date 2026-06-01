@@ -19,13 +19,18 @@ For local development with tests:
 uv sync --frozen --group dev
 ```
 
-## Running tests
+## Running locally
 
-From the **repository root** (not `src/`):
+Start the development server:
 
 ```bash
-pytest tests
+cd src
+uv run uvicorn main:app --reload
 ```
+
+The app will be available at: http://localhost:8000
+
+API documentation: http://localhost:8000/docs
 
 ## Contributing
 
@@ -38,18 +43,13 @@ git config core.hooksPath .githooks
 
 Every contributor needs to run it once.
 
-## Running Locally
+### Running tests
 
-Start the development server:
+From the **repository root** (not `src/`):
 
 ```bash
-cd src
-uv run uvicorn main:app --reload
+pytest tests
 ```
-
-The app will be available at: http://localhost:8000
-
-API documentation: http://localhost:8000/docs
 
 ## License
 
