@@ -64,6 +64,49 @@ def test_parse_agent_test_results():
     assert _parse_agent_test_results("not-a-list") == []
 
 
+def test_parse_agent_test_results_preserves_tool_call_output():
+    """Tool-call entries from agent-connection runs may carry an `output`
+    (the tool's execution result); it must survive parsing verbatim."""
+    from routers.agent_tests import _parse_agent_test_results
+
+    data = [
+        {
+            "test_case_id": "t1",
+            "output": {
+                "response": None,
+                "tool_calls": [
+                    {
+                        "tool": "get_weather",
+                        "arguments": {"city": "NYC"},
+                        "output": {"temp": 72},
+                    }
+                ],
+            },
+            "metrics": {"passed": True},
+            "test_case": {"name": "T1", "id": "t1"},
+        }
+    ]
+    out = _parse_agent_test_results(data)
+    assert out[0]["output"]["tool_calls"][0]["output"] == {"temp": 72}
+
+
+def test_tool_call_output_model_surfaces_output():
+    """The `output` field must be declared on ToolCallOutput, otherwise the
+    response_model drops it on serialization."""
+    from routers.agent_tests import ToolCallOutput, TestOutput
+
+    tc = ToolCallOutput.model_validate(
+        {"tool": "get_weather", "arguments": {"city": "NYC"}, "output": {"temp": 72}}
+    )
+    assert tc.output == {"temp": 72}
+
+    # Optional: absent output serializes as None, not dropped.
+    out = TestOutput.model_validate(
+        {"tool_calls": [{"tool": "noop", "arguments": {}}]}
+    )
+    assert out.tool_calls[0].output is None
+
+
 def test_merge_test_results_by_test_names():
     from routers.agent_tests import _merge_test_results_by_test_names
 
