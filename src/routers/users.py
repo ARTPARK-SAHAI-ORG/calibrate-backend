@@ -1,9 +1,9 @@
 import logging
-from typing import List
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 
-from db import get_user, get_all_users
+from db import get_user
+from auth_utils import get_current_user_id
 
 logger = logging.getLogger(__name__)
 
@@ -21,27 +21,16 @@ class UserResponse(BaseModel):
     updated_at: str
 
 
-@router.get("", response_model=List[UserResponse])
-async def list_users():
-    """List all users."""
-    users = get_all_users()
-    return [
-        UserResponse(
-            uuid=user["uuid"],
-            first_name=user["first_name"],
-            last_name=user["last_name"],
-            email=user["email"],
-            created_at=user["created_at"],
-            updated_at=user["updated_at"],
-        )
-        for user in users
-    ]
-
-
 @router.get("/{user_uuid}", response_model=UserResponse)
-async def get_user_endpoint(user_uuid: str):
+async def get_user_endpoint(
+    user_uuid: str,
+    current_user_id: str = Depends(get_current_user_id),
+):
     """
     Get user information by UUID.
+
+    Requires a valid JWT, and a user may only fetch their own record — any
+    other UUID returns 404 (existence-leak parity with the rest of the API).
 
     Args:
         user_uuid: The user's UUID
@@ -49,6 +38,9 @@ async def get_user_endpoint(user_uuid: str):
     Returns:
         User information
     """
+    if user_uuid != current_user_id:
+        raise HTTPException(status_code=404, detail="User not found")
+
     user = get_user(user_uuid)
     if not user:
         raise HTTPException(status_code=404, detail="User not found")
