@@ -23,7 +23,7 @@ from db import (
     add_tool_to_agent,
     add_test_to_agent,
 )
-from auth_utils import get_current_org, OrgContext
+from auth_utils import get_current_org, get_org_jwt_or_api_key, OrgContext
 
 logger = logging.getLogger(__name__)
 
@@ -242,6 +242,17 @@ class AgentDuplicateResponse(BaseModel):
     message: str
 
 
+class ResolveAgentNamesRequest(BaseModel):
+    names: List[str]
+
+
+class ResolveAgentNamesResponse(BaseModel):
+    # name -> agent UUID for every requested name that resolved in the org
+    resolved: Dict[str, str]
+    # requested names with no matching agent in the org
+    not_found: List[str]
+
+
 class VerifyConnectionRequest(BaseModel):
     agent_url: Optional[str] = None
     agent_headers: Optional[Dict[str, str]] = None
@@ -343,6 +354,33 @@ async def verify_agent_connection(
         update_agent(agent_uuid=agent_uuid, config=new_config)
 
     return VerifyConnectionResponse(**result)
+
+
+@router.post("/resolve", response_model=ResolveAgentNamesResponse)
+async def resolve_agent_names(
+    request: ResolveAgentNamesRequest,
+    ctx: OrgContext = Depends(get_org_jwt_or_api_key),
+):
+    """Resolve a list of agent names to their UUIDs within the caller's org.
+
+    Auth accepts either a JWT (frontend) or an `sk_` API key (programmatic
+    clients) via `get_org_jwt_or_api_key`, so CI tooling can map human-friendly
+    agent names to the UUIDs the run/poll endpoints expect. Agent names are
+    unique per org, so each name resolves to at most one agent. Names with no
+    matching (non-deleted) agent in the org are returned under `not_found`.
+    """
+    agents = get_all_agents(org_uuid=ctx.org_uuid)
+    name_to_uuid = {agent["name"]: agent["uuid"] for agent in agents}
+
+    resolved: Dict[str, str] = {}
+    not_found: List[str] = []
+    for name in request.names:
+        if name in name_to_uuid:
+            resolved[name] = name_to_uuid[name]
+        elif name not in not_found:
+            not_found.append(name)
+
+    return ResolveAgentNamesResponse(resolved=resolved, not_found=not_found)
 
 
 @router.post("", response_model=AgentCreateResponse)
