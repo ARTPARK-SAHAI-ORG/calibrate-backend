@@ -250,7 +250,7 @@ The JWT token contains the user's UUID and is validated on every protected endpo
 - `/api-keys` - Create (returns raw key once), list metadata, soft-delete keys (JWT only). Keys authenticate the evaluator invoke endpoint.
 - `/simulations` - Simulation configurations (CRUD + run/status)
 - `/datasets` - Dataset CRUD, item management (add/update/delete items), `eval_count` per dataset (number of linked STT/TTS eval jobs via `json_extract` on jobs `details`)
-- `/users` - Single read-only endpoint `GET /users/{user_uuid}` (JWT-only; a caller may only fetch their own record — any other UUID returns 404). There is no list-all-users endpoint.
+- `/users` - **Removed.** There is no users router; user identity comes from the JWT (`get_current_user_id` / `OrgContext`). `db.get_user` / `db.get_all_users` remain as internal DB helpers.
 - `/user-limits` - Per-user limits CRUD + `/me/max-rows-per-eval` query endpoint. Mutating endpoints (`POST`, `PUT`, `DELETE`) require superadmin (`require_superadmin` dependency composes `get_current_user_id` for token validation, then checks JWT email against `SUPERADMIN_EMAIL` env var); read endpoints (`GET`) require only standard JWT auth
 - `/annotators` - Annotator CRUD (human labelers; unique active name per user)
 - `/annotation-tasks` - Annotation task CRUD, items, evaluator links, jobs, public labelling tokens, evaluator-run jobs (`annotation_eval_runner.py`). Evaluator link order on a task follows **`get_evaluators_for_annotation_task()`** (see **Annotation task evaluator ordering** under Database Schema).

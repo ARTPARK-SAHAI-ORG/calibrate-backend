@@ -234,28 +234,12 @@ def test_auth_signup_login_and_dup(client):
 # ---------------------------------------------------------------------------
 
 
-def test_users_get_self_only(client):
+def test_users_router_removed(client):
+    # The users router was removed entirely — no list and no per-user lookup.
     auth = _auth(client)
     h = auth["headers"]
-
-    # No list endpoint anymore.
     assert client.get("/users", headers=h).status_code == 404
-
-    # Unauthenticated → 403 (HTTPBearer rejects the missing header).
-    assert client.get(f"/users/{auth['user_uuid']}").status_code == 403
-
-    # Authenticated self-fetch works.
-    me = client.get(f"/users/{auth['user_uuid']}", headers=h)
-    assert me.status_code == 200
-    assert me.json()["uuid"] == auth["user_uuid"]
-
-    # Fetching another user's record → 404 (existence-leak parity).
-    other = _auth(client)
-    forbidden = client.get(f"/users/{other['user_uuid']}", headers=h)
-    assert forbidden.status_code == 404
-
-    # Even a non-existent UUID with a valid token → 404.
-    assert client.get("/users/non-existent-uuid", headers=h).status_code == 404
+    assert client.get(f"/users/{auth['user_uuid']}", headers=h).status_code == 404
 
 
 # ---------------------------------------------------------------------------
