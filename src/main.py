@@ -150,6 +150,20 @@ def custom_openapi(_: HTTPBasicCredentials = Depends(_verify_docs_access)):
 PUBLIC_API_TAG = "Public API"
 
 
+def _collect_schema_refs(node: Any, acc: set) -> None:
+    """Walk an OpenAPI fragment, collecting every `#/components/schemas/<Name>`
+    schema name referenced (transitively) into ``acc``."""
+    if isinstance(node, dict):
+        ref = node.get("$ref")
+        if isinstance(ref, str) and ref.startswith("#/components/schemas/"):
+            acc.add(ref.rsplit("/", 1)[-1])
+        for value in node.values():
+            _collect_schema_refs(value, acc)
+    elif isinstance(node, list):
+        for item in node:
+            _collect_schema_refs(item, acc)
+
+
 def _build_public_openapi() -> Dict[str, Any]:
     full = app.openapi()
     public_paths: Dict[str, Any] = {}
@@ -167,6 +181,27 @@ def _build_public_openapi() -> Dict[str, Any]:
         if kept:
             public_paths[path] = kept
 
+    # Include ONLY the component schemas the public paths actually reference, so
+    # the anonymous page doesn't expose internal (JWT-only) model shapes. Resolve
+    # transitively: a kept schema may $ref further schemas.
+    all_schemas = full.get("components", {}).get("schemas", {})
+    needed: set = set()
+    _collect_schema_refs(public_paths, needed)
+    queue = list(needed)
+    while queue:
+        name = queue.pop()
+        nested: set = set()
+        _collect_schema_refs(all_schemas.get(name, {}), nested)
+        for dep in nested - needed:
+            needed.add(dep)
+            queue.append(dep)
+
+    components: Dict[str, Any] = dict(full.get("components", {}))
+    if all_schemas:
+        components["schemas"] = {
+            name: schema for name, schema in all_schemas.items() if name in needed
+        }
+
     return {
         "openapi": full.get("openapi", "3.1.0"),
         "info": {
@@ -178,8 +213,7 @@ def _build_public_openapi() -> Dict[str, Any]:
                 "`Authorization: Bearer sk_…`."
             ),
         },
-        # Components are kept whole so `$ref`s in the kept operations resolve.
-        "components": full.get("components", {}),
+        "components": components,
         "paths": public_paths,
     }
 

@@ -118,6 +118,29 @@ def test_public_api_docs_are_unauthenticated_and_filtered(client):
     full = client.get("/openapi.json", auth=("admin", "changeme")).json()
     assert full["paths"]["/agents"]["get"]["tags"] == ["agents", "Public API"]
 
+    # Components are trimmed to ONLY the schemas the public paths reference
+    # (transitively) — internal/JWT-only model shapes must not leak.
+    import json
+    import re
+
+    pub = schema.json()
+    pub_schemas = pub.get("components", {}).get("schemas", {})
+    full_schemas = full.get("components", {}).get("schemas", {})
+    # Public response models are present...
+    assert "ResolveAgentNamesResponse" in pub_schemas  # POST /agents/resolve
+    assert "BatchTestRunResponse" in pub_schemas  # POST /agent-tests/run
+    # ...nested refs are pulled in transitively...
+    assert "BatchTestSkip" in pub_schemas  # referenced by BatchTestRunResponse
+    # ...but it's a strict subset of the full set, and internal-only models are gone.
+    assert set(pub_schemas).issubset(set(full_schemas))
+    assert "PersonaCreate" not in pub_schemas
+    assert "AgentCreate" not in pub_schemas  # JWT-only create-agent body
+    # Every $ref in the public doc resolves within the trimmed schema set.
+    refs = {
+        m for m in re.findall(r'#/components/schemas/([^"]+)', json.dumps(pub))
+    }
+    assert refs.issubset(set(pub_schemas))
+
 
 # ---------------------------------------------------------------------------
 # Presigned URL endpoint
