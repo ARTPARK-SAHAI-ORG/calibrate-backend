@@ -356,7 +356,7 @@ async def verify_agent_connection(
     return VerifyConnectionResponse(**result)
 
 
-@router.post("/resolve", response_model=ResolveAgentNamesResponse)
+@router.post("/resolve", response_model=ResolveAgentNamesResponse, tags=["Public API"])
 async def resolve_agent_names(
     request: ResolveAgentNamesRequest,
     ctx: OrgContext = Depends(get_org_jwt_or_api_key),
@@ -413,7 +413,7 @@ async def create_agent_endpoint(
     return AgentCreateResponse(uuid=agent_uuid, message="Agent created successfully")
 
 
-@router.get("", response_model=List[AgentResponse])
+@router.get("", response_model=List[AgentResponse], tags=["Public API"])
 async def list_agents(ctx: OrgContext = Depends(get_org_jwt_or_api_key)):
     """List all agents for the caller's current org.
 

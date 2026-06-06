@@ -1803,7 +1803,7 @@ def run_llm_test_task(
         try_start_queued_agent_test_job(AGENT_TEST_JOB_TYPES)
 
 
-@router.post("/agent/{agent_uuid}/run", response_model=TaskCreateResponse)
+@router.post("/agent/{agent_uuid}/run", response_model=TaskCreateResponse, tags=["Public API"])
 async def run_agent_test(
     agent_uuid: str,
     request: RunTestRequest,
@@ -1965,7 +1965,7 @@ async def update_test_run_visibility(
     return VisibilityResponse(is_public=body.is_public, share_token=share_token)
 
 
-@router.get("/run/{task_id}", response_model=TestRunStatusResponse)
+@router.get("/run/{task_id}", response_model=TestRunStatusResponse, tags=["Public API"])
 async def get_agent_test_run_status(
     task_id: str,
     ctx: OrgContext = Depends(get_org_jwt_or_api_key),

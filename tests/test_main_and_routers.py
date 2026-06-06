@@ -85,6 +85,24 @@ def test_docs_endpoints_require_basic_auth(client):
     assert client.get("/docs", auth=("admin", "wrong")).status_code == 401
 
 
+def test_public_api_docs_are_unauthenticated_and_filtered(client):
+    # No auth required for the public subset.
+    assert client.get("/public-api/docs").status_code == 200
+    schema = client.get("/public-api/openapi.json")
+    assert schema.status_code == 200
+
+    paths = schema.json()["paths"]
+    # Only the four API-key-accessible endpoints are exposed.
+    assert ("get" in paths.get("/agents", {}))
+    assert ("post" in paths.get("/agents/resolve", {}))
+    assert ("post" in paths.get("/agent-tests/agent/{agent_uuid}/run", {}))
+    assert ("get" in paths.get("/agent-tests/run/{task_id}", {}))
+    # JWT-only endpoints must NOT leak into the public schema.
+    assert "/personas" not in paths
+    assert "/presigned-url" not in paths
+    assert "post" not in paths.get("/agents", {})  # create-agent is JWT-only
+
+
 # ---------------------------------------------------------------------------
 # Presigned URL endpoint
 # ---------------------------------------------------------------------------

@@ -141,6 +141,55 @@ def custom_redoc(_: HTTPBasicCredentials = Depends(_verify_docs_access)):
 def custom_openapi(_: HTTPBasicCredentials = Depends(_verify_docs_access)):
     return app.openapi()
 
+
+# --- Public API docs ------------------------------------------------------
+# A no-auth subset of the docs covering ONLY endpoints that accept an `sk_`
+# API key (those tagged "Public API"). Everything else stays behind the
+# Basic-Auth'd /docs above. The schema is filtered from the full app schema,
+# so it stays in sync automatically as routes change.
+PUBLIC_API_TAG = "Public API"
+
+
+def _build_public_openapi() -> Dict[str, Any]:
+    full = app.openapi()
+    public_paths: Dict[str, Any] = {}
+    for path, ops in full.get("paths", {}).items():
+        kept = {
+            method: op
+            for method, op in ops.items()
+            if isinstance(op, dict) and PUBLIC_API_TAG in op.get("tags", [])
+        }
+        if kept:
+            public_paths[path] = kept
+
+    return {
+        "openapi": full.get("openapi", "3.1.0"),
+        "info": {
+            "title": "Calibrate Public API",
+            "version": full.get("info", {}).get("version", "1.0.0"),
+            "description": (
+                "Programmatic API for CI/automation, authenticated with an "
+                "org-scoped API key. Pass your key as `X-API-Key: sk_…` or "
+                "`Authorization: Bearer sk_…`."
+            ),
+        },
+        # Components are kept whole so `$ref`s in the kept operations resolve.
+        "components": full.get("components", {}),
+        "paths": public_paths,
+    }
+
+
+@app.get("/public-api/openapi.json", include_in_schema=False)
+def public_openapi():
+    return _build_public_openapi()
+
+
+@app.get("/public-api/docs", include_in_schema=False)
+def public_swagger_ui():
+    return get_swagger_ui_html(
+        openapi_url="/public-api/openapi.json", title="Calibrate Public API"
+    )
+
 # Include routers
 app.include_router(auth_router)
 app.include_router(agents_router)
