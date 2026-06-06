@@ -155,11 +155,12 @@ def _build_public_openapi() -> Dict[str, Any]:
     public_paths: Dict[str, Any] = {}
     for path, ops in full.get("paths", {}).items():
         kept = {
-            # Collapse tags to just PUBLIC_API_TAG so the operation renders in a
-            # single Swagger group — routes also carry their router-level tag
-            # (e.g. "agents"), which would otherwise duplicate them. Copy the op
-            # so we don't mutate the cached full schema shared with /docs.
-            method: {**op, "tags": [PUBLIC_API_TAG]}
+            # PUBLIC_API_TAG is only a filter marker, not a display group — drop
+            # it so each op renders under its router-level tag ("agents",
+            # "agent-tests") instead of duplicating across both that tag AND a
+            # "Public API" group. Copy the op so we don't mutate the cached full
+            # schema shared with /docs.
+            method: {**op, "tags": [t for t in op["tags"] if t != PUBLIC_API_TAG]}
             for method, op in ops.items()
             if isinstance(op, dict) and PUBLIC_API_TAG in op.get("tags", [])
         }
