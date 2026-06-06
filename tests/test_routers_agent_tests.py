@@ -736,6 +736,10 @@ def test_run_tests_batch_by_names(client, monkeypatch):
     skipped = {s["agent_name"]: s["reason"] for s in data["skipped"]}
     assert skipped == {n3: "no_linked_tests"}
 
+    # Clean up queued jobs so they don't pollute the shared session queue.
+    for run in data["runs"]:
+        client.delete(f"/agent-tests/job/{run['task_id']}", headers=h)
+
 
 def test_run_tests_batch_skips_unverified(client, monkeypatch):
     import db
@@ -795,6 +799,7 @@ def test_run_tests_batch_all_agents(client, monkeypatch):
     assert client.post("/agent-tests/run").status_code == 403
 
     # No body, empty body, and explicit empty list all mean "run all agents".
+    created_task_ids: list[str] = []
     for body in (None, {}, {"agent_names": []}):
         with patch(
             "routers.agent_tests.can_start_agent_test_job", return_value=False
@@ -808,6 +813,11 @@ def test_run_tests_batch_all_agents(client, monkeypatch):
             s["agent_name"] == n2 and s["reason"] == "no_linked_tests"
             for s in data["skipped"]
         )
+        created_task_ids.extend(r["task_id"] for r in data["runs"])
+
+    # Clean up queued jobs so they don't pollute the shared session queue.
+    for task_id in created_task_ids:
+        client.delete(f"/agent-tests/job/{task_id}", headers=h)
 
     # Org scoping: a fresh org sees none of the above agents.
     other = _signup(client)
