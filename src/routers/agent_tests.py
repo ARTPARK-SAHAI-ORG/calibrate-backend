@@ -182,8 +182,10 @@ class RunTestRequest(BaseModel):
     test_uuids: Optional[List[str]] = None
 
 
-class RunTestsByAgentNamesRequest(BaseModel):
-    agent_names: List[str]
+class BatchRunRequest(BaseModel):
+    # Optional: when provided (and non-empty), run only these agents (validated
+    # up front). When omitted/null, run every agent in the caller's org.
+    agent_names: Optional[List[str]] = None
 
 
 class BatchTestRun(BaseModel):
@@ -2012,52 +2014,59 @@ def _run_tests_for_agents(
 
 
 @router.post(
-    "/run-by-agent-names",
+    "/run",
     response_model=BatchTestRunResponse,
     tags=["Public API"],
 )
-async def run_tests_by_agent_names(
-    request: RunTestsByAgentNamesRequest,
+async def run_tests_batch(
+    request: Optional[BatchRunRequest] = None,
     ctx: OrgContext = Depends(get_org_jwt_or_api_key),
 ):
-    """Run every test linked to each named agent, one job per agent.
+    """Run every linked test for a set of agents, one ``llm-unit-test`` job per agent.
 
-    Agent names are unique per org. **All names are validated up front**: if any
-    name doesn't resolve to a (non-deleted) agent in the caller's org, the call
-    400s with the offending names and NO jobs are created. Once validated, each
-    agent's linked tests are launched as one ``llm-unit-test`` job; agents with
-    no linked tests or an unverified connection are reported under ``skipped``
-    instead of failing the batch.
+    Scope is driven by the optional ``agent_names`` payload:
+
+    - **Provided (non-empty)** — run only those agents. Names are unique per org
+      and **all are validated up front**: if any doesn't resolve to a
+      (non-deleted) agent in the caller's org, the call 404s with the offending
+      names and NO jobs are created.
+    - **Omitted / null / empty** — run every agent in the caller's org.
+
+    For each selected agent, its linked tests are launched as one job. Agents
+    with no linked tests or an unverified connection are reported under
+    ``skipped`` instead of failing the batch. Subject to the normal per-org
+    concurrency queue, so over-limit jobs come back ``queued``.
 
     Auth accepts a JWT (frontend) or an `sk_` API key (programmatic clients).
     Returns one ``runs`` entry per launched agent with ``agent_name``,
     ``agent_uuid``, ``task_id``, and ``status``.
     """
-    if not request.agent_names:
-        raise HTTPException(status_code=400, detail="agent_names must not be empty")
+    agent_names = request.agent_names if request else None
 
-    # Validate ALL names before creating any tasks.
     org_agents = get_all_agents(org_uuid=ctx.org_uuid)
-    name_to_agent = {a["name"]: a for a in org_agents}
+    if agent_names:
+        # Validate ALL names before creating any tasks.
+        name_to_agent = {a["name"]: a for a in org_agents}
+        not_found: List[str] = []
+        selected: List[Dict[str, Any]] = []
+        seen: set[str] = set()
+        for name in agent_names:
+            if name in seen:
+                continue
+            seen.add(name)
+            agent = name_to_agent.get(name)
+            if agent is None:
+                not_found.append(name)
+            else:
+                selected.append(agent)
 
-    not_found: List[str] = []
-    selected: List[Dict[str, Any]] = []
-    seen: set[str] = set()
-    for name in request.agent_names:
-        if name in seen:
-            continue
-        seen.add(name)
-        agent = name_to_agent.get(name)
-        if agent is None:
-            not_found.append(name)
-        else:
-            selected.append(agent)
-
-    if not_found:
-        raise HTTPException(
-            status_code=404,
-            detail={"message": "Unknown agent name(s)", "not_found": not_found},
-        )
+        if not_found:
+            raise HTTPException(
+                status_code=404,
+                detail={"message": "Unknown agent name(s)", "not_found": not_found},
+            )
+    else:
+        selected = org_agents
 
     try:
         s3_bucket = get_s3_output_config()
@@ -2065,34 +2074,6 @@ async def run_tests_by_agent_names(
         raise HTTPException(status_code=500, detail=str(e))
 
     return _run_tests_for_agents(selected, s3_bucket)
-
-
-@router.post(
-    "/run-all",
-    response_model=BatchTestRunResponse,
-    tags=["Public API"],
-)
-async def run_tests_for_all_agents(
-    ctx: OrgContext = Depends(get_org_jwt_or_api_key),
-):
-    """Run every test linked to every agent in the caller's org, one job per agent.
-
-    Triggered with no body — the org is taken from the API key (or JWT). Each
-    agent with linked tests and a verified connection yields one ``llm-unit-test``
-    job; the rest are reported under ``skipped``. Subject to the normal per-org
-    concurrency queue, so over-limit jobs come back ``queued``.
-
-    Auth accepts a JWT (frontend) or an `sk_` API key (programmatic clients).
-    Returns one ``runs`` entry per launched agent with ``agent_name``,
-    ``agent_uuid``, ``task_id``, and ``status``.
-    """
-    try:
-        s3_bucket = get_s3_output_config()
-    except ValueError as e:
-        raise HTTPException(status_code=500, detail=str(e))
-
-    agents = get_all_agents(org_uuid=ctx.org_uuid)
-    return _run_tests_for_agents(agents, s3_bucket)
 
 
 def _load_owned_agent_test_job(task_id: str, ctx: OrgContext) -> Dict[str, Any]:

@@ -669,11 +669,11 @@ def test_agent_test_inflight(client, monkeypatch):
 
 
 # ---------------------------------------------------------------------------
-# Batch run endpoints: /run-by-agent-names and /run-all
+# Batch run endpoint: POST /agent-tests/run (optional agent_names payload)
 # ---------------------------------------------------------------------------
 
 
-def test_run_tests_by_agent_names(client, monkeypatch):
+def test_run_tests_batch_by_names(client, monkeypatch):
     auth = _signup(client)
     h = auth["headers"]
     n1, n2, n3 = (f"agent-{uuid.uuid4().hex[:6]}" for _ in range(3))
@@ -696,20 +696,10 @@ def test_run_tests_by_agent_names(client, monkeypatch):
     # Auth required.
     assert (
         client.post(
-            "/agent-tests/run-by-agent-names",
+            "/agent-tests/run",
             json={"agent_names": [n1]},
         ).status_code
         == 403
-    )
-
-    # Empty list → 400.
-    assert (
-        client.post(
-            "/agent-tests/run-by-agent-names",
-            json={"agent_names": []},
-            headers=h,
-        ).status_code
-        == 400
     )
 
     # An unknown name fails validation up front → 404, NO tasks created.
@@ -717,7 +707,7 @@ def test_run_tests_by_agent_names(client, monkeypatch):
         "routers.agent_tests.can_start_agent_test_job", return_value=False
     ), patch("routers.agent_tests._launch_agent_test_run") as launch_mock:
         bad = client.post(
-            "/agent-tests/run-by-agent-names",
+            "/agent-tests/run",
             json={"agent_names": [n1, "does-not-exist"]},
             headers=h,
         )
@@ -730,7 +720,7 @@ def test_run_tests_by_agent_names(client, monkeypatch):
         "routers.agent_tests.can_start_agent_test_job", return_value=False
     ), patch("threading.Thread"):
         resp = client.post(
-            "/agent-tests/run-by-agent-names",
+            "/agent-tests/run",
             json={"agent_names": [n1, n2, n3]},
             headers=h,
         )
@@ -747,7 +737,7 @@ def test_run_tests_by_agent_names(client, monkeypatch):
     assert skipped == {n3: "no_linked_tests"}
 
 
-def test_run_tests_by_agent_names_skips_unverified(client, monkeypatch):
+def test_run_tests_batch_skips_unverified(client, monkeypatch):
     import db
 
     auth = _signup(client)
@@ -770,7 +760,7 @@ def test_run_tests_by_agent_names_skips_unverified(client, monkeypatch):
         "routers.agent_tests.can_start_agent_test_job", return_value=False
     ), patch("threading.Thread"):
         resp = client.post(
-            "/agent-tests/run-by-agent-names",
+            "/agent-tests/run",
             json={"agent_names": [name]},
             headers=h,
         )
@@ -786,7 +776,7 @@ def test_run_tests_by_agent_names_skips_unverified(client, monkeypatch):
     ]
 
 
-def test_run_tests_for_all_agents(client, monkeypatch):
+def test_run_tests_batch_all_agents(client, monkeypatch):
     auth = _signup(client)
     h = auth["headers"]
     n1 = f"agent-{uuid.uuid4().hex[:6]}"
@@ -802,27 +792,29 @@ def test_run_tests_for_all_agents(client, monkeypatch):
     monkeypatch.setenv("S3_OUTPUT_BUCKET", "test-bucket")
 
     # Auth required.
-    assert client.post("/agent-tests/run-all").status_code == 403
+    assert client.post("/agent-tests/run").status_code == 403
 
-    with patch(
-        "routers.agent_tests.can_start_agent_test_job", return_value=False
-    ), patch("threading.Thread"):
-        resp = client.post("/agent-tests/run-all", headers=h)
-    assert resp.status_code == 200, resp.text
-    data = resp.json()
-    run_names = {r["agent_name"] for r in data["runs"]}
-    assert n1 in run_names
-    assert any(
-        s["agent_name"] == n2 and s["reason"] == "no_linked_tests"
-        for s in data["skipped"]
-    )
+    # No body, empty body, and explicit empty list all mean "run all agents".
+    for body in (None, {}, {"agent_names": []}):
+        with patch(
+            "routers.agent_tests.can_start_agent_test_job", return_value=False
+        ), patch("threading.Thread"):
+            resp = client.post("/agent-tests/run", json=body, headers=h)
+        assert resp.status_code == 200, resp.text
+        data = resp.json()
+        run_names = {r["agent_name"] for r in data["runs"]}
+        assert n1 in run_names
+        assert any(
+            s["agent_name"] == n2 and s["reason"] == "no_linked_tests"
+            for s in data["skipped"]
+        )
 
     # Org scoping: a fresh org sees none of the above agents.
     other = _signup(client)
     with patch(
         "routers.agent_tests.can_start_agent_test_job", return_value=False
     ), patch("threading.Thread"):
-        other_resp = client.post("/agent-tests/run-all", headers=other["headers"])
+        other_resp = client.post("/agent-tests/run", headers=other["headers"])
     assert other_resp.status_code == 200
     other_data = other_resp.json()
     assert other_data["runs"] == []
