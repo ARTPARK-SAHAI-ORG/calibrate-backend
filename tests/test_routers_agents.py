@@ -123,3 +123,45 @@ def test_resolve_requires_auth(client):
         headers={"X-API-Key": "sk_not-a-real-key"},
     )
     assert bad.status_code == 401
+
+
+def test_list_agents_with_api_key(client):
+    """GET /agents accepts an sk_ API key and lists the caller's org agents."""
+    h = _signup(client)
+    n1 = f"list-a-{uuid.uuid4().hex[:6]}"
+    n2 = f"list-b-{uuid.uuid4().hex[:6]}"
+    a1 = _create_agent(client, h, n1)
+    a2 = _create_agent(client, h, n2)
+    raw = _raw_key(client, h)
+
+    # X-API-Key header
+    r1 = client.get("/agents", headers={"X-API-Key": raw})
+    assert r1.status_code == 200, r1.text
+    uuids = {a["uuid"] for a in r1.json()}
+    assert {a1["uuid"], a2["uuid"]} <= uuids
+
+    # Authorization: Bearer sk_…
+    r2 = client.get("/agents", headers={"Authorization": f"Bearer {raw}"})
+    assert r2.status_code == 200, r2.text
+    assert {a1["uuid"], a2["uuid"]} <= {a["uuid"] for a in r2.json()}
+
+
+def test_list_agents_is_org_scoped(client):
+    """An API key for org A must not list agents from org B."""
+    ha = _signup(client)
+    name = f"scoped-{uuid.uuid4().hex[:6]}"
+    a = _create_agent(client, ha, name)
+
+    hb = _signup(client)
+    raw_b = _raw_key(client, hb)
+    r = client.get("/agents", headers={"X-API-Key": raw_b})
+    assert r.status_code == 200, r.text
+    assert a["uuid"] not in {x["uuid"] for x in r.json()}
+
+
+def test_list_agents_requires_auth(client):
+    r = client.get("/agents")
+    assert r.status_code in (401, 403)
+
+    bad = client.get("/agents", headers={"X-API-Key": "sk_not-a-real-key"})
+    assert bad.status_code == 401
