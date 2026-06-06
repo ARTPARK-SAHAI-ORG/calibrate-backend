@@ -102,6 +102,17 @@ def test_public_api_docs_are_unauthenticated_and_filtered(client):
     assert "/presigned-url" not in paths
     assert "post" not in paths.get("/agents", {})  # create-agent is JWT-only
 
+    # Each op is tagged ONLY "Public API" so Swagger renders one group, not a
+    # duplicate under the router-level tag (e.g. "agents").
+    for ops in paths.values():
+        for op in ops.values():
+            assert op["tags"] == ["Public API"]
+
+    # The private (Basic-Auth'd) full schema keeps the router tags intact —
+    # the public filter must not have mutated the shared cached schema.
+    full = client.get("/openapi.json", auth=("admin", "changeme")).json()
+    assert full["paths"]["/agents"]["get"]["tags"] == ["agents", "Public API"]
+
 
 # ---------------------------------------------------------------------------
 # Presigned URL endpoint
