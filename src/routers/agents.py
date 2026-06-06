@@ -414,8 +414,14 @@ async def create_agent_endpoint(
 
 
 @router.get("", response_model=List[AgentResponse])
-async def list_agents(ctx: OrgContext = Depends(get_current_org)):
-    """List all agents for the caller's current org."""
+async def list_agents(ctx: OrgContext = Depends(get_org_jwt_or_api_key)):
+    """List all agents for the caller's current org.
+
+    Auth accepts either a JWT (frontend) or an `sk_` API key (programmatic
+    clients) via `get_org_jwt_or_api_key`, so CI tooling can enumerate every
+    agent UUID in the org without knowing names up front (the run/poll and
+    `/resolve` endpoints accept the same key).
+    """
     agents = get_all_agents(org_uuid=ctx.org_uuid)
     return agents
 
