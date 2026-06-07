@@ -141,6 +141,94 @@ def custom_redoc(_: HTTPBasicCredentials = Depends(_verify_docs_access)):
 def custom_openapi(_: HTTPBasicCredentials = Depends(_verify_docs_access)):
     return app.openapi()
 
+
+# --- Public API docs ------------------------------------------------------
+# A no-auth subset of the docs covering ONLY endpoints that accept an `sk_`
+# API key (those tagged "Public API"). Everything else stays behind the
+# Basic-Auth'd /docs above. The schema is filtered from the full app schema,
+# so it stays in sync automatically as routes change.
+PUBLIC_API_TAG = "Public API"
+
+
+def _collect_schema_refs(node: Any, acc: set) -> None:
+    """Walk an OpenAPI fragment, collecting every `#/components/schemas/<Name>`
+    schema name referenced (transitively) into ``acc``."""
+    if isinstance(node, dict):
+        ref = node.get("$ref")
+        if isinstance(ref, str) and ref.startswith("#/components/schemas/"):
+            acc.add(ref.rsplit("/", 1)[-1])
+        for value in node.values():
+            _collect_schema_refs(value, acc)
+    elif isinstance(node, list):
+        for item in node:
+            _collect_schema_refs(item, acc)
+
+
+def _build_public_openapi() -> Dict[str, Any]:
+    full = app.openapi()
+    public_paths: Dict[str, Any] = {}
+    for path, ops in full.get("paths", {}).items():
+        kept = {
+            # PUBLIC_API_TAG is only a filter marker, not a display group — drop
+            # it so each op renders under its router-level tag ("agents",
+            # "agent-tests") instead of duplicating across both that tag AND a
+            # "Public API" group. Copy the op so we don't mutate the cached full
+            # schema shared with /docs.
+            method: {**op, "tags": [t for t in op["tags"] if t != PUBLIC_API_TAG]}
+            for method, op in ops.items()
+            if isinstance(op, dict) and PUBLIC_API_TAG in op.get("tags", [])
+        }
+        if kept:
+            public_paths[path] = kept
+
+    # Include ONLY the component schemas the public paths actually reference, so
+    # the anonymous page doesn't expose internal (JWT-only) model shapes. Resolve
+    # transitively: a kept schema may $ref further schemas.
+    all_schemas = full.get("components", {}).get("schemas", {})
+    needed: set = set()
+    _collect_schema_refs(public_paths, needed)
+    queue = list(needed)
+    while queue:
+        name = queue.pop()
+        nested: set = set()
+        _collect_schema_refs(all_schemas.get(name, {}), nested)
+        for dep in nested - needed:
+            needed.add(dep)
+            queue.append(dep)
+
+    components: Dict[str, Any] = dict(full.get("components", {}))
+    if all_schemas:
+        components["schemas"] = {
+            name: schema for name, schema in all_schemas.items() if name in needed
+        }
+
+    return {
+        "openapi": full.get("openapi", "3.1.0"),
+        "info": {
+            "title": "Calibrate Public API",
+            "version": full.get("info", {}).get("version", "1.0.0"),
+            "description": (
+                "Programmatic API for CI/automation, authenticated with an "
+                "org-scoped API key. Pass your key as `X-API-Key: sk_…` or "
+                "`Authorization: Bearer sk_…`."
+            ),
+        },
+        "components": components,
+        "paths": public_paths,
+    }
+
+
+@app.get("/public-api/openapi.json", include_in_schema=False)
+def public_openapi():
+    return _build_public_openapi()
+
+
+@app.get("/public-api/docs", include_in_schema=False)
+def public_swagger_ui():
+    return get_swagger_ui_html(
+        openapi_url="/public-api/openapi.json", title="Calibrate Public API"
+    )
+
 # Include routers
 app.include_router(auth_router)
 app.include_router(agents_router)

@@ -666,3 +666,166 @@ def test_agent_test_inflight(client, monkeypatch):
         )
         assert resp.status_code == 200
         thread_mock.return_value.start.assert_called_once()
+
+
+# ---------------------------------------------------------------------------
+# Batch run endpoint: POST /agent-tests/run (optional agent_names payload)
+# ---------------------------------------------------------------------------
+
+
+def test_run_tests_batch_by_names(client, monkeypatch):
+    auth = _signup(client)
+    h = auth["headers"]
+    n1, n2, n3 = (f"agent-{uuid.uuid4().hex[:6]}" for _ in range(3))
+    a1 = _create_agent(client, h, name=n1)
+    a2 = _create_agent(client, h, name=n2)
+    a3_no_tests = _create_agent(client, h, name=n3)
+    t1 = _create_test(client, h)
+    t2 = _create_test(client, h)
+    client.post(
+        "/agent-tests",
+        json={"agent_uuid": a1["uuid"], "test_uuids": [t1["uuid"]]},
+    )
+    client.post(
+        "/agent-tests",
+        json={"agent_uuid": a2["uuid"], "test_uuids": [t2["uuid"]]},
+    )
+
+    monkeypatch.setenv("S3_OUTPUT_BUCKET", "test-bucket")
+
+    # Auth required.
+    assert (
+        client.post(
+            "/agent-tests/run",
+            json={"agent_names": [n1]},
+        ).status_code
+        == 403
+    )
+
+    # An unknown name fails validation up front → 404, NO tasks created.
+    with patch(
+        "routers.agent_tests.can_start_agent_test_job", return_value=False
+    ), patch("routers.agent_tests._launch_agent_test_run") as launch_mock:
+        bad = client.post(
+            "/agent-tests/run",
+            json={"agent_names": [n1, "does-not-exist"]},
+            headers=h,
+        )
+    assert bad.status_code == 404
+    assert "does-not-exist" in bad.json()["detail"]["not_found"]
+    launch_mock.assert_not_called()  # nothing launched when validation fails
+
+    # Valid batch: a1 + a2 launch; a3 (no linked tests) is skipped.
+    with patch(
+        "routers.agent_tests.can_start_agent_test_job", return_value=False
+    ), patch("threading.Thread"):
+        resp = client.post(
+            "/agent-tests/run",
+            json={"agent_names": [n1, n2, n3]},
+            headers=h,
+        )
+    assert resp.status_code == 200, resp.text
+    data = resp.json()
+    runs_by_name = {r["agent_name"]: r for r in data["runs"]}
+    assert set(runs_by_name) == {n1, n2}
+    for run in runs_by_name.values():
+        assert run["agent_uuid"]
+        assert run["task_id"]
+        assert run["status"] == "queued"
+    assert runs_by_name[n1]["agent_uuid"] == a1["uuid"]
+    skipped = {s["agent_name"]: s["reason"] for s in data["skipped"]}
+    assert skipped == {n3: "no_linked_tests"}
+
+    # Clean up queued jobs so they don't pollute the shared session queue.
+    for run in data["runs"]:
+        client.delete(f"/agent-tests/job/{run['task_id']}", headers=h)
+
+
+def test_run_tests_batch_skips_unverified(client, monkeypatch):
+    import db
+
+    auth = _signup(client)
+    h = auth["headers"]
+    name = f"agent-{uuid.uuid4().hex[:6]}"
+    agent = _create_agent(client, h, name=name)
+    test = _create_test(client, h)
+    client.post(
+        "/agent-tests",
+        json={"agent_uuid": agent["uuid"], "test_uuids": [test["uuid"]]},
+    )
+    # Make it a connection-type agent that hasn't been verified.
+    db.update_agent(
+        agent["uuid"],
+        config={"agent_url": "http://agent.local/run", "connection_verified": False},
+    )
+
+    monkeypatch.setenv("S3_OUTPUT_BUCKET", "test-bucket")
+    with patch(
+        "routers.agent_tests.can_start_agent_test_job", return_value=False
+    ), patch("threading.Thread"):
+        resp = client.post(
+            "/agent-tests/run",
+            json={"agent_names": [name]},
+            headers=h,
+        )
+    assert resp.status_code == 200, resp.text
+    data = resp.json()
+    assert data["runs"] == []
+    assert data["skipped"] == [
+        {
+            "agent_name": name,
+            "agent_uuid": agent["uuid"],
+            "reason": "connection_not_verified",
+        }
+    ]
+
+
+def test_run_tests_batch_all_agents(client, monkeypatch):
+    auth = _signup(client)
+    h = auth["headers"]
+    n1 = f"agent-{uuid.uuid4().hex[:6]}"
+    n2 = f"agent-{uuid.uuid4().hex[:6]}"
+    a1 = _create_agent(client, h, name=n1)
+    _create_agent(client, h, name=n2)  # no linked tests
+    t1 = _create_test(client, h)
+    client.post(
+        "/agent-tests",
+        json={"agent_uuid": a1["uuid"], "test_uuids": [t1["uuid"]]},
+    )
+
+    monkeypatch.setenv("S3_OUTPUT_BUCKET", "test-bucket")
+
+    # Auth required.
+    assert client.post("/agent-tests/run").status_code == 403
+
+    # No body, empty body, and explicit empty list all mean "run all agents".
+    created_task_ids: list[str] = []
+    for body in (None, {}, {"agent_names": []}):
+        with patch(
+            "routers.agent_tests.can_start_agent_test_job", return_value=False
+        ), patch("threading.Thread"):
+            resp = client.post("/agent-tests/run", json=body, headers=h)
+        assert resp.status_code == 200, resp.text
+        data = resp.json()
+        run_names = {r["agent_name"] for r in data["runs"]}
+        assert n1 in run_names
+        assert any(
+            s["agent_name"] == n2 and s["reason"] == "no_linked_tests"
+            for s in data["skipped"]
+        )
+        created_task_ids.extend(r["task_id"] for r in data["runs"])
+
+    # Clean up queued jobs so they don't pollute the shared session queue.
+    for task_id in created_task_ids:
+        client.delete(f"/agent-tests/job/{task_id}", headers=h)
+
+    # Org scoping: a fresh org sees none of the above agents.
+    other = _signup(client)
+    with patch(
+        "routers.agent_tests.can_start_agent_test_job", return_value=False
+    ), patch("threading.Thread"):
+        other_resp = client.post("/agent-tests/run", headers=other["headers"])
+    assert other_resp.status_code == 200
+    other_data = other_resp.json()
+    assert other_data["runs"] == []
+    assert other_data["skipped"] == []

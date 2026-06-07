@@ -85,6 +85,63 @@ def test_docs_endpoints_require_basic_auth(client):
     assert client.get("/docs", auth=("admin", "wrong")).status_code == 401
 
 
+def test_public_api_docs_are_unauthenticated_and_filtered(client):
+    # No auth required for the public subset.
+    assert client.get("/public-api/docs").status_code == 200
+    schema = client.get("/public-api/openapi.json")
+    assert schema.status_code == 200
+
+    paths = schema.json()["paths"]
+    # Only the four API-key-accessible endpoints are exposed.
+    assert ("get" in paths.get("/agents", {}))
+    assert ("post" in paths.get("/agents/resolve", {}))
+    assert ("post" in paths.get("/agent-tests/agent/{agent_uuid}/run", {}))
+    assert ("get" in paths.get("/agent-tests/run/{task_id}", {}))
+    # JWT-only endpoints must NOT leak into the public schema.
+    assert "/personas" not in paths
+    assert "/presigned-url" not in paths
+    assert "post" not in paths.get("/agents", {})  # create-agent is JWT-only
+
+    # Ops keep their router-level tag (e.g. "agents") for grouping, but the
+    # "Public API" filter marker is stripped so it never shows as its own group
+    # and never duplicates an op across two groups.
+    assert paths["/agents"]["get"]["tags"] == ["agents"]
+    assert paths["/agent-tests/agent/{agent_uuid}/run"]["post"]["tags"] == [
+        "agent-tests"
+    ]
+    for ops in paths.values():
+        for op in ops.values():
+            assert "Public API" not in op["tags"]
+
+    # The private (Basic-Auth'd) full schema keeps the router tags intact —
+    # the public filter must not have mutated the shared cached schema.
+    full = client.get("/openapi.json", auth=("admin", "changeme")).json()
+    assert full["paths"]["/agents"]["get"]["tags"] == ["agents", "Public API"]
+
+    # Components are trimmed to ONLY the schemas the public paths reference
+    # (transitively) — internal/JWT-only model shapes must not leak.
+    import json
+    import re
+
+    pub = schema.json()
+    pub_schemas = pub.get("components", {}).get("schemas", {})
+    full_schemas = full.get("components", {}).get("schemas", {})
+    # Public response models are present...
+    assert "ResolveAgentNamesResponse" in pub_schemas  # POST /agents/resolve
+    assert "BatchTestRunResponse" in pub_schemas  # POST /agent-tests/run
+    # ...nested refs are pulled in transitively...
+    assert "BatchTestSkip" in pub_schemas  # referenced by BatchTestRunResponse
+    # ...but it's a strict subset of the full set, and internal-only models are gone.
+    assert set(pub_schemas).issubset(set(full_schemas))
+    assert "PersonaCreate" not in pub_schemas
+    assert "AgentCreate" not in pub_schemas  # JWT-only create-agent body
+    # Every $ref in the public doc resolves within the trimmed schema set.
+    refs = {
+        m for m in re.findall(r'#/components/schemas/([^"]+)', json.dumps(pub))
+    }
+    assert refs.issubset(set(pub_schemas))
+
+
 # ---------------------------------------------------------------------------
 # Presigned URL endpoint
 # ---------------------------------------------------------------------------

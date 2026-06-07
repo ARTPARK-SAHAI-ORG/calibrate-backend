@@ -25,6 +25,7 @@ from db import (
     get_agent_test_link,
     get_all_agent_tests,
     get_agent,
+    get_all_agents,
     get_test,
     get_tools_for_agent,
     get_evaluators_for_test,
@@ -179,6 +180,30 @@ class AgentResponse(BaseModel):
 
 class RunTestRequest(BaseModel):
     test_uuids: Optional[List[str]] = None
+
+
+class BatchRunRequest(BaseModel):
+    # Optional: when provided (and non-empty), run only these agents (validated
+    # up front). When omitted/null, run every agent in the caller's org.
+    agent_names: Optional[List[str]] = None
+
+
+class BatchTestRun(BaseModel):
+    agent_name: str
+    agent_uuid: str
+    task_id: str
+    status: str
+
+
+class BatchTestSkip(BaseModel):
+    agent_name: str
+    agent_uuid: str
+    reason: str  # "no_linked_tests" | "connection_not_verified"
+
+
+class BatchTestRunResponse(BaseModel):
+    runs: List[BatchTestRun]
+    skipped: List[BatchTestSkip] = []
 
 
 class ToolCallOutput(BaseModel):
@@ -1803,66 +1828,31 @@ def run_llm_test_task(
         try_start_queued_agent_test_job(AGENT_TEST_JOB_TYPES)
 
 
-@router.post("/agent/{agent_uuid}/run", response_model=TaskCreateResponse)
-async def run_agent_test(
-    agent_uuid: str,
-    request: RunTestRequest,
-    ctx: OrgContext = Depends(get_org_jwt_or_api_key),
-):
+def _agent_connection_unverified(agent: Dict[str, Any]) -> bool:
+    """True when a connection-type agent hasn't passed connection verification.
+
+    Every test type runs the agent live, so an unverified connection means a run
+    would fail. The single-agent endpoint turns this into a 400; the batch
+    endpoints use it to skip-and-report rather than failing the whole batch.
     """
-    Run one or more tests for an agent.
-
-    This starts a background task that runs the calibrate LLM tests command
-    with the agent's config and the combined test cases from all specified tests.
-
-    Returns a task ID that can be used to poll for status and results.
-
-    Auth: requires either a JWT (frontend) or an `sk_` API key. The agent
-    must belong to the caller's org or this 404s.
-    """
-    # Verify agent exists and belongs to the caller's org.
-    agent = get_agent(agent_uuid)
-    if not agent or agent.get("org_uuid") != ctx.org_uuid:
-        raise HTTPException(status_code=404, detail="Agent not found")
-
-    # Guard: agent connection must be verified before running tests. Every test
-    # type runs the agent — response/tool_call generate the reply to judge, and
-    # conversation tests run in live mode too (calibrate runs the agent on the
-    # `history`, appends the generated reply, then the simulation judge scores
-    # the full conversation). So the guard applies uniformly.
     agent_config = agent.get("config") or {}
-    if agent_config.get("agent_url") and not agent_config.get("connection_verified"):
-        raise HTTPException(
-            status_code=400,
-            detail="Agent connection not verified. Call POST /agents/{agent_uuid}/verify-connection first.",
-        )
+    return bool(
+        agent_config.get("agent_url") and not agent_config.get("connection_verified")
+    )
 
-    if request.test_uuids:
-        # Verify all specified tests exist
-        tests = []
-        for test_uuid in request.test_uuids:
-            test = get_test(test_uuid)
-            if not test:
-                raise HTTPException(
-                    status_code=404, detail=f"Test {test_uuid} not found"
-                )
-            tests.append(test)
-    else:
-        # No test_uuids provided — run all tests linked to the agent
-        tests = get_tests_for_agent(agent_uuid)
-        if not tests:
-            raise HTTPException(
-                status_code=400,
-                detail="No tests linked to this agent. Link tests first or provide test_uuids.",
-            )
 
-    # Get S3 configuration
-    try:
-        s3_bucket = get_s3_output_config()
-    except ValueError as e:
-        raise HTTPException(status_code=500, detail=str(e))
+def _launch_agent_test_run(
+    agent: Dict[str, Any],
+    tests: List[Dict[str, Any]],
+    s3_bucket: str,
+) -> tuple[str, str]:
+    """Create + start (or queue) one ``llm-unit-test`` job for ``agent`` over ``tests``.
 
-    # Per-org limit check uses the agent's org.
+    Shared by the single-agent run endpoint and the batch run endpoints. Returns
+    ``(task_id, status)``. The caller owns agent-ownership, connection-verified,
+    and non-empty ``tests`` checks; this just snapshots config and dispatches.
+    """
+    agent_uuid = agent["uuid"]
     org_uuid = agent.get("org_uuid")
 
     can_start = can_start_agent_test_job(AGENT_TEST_JOB_TYPES, org_uuid)
@@ -1910,7 +1900,180 @@ async def run_agent_test(
     else:
         logger.info(f"Queued LLM unit test job {job_id}")
 
+    return job_id, initial_status
+
+
+@router.post("/agent/{agent_uuid}/run", response_model=TaskCreateResponse, tags=["Public API"])
+async def run_agent_test(
+    agent_uuid: str,
+    request: RunTestRequest,
+    ctx: OrgContext = Depends(get_org_jwt_or_api_key),
+):
+    """
+    Run one or more tests for an agent.
+
+    This starts a background task that runs the calibrate LLM tests command
+    with the agent's config and the combined test cases from all specified tests.
+
+    Returns a task ID that can be used to poll for status and results.
+
+    Auth: requires either a JWT (frontend) or an `sk_` API key. The agent
+    must belong to the caller's org or this 404s.
+    """
+    # Verify agent exists and belongs to the caller's org.
+    agent = get_agent(agent_uuid)
+    if not agent or agent.get("org_uuid") != ctx.org_uuid:
+        raise HTTPException(status_code=404, detail="Agent not found")
+
+    # Guard: agent connection must be verified before running tests. Every test
+    # type runs the agent — response/tool_call generate the reply to judge, and
+    # conversation tests run in live mode too (calibrate runs the agent on the
+    # `history`, appends the generated reply, then the simulation judge scores
+    # the full conversation). So the guard applies uniformly.
+    if _agent_connection_unverified(agent):
+        raise HTTPException(
+            status_code=400,
+            detail="Agent connection not verified. Call POST /agents/{agent_uuid}/verify-connection first.",
+        )
+
+    if request.test_uuids:
+        # Verify all specified tests exist
+        tests = []
+        for test_uuid in request.test_uuids:
+            test = get_test(test_uuid)
+            if not test:
+                raise HTTPException(
+                    status_code=404, detail=f"Test {test_uuid} not found"
+                )
+            tests.append(test)
+    else:
+        # No test_uuids provided — run all tests linked to the agent
+        tests = get_tests_for_agent(agent_uuid)
+        if not tests:
+            raise HTTPException(
+                status_code=400,
+                detail="No tests linked to this agent. Link tests first or provide test_uuids.",
+            )
+
+    # Get S3 configuration
+    try:
+        s3_bucket = get_s3_output_config()
+    except ValueError as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+    job_id, initial_status = _launch_agent_test_run(agent, tests, s3_bucket)
     return TaskCreateResponse(task_id=job_id, status=initial_status)
+
+
+def _run_tests_for_agents(
+    agents: List[Dict[str, Any]], s3_bucket: str
+) -> BatchTestRunResponse:
+    """Launch all linked tests for each agent in ``agents``, one job per agent.
+
+    Agents with no linked tests or an unverified connection are skipped and
+    reported under ``skipped`` rather than aborting the whole batch. Each launched
+    agent yields one ``llm-unit-test`` job (its task_id), subject to the normal
+    per-org concurrency queue — over-limit jobs come back ``queued``.
+    """
+    runs: List[BatchTestRun] = []
+    skipped: List[BatchTestSkip] = []
+
+    for agent in agents:
+        if _agent_connection_unverified(agent):
+            skipped.append(
+                BatchTestSkip(
+                    agent_name=agent.get("name", ""),
+                    agent_uuid=agent["uuid"],
+                    reason="connection_not_verified",
+                )
+            )
+            continue
+
+        tests = get_tests_for_agent(agent["uuid"])
+        if not tests:
+            skipped.append(
+                BatchTestSkip(
+                    agent_name=agent.get("name", ""),
+                    agent_uuid=agent["uuid"],
+                    reason="no_linked_tests",
+                )
+            )
+            continue
+
+        job_id, status = _launch_agent_test_run(agent, tests, s3_bucket)
+        runs.append(
+            BatchTestRun(
+                agent_name=agent.get("name", ""),
+                agent_uuid=agent["uuid"],
+                task_id=job_id,
+                status=status,
+            )
+        )
+
+    return BatchTestRunResponse(runs=runs, skipped=skipped)
+
+
+@router.post(
+    "/run",
+    response_model=BatchTestRunResponse,
+    tags=["Public API"],
+)
+async def run_tests_batch(
+    request: Optional[BatchRunRequest] = None,
+    ctx: OrgContext = Depends(get_org_jwt_or_api_key),
+):
+    """Run every linked test for a set of agents, one ``llm-unit-test`` job per agent.
+
+    Scope is driven by the optional ``agent_names`` payload:
+
+    - **Provided (non-empty)** — run only those agents. Names are unique per org
+      and **all are validated up front**: if any doesn't resolve to a
+      (non-deleted) agent in the caller's org, the call 404s with the offending
+      names and NO jobs are created.
+    - **Omitted / null / empty** — run every agent in the caller's org.
+
+    For each selected agent, its linked tests are launched as one job. Agents
+    with no linked tests or an unverified connection are reported under
+    ``skipped`` instead of failing the batch. Subject to the normal per-org
+    concurrency queue, so over-limit jobs come back ``queued``.
+
+    Auth accepts a JWT (frontend) or an `sk_` API key (programmatic clients).
+    Returns one ``runs`` entry per launched agent with ``agent_name``,
+    ``agent_uuid``, ``task_id``, and ``status``.
+    """
+    agent_names = request.agent_names if request else None
+
+    org_agents = get_all_agents(org_uuid=ctx.org_uuid)
+    if agent_names:
+        # Validate ALL names before creating any tasks.
+        name_to_agent = {a["name"]: a for a in org_agents}
+        not_found: List[str] = []
+        selected: List[Dict[str, Any]] = []
+        seen: set[str] = set()
+        for name in agent_names:
+            if name in seen:
+                continue
+            seen.add(name)
+            agent = name_to_agent.get(name)
+            if agent is None:
+                not_found.append(name)
+            else:
+                selected.append(agent)
+
+        if not_found:
+            raise HTTPException(
+                status_code=404,
+                detail={"message": "Unknown agent name(s)", "not_found": not_found},
+            )
+    else:
+        selected = org_agents
+
+    try:
+        s3_bucket = get_s3_output_config()
+    except ValueError as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+    return _run_tests_for_agents(selected, s3_bucket)
 
 
 def _load_owned_agent_test_job(task_id: str, ctx: OrgContext) -> Dict[str, Any]:
@@ -1965,7 +2128,7 @@ async def update_test_run_visibility(
     return VisibilityResponse(is_public=body.is_public, share_token=share_token)
 
 
-@router.get("/run/{task_id}", response_model=TestRunStatusResponse)
+@router.get("/run/{task_id}", response_model=TestRunStatusResponse, tags=["Public API"])
 async def get_agent_test_run_status(
     task_id: str,
     ctx: OrgContext = Depends(get_org_jwt_or_api_key),
