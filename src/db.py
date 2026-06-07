@@ -3541,27 +3541,31 @@ def get_all_tests(org_uuid: Optional[str] = None) -> List[Dict[str, Any]]:
 # as a fallback snapshot for tools that were deleted or never matched.
 
 
+def iter_tool_call_entries(config: Optional[Dict[str, Any]]):
+    """Yield each expected-tool-call dict from a `tool_call` test config, centralizing
+    the config/evaluation/tool_calls shape guards. No-op (yields nothing) for any
+    other shape. Shared by every helper that walks `tool_calls`."""
+    if not isinstance(config, dict):
+        return
+    evaluation = config.get("evaluation")
+    if not isinstance(evaluation, dict) or evaluation.get("type") != "tool_call":
+        return
+    for tc in evaluation.get("tool_calls") or []:
+        if isinstance(tc, dict):
+            yield tc
+
+
 def inject_tool_uuids_into_config(
     config: Optional[Dict[str, Any]], name_to_uuid: Dict[str, str]
 ) -> Optional[Dict[str, Any]]:
-    """Ensure each expected tool call carries a `tool_uuid`.
-
-    A caller-supplied `tool_uuid` is **authoritative** and never overwritten — the
-    frontend is expected to send it on every write (add/remove/edit/update), so the
-    link survives renames and name collisions. Name-matching against the org's live
-    tools (`name_to_uuid`; names are unique per org) is only a **fallback** for
-    entries that arrive without a uuid — i.e. legacy clients, the backfill, and
-    name-based bulk/CSV/programmatic imports. Entries with neither a uuid nor a
-    matching name are left as name-only snapshots. Mutates and returns `config`.
-    No-op for non-`tool_call` configs.
+    """Auto-link name-only tool calls to a `tool_uuid` by matching `tool` against the
+    org's live tools (`name_to_uuid`; names are unique per org). A caller-supplied
+    `tool_uuid` is never overwritten. Entries with neither a uuid nor a matching name
+    stay name-only snapshots (built-in / agent-owned tools). Mutates and returns
+    `config`. No-op for non-`tool_call` configs.
     """
-    if not isinstance(config, dict):
-        return config
-    evaluation = config.get("evaluation")
-    if not isinstance(evaluation, dict) or evaluation.get("type") != "tool_call":
-        return config
-    for tc in evaluation.get("tool_calls") or []:
-        if not isinstance(tc, dict) or tc.get("tool_uuid"):
+    for tc in iter_tool_call_entries(config):
+        if tc.get("tool_uuid"):
             continue
         matched = name_to_uuid.get(tc.get("tool"))
         if matched:
@@ -3578,14 +3582,7 @@ def refresh_tool_call_names_in_config(
     map. This is what makes a renamed tool propagate to existing tests. Mutates and
     returns `config`. No-op for non-`tool_call` configs.
     """
-    if not isinstance(config, dict):
-        return config
-    evaluation = config.get("evaluation")
-    if not isinstance(evaluation, dict) or evaluation.get("type") != "tool_call":
-        return config
-    for tc in evaluation.get("tool_calls") or []:
-        if not isinstance(tc, dict):
-            continue
+    for tc in iter_tool_call_entries(config):
         tool_uuid = tc.get("tool_uuid")
         if tool_uuid and tool_uuid in uuid_to_name:
             tc["tool"] = uuid_to_name[tool_uuid]

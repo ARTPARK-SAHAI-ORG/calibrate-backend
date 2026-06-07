@@ -17,6 +17,7 @@ from db import (
     get_evaluator,
     get_evaluators_for_test,
     set_test_evaluators,
+    iter_tool_call_entries,
     inject_tool_uuids_into_config,
     refresh_tool_call_names_in_config,
 )
@@ -227,14 +228,7 @@ def _resolve_tool_call_uuids(
 
     Mutates and returns `config`. No-op for non-`tool_call` configs.
     """
-    if not isinstance(config, dict):
-        return config
-    evaluation = config.get("evaluation")
-    if not isinstance(evaluation, dict) or evaluation.get("type") != "tool_call":
-        return config
-    for tc in evaluation.get("tool_calls") or []:
-        if not isinstance(tc, dict):
-            continue
+    for tc in iter_tool_call_entries(config):
         tool_uuid = tc.get("tool_uuid")
         if not tool_uuid:
             # Built-in / agent-owned tool: no uuid, keep the name snapshot.

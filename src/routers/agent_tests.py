@@ -28,6 +28,7 @@ from db import (
     get_all_agents,
     get_test,
     get_all_tools,
+    refresh_tool_call_names_in_config,
     get_tools_for_agent,
     get_evaluators_for_test,
     get_evaluator_by_slug,
@@ -879,15 +880,15 @@ def _build_calibrate_config(
         test_config["evaluation"] = evaluation
 
         if row_type == "tool_call":
+            # Resolve live tool names from durable uuids via the shared helper
+            # (evaluation.type was normalized to row_type above, so its guard
+            # matches), then strip arguments for accept-any entries.
+            refresh_tool_call_names_in_config(test_config, tool_uuid_to_name)
             tool_calls = []
             for tool_call in evaluation.get("tool_calls", []):
-                # Prefer the live name resolved from the durable tool_uuid; fall
-                # back to the stored name snapshot for deleted/unmatched tools.
-                tc_uuid = tool_call.get("tool_uuid")
-                tool_name = tool_uuid_to_name.get(tc_uuid, tool_call["tool"])
                 tool_calls.append(
                     {
-                        "tool": tool_name,
+                        "tool": tool_call.get("tool"),
                         "arguments": (
                             tool_call["arguments"]
                             if not tool_call.get("accept_any_arguments", False)
