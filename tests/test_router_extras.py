@@ -522,11 +522,35 @@ def test_tool_call_test_tool_uuid_optional_but_validated(client):
         headers=h,
     )
     assert name_only.status_code == 200
-    # Stored verbatim — no uuid stamped for a built-in tool.
+    # No matching org tool → stays name-only (built-in tool).
     fetched = client.get(f"/tests/{name_only.json()['uuid']}", headers=h).json()
     tc = fetched["config"]["evaluation"]["tool_calls"][0]
     assert tc["tool"] == "process_user_turn"
     assert "tool_uuid" not in tc or tc["tool_uuid"] is None
+
+    # Name-only entry whose name matches an org tool → auto-linked to its uuid.
+    tool_name = f"lib-{uuid.uuid4().hex[:6]}"
+    tool = client.post(
+        "/tools", json={"name": tool_name, "description": "d"}, headers=h
+    ).json()
+    autolink = client.post(
+        "/tests",
+        json={
+            "name": f"tc-{uuid.uuid4().hex[:6]}",
+            "type": "tool_call",
+            "config": {
+                "history": [{"role": "user", "content": "hi"}],
+                "evaluation": {
+                    "type": "tool_call",
+                    "tool_calls": [{"tool": tool_name, "arguments": {}}],
+                },
+            },
+        },
+        headers=h,
+    )
+    assert autolink.status_code == 200
+    linked = client.get(f"/tests/{autolink.json()['uuid']}", headers=h).json()
+    assert linked["config"]["evaluation"]["tool_calls"][0]["tool_uuid"] == tool["uuid"]
 
     # A supplied uuid that isn't a live org tool → 404.
     bad_uuid = client.post(
