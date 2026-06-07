@@ -297,7 +297,7 @@ async def bulk_upload_tests(
         else:
             resolved_evaluator_refs.append(None)
 
-    name_to_uuid, _ = _org_tool_indexes(ctx.org_uuid)
+    name_to_uuid, uuid_to_name = _org_tool_indexes(ctx.org_uuid)
 
     db_tests = []
     for t in payload.tests:
@@ -312,6 +312,11 @@ async def bulk_upload_tests(
         if payload.language:
             config["settings"] = {"language": payload.language}
 
+        # Validate any caller-supplied tool_uuid (404 on a bad/foreign id), same as
+        # the interactive path. Then auto-link name-only entries to a library tool
+        # by name; built-in / agent-owned tools (no uuid, no name match) stay
+        # name-only.
+        _resolve_tool_call_uuids(config, uuid_to_name)
         inject_tool_uuids_into_config(config, name_to_uuid)
 
         db_tests.append({

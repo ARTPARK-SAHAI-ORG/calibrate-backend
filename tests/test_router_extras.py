@@ -386,6 +386,62 @@ def test_bulk_test_upload(client):
     assert ok_tc.status_code == 200
 
 
+def test_bulk_tool_call_uuid_optional_but_validated(client):
+    """Bulk upload accepts name-only entries (built-in tools), auto-links names that
+    match a library tool, and 404s on a supplied tool_uuid that isn't an org tool."""
+    auth = _signup(client)
+    h = auth["headers"]
+
+    tool_name = f"lib-{uuid.uuid4().hex[:6]}"
+    tool = client.post(
+        "/tools", json={"name": tool_name, "description": "d"}, headers=h
+    ).json()
+
+    # Name-only (built-in) + name matching a library tool → both accepted; the
+    # matching name is auto-linked to its uuid.
+    ok = client.post(
+        "/tests/bulk",
+        json={
+            "type": "tool_call",
+            "tests": [
+                {
+                    "name": f"tc-{uuid.uuid4().hex[:6]}",
+                    "conversation_history": [{"role": "user", "content": "hi"}],
+                    "tool_calls": [
+                        {"tool": "builtin_thing", "arguments": {}},
+                        {"tool": tool_name, "arguments": {}},
+                    ],
+                }
+            ],
+        },
+        headers=h,
+    )
+    assert ok.status_code == 200
+    created = client.get(f"/tests/{ok.json()['uuids'][0]}", headers=h).json()
+    tcs = created["config"]["evaluation"]["tool_calls"]
+    assert "tool_uuid" not in tcs[0] or tcs[0]["tool_uuid"] is None  # built-in
+    assert tcs[1]["tool_uuid"] == tool["uuid"]                       # auto-linked
+
+    # A supplied tool_uuid that isn't a live org tool → 404, no tests created.
+    bad = client.post(
+        "/tests/bulk",
+        json={
+            "type": "tool_call",
+            "tests": [
+                {
+                    "name": f"tc-{uuid.uuid4().hex[:6]}",
+                    "conversation_history": [{"role": "user", "content": "hi"}],
+                    "tool_calls": [
+                        {"tool": "x", "tool_uuid": str(uuid.uuid4()), "arguments": {}}
+                    ],
+                }
+            ],
+        },
+        headers=h,
+    )
+    assert bad.status_code == 404
+
+
 def test_tool_call_test_tracks_tool_rename(client):
     """A tool_call test links to the tool by uuid, so renaming the tool surfaces
     the new name on read instead of a stale snapshot."""
