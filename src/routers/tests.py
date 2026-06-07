@@ -248,32 +248,52 @@ def _resolve_tool_call_uuids(
     return config
 
 
+def _normalize_evaluation_type(
+    config: Optional[Dict[str, Any]], row_type: Optional[str]
+) -> Optional[Dict[str, Any]]:
+    """Derive `config.evaluation.type` from the immutable row `type` — the single
+    source of truth. The blob copy only exists because the whole config is stored
+    verbatim and shipped to the calibrate CLI; deriving it from the row type on every
+    write and read keeps the two from drifting (the run path re-stamps it too).
+    Mutates and returns `config`. No-op when there's no `evaluation` block."""
+    if isinstance(config, dict) and row_type:
+        evaluation = config.get("evaluation")
+        if isinstance(evaluation, dict):
+            evaluation["type"] = row_type
+    return config
+
+
 def _link_tool_calls(
     config: Optional[Dict[str, Any]],
+    row_type: Optional[str],
     name_to_uuid: Dict[str, str],
     uuid_to_name: Dict[str, str],
 ) -> Optional[Dict[str, Any]]:
-    """Resolve a tool_call config on write — identical for `POST`/`PUT /tests` and
-    `POST /tests/bulk`:
-      1. Validate any caller-supplied `tool_uuid` (404 on a bad/foreign id) and stamp
-         the live name into `tool`.
-      2. Auto-link name-only entries to a tool by org name-match.
-    Built-in / agent-owned tools (no uuid, no name match) stay name-only snapshots.
-    Mutates and returns `config`. No-op for non-`tool_call` configs.
+    """On write — identical for `POST`/`PUT /tests` and `POST /tests/bulk`:
+      1. Derive `evaluation.type` from the row `type` (single source of truth).
+      2. For tool_call tests only: validate any caller-supplied `tool_uuid` (404 on a
+         bad/foreign id, stamp the live name) and auto-link name-only entries to a
+         tool by org name-match.
+    Dispatch is driven by the row `type`, never the (drift-prone) blob copy. Built-in
+    / unmatched names stay name-only. Mutates and returns `config`.
     """
-    _resolve_tool_call_uuids(config, uuid_to_name)
-    inject_tool_uuids_into_config(config, name_to_uuid)
+    _normalize_evaluation_type(config, row_type)
+    if row_type == "tool_call":
+        _resolve_tool_call_uuids(config, uuid_to_name)
+        inject_tool_uuids_into_config(config, name_to_uuid)
     return config
 
 
 def _with_evaluators(
     test_dict: Dict[str, Any], uuid_to_name: Optional[Dict[str, str]] = None
 ) -> Dict[str, Any]:
-    """Attach linked evaluators to a test dict and (for tool_call tests) refresh each
-    expected tool call's `tool` name from its `tool_uuid`, so a renamed tool is
-    reflected without rewriting the test. Pass the org's `uuid_to_name` index to
-    enable the refresh; omit it to skip (no org context)."""
-    if uuid_to_name:
+    """Attach linked evaluators to a test dict, derive `evaluation.type` from the row
+    `type`, and (for tool_call tests) refresh each expected tool call's `tool` name
+    from its `tool_uuid` so a renamed tool is reflected without rewriting the test.
+    Pass the org's `uuid_to_name` index to enable the name refresh."""
+    row_type = test_dict.get("type")
+    _normalize_evaluation_type(test_dict.get("config"), row_type)
+    if uuid_to_name and row_type == "tool_call":
         refresh_tool_call_names_in_config(test_dict.get("config"), uuid_to_name)
     evaluators = get_evaluators_for_test(test_dict["uuid"])
     return {**test_dict, "evaluators": evaluators}
@@ -330,7 +350,7 @@ async def bulk_upload_tests(
         if payload.language:
             config["settings"] = {"language": payload.language}
 
-        _link_tool_calls(config, name_to_uuid, uuid_to_name)
+        _link_tool_calls(config, payload.type, name_to_uuid, uuid_to_name)
 
         db_tests.append({
             "name": t.name,
@@ -399,7 +419,7 @@ async def create_test_endpoint(
     config = test.config
     if config is not None:
         name_to_uuid, uuid_to_name = _org_tool_indexes(ctx.org_uuid)
-        _link_tool_calls(config, name_to_uuid, uuid_to_name)
+        _link_tool_calls(config, test.type, name_to_uuid, uuid_to_name)
     with ensure_name_unique("tests", test.name, ctx.org_uuid, entity="Test"):
         test_uuid = create_test(
             name=test.name,
@@ -478,7 +498,7 @@ async def update_test_endpoint(
     name_to_uuid, uuid_to_name = _org_tool_indexes(ctx.org_uuid)
     config_to_save = test.config
     if config_to_save is not None:
-        _link_tool_calls(config_to_save, name_to_uuid, uuid_to_name)
+        _link_tool_calls(config_to_save, existing_type, name_to_uuid, uuid_to_name)
 
     has_core_updates = any(
         v is not None for v in (test.name, test.type, test.config)

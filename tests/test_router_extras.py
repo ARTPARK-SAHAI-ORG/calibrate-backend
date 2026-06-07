@@ -442,6 +442,43 @@ def test_bulk_tool_call_uuid_optional_but_validated(client):
     assert bad.status_code == 404
 
 
+def test_tool_call_linking_driven_by_row_type_not_blob(client):
+    """Linking/validation follows the immutable row type, not the (drift-prone)
+    config.evaluation.type. A tool_call test whose blob type is wrong/missing still
+    gets its tool linked, and reads normalize the blob type back to the row type."""
+    auth = _signup(client)
+    h = auth["headers"]
+
+    tool_name = f"lib-{uuid.uuid4().hex[:6]}"
+    tool = client.post(
+        "/tools", json={"name": tool_name, "description": "d"}, headers=h
+    ).json()
+
+    # Row type says tool_call, but the blob type is drifted to "response".
+    create = client.post(
+        "/tests",
+        json={
+            "name": f"tc-{uuid.uuid4().hex[:6]}",
+            "type": "tool_call",
+            "config": {
+                "history": [{"role": "user", "content": "hi"}],
+                "evaluation": {
+                    "type": "response",  # drifted on purpose
+                    "tool_calls": [{"tool": tool_name, "arguments": {}}],
+                },
+            },
+        },
+        headers=h,
+    )
+    assert create.status_code == 200
+
+    fetched = client.get(f"/tests/{create.json()['uuid']}", headers=h).json()
+    evaluation = fetched["config"]["evaluation"]
+    # Blob type normalized to the row type, and the tool got auto-linked.
+    assert evaluation["type"] == "tool_call"
+    assert evaluation["tool_calls"][0]["tool_uuid"] == tool["uuid"]
+
+
 def test_tool_call_test_tracks_tool_rename(client):
     """A tool_call test links to the tool by uuid, so renaming the tool surfaces
     the new name on read instead of a stale snapshot."""
