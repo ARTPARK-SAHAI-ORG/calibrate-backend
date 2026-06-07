@@ -890,7 +890,7 @@ def _build_calibrate_config(
                     {
                         "tool": tool_call.get("tool"),
                         "arguments": (
-                            tool_call["arguments"]
+                            tool_call.get("arguments")
                             if not tool_call.get("accept_any_arguments", False)
                             else None
                         ),
