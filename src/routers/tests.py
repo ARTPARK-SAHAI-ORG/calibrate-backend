@@ -7,6 +7,7 @@ from db import (
     ensure_name_unique,
     get_test,
     get_all_tests,
+    get_all_tools,
     update_test,
     delete_test,
     bulk_create_tests,
@@ -16,6 +17,8 @@ from db import (
     get_evaluator,
     get_evaluators_for_test,
     set_test_evaluators,
+    inject_tool_uuids_into_config,
+    refresh_tool_call_names_in_config,
 )
 from auth_utils import get_current_org, OrgContext
 
@@ -90,6 +93,10 @@ class ChatMessage(BaseModel):
 
 class ExpectedToolCall(BaseModel):
     tool: str
+    # Durable link to the `tools` entity. Stamped server-side at write time by
+    # matching `tool` to a live tool in the org; the live name is re-resolved from
+    # it on read so a renamed tool propagates. `tool` stays as a fallback snapshot.
+    tool_uuid: Optional[str] = None
     arguments: Optional[Dict[str, Any]] = None
     accept_any_arguments: bool = False
 
@@ -196,8 +203,24 @@ def _validate_evaluators(
     return out
 
 
-def _with_evaluators(test_dict: Dict[str, Any]) -> Dict[str, Any]:
-    """Attach linked evaluators to a test dict."""
+def _org_tool_indexes(org_uuid: str) -> tuple[Dict[str, str], Dict[str, str]]:
+    """Return (name→uuid, uuid→name) maps for the org's live (non-deleted) tools.
+    Tool names are unique per org, so name→uuid is unambiguous."""
+    tools = get_all_tools(org_uuid=org_uuid)
+    name_to_uuid = {t["name"]: t["uuid"] for t in tools}
+    uuid_to_name = {t["uuid"]: t["name"] for t in tools}
+    return name_to_uuid, uuid_to_name
+
+
+def _with_evaluators(
+    test_dict: Dict[str, Any], uuid_to_name: Optional[Dict[str, str]] = None
+) -> Dict[str, Any]:
+    """Attach linked evaluators to a test dict and (for tool_call tests) refresh each
+    expected tool call's `tool` name from its `tool_uuid`, so a renamed tool is
+    reflected without rewriting the test. Pass the org's `uuid_to_name` index to
+    enable the refresh; omit it to skip (no org context)."""
+    if uuid_to_name:
+        refresh_tool_call_names_in_config(test_dict.get("config"), uuid_to_name)
     evaluators = get_evaluators_for_test(test_dict["uuid"])
     return {**test_dict, "evaluators": evaluators}
 
@@ -238,6 +261,8 @@ async def bulk_upload_tests(
         else:
             resolved_evaluator_refs.append(None)
 
+    name_to_uuid, _ = _org_tool_indexes(ctx.org_uuid)
+
     db_tests = []
     for t in payload.tests:
         evaluation: Dict[str, Any] = {"type": payload.type}
@@ -250,6 +275,8 @@ async def bulk_upload_tests(
         }
         if payload.language:
             config["settings"] = {"language": payload.language}
+
+        inject_tool_uuids_into_config(config, name_to_uuid)
 
         db_tests.append({
             "name": t.name,
@@ -315,11 +342,15 @@ async def create_test_endpoint(
         if test.evaluators
         else None
     )
+    config = test.config
+    if config is not None:
+        name_to_uuid, _ = _org_tool_indexes(ctx.org_uuid)
+        inject_tool_uuids_into_config(config, name_to_uuid)
     with ensure_name_unique("tests", test.name, ctx.org_uuid, entity="Test"):
         test_uuid = create_test(
             name=test.name,
             type=test.type,
-            config=test.config,
+            config=config,
             org_uuid=ctx.org_uuid,
             user_id=ctx.user_id,
         )
@@ -332,7 +363,8 @@ async def create_test_endpoint(
 async def list_tests(ctx: OrgContext = Depends(get_current_org)):
     """List all tests for the caller's current org."""
     tests = get_all_tests(org_uuid=ctx.org_uuid)
-    return [_with_evaluators(t) for t in tests]
+    _, uuid_to_name = _org_tool_indexes(ctx.org_uuid)
+    return [_with_evaluators(t, uuid_to_name) for t in tests]
 
 
 @router.get("/{test_uuid}", response_model=TestResponse)
@@ -343,7 +375,8 @@ async def get_test_endpoint(
     test = get_test(test_uuid)
     if not test or test.get("org_uuid") != ctx.org_uuid:
         raise HTTPException(status_code=404, detail="Test not found")
-    return _with_evaluators(test)
+    _, uuid_to_name = _org_tool_indexes(ctx.org_uuid)
+    return _with_evaluators(test, uuid_to_name)
 
 
 @router.put("/{test_uuid}", response_model=TestResponse)
@@ -388,6 +421,11 @@ async def update_test_endpoint(
         else None
     )
 
+    name_to_uuid, uuid_to_name = _org_tool_indexes(ctx.org_uuid)
+    config_to_save = test.config
+    if config_to_save is not None:
+        inject_tool_uuids_into_config(config_to_save, name_to_uuid)
+
     has_core_updates = any(
         v is not None for v in (test.name, test.type, test.config)
     )
@@ -399,7 +437,7 @@ async def update_test_endpoint(
                 test_uuid=test_uuid,
                 name=test.name,
                 type=test.type,
-                config=test.config,
+                config=config_to_save,
             )
         if not updated and resolved is None:
             raise HTTPException(status_code=400, detail="No fields to update")
@@ -407,7 +445,7 @@ async def update_test_endpoint(
     if resolved is not None:
         set_test_evaluators(test_uuid, resolved)
 
-    return _with_evaluators(get_test(test_uuid))
+    return _with_evaluators(get_test(test_uuid), uuid_to_name)
 
 
 @router.delete("/{test_uuid}")

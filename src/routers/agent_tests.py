@@ -27,6 +27,7 @@ from db import (
     get_agent,
     get_all_agents,
     get_test,
+    get_all_tools,
     get_tools_for_agent,
     get_evaluators_for_test,
     get_evaluator_by_slug,
@@ -711,6 +712,16 @@ def _build_calibrate_config(
     """
     agent_config = agent.get("config") or {}
 
+    # Live tool-name index for resolving `tool_call` expected tools from their
+    # durable `tool_uuid` — so a renamed tool is matched correctly at run time
+    # rather than against the stale name snapshot stored in the test config.
+    agent_org_uuid = agent.get("org_uuid")
+    tool_uuid_to_name: Dict[str, str] = (
+        {t["uuid"]: t["name"] for t in get_all_tools(org_uuid=agent_org_uuid)}
+        if agent_org_uuid
+        else {}
+    )
+
     # First pass: collect linked evaluators per response-type test so we can build a
     # deduped top-level `evaluators` list. Calibrate keys results by evaluator
     # name across the whole run, so each unique evaluator appears once at top level and
@@ -870,9 +881,13 @@ def _build_calibrate_config(
         if row_type == "tool_call":
             tool_calls = []
             for tool_call in evaluation.get("tool_calls", []):
+                # Prefer the live name resolved from the durable tool_uuid; fall
+                # back to the stored name snapshot for deleted/unmatched tools.
+                tc_uuid = tool_call.get("tool_uuid")
+                tool_name = tool_uuid_to_name.get(tc_uuid, tool_call["tool"])
                 tool_calls.append(
                     {
-                        "tool": tool_call["tool"],
+                        "tool": tool_name,
                         "arguments": (
                             tool_call["arguments"]
                             if not tool_call.get("accept_any_arguments", False)

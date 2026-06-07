@@ -386,6 +386,61 @@ def test_bulk_test_upload(client):
     assert ok_tc.status_code == 200
 
 
+def test_tool_call_test_tracks_tool_rename(client):
+    """A tool_call test links to the tool by uuid, so renaming the tool surfaces
+    the new name on read instead of a stale snapshot."""
+    auth = _signup(client)
+    h = auth["headers"]
+
+    tool_name = f"proc-{uuid.uuid4().hex[:6]}"
+    tool = client.post(
+        "/tools",
+        json={"name": tool_name, "description": "d"},
+        headers=h,
+    ).json()
+    tool_uuid = tool["uuid"]
+
+    create = client.post(
+        "/tests",
+        json={
+            "name": f"tc-{uuid.uuid4().hex[:6]}",
+            "type": "tool_call",
+            "config": {
+                "history": [{"role": "user", "content": "hi"}],
+                "evaluation": {
+                    "type": "tool_call",
+                    "tool_calls": [{"tool": tool_name, "arguments": {}}],
+                },
+            },
+        },
+        headers=h,
+    )
+    assert create.status_code == 200
+    test_uuid = create.json()["uuid"]
+
+    # Read back: tool_uuid was stamped server-side.
+    fetched = client.get(f"/tests/{test_uuid}", headers=h).json()
+    tc = fetched["config"]["evaluation"]["tool_calls"][0]
+    assert tc["tool_uuid"] == tool_uuid
+    assert tc["tool"] == tool_name
+
+    # Rename the tool; the test's expected tool name follows on read.
+    new_name = f"proc-renamed-{uuid.uuid4().hex[:6]}"
+    assert client.put(
+        f"/tools/{tool_uuid}", json={"name": new_name}, headers=h
+    ).status_code == 200
+
+    refetched = client.get(f"/tests/{test_uuid}", headers=h).json()
+    tc2 = refetched["config"]["evaluation"]["tool_calls"][0]
+    assert tc2["tool_uuid"] == tool_uuid
+    assert tc2["tool"] == new_name
+
+    # Also reflected in the list endpoint.
+    listed = client.get("/tests", headers=h).json()
+    mine = next(t for t in listed if t["uuid"] == test_uuid)
+    assert mine["config"]["evaluation"]["tool_calls"][0]["tool"] == new_name
+
+
 def test_create_test_wrong_evaluator_type(client):
     """Tests with evaluator_type != 'llm' should be rejected."""
     auth = _signup(client)

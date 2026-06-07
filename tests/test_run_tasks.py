@@ -544,6 +544,46 @@ def test_build_calibrate_config_tool_call_branch():
     assert "criteria" not in by_type["weird"]["evaluation"]
 
 
+def test_build_calibrate_config_resolves_renamed_tool():
+    """A tool_call test linked by tool_uuid sends the tool's CURRENT name to
+    calibrate even after the tool was renamed (no stale snapshot at run time)."""
+    from routers.agent_tests import _build_calibrate_config
+
+    user_uuid = db.create_user("R", "TR", f"rtr-{os.urandom(4).hex()}@x.com")
+    org_uuid = db.get_personal_org_for_user(user_uuid)["uuid"]
+    agent_uuid = db.create_agent(
+        name=f"a-{os.urandom(4).hex()}", org_uuid=org_uuid, user_id=user_uuid
+    )
+    tool_uuid = db.create_tool(
+        name=f"book-{os.urandom(4).hex()}",
+        description="d",
+        org_uuid=org_uuid,
+        user_id=user_uuid,
+    )
+    test_uuid = db.create_test(
+        name=f"tc-{os.urandom(4).hex()}",
+        type="tool_call",
+        config={
+            "history": [{"role": "user", "content": "book it"}],
+            "evaluation": {
+                "type": "tool_call",
+                # Stored snapshot is intentionally stale; tool_uuid is the link.
+                "tool_calls": [
+                    {"tool": "old_name", "tool_uuid": tool_uuid, "arguments": {"id": 1}}
+                ],
+            },
+        },
+        org_uuid=org_uuid,
+        user_id=user_uuid,
+    )
+    new_name = f"book-renamed-{os.urandom(4).hex()}"
+    db.update_tool(tool_uuid, name=new_name)
+
+    config, _ = _build_calibrate_config(db.get_agent(agent_uuid), [db.get_test(test_uuid)])
+    tc = config["test_cases"][0]["evaluation"]["tool_calls"][0]
+    assert tc["tool"] == new_name
+
+
 def test_run_conversation_test_task_success():
     from routers.agent_tests import run_llm_test_task
 

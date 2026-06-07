@@ -279,6 +279,78 @@ def test_tests_crud_and_bulk(user):
     assert db.bulk_delete_tests([str(_uuid.uuid4())], user["org_uuid"]) == 0
 
 
+def _tool_call_config(*tool_calls):
+    return {"evaluation": {"type": "tool_call", "tool_calls": list(tool_calls)}}
+
+
+def test_inject_tool_uuids_into_config():
+    name_to_uuid = {"alpha": "uuid-a", "beta": "uuid-b"}
+
+    # Matching names get stamped; unknown names are left without a tool_uuid.
+    cfg = _tool_call_config(
+        {"tool": "alpha", "arguments": {}},
+        {"tool": "ghost", "arguments": {}},
+    )
+    db.inject_tool_uuids_into_config(cfg, name_to_uuid)
+    tcs = cfg["evaluation"]["tool_calls"]
+    assert tcs[0]["tool_uuid"] == "uuid-a"
+    assert "tool_uuid" not in tcs[1]
+
+    # Non-tool_call configs are untouched.
+    other = {"evaluation": {"type": "response", "criteria": "x"}}
+    assert db.inject_tool_uuids_into_config(other, name_to_uuid) == other
+
+    # Robust against junk shapes.
+    assert db.inject_tool_uuids_into_config(None, name_to_uuid) is None
+
+
+def test_refresh_tool_call_names_in_config():
+    uuid_to_name = {"uuid-a": "alpha_renamed"}
+
+    cfg = _tool_call_config(
+        {"tool": "alpha_old", "tool_uuid": "uuid-a"},   # live → renamed
+        {"tool": "gone", "tool_uuid": "uuid-deleted"},  # deleted → keep snapshot
+        {"tool": "legacy"},                              # no uuid → keep snapshot
+    )
+    db.refresh_tool_call_names_in_config(cfg, uuid_to_name)
+    tcs = cfg["evaluation"]["tool_calls"]
+    assert tcs[0]["tool"] == "alpha_renamed"
+    assert tcs[1]["tool"] == "gone"
+    assert tcs[2]["tool"] == "legacy"
+
+
+def test_backfill_tool_call_test_tool_uuids(user):
+    tool_uuid = db.create_tool(
+        name=_u("proc"), description="d", user_id=user["uuid"], org_uuid=user["org_uuid"]
+    )
+    tool_name = db.get_tool(tool_uuid)["name"]
+
+    # Legacy tool_call test: name-only snapshot, no tool_uuid.
+    test_uuid = db.create_test(
+        name=_u("tc-test"),
+        type="tool_call",
+        config=_tool_call_config({"tool": tool_name, "arguments": {}}),
+        user_id=user["uuid"],
+        org_uuid=user["org_uuid"],
+    )
+
+    with db.get_db_connection() as conn:
+        db._backfill_tool_call_test_tool_uuids(conn.cursor(), conn)
+
+    stamped = db.get_test(test_uuid)["config"]["evaluation"]["tool_calls"][0]
+    assert stamped["tool_uuid"] == tool_uuid
+
+    # Renaming the tool now propagates via refresh-on-read.
+    db.update_tool(tool_uuid, name=_u("proc-renamed"))
+    new_name = db.get_tool(tool_uuid)["name"]
+    _, uuid_to_name = (
+        {}, {t["uuid"]: t["name"] for t in db.get_all_tools(org_uuid=user["org_uuid"])}
+    )
+    refreshed = db.get_test(test_uuid)
+    db.refresh_tool_call_names_in_config(refreshed["config"], uuid_to_name)
+    assert refreshed["config"]["evaluation"]["tool_calls"][0]["tool"] == new_name
+
+
 # ---------------------------------------------------------------------------
 # Personas + Scenarios
 # ---------------------------------------------------------------------------
