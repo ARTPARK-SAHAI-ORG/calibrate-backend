@@ -409,7 +409,9 @@ def test_tool_call_test_tracks_tool_rename(client):
                 "history": [{"role": "user", "content": "hi"}],
                 "evaluation": {
                     "type": "tool_call",
-                    "tool_calls": [{"tool": tool_name, "arguments": {}}],
+                    "tool_calls": [
+                        {"tool": tool_name, "tool_uuid": tool_uuid, "arguments": {}}
+                    ],
                 },
             },
         },
@@ -418,7 +420,7 @@ def test_tool_call_test_tracks_tool_rename(client):
     assert create.status_code == 200
     test_uuid = create.json()["uuid"]
 
-    # Read back: tool_uuid was stamped server-side.
+    # Read back: tool_uuid persisted, live name resolved.
     fetched = client.get(f"/tests/{test_uuid}", headers=h).json()
     tc = fetched["config"]["evaluation"]["tool_calls"][0]
     assert tc["tool_uuid"] == tool_uuid
@@ -439,6 +441,51 @@ def test_tool_call_test_tracks_tool_rename(client):
     listed = client.get("/tests", headers=h).json()
     mine = next(t for t in listed if t["uuid"] == test_uuid)
     assert mine["config"]["evaluation"]["tool_calls"][0]["tool"] == new_name
+
+
+def test_create_tool_call_test_requires_tool_uuid(client):
+    """Interactive writes must send tool_uuid — a name-only tool_call is rejected,
+    and a uuid that isn't a live org tool 404s."""
+    auth = _signup(client)
+    h = auth["headers"]
+
+    # Name-only entry → 400.
+    name_only = client.post(
+        "/tests",
+        json={
+            "name": f"tc-{uuid.uuid4().hex[:6]}",
+            "type": "tool_call",
+            "config": {
+                "history": [{"role": "user", "content": "hi"}],
+                "evaluation": {
+                    "type": "tool_call",
+                    "tool_calls": [{"tool": "whatever", "arguments": {}}],
+                },
+            },
+        },
+        headers=h,
+    )
+    assert name_only.status_code == 400
+
+    # Unknown uuid → 404.
+    bad_uuid = client.post(
+        "/tests",
+        json={
+            "name": f"tc-{uuid.uuid4().hex[:6]}",
+            "type": "tool_call",
+            "config": {
+                "history": [{"role": "user", "content": "hi"}],
+                "evaluation": {
+                    "type": "tool_call",
+                    "tool_calls": [
+                        {"tool": "x", "tool_uuid": str(uuid.uuid4()), "arguments": {}}
+                    ],
+                },
+            },
+        },
+        headers=h,
+    )
+    assert bad_uuid.status_code == 404
 
 
 def test_create_test_wrong_evaluator_type(client):

@@ -212,6 +212,39 @@ def _org_tool_indexes(org_uuid: str) -> tuple[Dict[str, str], Dict[str, str]]:
     return name_to_uuid, uuid_to_name
 
 
+def _resolve_tool_call_uuids(
+    config: Optional[Dict[str, Any]], uuid_to_name: Dict[str, str]
+) -> Optional[Dict[str, Any]]:
+    """Strict resolution for interactive writes (`POST`/`PUT /tests`): every
+    `tool_call` entry MUST carry a `tool_uuid` that points to a live tool in the
+    caller's org. Stamps the live name into `tool` and returns `config`. Raises 400
+    if a uuid is missing, 404 if it doesn't resolve to an org tool. Name-only entries
+    are rejected here — bulk/CSV/programmatic imports use the lenient name-matching
+    path (`inject_tool_uuids_into_config`) instead. No-op for non-`tool_call` configs.
+    """
+    if not isinstance(config, dict):
+        return config
+    evaluation = config.get("evaluation")
+    if not isinstance(evaluation, dict) or evaluation.get("type") != "tool_call":
+        return config
+    for tc in evaluation.get("tool_calls") or []:
+        if not isinstance(tc, dict):
+            continue
+        tool_uuid = tc.get("tool_uuid")
+        if not tool_uuid:
+            raise HTTPException(
+                status_code=400,
+                detail="Each tool_call entry requires a tool_uuid.",
+            )
+        name = uuid_to_name.get(tool_uuid)
+        if name is None:
+            raise HTTPException(
+                status_code=404, detail=f"Tool {tool_uuid} not found"
+            )
+        tc["tool"] = name
+    return config
+
+
 def _with_evaluators(
     test_dict: Dict[str, Any], uuid_to_name: Optional[Dict[str, str]] = None
 ) -> Dict[str, Any]:
@@ -344,8 +377,8 @@ async def create_test_endpoint(
     )
     config = test.config
     if config is not None:
-        name_to_uuid, _ = _org_tool_indexes(ctx.org_uuid)
-        inject_tool_uuids_into_config(config, name_to_uuid)
+        _, uuid_to_name = _org_tool_indexes(ctx.org_uuid)
+        _resolve_tool_call_uuids(config, uuid_to_name)
     with ensure_name_unique("tests", test.name, ctx.org_uuid, entity="Test"):
         test_uuid = create_test(
             name=test.name,
@@ -421,10 +454,10 @@ async def update_test_endpoint(
         else None
     )
 
-    name_to_uuid, uuid_to_name = _org_tool_indexes(ctx.org_uuid)
+    _, uuid_to_name = _org_tool_indexes(ctx.org_uuid)
     config_to_save = test.config
     if config_to_save is not None:
-        inject_tool_uuids_into_config(config_to_save, name_to_uuid)
+        _resolve_tool_call_uuids(config_to_save, uuid_to_name)
 
     has_core_updates = any(
         v is not None for v in (test.name, test.type, test.config)
