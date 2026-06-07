@@ -215,12 +215,17 @@ def _org_tool_indexes(org_uuid: str) -> tuple[Dict[str, str], Dict[str, str]]:
 def _resolve_tool_call_uuids(
     config: Optional[Dict[str, Any]], uuid_to_name: Dict[str, str]
 ) -> Optional[Dict[str, Any]]:
-    """Strict resolution for interactive writes (`POST`/`PUT /tests`): every
-    `tool_call` entry MUST carry a `tool_uuid` that points to a live tool in the
-    caller's org. Stamps the live name into `tool` and returns `config`. Raises 400
-    if a uuid is missing, 404 if it doesn't resolve to an org tool. Name-only entries
-    are rejected here — bulk/CSV/programmatic imports use the lenient name-matching
-    path (`inject_tool_uuids_into_config`) instead. No-op for non-`tool_call` configs.
+    """Resolution for interactive writes (`POST`/`PUT /tests`): `tool_uuid` is
+    **optional but validated**.
+
+    - Entry WITH a `tool_uuid` → it must resolve to a live tool in the caller's org
+      (404 otherwise); the live name is stamped into `tool`. These are library tools
+      and get rename-tracking.
+    - Entry WITHOUT a `tool_uuid` → allowed as a name-only snapshot. This covers
+      built-in / agent-owned tools (agent-connection mode, framework tools) that have
+      no `tools` row and therefore no uuid to send.
+
+    Mutates and returns `config`. No-op for non-`tool_call` configs.
     """
     if not isinstance(config, dict):
         return config
@@ -232,10 +237,8 @@ def _resolve_tool_call_uuids(
             continue
         tool_uuid = tc.get("tool_uuid")
         if not tool_uuid:
-            raise HTTPException(
-                status_code=400,
-                detail="Each tool_call entry requires a tool_uuid.",
-            )
+            # Built-in / agent-owned tool: no uuid, keep the name snapshot.
+            continue
         name = uuid_to_name.get(tool_uuid)
         if name is None:
             raise HTTPException(

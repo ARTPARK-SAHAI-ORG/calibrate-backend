@@ -443,13 +443,13 @@ def test_tool_call_test_tracks_tool_rename(client):
     assert mine["config"]["evaluation"]["tool_calls"][0]["tool"] == new_name
 
 
-def test_create_tool_call_test_requires_tool_uuid(client):
-    """Interactive writes must send tool_uuid — a name-only tool_call is rejected,
-    and a uuid that isn't a live org tool 404s."""
+def test_tool_call_test_tool_uuid_optional_but_validated(client):
+    """Interactive writes accept name-only entries (built-in / agent-owned tools),
+    but a supplied tool_uuid must resolve to a live org tool (404 otherwise)."""
     auth = _signup(client)
     h = auth["headers"]
 
-    # Name-only entry → 400.
+    # Name-only entry (built-in tool, no uuid) → allowed.
     name_only = client.post(
         "/tests",
         json={
@@ -459,15 +459,20 @@ def test_create_tool_call_test_requires_tool_uuid(client):
                 "history": [{"role": "user", "content": "hi"}],
                 "evaluation": {
                     "type": "tool_call",
-                    "tool_calls": [{"tool": "whatever", "arguments": {}}],
+                    "tool_calls": [{"tool": "process_user_turn", "arguments": {}}],
                 },
             },
         },
         headers=h,
     )
-    assert name_only.status_code == 400
+    assert name_only.status_code == 200
+    # Stored verbatim — no uuid stamped for a built-in tool.
+    fetched = client.get(f"/tests/{name_only.json()['uuid']}", headers=h).json()
+    tc = fetched["config"]["evaluation"]["tool_calls"][0]
+    assert tc["tool"] == "process_user_turn"
+    assert "tool_uuid" not in tc or tc["tool_uuid"] is None
 
-    # Unknown uuid → 404.
+    # A supplied uuid that isn't a live org tool → 404.
     bad_uuid = client.post(
         "/tests",
         json={
