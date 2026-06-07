@@ -3544,10 +3544,15 @@ def get_all_tests(org_uuid: Optional[str] = None) -> List[Dict[str, Any]]:
 def inject_tool_uuids_into_config(
     config: Optional[Dict[str, Any]], name_to_uuid: Dict[str, str]
 ) -> Optional[Dict[str, Any]]:
-    """Stamp `tool_uuid` onto each expected tool call by matching its `tool` name
-    against the org's live tools (`name_to_uuid`; tool names are unique per org).
-    Mutates and returns `config`. Entries whose name matches no live tool are left
-    untouched (no `tool_uuid` added), degrading to the legacy name-only behavior.
+    """Ensure each expected tool call carries a `tool_uuid`.
+
+    A caller-supplied `tool_uuid` is **authoritative** and never overwritten — the
+    frontend is expected to send it on every write (add/remove/edit/update), so the
+    link survives renames and name collisions. Name-matching against the org's live
+    tools (`name_to_uuid`; names are unique per org) is only a **fallback** for
+    entries that arrive without a uuid — i.e. legacy clients, the backfill, and
+    name-based bulk/CSV/programmatic imports. Entries with neither a uuid nor a
+    matching name are left as name-only snapshots. Mutates and returns `config`.
     No-op for non-`tool_call` configs.
     """
     if not isinstance(config, dict):
@@ -3556,7 +3561,7 @@ def inject_tool_uuids_into_config(
     if not isinstance(evaluation, dict) or evaluation.get("type") != "tool_call":
         return config
     for tc in evaluation.get("tool_calls") or []:
-        if not isinstance(tc, dict):
+        if not isinstance(tc, dict) or tc.get("tool_uuid"):
             continue
         matched = name_to_uuid.get(tc.get("tool"))
         if matched:

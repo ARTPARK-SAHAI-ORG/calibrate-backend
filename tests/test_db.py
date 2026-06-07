@@ -296,6 +296,12 @@ def test_inject_tool_uuids_into_config():
     assert tcs[0]["tool_uuid"] == "uuid-a"
     assert "tool_uuid" not in tcs[1]
 
+    # A caller-supplied tool_uuid is authoritative — never clobbered by name match,
+    # even when the (stale) name would resolve to a different tool.
+    cfg2 = _tool_call_config({"tool": "alpha", "tool_uuid": "uuid-explicit"})
+    db.inject_tool_uuids_into_config(cfg2, name_to_uuid)
+    assert cfg2["evaluation"]["tool_calls"][0]["tool_uuid"] == "uuid-explicit"
+
     # Non-tool_call configs are untouched.
     other = {"evaluation": {"type": "response", "criteria": "x"}}
     assert db.inject_tool_uuids_into_config(other, name_to_uuid) == other
