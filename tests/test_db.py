@@ -566,6 +566,33 @@ def test_agent_tests_pivot_and_test_evaluators(user):
         db.set_test_evaluators(test_uuid, [{"evaluator_id": no_live}])
 
 
+def test_add_test_to_agent_restore_refreshes_created_at(user):
+    """Re-adding a soft-deleted link reuses the row but refreshes created_at
+    to now, so the re-added test sorts as recently-added rather than inheriting
+    its original first-add time."""
+    agent_uuid = db.create_agent(name=_u("a-restore"), user_id=user["uuid"], org_uuid=user["org_uuid"])
+    test_uuid = db.create_test(name=_u("t-restore"), type="llm", user_id=user["uuid"], org_uuid=user["org_uuid"])
+
+    link_id = db.add_test_to_agent(agent_uuid, test_uuid)
+
+    # Backdate created_at so we can detect whether re-add refreshes it.
+    with db.get_db_connection() as conn:
+        conn.execute(
+            "UPDATE agent_tests SET created_at = '2000-01-01 00:00:00' WHERE id = ?",
+            (link_id,),
+        )
+        conn.commit()
+
+    assert db.remove_test_from_agent(agent_uuid, test_uuid) is True
+
+    # Re-add restores the same row...
+    assert db.add_test_to_agent(agent_uuid, test_uuid) == link_id
+    # ...and created_at is no longer the backdated value.
+    restored = db.get_agent_test_link(agent_uuid, test_uuid)
+    assert restored is not None
+    assert restored["created_at"] != "2000-01-01 00:00:00"
+
+
 # ---------------------------------------------------------------------------
 # Generic jobs + queue accounting
 # ---------------------------------------------------------------------------

@@ -4946,7 +4946,10 @@ def get_all_simulation_scenarios() -> List[Dict[str, Any]]:
 
 def add_test_to_agent(agent_id: str, test_id: str) -> int:
     """Add a test to an agent. Returns the id of the created/restored link.
-    If a soft-deleted link exists, it will be restored by unsetting deleted_at.
+    If a soft-deleted link exists, it will be restored by unsetting deleted_at
+    and resetting created_at to now, so a re-added test behaves like a fresh
+    add (it sorts as recently-added in get_tests_for_agent's created_at DESC order)
+    instead of silently inheriting its original first-add timestamp.
     """
     with get_db_connection() as conn:
         cursor = conn.cursor()
@@ -4957,9 +4960,10 @@ def add_test_to_agent(agent_id: str, test_id: str) -> int:
         )
         existing = cursor.fetchone()
         if existing:
-            # Restore the soft-deleted link
+            # Restore the soft-deleted link, refreshing created_at so the re-add
+            # registers as a recent action rather than the original add time.
             cursor.execute(
-                "UPDATE agent_tests SET deleted_at = NULL WHERE id = ?",
+                "UPDATE agent_tests SET deleted_at = NULL, created_at = CURRENT_TIMESTAMP WHERE id = ?",
                 (existing["id"],),
             )
             conn.commit()
