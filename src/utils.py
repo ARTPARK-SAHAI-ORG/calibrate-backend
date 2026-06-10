@@ -48,17 +48,12 @@ def env_int(var: str, fallback: int) -> int:
         return fallback
 
 
-# Single source of truth for the calibrate CLI `-n` parallelism defaults.
-# Deployment configs (docker-compose, workflows) pass the env var through with
-# an EMPTY fallback so they never hardcode a number — when unset these constants
-# govern. Change the default here and nowhere else.
-DEFAULT_CALIBRATE_LLM_PARALLELISM = 4
+# `calibrate llm` resolves test-case parallelism itself
+# (`-n flag > CALIBRATE_TEST_PARALLEL env > default 4`), so the backend does NOT
+# pass `-n` for LLM tests — it just lets the subprocess inherit CALIBRATE_TEST_PARALLEL.
+# `calibrate simulations`, by contrast, has no env-var fallback (CLI default is 1),
+# so we DO pass `-n` for simulations. This constant is its single source of truth.
 DEFAULT_CALIBRATE_SIMULATION_PARALLELISM = 2
-
-
-def get_calibrate_llm_parallelism() -> int:
-    """How many test cases each `calibrate llm` process runs in parallel (`-n`)."""
-    return env_int("CALIBRATE_LLM_PARALLELISM", DEFAULT_CALIBRATE_LLM_PARALLELISM)
 
 
 def get_calibrate_simulation_parallelism() -> int:

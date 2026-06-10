@@ -591,9 +591,9 @@ def test_run_conversation_test_task_success():
     assert row["test_case_id"] == test_uuid
 
 
-def test_run_llm_test_task_passes_parallelism_flag():
-    """`run_llm_test_task` appends `-n <CALIBRATE_LLM_PARALLELISM>` so calibrate
-    runs that many test cases in parallel within the single process."""
+def test_run_llm_test_task_omits_parallelism_flag():
+    """The backend does NOT pass `-n` for `calibrate llm` — calibrate resolves
+    test-case parallelism itself from CALIBRATE_TEST_PARALLEL / its own default."""
     from routers.agent_tests import run_llm_test_task
 
     user_uuid = db.create_user("R", "P", f"rp-{os.urandom(4).hex()}@x.com")
@@ -618,7 +618,7 @@ def test_run_llm_test_task_passes_parallelism_flag():
             _write_conversation_llm_output(output_dir, test_uuid, ev_name)
         return process
 
-    with patch.dict(os.environ, {"CALIBRATE_LLM_PARALLELISM": "5"}), patch(
+    with patch(
         "routers.agent_tests.subprocess.Popen", side_effect=fake_popen
     ), patch(
         "routers.agent_tests.get_s3_client", return_value=MagicMock()
@@ -632,9 +632,7 @@ def test_run_llm_test_task_passes_parallelism_flag():
         agent = {"uuid": agent_uuid, "name": "a", "config": {}}
         run_llm_test_task(job_uuid, agent, [test], "bucket")
 
-    cmd = captured["cmd"]
-    assert "-n" in cmd
-    assert cmd[cmd.index("-n") + 1] == "5"
+    assert "-n" not in captured["cmd"]
 
 
 def test_run_conversation_test_task_calibrate_failure():

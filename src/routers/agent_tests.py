@@ -44,7 +44,6 @@ from auth_utils import get_current_org, get_org_jwt_or_api_key, OrgContext
 from utils import (
     TaskStatus,
     TaskCreateResponse,
-    get_calibrate_llm_parallelism,
     get_s3_client,
     get_s3_output_config,
     can_start_agent_test_job,
@@ -1613,8 +1612,9 @@ def run_llm_test_task(
                         str(output_dir),
                     ]
 
-                # Run N test cases in parallel within the single calibrate process.
-                run_cmd += ["-n", str(get_calibrate_llm_parallelism())]
+                # Test-case parallelism is left to calibrate, which resolves it as
+                # `-n flag > CALIBRATE_TEST_PARALLEL env > default(4)`. The subprocess
+                # inherits this process's env, so set CALIBRATE_TEST_PARALLEL to tune it.
 
                 logger.info(f"Running LLM test command: {' '.join(run_cmd)}")
 
@@ -2437,8 +2437,8 @@ def run_benchmark_task(
                         + ["-p", provider, "-o", str(output_dir)]
                     )
 
-                # Run N test cases in parallel within the single calibrate process.
-                run_cmd += ["-n", str(get_calibrate_llm_parallelism())]
+                # Test-case parallelism is left to calibrate (CALIBRATE_TEST_PARALLEL
+                # env / default 4); the subprocess inherits this process's env.
 
                 logger.info(f"Running benchmark command: {' '.join(run_cmd)}")
 
