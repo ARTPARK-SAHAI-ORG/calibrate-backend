@@ -62,6 +62,7 @@ from utils import (
     env_bool,
     env_int,
     env_str,
+    get_calibrate_simulation_parallelism,
 )
 from auth_utils import get_current_org, OrgContext
 from datetime import datetime
@@ -1431,7 +1432,7 @@ def _run_calibrate_text_simulation(
         "-o",
         str(output_dir),
         "-n",
-        str(env_int("CALIBRATE_SIMULATION_PARALLELISM", 2)),
+        str(get_calibrate_simulation_parallelism()),
     ]
     if model:
         run_cmd += ["-m", model]
@@ -1908,7 +1909,7 @@ def _run_calibrate_voice_simulation(
         "-o",
         str(output_dir),
         "-n",
-        str(env_int("CALIBRATE_SIMULATION_PARALLELISM", 2)),
+        str(get_calibrate_simulation_parallelism()),
     ]
 
     logger.info(f"{log_prefix} command: {' '.join(run_cmd)}")

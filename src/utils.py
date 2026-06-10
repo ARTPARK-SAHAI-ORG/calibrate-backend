@@ -48,6 +48,26 @@ def env_int(var: str, fallback: int) -> int:
         return fallback
 
 
+# Single source of truth for the calibrate CLI `-n` parallelism defaults.
+# Deployment configs (docker-compose, workflows) pass the env var through with
+# an EMPTY fallback so they never hardcode a number — when unset these constants
+# govern. Change the default here and nowhere else.
+DEFAULT_CALIBRATE_LLM_PARALLELISM = 4
+DEFAULT_CALIBRATE_SIMULATION_PARALLELISM = 2
+
+
+def get_calibrate_llm_parallelism() -> int:
+    """How many test cases each `calibrate llm` process runs in parallel (`-n`)."""
+    return env_int("CALIBRATE_LLM_PARALLELISM", DEFAULT_CALIBRATE_LLM_PARALLELISM)
+
+
+def get_calibrate_simulation_parallelism() -> int:
+    """How many persona/scenario pairs each `calibrate simulations` process runs in parallel (`-n`)."""
+    return env_int(
+        "CALIBRATE_SIMULATION_PARALLELISM", DEFAULT_CALIBRATE_SIMULATION_PARALLELISM
+    )
+
+
 def capture_exception_to_sentry(exception: Exception) -> None:
     """
     Capture an exception to Sentry and mark it as unhandled.

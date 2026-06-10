@@ -89,6 +89,26 @@ def test_env_helpers(monkeypatch):
     assert env_int("INT_MISSING", 9) == 9
 
 
+def test_calibrate_parallelism_defaults(monkeypatch):
+    """The `-n` defaults live in one place (utils constants); helpers fall back
+    to them when the env var is unset and honor an override when set."""
+    monkeypatch.delenv("CALIBRATE_LLM_PARALLELISM", raising=False)
+    monkeypatch.delenv("CALIBRATE_SIMULATION_PARALLELISM", raising=False)
+    assert (
+        utils.get_calibrate_llm_parallelism()
+        == utils.DEFAULT_CALIBRATE_LLM_PARALLELISM
+    )
+    assert (
+        utils.get_calibrate_simulation_parallelism()
+        == utils.DEFAULT_CALIBRATE_SIMULATION_PARALLELISM
+    )
+
+    monkeypatch.setenv("CALIBRATE_LLM_PARALLELISM", "11")
+    monkeypatch.setenv("CALIBRATE_SIMULATION_PARALLELISM", "3")
+    assert utils.get_calibrate_llm_parallelism() == 11
+    assert utils.get_calibrate_simulation_parallelism() == 3
+
+
 # ---------------------------------------------------------------------------
 # Sentry capture (we just verify it forwards the exception)
 # ---------------------------------------------------------------------------
