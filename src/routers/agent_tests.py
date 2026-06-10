@@ -44,6 +44,7 @@ from auth_utils import get_current_org, get_org_jwt_or_api_key, OrgContext
 from utils import (
     TaskStatus,
     TaskCreateResponse,
+    env_int,
     get_s3_client,
     get_s3_output_config,
     can_start_agent_test_job,
@@ -1612,6 +1613,9 @@ def run_llm_test_task(
                         str(output_dir),
                     ]
 
+                # Run N test cases in parallel within the single calibrate process.
+                run_cmd += ["-n", str(env_int("CALIBRATE_LLM_PARALLELISM", 4))]
+
                 logger.info(f"Running LLM test command: {' '.join(run_cmd)}")
 
                 # Create temp files for stdout/stderr
@@ -2432,6 +2436,9 @@ def run_benchmark_task(
                         + cli_models
                         + ["-p", provider, "-o", str(output_dir)]
                     )
+
+                # Run N test cases in parallel within the single calibrate process.
+                run_cmd += ["-n", str(env_int("CALIBRATE_LLM_PARALLELISM", 4))]
 
                 logger.info(f"Running benchmark command: {' '.join(run_cmd)}")
 

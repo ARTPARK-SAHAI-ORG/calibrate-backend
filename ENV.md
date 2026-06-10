@@ -71,6 +71,8 @@ These are **not read directly** by most backend modules; they are passed through
 | **`MAX_CONCURRENT_JOBS`**          | Global cap on concurrent background jobs across queues. Read as **`int(os.getenv(...))`** with **no fallback** in code ([`src/utils.py`](src/utils.py)), so it **must be set** for queue helpers to work (tests and Compose default this to **`1`**). |
 | **`MAX_CONCURRENT_JOBS_PER_USER`** | Per-user concurrent job cap. Default **`1`**. Set to **`0`** to disable the per-user limit ([`src/utils.py`](src/utils.py)).                                                                                                                          |
 | **`DEFAULT_MAX_ROWS_PER_EVAL`**    | Default maximum rows per evaluation run when no per-user override exists ([`src/routers/user_limits.py`](src/routers/user_limits.py)). Default **`20`**.                                                                                              |
+| **`CALIBRATE_LLM_PARALLELISM`**    | How many test cases each `calibrate llm` process runs in parallel (`-n`), for both single-agent runs and benchmarks ([`src/routers/agent_tests.py`](src/routers/agent_tests.py)). Default **`4`**.                                                    |
+| **`CALIBRATE_SIMULATION_PARALLELISM`** | How many persona/scenario pairs each `calibrate simulations` process runs in parallel (`-n`), for text and voice ([`src/routers/simulations.py`](src/routers/simulations.py)). Default **`2`**.                                                  |
 
 ---
 

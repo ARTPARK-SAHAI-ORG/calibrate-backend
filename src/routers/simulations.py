@@ -1431,7 +1431,7 @@ def _run_calibrate_text_simulation(
         "-o",
         str(output_dir),
         "-n",
-        "2",
+        str(env_int("CALIBRATE_SIMULATION_PARALLELISM", 2)),
     ]
     if model:
         run_cmd += ["-m", model]
@@ -1908,7 +1908,7 @@ def _run_calibrate_voice_simulation(
         "-o",
         str(output_dir),
         "-n",
-        "2",
+        str(env_int("CALIBRATE_SIMULATION_PARALLELISM", 2)),
     ]
 
     logger.info(f"{log_prefix} command: {' '.join(run_cmd)}")

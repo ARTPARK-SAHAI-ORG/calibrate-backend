@@ -591,6 +591,52 @@ def test_run_conversation_test_task_success():
     assert row["test_case_id"] == test_uuid
 
 
+def test_run_llm_test_task_passes_parallelism_flag():
+    """`run_llm_test_task` appends `-n <CALIBRATE_LLM_PARALLELISM>` so calibrate
+    runs that many test cases in parallel within the single process."""
+    from routers.agent_tests import run_llm_test_task
+
+    user_uuid = db.create_user("R", "P", f"rp-{os.urandom(4).hex()}@x.com")
+    org_uuid = db.get_personal_org_for_user(user_uuid)["uuid"]
+    agent_uuid = db.create_agent(
+        name=f"a-{os.urandom(4).hex()}", org_uuid=org_uuid, user_id=user_uuid
+    )
+    test_uuid, ev_uuid = _make_conversation_test(db, org_uuid, user_uuid)
+    test = db.get_test(test_uuid)
+    ev_name = db.get_evaluator(ev_uuid)["name"]
+    job_uuid = db.create_agent_test_job(
+        agent_id=agent_uuid, job_type="llm-unit-test", status="in_progress"
+    )
+
+    process = _FakeProcess(returncode=0, poll_results=[None, 0])
+    captured = {}
+
+    def fake_popen(*args, **kwargs):
+        captured["cmd"] = args[0]
+        output_dir = Path(kwargs["cwd"]) / "output"
+        if output_dir.exists():
+            _write_conversation_llm_output(output_dir, test_uuid, ev_name)
+        return process
+
+    with patch.dict(os.environ, {"CALIBRATE_LLM_PARALLELISM": "5"}), patch(
+        "routers.agent_tests.subprocess.Popen", side_effect=fake_popen
+    ), patch(
+        "routers.agent_tests.get_s3_client", return_value=MagicMock()
+    ), patch("routers.agent_tests.upload_directory_tree_to_s3"), patch(
+        "routers.agent_tests.upload_file_to_s3"
+    ), patch(
+        "routers.agent_tests.try_start_queued_agent_test_job"
+    ), patch(
+        "routers.agent_tests.time.sleep"
+    ):
+        agent = {"uuid": agent_uuid, "name": "a", "config": {}}
+        run_llm_test_task(job_uuid, agent, [test], "bucket")
+
+    cmd = captured["cmd"]
+    assert "-n" in cmd
+    assert cmd[cmd.index("-n") + 1] == "5"
+
+
 def test_run_conversation_test_task_calibrate_failure():
     """A failing calibrate run for the only test → job FAILED."""
     from routers.agent_tests import run_llm_test_task
@@ -659,3 +705,29 @@ def test_run_simulation_task_failure_path():
 
     job = db.get_simulation_job(job_uuid)
     assert job["status"] == "failed"
+
+
+def test_run_simulation_task_passes_parallelism_flag():
+    """The text simulation command appends `-n <CALIBRATE_SIMULATION_PARALLELISM>`."""
+    from routers.simulations import run_simulation_task
+
+    _, _, job_uuid = _make_sim_job()
+    agent = {"uuid": "a", "name": "Agent", "config": {}}
+    personas = [{"uuid": "p", "name": "Alex", "config": {}}]
+    scenarios = [{"uuid": "s", "name": "Sc", "description": "desc"}]
+    captured = {}
+
+    def fake_popen(*args, **kwargs):
+        captured["cmd"] = args[0]
+        raise RuntimeError("stop after capture")
+
+    with patch.dict(os.environ, {"CALIBRATE_SIMULATION_PARALLELISM": "4"}), patch(
+        "routers.simulations.subprocess.Popen", side_effect=fake_popen
+    ), patch("routers.simulations.try_start_queued_simulation_job"):
+        run_simulation_task(
+            job_uuid, agent, personas, scenarios, [], "bucket", "text"
+        )
+
+    cmd = captured["cmd"]
+    assert "-n" in cmd
+    assert cmd[cmd.index("-n") + 1] == "4"
