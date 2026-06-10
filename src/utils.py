@@ -131,7 +131,9 @@ class EvaluatorRunEntry(BaseModel):
     """
 
     evaluator_uuid: str
-    metric_key: str  # key as emitted in metrics.json (derived from CLI/config at run time)
+    metric_key: (
+        str  # key as emitted in metrics.json (derived from CLI/config at run time)
+    )
     aggregate: Dict[str, Any]
     name: Optional[str] = None  # filled on API read from DB + job snapshot
     description: Optional[str] = None  # filled on API read from current DB row
@@ -1165,9 +1167,7 @@ def post_process_provider_results(
                 else:
                     output_type = (snap.get("output_type") or "").lower()
                     if output_type in ("binary", "rating"):
-                        typed_value = coerce_evaluator_score(
-                            raw_value, output_type
-                        )
+                        typed_value = coerce_evaluator_score(raw_value, output_type)
                     else:
                         # Unknown/unspecified — leave as-is so we don't lossy-
                         # convert future evaluator types we haven't met.

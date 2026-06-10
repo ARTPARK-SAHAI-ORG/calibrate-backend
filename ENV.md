@@ -71,6 +71,8 @@ These are **not read directly** by most backend modules; they are passed through
 | **`MAX_CONCURRENT_JOBS`**          | Global cap on concurrent background jobs across queues. Read as **`int(os.getenv(...))`** with **no fallback** in code ([`src/utils.py`](src/utils.py)), so it **must be set** for queue helpers to work (tests and Compose default this to **`1`**). |
 | **`MAX_CONCURRENT_JOBS_PER_USER`** | Per-user concurrent job cap. Default **`1`**. Set to **`0`** to disable the per-user limit ([`src/utils.py`](src/utils.py)).                                                                                                                          |
 | **`DEFAULT_MAX_ROWS_PER_EVAL`**    | Default maximum rows per evaluation run when no per-user override exists ([`src/routers/user_limits.py`](src/routers/user_limits.py)). Default **`20`**.                                                                                              |
+| **`CALIBRATE_TEST_PARALLEL`**      | How many test cases `calibrate llm` evaluates in parallel per model. Read **natively by the calibrate CLI** (`-n flag > CALIBRATE_TEST_PARALLEL > default 4`); the backend doesn't pass `-n` for LLM tests, it just lets the subprocess inherit this var. Unset ⇒ CLI default **`4`**. |
+| **`CALIBRATE_SIMULATION_PARALLEL`** | How many simulations `calibrate simulations` runs in parallel (text and voice). Read **natively by the calibrate CLI**; the backend doesn't pass `-n`, it just lets the subprocess inherit this var. Unset ⇒ the CLI's own default. |
 
 ---
 

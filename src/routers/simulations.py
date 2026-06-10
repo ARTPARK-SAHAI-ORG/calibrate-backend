@@ -1420,7 +1420,9 @@ def _run_calibrate_text_simulation(
     scenarios_list = calibrate_config.get("scenarios", [])
     expected_total = len(personas_list) * len(scenarios_list)
 
-    # Build CLI command — agent connection mode omits -m (agent owns its model)
+    # Build CLI command — agent connection mode omits -m (agent owns its model).
+    # Parallelism is left to calibrate, which reads CALIBRATE_SIMULATION_PARALLEL
+    # from the inherited env (we don't pass -n), mirroring the LLM-test path.
     run_cmd = [
         "calibrate",
         "simulations",
@@ -1430,8 +1432,6 @@ def _run_calibrate_text_simulation(
         str(config_file),
         "-o",
         str(output_dir),
-        "-n",
-        "2",
     ]
     if model:
         run_cmd += ["-m", model]
@@ -1897,7 +1897,9 @@ def _run_calibrate_voice_simulation(
     with open(config_file, "w", encoding="utf-8") as f:
         json.dump(calibrate_config, f, indent=2)
 
-    # Run calibrate agent simulation command as a non-blocking process
+    # Run calibrate agent simulation command as a non-blocking process.
+    # Parallelism is left to calibrate via the inherited CALIBRATE_SIMULATION_PARALLEL
+    # env (we don't pass -n), mirroring the LLM-test path.
     run_cmd = [
         "calibrate",
         "simulations",
@@ -1907,8 +1909,6 @@ def _run_calibrate_voice_simulation(
         str(config_file),
         "-o",
         str(output_dir),
-        "-n",
-        "2",
     ]
 
     logger.info(f"{log_prefix} command: {' '.join(run_cmd)}")
