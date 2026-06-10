@@ -72,7 +72,7 @@ These are **not read directly** by most backend modules; they are passed through
 | **`MAX_CONCURRENT_JOBS_PER_USER`** | Per-user concurrent job cap. Default **`1`**. Set to **`0`** to disable the per-user limit ([`src/utils.py`](src/utils.py)).                                                                                                                          |
 | **`DEFAULT_MAX_ROWS_PER_EVAL`**    | Default maximum rows per evaluation run when no per-user override exists ([`src/routers/user_limits.py`](src/routers/user_limits.py)). Default **`20`**.                                                                                              |
 | **`CALIBRATE_TEST_PARALLEL`**      | How many test cases `calibrate llm` evaluates in parallel per model. Read **natively by the calibrate CLI** (`-n flag > CALIBRATE_TEST_PARALLEL > default 4`); the backend doesn't pass `-n` for LLM tests, it just lets the subprocess inherit this var. Unset ⇒ CLI default **`4`**. |
-| **`CALIBRATE_SIMULATION_PARALLELISM`** | How many persona/scenario pairs each `calibrate simulations` process runs in parallel (`-n`), for text and voice. Calibrate has **no** env var here (CLI default is `1`), so the backend passes `-n` explicitly; default lives in code: `DEFAULT_CALIBRATE_SIMULATION_PARALLELISM` in [`src/utils.py`](src/utils.py) (currently **`2`**). |
+| **`CALIBRATE_SIMULATION_PARALLEL`** | How many simulations `calibrate simulations` runs in parallel (text and voice). Read **natively by the calibrate CLI**; the backend doesn't pass `-n`, it just lets the subprocess inherit this var. Unset ⇒ the CLI's own default. |
 
 ---
 

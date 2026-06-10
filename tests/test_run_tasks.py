@@ -705,8 +705,9 @@ def test_run_simulation_task_failure_path():
     assert job["status"] == "failed"
 
 
-def test_run_simulation_task_passes_parallelism_flag():
-    """The text simulation command appends `-n <CALIBRATE_SIMULATION_PARALLELISM>`."""
+def test_run_simulation_task_omits_parallelism_flag():
+    """The backend does NOT pass `-n` for `calibrate simulations` — calibrate
+    resolves parallelism itself from the inherited CALIBRATE_SIMULATION_PARALLEL."""
     from routers.simulations import run_simulation_task
 
     _, _, job_uuid = _make_sim_job()
@@ -719,13 +720,11 @@ def test_run_simulation_task_passes_parallelism_flag():
         captured["cmd"] = args[0]
         raise RuntimeError("stop after capture")
 
-    with patch.dict(os.environ, {"CALIBRATE_SIMULATION_PARALLELISM": "4"}), patch(
+    with patch(
         "routers.simulations.subprocess.Popen", side_effect=fake_popen
     ), patch("routers.simulations.try_start_queued_simulation_job"):
         run_simulation_task(
             job_uuid, agent, personas, scenarios, [], "bucket", "text"
         )
 
-    cmd = captured["cmd"]
-    assert "-n" in cmd
-    assert cmd[cmd.index("-n") + 1] == "4"
+    assert "-n" not in captured["cmd"]

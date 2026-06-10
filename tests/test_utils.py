@@ -89,20 +89,6 @@ def test_env_helpers(monkeypatch):
     assert env_int("INT_MISSING", 9) == 9
 
 
-def test_calibrate_simulation_parallelism_default(monkeypatch):
-    """Simulation `-n` default lives in one place (utils constant): the helper
-    falls back to it when unset and honors an override when set. (LLM-test
-    parallelism is owned by the calibrate CLI, not the backend.)"""
-    monkeypatch.delenv("CALIBRATE_SIMULATION_PARALLELISM", raising=False)
-    assert (
-        utils.get_calibrate_simulation_parallelism()
-        == utils.DEFAULT_CALIBRATE_SIMULATION_PARALLELISM
-    )
-
-    monkeypatch.setenv("CALIBRATE_SIMULATION_PARALLELISM", "3")
-    assert utils.get_calibrate_simulation_parallelism() == 3
-
-
 # ---------------------------------------------------------------------------
 # Sentry capture (we just verify it forwards the exception)
 # ---------------------------------------------------------------------------

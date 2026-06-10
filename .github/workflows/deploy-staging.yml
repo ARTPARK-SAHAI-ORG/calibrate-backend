@@ -129,7 +129,7 @@ jobs:
             export MAX_CONCURRENT_JOBS_PER_ORG="${{ secrets.MAX_CONCURRENT_JOBS_PER_ORG }}"
             export DEFAULT_MAX_ROWS_PER_EVAL="${{ secrets.DEFAULT_MAX_ROWS_PER_EVAL }}"
             export CALIBRATE_TEST_PARALLEL="${{ secrets.CALIBRATE_TEST_PARALLEL }}"
-            export CALIBRATE_SIMULATION_PARALLELISM="${{ secrets.CALIBRATE_SIMULATION_PARALLELISM }}"
+            export CALIBRATE_SIMULATION_PARALLEL="${{ secrets.CALIBRATE_SIMULATION_PARALLEL }}"
             export SUPERADMIN_EMAIL="${{ secrets.SUPERADMIN_EMAIL }}"
 
             # Navigate to directory with docker-compose.yml

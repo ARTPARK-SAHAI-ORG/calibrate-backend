@@ -48,19 +48,11 @@ def env_int(var: str, fallback: int) -> int:
         return fallback
 
 
-# `calibrate llm` resolves test-case parallelism itself
-# (`-n flag > CALIBRATE_TEST_PARALLEL env > default 4`), so the backend does NOT
-# pass `-n` for LLM tests — it just lets the subprocess inherit CALIBRATE_TEST_PARALLEL.
-# `calibrate simulations`, by contrast, has no env-var fallback (CLI default is 1),
-# so we DO pass `-n` for simulations. This constant is its single source of truth.
-DEFAULT_CALIBRATE_SIMULATION_PARALLELISM = 2
-
-
-def get_calibrate_simulation_parallelism() -> int:
-    """How many persona/scenario pairs each `calibrate simulations` process runs in parallel (`-n`)."""
-    return env_int(
-        "CALIBRATE_SIMULATION_PARALLELISM", DEFAULT_CALIBRATE_SIMULATION_PARALLELISM
-    )
+# The calibrate CLI resolves its own intra-process parallelism from inherited env
+# vars, so the backend does NOT pass `-n` and owns no default:
+#   - `calibrate llm`         → CALIBRATE_TEST_PARALLEL       (CLI default 4)
+#   - `calibrate simulations` → CALIBRATE_SIMULATION_PARALLEL (CLI default)
+# Set those env vars on this process and the spawned subprocess inherits them.
 
 
 def capture_exception_to_sentry(exception: Exception) -> None:
