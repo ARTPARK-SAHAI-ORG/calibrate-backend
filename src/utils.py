@@ -48,13 +48,6 @@ def env_int(var: str, fallback: int) -> int:
         return fallback
 
 
-# The calibrate CLI resolves its own intra-process parallelism from inherited env
-# vars, so the backend does NOT pass `-n` and owns no default:
-#   - `calibrate llm`         → CALIBRATE_TEST_PARALLEL       (CLI default 4)
-#   - `calibrate simulations` → CALIBRATE_SIMULATION_PARALLEL (CLI default)
-# Set those env vars on this process and the spawned subprocess inherits them.
-
-
 def capture_exception_to_sentry(exception: Exception) -> None:
     """
     Capture an exception to Sentry and mark it as unhandled.
@@ -138,7 +131,9 @@ class EvaluatorRunEntry(BaseModel):
     """
 
     evaluator_uuid: str
-    metric_key: str  # key as emitted in metrics.json (derived from CLI/config at run time)
+    metric_key: (
+        str  # key as emitted in metrics.json (derived from CLI/config at run time)
+    )
     aggregate: Dict[str, Any]
     name: Optional[str] = None  # filled on API read from DB + job snapshot
     description: Optional[str] = None  # filled on API read from current DB row
@@ -1172,9 +1167,7 @@ def post_process_provider_results(
                 else:
                     output_type = (snap.get("output_type") or "").lower()
                     if output_type in ("binary", "rating"):
-                        typed_value = coerce_evaluator_score(
-                            raw_value, output_type
-                        )
+                        typed_value = coerce_evaluator_score(raw_value, output_type)
                     else:
                         # Unknown/unspecified — leave as-is so we don't lossy-
                         # convert future evaluator types we haven't met.
