@@ -533,7 +533,7 @@ async def bulk_create_items(
     annotator covering every newly-inserted item. Annotations are upserted
     as if the annotator had submitted them through the public form.
     Annotations are validated against the task's *currently linked*
-    evaluator set; the task type (`stt | llm | conversation | tts`) does
+    evaluator set; the task type (`stt | conversation-turn | conversation | tts`) does
     not affect the contract. Value shape is uniform across output types:
     `{"value": <bool|number|string>, "reasoning"?: str}` — binary uses a
     bool, rating uses a number. This matches what the public form writes
@@ -1283,8 +1283,8 @@ async def start_evaluator_run(
     calibrate CLI's `--eval-only` mode. Poll
     `GET /evaluator-runs/{job_uuid}` for status.
 
-    Supported task types: `stt`, `llm`, `simulation`. (Voice simulations and
-    TTS are not supported in eval-only mode.)"""
+    Supported task types: `stt`, `conversation-turn`, `conversation`. (Voice
+    simulations and TTS are not supported in eval-only mode.)"""
     task = _ensure_owned_task(task_uuid, ctx.org_uuid)
     if task.get("type") not in SUPPORTED_EVAL_TASK_TYPES:
         raise HTTPException(
@@ -2116,7 +2116,7 @@ async def task_summary(
     Response shape:
       {
         "task_id": str,
-        "task_type": "stt" | "llm" | "conversation",
+        "task_type": "stt" | "conversation-turn" | "conversation",
         "evaluators": [
           {
             "uuid": str,

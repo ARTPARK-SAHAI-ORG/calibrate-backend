@@ -804,7 +804,7 @@ def init_db():
                 user_id TEXT NOT NULL,
                 name TEXT NOT NULL,
                 description TEXT,
-                type TEXT NOT NULL DEFAULT 'llm',
+                type TEXT NOT NULL DEFAULT 'conversation-turn',
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                 updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                 deleted_at TIMESTAMP DEFAULT NULL,
@@ -1028,7 +1028,7 @@ def init_db():
         # COLUMN, so a literal default is fine here.
         try:
             cursor.execute(
-                "ALTER TABLE annotation_tasks ADD COLUMN type TEXT NOT NULL DEFAULT 'llm'"
+                "ALTER TABLE annotation_tasks ADD COLUMN type TEXT NOT NULL DEFAULT 'conversation-turn'"
             )
         except sqlite3.OperationalError:
             pass
@@ -1038,6 +1038,14 @@ def init_db():
         # judging). Convert existing rows. Idempotent.
         cursor.execute(
             "UPDATE annotation_tasks SET type = 'conversation' WHERE type = 'simulation'"
+        )
+
+        # Migration: the annotation-task `type` value `llm` was renamed to
+        # `conversation-turn` (it judges a single conversation turn, distinct
+        # from `conversation` which judges the full conversation). Convert
+        # existing rows. Idempotent.
+        cursor.execute(
+            "UPDATE annotation_tasks SET type = 'conversation-turn' WHERE type = 'llm'"
         )
 
         # Add deleted_at column to existing tables if not present (migration)
@@ -6328,7 +6336,7 @@ def _parse_annotation_task_row(row: sqlite3.Row) -> Dict[str, Any]:
     return dict(row)
 
 
-ANNOTATION_TASK_TYPES = ("llm", "stt", "tts", "conversation")
+ANNOTATION_TASK_TYPES = ("conversation-turn", "stt", "tts", "conversation")
 
 
 def create_annotation_task(

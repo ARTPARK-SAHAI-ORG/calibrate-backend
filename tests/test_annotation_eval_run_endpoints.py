@@ -55,7 +55,7 @@ def test_evaluator_run_lifecycle(client, monkeypatch):
         "/annotation-tasks",
         json={
             "name": f"t-{uuid.uuid4().hex[:6]}",
-            "type": "llm",
+            "type": "conversation-turn",
             "evaluator_ids": [llm_ev["uuid"]],
         },
         headers=h,
@@ -181,7 +181,7 @@ def test_evaluator_run_bad_evaluator_resolution(client):
         "/annotation-tasks",
         json={
             "name": f"t-{uuid.uuid4().hex[:6]}",
-            "type": "llm",
+            "type": "conversation-turn",
             "evaluator_ids": [llm_ev["uuid"]],
         },
         headers=h,
@@ -237,7 +237,7 @@ def test_evaluator_run_detail_shape(client):
         "/annotation-tasks",
         json={
             "name": f"t-{uuid.uuid4().hex[:6]}",
-            "type": "llm",
+            "type": "conversation-turn",
             "evaluator_ids": [llm_ev["uuid"]],
         },
         headers=h,
@@ -474,7 +474,7 @@ def test_evaluator_run_with_specific_item_ids(client):
         "/annotation-tasks",
         json={
             "name": f"t-{uuid.uuid4().hex[:6]}",
-            "type": "llm",
+            "type": "conversation-turn",
             "evaluator_ids": [llm_ev["uuid"]],
         },
         headers=h,

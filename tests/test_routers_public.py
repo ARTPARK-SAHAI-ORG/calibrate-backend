@@ -248,7 +248,7 @@ def test_public_annotation_eval_must_be_done(client):
     # Create a task to host the job
     task_uuid = db_mod.create_annotation_task(
         name=f"t-{uuid.uuid4().hex[:6]}",
-        type="llm",
+        type="conversation-turn",
         org_uuid=org_uuid,
         user_id=user_id,
     )

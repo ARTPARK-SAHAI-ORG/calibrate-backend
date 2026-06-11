@@ -53,7 +53,7 @@ def _create_task(client, h, llm_ev):
         "/annotation-tasks",
         json={
             "name": f"t-{uuid.uuid4().hex[:6]}",
-            "type": "llm",
+            "type": "conversation-turn",
             "evaluator_ids": [llm_ev["uuid"]],
         },
         headers=h,

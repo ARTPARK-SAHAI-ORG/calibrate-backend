@@ -66,7 +66,7 @@ def test_annotation_task_crud(client):
     # invalid evaluator
     bad_ev = client.post(
         "/annotation-tasks",
-        json={"name": "x", "type": "llm", "evaluator_ids": ["missing"]},
+        json={"name": "x", "type": "conversation-turn", "evaluator_ids": ["missing"]},
         headers=h,
     )
     assert bad_ev.status_code == 404
@@ -77,7 +77,7 @@ def test_annotation_task_crud(client):
         "/annotation-tasks",
         json={
             "name": name,
-            "type": "llm",
+            "type": "conversation-turn",
             "description": "d",
             "evaluator_ids": [llm_ev["uuid"]],
         },
@@ -202,7 +202,7 @@ def test_annotation_task_evaluator_ordering(client):
         "/annotation-tasks",
         json={
             "name": f"order-{uuid.uuid4().hex[:6]}",
-            "type": "llm",
+            "type": "conversation-turn",
             "evaluator_ids": [ev_a["uuid"], ev_b["uuid"]],
         },
         headers=h,
@@ -286,7 +286,7 @@ def test_annotation_items_crud(client):
         "/annotation-tasks",
         json={
             "name": f"t-{uuid.uuid4().hex[:6]}",
-            "type": "llm",
+            "type": "conversation-turn",
             "evaluator_ids": [llm_ev["uuid"]],
         },
         headers=h,
@@ -426,7 +426,7 @@ def test_bulk_delete_items_select_all(client):
         "/annotation-tasks",
         json={
             "name": f"t-{uuid.uuid4().hex[:6]}",
-            "type": "llm",
+            "type": "conversation-turn",
             "evaluator_ids": [llm_ev["uuid"]],
         },
         headers=h,
@@ -490,7 +490,7 @@ def test_annotation_jobs_crud(client):
         "/annotation-tasks",
         json={
             "name": f"t-{uuid.uuid4().hex[:6]}",
-            "type": "llm",
+            "type": "conversation-turn",
             "evaluator_ids": [llm_ev["uuid"]],
         },
         headers=h,
@@ -640,7 +640,7 @@ def test_create_jobs_select_all(client):
         "/annotation-tasks",
         json={
             "name": f"t-{uuid.uuid4().hex[:6]}",
-            "type": "llm",
+            "type": "conversation-turn",
             "evaluator_ids": [llm_ev["uuid"]],
         },
         headers=h,
@@ -723,7 +723,7 @@ def test_evaluator_run_select_all_and_q(client):
         "/annotation-tasks",
         json={
             "name": f"t-{uuid.uuid4().hex[:6]}",
-            "type": "llm",
+            "type": "conversation-turn",
             "evaluator_ids": [llm_ev["uuid"]],
         },
         headers=h,
@@ -800,7 +800,7 @@ def test_delete_annotation_job(client):
         "/annotation-tasks",
         json={
             "name": f"t-{uuid.uuid4().hex[:6]}",
-            "type": "llm",
+            "type": "conversation-turn",
             "evaluator_ids": [llm_ev["uuid"]],
         },
         headers=h,
@@ -854,7 +854,7 @@ def test_delete_annotation_job(client):
         "/annotation-tasks",
         json={
             "name": f"t-{uuid.uuid4().hex[:6]}",
-            "type": "llm",
+            "type": "conversation-turn",
             "evaluator_ids": [llm_ev["uuid"]],
         },
         headers=h,
@@ -914,7 +914,7 @@ def test_bulk_delete_annotation_jobs(client):
         "/annotation-tasks",
         json={
             "name": f"t-{uuid.uuid4().hex[:6]}",
-            "type": "llm",
+            "type": "conversation-turn",
             "evaluator_ids": [llm_ev["uuid"]],
         },
         headers=h,
@@ -968,7 +968,7 @@ def test_bulk_delete_annotation_jobs(client):
         "/annotation-tasks",
         json={
             "name": f"t-{uuid.uuid4().hex[:6]}",
-            "type": "llm",
+            "type": "conversation-turn",
             "evaluator_ids": [llm_ev["uuid"]],
         },
         headers=h,
@@ -1040,7 +1040,7 @@ def test_annotated_check(client):
         "/annotation-tasks",
         json={
             "name": f"t-{uuid.uuid4().hex[:6]}",
-            "type": "llm",
+            "type": "conversation-turn",
             "evaluator_ids": [llm_ev["uuid"]],
         },
         headers=h,
@@ -1225,7 +1225,7 @@ def test_annotation_task_agreement_and_summary(client):
         "/annotation-tasks",
         json={
             "name": f"t-{uuid.uuid4().hex[:6]}",
-            "type": "llm",
+            "type": "conversation-turn",
             "evaluator_ids": [llm_ev["uuid"]],
         },
         headers=h,
@@ -1316,7 +1316,7 @@ def test_summary_surfaces_item_comments(client):
         "/annotation-tasks",
         json={
             "name": f"t-{uuid.uuid4().hex[:6]}",
-            "type": "llm",
+            "type": "conversation-turn",
             "evaluator_ids": [llm_ev["uuid"]],
         },
         headers=h,
@@ -1476,7 +1476,7 @@ def test_summary_drops_comments_from_soft_deleted_annotator(client):
         "/annotation-tasks",
         json={
             "name": f"t-{uuid.uuid4().hex[:6]}",
-            "type": "llm",
+            "type": "conversation-turn",
             "evaluator_ids": [llm_ev["uuid"]],
         },
         headers=h,
@@ -1568,7 +1568,7 @@ def test_summary_comment_cleared_in_newer_job_wipes_older(client):
         "/annotation-tasks",
         json={
             "name": f"t-{uuid.uuid4().hex[:6]}",
-            "type": "llm",
+            "type": "conversation-turn",
             "evaluator_ids": [llm_ev["uuid"]],
         },
         headers=h,
@@ -1666,7 +1666,7 @@ def test_evaluator_runs_endpoints(client, monkeypatch):
         "/annotation-tasks",
         json={
             "name": f"t-{uuid.uuid4().hex[:6]}",
-            "type": "llm",
+            "type": "conversation-turn",
             "evaluator_ids": [llm_ev["uuid"]],
         },
         headers=h,
@@ -1790,7 +1790,7 @@ def test_annotation_task_summary_pagination(client):
         "/annotation-tasks",
         json={
             "name": f"t-{uuid.uuid4().hex[:6]}",
-            "type": "llm",
+            "type": "conversation-turn",
             "evaluator_ids": [llm_ev["uuid"]],
         },
         headers=h,
@@ -1867,7 +1867,7 @@ def test_annotation_task_summary_search(client):
         "/annotation-tasks",
         json={
             "name": f"t-{uuid.uuid4().hex[:6]}",
-            "type": "llm",
+            "type": "conversation-turn",
             "evaluator_ids": [llm_ev["uuid"]],
         },
         headers=h,
@@ -1942,7 +1942,7 @@ def test_annotation_task_summary_sort(client):
         "/annotation-tasks",
         json={
             "name": f"t-{uuid.uuid4().hex[:6]}",
-            "type": "llm",
+            "type": "conversation-turn",
             "evaluator_ids": [llm_ev["uuid"]],
         },
         headers=h,
@@ -2041,7 +2041,7 @@ def test_summary_item_comments_scoped_to_page(client):
         "/annotation-tasks",
         json={
             "name": f"t-{uuid.uuid4().hex[:6]}",
-            "type": "llm",
+            "type": "conversation-turn",
             "evaluator_ids": [llm_ev["uuid"]],
         },
         headers=h,

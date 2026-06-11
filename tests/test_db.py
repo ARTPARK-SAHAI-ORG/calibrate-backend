@@ -73,6 +73,31 @@ def test_simulation_to_conversation_migration():
     assert task_type == "conversation"
 
 
+def test_llm_to_conversation_turn_migration():
+    """init_db() converts the legacy annotation-task `type` value `llm` to
+    `conversation-turn`. The row is inserted raw to bypass the API-layer
+    validator that now rejects the old value."""
+    user_uuid = db.create_user("L", "T", _u("llmmig") + "@example.com")
+    task_uuid = _uuid.uuid4().hex
+    with db.get_db_connection() as conn:
+        cur = conn.cursor()
+        cur.execute(
+            "INSERT INTO annotation_tasks (uuid, user_id, name, type) "
+            "VALUES (?, ?, ?, 'llm')",
+            (task_uuid, user_uuid, _u("legacy-llm-task")),
+        )
+        conn.commit()
+
+    db.init_db()  # idempotent — runs the rename migration
+
+    with db.get_db_connection() as conn:
+        cur = conn.cursor()
+        task_type = cur.execute(
+            "SELECT type FROM annotation_tasks WHERE uuid = ?", (task_uuid,)
+        ).fetchone()[0]
+    assert task_type == "conversation-turn"
+
+
 def test_legacy_api_keys_table_is_dropped_and_recreated():
     """init_db() drops a legacy user-scoped `api_keys` table (the abandoned
     `user_id` shape, no `org_uuid`) and recreates the current org-scoped one,
@@ -858,7 +883,7 @@ def test_annotation_pipeline(user):
     task_uuid = db.create_annotation_task(
         name=_u("anno-task"),
         user_id=user["uuid"], org_uuid=user["org_uuid"],
-        type="llm",
+        type="conversation-turn",
         description="d",
     )
     assert db.get_annotation_task(task_uuid)["item_count"] == 0
@@ -869,7 +894,7 @@ def test_annotation_pipeline(user):
     assert db.get_annotation_tasks_by_uuids([None]) == {}  # type: ignore[arg-type]
 
     with pytest.raises(ValueError):
-        db.create_annotation_task(name="x", org_uuid=None, type="llm")
+        db.create_annotation_task(name="x", org_uuid=None, type="conversation-turn")
     with pytest.raises(ValueError):
         db.create_annotation_task(name="x", user_id=user["uuid"], org_uuid=user["org_uuid"], type="bogus")
 

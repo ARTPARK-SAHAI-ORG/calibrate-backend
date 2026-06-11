@@ -292,7 +292,7 @@ def test_cross_org_cannot_see_annotation_tasks(client):
     b = _signup(client)
     task = client.post(
         "/annotation-tasks",
-        json={"name": f"t-{uuid.uuid4().hex[:6]}", "type": "llm"},
+        json={"name": f"t-{uuid.uuid4().hex[:6]}", "type": "conversation-turn"},
         headers=a["headers"],
     ).json()
     assert (

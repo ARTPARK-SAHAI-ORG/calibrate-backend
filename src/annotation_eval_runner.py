@@ -105,7 +105,7 @@ ANNOTATION_EVAL_JOB_TYPE = "annotation-eval"
 # --eval-only modes. `tts` is omitted because annotation tasks don't store
 # audio S3 keys today; `voice` simulation isn't supported by the CLI in
 # eval-only mode.
-SUPPORTED_EVAL_TASK_TYPES = ("stt", "llm", "conversation")
+SUPPORTED_EVAL_TASK_TYPES = ("stt", "conversation-turn", "conversation")
 
 logger = logging.getLogger(__name__)
 
@@ -384,13 +384,13 @@ def build_dataset_for_task_type(
 ) -> List[Dict[str, Any]]:
     if task_type == "stt":
         return _build_stt_dataset(items)
-    if task_type == "llm":
+    if task_type == "conversation-turn":
         return _build_llm_dataset(items, evaluators_resolved)
     if task_type == "conversation":
         return _build_simulation_dataset(items)
     raise DatasetBuildError(
         f"Evaluator runs are not supported for task type {task_type!r} "
-        "(supported: stt, llm, conversation)"
+        "(supported: stt, conversation-turn, conversation)"
     )
 
 
@@ -404,7 +404,7 @@ def calibrate_command_for_task_type(
             "-o", str(output_dir),
             "--config", str(config_path),
         ]
-    if task_type == "llm":
+    if task_type == "conversation-turn":
         return [
             "calibrate", "llm",
             "-c", str(config_path),
@@ -759,7 +759,7 @@ def parse_results_for_task_type(
     annotation_item.uuid via `dataset_map.json` + this list."""
     if task_type == "stt":
         return _parse_results_stt(output_dir, evaluators_resolved, job_uuid)
-    if task_type == "llm":
+    if task_type == "conversation-turn":
         return _parse_results_llm(output_dir, evaluators_resolved, job_uuid)
     if task_type == "conversation":
         return _parse_results_simulation(
@@ -1021,13 +1021,13 @@ def _run_job(
             with open(dataset_path, "w", encoding="utf-8") as f:
                 json.dump(dataset, f, ensure_ascii=False)
 
-            # 2. Config (evaluators only). For LLM tasks, leave {{variable}}
-            # placeholders unrendered so calibrate substitutes per-test
-            # `criteria[].arguments` from each item's `evaluator_variables`.
-            # STT/simulation flows have no per-row arguments mechanism, so we
-            # pre-render the evaluator's own `variable_values` (typically empty
-            # in the annotation flow).
-            if task_type == "llm":
+            # 2. Config (evaluators only). For conversation-turn tasks, leave
+            # {{variable}} placeholders unrendered so calibrate substitutes
+            # per-test `criteria[].arguments` from each item's
+            # `evaluator_variables`. STT/simulation flows have no per-row
+            # arguments mechanism, so we pre-render the evaluator's own
+            # `variable_values` (typically empty in the annotation flow).
+            if task_type == "conversation-turn":
                 evaluator_payload = build_evaluator_cli_payload_unrendered(
                     evaluators_resolved
                 )
