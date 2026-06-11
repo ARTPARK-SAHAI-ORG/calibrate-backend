@@ -52,13 +52,24 @@ def test_parse_agent_test_results():
     data = [
         {
             "test_case_id": "t1",
-            "output": {"response": "hi", "tool_calls": None},
+            # cost is nested in output; latency_ms is top-level on the result object
+            "output": {"response": "hi", "tool_calls": None, "cost": 0.000942},
             "metrics": {"passed": True, "reasoning": "ok"},
             "test_case": {"name": "T1", "id": "t1"},
+            "latency_ms": 842,
         }
     ]
     out = _parse_agent_test_results(data)
     assert out[0]["passed"] is True
+    assert out[0]["latency_ms"] == 842
+    assert out[0]["cost"] == 0.000942
+
+    # Eval-only / older rows without latency or cost: keys present, values None
+    no_metrics = _parse_agent_test_results(
+        [{"output": {}, "metrics": {"passed": False}, "test_case": {"name": "T2"}}]
+    )
+    assert no_metrics[0]["latency_ms"] is None
+    assert no_metrics[0]["cost"] is None
 
     assert _parse_agent_test_results(None) == []
     assert _parse_agent_test_results("not-a-list") == []
@@ -88,6 +99,39 @@ def test_parse_agent_test_results_preserves_tool_call_output():
     ]
     out = _parse_agent_test_results(data)
     assert out[0]["output"]["tool_calls"][0]["output"] == {"temp": 72}
+
+
+def test_test_case_result_accepts_fractional_latency():
+    """External agent-connection tests self-report `metrics.latency_ms` verbatim,
+    which may be a float (e.g. 1955.7) — the model must not reject it as a
+    non-integer. Regression for a ValidationError when latency_ms was Optional[int]."""
+    from routers.agent_tests import TestCaseResult
+
+    r = TestCaseResult.model_validate({"name": "T1", "latency_ms": 1955.7, "cost": 0.0021})
+    assert r.latency_ms == 1955.7
+    # Integers still validate fine.
+    assert TestCaseResult.model_validate({"latency_ms": 842}).latency_ms == 842
+
+
+def test_perf_aggregate_means_accept_floats():
+    """Aggregate blocks are Dict[str, Any], so a fractional `mean` (e.g.
+    total_tokens averaged over runs) must validate, not be coerced/rejected."""
+    from routers.agent_tests import TestRunStatusResponse, ModelResult
+
+    resp = TestRunStatusResponse(
+        task_id="t",
+        status="done",
+        total_tokens={"mean": 4378.5, "min": 4369, "max": 4387, "count": 2},
+        latency_ms={"mean": 1955.7, "min": 1851.0, "max": 2060.4, "count": 2},
+    )
+    assert resp.total_tokens["mean"] == 4378.5
+    assert resp.latency_ms["mean"] == 1955.7
+
+    mr = ModelResult(
+        model="m", message="ok",
+        total_tokens={"mean": 4378.5, "min": 4369, "max": 4387, "count": 2},
+    )
+    assert mr.total_tokens["mean"] == 4378.5
 
 
 def test_tool_call_output_model_surfaces_output():
@@ -554,6 +598,96 @@ def test_build_evaluator_summary():
     assert any(e["type"] == "rating" for e in out)
 
 
+def test_update_agent_test_intermediate_results_stores_perf_aggregates(tmp_path):
+    """The aggregated latency_ms/cost/total_tokens blocks from metrics.json must
+    land in the unit-test job results, and the per-case values must ride on each
+    row (latency top-level, cost nested in output)."""
+    from routers.agent_tests import _update_agent_test_intermediate_results
+    from db import create_agent_test_job, get_agent_test_job
+
+    job_id = create_agent_test_job(agent_id="agent-x", job_type="llm-unit-test")
+
+    (tmp_path / "results.json").write_text(
+        json.dumps(
+            [
+                {
+                    "output": {"response": "hi", "cost": 0.000942},
+                    "metrics": {"passed": True},
+                    "test_case": {"name": "T1"},
+                    "latency_ms": 842,
+                }
+            ]
+        )
+    )
+    (tmp_path / "metrics.json").write_text(
+        json.dumps(
+            {
+                "total": 1,
+                "passed": 1,
+                "latency_ms": {"mean": 842, "min": 842, "max": 842, "count": 1},
+                "cost": {"mean": 0.000942, "min": 0.000942, "max": 0.000942, "count": 1},
+                # Fractional mean: per-run tokens are ints but the aggregate mean
+                # can be a float — it must round-trip, not be coerced to int.
+                "total_tokens": {"mean": 4378.0, "min": 4369, "max": 4387, "count": 2},
+            }
+        )
+    )
+
+    _update_agent_test_intermediate_results(job_id, tmp_path, ["T1"])
+
+    results = get_agent_test_job(job_id)["results"]
+    assert results["latency_ms"] == {"mean": 842, "min": 842, "max": 842, "count": 1}
+    assert results["cost"]["mean"] == 0.000942
+    assert results["total_tokens"] == {"mean": 4378.0, "min": 4369, "max": 4387, "count": 2}
+    assert results["test_results"][0]["latency_ms"] == 842
+    assert results["test_results"][0]["cost"] == 0.000942
+
+
+def test_update_benchmark_intermediate_results_stores_per_model_perf_aggregates(tmp_path):
+    """Each completed model's aggregated latency_ms/cost/total_tokens ride on its
+    model_results entry."""
+    from routers.agent_tests import _update_benchmark_intermediate_results
+    from db import create_agent_test_job, get_agent_test_job
+
+    job_id = create_agent_test_job(agent_id="agent-y", job_type="llm-benchmark")
+
+    model_dir = tmp_path / "gpt-4o"
+    model_dir.mkdir()
+    (model_dir / "results.json").write_text(
+        json.dumps(
+            [
+                {
+                    "output": {"response": "hi", "cost": 0.0021},
+                    "metrics": {"passed": True},
+                    "test_case": {"name": "T1"},
+                    "latency_ms": 500,
+                }
+            ]
+        )
+    )
+    (model_dir / "metrics.json").write_text(
+        json.dumps(
+            {
+                "total": 1,
+                "passed": 1,
+                "latency_ms": {"mean": 500, "min": 500, "max": 500, "count": 1},
+                "cost": {"mean": 0.0021, "min": 0.0021, "max": 0.0021, "count": 1},
+                "total_tokens": {"mean": 4378, "min": 4369, "max": 4387, "count": 2},
+            }
+        )
+    )
+
+    _update_benchmark_intermediate_results(job_id, tmp_path, ["gpt-4o"], ["T1"])
+
+    model_results = get_agent_test_job(job_id)["results"]["model_results"]
+    completed = next(m for m in model_results if m["model"] == "gpt-4o")
+    assert completed["latency_ms"] == {"mean": 500, "min": 500, "max": 500, "count": 1}
+    assert completed["cost"]["mean"] == 0.0021
+    assert completed["total_tokens"] == {"mean": 4378, "min": 4369, "max": 4387, "count": 2}
+    assert completed["test_results"][0]["latency_ms"] == 500
+    assert completed["test_results"][0]["cost"] == 0.0021
+
+
 def test_calibrate_config_from_agent_test_job_stored():
     """If stored calibrate_config is on the job, it's reused."""
     from routers.agent_tests import _calibrate_config_from_agent_test_job
@@ -572,6 +706,8 @@ def test_pending_test_case_result_placeholder():
     out = _pending_test_case_result_placeholder("t1")
     assert out["name"] == "t1"
     assert out["passed"] is None
+    assert out["latency_ms"] is None
+    assert out["cost"] is None
 
 
 def test_get_evaluator_cached_for_enrichment():

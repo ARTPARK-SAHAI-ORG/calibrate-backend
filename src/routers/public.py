@@ -120,6 +120,13 @@ class PublicTestRunResponse(BaseModel):
     # `evaluator_uuid` so the rubric isn't duplicated per test case.
     evaluators: Optional[List[Dict[str, Any]]] = None
     results: Optional[List[Dict[str, Any]]] = None
+    # Aggregated latency/cost/total_tokens: {mean, min, max, count}. Values are
+    # `Any` — don't assume int: total_tokens is per-run an int but its aggregate
+    # `mean` can be fractional. None when calibrate omits it (eval-only / no cost
+    # or token usage reported).
+    latency_ms: Optional[Dict[str, Any]] = None
+    cost: Optional[Dict[str, Any]] = None
+    total_tokens: Optional[Dict[str, Any]] = None
     error: bool = False
 
 
@@ -526,6 +533,9 @@ async def get_public_test_run(share_token: str):
         failed=results.get("failed"),
         evaluators=evaluators_block or None,
         results=results.get("test_results"),
+        latency_ms=results.get("latency_ms"),
+        cost=results.get("cost"),
+        total_tokens=results.get("total_tokens"),
         error=bool(results.get("error")),
     )
 

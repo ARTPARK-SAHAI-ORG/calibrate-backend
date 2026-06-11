@@ -272,6 +272,16 @@ class TestCaseResult(BaseModel):
     # Per-evaluator verdicts for response-type tests; None for tool-call tests or
     # in-progress rows. Names reflect the current DB value (refreshed on each read).
     judge_results: Optional[List[JudgeResult]] = None
+    # Response-generation latency for this case in milliseconds (the agent under
+    # test, not the judge). Present only for live runs; None for in-progress rows
+    # and eval-only runs (no inference happened). Float, not int: calibrate rounds
+    # internal-model latency to a whole number, but external agent-connection tests
+    # self-report `metrics.latency_ms` verbatim and may send a fractional value.
+    latency_ms: Optional[float] = None
+    # Per-case cost in USD, lifted from calibrate's nested `output.cost` (NOT a
+    # top-level sibling of latency_ms — cost lives inside `output`). None when the
+    # provider/agent reports none (e.g. --provider openai, or no `metrics.cost`).
+    cost: Optional[float] = None
 
 
 class TestRunStatusResponse(BaseModel):
@@ -280,6 +290,16 @@ class TestRunStatusResponse(BaseModel):
     total_tests: Optional[int] = None
     passed: Optional[int] = None
     failed: Optional[int] = None
+    # Aggregated response-generation latency across cases: {mean, min, max, count}
+    # (millisecond ints). Omitted by calibrate for eval-only runs, so None then.
+    latency_ms: Optional[Dict[str, Any]] = None
+    # Aggregated cost across cases: {mean, min, max, count} (USD floats). Omitted
+    # by calibrate when no case reported a cost (e.g. openai provider), so None.
+    cost: Optional[Dict[str, Any]] = None
+    # Aggregated total token usage across cases: {mean, min, max, count}. Per-run
+    # token counts are ints but the aggregate `mean` can be fractional — values are
+    # `Any`, so don't assume int. Omitted by calibrate when no case reported usage.
+    total_tokens: Optional[Dict[str, Any]] = None
     # Top-level evaluator block — name/description/output_type/rubric
     # shared across every judge_results row. Per-row entries reference
     # back via `evaluator_uuid` so the rubric isn't duplicated per test.
@@ -304,6 +324,11 @@ class AgentTestRunListItem(BaseModel):
     passed: Optional[int] = None
     failed: Optional[int] = None
     results: Optional[List[TestCaseResult]] = None
+    # Aggregated latency/cost/total_tokens for unit-test runs (see
+    # TestRunStatusResponse). None for benchmarks (per-model on model_results).
+    latency_ms: Optional[Dict[str, Any]] = None
+    cost: Optional[Dict[str, Any]] = None
+    total_tokens: Optional[Dict[str, Any]] = None
     # Benchmark results (for llm-benchmark type)
     model_results: Optional[List[Dict[str, Any]]] = None
     leaderboard_summary: Optional[List[Dict[str, Any]]] = None
@@ -383,6 +408,61 @@ async def get_agent_tests_endpoint(agent_uuid: str):
     return tests
 
 
+def _build_agent_test_run_item_fields(job: Dict[str, Any], name: str) -> Dict[str, Any]:
+    """Shared field mapping for the run-list item models (``AgentTestRunListItem``
+    and its ``GlobalTestRunListItem`` subclass).
+
+    Runs evaluator enrichment on the stored test/model results, builds the shared
+    top-level ``evaluators`` block, and maps job + results into the common kwargs
+    both endpoints need. Callers spread the result and append any model-specific
+    fields (e.g. ``agent_id``/``agent_name`` for the global view). Keeping this in
+    one place means new result fields (latency/cost/tokens, …) are wired once.
+    """
+    job_results = job.get("results") or {}
+    job_details = job.get("details") or {}
+    evaluators_snapshot = job_details.get("evaluators_by_test_id") or {}
+
+    # Refresh evaluator names + uuids on per-row judge_results before serializing
+    evaluator_cache: Dict[str, Optional[Dict[str, Any]]] = {}
+    _enrich_test_results_with_evaluators(
+        job_results.get("test_results"), evaluators_snapshot, evaluator_cache
+    )
+    _enrich_model_results_with_evaluators(
+        job_results.get("model_results"), evaluators_snapshot, evaluator_cache
+    )
+    evaluators_block = _build_evaluators_block_for_test_run(
+        evaluators_snapshot,
+        test_results=job_results.get("test_results"),
+        model_results=job_results.get("model_results"),
+        evaluator_cache=evaluator_cache,
+    )
+
+    return {
+        "uuid": job["uuid"],
+        "name": name,
+        "status": job["status"],
+        "type": job.get("type", ""),
+        "updated_at": job.get("updated_at", job.get("created_at", "")),
+        "evaluators": evaluators_block or None,
+        # Unit test results
+        "total_tests": job_results.get("total_tests"),
+        "passed": job_results.get("passed"),
+        "failed": job_results.get("failed"),
+        "latency_ms": job_results.get("latency_ms"),
+        "cost": job_results.get("cost"),
+        "total_tokens": job_results.get("total_tokens"),
+        "results": job_results.get("test_results"),
+        # Benchmark results
+        "model_results": job_results.get("model_results"),
+        "leaderboard_summary": job_results.get("leaderboard_summary"),
+        # Common fields
+        "results_s3_prefix": job_results.get("results_s3_prefix"),
+        "error": bool(job_results.get("error")),
+        "is_public": bool(job.get("is_public")),
+        "share_token": job.get("share_token"),
+    }
+
+
 @router.get("/agent/{agent_uuid}/runs", response_model=AgentTestRunsResponse)
 async def get_agent_test_runs(agent_uuid: str):
     """
@@ -414,53 +494,8 @@ async def get_agent_test_runs(agent_uuid: str):
         else:
             name = f"Job {len(runs) + 1}"
 
-        # Extract results from job
-        job_results = job.get("results") or {}
-        job_details = job.get("details") or {}
-        evaluators_snapshot = (
-            job_details.get("evaluators_by_test_id")
-            or {}
-        )
-
-        # Refresh evaluator names + uuids on per-row judge_results before serializing
-        _evaluator_cache: Dict[str, Optional[Dict[str, Any]]] = {}
-        _enrich_test_results_with_evaluators(
-            job_results.get("test_results"),
-            evaluators_snapshot,
-            _evaluator_cache,
-        )
-        _enrich_model_results_with_evaluators(
-            job_results.get("model_results"),
-            evaluators_snapshot,
-            _evaluator_cache,
-        )
-        evaluators_block = _build_evaluators_block_for_test_run(
-            evaluators_snapshot,
-            test_results=job_results.get("test_results"),
-            model_results=job_results.get("model_results"),
-            evaluator_cache=_evaluator_cache,
-        )
-
         run_item = AgentTestRunListItem(
-            uuid=job["uuid"],
-            name=name,
-            status=job["status"],
-            type=job_type,
-            updated_at=job.get("updated_at", job.get("created_at", "")),
-            evaluators=evaluators_block or None,
-            # Unit test results
-            total_tests=job_results.get("total_tests"),
-            passed=job_results.get("passed"),
-            failed=job_results.get("failed"),
-            results=job_results.get("test_results"),
-            # Benchmark results
-            model_results=job_results.get("model_results"),
-            leaderboard_summary=job_results.get("leaderboard_summary"),
-            # Common fields
-            results_s3_prefix=job_results.get("results_s3_prefix"),
-            error=bool(job_results.get("error")),
-            is_public=bool(job.get("is_public")),
-            share_token=job.get("share_token"),
+            **_build_agent_test_run_item_fields(job, name)
         )
         runs.append(run_item)
 
@@ -508,52 +543,8 @@ async def get_all_test_runs_for_user(
 
     runs = []
     for job in jobs:  # already newest-first
-        job_results = job.get("results") or {}
-        job_details = job.get("details") or {}
-        evaluators_snapshot = (
-            job_details.get("evaluators_by_test_id")
-            or {}
-        )
-
-        # Refresh evaluator names + uuids on per-row judge_results before serializing
-        _evaluator_cache: Dict[str, Optional[Dict[str, Any]]] = {}
-        _enrich_test_results_with_evaluators(
-            job_results.get("test_results"),
-            evaluators_snapshot,
-            _evaluator_cache,
-        )
-        _enrich_model_results_with_evaluators(
-            job_results.get("model_results"),
-            evaluators_snapshot,
-            _evaluator_cache,
-        )
-        evaluators_block = _build_evaluators_block_for_test_run(
-            evaluators_snapshot,
-            test_results=job_results.get("test_results"),
-            model_results=job_results.get("model_results"),
-            evaluator_cache=_evaluator_cache,
-        )
-
         run_item = GlobalTestRunListItem(
-            uuid=job["uuid"],
-            name=name_map[job["uuid"]],
-            status=job["status"],
-            type=job.get("type", ""),
-            updated_at=job.get("updated_at", job.get("created_at", "")),
-            evaluators=evaluators_block or None,
-            # Unit test fields
-            total_tests=job_results.get("total_tests"),
-            passed=job_results.get("passed"),
-            failed=job_results.get("failed"),
-            results=job_results.get("test_results"),
-            # Benchmark fields
-            model_results=job_results.get("model_results"),
-            leaderboard_summary=job_results.get("leaderboard_summary"),
-            # Common fields
-            results_s3_prefix=job_results.get("results_s3_prefix"),
-            error=bool(job_results.get("error")),
-            is_public=bool(job.get("is_public")),
-            share_token=job.get("share_token"),
+            **_build_agent_test_run_item_fields(job, name_map[job["uuid"]]),
             # Agent identity (global-only fields)
             agent_id=job.get("agent_id", ""),
             agent_name=job.get("agent_name", ""),
@@ -997,6 +988,12 @@ def _parse_agent_test_results(results_data: Optional[List[dict]]) -> List[dict]:
                 },
                 "test_case": test_case,
                 "judge_results": metrics.get("judge_results"),
+                # latency_ms is top-level on the calibrate result object (sibling of
+                # output/metrics); cost is nested inside output. Different depths by
+                # design — see CLAUDE.md. We lift cost up so the API surfaces both
+                # symmetrically. Both present only for live runs (None otherwise).
+                "latency_ms": r.get("latency_ms"),
+                "cost": output_data.get("cost"),
             }
         )
     return test_results
@@ -1012,6 +1009,8 @@ def _pending_test_case_result_placeholder(name: str) -> Dict[str, Any]:
         "output": None,
         "test_case": None,
         "judge_results": None,
+        "latency_ms": None,
+        "cost": None,
     }
 
 
@@ -1510,6 +1509,11 @@ def _update_agent_test_intermediate_results(
                 if metrics_data
                 else None
             ),
+            "latency_ms": metrics_data.get("latency_ms") if metrics_data else None,
+            "cost": metrics_data.get("cost") if metrics_data else None,
+            "total_tokens": (
+                metrics_data.get("total_tokens") if metrics_data else None
+            ),
             "test_results": intermediate_results,
         },
     )
@@ -1714,11 +1718,17 @@ def run_llm_test_task(
                 total_tests = 0
                 passed = 0
                 failed = 0
+                latency_ms = None
+                cost = None
+                total_tokens = None
 
                 if metrics_data and isinstance(metrics_data, dict):
                     total_tests = metrics_data.get("total", 0)
                     passed = metrics_data.get("passed", 0)
                     failed = total_tests - passed
+                    latency_ms = metrics_data.get("latency_ms")
+                    cost = metrics_data.get("cost")
+                    total_tokens = metrics_data.get("total_tokens")
                 elif results_data:
                     # Compute from results if metrics.json not found
                     total_tests = len(results_data)
@@ -1746,6 +1756,9 @@ def run_llm_test_task(
                         "total_tests": total_tests,
                         "passed": passed,
                         "failed": failed,
+                        "latency_ms": latency_ms,
+                        "cost": cost,
+                        "total_tokens": total_tokens,
                         "test_results": test_results,
                         "results_s3_prefix": results_prefix,
                         "error": None,
@@ -2188,6 +2201,9 @@ async def get_agent_test_run_status(
         total_tests=results.get("total_tests"),
         passed=results.get("passed"),
         failed=results.get("failed"),
+        latency_ms=results.get("latency_ms"),
+        cost=results.get("cost"),
+        total_tokens=results.get("total_tokens"),
         evaluators=evaluators_block or None,
         results=results.get("test_results"),
         results_s3_prefix=results.get("results_s3_prefix"),
@@ -2213,6 +2229,14 @@ class ModelResult(BaseModel):
     failed: Optional[int] = None
     evaluator_summary: Optional[List[Dict[str, Any]]] = None
     test_results: Optional[List[Dict[str, Any]]] = None
+    # Aggregated latency/cost/total_tokens for this model: {mean, min, max, count}.
+    # Values are `Any` — don't assume int: even total_tokens (per-run an int) has a
+    # fractional `mean`, and latency/cost are floats. Lets the frontend compare
+    # models on latency, cost, and token usage. None when calibrate omits it
+    # (eval-only / openai provider) or before this model's metrics are ready.
+    latency_ms: Optional[Dict[str, Any]] = None
+    cost: Optional[Dict[str, Any]] = None
+    total_tokens: Optional[Dict[str, Any]] = None
 
 
 class BenchmarkStatusResponse(BaseModel):
@@ -2289,6 +2313,9 @@ def _update_benchmark_intermediate_results(
                         "passed": passed,
                         "failed": total - passed,
                         "evaluator_summary": evaluator_summary,
+                        "latency_ms": metrics_data.get("latency_ms"),
+                        "cost": metrics_data.get("cost"),
+                        "total_tokens": metrics_data.get("total_tokens"),
                         "test_results": merged,
                     }
                 )
@@ -2552,6 +2579,9 @@ def run_benchmark_task(
                                     passed=passed,
                                     failed=total - passed,
                                     evaluator_summary=evaluator_summary,
+                                    latency_ms=metrics_data.get("latency_ms"),
+                                    cost=metrics_data.get("cost"),
+                                    total_tokens=metrics_data.get("total_tokens"),
                                     test_results=test_results,
                                 )
                             )
