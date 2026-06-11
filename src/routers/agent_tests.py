@@ -272,6 +272,14 @@ class TestCaseResult(BaseModel):
     # Per-evaluator verdicts for response-type tests; None for tool-call tests or
     # in-progress rows. Names reflect the current DB value (refreshed on each read).
     judge_results: Optional[List[JudgeResult]] = None
+    # Response-generation latency for this case in milliseconds (the agent under
+    # test, not the judge). Present only for live runs; None for in-progress rows
+    # and eval-only runs (no inference happened).
+    latency_ms: Optional[int] = None
+    # Per-case cost in USD, lifted from calibrate's nested `output.cost` (NOT a
+    # top-level sibling of latency_ms — cost lives inside `output`). None when the
+    # provider/agent reports none (e.g. --provider openai, or no `metrics.cost`).
+    cost: Optional[float] = None
 
 
 class TestRunStatusResponse(BaseModel):
@@ -280,6 +288,12 @@ class TestRunStatusResponse(BaseModel):
     total_tests: Optional[int] = None
     passed: Optional[int] = None
     failed: Optional[int] = None
+    # Aggregated response-generation latency across cases: {mean, min, max, count}
+    # (millisecond ints). Omitted by calibrate for eval-only runs, so None then.
+    latency_ms: Optional[Dict[str, Any]] = None
+    # Aggregated cost across cases: {mean, min, max, count} (USD floats). Omitted
+    # by calibrate when no case reported a cost (e.g. openai provider), so None.
+    cost: Optional[Dict[str, Any]] = None
     # Top-level evaluator block — name/description/output_type/rubric
     # shared across every judge_results row. Per-row entries reference
     # back via `evaluator_uuid` so the rubric isn't duplicated per test.
@@ -304,6 +318,10 @@ class AgentTestRunListItem(BaseModel):
     passed: Optional[int] = None
     failed: Optional[int] = None
     results: Optional[List[TestCaseResult]] = None
+    # Aggregated latency/cost for unit-test runs (see TestRunStatusResponse).
+    # None for benchmarks (per-model on model_results instead).
+    latency_ms: Optional[Dict[str, Any]] = None
+    cost: Optional[Dict[str, Any]] = None
     # Benchmark results (for llm-benchmark type)
     model_results: Optional[List[Dict[str, Any]]] = None
     leaderboard_summary: Optional[List[Dict[str, Any]]] = None
@@ -452,6 +470,8 @@ async def get_agent_test_runs(agent_uuid: str):
             total_tests=job_results.get("total_tests"),
             passed=job_results.get("passed"),
             failed=job_results.get("failed"),
+            latency_ms=job_results.get("latency_ms"),
+            cost=job_results.get("cost"),
             results=job_results.get("test_results"),
             # Benchmark results
             model_results=job_results.get("model_results"),
@@ -545,6 +565,8 @@ async def get_all_test_runs_for_user(
             total_tests=job_results.get("total_tests"),
             passed=job_results.get("passed"),
             failed=job_results.get("failed"),
+            latency_ms=job_results.get("latency_ms"),
+            cost=job_results.get("cost"),
             results=job_results.get("test_results"),
             # Benchmark fields
             model_results=job_results.get("model_results"),
@@ -997,6 +1019,12 @@ def _parse_agent_test_results(results_data: Optional[List[dict]]) -> List[dict]:
                 },
                 "test_case": test_case,
                 "judge_results": metrics.get("judge_results"),
+                # latency_ms is top-level on the calibrate result object (sibling of
+                # output/metrics); cost is nested inside output. Different depths by
+                # design — see CLAUDE.md. We lift cost up so the API surfaces both
+                # symmetrically. Both present only for live runs (None otherwise).
+                "latency_ms": r.get("latency_ms"),
+                "cost": output_data.get("cost"),
             }
         )
     return test_results
@@ -1012,6 +1040,8 @@ def _pending_test_case_result_placeholder(name: str) -> Dict[str, Any]:
         "output": None,
         "test_case": None,
         "judge_results": None,
+        "latency_ms": None,
+        "cost": None,
     }
 
 
@@ -1510,6 +1540,8 @@ def _update_agent_test_intermediate_results(
                 if metrics_data
                 else None
             ),
+            "latency_ms": metrics_data.get("latency_ms") if metrics_data else None,
+            "cost": metrics_data.get("cost") if metrics_data else None,
             "test_results": intermediate_results,
         },
     )
@@ -1714,11 +1746,15 @@ def run_llm_test_task(
                 total_tests = 0
                 passed = 0
                 failed = 0
+                latency_ms = None
+                cost = None
 
                 if metrics_data and isinstance(metrics_data, dict):
                     total_tests = metrics_data.get("total", 0)
                     passed = metrics_data.get("passed", 0)
                     failed = total_tests - passed
+                    latency_ms = metrics_data.get("latency_ms")
+                    cost = metrics_data.get("cost")
                 elif results_data:
                     # Compute from results if metrics.json not found
                     total_tests = len(results_data)
@@ -1746,6 +1782,8 @@ def run_llm_test_task(
                         "total_tests": total_tests,
                         "passed": passed,
                         "failed": failed,
+                        "latency_ms": latency_ms,
+                        "cost": cost,
                         "test_results": test_results,
                         "results_s3_prefix": results_prefix,
                         "error": None,
@@ -2188,6 +2226,8 @@ async def get_agent_test_run_status(
         total_tests=results.get("total_tests"),
         passed=results.get("passed"),
         failed=results.get("failed"),
+        latency_ms=results.get("latency_ms"),
+        cost=results.get("cost"),
         evaluators=evaluators_block or None,
         results=results.get("test_results"),
         results_s3_prefix=results.get("results_s3_prefix"),
@@ -2213,6 +2253,12 @@ class ModelResult(BaseModel):
     failed: Optional[int] = None
     evaluator_summary: Optional[List[Dict[str, Any]]] = None
     test_results: Optional[List[Dict[str, Any]]] = None
+    # Aggregated latency/cost for this model: {mean, min, max, count} (latency in
+    # ms ints, cost in USD floats). Lets the frontend compare models on latency
+    # and cost. None when calibrate omits it (eval-only / openai provider) or
+    # before this model's metrics are ready.
+    latency_ms: Optional[Dict[str, Any]] = None
+    cost: Optional[Dict[str, Any]] = None
 
 
 class BenchmarkStatusResponse(BaseModel):
@@ -2289,6 +2335,8 @@ def _update_benchmark_intermediate_results(
                         "passed": passed,
                         "failed": total - passed,
                         "evaluator_summary": evaluator_summary,
+                        "latency_ms": metrics_data.get("latency_ms"),
+                        "cost": metrics_data.get("cost"),
                         "test_results": merged,
                     }
                 )
@@ -2552,6 +2600,8 @@ def run_benchmark_task(
                                     passed=passed,
                                     failed=total - passed,
                                     evaluator_summary=evaluator_summary,
+                                    latency_ms=metrics_data.get("latency_ms"),
+                                    cost=metrics_data.get("cost"),
                                     test_results=test_results,
                                 )
                             )
