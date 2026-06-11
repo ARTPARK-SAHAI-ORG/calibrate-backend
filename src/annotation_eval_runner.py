@@ -355,9 +355,10 @@ def _validated_evaluator_variables(
 ) -> Dict[str, Any]:
     """Extract + validate an item's optional `evaluator_variables` map
     (`{evaluator_uuid: {var: value}}`). Shared by the `llm` and `llm-general`
-    dataset builders, which shape it differently downstream (the `llm` path
-    threads per-evaluator `criteria[].arguments`; `llm-general` merges into a
-    single flat per-row `arguments`)."""
+    dataset builders, which both resolve it per-evaluator via
+    `_criteria_refs_for_item` (the `llm` path threads them as
+    `criteria[].arguments`; `llm-general` reshapes them into a per-row
+    `arguments` object keyed by evaluator name)."""
     per_evaluator_vars = payload.get("evaluator_variables") or {}
     if not isinstance(per_evaluator_vars, dict):
         raise DatasetBuildError(
@@ -1134,7 +1135,8 @@ def _run_job(
             # 2. Config (evaluators only). For LLM + llm-general tasks, leave
             # {{variable}} placeholders unrendered so calibrate substitutes them
             # per row from each item's `evaluator_variables` (llm → per-test
-            # `criteria[].arguments`; general → the flat per-row `arguments`).
+            # `criteria[].arguments`; general → a per-row `arguments` object
+            # keyed by evaluator name).
             # STT/simulation flows have no per-row arguments mechanism, so we
             # pre-render the evaluator's own `variable_values` (typically empty
             # in the annotation flow).
