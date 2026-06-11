@@ -374,8 +374,8 @@ def run_tts_evaluation_task(
                 raw_evaluators = job_details.get("evaluators") or []
                 if raw_evaluators:
                     raw_evaluators = refresh_evaluators_to_live(raw_evaluators)
-                    new_details = {**job_details, "evaluators": raw_evaluators}
-                    update_job(task_id, details=new_details)
+                    # update_job merges details, so pass only the changed key.
+                    update_job(task_id, details={"evaluators": raw_evaluators})
                     evaluator_payload = build_evaluator_cli_payload(raw_evaluators)
                     config_path = temp_path / "config.json"
                     with open(config_path, "w", encoding="utf-8") as f:
