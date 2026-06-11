@@ -628,6 +628,55 @@ def test_get_evaluators_for_test_resolves_live_version(user):
     assert relinked[0]["version_number"] == 2
 
 
+def test_evaluator_variables_are_immutable_across_versions(user):
+    """Variable names are frozen after the first version. A new version must
+    declare the same variable name set; renaming/adding/removing one is rejected.
+    This guards the live-resolution path: a test's pinned variable_values must
+    always still fill the live prompt's {{placeholders}}."""
+    ev_uuid = db.create_evaluator(
+        name=_u("ev-immut"), owner_user_id=user["uuid"], org_uuid=user["org_uuid"]
+    )
+    db.create_evaluator_version(
+        ev_uuid,
+        judge_model="m",
+        system_prompt="Check {{criteria}}",
+        variables=[{"name": "criteria"}],
+    )
+
+    # Same name set → allowed (description/default may change).
+    v2 = db.create_evaluator_version(
+        ev_uuid,
+        judge_model="m",
+        system_prompt="Strictly check {{criteria}}",
+        variables=[{"name": "criteria", "description": "now with a description"}],
+    )
+    assert v2["version_number"] == 2
+
+    # Renamed variable → rejected.
+    with pytest.raises(ValueError, match="immutable"):
+        db.create_evaluator_version(
+            ev_uuid,
+            judge_model="m",
+            system_prompt="Check {{requirement}}",
+            variables=[{"name": "requirement"}],
+        )
+
+    # Added variable → rejected.
+    with pytest.raises(ValueError, match="immutable"):
+        db.create_evaluator_version(
+            ev_uuid,
+            judge_model="m",
+            system_prompt="Check {{criteria}} and {{extra}}",
+            variables=[{"name": "criteria"}, {"name": "extra"}],
+        )
+
+    # Removed all variables → rejected.
+    with pytest.raises(ValueError, match="immutable"):
+        db.create_evaluator_version(
+            ev_uuid, judge_model="m", system_prompt="Check it", variables=None
+        )
+
+
 def test_add_test_to_agent_restore_refreshes_created_at(user):
     """Re-adding a soft-deleted link reuses the row but refreshes created_at
     to now, so the re-added test sorts as recently-added rather than inheriting

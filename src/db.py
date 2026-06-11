@@ -4221,6 +4221,16 @@ def create_evaluator_version(
 
     `output_config` (the rubric — scale values/labels/descriptions/colors) is version-owned
     and validated against the parent evaluator's `output_type`.
+
+    Variables are IMMUTABLE across versions: a new version (2+) must declare the
+    exact same set of variable names (`{{placeholder}}`s) as the prior version,
+    else `ValueError`. This mirrors the frontend, which doesn't let you change an
+    evaluator's variables after creation. The invariant is load-bearing because
+    LLM tests resolve the LIVE evaluator version at run time while keeping each
+    test's pinned `variable_values` (see `get_evaluators_for_test`): if a later
+    version could rename/add/remove a variable, an existing test's frozen values
+    would no longer fill the live prompt's placeholders, silently sending a
+    half-rendered prompt to the judge. Freezing the variable set closes that gap.
     """
     with get_db_connection() as conn:
         cursor = conn.cursor()
@@ -4238,6 +4248,33 @@ def create_evaluator_version(
             (evaluator_uuid,),
         )
         max_v = cursor.fetchone()["max_v"] or 0
+
+        # Variables are frozen after the first version. Compare the new version's
+        # variable names against the most recent existing version and reject a
+        # mismatch. Only names matter — they're the `{{placeholder}}` keys that
+        # pinned per-test `variable_values` fill; description/default are cosmetic
+        # and may change.
+        if max_v > 0:
+            cursor.execute(
+                "SELECT variables FROM evaluator_versions "
+                "WHERE evaluator_id = ? ORDER BY version_number DESC LIMIT 1",
+                (evaluator_uuid,),
+            )
+            prev_row = cursor.fetchone()
+            prev_vars = (
+                json.loads(prev_row["variables"])
+                if prev_row and prev_row["variables"]
+                else []
+            )
+            prev_names = {v.get("name") for v in prev_vars}
+            new_names = {v.get("name") for v in (variables or [])}
+            if prev_names != new_names:
+                raise ValueError(
+                    "Evaluator variables are immutable across versions: new "
+                    f"version variables {sorted(n for n in new_names if n)} do "
+                    f"not match existing {sorted(n for n in prev_names if n)}"
+                )
+
         version_number = max_v + 1
         version_uuid = str(uuid.uuid4())
         cursor.execute(
