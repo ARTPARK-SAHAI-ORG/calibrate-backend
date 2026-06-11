@@ -373,21 +373,28 @@ def _build_llm_general_dataset(
     items: List[Dict[str, Any]], evaluators_resolved: List[Dict[str, Any]]
 ) -> List[Dict[str, Any]]:
     """`calibrate general` dataset: a flat list of non-conversational
-    `{id, input, output}` rows. There is no agent and no conversation —
+    `{id, input, output, arguments?}` rows. No agent and no conversation —
     `calibrate general` grades each pre-existing input/output pair against the
     config's evaluators (see `calibrate general --dataset … -c …`).
 
-    Annotation convention for payload: `{ "input": "...", "output": "..." }`.
+    Annotation convention for payload:
+      { "input": "...", "output": "...",
+        "evaluator_variables"?: { "<evaluator_uuid>": { "<var>": <value>, ... } } }
 
-    Unlike the `llm` builder there is **no** per-item `evaluator_variables` /
-    criteria-arguments mechanism — `calibrate general` doesn't accept per-row
-    arguments, so each evaluator's prompt (with its own `variable_values`
-    pre-rendered) applies uniformly across every row.
+    `evaluator_variables` uses the SAME payload contract as the `llm` task type.
+    The difference is the wire shape: `calibrate general` takes one flat per-row
+    `arguments` object (substituted into any `{{placeholder}}` across the
+    evaluators' prompts — the same `{{var}}` mechanism as `calibrate llm`),
+    whereas the `llm` path threads per-evaluator `criteria[].arguments`. So the
+    per-evaluator dicts are merged into a single `arguments` map per row (only
+    for evaluators actually in this run). Omitted/empty → no `arguments` key;
+    calibrate then leaves placeholders intact / uses the declared default.
     """
     if not evaluators_resolved:
         raise DatasetBuildError(
             "general eval requires at least one evaluator (criteria)"
         )
+    resolved_uuids = [ev["uuid"] for ev in evaluators_resolved]
     out: List[Dict[str, Any]] = []
     for it in items:
         payload = _payload_dict(it)
@@ -398,13 +405,25 @@ def _build_llm_general_dataset(
                 f"Item {it['uuid']}: llm-general items need `input` and "
                 "`output` in payload"
             )
-        out.append(
-            {
-                "id": it["uuid"],
-                "input": str(input_text),
-                "output": str(output_text),
-            }
-        )
+        per_evaluator_vars = payload.get("evaluator_variables") or {}
+        if not isinstance(per_evaluator_vars, dict):
+            raise DatasetBuildError(
+                f"Item {it['uuid']}: `evaluator_variables` must be a dict "
+                "keyed by evaluator UUID"
+            )
+        arguments: Dict[str, Any] = {}
+        for uid in resolved_uuids:
+            vals = per_evaluator_vars.get(uid)
+            if isinstance(vals, dict):
+                arguments.update(vals)
+        row: Dict[str, Any] = {
+            "id": it["uuid"],
+            "input": str(input_text),
+            "output": str(output_text),
+        }
+        if arguments:
+            row["arguments"] = arguments
+        out.append(row)
     return out
 
 
@@ -1102,13 +1121,14 @@ def _run_job(
             with open(dataset_path, "w", encoding="utf-8") as f:
                 json.dump(dataset, f, ensure_ascii=False)
 
-            # 2. Config (evaluators only). For LLM tasks, leave {{variable}}
-            # placeholders unrendered so calibrate substitutes per-test
-            # `criteria[].arguments` from each item's `evaluator_variables`.
-            # STT/simulation/general flows have no per-row arguments mechanism,
-            # so we pre-render the evaluator's own `variable_values` (typically
-            # empty in the annotation flow).
-            if task_type == "llm":
+            # 2. Config (evaluators only). For LLM + llm-general tasks, leave
+            # {{variable}} placeholders unrendered so calibrate substitutes them
+            # per row from each item's `evaluator_variables` (llm → per-test
+            # `criteria[].arguments`; general → the flat per-row `arguments`).
+            # STT/simulation flows have no per-row arguments mechanism, so we
+            # pre-render the evaluator's own `variable_values` (typically empty
+            # in the annotation flow).
+            if task_type in ("llm", "llm-general"):
                 evaluator_payload = build_evaluator_cli_payload_unrendered(
                     evaluators_resolved
                 )

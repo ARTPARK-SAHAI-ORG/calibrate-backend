@@ -254,6 +254,21 @@ def test_build_llm_general_dataset_bad_payload():
         runner._build_llm_general_dataset(
             [{"uuid": "i1", "payload": {"input": "i"}}], evs
         )
+    # Bad evaluator_variables.
+    with pytest.raises(runner.DatasetBuildError):
+        runner._build_llm_general_dataset(
+            [
+                {
+                    "uuid": "i1",
+                    "payload": {
+                        "input": "i",
+                        "output": "o",
+                        "evaluator_variables": "not-dict",
+                    },
+                }
+            ],
+            evs,
+        )
 
 
 def test_build_llm_general_dataset_happy():
@@ -267,10 +282,39 @@ def test_build_llm_general_dataset_happy():
         ],
         evs,
     )
-    # Flat `calibrate general` shape: {id, input, output}.
+    # Flat `calibrate general` shape: {id, input, output}. No vars → no arguments.
     assert out == [
         {"id": "i1", "input": "summarize this", "output": "a summary"}
     ]
+
+
+def test_build_llm_general_dataset_with_arguments():
+    """Per-item `evaluator_variables` (same contract as the llm task type) are
+    merged into a flat per-row `arguments` object across the run's evaluators."""
+    evs = [{"uuid": "e1", "name": "judge1"}, {"uuid": "e2", "name": "judge2"}]
+    out = runner._build_llm_general_dataset(
+        [
+            {
+                "uuid": "i1",
+                "payload": {
+                    "input": "in",
+                    "output": "out",
+                    "evaluator_variables": {
+                        "e1": {"criteria": "be concise"},
+                        "e2": {"reference": "gold answer"},
+                        # not in this run → ignored
+                        "e9": {"ignored": "x"},
+                    },
+                },
+            }
+        ],
+        evs,
+    )
+    assert out[0]["id"] == "i1"
+    assert out[0]["arguments"] == {
+        "criteria": "be concise",
+        "reference": "gold answer",
+    }
 
 
 def test_build_dataset_dispatch_llm_general():
