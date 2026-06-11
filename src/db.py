@@ -4565,7 +4565,28 @@ def remove_evaluator_from_simulation(simulation_id: str, evaluator_id: str) -> b
 
 
 def get_evaluators_for_simulation(simulation_id: str) -> List[Dict[str, Any]]:
-    """Return evaluator link rows joined with evaluator + version details."""
+    """Return evaluator link rows joined with evaluator + version details for a simulation.
+
+    Version resolution is ALWAYS LIVE: the version columns (version_number,
+    judge_model, system_prompt, output_config, variables) come from the
+    evaluator's current ``live_version_id``, NOT the ``evaluator_version_id``
+    pinned on the ``simulation_evaluators`` pivot at link time. So editing an
+    evaluator changes what an already-linked simulation uses at its NEXT run.
+    The ``COALESCE`` only guards the degenerate case where the evaluator somehow
+    has no live version. The pivot's ``variable_values`` (per-simulation
+    substitutions) stay pinned — they're simulation config, not part of the
+    evaluator version.
+
+    The returned ``evaluator_version_id`` is the LIVE version's id (``ev.uuid``),
+    not the pinned ``se.evaluator_version_id`` — so the id, ``version_number``,
+    and prompt/rubric in each row all describe the SAME (live) version. The pivot
+    column is still stored (FK NOT NULL) but no longer surfaced, to avoid a row
+    that labels live content with a stale version id.
+
+    A finished simulation run still renders reproducibly because the run
+    snapshots the live-at-run-time evaluator into the job details
+    (``_snapshot_evaluators_for_job_details`` in routers/simulations.py).
+    """
     with get_db_connection() as conn:
         cursor = conn.cursor()
         cursor.execute(
@@ -4580,7 +4601,7 @@ def get_evaluators_for_simulation(simulation_id: str) -> List[Dict[str, Any]]:
                 e.output_type AS output_type,
                 e.owner_user_id AS owner_user_id,
                 e.slug AS slug,
-                se.evaluator_version_id AS evaluator_version_id,
+                ev.uuid AS evaluator_version_id,
                 se.variable_values AS variable_values,
                 ev.version_number AS version_number,
                 ev.judge_model AS judge_model,
@@ -4589,7 +4610,8 @@ def get_evaluators_for_simulation(simulation_id: str) -> List[Dict[str, Any]]:
                 ev.variables AS variables
               FROM simulation_evaluators se
               JOIN evaluators e ON e.uuid = se.evaluator_id
-              JOIN evaluator_versions ev ON ev.uuid = se.evaluator_version_id
+              JOIN evaluator_versions ev
+                ON ev.uuid = COALESCE(e.live_version_id, se.evaluator_version_id)
              WHERE se.simulation_id = ? AND se.deleted_at IS NULL AND e.deleted_at IS NULL
              ORDER BY se.created_at ASC
             """,
