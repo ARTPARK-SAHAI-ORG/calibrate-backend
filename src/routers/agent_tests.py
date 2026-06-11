@@ -813,9 +813,11 @@ def _build_calibrate_config(
                 "output_type": output_type,
                 "variable_values": ev.get("variable_values") or {},
             }
-            # Snapshot the pinned version's rubric so `value_name` can be
-            # resolved at read time without re-reading the version row
-            # (which may have drifted). Applies to binary and rating both.
+            # Snapshot the live-at-run-time version's rubric so `value_name` can
+            # be resolved at read time without re-reading the version row (which
+            # may have drifted since — test runs resolve the live version, so a
+            # later evaluator edit would otherwise change how this finished run
+            # renders). Applies to binary and rating both.
             if isinstance(output_config, dict):
                 snap_entry["output_config"] = output_config
             if output_type == "rating":

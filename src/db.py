@@ -4557,7 +4557,20 @@ def remove_evaluator_from_test(test_id: str, evaluator_id: str) -> bool:
 
 
 def get_evaluators_for_test(test_id: str) -> List[Dict[str, Any]]:
-    """Return evaluator link rows joined with evaluator + version details for a single test."""
+    """Return evaluator link rows joined with evaluator + version details for a single test.
+
+    Version resolution is ALWAYS LIVE: the version columns (version_number,
+    judge_model, system_prompt, output_config, variables) come from the
+    evaluator's current ``live_version_id``, NOT the ``evaluator_version_id``
+    pinned on the pivot at link time. So a test run always picks up the latest
+    evaluator edits — unlike simulations/STT/TTS, which stay pinned to the
+    link-time version. ``te.evaluator_version_id`` is still kept populated (FK
+    NOT NULL) and returned for reference, but it is no longer the version sent
+    to calibrate; the ``COALESCE`` only guards the degenerate case where the
+    evaluator somehow has no live version. The pivot's ``variable_values``
+    (per-test {{var}} substitutions) stay pinned — they're test config, not part
+    of the evaluator version.
+    """
     with get_db_connection() as conn:
         cursor = conn.cursor()
         cursor.execute(
@@ -4581,7 +4594,8 @@ def get_evaluators_for_test(test_id: str) -> List[Dict[str, Any]]:
                 ev.variables AS variables
               FROM test_evaluators te
               JOIN evaluators e ON e.uuid = te.evaluator_id
-              JOIN evaluator_versions ev ON ev.uuid = te.evaluator_version_id
+              JOIN evaluator_versions ev
+                ON ev.uuid = COALESCE(e.live_version_id, te.evaluator_version_id)
              WHERE te.test_id = ? AND te.deleted_at IS NULL AND e.deleted_at IS NULL
              ORDER BY te.created_at ASC
             """,

@@ -40,8 +40,12 @@ REQUIRED_EVALUATOR_TYPE_BY_TEST_TYPE: Dict[str, str] = {
 
 
 class EvaluatorRef(BaseModel):
-    """Reference to an evaluator attached to a test. The pinned version is always the
-    evaluator's live version at write time (`set_test_evaluators` in `db.py`)."""
+    """Reference to an evaluator attached to a test. The pivot stores the live
+    version as of write time (`set_test_evaluators` in `db.py`), but test RUNS
+    always resolve the evaluator's *current* live version at run time — see
+    `get_evaluators_for_test`. So editing an evaluator after linking it changes
+    what future runs of the test use (no per-test version pinning, unlike
+    simulations/STT/TTS)."""
 
     model_config = ConfigDict(extra="forbid")
 
