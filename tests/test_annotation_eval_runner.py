@@ -254,21 +254,6 @@ def test_build_llm_general_dataset_bad_payload():
         runner._build_llm_general_dataset(
             [{"uuid": "i1", "payload": {"input": "i"}}], evs
         )
-    # Bad evaluator_variables.
-    with pytest.raises(runner.DatasetBuildError):
-        runner._build_llm_general_dataset(
-            [
-                {
-                    "uuid": "i1",
-                    "payload": {
-                        "input": "i",
-                        "output": "o",
-                        "evaluator_variables": "not-dict",
-                    },
-                }
-            ],
-            evs,
-        )
 
 
 def test_build_llm_general_dataset_happy():
@@ -277,27 +262,15 @@ def test_build_llm_general_dataset_happy():
         [
             {
                 "uuid": "i1",
-                "payload": {
-                    "input": "summarize this",
-                    "output": "a summary",
-                    "evaluator_variables": {"e1": {"criteria": "concise"}},
-                },
+                "payload": {"input": "summarize this", "output": "a summary"},
             }
         ],
         evs,
     )
-    # Maps onto the conversational llm shape: input -> single user turn,
-    # output -> output.response.
-    assert out[0]["test_case"]["id"] == "i1"
-    assert out[0]["test_case"]["history"] == [
-        {"role": "user", "content": "summarize this"}
+    # Flat `calibrate general` shape: {id, input, output}.
+    assert out == [
+        {"id": "i1", "input": "summarize this", "output": "a summary"}
     ]
-    assert out[0]["test_case"]["evaluation"]["type"] == "response"
-    assert out[0]["test_case"]["evaluation"]["criteria"][0]["arguments"] == {
-        "criteria": "concise"
-    }
-    assert out[0]["output"]["response"] == "a summary"
-    assert out[0]["output"]["tool_calls"] == []
 
 
 def test_build_dataset_dispatch_llm_general():
@@ -306,8 +279,7 @@ def test_build_dataset_dispatch_llm_general():
         [{"uuid": "i1", "payload": {"input": "i", "output": "o"}}],
         [{"uuid": "e1", "name": "judge"}],
     )
-    assert out[0]["test_case"]["id"] == "i1"
-    assert out[0]["output"]["response"] == "o"
+    assert out == [{"id": "i1", "input": "i", "output": "o"}]
 
 
 def test_build_simulation_dataset():
@@ -355,10 +327,10 @@ def test_calibrate_command_for_task_type():
     assert out_stt[:3] == ["calibrate", "stt", "--eval-only"]
     out_llm = runner.calibrate_command_for_task_type("llm", p, p, p)
     assert out_llm[:2] == ["calibrate", "llm"]
-    # llm-general reuses the llm calibrate command.
+    # llm-general uses the dedicated `calibrate general` command (no --eval-only).
     out_llm_general = runner.calibrate_command_for_task_type("llm-general", p, p, p)
-    assert out_llm_general[:2] == ["calibrate", "llm"]
-    assert out_llm_general == out_llm
+    assert out_llm_general[:2] == ["calibrate", "general"]
+    assert "--eval-only" not in out_llm_general
     out_sim = runner.calibrate_command_for_task_type("conversation", p, p, p)
     assert out_sim[:2] == ["calibrate", "simulations"]
     with pytest.raises(runner.DatasetBuildError):
@@ -622,22 +594,31 @@ def test_parse_results_for_task_type_dispatch(tmp_path):
     )
 
 
-def test_parse_results_for_task_type_dispatch_llm_general(tmp_path):
-    # llm-general routes to the same results parser as llm.
+def test_parse_results_general(tmp_path):
+    """`calibrate general` writes the same results.csv shape as STT, with
+    input/output as the built-in columns; the column-map parser is reused."""
     (tmp_path / "config.json").write_text(
         json.dumps({"evaluators_map": {"ev-1": "Safety"}})
     )
-    (tmp_path / "results.json").write_text(
-        json.dumps(
-            [
-                {
-                    "test_case": {"id": "i1"},
-                    "metrics": {
-                        "judge_results": {"Safety": {"match": True, "reasoning": "ok"}}
-                    },
-                }
-            ]
-        )
+    (tmp_path / "results.csv").write_text(
+        "id,input,output,Safety,Safety_reasoning\n"
+        "i1,in1,out1,1,ok\n"
+        "i2,in2,out2,0,not ok\n"
+    )
+    runs = runner._parse_results_general(tmp_path, [_ev_resolved()], "job-1")
+    assert len(runs) == 2
+    assert runs[0]["evaluator_id"] == "ev-1"
+    assert runs[0]["value"]["value"] is True
+    assert runs[1]["value"]["value"] is False
+
+
+def test_parse_results_for_task_type_dispatch_llm_general(tmp_path):
+    # llm-general routes to the `calibrate general` CSV parser.
+    (tmp_path / "config.json").write_text(
+        json.dumps({"evaluators_map": {"ev-1": "Safety"}})
+    )
+    (tmp_path / "results.csv").write_text(
+        "id,input,output,Safety,Safety_reasoning\ni1,in1,out1,1,ok\n"
     )
     runs = runner.parse_results_for_task_type(
         "llm-general", tmp_path, [_ev_resolved()], "job-1"
