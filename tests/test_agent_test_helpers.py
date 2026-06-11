@@ -113,6 +113,27 @@ def test_test_case_result_accepts_fractional_latency():
     assert TestCaseResult.model_validate({"latency_ms": 842}).latency_ms == 842
 
 
+def test_perf_aggregate_means_accept_floats():
+    """Aggregate blocks are Dict[str, Any], so a fractional `mean` (e.g.
+    total_tokens averaged over runs) must validate, not be coerced/rejected."""
+    from routers.agent_tests import TestRunStatusResponse, ModelResult
+
+    resp = TestRunStatusResponse(
+        task_id="t",
+        status="done",
+        total_tokens={"mean": 4378.5, "min": 4369, "max": 4387, "count": 2},
+        latency_ms={"mean": 1955.7, "min": 1851.0, "max": 2060.4, "count": 2},
+    )
+    assert resp.total_tokens["mean"] == 4378.5
+    assert resp.latency_ms["mean"] == 1955.7
+
+    mr = ModelResult(
+        model="m", message="ok",
+        total_tokens={"mean": 4378.5, "min": 4369, "max": 4387, "count": 2},
+    )
+    assert mr.total_tokens["mean"] == 4378.5
+
+
 def test_tool_call_output_model_surfaces_output():
     """The `output` field must be declared on ToolCallOutput, otherwise the
     response_model drops it on serialization."""
@@ -605,7 +626,9 @@ def test_update_agent_test_intermediate_results_stores_perf_aggregates(tmp_path)
                 "passed": 1,
                 "latency_ms": {"mean": 842, "min": 842, "max": 842, "count": 1},
                 "cost": {"mean": 0.000942, "min": 0.000942, "max": 0.000942, "count": 1},
-                "total_tokens": {"mean": 4378, "min": 4369, "max": 4387, "count": 1},
+                # Fractional mean: per-run tokens are ints but the aggregate mean
+                # can be a float — it must round-trip, not be coerced to int.
+                "total_tokens": {"mean": 4378.0, "min": 4369, "max": 4387, "count": 2},
             }
         )
     )
@@ -615,7 +638,7 @@ def test_update_agent_test_intermediate_results_stores_perf_aggregates(tmp_path)
     results = get_agent_test_job(job_id)["results"]
     assert results["latency_ms"] == {"mean": 842, "min": 842, "max": 842, "count": 1}
     assert results["cost"]["mean"] == 0.000942
-    assert results["total_tokens"] == {"mean": 4378, "min": 4369, "max": 4387, "count": 1}
+    assert results["total_tokens"] == {"mean": 4378.0, "min": 4369, "max": 4387, "count": 2}
     assert results["test_results"][0]["latency_ms"] == 842
     assert results["test_results"][0]["cost"] == 0.000942
 

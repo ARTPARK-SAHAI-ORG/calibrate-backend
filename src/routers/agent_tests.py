@@ -296,8 +296,9 @@ class TestRunStatusResponse(BaseModel):
     # Aggregated cost across cases: {mean, min, max, count} (USD floats). Omitted
     # by calibrate when no case reported a cost (e.g. openai provider), so None.
     cost: Optional[Dict[str, Any]] = None
-    # Aggregated total token usage across cases: {mean, min, max, count} (token
-    # ints). Omitted by calibrate when no case reported token usage, so None.
+    # Aggregated total token usage across cases: {mean, min, max, count}. Per-run
+    # token counts are ints but the aggregate `mean` can be fractional — values are
+    # `Any`, so don't assume int. Omitted by calibrate when no case reported usage.
     total_tokens: Optional[Dict[str, Any]] = None
     # Top-level evaluator block — name/description/output_type/rubric
     # shared across every judge_results row. Per-row entries reference
@@ -2268,10 +2269,11 @@ class ModelResult(BaseModel):
     failed: Optional[int] = None
     evaluator_summary: Optional[List[Dict[str, Any]]] = None
     test_results: Optional[List[Dict[str, Any]]] = None
-    # Aggregated latency/cost/total_tokens for this model: {mean, min, max, count}
-    # (latency ms ints, cost USD floats, total_tokens int). Lets the frontend
-    # compare models on latency, cost, and token usage. None when calibrate omits
-    # it (eval-only / openai provider) or before this model's metrics are ready.
+    # Aggregated latency/cost/total_tokens for this model: {mean, min, max, count}.
+    # Values are `Any` — don't assume int: even total_tokens (per-run an int) has a
+    # fractional `mean`, and latency/cost are floats. Lets the frontend compare
+    # models on latency, cost, and token usage. None when calibrate omits it
+    # (eval-only / openai provider) or before this model's metrics are ready.
     latency_ms: Optional[Dict[str, Any]] = None
     cost: Optional[Dict[str, Any]] = None
     total_tokens: Optional[Dict[str, Any]] = None
