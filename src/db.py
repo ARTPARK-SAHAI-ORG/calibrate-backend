@@ -4601,12 +4601,16 @@ def get_evaluators_for_test(test_id: str) -> List[Dict[str, Any]]:
     evaluator's current ``live_version_id``, NOT the ``evaluator_version_id``
     pinned on the pivot at link time. So a test run always picks up the latest
     evaluator edits — unlike simulations/STT/TTS, which stay pinned to the
-    link-time version. ``te.evaluator_version_id`` is still kept populated (FK
-    NOT NULL) and returned for reference, but it is no longer the version sent
-    to calibrate; the ``COALESCE`` only guards the degenerate case where the
+    link-time version. The ``COALESCE`` only guards the degenerate case where the
     evaluator somehow has no live version. The pivot's ``variable_values``
     (per-test {{var}} substitutions) stay pinned — they're test config, not part
     of the evaluator version.
+
+    The returned ``evaluator_version_id`` is the LIVE version's id (``ev.uuid``),
+    not the pinned ``te.evaluator_version_id`` — so the id, ``version_number``,
+    and rubric/prompt in each row all describe the SAME version (the one that
+    actually runs). The pivot column is still stored (FK NOT NULL) but no longer
+    surfaced, to avoid a row that labels live content with a stale version id.
     """
     with get_db_connection() as conn:
         cursor = conn.cursor()
@@ -4622,7 +4626,7 @@ def get_evaluators_for_test(test_id: str) -> List[Dict[str, Any]]:
                 e.output_type AS output_type,
                 e.owner_user_id AS owner_user_id,
                 e.slug AS slug,
-                te.evaluator_version_id AS evaluator_version_id,
+                ev.uuid AS evaluator_version_id,
                 te.variable_values AS variable_values,
                 ev.version_number AS version_number,
                 ev.judge_model AS judge_model,

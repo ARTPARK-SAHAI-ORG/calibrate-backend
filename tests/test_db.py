@@ -613,7 +613,7 @@ def test_get_evaluators_for_test_resolves_live_version(user):
     db.set_test_evaluators(test_uuid, [{"evaluator_id": ev_uuid}])
     linked = db.get_evaluators_for_test(test_uuid)
     assert len(linked) == 1
-    assert linked[0]["evaluator_version_id"] == v1["uuid"]  # pivot pin unchanged
+    assert linked[0]["evaluator_version_id"] == v1["uuid"]  # live == v1 here
     assert linked[0]["system_prompt"] == "PROMPT V1"
     assert linked[0]["version_number"] == 1
 
@@ -622,8 +622,9 @@ def test_get_evaluators_for_test_resolves_live_version(user):
     db.set_evaluator_live_version(ev_uuid, v2["uuid"])
 
     relinked = db.get_evaluators_for_test(test_uuid)
-    # Pivot still pins v1, but the run-facing version columns resolve LIVE (v2).
-    assert relinked[0]["evaluator_version_id"] == v1["uuid"]
+    # All three describe the SAME (live) version v2 — the row is internally
+    # consistent even though the pivot still pins v1 in the DB.
+    assert relinked[0]["evaluator_version_id"] == v2["uuid"]
     assert relinked[0]["system_prompt"] == "PROMPT V2"
     assert relinked[0]["version_number"] == 2
 
