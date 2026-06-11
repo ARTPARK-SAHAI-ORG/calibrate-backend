@@ -1035,7 +1035,7 @@ async def create_jobs(
         linked_ids = {
             e["uuid"] for e in get_evaluators_for_annotation_task(task_uuid)
         }
-        # Dedup while preserving caller order.
+        # Dedup; the snapshot itself is ordered by the task's position.
         evaluator_ids = list(dict.fromkeys(payload.evaluator_ids))
         unknown = [eid for eid in evaluator_ids if eid not in linked_ids]
         if unknown:
