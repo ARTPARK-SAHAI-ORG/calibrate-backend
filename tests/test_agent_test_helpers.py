@@ -577,10 +577,10 @@ def test_build_evaluator_summary():
     assert any(e["type"] == "rating" for e in out)
 
 
-def test_update_agent_test_intermediate_results_stores_latency_and_cost(tmp_path):
-    """The aggregated latency_ms/cost blocks from metrics.json must land in the
-    unit-test job results, and the per-case values must ride on each row
-    (latency top-level, cost nested in output)."""
+def test_update_agent_test_intermediate_results_stores_perf_aggregates(tmp_path):
+    """The aggregated latency_ms/cost/total_tokens blocks from metrics.json must
+    land in the unit-test job results, and the per-case values must ride on each
+    row (latency top-level, cost nested in output)."""
     from routers.agent_tests import _update_agent_test_intermediate_results
     from db import create_agent_test_job, get_agent_test_job
 
@@ -605,6 +605,7 @@ def test_update_agent_test_intermediate_results_stores_latency_and_cost(tmp_path
                 "passed": 1,
                 "latency_ms": {"mean": 842, "min": 842, "max": 842, "count": 1},
                 "cost": {"mean": 0.000942, "min": 0.000942, "max": 0.000942, "count": 1},
+                "total_tokens": {"mean": 4378, "min": 4369, "max": 4387, "count": 1},
             }
         )
     )
@@ -614,12 +615,14 @@ def test_update_agent_test_intermediate_results_stores_latency_and_cost(tmp_path
     results = get_agent_test_job(job_id)["results"]
     assert results["latency_ms"] == {"mean": 842, "min": 842, "max": 842, "count": 1}
     assert results["cost"]["mean"] == 0.000942
+    assert results["total_tokens"] == {"mean": 4378, "min": 4369, "max": 4387, "count": 1}
     assert results["test_results"][0]["latency_ms"] == 842
     assert results["test_results"][0]["cost"] == 0.000942
 
 
-def test_update_benchmark_intermediate_results_stores_per_model_latency_and_cost(tmp_path):
-    """Each completed model's aggregated latency_ms/cost ride on its model_results entry."""
+def test_update_benchmark_intermediate_results_stores_per_model_perf_aggregates(tmp_path):
+    """Each completed model's aggregated latency_ms/cost/total_tokens ride on its
+    model_results entry."""
     from routers.agent_tests import _update_benchmark_intermediate_results
     from db import create_agent_test_job, get_agent_test_job
 
@@ -646,6 +649,7 @@ def test_update_benchmark_intermediate_results_stores_per_model_latency_and_cost
                 "passed": 1,
                 "latency_ms": {"mean": 500, "min": 500, "max": 500, "count": 1},
                 "cost": {"mean": 0.0021, "min": 0.0021, "max": 0.0021, "count": 1},
+                "total_tokens": {"mean": 4378, "min": 4369, "max": 4387, "count": 2},
             }
         )
     )
@@ -656,6 +660,7 @@ def test_update_benchmark_intermediate_results_stores_per_model_latency_and_cost
     completed = next(m for m in model_results if m["model"] == "gpt-4o")
     assert completed["latency_ms"] == {"mean": 500, "min": 500, "max": 500, "count": 1}
     assert completed["cost"]["mean"] == 0.0021
+    assert completed["total_tokens"] == {"mean": 4378, "min": 4369, "max": 4387, "count": 2}
     assert completed["test_results"][0]["latency_ms"] == 500
     assert completed["test_results"][0]["cost"] == 0.0021
 

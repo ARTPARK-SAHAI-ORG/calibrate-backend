@@ -296,6 +296,9 @@ class TestRunStatusResponse(BaseModel):
     # Aggregated cost across cases: {mean, min, max, count} (USD floats). Omitted
     # by calibrate when no case reported a cost (e.g. openai provider), so None.
     cost: Optional[Dict[str, Any]] = None
+    # Aggregated total token usage across cases: {mean, min, max, count} (token
+    # ints). Omitted by calibrate when no case reported token usage, so None.
+    total_tokens: Optional[Dict[str, Any]] = None
     # Top-level evaluator block — name/description/output_type/rubric
     # shared across every judge_results row. Per-row entries reference
     # back via `evaluator_uuid` so the rubric isn't duplicated per test.
@@ -320,10 +323,11 @@ class AgentTestRunListItem(BaseModel):
     passed: Optional[int] = None
     failed: Optional[int] = None
     results: Optional[List[TestCaseResult]] = None
-    # Aggregated latency/cost for unit-test runs (see TestRunStatusResponse).
-    # None for benchmarks (per-model on model_results instead).
+    # Aggregated latency/cost/total_tokens for unit-test runs (see
+    # TestRunStatusResponse). None for benchmarks (per-model on model_results).
     latency_ms: Optional[Dict[str, Any]] = None
     cost: Optional[Dict[str, Any]] = None
+    total_tokens: Optional[Dict[str, Any]] = None
     # Benchmark results (for llm-benchmark type)
     model_results: Optional[List[Dict[str, Any]]] = None
     leaderboard_summary: Optional[List[Dict[str, Any]]] = None
@@ -474,6 +478,7 @@ async def get_agent_test_runs(agent_uuid: str):
             failed=job_results.get("failed"),
             latency_ms=job_results.get("latency_ms"),
             cost=job_results.get("cost"),
+            total_tokens=job_results.get("total_tokens"),
             results=job_results.get("test_results"),
             # Benchmark results
             model_results=job_results.get("model_results"),
@@ -569,6 +574,7 @@ async def get_all_test_runs_for_user(
             failed=job_results.get("failed"),
             latency_ms=job_results.get("latency_ms"),
             cost=job_results.get("cost"),
+            total_tokens=job_results.get("total_tokens"),
             results=job_results.get("test_results"),
             # Benchmark fields
             model_results=job_results.get("model_results"),
@@ -1544,6 +1550,9 @@ def _update_agent_test_intermediate_results(
             ),
             "latency_ms": metrics_data.get("latency_ms") if metrics_data else None,
             "cost": metrics_data.get("cost") if metrics_data else None,
+            "total_tokens": (
+                metrics_data.get("total_tokens") if metrics_data else None
+            ),
             "test_results": intermediate_results,
         },
     )
@@ -1750,6 +1759,7 @@ def run_llm_test_task(
                 failed = 0
                 latency_ms = None
                 cost = None
+                total_tokens = None
 
                 if metrics_data and isinstance(metrics_data, dict):
                     total_tests = metrics_data.get("total", 0)
@@ -1757,6 +1767,7 @@ def run_llm_test_task(
                     failed = total_tests - passed
                     latency_ms = metrics_data.get("latency_ms")
                     cost = metrics_data.get("cost")
+                    total_tokens = metrics_data.get("total_tokens")
                 elif results_data:
                     # Compute from results if metrics.json not found
                     total_tests = len(results_data)
@@ -1786,6 +1797,7 @@ def run_llm_test_task(
                         "failed": failed,
                         "latency_ms": latency_ms,
                         "cost": cost,
+                        "total_tokens": total_tokens,
                         "test_results": test_results,
                         "results_s3_prefix": results_prefix,
                         "error": None,
@@ -2230,6 +2242,7 @@ async def get_agent_test_run_status(
         failed=results.get("failed"),
         latency_ms=results.get("latency_ms"),
         cost=results.get("cost"),
+        total_tokens=results.get("total_tokens"),
         evaluators=evaluators_block or None,
         results=results.get("test_results"),
         results_s3_prefix=results.get("results_s3_prefix"),
@@ -2255,12 +2268,13 @@ class ModelResult(BaseModel):
     failed: Optional[int] = None
     evaluator_summary: Optional[List[Dict[str, Any]]] = None
     test_results: Optional[List[Dict[str, Any]]] = None
-    # Aggregated latency/cost for this model: {mean, min, max, count} (latency in
-    # ms ints, cost in USD floats). Lets the frontend compare models on latency
-    # and cost. None when calibrate omits it (eval-only / openai provider) or
-    # before this model's metrics are ready.
+    # Aggregated latency/cost/total_tokens for this model: {mean, min, max, count}
+    # (latency ms ints, cost USD floats, total_tokens int). Lets the frontend
+    # compare models on latency, cost, and token usage. None when calibrate omits
+    # it (eval-only / openai provider) or before this model's metrics are ready.
     latency_ms: Optional[Dict[str, Any]] = None
     cost: Optional[Dict[str, Any]] = None
+    total_tokens: Optional[Dict[str, Any]] = None
 
 
 class BenchmarkStatusResponse(BaseModel):
@@ -2339,6 +2353,7 @@ def _update_benchmark_intermediate_results(
                         "evaluator_summary": evaluator_summary,
                         "latency_ms": metrics_data.get("latency_ms"),
                         "cost": metrics_data.get("cost"),
+                        "total_tokens": metrics_data.get("total_tokens"),
                         "test_results": merged,
                     }
                 )
@@ -2604,6 +2619,7 @@ def run_benchmark_task(
                                     evaluator_summary=evaluator_summary,
                                     latency_ms=metrics_data.get("latency_ms"),
                                     cost=metrics_data.get("cost"),
+                                    total_tokens=metrics_data.get("total_tokens"),
                                     test_results=test_results,
                                 )
                             )
