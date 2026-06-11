@@ -713,6 +713,91 @@ def test_create_jobs_select_all(client):
     assert none.status_code == 400
 
 
+def test_create_jobs_evaluator_subset(client):
+    """`evaluator_ids` on POST /jobs restricts the snapshotted (and therefore
+    labelled) evaluator set to a subset of the task's linked evaluators;
+    omitting it snapshots all of them."""
+    auth = _signup(client)
+    h = auth["headers"]
+    evaluators = client.get("/evaluators", headers=h).json()
+    llm_evs = [e for e in evaluators if e.get("evaluator_type") == "llm"]
+    assert len(llm_evs) >= 2, "expected ≥2 seeded LLM evaluators"
+    ev_a, ev_b = llm_evs[0], llm_evs[1]
+
+    task_uuid = client.post(
+        "/annotation-tasks",
+        json={
+            "name": f"t-{uuid.uuid4().hex[:6]}",
+            "type": "llm",
+            "evaluator_ids": [ev_a["uuid"], ev_b["uuid"]],
+        },
+        headers=h,
+    ).json()["uuid"]
+    items = client.post(
+        f"/annotation-tasks/{task_uuid}/items",
+        json={"items": [{"payload": {"name": "i1"}}]},
+        headers=h,
+    ).json()["item_ids"]
+    annotator = client.post(
+        "/annotators", json={"name": f"ann-{uuid.uuid4().hex[:6]}"}, headers=h
+    ).json()
+
+    # Subset: only ev_b → job (and labelling form) shows only ev_b.
+    subset = client.post(
+        f"/annotation-tasks/{task_uuid}/jobs",
+        json={
+            "annotator_ids": [annotator["uuid"]],
+            "item_ids": items,
+            "evaluator_ids": [ev_b["uuid"]],
+        },
+        headers=h,
+    )
+    assert subset.status_code == 200
+    job = subset.json()["jobs"][0]
+    assert job["evaluator_ids"] == [ev_b["uuid"]]
+    # The public labelling form reflects the same snapshot.
+    token = job["public_token"]
+    form = client.get(f"/public/annotation-jobs/{token}")
+    assert form.status_code == 200
+    assert [e["uuid"] for e in form.json()["evaluators"]] == [ev_b["uuid"]]
+
+    # Omitted evaluator_ids → snapshots every linked evaluator.
+    full = client.post(
+        f"/annotation-tasks/{task_uuid}/jobs",
+        json={"annotator_ids": [annotator["uuid"]], "item_ids": items},
+        headers=h,
+    )
+    assert full.status_code == 200
+    assert set(full.json()["jobs"][0]["evaluator_ids"]) == {
+        ev_a["uuid"],
+        ev_b["uuid"],
+    }
+
+    # Empty evaluator_ids list (provided but empty) → 400.
+    empty = client.post(
+        f"/annotation-tasks/{task_uuid}/jobs",
+        json={
+            "annotator_ids": [annotator["uuid"]],
+            "item_ids": items,
+            "evaluator_ids": [],
+        },
+        headers=h,
+    )
+    assert empty.status_code == 400
+
+    # Evaluator not linked to the task → 400.
+    unlinked = client.post(
+        f"/annotation-tasks/{task_uuid}/jobs",
+        json={
+            "annotator_ids": [annotator["uuid"]],
+            "item_ids": items,
+            "evaluator_ids": ["not-a-real-evaluator"],
+        },
+        headers=h,
+    )
+    assert unlinked.status_code == 400
+
+
 def test_evaluator_run_select_all_and_q(client):
     """`select_all=True` (with optional `q`) replaces the previous null-means-all
     convention on POST /evaluator-runs."""

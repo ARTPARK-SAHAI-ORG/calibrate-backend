@@ -982,6 +982,11 @@ class CreateJobsRequest(BaseModel):
     item_ids: List[str] = []
     select_all: bool = False
     q: Optional[str] = None
+    # Optional subset of the task's linked evaluators to show in these jobs.
+    # `None` (default) snapshots every linked evaluator (legacy behavior);
+    # a list restricts the labelling form to just those evaluators. The same
+    # subset applies to every annotator's job in the request.
+    evaluator_ids: Optional[List[str]] = None
 
 
 @router.get("/{task_uuid}/jobs")
@@ -1004,12 +1009,40 @@ async def create_jobs(
 
     Use `select_all=True` (optionally with `q`) to assign every item in the
     task matching the current search filter; in that mode `item_ids` is
-    ignored."""
+    ignored.
+
+    `evaluator_ids` optionally restricts the labelling form to a subset of
+    the task's linked evaluators; omit it to include every linked
+    evaluator."""
     _ensure_owned_task(task_uuid, ctx.org_uuid)
     if not payload.annotator_ids:
         raise HTTPException(
             status_code=400, detail="annotator_ids must be non-empty"
         )
+
+    # Resolve the evaluator subset (if any) up front against the task's live
+    # linked set. `None` ⇒ snapshot all (handled by create_annotation_job).
+    evaluator_ids: Optional[List[str]] = None
+    if payload.evaluator_ids is not None:
+        if not payload.evaluator_ids:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    "evaluator_ids must be non-empty when provided "
+                    "(omit it to include every linked evaluator)"
+                ),
+            )
+        linked_ids = {
+            e["uuid"] for e in get_evaluators_for_annotation_task(task_uuid)
+        }
+        # Dedup while preserving caller order.
+        evaluator_ids = list(dict.fromkeys(payload.evaluator_ids))
+        unknown = [eid for eid in evaluator_ids if eid not in linked_ids]
+        if unknown:
+            raise HTTPException(
+                status_code=400,
+                detail=f"evaluator_ids not linked to this task: {unknown}",
+            )
     target_ids = _resolve_target_item_ids(
         task_uuid,
         select_all=payload.select_all,
@@ -1073,6 +1106,7 @@ async def create_jobs(
             annotator_id=annotator_id,
             item_uuids=target_ids,
             public_token=public_token,
+            evaluator_ids=evaluator_ids,
         )
         jobs_created.append(
             {
@@ -1082,6 +1116,7 @@ async def create_jobs(
                 "annotator_name": annotators_by_id[annotator_id]["name"],
                 "item_ids": target_ids,
                 "item_count": len(target_ids),
+                "evaluator_ids": get_evaluator_ids_for_job(job_uuid),
                 "status": "pending",
             }
         )

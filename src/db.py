@@ -6995,13 +6995,22 @@ def create_annotation_job(
     item_uuids: List[str],
     public_token: str,
     status: str = "pending",
+    evaluator_ids: Optional[List[str]] = None,
 ) -> str:
     """Create one job (annotator × N rows). Items AND linked evaluators are
     SNAPSHOTTED at creation time — subsequent edits/soft-deletes on the
     source `annotation_items` row, and link/unlink on
     `annotation_task_evaluators`, do not affect the job's view of its items
     or the auto-completion check. The auto-complete contract is "the
-    evaluator set as it was at creation time", not the current task config."""
+    evaluator set as it was at creation time", not the current task config.
+
+    `evaluator_ids` optionally restricts the snapshot to a SUBSET of the
+    task's currently-linked evaluators (so a job can show only some of the
+    task's evaluators in the labelling form). When None (default), every
+    linked evaluator is snapshotted. The parent task's display order
+    (`position`) is preserved among whichever evaluators are snapshotted; any
+    id in `evaluator_ids` that isn't a live link on the task is silently
+    dropped (callers validate up front for a clean error)."""
     if not item_uuids:
         raise ValueError("item_uuids must be non-empty")
     if len(item_uuids) != len(set(item_uuids)):
@@ -7058,6 +7067,14 @@ def create_annotation_job(
             (task_id,),
         )
         snapshot_rows = cursor.fetchall()
+        if evaluator_ids is not None:
+            # Restrict to the requested subset while keeping the task's
+            # position order (re-numbered 1..N below so the job's own
+            # positions stay gap-free).
+            wanted = set(evaluator_ids)
+            snapshot_rows = [
+                r for r in snapshot_rows if r["evaluator_id"] in wanted
+            ]
         if snapshot_rows:
             cursor.executemany(
                 "INSERT INTO annotation_job_evaluators "
