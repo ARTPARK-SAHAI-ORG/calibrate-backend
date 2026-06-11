@@ -1494,12 +1494,13 @@ DEFAULT_PROMPTS_BY_PURPOSE: Dict[str, Dict[str, Any]] = {
     "llm-general": {
         "name": "Output correctness",
         "system_prompt": (
-            "You are a highly accurate evaluator evaluating a model's output "
-            "for a given input.\n\n"
-            "You will be given an input (the task or prompt given to a model) "
-            "along with the model's output.\n\n"
-            "You need to evaluate if the output adheres to the evaluation "
-            "criteria:\n\n"
+            "You are a highly accurate evaluator assessing the output produced for "
+            "a task.\n\n"
+            "You will be given the task input (when one is provided) and the output "
+            "produced for it. Judge the output on its own merits — do not assume the "
+            "input is a conversation or that the output is a reply to a user.\n\n"
+            "Mark `match` true only if the output satisfies the following criteria, "
+            "and false otherwise:\n\n"
             "<ENTER EVALUATION CRITERIA HERE>"
         ),
         "judge_model": DEFAULT_TEXT_JUDGE_MODEL,
@@ -1712,12 +1713,13 @@ _LLM_NEXT_REPLY_SEED = {
 # `arguments`. Differs from next-reply in its non-conversational input -> output
 # framing (see DEFAULT_PROMPTS_BY_PURPOSE['llm-general']).
 _LLM_GENERAL_SEED_SYSTEM_PROMPT = (
-    "You are a highly accurate evaluator evaluating a model's output for a "
-    "given input.\n\n"
-    "You will be given an input (the task or prompt given to a model) along "
-    "with the model's output.\n\n"
-    "You need to evaluate if the output adheres to the evaluation "
-    "criteria:\n\n{{criteria}}"
+    "You are a highly accurate evaluator assessing the output produced for "
+    "a task.\n\n"
+    "You will be given the task input (when one is provided) and the output "
+    "produced for it. Judge the output on its own merits — do not assume the "
+    "input is a conversation or that the output is a reply to a user.\n\n"
+    "Mark `match` true only if the output satisfies the following criteria, "
+    "and false otherwise:\n\n{{criteria}}"
 )
 
 _LLM_GENERAL_SEED = {
