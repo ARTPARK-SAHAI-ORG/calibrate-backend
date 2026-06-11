@@ -101,6 +101,18 @@ def test_parse_agent_test_results_preserves_tool_call_output():
     assert out[0]["output"]["tool_calls"][0]["output"] == {"temp": 72}
 
 
+def test_test_case_result_accepts_fractional_latency():
+    """External agent-connection tests self-report `metrics.latency_ms` verbatim,
+    which may be a float (e.g. 1955.7) — the model must not reject it as a
+    non-integer. Regression for a ValidationError when latency_ms was Optional[int]."""
+    from routers.agent_tests import TestCaseResult
+
+    r = TestCaseResult.model_validate({"name": "T1", "latency_ms": 1955.7, "cost": 0.0021})
+    assert r.latency_ms == 1955.7
+    # Integers still validate fine.
+    assert TestCaseResult.model_validate({"latency_ms": 842}).latency_ms == 842
+
+
 def test_tool_call_output_model_surfaces_output():
     """The `output` field must be declared on ToolCallOutput, otherwise the
     response_model drops it on serialization."""

@@ -274,8 +274,10 @@ class TestCaseResult(BaseModel):
     judge_results: Optional[List[JudgeResult]] = None
     # Response-generation latency for this case in milliseconds (the agent under
     # test, not the judge). Present only for live runs; None for in-progress rows
-    # and eval-only runs (no inference happened).
-    latency_ms: Optional[int] = None
+    # and eval-only runs (no inference happened). Float, not int: calibrate rounds
+    # internal-model latency to a whole number, but external agent-connection tests
+    # self-report `metrics.latency_ms` verbatim and may send a fractional value.
+    latency_ms: Optional[float] = None
     # Per-case cost in USD, lifted from calibrate's nested `output.cost` (NOT a
     # top-level sibling of latency_ms — cost lives inside `output`). None when the
     # provider/agent reports none (e.g. --provider openai, or no `metrics.cost`).
