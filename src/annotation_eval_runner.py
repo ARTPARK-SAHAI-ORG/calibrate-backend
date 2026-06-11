@@ -308,10 +308,7 @@ def _build_llm_dataset(
     arguments → calibrate falls back to the placeholder (or its declared
     default if any).
     """
-    if not evaluators_resolved:
-        raise DatasetBuildError(
-            "LLM --eval-only requires at least one evaluator (criteria)"
-        )
+    _require_evaluators(evaluators_resolved, "LLM --eval-only")
     out: List[Dict[str, Any]] = []
     for it in items:
         payload = _payload_dict(it)
@@ -342,6 +339,15 @@ def _build_llm_dataset(
             }
         )
     return out
+
+
+def _require_evaluators(evaluators_resolved: List[Dict[str, Any]], what: str) -> None:
+    """Guard for builders whose CLI mode judges against evaluators — raise if
+    none were resolved. `what` names the flow for the error message."""
+    if not evaluators_resolved:
+        raise DatasetBuildError(
+            f"{what} requires at least one evaluator (criteria)"
+        )
 
 
 def _validated_evaluator_variables(
@@ -402,10 +408,7 @@ def _build_llm_general_dataset(
     for evaluators actually in this run). Omitted/empty → no `arguments` key;
     calibrate then leaves placeholders intact / uses the declared default.
     """
-    if not evaluators_resolved:
-        raise DatasetBuildError(
-            "general eval requires at least one evaluator (criteria)"
-        )
+    _require_evaluators(evaluators_resolved, "general eval")
     resolved_uuids = [ev["uuid"] for ev in evaluators_resolved]
     out: List[Dict[str, Any]] = []
     for it in items:
