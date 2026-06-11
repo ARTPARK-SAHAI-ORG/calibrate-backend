@@ -27,6 +27,8 @@ from db import (
     get_agent,
     get_all_agents,
     get_test,
+    get_all_tools,
+    refresh_tool_call_names_in_config,
     get_tools_for_agent,
     get_evaluators_for_test,
     get_evaluator_by_slug,
@@ -711,6 +713,16 @@ def _build_calibrate_config(
     """
     agent_config = agent.get("config") or {}
 
+    # Live tool-name index for resolving `tool_call` expected tools from their
+    # durable `tool_uuid` — so a renamed tool is matched correctly at run time
+    # rather than against the stale name snapshot stored in the test config.
+    agent_org_uuid = agent.get("org_uuid")
+    tool_uuid_to_name: Dict[str, str] = (
+        {t["uuid"]: t["name"] for t in get_all_tools(org_uuid=agent_org_uuid)}
+        if agent_org_uuid
+        else {}
+    )
+
     # First pass: collect linked evaluators per response-type test so we can build a
     # deduped top-level `evaluators` list. Calibrate keys results by evaluator
     # name across the whole run, so each unique evaluator appears once at top level and
@@ -868,13 +880,17 @@ def _build_calibrate_config(
         test_config["evaluation"] = evaluation
 
         if row_type == "tool_call":
+            # Resolve live tool names from durable uuids via the shared helper
+            # (evaluation.type was normalized to row_type above, so its guard
+            # matches), then strip arguments for accept-any entries.
+            refresh_tool_call_names_in_config(test_config, tool_uuid_to_name)
             tool_calls = []
             for tool_call in evaluation.get("tool_calls", []):
                 tool_calls.append(
                     {
-                        "tool": tool_call["tool"],
+                        "tool": tool_call.get("tool"),
                         "arguments": (
-                            tool_call["arguments"]
+                            tool_call.get("arguments")
                             if not tool_call.get("accept_any_arguments", False)
                             else None
                         ),

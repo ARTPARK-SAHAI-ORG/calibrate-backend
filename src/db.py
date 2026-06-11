@@ -1422,6 +1422,7 @@ def init_db():
         # ============ Evaluator migrations + seed ============
         _seed_default_evaluators(cursor, conn)
         _backfill_test_evaluator_links(cursor, conn)
+        _backfill_tool_call_test_tool_uuids(cursor, conn)
 
         conn.commit()
         logger.info("Database initialized successfully")
@@ -2304,6 +2305,67 @@ def _backfill_test_evaluator_links(
     conn.commit()
     if backfilled:
         logger.info(f"Backfilled {backfilled} LLM test(s) with default evaluator link")
+
+
+def _backfill_tool_call_test_tool_uuids(
+    cursor: sqlite3.Cursor, conn: sqlite3.Connection
+) -> None:
+    """For every `tool_call` test, stamp `tool_uuid` onto each expected tool call by
+    matching its stored `tool` name to a live tool in the same org. Idempotent:
+    entries that already carry a `tool_uuid` are left untouched, and entries whose
+    name matches no live tool are skipped (they keep the name-only snapshot).
+    Preserves `updated_at` (writes only `config`) so the backfill doesn't masquerade
+    as a user edit.
+    """
+    cursor.execute(
+        "SELECT uuid, org_uuid, config FROM tests WHERE type = 'tool_call' AND deleted_at IS NULL"
+    )
+    rows = cursor.fetchall()
+    org_tool_index: Dict[str, Dict[str, str]] = {}
+    updated = 0
+    for row in rows:
+        config_raw = row["config"]
+        if not config_raw:
+            continue
+        try:
+            config = json.loads(config_raw)
+        except (TypeError, json.JSONDecodeError):
+            continue
+        evaluation = config.get("evaluation") or {}
+        if evaluation.get("type") != "tool_call":
+            continue
+        tool_calls = evaluation.get("tool_calls") or []
+        if not tool_calls:
+            continue
+
+        org_uuid = row["org_uuid"]
+        if org_uuid not in org_tool_index:
+            cursor.execute(
+                "SELECT name, uuid FROM tools WHERE org_uuid = ? AND deleted_at IS NULL",
+                (org_uuid,),
+            )
+            org_tool_index[org_uuid] = {r["name"]: r["uuid"] for r in cursor.fetchall()}
+        name_to_uuid = org_tool_index[org_uuid]
+
+        changed = False
+        for tc in tool_calls:
+            if not isinstance(tc, dict) or tc.get("tool_uuid"):
+                continue
+            matched = name_to_uuid.get(tc.get("tool"))
+            if matched:
+                tc["tool_uuid"] = matched
+                changed = True
+
+        if changed:
+            cursor.execute(
+                "UPDATE tests SET config = ? WHERE uuid = ?",
+                (json.dumps(config), row["uuid"]),
+            )
+            updated += 1
+
+    conn.commit()
+    if updated:
+        logger.info(f"Backfilled tool_uuid on {updated} tool_call test(s)")
 
 
 # ============ Users Functions ============
@@ -3465,6 +3527,66 @@ def get_all_tests(org_uuid: Optional[str] = None) -> List[Dict[str, Any]]:
             )
         rows = cursor.fetchall()
         return [_parse_test_row(row) for row in rows]
+
+
+# ---- tool_call test ↔ tool linkage helpers -------------------------------
+#
+# `tool_call` tests store their expected tool calls in
+# `config.evaluation.tool_calls[]` as `{tool, arguments, accept_any_arguments}`.
+# Historically `tool` was a name-only snapshot with no link back to the `tools`
+# table, so renaming a tool left the test pointing at a stale name. We now also
+# carry `tool_uuid` (the durable link) on each entry: it's stamped at write time
+# by matching the name within the org, and the live name is re-resolved from it
+# at read/run time so a rename propagates automatically. The `tool` name remains
+# as a fallback snapshot for tools that were deleted or never matched.
+
+
+def iter_tool_call_entries(config: Optional[Dict[str, Any]]):
+    """Yield each expected-tool-call dict from a `tool_call` test config, centralizing
+    the config/evaluation/tool_calls shape guards. No-op (yields nothing) for any
+    other shape. Shared by every helper that walks `tool_calls`."""
+    if not isinstance(config, dict):
+        return
+    evaluation = config.get("evaluation")
+    if not isinstance(evaluation, dict) or evaluation.get("type") != "tool_call":
+        return
+    for tc in evaluation.get("tool_calls") or []:
+        if isinstance(tc, dict):
+            yield tc
+
+
+def inject_tool_uuids_into_config(
+    config: Optional[Dict[str, Any]], name_to_uuid: Dict[str, str]
+) -> Optional[Dict[str, Any]]:
+    """Auto-link name-only tool calls to a `tool_uuid` by matching `tool` against the
+    org's live tools (`name_to_uuid`; names are unique per org). A caller-supplied
+    `tool_uuid` is never overwritten. Entries with neither a uuid nor a matching name
+    stay name-only snapshots (built-in / agent-owned tools). Mutates and returns
+    `config`. No-op for non-`tool_call` configs.
+    """
+    for tc in iter_tool_call_entries(config):
+        if tc.get("tool_uuid"):
+            continue
+        matched = name_to_uuid.get(tc.get("tool"))
+        if matched:
+            tc["tool_uuid"] = matched
+    return config
+
+
+def refresh_tool_call_names_in_config(
+    config: Optional[Dict[str, Any]], uuid_to_name: Dict[str, str]
+) -> Optional[Dict[str, Any]]:
+    """Overwrite each expected tool call's `tool` name with the live name resolved
+    from its `tool_uuid` (`uuid_to_name`). Falls back to the stored name snapshot
+    when the entry has no `tool_uuid` or its tool was deleted / is absent from the
+    map. This is what makes a renamed tool propagate to existing tests. Mutates and
+    returns `config`. No-op for non-`tool_call` configs.
+    """
+    for tc in iter_tool_call_entries(config):
+        tool_uuid = tc.get("tool_uuid")
+        if tool_uuid and tool_uuid in uuid_to_name:
+            tc["tool"] = uuid_to_name[tool_uuid]
+    return config
 
 
 def update_test(

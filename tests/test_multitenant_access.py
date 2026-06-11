@@ -201,6 +201,12 @@ def test_cross_org_cannot_see_tools(client):
 def test_cross_org_cannot_see_tests(client):
     a = _signup(client)
     b = _signup(client)
+    tool_name = f"x-{uuid.uuid4().hex[:6]}"
+    tool = client.post(
+        "/tools",
+        json={"name": tool_name, "description": "d"},
+        headers=a["headers"],
+    ).json()
     test = client.post(
         "/tests",
         json={
@@ -210,7 +216,13 @@ def test_cross_org_cannot_see_tests(client):
                 "history": [{"role": "user", "content": "hi"}],
                 "evaluation": {
                     "type": "tool_call",
-                    "tool_calls": [{"tool": "x", "accept_any_arguments": True}],
+                    "tool_calls": [
+                        {
+                            "tool": tool_name,
+                            "tool_uuid": tool["uuid"],
+                            "accept_any_arguments": True,
+                        }
+                    ],
                 },
             },
         },

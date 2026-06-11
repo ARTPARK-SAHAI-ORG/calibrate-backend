@@ -386,6 +386,230 @@ def test_bulk_test_upload(client):
     assert ok_tc.status_code == 200
 
 
+def test_bulk_tool_call_uuid_optional_but_validated(client):
+    """Bulk upload accepts name-only entries (built-in tools), auto-links names that
+    match a library tool, and 404s on a supplied tool_uuid that isn't an org tool."""
+    auth = _signup(client)
+    h = auth["headers"]
+
+    tool_name = f"lib-{uuid.uuid4().hex[:6]}"
+    tool = client.post(
+        "/tools", json={"name": tool_name, "description": "d"}, headers=h
+    ).json()
+
+    # Name-only (built-in) + name matching a library tool → both accepted; the
+    # matching name is auto-linked to its uuid.
+    ok = client.post(
+        "/tests/bulk",
+        json={
+            "type": "tool_call",
+            "tests": [
+                {
+                    "name": f"tc-{uuid.uuid4().hex[:6]}",
+                    "conversation_history": [{"role": "user", "content": "hi"}],
+                    "tool_calls": [
+                        {"tool": "builtin_thing", "arguments": {}},
+                        {"tool": tool_name, "arguments": {}},
+                    ],
+                }
+            ],
+        },
+        headers=h,
+    )
+    assert ok.status_code == 200
+    created = client.get(f"/tests/{ok.json()['uuids'][0]}", headers=h).json()
+    tcs = created["config"]["evaluation"]["tool_calls"]
+    assert "tool_uuid" not in tcs[0] or tcs[0]["tool_uuid"] is None  # built-in
+    assert tcs[1]["tool_uuid"] == tool["uuid"]                       # auto-linked
+
+    # A supplied tool_uuid that isn't a live org tool → 404, no tests created.
+    bad = client.post(
+        "/tests/bulk",
+        json={
+            "type": "tool_call",
+            "tests": [
+                {
+                    "name": f"tc-{uuid.uuid4().hex[:6]}",
+                    "conversation_history": [{"role": "user", "content": "hi"}],
+                    "tool_calls": [
+                        {"tool": "x", "tool_uuid": str(uuid.uuid4()), "arguments": {}}
+                    ],
+                }
+            ],
+        },
+        headers=h,
+    )
+    assert bad.status_code == 404
+
+
+def test_tool_call_linking_driven_by_row_type_not_blob(client):
+    """Linking/validation follows the immutable row type, not the (drift-prone)
+    config.evaluation.type. A tool_call test whose blob type is wrong/missing still
+    gets its tool linked, and reads normalize the blob type back to the row type."""
+    auth = _signup(client)
+    h = auth["headers"]
+
+    tool_name = f"lib-{uuid.uuid4().hex[:6]}"
+    tool = client.post(
+        "/tools", json={"name": tool_name, "description": "d"}, headers=h
+    ).json()
+
+    # Row type says tool_call, but the blob type is drifted to "response".
+    create = client.post(
+        "/tests",
+        json={
+            "name": f"tc-{uuid.uuid4().hex[:6]}",
+            "type": "tool_call",
+            "config": {
+                "history": [{"role": "user", "content": "hi"}],
+                "evaluation": {
+                    "type": "response",  # drifted on purpose
+                    "tool_calls": [{"tool": tool_name, "arguments": {}}],
+                },
+            },
+        },
+        headers=h,
+    )
+    assert create.status_code == 200
+
+    fetched = client.get(f"/tests/{create.json()['uuid']}", headers=h).json()
+    evaluation = fetched["config"]["evaluation"]
+    # Blob type normalized to the row type, and the tool got auto-linked.
+    assert evaluation["type"] == "tool_call"
+    assert evaluation["tool_calls"][0]["tool_uuid"] == tool["uuid"]
+
+
+def test_tool_call_test_tracks_tool_rename(client):
+    """A tool_call test links to the tool by uuid, so renaming the tool surfaces
+    the new name on read instead of a stale snapshot."""
+    auth = _signup(client)
+    h = auth["headers"]
+
+    tool_name = f"proc-{uuid.uuid4().hex[:6]}"
+    tool = client.post(
+        "/tools",
+        json={"name": tool_name, "description": "d"},
+        headers=h,
+    ).json()
+    tool_uuid = tool["uuid"]
+
+    create = client.post(
+        "/tests",
+        json={
+            "name": f"tc-{uuid.uuid4().hex[:6]}",
+            "type": "tool_call",
+            "config": {
+                "history": [{"role": "user", "content": "hi"}],
+                "evaluation": {
+                    "type": "tool_call",
+                    "tool_calls": [
+                        {"tool": tool_name, "tool_uuid": tool_uuid, "arguments": {}}
+                    ],
+                },
+            },
+        },
+        headers=h,
+    )
+    assert create.status_code == 200
+    test_uuid = create.json()["uuid"]
+
+    # Read back: tool_uuid persisted, live name resolved.
+    fetched = client.get(f"/tests/{test_uuid}", headers=h).json()
+    tc = fetched["config"]["evaluation"]["tool_calls"][0]
+    assert tc["tool_uuid"] == tool_uuid
+    assert tc["tool"] == tool_name
+
+    # Rename the tool; the test's expected tool name follows on read.
+    new_name = f"proc-renamed-{uuid.uuid4().hex[:6]}"
+    assert client.put(
+        f"/tools/{tool_uuid}", json={"name": new_name}, headers=h
+    ).status_code == 200
+
+    refetched = client.get(f"/tests/{test_uuid}", headers=h).json()
+    tc2 = refetched["config"]["evaluation"]["tool_calls"][0]
+    assert tc2["tool_uuid"] == tool_uuid
+    assert tc2["tool"] == new_name
+
+    # Also reflected in the list endpoint.
+    listed = client.get("/tests", headers=h).json()
+    mine = next(t for t in listed if t["uuid"] == test_uuid)
+    assert mine["config"]["evaluation"]["tool_calls"][0]["tool"] == new_name
+
+
+def test_tool_call_test_tool_uuid_optional_but_validated(client):
+    """Interactive writes accept name-only entries (built-in / agent-owned tools),
+    but a supplied tool_uuid must resolve to a live org tool (404 otherwise)."""
+    auth = _signup(client)
+    h = auth["headers"]
+
+    # Name-only entry (built-in tool, no uuid) → allowed.
+    name_only = client.post(
+        "/tests",
+        json={
+            "name": f"tc-{uuid.uuid4().hex[:6]}",
+            "type": "tool_call",
+            "config": {
+                "history": [{"role": "user", "content": "hi"}],
+                "evaluation": {
+                    "type": "tool_call",
+                    "tool_calls": [{"tool": "process_user_turn", "arguments": {}}],
+                },
+            },
+        },
+        headers=h,
+    )
+    assert name_only.status_code == 200
+    # No matching org tool → stays name-only (built-in tool).
+    fetched = client.get(f"/tests/{name_only.json()['uuid']}", headers=h).json()
+    tc = fetched["config"]["evaluation"]["tool_calls"][0]
+    assert tc["tool"] == "process_user_turn"
+    assert "tool_uuid" not in tc or tc["tool_uuid"] is None
+
+    # Name-only entry whose name matches an org tool → auto-linked to its uuid.
+    tool_name = f"lib-{uuid.uuid4().hex[:6]}"
+    tool = client.post(
+        "/tools", json={"name": tool_name, "description": "d"}, headers=h
+    ).json()
+    autolink = client.post(
+        "/tests",
+        json={
+            "name": f"tc-{uuid.uuid4().hex[:6]}",
+            "type": "tool_call",
+            "config": {
+                "history": [{"role": "user", "content": "hi"}],
+                "evaluation": {
+                    "type": "tool_call",
+                    "tool_calls": [{"tool": tool_name, "arguments": {}}],
+                },
+            },
+        },
+        headers=h,
+    )
+    assert autolink.status_code == 200
+    linked = client.get(f"/tests/{autolink.json()['uuid']}", headers=h).json()
+    assert linked["config"]["evaluation"]["tool_calls"][0]["tool_uuid"] == tool["uuid"]
+
+    # A supplied uuid that isn't a live org tool → 404.
+    bad_uuid = client.post(
+        "/tests",
+        json={
+            "name": f"tc-{uuid.uuid4().hex[:6]}",
+            "type": "tool_call",
+            "config": {
+                "history": [{"role": "user", "content": "hi"}],
+                "evaluation": {
+                    "type": "tool_call",
+                    "tool_calls": [
+                        {"tool": "x", "tool_uuid": str(uuid.uuid4()), "arguments": {}}
+                    ],
+                },
+            },
+        },
+        headers=h,
+    )
+    assert bad_uuid.status_code == 404
+
+
 def test_create_test_wrong_evaluator_type(client):
     """Tests with evaluator_type != 'llm' should be rejected."""
     auth = _signup(client)
