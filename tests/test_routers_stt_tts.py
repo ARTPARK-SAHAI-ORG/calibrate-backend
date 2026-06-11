@@ -263,7 +263,7 @@ def _make_snapshot(ev_uuid: str, version_uuid: str, *, evaluator_type: str,
 
 def test_stt_refresh_evaluators_picks_up_live_version(client):
     import db
-    from routers.stt import _refresh_evaluators_to_live as stt_refresh
+    from llm_judge import refresh_evaluators_to_live as stt_refresh
 
     ev_uuid = db.create_evaluator(
         name=f"stt-ev-{uuid.uuid4().hex[:8]}",
@@ -297,7 +297,7 @@ def test_stt_refresh_evaluators_picks_up_live_version(client):
 
 
 def test_stt_refresh_keeps_snapshot_when_no_live_version(client):
-    from routers.stt import _refresh_evaluators_to_live as stt_refresh
+    from llm_judge import refresh_evaluators_to_live as stt_refresh
 
     snap = _make_snapshot(
         str(uuid.uuid4()), str(uuid.uuid4()), evaluator_type="stt",
@@ -311,7 +311,7 @@ def test_stt_refresh_keeps_snapshot_when_no_live_version(client):
 
 def test_tts_refresh_evaluators_picks_up_live_version(client):
     import db
-    from routers.tts import _refresh_evaluators_to_live as tts_refresh
+    from llm_judge import refresh_evaluators_to_live as tts_refresh
 
     ev_uuid = db.create_evaluator(
         name=f"tts-ev-{uuid.uuid4().hex[:8]}",

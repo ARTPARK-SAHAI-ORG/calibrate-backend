@@ -24,7 +24,7 @@ from db import (
 )
 from dataset_utils import resolve_dataset_inputs
 from auth_utils import get_current_org, OrgContext
-from llm_judge import build_evaluator_cli_payload
+from llm_judge import build_evaluator_cli_payload, refresh_evaluators_to_live
 from utils import (
     TaskStatus,
     ProviderResult,
@@ -273,49 +273,6 @@ def _resolve_evaluators_for_tts_job(
     return resolved
 
 
-def _refresh_evaluators_to_live(snapshot_evaluators: List[dict]) -> List[dict]:
-    """Re-hydrate submit-time evaluator snapshots to each evaluator's CURRENT
-    live version at run time.
-
-    STT/TTS jobs snapshot a fully-hydrated evaluator into ``details.evaluators``
-    at submit time. To make runs use the LIVE version (consistent with LLM tests
-    and simulations, which resolve live), we re-read each evaluator's current
-    ``live_version_id`` when the job actually executes and rebuild the snapshot
-    from it — preserving the job's pinned ``variable_values``. If the evaluator
-    was deleted, or has no live version, or the live version row is missing, we
-    keep the original submit-time snapshot unchanged (a queued job must not break
-    because someone edited/deleted the evaluator). The refreshed list is written
-    back into the job details by the caller so finished-run reads render against
-    the live-at-run-time version reproducibly.
-    """
-    refreshed: List[dict] = []
-    for snap in snapshot_evaluators or []:
-        uid = snap.get("uuid")
-        evaluator = get_evaluator(uid) if uid else None
-        live_id = evaluator.get("live_version_id") if evaluator else None
-        version = get_evaluator_version(live_id) if live_id else None
-        if not evaluator or not version or version.get("evaluator_id") != uid:
-            refreshed.append(snap)
-            continue
-        refreshed.append(
-            {
-                "uuid": evaluator["uuid"],
-                "name": evaluator["name"],
-                "evaluator_type": evaluator.get("evaluator_type", snap.get("evaluator_type")),
-                "data_type": evaluator.get("data_type", snap.get("data_type", "audio")),
-                "kind": evaluator.get("kind", snap.get("kind", "single")),
-                "output_type": evaluator.get("output_type", snap.get("output_type", "binary")),
-                "evaluator_version_id": version["uuid"],
-                "judge_model": version["judge_model"],
-                "system_prompt": version["system_prompt"],
-                "output_config": version.get("output_config"),
-                "variables": version.get("variables"),
-                "variable_values": snap.get("variable_values") or {},
-            }
-        )
-    return refreshed
-
-
 def _find_tts_provider_output_dir(output_dir: Path, provider: str) -> Optional[Path]:
     """Find the provider-specific output directory."""
     if not output_dir.exists():
@@ -416,7 +373,7 @@ def run_tts_evaluation_task(
                 job_details = (get_job(task_id) or {}).get("details", {}) or {}
                 raw_evaluators = job_details.get("evaluators") or []
                 if raw_evaluators:
-                    raw_evaluators = _refresh_evaluators_to_live(raw_evaluators)
+                    raw_evaluators = refresh_evaluators_to_live(raw_evaluators)
                     new_details = {**job_details, "evaluators": raw_evaluators}
                     update_job(task_id, details=new_details)
                     evaluator_payload = build_evaluator_cli_payload(raw_evaluators)
