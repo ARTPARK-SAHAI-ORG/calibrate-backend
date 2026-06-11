@@ -1032,54 +1032,6 @@ def _parse_agent_test_results(results_data: Optional[List[dict]]) -> List[dict]:
     return test_results
 
 
-def _aggregate_numeric_metric(
-    rows: Optional[List[dict]], key: str
-) -> Optional[Dict[str, Any]]:
-    """Roll per-case ``rows[i][key]`` into ``{mean, min, max, count}`` (or None).
-
-    Only numeric, non-null values are counted (placeholders/None are skipped, never
-    treated as 0), so ``count`` is how many cases actually reported a value — matching
-    calibrate's own aggregate semantics. Booleans are excluded (``bool`` is an ``int``).
-    """
-    if not rows:
-        return None
-    vals = [
-        r[key]
-        for r in rows
-        if isinstance(r, dict)
-        and isinstance(r.get(key), (int, float))
-        and not isinstance(r.get(key), bool)
-    ]
-    if not vals:
-        return None
-    return {
-        "mean": sum(vals) / len(vals),
-        "min": min(vals),
-        "max": max(vals),
-        "count": len(vals),
-    }
-
-
-def _perf_aggregates(
-    test_results: Optional[List[dict]], metrics_data: Optional[dict]
-) -> tuple[Optional[Dict[str, Any]], Optional[Dict[str, Any]]]:
-    """Return ``(latency_ms, cost)`` aggregate blocks for a run.
-
-    Prefers calibrate's own ``metrics.json`` blocks when present; otherwise falls
-    back to computing them from the per-case rows (older calibrate versions emit
-    per-case latency/cost in ``results.json`` but not the aggregated block). Either
-    can be None — both are optional everywhere downstream.
-    """
-    md = metrics_data if isinstance(metrics_data, dict) else None
-    latency = (md or {}).get("latency_ms")
-    cost = (md or {}).get("cost")
-    if latency is None:
-        latency = _aggregate_numeric_metric(test_results, "latency_ms")
-    if cost is None:
-        cost = _aggregate_numeric_metric(test_results, "cost")
-    return latency, cost
-
-
 def _pending_test_case_result_placeholder(name: str) -> Dict[str, Any]:
     """``TestCaseResult`` shape for rows not yet finished (explicit nulls for clients)."""
     return {
@@ -1577,7 +1529,6 @@ def _update_agent_test_intermediate_results(
 
     # Check if metrics.json exists (all tests complete)
     metrics_data = _read_agent_test_metrics_json(output_dir)
-    latency_ms, cost = _perf_aggregates(test_results, metrics_data)
 
     update_agent_test_job(
         task_id,
@@ -1591,8 +1542,8 @@ def _update_agent_test_intermediate_results(
                 if metrics_data
                 else None
             ),
-            "latency_ms": latency_ms,
-            "cost": cost,
+            "latency_ms": metrics_data.get("latency_ms") if metrics_data else None,
+            "cost": metrics_data.get("cost") if metrics_data else None,
             "test_results": intermediate_results,
         },
     )
@@ -1797,11 +1748,15 @@ def run_llm_test_task(
                 total_tests = 0
                 passed = 0
                 failed = 0
+                latency_ms = None
+                cost = None
 
                 if metrics_data and isinstance(metrics_data, dict):
                     total_tests = metrics_data.get("total", 0)
                     passed = metrics_data.get("passed", 0)
                     failed = total_tests - passed
+                    latency_ms = metrics_data.get("latency_ms")
+                    cost = metrics_data.get("cost")
                 elif results_data:
                     # Compute from results if metrics.json not found
                     total_tests = len(results_data)
@@ -1811,10 +1766,6 @@ def run_llm_test_task(
                         if r.get("metrics", {}).get("passed", False)
                     )
                     failed = total_tests - passed
-
-                # Perf aggregates: prefer calibrate's metrics.json blocks, else
-                # compute from the per-case rows (older CLI emits per-case only).
-                latency_ms, cost = _perf_aggregates(test_results, metrics_data)
 
                 # Upload results to S3 (calibrate ``logs``/``results.log`` per model, run-level ``logs``, etc.)
                 results_prefix = f"agent-tests/runs/{task_id}"
@@ -2377,7 +2328,6 @@ def _update_benchmark_intermediate_results(
                 total = metrics_data.get("total", 0)
                 passed = metrics_data.get("passed", 0)
                 evaluator_summary = _build_evaluator_summary(metrics_data)
-                model_latency, model_cost = _perf_aggregates(merged, metrics_data)
                 model_results.append(
                     {
                         "model": model,
@@ -2387,8 +2337,8 @@ def _update_benchmark_intermediate_results(
                         "passed": passed,
                         "failed": total - passed,
                         "evaluator_summary": evaluator_summary,
-                        "latency_ms": model_latency,
-                        "cost": model_cost,
+                        "latency_ms": metrics_data.get("latency_ms"),
+                        "cost": metrics_data.get("cost"),
                         "test_results": merged,
                     }
                 )
@@ -2639,12 +2589,6 @@ def run_benchmark_task(
                                 test_names, test_results
                             )
 
-                        # Perf aggregates: prefer calibrate's metrics.json blocks,
-                        # else compute from the per-case rows (older CLI emits
-                        # per-case latency/cost but not the aggregated block).
-                        model_latency, model_cost = _perf_aggregates(
-                            test_results, metrics_data
-                        )
                         if metrics_data:
                             total = metrics_data.get("total", 0)
                             passed = metrics_data.get("passed", 0)
@@ -2658,8 +2602,8 @@ def run_benchmark_task(
                                     passed=passed,
                                     failed=total - passed,
                                     evaluator_summary=evaluator_summary,
-                                    latency_ms=model_latency,
-                                    cost=model_cost,
+                                    latency_ms=metrics_data.get("latency_ms"),
+                                    cost=metrics_data.get("cost"),
                                     test_results=test_results,
                                 )
                             )
@@ -2678,8 +2622,6 @@ def run_benchmark_task(
                                     passed=passed,
                                     failed=total - passed,
                                     evaluator_summary=None,
-                                    latency_ms=model_latency,
-                                    cost=model_cost,
                                     test_results=test_results,
                                 )
                             )
