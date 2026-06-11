@@ -408,6 +408,61 @@ async def get_agent_tests_endpoint(agent_uuid: str):
     return tests
 
 
+def _build_agent_test_run_item_fields(job: Dict[str, Any], name: str) -> Dict[str, Any]:
+    """Shared field mapping for the run-list item models (``AgentTestRunListItem``
+    and its ``GlobalTestRunListItem`` subclass).
+
+    Runs evaluator enrichment on the stored test/model results, builds the shared
+    top-level ``evaluators`` block, and maps job + results into the common kwargs
+    both endpoints need. Callers spread the result and append any model-specific
+    fields (e.g. ``agent_id``/``agent_name`` for the global view). Keeping this in
+    one place means new result fields (latency/cost/tokens, …) are wired once.
+    """
+    job_results = job.get("results") or {}
+    job_details = job.get("details") or {}
+    evaluators_snapshot = job_details.get("evaluators_by_test_id") or {}
+
+    # Refresh evaluator names + uuids on per-row judge_results before serializing
+    evaluator_cache: Dict[str, Optional[Dict[str, Any]]] = {}
+    _enrich_test_results_with_evaluators(
+        job_results.get("test_results"), evaluators_snapshot, evaluator_cache
+    )
+    _enrich_model_results_with_evaluators(
+        job_results.get("model_results"), evaluators_snapshot, evaluator_cache
+    )
+    evaluators_block = _build_evaluators_block_for_test_run(
+        evaluators_snapshot,
+        test_results=job_results.get("test_results"),
+        model_results=job_results.get("model_results"),
+        evaluator_cache=evaluator_cache,
+    )
+
+    return {
+        "uuid": job["uuid"],
+        "name": name,
+        "status": job["status"],
+        "type": job.get("type", ""),
+        "updated_at": job.get("updated_at", job.get("created_at", "")),
+        "evaluators": evaluators_block or None,
+        # Unit test results
+        "total_tests": job_results.get("total_tests"),
+        "passed": job_results.get("passed"),
+        "failed": job_results.get("failed"),
+        "latency_ms": job_results.get("latency_ms"),
+        "cost": job_results.get("cost"),
+        "total_tokens": job_results.get("total_tokens"),
+        "results": job_results.get("test_results"),
+        # Benchmark results
+        "model_results": job_results.get("model_results"),
+        "leaderboard_summary": job_results.get("leaderboard_summary"),
+        # Common fields
+        "results_s3_prefix": job_results.get("results_s3_prefix"),
+        "error": bool(job_results.get("error")),
+        "is_public": bool(job.get("is_public")),
+        "share_token": job.get("share_token"),
+    }
+
+
 @router.get("/agent/{agent_uuid}/runs", response_model=AgentTestRunsResponse)
 async def get_agent_test_runs(agent_uuid: str):
     """
@@ -439,56 +494,8 @@ async def get_agent_test_runs(agent_uuid: str):
         else:
             name = f"Job {len(runs) + 1}"
 
-        # Extract results from job
-        job_results = job.get("results") or {}
-        job_details = job.get("details") or {}
-        evaluators_snapshot = (
-            job_details.get("evaluators_by_test_id")
-            or {}
-        )
-
-        # Refresh evaluator names + uuids on per-row judge_results before serializing
-        _evaluator_cache: Dict[str, Optional[Dict[str, Any]]] = {}
-        _enrich_test_results_with_evaluators(
-            job_results.get("test_results"),
-            evaluators_snapshot,
-            _evaluator_cache,
-        )
-        _enrich_model_results_with_evaluators(
-            job_results.get("model_results"),
-            evaluators_snapshot,
-            _evaluator_cache,
-        )
-        evaluators_block = _build_evaluators_block_for_test_run(
-            evaluators_snapshot,
-            test_results=job_results.get("test_results"),
-            model_results=job_results.get("model_results"),
-            evaluator_cache=_evaluator_cache,
-        )
-
         run_item = AgentTestRunListItem(
-            uuid=job["uuid"],
-            name=name,
-            status=job["status"],
-            type=job_type,
-            updated_at=job.get("updated_at", job.get("created_at", "")),
-            evaluators=evaluators_block or None,
-            # Unit test results
-            total_tests=job_results.get("total_tests"),
-            passed=job_results.get("passed"),
-            failed=job_results.get("failed"),
-            latency_ms=job_results.get("latency_ms"),
-            cost=job_results.get("cost"),
-            total_tokens=job_results.get("total_tokens"),
-            results=job_results.get("test_results"),
-            # Benchmark results
-            model_results=job_results.get("model_results"),
-            leaderboard_summary=job_results.get("leaderboard_summary"),
-            # Common fields
-            results_s3_prefix=job_results.get("results_s3_prefix"),
-            error=bool(job_results.get("error")),
-            is_public=bool(job.get("is_public")),
-            share_token=job.get("share_token"),
+            **_build_agent_test_run_item_fields(job, name)
         )
         runs.append(run_item)
 
@@ -536,55 +543,8 @@ async def get_all_test_runs_for_user(
 
     runs = []
     for job in jobs:  # already newest-first
-        job_results = job.get("results") or {}
-        job_details = job.get("details") or {}
-        evaluators_snapshot = (
-            job_details.get("evaluators_by_test_id")
-            or {}
-        )
-
-        # Refresh evaluator names + uuids on per-row judge_results before serializing
-        _evaluator_cache: Dict[str, Optional[Dict[str, Any]]] = {}
-        _enrich_test_results_with_evaluators(
-            job_results.get("test_results"),
-            evaluators_snapshot,
-            _evaluator_cache,
-        )
-        _enrich_model_results_with_evaluators(
-            job_results.get("model_results"),
-            evaluators_snapshot,
-            _evaluator_cache,
-        )
-        evaluators_block = _build_evaluators_block_for_test_run(
-            evaluators_snapshot,
-            test_results=job_results.get("test_results"),
-            model_results=job_results.get("model_results"),
-            evaluator_cache=_evaluator_cache,
-        )
-
         run_item = GlobalTestRunListItem(
-            uuid=job["uuid"],
-            name=name_map[job["uuid"]],
-            status=job["status"],
-            type=job.get("type", ""),
-            updated_at=job.get("updated_at", job.get("created_at", "")),
-            evaluators=evaluators_block or None,
-            # Unit test fields
-            total_tests=job_results.get("total_tests"),
-            passed=job_results.get("passed"),
-            failed=job_results.get("failed"),
-            latency_ms=job_results.get("latency_ms"),
-            cost=job_results.get("cost"),
-            total_tokens=job_results.get("total_tokens"),
-            results=job_results.get("test_results"),
-            # Benchmark fields
-            model_results=job_results.get("model_results"),
-            leaderboard_summary=job_results.get("leaderboard_summary"),
-            # Common fields
-            results_s3_prefix=job_results.get("results_s3_prefix"),
-            error=bool(job_results.get("error")),
-            is_public=bool(job.get("is_public")),
-            share_token=job.get("share_token"),
+            **_build_agent_test_run_item_fields(job, name_map[job["uuid"]]),
             # Agent identity (global-only fields)
             agent_id=job.get("agent_id", ""),
             agent_name=job.get("agent_name", ""),

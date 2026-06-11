@@ -205,6 +205,55 @@ def test_agent_tests_link_crud(client):
     assert foreign.status_code == 404
 
 
+def test_agent_runs_list_surfaces_perf_aggregates(client):
+    """A completed unit-test run must surface latency/cost/total_tokens aggregates
+    and per-case latency/cost through the agent runs-list endpoint. Covers the
+    shared `_build_agent_test_run_item_fields` mapping used by both list endpoints."""
+    from db import create_agent_test_job, update_agent_test_job
+
+    h = _signup(client)["headers"]
+    agent = _create_agent(client, h)
+
+    job_id = create_agent_test_job(agent_id=agent["uuid"], job_type="llm-unit-test")
+    update_agent_test_job(
+        job_id,
+        status="done",
+        results={
+            "total_tests": 1,
+            "passed": 1,
+            "failed": 0,
+            "latency_ms": {"mean": 1851.0, "min": 1851.0, "max": 1851.0, "count": 1},
+            "cost": {"mean": 0.0248, "min": 0.0248, "max": 0.0248, "count": 1},
+            "total_tokens": {"mean": 4378.0, "min": 4369, "max": 4387, "count": 2},
+            "test_results": [
+                {
+                    "name": "tc1",
+                    "test_case_id": "tc1",
+                    "passed": True,
+                    "output": {"response": "hi", "tool_calls": None},
+                    "latency_ms": 1851.0,
+                    "cost": 0.0248,
+                }
+            ],
+        },
+    )
+
+    resp = client.get(f"/agent-tests/agent/{agent['uuid']}/runs")
+    assert resp.status_code == 200
+    run = resp.json()["runs"][0]
+    assert run["latency_ms"] == {"mean": 1851.0, "min": 1851.0, "max": 1851.0, "count": 1}
+    assert run["cost"]["mean"] == 0.0248
+    assert run["total_tokens"] == {"mean": 4378.0, "min": 4369, "max": 4387, "count": 2}
+    assert run["results"][0]["latency_ms"] == 1851.0
+    assert run["results"][0]["cost"] == 0.0248
+
+    # Same fields flow through the global runs-list endpoint.
+    global_resp = client.get("/agent-tests/runs", headers=h)
+    assert global_resp.status_code == 200
+    gruns = [r for r in global_resp.json()["runs"] if r["uuid"] == job_id]
+    assert gruns and gruns[0]["total_tokens"]["count"] == 2
+
+
 def test_agent_tests_link_with_missing(client):
     auth = _signup(client)
     h = auth["headers"]
