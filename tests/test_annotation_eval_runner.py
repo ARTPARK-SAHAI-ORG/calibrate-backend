@@ -237,6 +237,79 @@ def test_build_llm_dataset_happy():
     assert out[0]["test_case"]["evaluation"]["criteria"][0]["arguments"] == {"x": 1}
 
 
+def test_build_llm_general_dataset_no_evaluators():
+    with pytest.raises(runner.DatasetBuildError):
+        runner._build_llm_general_dataset([], [])
+
+
+def test_build_llm_general_dataset_bad_payload():
+    evs = [{"uuid": "e1", "name": "judge"}]
+    # Missing `input`.
+    with pytest.raises(runner.DatasetBuildError):
+        runner._build_llm_general_dataset(
+            [{"uuid": "i1", "payload": {"output": "o"}}], evs
+        )
+    # Missing `output`.
+    with pytest.raises(runner.DatasetBuildError):
+        runner._build_llm_general_dataset(
+            [{"uuid": "i1", "payload": {"input": "i"}}], evs
+        )
+    # Bad evaluator_variables.
+    with pytest.raises(runner.DatasetBuildError):
+        runner._build_llm_general_dataset(
+            [
+                {
+                    "uuid": "i1",
+                    "payload": {
+                        "input": "i",
+                        "output": "o",
+                        "evaluator_variables": "not-dict",
+                    },
+                }
+            ],
+            evs,
+        )
+
+
+def test_build_llm_general_dataset_happy():
+    evs = [{"uuid": "e1", "name": "judge"}]
+    out = runner._build_llm_general_dataset(
+        [
+            {
+                "uuid": "i1",
+                "payload": {
+                    "input": "summarize this",
+                    "output": "a summary",
+                    "evaluator_variables": {"e1": {"criteria": "concise"}},
+                },
+            }
+        ],
+        evs,
+    )
+    # Maps onto the conversational llm shape: input -> single user turn,
+    # output -> output.response.
+    assert out[0]["test_case"]["id"] == "i1"
+    assert out[0]["test_case"]["history"] == [
+        {"role": "user", "content": "summarize this"}
+    ]
+    assert out[0]["test_case"]["evaluation"]["type"] == "response"
+    assert out[0]["test_case"]["evaluation"]["criteria"][0]["arguments"] == {
+        "criteria": "concise"
+    }
+    assert out[0]["output"]["response"] == "a summary"
+    assert out[0]["output"]["tool_calls"] == []
+
+
+def test_build_dataset_dispatch_llm_general():
+    out = runner.build_dataset_for_task_type(
+        "llm-general",
+        [{"uuid": "i1", "payload": {"input": "i", "output": "o"}}],
+        [{"uuid": "e1", "name": "judge"}],
+    )
+    assert out[0]["test_case"]["id"] == "i1"
+    assert out[0]["output"]["response"] == "o"
+
+
 def test_build_simulation_dataset():
     out = runner._build_simulation_dataset(
         [{"uuid": "i1", "payload": {"transcript": [{"role": "user", "content": "x"}]}}]
@@ -282,6 +355,10 @@ def test_calibrate_command_for_task_type():
     assert out_stt[:3] == ["calibrate", "stt", "--eval-only"]
     out_llm = runner.calibrate_command_for_task_type("llm", p, p, p)
     assert out_llm[:2] == ["calibrate", "llm"]
+    # llm-general reuses the llm calibrate command.
+    out_llm_general = runner.calibrate_command_for_task_type("llm-general", p, p, p)
+    assert out_llm_general[:2] == ["calibrate", "llm"]
+    assert out_llm_general == out_llm
     out_sim = runner.calibrate_command_for_task_type("conversation", p, p, p)
     assert out_sim[:2] == ["calibrate", "simulations"]
     with pytest.raises(runner.DatasetBuildError):
@@ -543,6 +620,30 @@ def test_parse_results_for_task_type_dispatch(tmp_path):
         )
         == []
     )
+
+
+def test_parse_results_for_task_type_dispatch_llm_general(tmp_path):
+    # llm-general routes to the same results parser as llm.
+    (tmp_path / "config.json").write_text(
+        json.dumps({"evaluators_map": {"ev-1": "Safety"}})
+    )
+    (tmp_path / "results.json").write_text(
+        json.dumps(
+            [
+                {
+                    "test_case": {"id": "i1"},
+                    "metrics": {
+                        "judge_results": {"Safety": {"match": True, "reasoning": "ok"}}
+                    },
+                }
+            ]
+        )
+    )
+    runs = runner.parse_results_for_task_type(
+        "llm-general", tmp_path, [_ev_resolved()], "job-1"
+    )
+    assert len(runs) == 1
+    assert runs[0]["value"]["value"] is True
 
 
 def test_parse_results_for_task_type_dispatch_conversation(tmp_path):

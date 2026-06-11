@@ -104,8 +104,9 @@ ANNOTATION_EVAL_JOB_TYPE = "annotation-eval"
 # Task types whose annotation rows we know how to evaluate via the CLI's
 # --eval-only modes. `tts` is omitted because annotation tasks don't store
 # audio S3 keys today; `voice` simulation isn't supported by the CLI in
-# eval-only mode.
-SUPPORTED_EVAL_TASK_TYPES = ("stt", "llm", "conversation")
+# eval-only mode. `llm-general` (non-conversational input -> output) reuses the
+# `llm` calibrate path — see `_build_llm_general_dataset`.
+SUPPORTED_EVAL_TASK_TYPES = ("stt", "llm", "llm-general", "conversation")
 
 logger = logging.getLogger(__name__)
 
@@ -326,19 +327,7 @@ def _build_llm_dataset(
             raise DatasetBuildError(
                 f"Item {it['uuid']}: `tool_calls` must be a list if provided"
             )
-        per_evaluator_vars = payload.get("evaluator_variables") or {}
-        if not isinstance(per_evaluator_vars, dict):
-            raise DatasetBuildError(
-                f"Item {it['uuid']}: `evaluator_variables` must be a dict "
-                "keyed by evaluator UUID"
-            )
-        criteria_refs: List[Dict[str, Any]] = []
-        for ev in evaluators_resolved:
-            ref: Dict[str, Any] = {"name": ev["name"]}
-            args = per_evaluator_vars.get(ev["uuid"]) or {}
-            if args:
-                ref["arguments"] = args
-            criteria_refs.append(ref)
+        criteria_refs = _criteria_refs_for_item(it, payload, evaluators_resolved)
         out.append(
             {
                 "test_case": {
@@ -350,6 +339,77 @@ def _build_llm_dataset(
                     },
                 },
                 "output": {"response": str(response), "tool_calls": tool_calls},
+            }
+        )
+    return out
+
+
+def _criteria_refs_for_item(
+    it: Dict[str, Any],
+    payload: Dict[str, Any],
+    evaluators_resolved: List[Dict[str, Any]],
+) -> List[Dict[str, Any]]:
+    """Build the per-test `evaluation.criteria` refs from an item's optional
+    `evaluator_variables` map. Each ref is `{name, arguments?}`; missing entries
+    → no arguments → calibrate falls back to the prompt placeholder/default.
+    Shared by the `llm` and `llm-general` dataset builders."""
+    per_evaluator_vars = payload.get("evaluator_variables") or {}
+    if not isinstance(per_evaluator_vars, dict):
+        raise DatasetBuildError(
+            f"Item {it['uuid']}: `evaluator_variables` must be a dict "
+            "keyed by evaluator UUID"
+        )
+    criteria_refs: List[Dict[str, Any]] = []
+    for ev in evaluators_resolved:
+        ref: Dict[str, Any] = {"name": ev["name"]}
+        args = per_evaluator_vars.get(ev["uuid"]) or {}
+        if args:
+            ref["arguments"] = args
+        criteria_refs.append(ref)
+    return criteria_refs
+
+
+def _build_llm_general_dataset(
+    items: List[Dict[str, Any]], evaluators_resolved: List[Dict[str, Any]]
+) -> List[Dict[str, Any]]:
+    """LLM-general --eval-only: non-conversational `input` -> `output`, mapped
+    onto calibrate's `llm --eval-only` path as a single user turn so it reuses
+    the same command + result parser as `llm`.
+
+    Annotation convention for payload:
+      { "input": "...", "output": "...",
+        "evaluator_variables"?: { "<evaluator_uuid>": { "<var>": <value>, ... } } }
+
+    `input` becomes a single `{role: "user", content: input}` history entry and
+    `output` becomes `output.response`. `evaluator_variables` works exactly as in
+    the `llm` builder (per-evaluator `{{variable}}` substitution).
+    """
+    if not evaluators_resolved:
+        raise DatasetBuildError(
+            "LLM --eval-only requires at least one evaluator (criteria)"
+        )
+    out: List[Dict[str, Any]] = []
+    for it in items:
+        payload = _payload_dict(it)
+        input_text = payload.get("input")
+        output_text = payload.get("output")
+        if input_text is None or output_text is None:
+            raise DatasetBuildError(
+                f"Item {it['uuid']}: llm-general items need `input` and "
+                "`output` in payload"
+            )
+        criteria_refs = _criteria_refs_for_item(it, payload, evaluators_resolved)
+        out.append(
+            {
+                "test_case": {
+                    "id": it["uuid"],
+                    "history": [{"role": "user", "content": str(input_text)}],
+                    "evaluation": {
+                        "type": "response",
+                        "criteria": criteria_refs,
+                    },
+                },
+                "output": {"response": str(output_text), "tool_calls": []},
             }
         )
     return out
@@ -386,11 +446,13 @@ def build_dataset_for_task_type(
         return _build_stt_dataset(items)
     if task_type == "llm":
         return _build_llm_dataset(items, evaluators_resolved)
+    if task_type == "llm-general":
+        return _build_llm_general_dataset(items, evaluators_resolved)
     if task_type == "conversation":
         return _build_simulation_dataset(items)
     raise DatasetBuildError(
         f"Evaluator runs are not supported for task type {task_type!r} "
-        "(supported: stt, llm, conversation)"
+        "(supported: stt, llm, llm-general, conversation)"
     )
 
 
@@ -404,7 +466,9 @@ def calibrate_command_for_task_type(
             "-o", str(output_dir),
             "--config", str(config_path),
         ]
-    if task_type == "llm":
+    if task_type in ("llm", "llm-general"):
+        # llm-general maps onto the same conversational `llm --eval-only` path
+        # (single user turn); see `_build_llm_general_dataset`.
         return [
             "calibrate", "llm",
             "-c", str(config_path),
@@ -759,7 +823,7 @@ def parse_results_for_task_type(
     annotation_item.uuid via `dataset_map.json` + this list."""
     if task_type == "stt":
         return _parse_results_stt(output_dir, evaluators_resolved, job_uuid)
-    if task_type == "llm":
+    if task_type in ("llm", "llm-general"):
         return _parse_results_llm(output_dir, evaluators_resolved, job_uuid)
     if task_type == "conversation":
         return _parse_results_simulation(
@@ -1027,7 +1091,7 @@ def _run_job(
             # STT/simulation flows have no per-row arguments mechanism, so we
             # pre-render the evaluator's own `variable_values` (typically empty
             # in the annotation flow).
-            if task_type == "llm":
+            if task_type in ("llm", "llm-general"):
                 evaluator_payload = build_evaluator_cli_payload_unrendered(
                     evaluators_resolved
                 )
