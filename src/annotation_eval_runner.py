@@ -344,6 +344,23 @@ def _build_llm_dataset(
     return out
 
 
+def _validated_evaluator_variables(
+    it: Dict[str, Any], payload: Dict[str, Any]
+) -> Dict[str, Any]:
+    """Extract + validate an item's optional `evaluator_variables` map
+    (`{evaluator_uuid: {var: value}}`). Shared by the `llm` and `llm-general`
+    dataset builders, which shape it differently downstream (the `llm` path
+    threads per-evaluator `criteria[].arguments`; `llm-general` merges into a
+    single flat per-row `arguments`)."""
+    per_evaluator_vars = payload.get("evaluator_variables") or {}
+    if not isinstance(per_evaluator_vars, dict):
+        raise DatasetBuildError(
+            f"Item {it['uuid']}: `evaluator_variables` must be a dict "
+            "keyed by evaluator UUID"
+        )
+    return per_evaluator_vars
+
+
 def _criteria_refs_for_item(
     it: Dict[str, Any],
     payload: Dict[str, Any],
@@ -352,13 +369,8 @@ def _criteria_refs_for_item(
     """Build the per-test `evaluation.criteria` refs from an item's optional
     `evaluator_variables` map. Each ref is `{name, arguments?}`; missing entries
     → no arguments → calibrate falls back to the prompt placeholder/default.
-    Shared by the `llm` and `llm-general` dataset builders."""
-    per_evaluator_vars = payload.get("evaluator_variables") or {}
-    if not isinstance(per_evaluator_vars, dict):
-        raise DatasetBuildError(
-            f"Item {it['uuid']}: `evaluator_variables` must be a dict "
-            "keyed by evaluator UUID"
-        )
+    Used by the `llm` dataset builder."""
+    per_evaluator_vars = _validated_evaluator_variables(it, payload)
     criteria_refs: List[Dict[str, Any]] = []
     for ev in evaluators_resolved:
         ref: Dict[str, Any] = {"name": ev["name"]}
@@ -405,12 +417,7 @@ def _build_llm_general_dataset(
                 f"Item {it['uuid']}: llm-general items need `input` and "
                 "`output` in payload"
             )
-        per_evaluator_vars = payload.get("evaluator_variables") or {}
-        if not isinstance(per_evaluator_vars, dict):
-            raise DatasetBuildError(
-                f"Item {it['uuid']}: `evaluator_variables` must be a dict "
-                "keyed by evaluator UUID"
-            )
+        per_evaluator_vars = _validated_evaluator_variables(it, payload)
         arguments: Dict[str, Any] = {}
         for uid in resolved_uuids:
             vals = per_evaluator_vars.get(uid)
