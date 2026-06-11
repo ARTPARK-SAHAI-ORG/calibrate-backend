@@ -629,6 +629,43 @@ def test_get_evaluators_for_test_resolves_live_version(user):
     assert relinked[0]["version_number"] == 2
 
 
+def test_get_evaluators_for_simulation_resolves_live_version(user):
+    """A simulation run must always use the evaluator's CURRENT live version, not
+    the version pinned on the simulation_evaluators pivot at link time. Editing the
+    evaluator (new live version) after linking changes what
+    get_evaluators_for_simulation returns, even though the pivot's
+    evaluator_version_id still points at the old version. Mirrors
+    test_get_evaluators_for_test_resolves_live_version."""
+    sim_uuid = db.create_simulation(
+        name=_u("sim-live"), user_id=user["uuid"], org_uuid=user["org_uuid"]
+    )
+    ev_uuid = db.create_evaluator(
+        name=_u("ev-sim-live"), owner_user_id=user["uuid"], org_uuid=user["org_uuid"]
+    )
+    v1 = db.create_evaluator_version(ev_uuid, judge_model="m", system_prompt="PROMPT V1")
+    db.set_evaluator_live_version(ev_uuid, v1["uuid"])
+
+    # Link pinning v1 on the pivot.
+    db.add_evaluator_to_simulation(sim_uuid, ev_uuid, v1["uuid"])
+    linked = db.get_evaluators_for_simulation(sim_uuid)
+    linked = [e for e in linked if e["uuid"] == ev_uuid]
+    assert len(linked) == 1
+    assert linked[0]["evaluator_version_id"] == v1["uuid"]  # live == v1 here
+    assert linked[0]["system_prompt"] == "PROMPT V1"
+    assert linked[0]["version_number"] == 1
+
+    # Edit the evaluator: new version becomes live. Do NOT re-link.
+    v2 = db.create_evaluator_version(ev_uuid, judge_model="m", system_prompt="PROMPT V2")
+    db.set_evaluator_live_version(ev_uuid, v2["uuid"])
+
+    relinked = db.get_evaluators_for_simulation(sim_uuid)
+    relinked = [e for e in relinked if e["uuid"] == ev_uuid]
+    # Now reports v2 even though the pivot still pins v1 in the DB.
+    assert relinked[0]["evaluator_version_id"] == v2["uuid"]
+    assert relinked[0]["system_prompt"] == "PROMPT V2"
+    assert relinked[0]["version_number"] == 2
+
+
 def test_evaluator_variables_are_immutable_across_versions(user):
     """Variable names are frozen after the first version. A new version must
     declare the same variable name set; renaming/adding/removing one is rejected.
