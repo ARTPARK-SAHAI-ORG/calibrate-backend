@@ -290,7 +290,8 @@ def test_build_llm_general_dataset_happy():
 
 def test_build_llm_general_dataset_with_arguments():
     """Per-item `evaluator_variables` (same contract as the llm task type) are
-    merged into a flat per-row `arguments` object across the run's evaluators."""
+    keyed by evaluator NAME in the per-row `arguments` map — each evaluator gets
+    its own box, exactly like the llm path (no shared bag, no collision)."""
     evs = [{"uuid": "e1", "name": "judge1"}, {"uuid": "e2", "name": "judge2"}]
     out = runner._build_llm_general_dataset(
         [
@@ -300,8 +301,9 @@ def test_build_llm_general_dataset_with_arguments():
                     "input": "in",
                     "output": "out",
                     "evaluator_variables": {
+                        # same {{var}} name for both — must NOT collide
                         "e1": {"criteria": "be concise"},
-                        "e2": {"reference": "gold answer"},
+                        "e2": {"criteria": "be accurate"},
                         # not in this run → ignored
                         "e9": {"ignored": "x"},
                     },
@@ -312,8 +314,8 @@ def test_build_llm_general_dataset_with_arguments():
     )
     assert out[0]["id"] == "i1"
     assert out[0]["arguments"] == {
-        "criteria": "be concise",
-        "reference": "gold answer",
+        "judge1": {"criteria": "be concise"},
+        "judge2": {"criteria": "be accurate"},
     }
 
 

@@ -399,17 +399,15 @@ def _build_llm_general_dataset(
       { "input": "...", "output": "...",
         "evaluator_variables"?: { "<evaluator_uuid>": { "<var>": <value>, ... } } }
 
-    `evaluator_variables` uses the SAME payload contract as the `llm` task type.
-    The difference is the wire shape: `calibrate general` takes one flat per-row
-    `arguments` object (substituted into any `{{placeholder}}` across the
-    evaluators' prompts — the same `{{var}}` mechanism as `calibrate llm`),
-    whereas the `llm` path threads per-evaluator `criteria[].arguments`. So the
-    per-evaluator dicts are merged into a single `arguments` map per row (only
-    for evaluators actually in this run). Omitted/empty → no `arguments` key;
-    calibrate then leaves placeholders intact / uses the declared default.
+    `evaluator_variables` uses the SAME payload contract as the `llm` task type,
+    and is resolved per-evaluator the SAME way (`_criteria_refs_for_item`).
+    `calibrate general` takes those as a per-row `arguments` object keyed by
+    evaluator **name** — it renders each evaluator's prompt against
+    `arguments[ev_name]`, exactly mirroring `llm`'s per-criteria `arguments`
+    (no shared bag, so two evaluators using the same `{{var}}` never collide).
+    Omitted/empty → no `arguments` key.
     """
     _require_evaluators(evaluators_resolved, "general eval")
-    resolved_uuids = [ev["uuid"] for ev in evaluators_resolved]
     out: List[Dict[str, Any]] = []
     for it in items:
         payload = _payload_dict(it)
@@ -420,12 +418,14 @@ def _build_llm_general_dataset(
                 f"Item {it['uuid']}: llm-general items need `input` and "
                 "`output` in payload"
             )
-        per_evaluator_vars = _validated_evaluator_variables(it, payload)
-        arguments: Dict[str, Any] = {}
-        for uid in resolved_uuids:
-            vals = per_evaluator_vars.get(uid)
-            if isinstance(vals, dict):
-                arguments.update(vals)
+        # Identical per-evaluator resolution to the `llm` builder; just reshape
+        # the criteria refs into general's name-keyed `arguments` map.
+        criteria_refs = _criteria_refs_for_item(it, payload, evaluators_resolved)
+        arguments = {
+            ref["name"]: ref["arguments"]
+            for ref in criteria_refs
+            if "arguments" in ref
+        }
         row: Dict[str, Any] = {
             "id": it["uuid"],
             "input": str(input_text),
