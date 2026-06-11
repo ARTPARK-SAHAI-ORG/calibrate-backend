@@ -618,6 +618,75 @@ def test_update_agent_test_intermediate_results_stores_latency_and_cost(tmp_path
     assert results["test_results"][0]["cost"] == 0.000942
 
 
+def test_aggregate_numeric_metric():
+    from routers.agent_tests import _aggregate_numeric_metric
+
+    rows = [
+        {"latency_ms": 1851.0},
+        {"latency_ms": 2000},
+        {"latency_ms": None},   # not counted
+        {},                      # not counted
+        {"latency_ms": True},    # bool excluded
+    ]
+    agg = _aggregate_numeric_metric(rows, "latency_ms")
+    assert agg == {"mean": (1851.0 + 2000) / 2, "min": 1851.0, "max": 2000, "count": 2}
+
+    # No reported values / empty → None
+    assert _aggregate_numeric_metric([{"latency_ms": None}], "latency_ms") is None
+    assert _aggregate_numeric_metric([], "latency_ms") is None
+    assert _aggregate_numeric_metric(None, "latency_ms") is None
+
+
+def test_perf_aggregates_prefers_calibrate_else_computes():
+    from routers.agent_tests import _perf_aggregates
+
+    rows = [
+        {"latency_ms": 1851.0, "cost": 0.0248},
+        {"latency_ms": 2000.0, "cost": 0.0252},
+    ]
+    # calibrate's metrics.json blocks win when present
+    md = {"latency_ms": {"mean": 1, "min": 1, "max": 1, "count": 9}, "cost": None}
+    latency, cost = _perf_aggregates(rows, md)
+    assert latency == {"mean": 1, "min": 1, "max": 1, "count": 9}
+    # cost absent from metrics → computed from rows
+    assert cost == {"mean": 0.025, "min": 0.0248, "max": 0.0252, "count": 2}
+
+    # No metrics.json at all → both computed from rows
+    latency2, cost2 = _perf_aggregates(rows, None)
+    assert latency2["count"] == 2 and latency2["min"] == 1851.0
+    assert cost2["count"] == 2
+
+
+def test_update_agent_test_intermediate_results_computes_latency_fallback(tmp_path):
+    """When calibrate emits per-case latency/cost in results.json but omits the
+    aggregated metrics.json block, the backend computes the aggregate from rows."""
+    from routers.agent_tests import _update_agent_test_intermediate_results
+    from db import create_agent_test_job, get_agent_test_job
+
+    job_id = create_agent_test_job(agent_id="agent-fb", job_type="llm-unit-test")
+
+    (tmp_path / "results.json").write_text(
+        json.dumps(
+            [
+                {
+                    "output": {"response": "hi", "cost": 0.0248},
+                    "metrics": {"passed": True},
+                    "test_case": {"name": "T1"},
+                    "latency_ms": 1851.0,
+                }
+            ]
+        )
+    )
+    # metrics.json present but WITHOUT latency_ms/cost aggregate blocks
+    (tmp_path / "metrics.json").write_text(json.dumps({"total": 1, "passed": 1}))
+
+    _update_agent_test_intermediate_results(job_id, tmp_path, ["T1"])
+
+    results = get_agent_test_job(job_id)["results"]
+    assert results["latency_ms"] == {"mean": 1851.0, "min": 1851.0, "max": 1851.0, "count": 1}
+    assert results["cost"] == {"mean": 0.0248, "min": 0.0248, "max": 0.0248, "count": 1}
+
+
 def test_update_benchmark_intermediate_results_stores_per_model_latency_and_cost(tmp_path):
     """Each completed model's aggregated latency_ms/cost ride on its model_results entry."""
     from routers.agent_tests import _update_benchmark_intermediate_results
