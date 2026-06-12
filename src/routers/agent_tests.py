@@ -2232,6 +2232,9 @@ async def get_agent_test_run_status(
 
 class BenchmarkRequest(BaseModel):
     models: List[str]  # List of model names to benchmark
+    # Optional subset of the agent's linked tests to benchmark. Each uuid must be
+    # linked to the agent (404 otherwise). Omit/null/empty ⇒ all linked tests.
+    test_uuids: Optional[List[str]] = None
 
 
 class ModelResult(BaseModel):
@@ -2810,13 +2813,35 @@ async def run_agent_benchmark(
                 ),
             )
 
-    # Benchmarks always run all tests linked to the agent
-    tests = get_tests_for_agent(agent_uuid)
-    if not tests:
+    # Benchmarks run the agent's linked tests, optionally narrowed to a subset.
+    linked_tests = get_tests_for_agent(agent_uuid)
+    if not linked_tests:
         raise HTTPException(
             status_code=400,
             detail="No tests linked to this agent. Link tests first.",
         )
+
+    if request.test_uuids:
+        # Scope to the requested subset; every uuid must be linked to this agent.
+        linked_by_uuid = {t["uuid"]: t for t in linked_tests}
+        unknown = [u for u in request.test_uuids if u not in linked_by_uuid]
+        if unknown:
+            raise HTTPException(
+                status_code=404,
+                detail=(
+                    "The following tests are not linked to this agent: "
+                    f"{', '.join(unknown)}."
+                ),
+            )
+        # Preserve request order while de-duplicating.
+        seen: set = set()
+        tests = []
+        for u in request.test_uuids:
+            if u not in seen:
+                seen.add(u)
+                tests.append(linked_by_uuid[u])
+    else:
+        tests = linked_tests
 
     # Get S3 configuration
     try:

@@ -628,6 +628,50 @@ def test_run_agent_benchmark_validation(client):
     )
     assert no_tests.status_code == 400
 
+    # test_uuids referencing a test not linked to the agent → 404
+    test = _create_test(client, h)
+    client.post(
+        "/agent-tests",
+        json={"agent_uuid": agent["uuid"], "test_uuids": [test["uuid"]]},
+    )
+    unlinked = _create_test(client, h)  # exists but not linked to this agent
+    bad_subset = client.post(
+        f"/agent-tests/agent/{agent['uuid']}/benchmark",
+        json={"models": ["openai/gpt-4"], "test_uuids": [unlinked["uuid"]]},
+        headers=h,
+    )
+    assert bad_subset.status_code == 404
+    assert unlinked["uuid"] in bad_subset.json()["detail"]
+
+
+def test_run_agent_benchmark_subset_scoping(client, monkeypatch):
+    """A benchmark with `test_uuids` runs only the requested linked subset."""
+    from db import get_agent_test_job
+
+    auth = _signup(client)
+    h = auth["headers"]
+    agent = _create_agent(client, h)
+    t1 = _create_test(client, h)
+    t2 = _create_test(client, h)
+    for t in (t1, t2):
+        client.post(
+            "/agent-tests",
+            json={"agent_uuid": agent["uuid"], "test_uuids": [t["uuid"]]},
+        )
+
+    monkeypatch.setenv("S3_OUTPUT_BUCKET", "test-bucket")
+    with patch(
+        "routers.agent_tests.can_start_agent_test_job", return_value=False
+    ), patch("threading.Thread"):
+        resp = client.post(
+            f"/agent-tests/agent/{agent['uuid']}/benchmark",
+            json={"models": ["openai/gpt-4"], "test_uuids": [t2["uuid"]]},
+            headers=h,
+        )
+    assert resp.status_code == 200
+    job = get_agent_test_job(resp.json()["task_id"])
+    assert job["details"]["test_uuids"] == [t2["uuid"]]
+
 
 def test_run_agent_benchmark_queued_path(client, monkeypatch):
     auth = _signup(client)
