@@ -20,6 +20,7 @@ from db import (
     get_dataset_items_by_uuids,
     update_dataset_item,
     delete_dataset_item,
+    delete_dataset_items,
 )
 
 logger = logging.getLogger(__name__)
@@ -288,6 +289,43 @@ async def update_item(
     if not item:
         raise HTTPException(status_code=404, detail="Item not found")
     return _item_row_to_response(item)
+
+
+class BulkDeleteItemsRequest(BaseModel):
+    # When `select_all=True`, `item_uuids` is ignored and every non-deleted
+    # item in the dataset is targeted. Otherwise `item_uuids` must be non-empty.
+    item_uuids: List[str] = []
+    select_all: bool = False
+
+
+@router.delete("/{dataset_id}/items")
+async def remove_items(
+    dataset_id: str,
+    request: BulkDeleteItemsRequest,
+    ctx: OrgContext = Depends(get_current_org),
+):
+    """Soft-delete multiple items from a dataset in one request.
+
+    Pass `item_uuids` to delete a specific set, or `select_all=true` to clear
+    every item in the dataset (in which case `item_uuids` is ignored). UUIDs not
+    in this dataset (or already deleted) are skipped silently, so `deleted_count`
+    reflects how many rows actually transitioned to deleted.
+    """
+    row = get_dataset(dataset_id, org_uuid=ctx.org_uuid)
+    if not row:
+        raise HTTPException(status_code=404, detail="Dataset not found")
+
+    if not request.select_all and not request.item_uuids:
+        raise HTTPException(
+            status_code=400,
+            detail="provide item_uuids, or set select_all=true",
+        )
+
+    deleted_count = delete_dataset_items(
+        dataset_id,
+        item_uuids=None if request.select_all else request.item_uuids,
+    )
+    return {"deleted_count": deleted_count}
 
 
 @router.delete("/{dataset_id}/items/{item_uuid}", status_code=204)
