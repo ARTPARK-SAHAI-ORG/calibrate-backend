@@ -422,7 +422,7 @@ wheels = [
 
 [[package]]
 name = "calibrate-agent"
-version = "0.0.50"
+version = "0.0.51"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "backoff" },
@@ -433,6 +433,7 @@ dependencies = [
     { name = "langfuse" },
     { name = "matplotlib" },
     { name = "natsort" },
+    { name = "numpy" },
     { name = "onnxruntime" },
     { name = "openpyxl" },
     { name = "opentelemetry-api" },
@@ -448,9 +449,9 @@ dependencies = [
     { name = "uvicorn" },
     { name = "whisper-normalizer" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/8d/e4/8be84bcf493e9ed3e2de57a81c6e343509524c140ee31a7b586dd9b78139/calibrate_agent-0.0.50.tar.gz", hash = "sha256:50da26973f0778fa747cacafece87fd913c13e9d8cda3dc04ffbc6c76715f236", size = 17812423, upload-time = "2026-06-13T05:00:22.223Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/43/3c/f5511ae436883b78288b590af1a5717bc84a39f4e515128a8821c7bf0dfa/calibrate_agent-0.0.51.tar.gz", hash = "sha256:5c550c7c58972eda4ccb6d6438f25bcea22dae486da1312e7cf04fea893f3208", size = 17815388, upload-time = "2026-06-13T08:29:06.822Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/45/d7/92fe43a4ffb5eeeb06488d84f2a1832bedd6f41b73d4daa959a770675957/calibrate_agent-0.0.50-py3-none-any.whl", hash = "sha256:ee092be62520f78390476db497f5e0a31f60e659e0fce611edfd2f36eb6c2273", size = 713397, upload-time = "2026-06-13T05:00:20.441Z" },
+    { url = "https://files.pythonhosted.org/packages/25/60/7c1a201882e0d39a4a96cd02def26266d0d726df2f162b0675f440382ba2/calibrate_agent-0.0.51-py3-none-any.whl", hash = "sha256:c73d082f2c876663eb61ce9d241cdf3b8c008fe4357a38387c13e95078fcf3b2", size = 715344, upload-time = "2026-06-13T08:29:05.104Z" },
 ]
 
 [[package]]
