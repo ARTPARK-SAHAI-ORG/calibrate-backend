@@ -6370,6 +6370,46 @@ def delete_dataset_item(item_uuid: str, dataset_id: str) -> bool:
         return deleted
 
 
+def delete_dataset_items(
+    dataset_id: str, item_uuids: Optional[List[str]] = None
+) -> int:
+    """Soft delete multiple dataset items in one transaction. Returns the count
+    that actually transitioned to deleted.
+
+    `item_uuids=None` deletes every non-deleted item in the dataset (the
+    "select all" path); a list deletes only those uuids, scoped to the dataset.
+    UUIDs not in this dataset (or already deleted) are skipped silently, so the
+    return value can be smaller than `len(item_uuids)`. order_index values of
+    remaining items are intentionally not renumbered (see delete_dataset_item).
+    """
+    if item_uuids is not None and not item_uuids:
+        return 0
+    with get_db_connection() as conn:
+        cursor = conn.cursor()
+        if item_uuids is None:
+            cursor.execute(
+                "UPDATE dataset_items SET deleted_at = CURRENT_TIMESTAMP WHERE dataset_id = ? AND deleted_at IS NULL",
+                (dataset_id,),
+            )
+        else:
+            placeholders = ",".join("?" for _ in item_uuids)
+            cursor.execute(
+                f"UPDATE dataset_items SET deleted_at = CURRENT_TIMESTAMP WHERE dataset_id = ? AND deleted_at IS NULL AND uuid IN ({placeholders})",
+                [dataset_id, *item_uuids],
+            )
+        deleted_count = cursor.rowcount
+        if deleted_count > 0:
+            cursor.execute(
+                "UPDATE datasets SET updated_at = CURRENT_TIMESTAMP WHERE uuid = ?",
+                (dataset_id,),
+            )
+            logger.info(
+                f"Soft deleted {deleted_count} dataset item(s) from {dataset_id}"
+            )
+        conn.commit()
+        return deleted_count
+
+
 # ============ Org Limits Functions ============
 
 
