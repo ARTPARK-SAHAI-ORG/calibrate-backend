@@ -111,6 +111,12 @@ SUPPORTED_EVAL_TASK_TYPES = ("stt", "llm", "llm-general", "conversation")
 logger = logging.getLogger(__name__)
 
 
+def _is_job_aborted(job_uuid: str) -> bool:
+    """Check if an annotation-eval job was aborted by the user."""
+    job = get_job(job_uuid)
+    return bool(job and (job.get("details") or {}).get("aborted"))
+
+
 # ---------------------------------------------------------------------------
 # Output parsing — generic eval-only output dir (same layout as STT --eval-only)
 # ---------------------------------------------------------------------------
@@ -890,6 +896,12 @@ class AnnotationEvalTimeoutError(RuntimeError):
     upload partials)."""
 
 
+class AnnotationEvalAbortedError(RuntimeError):
+    """Raised when the polling loop detects a user-requested abort. The outer
+    handler must NOT overwrite the abort state — the abort endpoint is the
+    authoritative writer of the final results/status for an aborted job."""
+
+
 def _run_calibrate_eval_only(
     cmd: List[str],
     cwd: Path,
@@ -934,6 +946,18 @@ def _run_calibrate_eval_only(
                 logger.warning(f"on_started callback raised: {e}")
         last_snapshot: Tuple[int, int] = _output_dir_snapshot(log_dir)
         while proc.poll() is None:
+            if job_uuid is not None and _is_job_aborted(job_uuid):
+                logger.info(
+                    f"[annotation-eval] job {job_uuid} aborted, killing pgid {proc.pid}"
+                )
+                kill_process_group(proc.pid, job_uuid)
+                try:
+                    proc.wait(timeout=5)
+                except subprocess.TimeoutExpired:
+                    pass
+                raise AnnotationEvalAbortedError(
+                    "annotation-eval job aborted by user"
+                )
             time.sleep(heartbeat_seconds)
             if job_uuid is None:
                 continue
@@ -972,6 +996,14 @@ def _run_calibrate_eval_only(
                     f"calibrate --eval-only timed out after {timeout_seconds}s "
                     "with no progress"
                 )
+    # Re-check abort after natural subprocess exit: an abort flag set
+    # AFTER `proc.poll()` returned non-None but BEFORE _run_job's parse +
+    # final update_job below would otherwise be silently overwritten by
+    # the success path.
+    if job_uuid is not None and _is_job_aborted(job_uuid):
+        raise AnnotationEvalAbortedError(
+            "annotation-eval job aborted by user (post-exit)"
+        )
     try:
         with open(stdout_path, "r") as f:
             stdout = f.read()
@@ -1199,6 +1231,15 @@ def _run_job(
                         s3, local_path, s3_bucket, f"{s3_prefix}/{rel}"
                     )
 
+            # Last-chance abort check: parse + create_evaluator_runs + S3
+            # upload above can take seconds-to-minutes; an abort that lands
+            # during that window must not be overwritten by the success
+            # write below.
+            if _is_job_aborted(job_uuid):
+                raise AnnotationEvalAbortedError(
+                    "annotation-eval job aborted by user (pre-final-update)"
+                )
+
             # 7. Mark job completed (status + completed_at on the generic
             # jobs table; metrics + s3_prefix go into details so polling
             # endpoints can surface them).
@@ -1213,7 +1254,18 @@ def _run_job(
                 },
             )
             logger.info(f"[annotation-eval] job {job_uuid} completed")
+    except AnnotationEvalAbortedError:
+        # User-initiated abort: the abort endpoint already marked the job
+        # done/aborted with the runs collected so far. Don't overwrite that.
+        logger.info(
+            f"[annotation-eval] job {job_uuid} aborted by user; skipping final update"
+        )
     except subprocess.CalledProcessError as e:
+        if _is_job_aborted(job_uuid):
+            logger.info(
+                f"[annotation-eval] job {job_uuid} aborted, skipping error update"
+            )
+            return
         # The calibrate CLI exited non-zero. Surface the actual stderr (or the
         # structured `{"status":"error","error":"..."}` blob if present) so the
         # API caller sees what went wrong, mirroring stt/tts/etc.
@@ -1235,6 +1287,11 @@ def _run_job(
             details=details_patch,
         )
     except Exception as e:
+        if _is_job_aborted(job_uuid):
+            logger.info(
+                f"[annotation-eval] job {job_uuid} aborted, skipping error update"
+            )
+            return
         traceback.print_exc()
         logger.exception(f"[annotation-eval] job {job_uuid} failed: {e}")
         capture_exception_to_sentry(e)

@@ -50,6 +50,7 @@ from utils import (
     try_start_queued_agent_test_job,
     register_job_starter,
     is_job_timed_out,
+    kill_process_group,
     capture_exception_to_sentry,
     build_tool_configs,
     upload_directory_tree_to_s3,
@@ -58,6 +59,12 @@ from utils import (
 
 # Job types that share the same queue
 AGENT_TEST_JOB_TYPES = ["llm-unit-test", "llm-benchmark"]
+
+
+def _is_job_aborted(task_id: str) -> bool:
+    """Check if an agent test (LLM unit test or benchmark) job was aborted."""
+    job = get_agent_test_job(task_id)
+    return bool(job and (job.get("details") or {}).get("aborted"))
 
 
 def _start_llm_unit_test_job_from_queue(job: dict) -> bool:
@@ -1654,9 +1661,36 @@ def run_llm_test_task(
                         cwd=str(temp_path),
                     )
 
+                    # Persist pid/pgid so an abort endpoint can kill the
+                    # process group, and so recovery can clean up orphans.
+                    update_agent_test_job(
+                        task_id,
+                        details={
+                            "pid": process.pid,
+                            "pgid": process.pid,
+                            "output_dir": str(output_dir),
+                        },
+                    )
+
                     # Poll for process completion while updating intermediate results
                     prev_completed = 0
+                    aborted = False
                     while process.poll() is None:
+                        if _is_job_aborted(task_id):
+                            logger.info(
+                                f"LLM test {task_id} aborted, killing process group and stopping"
+                            )
+                            kill_process_group(process.pid, task_id)
+                            try:
+                                process.wait(timeout=5)
+                            except subprocess.TimeoutExpired:
+                                process.kill()
+                                try:
+                                    process.wait(timeout=5)
+                                except subprocess.TimeoutExpired:
+                                    pass
+                            aborted = True
+                            break
                         completed = _update_agent_test_intermediate_results(
                             task_id, output_dir, test_names
                         )
@@ -1666,6 +1700,15 @@ def run_llm_test_task(
                             )
                             prev_completed = completed
                         time.sleep(2)  # Poll every 2 seconds
+
+                    # Re-check abort after natural subprocess exit: an abort
+                    # could arrive between `poll()` returning non-None and
+                    # the final update_agent_test_job below.
+                    if aborted or _is_job_aborted(task_id):
+                        logger.info(
+                            f"LLM test {task_id} was aborted by user, skipping final processing"
+                        )
+                        return
 
                     # Final update after process completes
                     _update_agent_test_intermediate_results(
@@ -1763,6 +1806,15 @@ def run_llm_test_task(
                 upload_file_to_s3(s3, config_file, s3_bucket, config_s3_key)
                 logger.info(f"Uploaded config file to S3: {config_s3_key}")
 
+                # Last-chance abort check: parsing + S3 uploads above can
+                # take seconds; an abort that lands during that window
+                # must not be overwritten.
+                if _is_job_aborted(task_id):
+                    logger.info(
+                        f"LLM test {task_id} aborted before final update, skipping"
+                    )
+                    return
+
                 # Update job with results
                 update_agent_test_job(
                     task_id,
@@ -1785,6 +1837,11 @@ def run_llm_test_task(
                 )
 
             except subprocess.CalledProcessError as e:
+                if _is_job_aborted(task_id):
+                    logger.info(
+                        f"LLM test {task_id} aborted, skipping error update"
+                    )
+                    return
                 traceback.print_exc()
                 capture_exception_to_sentry(e)
                 # Preserve any existing results from the job
@@ -1814,6 +1871,11 @@ def run_llm_test_task(
                     results=existing_results,
                 )
             except Exception as e:
+                if _is_job_aborted(task_id):
+                    logger.info(
+                        f"LLM test {task_id} aborted, skipping error update"
+                    )
+                    return
                 traceback.print_exc()
                 capture_exception_to_sentry(e)
                 # Preserve any existing results from the job
@@ -1844,17 +1906,22 @@ def run_llm_test_task(
                 )
 
     except Exception as e:
-        traceback.print_exc()
-        capture_exception_to_sentry(e)
-        # Preserve any existing results from the job
-        existing_job = get_agent_test_job(task_id)
-        existing_results = (existing_job.get("results") or {}) if existing_job else {}
-        existing_results["error"] = f"Task failed: {str(e)}"
-        update_agent_test_job(
-            task_id,
-            status=TaskStatus.FAILED.value,
-            results=existing_results,
-        )
+        if _is_job_aborted(task_id):
+            logger.info(
+                f"LLM test {task_id} aborted, skipping error update"
+            )
+        else:
+            traceback.print_exc()
+            capture_exception_to_sentry(e)
+            # Preserve any existing results from the job
+            existing_job = get_agent_test_job(task_id)
+            existing_results = (existing_job.get("results") or {}) if existing_job else {}
+            existing_results["error"] = f"Task failed: {str(e)}"
+            update_agent_test_job(
+                task_id,
+                status=TaskStatus.FAILED.value,
+                results=existing_results,
+            )
     finally:
         # Try to start the next queued job
         try_start_queued_agent_test_job(AGENT_TEST_JOB_TYPES)
@@ -2506,9 +2573,34 @@ def run_benchmark_task(
                         cwd=str(temp_path),
                     )
 
+                    update_agent_test_job(
+                        task_id,
+                        details={
+                            "pid": process.pid,
+                            "pgid": process.pid,
+                            "output_dir": str(output_dir),
+                        },
+                    )
+
                     # Poll for process completion while updating intermediate results
                     prev_completed = 0
+                    aborted = False
                     while process.poll() is None:
+                        if _is_job_aborted(task_id):
+                            logger.info(
+                                f"Benchmark {task_id} aborted, killing process group and stopping"
+                            )
+                            kill_process_group(process.pid, task_id)
+                            try:
+                                process.wait(timeout=5)
+                            except subprocess.TimeoutExpired:
+                                process.kill()
+                                try:
+                                    process.wait(timeout=5)
+                                except subprocess.TimeoutExpired:
+                                    pass
+                            aborted = True
+                            break
                         completed = _update_benchmark_intermediate_results(
                             task_id, output_dir, models, test_names, cli_models
                         )
@@ -2518,6 +2610,15 @@ def run_benchmark_task(
                             )
                             prev_completed = completed
                         time.sleep(2)  # Poll every 2 seconds
+
+                    # Re-check abort after natural subprocess exit: an abort
+                    # could arrive between `poll()` returning non-None and
+                    # the final update_agent_test_job below.
+                    if aborted or _is_job_aborted(task_id):
+                        logger.info(
+                            f"Benchmark {task_id} was aborted by user, skipping final processing"
+                        )
+                        return
 
                     # Final update after process completes
                     _update_benchmark_intermediate_results(
@@ -2696,6 +2797,15 @@ def run_benchmark_task(
                     failed = [r.model for r in model_results if not r.success]
                     error_msg = f"Some models failed: {', '.join(failed)}"
 
+                # Last-chance abort check: parsing + S3 uploads above can
+                # take seconds-to-minutes; an abort that lands during that
+                # window must not be overwritten.
+                if _is_job_aborted(task_id):
+                    logger.info(
+                        f"Benchmark {task_id} aborted before final update, skipping"
+                    )
+                    return
+
                 # Update job with results
                 update_agent_test_job(
                     task_id,
@@ -2713,6 +2823,11 @@ def run_benchmark_task(
                 )
 
             except subprocess.CalledProcessError as e:
+                if _is_job_aborted(task_id):
+                    logger.info(
+                        f"Benchmark {task_id} aborted, skipping error update"
+                    )
+                    return
                 traceback.print_exc()
                 capture_exception_to_sentry(e)
                 failed_results: Dict[str, Any] = {
@@ -2733,6 +2848,11 @@ def run_benchmark_task(
                     results=failed_results,
                 )
             except Exception as e:
+                if _is_job_aborted(task_id):
+                    logger.info(
+                        f"Benchmark {task_id} aborted, skipping error update"
+                    )
+                    return
                 traceback.print_exc()
                 capture_exception_to_sentry(e)
                 # Preserve any existing results from the job
@@ -2759,17 +2879,22 @@ def run_benchmark_task(
                 )
 
     except Exception as e:
-        traceback.print_exc()
-        capture_exception_to_sentry(e)
-        # Preserve any existing results from the job
-        existing_job = get_agent_test_job(task_id)
-        existing_results = (existing_job.get("results") or {}) if existing_job else {}
-        existing_results["error"] = f"Task failed: {str(e)}"
-        update_agent_test_job(
-            task_id,
-            status=TaskStatus.FAILED.value,
-            results=existing_results,
-        )
+        if _is_job_aborted(task_id):
+            logger.info(
+                f"Benchmark {task_id} aborted, skipping error update"
+            )
+        else:
+            traceback.print_exc()
+            capture_exception_to_sentry(e)
+            # Preserve any existing results from the job
+            existing_job = get_agent_test_job(task_id)
+            existing_results = (existing_job.get("results") or {}) if existing_job else {}
+            existing_results["error"] = f"Task failed: {str(e)}"
+            update_agent_test_job(
+                task_id,
+                status=TaskStatus.FAILED.value,
+                results=existing_results,
+            )
     finally:
         # Try to start the next queued job
         try_start_queued_agent_test_job(AGENT_TEST_JOB_TYPES)
@@ -2982,6 +3107,96 @@ async def get_benchmark_status(
         is_public=bool(job.get("is_public")),
         share_token=job.get("share_token"),
     )
+
+
+@router.post("/job/{job_uuid}/abort")
+async def abort_agent_test_job(
+    job_uuid: str, user_id: str = Depends(get_current_user_id)
+):
+    """Abort a running LLM unit test or benchmark job, preserving partial results.
+
+    Kills the running calibrate subprocess and marks the job as done with
+    whatever intermediate results were already written to the DB by the
+    polling loop. Only the owner of the agent can abort their jobs.
+    """
+    job = get_agent_test_job(job_uuid)
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found")
+
+    # Check ownership via agent
+    agent_id = job.get("agent_id")
+    if not agent_id:
+        raise HTTPException(status_code=404, detail="Job not found")
+    agent = get_agent(agent_id)
+    if not agent or agent.get("user_id") != user_id:
+        raise HTTPException(status_code=404, detail="Job not found")
+
+    if job.get("status") != TaskStatus.IN_PROGRESS.value:
+        raise HTTPException(
+            status_code=400, detail="Can only abort in-progress jobs"
+        )
+
+    details = job.get("details") or {}
+
+    # Mark aborted FIRST so the polling loop's guard fires immediately.
+    update_agent_test_job(job_uuid, details={"aborted": True})
+
+    pid = details.get("pid") or details.get("pgid")
+    if pid:
+        kill_process_group(pid, job_uuid)
+
+    # Best-effort: upload whatever partial output the subprocess already
+    # wrote to the temp directory before we killed it.
+    output_dir_str = details.get("output_dir")
+    uploaded_prefix: Optional[str] = None
+    if output_dir_str:
+        try:
+            output_dir = Path(output_dir_str)
+            if output_dir.exists():
+                s3 = get_s3_client()
+                s3_bucket = get_s3_output_config()
+                if job.get("type") == "llm-benchmark":
+                    uploaded_prefix = f"agent-tests/benchmarks/{job_uuid}/outputs"
+                else:
+                    uploaded_prefix = f"agent-tests/runs/{job_uuid}"
+                upload_directory_tree_to_s3(
+                    s3, output_dir, s3_bucket, uploaded_prefix
+                )
+        except Exception as exc:
+            logger.warning(
+                f"Failed to upload partial outputs for aborted job {job_uuid}: {exc}"
+            )
+
+    # Re-read results from the DB right before the final write: the
+    # worker's polling loop may have committed newer
+    # test_results/model_results between our initial snapshot above and
+    # now (kill_process_group sends SIGTERM; the subprocess takes a
+    # moment to actually die, and the polling thread can land one more
+    # `_update_*_intermediate_results` write in that window). Using the
+    # stale snapshot here would overwrite those newer partials.
+    fresh_job = get_agent_test_job(job_uuid) or {}
+    results = dict(fresh_job.get("results") or {})
+    if uploaded_prefix:
+        results.setdefault("results_s3_prefix", uploaded_prefix)
+    results["error"] = "user_aborted"
+
+    update_agent_test_job(
+        job_uuid,
+        status=TaskStatus.DONE.value,
+        results=results,
+    )
+
+    # Drain queue
+    try_start_queued_agent_test_job(AGENT_TEST_JOB_TYPES)
+
+    updated = get_agent_test_job(job_uuid) or {}
+    updated_results = updated.get("results") or {}
+    return {
+        "task_id": job_uuid,
+        "status": TaskStatus.DONE.value,
+        "type": updated.get("type"),
+        "results": updated_results,
+    }
 
 
 @router.delete("/job/{job_uuid}")
