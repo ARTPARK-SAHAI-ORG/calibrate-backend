@@ -948,6 +948,7 @@ _NUMERIC_ROW_KEYS = frozenset(
         "similarity",
         "processing_time",
         "ttfb",
+        "ttft",
         "latency",
         "duration",
         "audio_duration",
@@ -991,7 +992,15 @@ def coerce_evaluator_score(raw: Any, output_type: str) -> Any:
     Rating returns ``int`` when the value is whole-numbered (the common
     case — 1-5 / 1-10 scales), ``float`` when fractional, preserving
     precision for any future fractional rating scale.
+
+    Empty strings and ``None`` collapse to ``None`` — calibrate writes
+    blanks for evaluator columns on rows that failed before the judge ran,
+    and we don't want those leaking out as the literal string ``""``.
     """
+    if raw is None:
+        return None
+    if isinstance(raw, str) and raw.strip() == "":
+        return None
     if output_type == "binary":
         if isinstance(raw, bool):
             return raw
@@ -1144,6 +1153,21 @@ def post_process_provider_results(
         for row in rows:
             if not isinstance(row, dict):
                 continue
+
+            # Row-level failure signal from calibrate (status="success"|"failed",
+            # error=<exception type+message>|""). CSV gives empty string for
+            # both fields on missing — normalize empty to None so the FE can
+            # just truthy-check.
+            row_status = row.get("status")
+            if isinstance(row_status, str) and row_status.strip() == "":
+                row["status"] = None
+                row_status = None
+            row_error = row.get("error")
+            if isinstance(row_error, str) and row_error.strip() == "":
+                row["error"] = None
+                row_error = None
+            row_failed = isinstance(row_status, str) and row_status.lower() == "failed"
+
             outputs = row.get("evaluator_outputs")
             if not isinstance(outputs, dict):
                 outputs = {}
@@ -1160,7 +1184,15 @@ def post_process_provider_results(
                     continue
                 raw_value = row.get(column_name)
                 reasoning = row.get(f"{column_name}_reasoning")
-                is_err = _row_value_looks_like_error(raw_value, reasoning)
+                if isinstance(reasoning, str) and reasoning.strip() == "":
+                    reasoning = None
+                # When the whole row failed before the judge ran, calibrate
+                # leaves the value + reasoning blank. Treat as errored and
+                # surface the row-level error message so the FE has
+                # something meaningful to render in the evaluator cell.
+                is_err = (
+                    row_failed and raw_value in (None, "")
+                ) or _row_value_looks_like_error(raw_value, reasoning)
 
                 if is_err:
                     typed_value: Any = None
@@ -1175,7 +1207,10 @@ def post_process_provider_results(
 
                 entry: Dict[str, Any] = {
                     "value": typed_value,
-                    "reasoning": reasoning,
+                    "reasoning": (
+                        reasoning if reasoning is not None
+                        else (row_error if (is_err and row_failed) else None)
+                    ),
                     "evaluator_version_id": snap.get("evaluator_version_id"),
                     "output_type": snap.get("output_type"),
                     # `name` is the human-facing display name from the
