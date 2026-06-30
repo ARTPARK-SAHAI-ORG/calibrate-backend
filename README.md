@@ -21,6 +21,14 @@ uv sync --frozen --group dev
 
 ## Running locally
 
+Create `src/.env`.
+
+```
+cp src/.env.example src/.env
+```
+
+See [`ENV.md`](ENV.md) for what each variable means.
+
 Start the development server:
 
 ```bash
