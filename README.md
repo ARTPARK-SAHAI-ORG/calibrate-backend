@@ -47,8 +47,11 @@ Related repositories:
 - [Calibrate frontend](https://github.com/ARTPARK-SAHAI-ORG/calibrate-frontend)
 - [Calibrate CLI](https://github.com/ARTPARK-SAHAI-ORG/calibrate)
 
-After cloning the repo, enable the project's git hooks so the pre-commit test
-runner fires on commits to `main`:
+Reference docs:
+
+- [Architecture diagram](https://docs.google.com/presentation/d/e/2PACX-1vQMXtGLWFnT6pGuYLS-P8GU6iHVVRFHYksgntIpcs-OzNp9DrPdq7ra38eYrCBxe8Y--6ZhK8Z-fyD8/pub?start=false&loop=false&delayms=3000)
+
+After cloning the repo, enable the project's git hooks so the pre-commit test runner fires on commits to `main`:
 
 ```bash
 git config core.hooksPath .githooks
