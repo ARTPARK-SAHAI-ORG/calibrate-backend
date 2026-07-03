@@ -287,7 +287,10 @@ def get_s3_client():
     "when_supported" adds x-amz-checksum-* headers that GCS's S3 interop layer
     rejects with SignatureDoesNotMatch. AWS S3 itself handles either setting.
     """
-    if (os.getenv("OBJECT_STORAGE_MODE") or "s3").strip().lower() == "local":
+    # Reuse the validating mode check so an invalid OBJECT_STORAGE_MODE fails the
+    # same way here as everywhere else (rather than silently building a real
+    # client for a typo'd value).
+    if is_local_object_storage():
         return None
 
     endpoint_url = os.getenv("S3_ENDPOINT_URL") or None

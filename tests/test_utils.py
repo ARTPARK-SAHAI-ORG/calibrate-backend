@@ -298,6 +298,10 @@ def test_invalid_object_storage_mode(monkeypatch):
     monkeypatch.setenv("OBJECT_STORAGE_MODE", "memory")
     with pytest.raises(ValueError):
         get_object_storage_mode()
+    # get_s3_client() must reject an invalid mode too (not silently build a real
+    # client), so a typo fails consistently instead of half-behaving like s3.
+    with pytest.raises(ValueError):
+        get_s3_client()
 
 
 def test_download_file_from_s3_local(monkeypatch, tmp_path):
