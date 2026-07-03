@@ -26,7 +26,7 @@ if sentry_dsn:
 import secrets
 
 from fastapi import Depends, FastAPI, HTTPException, Request
-from fastapi.responses import JSONResponse
+from fastapi.responses import FileResponse, JSONResponse, Response
 from fastapi.openapi.docs import get_swagger_ui_html, get_redoc_html
 from fastapi.security import HTTPBasic, HTTPBasicCredentials
 from pydantic import BaseModel
@@ -57,7 +57,9 @@ from routers.organizations import router as organizations_router
 from routers.api_keys import router as api_keys_router
 from utils import (
     generate_presigned_upload_url,
+    get_local_artifact_path,
     get_s3_output_config,
+    is_local_object_storage,
     PRESIGNED_URL_EXPIRY_SECONDS,
 )
 from job_recovery import recover_pending_jobs
@@ -286,9 +288,35 @@ def read_root():
     return {"message": "Health check successful!"}
 
 
+@app.api_route(
+    "/local-artifacts/{artifact_path:path}",
+    methods=["GET", "PUT"],
+    include_in_schema=False,
+)
+async def local_artifact(artifact_path: str, request: Request):
+    """Development-only local stand-in for S3 presigned upload/download URLs."""
+    if not is_local_object_storage():
+        raise HTTPException(status_code=404, detail="Not found")
+
+    try:
+        path = get_local_artifact_path(artifact_path)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Invalid artifact path")
+
+    if request.method == "PUT":
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(await request.body())
+        return Response(status_code=204)
+
+    if not path.is_file():
+        raise HTTPException(status_code=404, detail="Artifact not found")
+    return FileResponse(path)
+
+
 @app.post("/presigned-url", response_model=PresignedURLResponse)
 async def get_presigned_url(
-    request: PresignedURLRequest,
+    payload: PresignedURLRequest,
+    request: Request,
     user_id: str = Depends(get_current_user_id),
 ):
     """
@@ -299,13 +327,13 @@ async def get_presigned_url(
     The file will be stored at: bucket/task_type/media/UUID.extension
 
     Args:
-        request: Contains task_type (stt, tts, agent) and file_extension
+        payload: Contains task_type (stt, tts, agent) and file_extension
 
     Returns:
         Presigned URL, S3 path, and expiration time
     """
     # Validate file extension (remove leading dot if present)
-    file_extension = request.extension
+    file_extension = payload.extension
     if not file_extension:
         raise HTTPException(
             status_code=400,
@@ -313,7 +341,7 @@ async def get_presigned_url(
         )
 
     # Validate task type
-    if request.task_type not in ["stt", "tts", "agent"]:
+    if payload.task_type not in ["stt", "tts", "agent"]:
         raise HTTPException(
             status_code=400,
             detail="task_type must be one of: stt, tts, agent",
@@ -329,13 +357,16 @@ async def get_presigned_url(
     file_uuid = str(uuid.uuid4())
 
     # Construct S3 key: task_type/media/UUID.extension (no prefix)
-    s3_key = f"{request.task_type}/media/{file_uuid}.{file_extension}"
+    s3_key = f"{payload.task_type}/media/{file_uuid}.{file_extension}"
 
     # Generate presigned URL (expires in 1 hour)
     expiration = PRESIGNED_URL_EXPIRY_SECONDS  # 1 hour in seconds
 
     presigned_url = generate_presigned_upload_url(
-        s3_key, request.content_type, expiration=expiration
+        s3_key,
+        payload.content_type,
+        expiration=expiration,
+        base_url=str(request.base_url),
     )
     if not presigned_url:
         raise HTTPException(

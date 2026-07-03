@@ -39,10 +39,13 @@ from utils import (
     env_str,
     generate_presigned_download_url,
     generate_presigned_upload_url,
+    get_local_artifact_path,
     get_max_concurrent_jobs,
     get_max_concurrent_jobs_per_org,
+    get_object_storage_mode,
     get_s3_client,
     get_s3_output_config,
+    is_local_object_storage,
     is_evaluator_metric_aggregate,
     is_job_timed_out,
     kill_process_group,
@@ -253,10 +256,46 @@ def test_get_s3_client_with_and_without_endpoint(monkeypatch):
 
 def test_get_s3_output_config_requires_bucket(monkeypatch):
     monkeypatch.delenv("S3_OUTPUT_BUCKET", raising=False)
+    monkeypatch.delenv("OBJECT_STORAGE_MODE", raising=False)
     with pytest.raises(ValueError):
         get_s3_output_config()
     monkeypatch.setenv("S3_OUTPUT_BUCKET", "my-bucket")
     assert get_s3_output_config() == "my-bucket"
+
+
+def test_local_object_storage_mode(monkeypatch, tmp_path):
+    monkeypatch.setenv("OBJECT_STORAGE_MODE", "local")
+    monkeypatch.delenv("S3_OUTPUT_BUCKET", raising=False)
+    monkeypatch.setenv("LOCAL_ARTIFACT_ROOT", str(tmp_path / "artifacts"))
+
+    assert get_object_storage_mode() == "local"
+    assert is_local_object_storage() is True
+    assert get_s3_output_config() == "local-dev-artifacts"
+    assert get_s3_client() is None
+
+    source = tmp_path / "source.txt"
+    source.write_text("hello")
+    upload_file_to_s3(None, source, "ignored", "runs/one/source.txt")
+    assert get_local_artifact_path("runs/one/source.txt").read_text() == "hello"
+
+    assert generate_presigned_download_url("runs/one/source.txt") == (
+        "/local-artifacts/runs/one/source.txt"
+    )
+    monkeypatch.setenv("LOCAL_ARTIFACT_BASE_URL", "http://localhost:8000")
+    assert generate_presigned_download_url("runs/one/source.txt") == (
+        "http://localhost:8000/local-artifacts/runs/one/source.txt"
+    )
+    assert generate_presigned_upload_url(
+        "runs/two/upload.txt",
+        "text/plain",
+        base_url="http://testserver/",
+    ) == "http://testserver/local-artifacts/runs/two/upload.txt"
+
+
+def test_invalid_object_storage_mode(monkeypatch):
+    monkeypatch.setenv("OBJECT_STORAGE_MODE", "memory")
+    with pytest.raises(ValueError):
+        get_object_storage_mode()
 
 
 def test_upload_helpers_with_tmp_dir(tmp_path):

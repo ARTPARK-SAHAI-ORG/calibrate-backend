@@ -1,6 +1,7 @@
 import mimetypes
 import os
 import signal
+import shutil
 import logging
 import threading
 import time
@@ -9,6 +10,7 @@ from datetime import datetime, timedelta
 from enum import Enum
 from pathlib import Path
 from typing import List, Optional, Dict, Any, Union
+from urllib.parse import quote
 
 import boto3
 from botocore.config import Config
@@ -285,6 +287,9 @@ def get_s3_client():
     "when_supported" adds x-amz-checksum-* headers that GCS's S3 interop layer
     rejects with SignatureDoesNotMatch. AWS S3 itself handles either setting.
     """
+    if (os.getenv("OBJECT_STORAGE_MODE") or "s3").strip().lower() == "local":
+        return None
+
     endpoint_url = os.getenv("S3_ENDPOINT_URL") or None
     aws_access_key_id = os.getenv("AWS_ACCESS_KEY_ID") or None
     aws_secret_access_key = os.getenv("AWS_SECRET_ACCESS_KEY") or None
@@ -304,8 +309,62 @@ def get_s3_client():
     return boto3.client("s3", **kwargs)
 
 
+LOCAL_STORAGE_BUCKET = "local-dev-artifacts"
+
+
+def get_object_storage_mode() -> str:
+    """Return the configured artifact storage mode.
+
+    ``s3`` is the production default. ``local`` is a development-only shim that
+    stores objects under ``LOCAL_ARTIFACT_ROOT`` using the same object keys.
+    """
+    mode = (os.getenv("OBJECT_STORAGE_MODE") or "s3").strip().lower()
+    if mode not in {"s3", "local"}:
+        raise ValueError("OBJECT_STORAGE_MODE must be either 's3' or 'local'")
+    return mode
+
+
+def is_local_object_storage() -> bool:
+    return get_object_storage_mode() == "local"
+
+
+def get_local_artifact_root() -> Path:
+    configured = os.getenv("LOCAL_ARTIFACT_ROOT")
+    if configured:
+        root = Path(configured)
+    else:
+        root = Path(env_str("DB_ROOT_DIR", ".")) / "artifacts"
+    return root.expanduser().resolve()
+
+
+def get_local_artifact_path(key: str) -> Path:
+    root = get_local_artifact_root()
+    parts = [part for part in key.replace("\\", "/").split("/") if part]
+    if not parts or any(part in {".", ".."} for part in parts):
+        raise ValueError("Invalid local artifact path")
+    path = (root.joinpath(*parts)).resolve()
+    path.relative_to(root)
+    return path
+
+
+def get_local_artifact_url(key: str, base_url: Optional[str] = None) -> str:
+    path = quote(key.lstrip("/"), safe="/")
+    relative_url = f"/local-artifacts/{path}"
+    base_url = base_url or os.getenv("LOCAL_ARTIFACT_BASE_URL")
+    if not base_url:
+        return relative_url
+    return f"{base_url.rstrip('/')}{relative_url}"
+
+
 def get_s3_output_config():
-    """Get S3 output configuration from environment variables."""
+    """Get the configured artifact bucket.
+
+    In local development mode this returns a stable sentinel bucket so existing
+    ``s3://bucket/key`` paths keep working without AWS.
+    """
+    if is_local_object_storage():
+        return os.getenv("LOCAL_ARTIFACT_BUCKET") or LOCAL_STORAGE_BUCKET
+
     bucket = os.getenv("S3_OUTPUT_BUCKET")
 
     if not bucket:
@@ -326,6 +385,13 @@ def upload_file_to_s3(
     text) inline instead of forcing a download (which happens when S3 defaults
     to binary/octet-stream).
     """
+    if is_local_object_storage():
+        destination = get_local_artifact_path(s3_key)
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(local_path, destination)
+        logger.info("Stored local artifact at %s", destination)
+        return
+
     content_type, _ = mimetypes.guess_type(str(local_path))
     extra_args = {"ContentType": content_type} if content_type else None
     s3_client.upload_file(str(local_path), bucket, s3_key, ExtraArgs=extra_args)
@@ -385,6 +451,9 @@ def generate_presigned_download_url(
         Presigned URL string, or None if generation fails
     """
     try:
+        if is_local_object_storage():
+            return get_local_artifact_url(s3_key)
+
         s3 = get_s3_client()
         s3_bucket = bucket or get_s3_output_config()
 
@@ -420,6 +489,7 @@ def generate_presigned_upload_url(
     content_type: str,
     bucket: Optional[str] = None,
     expiration: int = PRESIGNED_URL_EXPIRY_SECONDS,
+    base_url: Optional[str] = None,
 ) -> Optional[str]:
     """Generate a presigned URL for uploading (put_object) to S3.
 
@@ -433,6 +503,9 @@ def generate_presigned_upload_url(
         Presigned URL string, or None if generation fails
     """
     try:
+        if is_local_object_storage():
+            return get_local_artifact_url(s3_key, base_url=base_url)
+
         s3 = get_s3_client()
         s3_bucket = bucket or get_s3_output_config()
 
