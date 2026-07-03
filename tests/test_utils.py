@@ -33,6 +33,7 @@ from utils import (
     capture_exception_to_sentry,
     coerce_evaluator_score,
     compute_share_token_toggle,
+    download_file_from_s3,
     enrich_evaluator_runs_with_current_names,
     env_bool,
     env_int,
@@ -47,6 +48,7 @@ from utils import (
     get_s3_output_config,
     is_local_object_storage,
     is_evaluator_metric_aggregate,
+    list_object_keys,
     is_job_timed_out,
     kill_process_group,
     kill_processes_from_dict,
@@ -296,6 +298,69 @@ def test_invalid_object_storage_mode(monkeypatch):
     monkeypatch.setenv("OBJECT_STORAGE_MODE", "memory")
     with pytest.raises(ValueError):
         get_object_storage_mode()
+
+
+def test_download_file_from_s3_local(monkeypatch, tmp_path):
+    monkeypatch.setenv("OBJECT_STORAGE_MODE", "local")
+    monkeypatch.setenv("LOCAL_ARTIFACT_ROOT", str(tmp_path / "artifacts"))
+
+    source = tmp_path / "input.wav"
+    source.write_bytes(b"fake wav")
+    upload_file_to_s3(None, source, "ignored", "stt/media/input.wav")
+
+    # Destination parent does not exist yet — the helper must create it.
+    dest = tmp_path / "work" / "audio.wav"
+    download_file_from_s3(None, "local-dev-artifacts", "stt/media/input.wav", dest)
+    assert dest.read_bytes() == b"fake wav"
+
+
+def test_download_file_from_s3_s3_mode(monkeypatch):
+    monkeypatch.delenv("OBJECT_STORAGE_MODE", raising=False)
+    client = MagicMock()
+    download_file_from_s3(client, "my-bucket", "runs/one/a.wav", "/tmp/a.wav")
+    client.download_file.assert_called_once_with(
+        "my-bucket", "runs/one/a.wav", "/tmp/a.wav"
+    )
+
+
+def test_list_object_keys_local(monkeypatch, tmp_path):
+    monkeypatch.setenv("OBJECT_STORAGE_MODE", "local")
+    monkeypatch.setenv("LOCAL_ARTIFACT_ROOT", str(tmp_path / "artifacts"))
+
+    for name in ("1_bot.wav", "1_user.wav", "2_bot.wav", "notes.txt"):
+        src = tmp_path / name
+        src.write_text("x")
+        upload_file_to_s3(None, src, "ignored", f"sims/abc/audios/{name}")
+    # A file outside the prefix must not appear.
+    other = tmp_path / "other.wav"
+    other.write_text("x")
+    upload_file_to_s3(None, other, "ignored", "sims/xyz/audios/9_bot.wav")
+
+    keys = list_object_keys(None, "local-dev-artifacts", "sims/abc/audios/")
+    assert keys == [
+        "sims/abc/audios/1_bot.wav",
+        "sims/abc/audios/1_user.wav",
+        "sims/abc/audios/2_bot.wav",
+        "sims/abc/audios/notes.txt",
+    ]
+    # Missing prefix lists nothing rather than raising.
+    assert list_object_keys(None, "local-dev-artifacts", "sims/missing/") == []
+
+
+def test_list_object_keys_s3_mode(monkeypatch):
+    monkeypatch.delenv("OBJECT_STORAGE_MODE", raising=False)
+    client = MagicMock()
+    paginator = MagicMock()
+    paginator.paginate.return_value = [
+        {"Contents": [{"Key": "p/a.wav"}, {"Key": "p/b.wav"}]},
+        {},  # page with no Contents must be tolerated
+    ]
+    client.get_paginator.return_value = paginator
+
+    keys = list_object_keys(client, "my-bucket", "p/")
+    assert keys == ["p/a.wav", "p/b.wav"]
+    client.get_paginator.assert_called_once_with("list_objects_v2")
+    paginator.paginate.assert_called_once_with(Bucket="my-bucket", Prefix="p/")
 
 
 def test_upload_helpers_with_tmp_dir(tmp_path):

@@ -36,6 +36,7 @@ from utils import (
     post_process_provider_results,
     get_s3_client,
     get_s3_output_config,
+    download_file_from_s3,
     can_start_job,
     try_start_queued_job,
     register_job_starter,
@@ -354,7 +355,7 @@ def run_evaluation_task(
                         logger.info(
                             f"Downloading audio file from {bucket}/{key} to {local_audio_path}"
                         )
-                        s3.download_file(bucket, key, str(local_audio_path))
+                        download_file_from_s3(s3, bucket, key, local_audio_path)
 
                         # Write CSV row
                         writer.writerow([audio_id, gt_text])

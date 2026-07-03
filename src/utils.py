@@ -397,6 +397,27 @@ def upload_file_to_s3(
     s3_client.upload_file(str(local_path), bucket, s3_key, ExtraArgs=extra_args)
 
 
+def download_file_from_s3(
+    s3_client,
+    bucket: str,
+    s3_key: str,
+    local_path: Union[str, Path],
+) -> None:
+    """Download a single object to ``local_path``.
+
+    In local mode this copies from ``LOCAL_ARTIFACT_ROOT`` using the same key
+    (``bucket`` is ignored, mirroring :func:`upload_file_to_s3`), so job runners
+    can fetch their inputs without a real S3 client.
+    """
+    if is_local_object_storage():
+        source = get_local_artifact_path(s3_key)
+        Path(local_path).parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(source, local_path)
+        return
+
+    s3_client.download_file(bucket, s3_key, str(local_path))
+
+
 def upload_top_level_files_to_s3(
     s3_client,
     local_dir: Path,
@@ -433,6 +454,32 @@ def upload_directory_tree_to_s3(
             relative_path = local_file_path.relative_to(local_root)
             s3_key = f"{prefix}/{relative_path.as_posix()}"
             upload_file_to_s3(s3_client, local_file_path, bucket, s3_key)
+
+
+def list_object_keys(s3_client, bucket: str, prefix: str = "") -> List[str]:
+    """List object keys under ``prefix``.
+
+    In local mode this walks ``LOCAL_ARTIFACT_ROOT`` and returns keys relative to
+    it (``bucket`` ignored, mirroring the upload/download helpers), so listing
+    works without a real S3 client. In S3 mode it paginates ``list_objects_v2``.
+    """
+    if is_local_object_storage():
+        root = get_local_artifact_root()
+        base = get_local_artifact_path(prefix) if prefix.strip("/") else root
+        if not base.exists():
+            return []
+        return [
+            p.relative_to(root).as_posix()
+            for p in sorted(base.rglob("*"))
+            if p.is_file()
+        ]
+
+    keys: List[str] = []
+    paginator = s3_client.get_paginator("list_objects_v2")
+    for page in paginator.paginate(Bucket=bucket, Prefix=prefix):
+        for obj in page.get("Contents", []):
+            keys.append(obj["Key"])
+    return keys
 
 
 def generate_presigned_download_url(
