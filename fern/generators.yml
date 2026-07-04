@@ -47,11 +47,13 @@ groups:
           client_class_name: Calibrate
   cli:
     generators:
-      # Early-access Fern CLI generator for the cloud API. Shares the `calibrate`
-      # command name with the existing Python offline engine — two artifacts
-      # (PyPI package vs Fern binary); install one or the other on PATH.
+      # Fern-generated cloud API client (`calibrate`). Offline evals use the
+      # separate PyPI package calibrate-agent (command: calibrate-agent).
       - name: fernapi/fern-cli
         version: 0.21.1
+        github:
+          repository: dalmia/calibrate-cli
+          mode: push
         config:
           cli-name: calibrate
           display-name: "Calibrate CLI"

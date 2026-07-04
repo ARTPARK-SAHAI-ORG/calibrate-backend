@@ -64,8 +64,10 @@ jobs:
           FERN_TOKEN: ${{ secrets.FERN_TOKEN }}
           PYPI_TOKEN: ${{ secrets.PYPI_TOKEN }}
 
-      # Early-access Fern CLI generator (`calibrate`, display name "Calibrate CLI").
-      - name: Generate Calibrate CLI
+      # github-mode: this PUSHES the generated CLI to dalmia/calibrate-cli
+      # (Fern also scaffolds that repo's release CI). It does NOT publish
+      # binaries itself — see the tag step below.
+      - name: Generate Calibrate CLI + sync to repo
         run: fern generate --group cli --version "${{ steps.version.outputs.version }}" --log-level debug
         env:
           FERN_TOKEN: ${{ secrets.FERN_TOKEN }}
@@ -73,7 +75,8 @@ jobs:
       # The SDK repo's own ci.yml publishes to PyPI, but only when a tag is pushed
       # THERE. So tag it automatically right after the sync — a single `sdk-v*` tag
       # on THIS repo then drives the whole release (generate -> push -> tag -> publish).
-      # Needs SDK_REPO_TOKEN: a PAT with contents:write on dalmia/calibrate-python-sdk.
+      # Needs SDK_REPO_TOKEN: a PAT with contents:write on dalmia/calibrate-python-sdk
+      # and dalmia/calibrate-cli.
       # (The default GITHUB_TOKEN can't push to another repo, and — unlike a
       # GITHUB_TOKEN push — a PAT-created tag DOES trigger the SDK repo's workflow.)
       # The published version comes from the SDK repo's pyproject (set by --version
@@ -87,3 +90,16 @@ jobs:
           SHA=$(gh api "repos/$SDK_REPO/git/ref/heads/main" --jq .object.sha)
           gh api "repos/$SDK_REPO/git/refs" -f ref="refs/tags/$TAG" -f sha="$SHA"
           echo "Tagged $SDK_REPO @ $SHA as $TAG — its ci.yml will publish to PyPI."
+
+      # Same pattern for the CLI repo — one sdk-v* tag drives SDK + CLI releases.
+      # Needs SDK_REPO_TOKEN with contents:write on dalmia/calibrate-cli too
+      # (the same PAT as the SDK repo works if scoped to both).
+      - name: Tag CLI repo to trigger its release publish
+        env:
+          GH_TOKEN: ${{ secrets.SDK_REPO_TOKEN }}
+        run: |
+          CLI_REPO="dalmia/calibrate-cli"
+          TAG="v${{ steps.version.outputs.version }}"
+          SHA=$(gh api "repos/$CLI_REPO/git/ref/heads/main" --jq .object.sha)
+          gh api "repos/$CLI_REPO/git/refs" -f ref="refs/tags/$TAG" -f sha="$SHA"
+          echo "Tagged $CLI_REPO @ $SHA as $TAG — its ci.yml will publish the CLI."
