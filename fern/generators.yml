@@ -45,8 +45,3 @@ groups:
           # Import path (pip install name stays package-name above).
           package_name: calibrate
           client_class_name: Calibrate
-          # Fern always emits [tool.poetry].description; set the PEP 621 summary
-          # on [project] instead to avoid a duplicate-key poetry lock failure.
-          pyproject_toml: |
-            [project]
-            description = "Python SDK for the Calibrate agent evaluation platform API."
