@@ -1,12 +1,20 @@
-# Fern SDK generation config. The API definition is our exported PUBLIC OpenAPI
-# spec (see scripts/export_openapi.py) — only endpoints that accept an org API
-# key. Regenerate + publish is driven by .github/workflows/publish-sdk.yml on a
-# `v*` release tag; the SDK version comes from the tag via `fern generate
-# --version <tag>` (PyPI versions are immutable, so each publish needs a fresh
-# one).
+# Fern SDK generation config.
+#
+# API definition: fetched live from the running backend's PUBLIC spec endpoint
+# (`/public-api/openapi.json`, which returns only `Public API`-tagged routes).
+# The publish workflow boots the app and points Fern at localhost, so the SDK is
+# generated from the current code; to generate/preview locally, run the server
+# the same way (`cd src && uv run uvicorn main:app`). Clean SDK method names come
+# from openapi-overrides.yml (keep that list in sync with the public routes —
+# see CLAUDE.md). Publish is driven by .github/workflows/publish-sdk.yml on an
+# `sdk-v*` tag; version = tag minus the `sdk-v` prefix.
 api:
   specs:
-    - openapi: ../openapi.json
+    # openapi/openapi.json is fetched (gitignored) from the running app's
+    # /public-api/openapi.json by the publish workflow (a plain curl) before
+    # generating; overrides add clean SDK method names.
+    - openapi: ./openapi/openapi.json
+      overrides: ./openapi-overrides.yml
 groups:
   python-sdk:
     generators:

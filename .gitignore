@@ -17,6 +17,6 @@ notebooks
 .specstory
 .claude
 
-# Generated on demand by scripts/export_openapi.py; CI regenerates it before
-# publishing the SDK, so it's never committed.
-openapi.json
+# Public OpenAPI spec fetched from the running app for SDK generation; never
+# committed (the publish workflow curls it fresh from /public-api/openapi.json).
+fern/openapi/
