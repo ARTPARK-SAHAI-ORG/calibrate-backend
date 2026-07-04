@@ -51,10 +51,7 @@ def env_int(var: str, fallback: int) -> int:
 
 
 def get_calibrate_agent_cli() -> str:
-    """Executable for the offline eval engine (PyPI package ``calibrate-agent``).
-
-    Distinct from the Fern-generated cloud API client (``calibrate``).
-    """
+    """Executable for the eval engine (PyPI package ``calibrate-agent``)."""
     return "calibrate-agent"
 
 

@@ -7,7 +7,7 @@ from typing import Optional, List, Dict, Any, Literal
 from urllib.parse import urlparse
 from fastapi import APIRouter, HTTPException, Depends
 from pydantic import BaseModel
-from calibrate.connections import TextAgentConnection
+from calibrate_agent.connections import TextAgentConnection
 
 from utils import env_bool, env_int, env_str
 
