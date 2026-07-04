@@ -150,6 +150,9 @@ def custom_openapi(_: HTTPBasicCredentials = Depends(_verify_docs_access)):
 # Basic-Auth'd /docs above. The schema is filtered from the full app schema,
 # so it stays in sync automatically as routes change.
 PUBLIC_API_TAG = "Public API"
+# Name of the apiKey security scheme published on the public spec. Fern derives
+# the SDK's required `api_key` auth param from this being the sole scheme.
+PUBLIC_API_KEY_SCHEME = "ApiKeyAuth"
 
 
 def _collect_schema_refs(node: Any, acc: set) -> None:
@@ -176,7 +179,20 @@ def _build_public_openapi() -> Dict[str, Any]:
             # "agent-tests") instead of duplicating across both that tag AND a
             # "Public API" group. Copy the op so we don't mutate the cached full
             # schema shared with /docs.
-            method: {**op, "tags": [t for t in op["tags"] if t != PUBLIC_API_TAG]}
+            #
+            # Force the API-key scheme as the SOLE auth on every public op. The
+            # underlying dep (`get_org_jwt_or_api_key`) also accepts a JWT bearer,
+            # but FastAPI's auto-generated `HTTPBearer` scheme would make Fern emit
+            # a REQUIRED `token` constructor arg in the SDK (with `api_key`
+            # optional) — so `Calibrate(api_key=…)` would TypeError. Pinning
+            # `PUBLIC_API_KEY_SCHEME` here makes `api_key` the one required auth
+            # param and drops `token`. (JWT-bearer callers are the frontend, which
+            # never uses the SDK, so nothing is lost.)
+            method: {
+                **op,
+                "tags": [t for t in op["tags"] if t != PUBLIC_API_TAG],
+                "security": [{PUBLIC_API_KEY_SCHEME: []}],
+            }
             for method, op in ops.items()
             if isinstance(op, dict) and PUBLIC_API_TAG in op.get("tags", [])
         }
@@ -203,6 +219,17 @@ def _build_public_openapi() -> Dict[str, Any]:
         components["schemas"] = {
             name: schema for name, schema in all_schemas.items() if name in needed
         }
+    # Expose ONLY the API-key scheme on the public spec — see the per-op
+    # `security` override above for why the auto-generated bearer scheme is
+    # dropped. `X-API-Key: sk_…` is the SDK's auth path.
+    components["securitySchemes"] = {
+        PUBLIC_API_KEY_SCHEME: {
+            "type": "apiKey",
+            "in": "header",
+            "name": "X-API-Key",
+            "description": "Org-scoped API key. Create one under Settings → API keys.",
+        }
+    }
 
     return {
         "openapi": full.get("openapi", "3.1.0"),

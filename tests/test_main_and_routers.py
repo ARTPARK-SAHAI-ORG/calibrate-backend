@@ -113,10 +113,32 @@ def test_public_api_docs_are_unauthenticated_and_filtered(client):
         for op in ops.values():
             assert "Public API" not in op["tags"]
 
+    # The public spec advertises ONLY the API-key (X-API-Key) scheme, and pins it
+    # as the sole `security` on every op. This is what makes Fern generate an SDK
+    # whose sole required auth param is `api_key` (no required `token`) — see the
+    # SDK-auth bullet in CLAUDE.md. The auto-generated HTTPBearer scheme must be
+    # gone so `Calibrate(api_key=...)` works.
+    pub_top = schema.json()
+    schemes = pub_top["components"]["securitySchemes"]
+    assert set(schemes) == {"ApiKeyAuth"}
+    assert schemes["ApiKeyAuth"] == {
+        "type": "apiKey",
+        "in": "header",
+        "name": "X-API-Key",
+        "description": schemes["ApiKeyAuth"]["description"],
+    }
+    assert "HTTPBearer" not in schemes
+    for ops in pub_top["paths"].values():
+        for op in ops.values():
+            assert op["security"] == [{"ApiKeyAuth": []}]
+
     # The private (Basic-Auth'd) full schema keeps the router tags intact —
     # the public filter must not have mutated the shared cached schema.
     full = client.get("/openapi.json", auth=("admin", "changeme")).json()
     assert full["paths"]["/agents"]["get"]["tags"] == ["agents", "Public API"]
+    # ...and the full schema still carries its original HTTPBearer scheme — the
+    # public override must not have leaked back into the shared cached schema.
+    assert "HTTPBearer" in full["components"]["securitySchemes"]
 
     # Components are trimmed to ONLY the schemas the public paths reference
     # (transitively) — internal/JWT-only model shapes must not leak.
