@@ -238,8 +238,8 @@ def _build_public_openapi() -> Dict[str, Any]:
             "version": full.get("info", {}).get("version", "1.0.0"),
             "description": (
                 "Programmatic API for CI/automation, authenticated with an "
-                "org-scoped API key. Pass your key as `X-API-Key: sk_…` or "
-                "`Authorization: Bearer sk_…`."
+                "org-scoped API key. Pass your key in the `X-API-Key: sk_…` "
+                "header."
             ),
         },
         "components": components,
