@@ -180,6 +180,8 @@ def test_presigned_url_local_storage_upload_roundtrip(client, monkeypatch, tmp_p
     monkeypatch.setenv("OBJECT_STORAGE_MODE", "local")
     monkeypatch.delenv("S3_OUTPUT_BUCKET", raising=False)
     monkeypatch.setenv("LOCAL_ARTIFACT_ROOT", str(tmp_path / "artifacts"))
+    # Upload URLs are built from LOCAL_ARTIFACT_BASE_URL, same as download URLs.
+    monkeypatch.setenv("LOCAL_ARTIFACT_BASE_URL", "http://testserver")
 
     resp = client.post(
         "/presigned-url",

@@ -287,11 +287,11 @@ def test_local_object_storage_mode(monkeypatch, tmp_path):
     assert generate_presigned_download_url("runs/one/source.txt") == (
         "http://localhost:8000/local-artifacts/runs/one/source.txt"
     )
+    # Uploads use the same LOCAL_ARTIFACT_BASE_URL fallback as downloads.
     assert generate_presigned_upload_url(
         "runs/two/upload.txt",
         "text/plain",
-        base_url="http://testserver/",
-    ) == "http://testserver/local-artifacts/runs/two/upload.txt"
+    ) == "http://localhost:8000/local-artifacts/runs/two/upload.txt"
 
 
 def test_invalid_object_storage_mode(monkeypatch):

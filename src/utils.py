@@ -350,10 +350,10 @@ def get_local_artifact_path(key: str) -> Path:
     return path
 
 
-def get_local_artifact_url(key: str, base_url: Optional[str] = None) -> str:
+def get_local_artifact_url(key: str) -> str:
     path = quote(key.lstrip("/"), safe="/")
     relative_url = f"/local-artifacts/{path}"
-    base_url = base_url or os.getenv("LOCAL_ARTIFACT_BASE_URL")
+    base_url = os.getenv("LOCAL_ARTIFACT_BASE_URL")
     if not base_url:
         return relative_url
     return f"{base_url.rstrip('/')}{relative_url}"
@@ -539,7 +539,6 @@ def generate_presigned_upload_url(
     content_type: str,
     bucket: Optional[str] = None,
     expiration: int = PRESIGNED_URL_EXPIRY_SECONDS,
-    base_url: Optional[str] = None,
 ) -> Optional[str]:
     """Generate a presigned URL for uploading (put_object) to S3.
 
@@ -554,7 +553,7 @@ def generate_presigned_upload_url(
     """
     try:
         if is_local_object_storage():
-            return get_local_artifact_url(s3_key, base_url=base_url)
+            return get_local_artifact_url(s3_key)
 
         s3 = get_s3_client()
         s3_bucket = bucket or get_s3_output_config()

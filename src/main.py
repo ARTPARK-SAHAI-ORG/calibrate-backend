@@ -315,8 +315,7 @@ async def local_artifact(artifact_path: str, request: Request):
 
 @app.post("/presigned-url", response_model=PresignedURLResponse)
 async def get_presigned_url(
-    payload: PresignedURLRequest,
-    request: Request,
+    request: PresignedURLRequest,
     user_id: str = Depends(get_current_user_id),
 ):
     """
@@ -327,13 +326,13 @@ async def get_presigned_url(
     The file will be stored at: bucket/task_type/media/UUID.extension
 
     Args:
-        payload: Contains task_type (stt, tts, agent) and file_extension
+        request: Contains task_type (stt, tts, agent) and file_extension
 
     Returns:
         Presigned URL, S3 path, and expiration time
     """
     # Validate file extension (remove leading dot if present)
-    file_extension = payload.extension
+    file_extension = request.extension
     if not file_extension:
         raise HTTPException(
             status_code=400,
@@ -341,7 +340,7 @@ async def get_presigned_url(
         )
 
     # Validate task type
-    if payload.task_type not in ["stt", "tts", "agent"]:
+    if request.task_type not in ["stt", "tts", "agent"]:
         raise HTTPException(
             status_code=400,
             detail="task_type must be one of: stt, tts, agent",
@@ -357,16 +356,15 @@ async def get_presigned_url(
     file_uuid = str(uuid.uuid4())
 
     # Construct S3 key: task_type/media/UUID.extension (no prefix)
-    s3_key = f"{payload.task_type}/media/{file_uuid}.{file_extension}"
+    s3_key = f"{request.task_type}/media/{file_uuid}.{file_extension}"
 
     # Generate presigned URL (expires in 1 hour)
     expiration = PRESIGNED_URL_EXPIRY_SECONDS  # 1 hour in seconds
 
     presigned_url = generate_presigned_upload_url(
         s3_key,
-        payload.content_type,
+        request.content_type,
         expiration=expiration,
-        base_url=str(request.base_url),
     )
     if not presigned_url:
         raise HTTPException(

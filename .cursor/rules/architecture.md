@@ -976,13 +976,13 @@ Used for:
 - Storing evaluation results (JSON, CSV, Excel files)
 - Presigned URLs for secure file access
 
-Production defaults to S3-compatible object storage. Local development can set `OBJECT_STORAGE_MODE=local`, which stores artifacts under `LOCAL_ARTIFACT_ROOT` and serves upload/download URLs through the development-only `/local-artifacts/{key}` endpoint while preserving `s3://local-dev-artifacts/...` paths in API payloads. Set `LOCAL_ARTIFACT_BASE_URL` (usually `http://localhost:8000`) when generated download URLs need to be absolute for a frontend running on a different origin.
+Production defaults to S3-compatible object storage. Local development can set `OBJECT_STORAGE_MODE=local`, which stores artifacts under `LOCAL_ARTIFACT_ROOT` and serves upload/download URLs through the development-only `/local-artifacts/{key}` endpoint while preserving `s3://local-dev-artifacts/...` paths in API payloads. Set `LOCAL_ARTIFACT_BASE_URL` (usually `http://localhost:8000`) when generated upload/download URLs need to be absolute for a frontend running on a different origin; both the presigned upload URL and download URLs read this env var (there is no per-request base-URL fallback).
 
 Required / common object-storage variables (full list and edge cases in **`ENV.md`**):
 
 - `OBJECT_STORAGE_MODE` — `s3` (default/production) or `local` (development disk shim)
 - `LOCAL_ARTIFACT_ROOT` — Local artifact directory when `OBJECT_STORAGE_MODE=local`
-- `LOCAL_ARTIFACT_BASE_URL` — Optional backend base URL for absolute local artifact download URLs
+- `LOCAL_ARTIFACT_BASE_URL` — Optional backend base URL for absolute local artifact upload/download URLs
 - `S3_OUTPUT_BUCKET` — Target bucket for outputs (**required** when `OBJECT_STORAGE_MODE=s3`)
 - `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY` — Optional in S3 mode; empty values are treated as unset (IAM role / other boto3 credential chains may apply)
 - `AWS_REGION` — Default **`ap-south-1`** if unset or empty in S3 mode
