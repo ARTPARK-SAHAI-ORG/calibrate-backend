@@ -8,10 +8,7 @@ description: >-
 
 inputs:
   public-api-base-url:
-    description: >-
-      PUBLIC_API_BASE_URL for the booted app. Pass the deployment URL when
-      generating the SDK so servers in the spec match production. Omit for the
-      localhost default.
+    description: Optional PUBLIC_API_BASE_URL for the booted app.
     required: false
     default: ""
 

@@ -7,9 +7,6 @@
 # `Public API` (the ones in `_build_public_openapi()`). Add/remove a public
 # endpoint -> add/remove its entry here. Enforced by tests/test_sdk_overrides.py
 # (fails CI if this doesn't name exactly the public routes).
-#
-# Base URL (`servers`) lives on the fetched spec — see PUBLIC_API_BASE_URL in
-# _build_public_openapi() (main.py). Do not duplicate it here.
 
 paths:
   /agents:
