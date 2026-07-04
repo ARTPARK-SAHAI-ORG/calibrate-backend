@@ -53,8 +53,28 @@ jobs:
       - name: Install Fern
         run: npm install -g fern-api
 
-      - name: Generate + publish SDK
+      # github-mode: this PUSHES the generated SDK to dalmia/calibrate-python-sdk
+      # (and sets that repo up to publish). It does NOT publish to PyPI itself.
+      - name: Generate SDK + sync to repo
         run: fern generate --group python-sdk --version "${{ steps.version.outputs.version }}" --log-level debug
         env:
           FERN_TOKEN: ${{ secrets.FERN_TOKEN }}
           PYPI_TOKEN: ${{ secrets.PYPI_TOKEN }}
+
+      # The SDK repo's own ci.yml publishes to PyPI, but only when a tag is pushed
+      # THERE. So tag it automatically right after the sync — a single `sdk-v*` tag
+      # on THIS repo then drives the whole release (generate -> push -> tag -> publish).
+      # Needs SDK_REPO_TOKEN: a PAT with contents:write on dalmia/calibrate-python-sdk.
+      # (The default GITHUB_TOKEN can't push to another repo, and — unlike a
+      # GITHUB_TOKEN push — a PAT-created tag DOES trigger the SDK repo's workflow.)
+      # The published version comes from the SDK repo's pyproject (set by --version
+      # above); this tag name only triggers the run.
+      - name: Tag SDK repo to trigger its PyPI publish
+        env:
+          GH_TOKEN: ${{ secrets.SDK_REPO_TOKEN }}
+        run: |
+          SDK_REPO="dalmia/calibrate-python-sdk"
+          TAG="v${{ steps.version.outputs.version }}"
+          SHA=$(gh api "repos/$SDK_REPO/git/ref/heads/main" --jq .object.sha)
+          gh api "repos/$SDK_REPO/git/refs" -f ref="refs/tags/$TAG" -f sha="$SHA"
+          echo "Tagged $SDK_REPO @ $SHA as $TAG — its ci.yml will publish to PyPI."
