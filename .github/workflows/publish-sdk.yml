@@ -29,8 +29,6 @@ permissions:
 jobs:
   sdk:
     runs-on: ubuntu-latest
-    # PUBLIC_API_BASE_URL lives in the Production environment (same as deploy.yml).
-    # The published SDK should always point at prod, not staging.
     environment: Production
     steps:
       - uses: actions/checkout@v4
