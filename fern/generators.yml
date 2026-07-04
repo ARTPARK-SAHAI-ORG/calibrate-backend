@@ -35,7 +35,7 @@ groups:
         # hand-written README (used as the PyPI long_description).
         github:
           repository: dalmia/calibrate-python-sdk
-          mode: pull-request
+          mode: push
         metadata:
           author: "Aman Dalmia"
           email: "aman.dalmia@artpark.in"
