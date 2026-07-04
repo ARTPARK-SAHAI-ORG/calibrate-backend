@@ -1,0 +1,23 @@
+# Fern SDK generation config. The API definition is our exported PUBLIC OpenAPI
+# spec (see scripts/export_openapi.py) — only endpoints that accept an org API
+# key. Regenerate + publish is driven by .github/workflows/publish-sdk.yml on a
+# `v*` release tag; the SDK version comes from the tag via `fern generate
+# --version <tag>` (PyPI versions are immutable, so each publish needs a fresh
+# one).
+api:
+  specs:
+    - openapi: ../openapi.json
+groups:
+  python-sdk:
+    generators:
+      # Pin to a specific generator version once the first generation succeeds,
+      # for reproducible builds (see fern/README.md). `latest` is used until the
+      # initial publish confirms a known-good version.
+      - name: fernapi/fern-python-sdk
+        version: latest
+        output:
+          location: pypi
+          package-name: calibrate-python-sdk
+          token: ${PYPI_TOKEN}
+        config:
+          client_class_name: Calibrate
