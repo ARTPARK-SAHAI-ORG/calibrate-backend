@@ -7,12 +7,9 @@
 # `Public API` (the ones in `_build_public_openapi()`). Add/remove a public
 # endpoint -> add/remove its entry here. Enforced by tests/test_sdk_overrides.py
 # (fails CI if this doesn't name exactly the public routes).
-
-# Production API base URL -> becomes the SDK's default base_url, so users can
-# call Calibrate(api_key=...) without passing a URL.
-servers:
-  - url: https://pense-backend.artpark.ai
-    description: Production
+#
+# Base URL (`servers`) lives on the fetched spec — see PUBLIC_API_BASE_URL in
+# _build_public_openapi() (main.py). Do not duplicate it here.
 
 paths:
   /agents:
