@@ -40,8 +40,13 @@ groups:
           author: "Aman Dalmia"
           email: "aman.dalmia@artpark.in"
           license: "MIT"
-          description: "Python SDK for the Calibrate agent evaluation platform API."
+          package-description: "Python SDK for the Calibrate agent evaluation platform API."
         config:
           # Import path (pip install name stays package-name above).
           package_name: calibrate
           client_class_name: Calibrate
+          # Fern always emits [tool.poetry].description; set the PEP 621 summary
+          # on [project] instead to avoid a duplicate-key poetry lock failure.
+          pyproject_toml: |
+            [project]
+            description = "Python SDK for the Calibrate agent evaluation platform API."
