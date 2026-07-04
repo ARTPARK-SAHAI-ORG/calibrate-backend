@@ -18,11 +18,12 @@ api:
 groups:
   python-sdk:
     generators:
-      # Pin to a specific generator version once the first generation succeeds,
-      # for reproducible builds. `latest` is used until the initial publish
-      # confirms a known-good version.
+      # Pinned for reproducible builds — a `latest` generator could silently
+      # change the SDK's shape (renamed methods, etc.) and publish it. Bump
+      # deliberately with `fern generator upgrade --group python-sdk`;
+      # validate-sdk.yml re-runs `fern check` on that PR.
       - name: fernapi/fern-python-sdk
-        version: latest
+        version: 5.15.2
         output:
           location: pypi
           package-name: calibrate-python-sdk
