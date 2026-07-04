@@ -1,0 +1,63 @@
+name: Validate SDK config
+
+# Runs `fern check` on PRs that touch the Fern SDK config, so a broken
+# generators.yml / openapi-overrides.yml is caught here instead of only when an
+# `sdk-v*` release tag is pushed (where it would fail the publish). Boots the app
+# to fetch the public spec the same way publish-sdk.yml does, then validates —
+# it does not generate or publish anything.
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - "fern/**"
+      - ".github/workflows/validate-sdk.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  fern-check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # calibrate-agent -> pipecat pulls in an audio dep that needs ALSA headers
+      # to `uv sync`; mirrors tests.yml. Needed so `import main` succeeds.
+      - name: Install system dependencies
+        run: sudo apt-get update && sudo apt-get install -y libasound2-dev
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+
+      - name: Install dependencies
+        run: uv sync --frozen
+
+      # Boot the app with throwaway env and curl the public spec into the file
+      # Fern reads (gitignored). Same approach as publish-sdk.yml.
+      - name: Fetch public OpenAPI spec from the app
+        env:
+          DB_ROOT_DIR: /tmp/sdk-openapi
+          JWT_SECRET_KEY: sdk-export-dummy-secret-key-32-chars-min
+          S3_OUTPUT_BUCKET: sdk-export-dummy-bucket
+          MAX_CONCURRENT_JOBS: "1"
+          MAX_CONCURRENT_JOBS_PER_ORG: "1"
+          DEFAULT_MAX_ROWS_PER_EVAL: "20"
+          SUPERADMIN_EMAIL: admin@example.com
+        run: |
+          (cd src && uv run uvicorn main:app --port 8000 --log-level warning &)
+          for i in $(seq 1 30); do
+            curl -sf http://localhost:8000/public-api/openapi.json -o /dev/null && break
+            sleep 2
+          done
+          mkdir -p fern/openapi
+          curl -sf http://localhost:8000/public-api/openapi.json -o fern/openapi/openapi.json
+          test -s fern/openapi/openapi.json || { echo "::error::Failed to fetch public OpenAPI spec"; exit 1; }
+
+      - name: Install Fern
+        run: npm install -g fern-api
+
+      - name: Validate Fern config
+        run: fern check
