@@ -42,4 +42,6 @@ groups:
           license: "MIT"
           package-description: "Python SDK for the Calibrate API."
         config:
+          # Import path (pip install name stays package-name above).
+          package_name: calibrate
           client_class_name: Calibrate
