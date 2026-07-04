@@ -5,8 +5,15 @@
 #
 # KEEP THIS IN SYNC WITH THE PUBLIC API. This list must mirror the routes tagged
 # `Public API` (the ones in `_build_public_openapi()`). Add/remove a public
-# endpoint -> add/remove its entry here. Nothing enforces it automatically, so
-# it's a documented rule (see CLAUDE.md, "Public API docs are tag-gated").
+# endpoint -> add/remove its entry here. Enforced by tests/test_sdk_overrides.py
+# (fails CI if this doesn't name exactly the public routes).
+
+# Production API base URL -> becomes the SDK's default base_url, so users can
+# call Calibrate(api_key=...) without passing a URL.
+servers:
+  - url: https://pense-backend.artpark.ai
+    description: Production
+
 paths:
   /agents:
     get:
