@@ -44,8 +44,8 @@ jobs:
       - name: Install dependencies
         run: uv sync --frozen
 
-      # Always regenerate from source so the spec is fresh — the committed
-      # openapi.json is a reviewable snapshot, not the publish input.
+      # openapi.json is gitignored, not committed — this step generates it fresh
+      # from the live app so the publish always reflects current code.
       - name: Export fresh public OpenAPI spec
         run: uv run python scripts/export_openapi.py
 
