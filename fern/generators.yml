@@ -26,7 +26,7 @@ groups:
         version: 5.15.2
         output:
           location: pypi
-          package-name: calibrate-cli
+          package-name: calibrate-sdk
           token: ${PYPI_TOKEN}
         # Sync generated source to a GitHub repo. This ALSO populates the
         # `Repository` project URL in the published package's metadata — without
