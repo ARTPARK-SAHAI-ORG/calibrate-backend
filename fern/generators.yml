@@ -1,13 +1,13 @@
-# Fern SDK generation config.
+# Fern generated client config.
 #
 # API definition: fetched live from the running backend's PUBLIC spec endpoint
 # (`/public-api/openapi.json`, which returns only `Public API`-tagged routes).
-# The publish workflow boots the app and points Fern at localhost, so the SDK is
-# generated from the current code; to generate/preview locally, run the server
-# the same way (`cd src && uv run uvicorn main:app`). Clean SDK method names come
-# from openapi-overrides.yml (keep that list in sync with the public routes —
-# see CLAUDE.md). Publish is driven by .github/workflows/publish-sdk.yml on an
-# `sdk-v*` tag; version = tag minus the `sdk-v` prefix.
+# The publish workflow boots the app and points Fern at localhost, so generated
+# clients are built from the current code; to generate/preview locally, run the
+# server the same way (`cd src && uv run uvicorn main:app`). Clean SDK method
+# names come from openapi-overrides.yml (keep that list in sync with the public
+# routes — see CLAUDE.md). Publish is driven by .github/workflows/publish-sdk.yml
+# on an `sdk-v*` tag; version = tag minus the `sdk-v` prefix.
 api:
   specs:
     # openapi/openapi.json is fetched (gitignored) from the running app's
@@ -45,3 +45,15 @@ groups:
           # Import path (pip install name stays package-name above).
           package_name: calibrate
           client_class_name: Calibrate
+  cli:
+    generators:
+      # Fern-generated cloud API client (`calibrate`). Offline evals use the
+      # separate PyPI package calibrate-agent (command: calibrate-agent).
+      - name: fernapi/fern-cli
+        version: 0.21.1
+        github:
+          repository: dalmia/calibrate-cli
+          mode: push
+        config:
+          cli-name: calibrate
+          display-name: "Calibrate CLI"

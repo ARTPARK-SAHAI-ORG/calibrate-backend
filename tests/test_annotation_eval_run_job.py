@@ -230,7 +230,7 @@ def test_run_calibrate_eval_only_success(tmp_path):
         "annotation_eval_runner.subprocess.Popen", return_value=FakeProcess()
     ), patch("annotation_eval_runner.time.sleep"):
         rc, _, _ = _run_calibrate_eval_only(
-            ["calibrate"],
+            ["calibrate-agent"],
             cwd=tmp_path,
             log_dir=log_dir,
             on_started=on_started,
@@ -276,7 +276,7 @@ def test_run_calibrate_eval_only_timeout(tmp_path):
     ):
         with pytest.raises(AnnotationEvalTimeoutError):
             _run_calibrate_eval_only(
-                ["calibrate"],
+                ["calibrate-agent"],
                 cwd=tmp_path,
                 log_dir=log_dir,
                 job_uuid="j-1",
@@ -306,7 +306,7 @@ def test_run_calibrate_eval_only_on_started_raises(tmp_path):
         "annotation_eval_runner.subprocess.Popen", return_value=FakeProcess()
     ), patch("annotation_eval_runner.time.sleep"):
         rc, _, _ = _run_calibrate_eval_only(
-            ["calibrate"],
+            ["calibrate-agent"],
             cwd=tmp_path,
             log_dir=log_dir,
             on_started=on_started_fail,

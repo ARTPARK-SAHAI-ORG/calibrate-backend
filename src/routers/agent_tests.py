@@ -52,6 +52,7 @@ from utils import (
     is_job_timed_out,
     capture_exception_to_sentry,
     build_tool_configs,
+    get_calibrate_agent_cli,
     upload_directory_tree_to_s3,
     upload_file_to_s3,
 )
@@ -1605,7 +1606,7 @@ def run_llm_test_task(
                     # Agent connection mode: agent owns its model — no -m or -p
                     model = "agent-connection"
                     run_cmd = [
-                        "calibrate",
+                        get_calibrate_agent_cli(),
                         "llm",
                         "-c",
                         str(config_file),
@@ -1619,7 +1620,7 @@ def run_llm_test_task(
                     llm_config = agent_config.get("llm", {})
                     provider = llm_config.get("provider", "openrouter")
                     run_cmd = [
-                        "calibrate",
+                        get_calibrate_agent_cli(),
                         "llm",
                         "-c",
                         str(config_file),
@@ -2469,7 +2470,7 @@ def run_benchmark_task(
                     else:
                         cli_models = models
                     run_cmd = (
-                        ["calibrate", "llm", "-c", str(config_file), "-m"]
+                        [get_calibrate_agent_cli(), "llm", "-c", str(config_file), "-m"]
                         + cli_models
                         + ["-o", str(output_dir), "--skip-verify"]
                     )
@@ -2479,7 +2480,7 @@ def run_benchmark_task(
                     provider = llm_config.get("provider", "openrouter")
                     cli_models = models
                     run_cmd = (
-                        ["calibrate", "llm", "-c", str(config_file), "-m"]
+                        [get_calibrate_agent_cli(), "llm", "-c", str(config_file), "-m"]
                         + cli_models
                         + ["-p", provider, "-o", str(output_dir)]
                     )

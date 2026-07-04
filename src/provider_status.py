@@ -8,6 +8,8 @@ from typing import Any, Dict, Optional
 from fastapi import HTTPException
 from fastapi.responses import JSONResponse
 
+from utils import get_calibrate_agent_cli
+
 
 logger = logging.getLogger(__name__)
 
@@ -149,7 +151,7 @@ class ProviderStatusMonitor:
             process = await asyncio.create_subprocess_exec(
                 "uv",
                 "run",
-                "calibrate",
+                get_calibrate_agent_cli(),
                 "status",
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
@@ -169,7 +171,7 @@ class ProviderStatusMonitor:
         except FileNotFoundError:
             raise HTTPException(
                 status_code=500,
-                detail="calibrate CLI not found",
+                detail="calibrate-agent CLI not found",
             )
 
         stdout = stdout_bytes.decode()

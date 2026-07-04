@@ -57,6 +57,7 @@ from utils import (
     is_job_timed_out,
     capture_exception_to_sentry,
     build_tool_configs,
+    get_calibrate_agent_cli,
     PRESIGNED_URL_EXPIRY_SECONDS,
     PRESIGNED_URL_REFRESH_BUFFER_SECONDS,
     upload_file_to_s3,
@@ -1421,7 +1422,7 @@ def _run_calibrate_text_simulation(
     # Parallelism is left to calibrate, which reads CALIBRATE_SIMULATION_PARALLEL
     # from the inherited env (we don't pass -n), mirroring the LLM-test path.
     run_cmd = [
-        "calibrate",
+        get_calibrate_agent_cli(),
         "simulations",
         "--type",
         "text",
@@ -1898,7 +1899,7 @@ def _run_calibrate_voice_simulation(
     # Parallelism is left to calibrate via the inherited CALIBRATE_SIMULATION_PARALLEL
     # env (we don't pass -n), mirroring the LLM-test path.
     run_cmd = [
-        "calibrate",
+        get_calibrate_agent_cli(),
         "simulations",
         "--type",
         "voice",

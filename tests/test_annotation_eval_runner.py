@@ -370,15 +370,15 @@ def test_build_dataset_dispatch_conversation():
 def test_calibrate_command_for_task_type():
     p = Path("/tmp")
     out_stt = runner.calibrate_command_for_task_type("stt", p, p, p)
-    assert out_stt[:3] == ["calibrate", "stt", "--eval-only"]
+    assert out_stt[:3] == ["calibrate-agent", "stt", "--eval-only"]
     out_llm = runner.calibrate_command_for_task_type("llm", p, p, p)
-    assert out_llm[:2] == ["calibrate", "llm"]
-    # llm-general uses the dedicated `calibrate general` command (no --eval-only).
+    assert out_llm[:2] == ["calibrate-agent", "llm"]
+    # llm-general uses the dedicated `calibrate-agent general` command (no --eval-only).
     out_llm_general = runner.calibrate_command_for_task_type("llm-general", p, p, p)
-    assert out_llm_general[:2] == ["calibrate", "general"]
+    assert out_llm_general[:2] == ["calibrate-agent", "general"]
     assert "--eval-only" not in out_llm_general
     out_sim = runner.calibrate_command_for_task_type("conversation", p, p, p)
-    assert out_sim[:2] == ["calibrate", "simulations"]
+    assert out_sim[:2] == ["calibrate-agent", "simulations"]
     with pytest.raises(runner.DatasetBuildError):
         runner.calibrate_command_for_task_type("unknown", p, p, p)
 

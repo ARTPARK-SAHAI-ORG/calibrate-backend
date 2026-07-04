@@ -142,7 +142,7 @@ def test_provider_status_calibrate_not_found(client):
         asyncio.run(provider_status.provider_status_monitor.refresh_cache())
         resp = client.get("/provider-status")
     assert resp.status_code == 500
-    assert resp.json()["message"] == "calibrate CLI not found"
+    assert resp.json()["message"] == "calibrate-agent CLI not found"
 
 
 def test_provider_status_timeout(client):

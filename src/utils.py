@@ -50,6 +50,14 @@ def env_int(var: str, fallback: int) -> int:
         return fallback
 
 
+def get_calibrate_agent_cli() -> str:
+    """Executable for the offline eval engine (PyPI package ``calibrate-agent``).
+
+    Distinct from the Fern-generated cloud API client (``calibrate``).
+    """
+    return "calibrate-agent"
+
+
 def capture_exception_to_sentry(exception: Exception) -> None:
     """
     Capture an exception to Sentry and mark it as unhandled.

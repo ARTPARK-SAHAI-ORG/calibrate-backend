@@ -44,6 +44,7 @@ from utils import (
     is_job_timed_out,
     kill_process_group,
     capture_exception_to_sentry,
+    get_calibrate_agent_cli,
     normalize_metrics,
     read_leaderboard_xlsx,
     read_evaluators_map_from_config,
@@ -354,7 +355,7 @@ def run_tts_evaluation_task(
                 # The CLI now handles parallelization internally and generates leaderboard
                 eval_cmd = (
                     [
-                        "calibrate",
+                        get_calibrate_agent_cli(),
                         "tts",
                         "-p",
                     ]

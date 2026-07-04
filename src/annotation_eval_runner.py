@@ -48,6 +48,7 @@ from utils import (
     TaskStatus,
     capture_exception_to_sentry,
     coerce_evaluator_score,
+    get_calibrate_agent_cli,
     get_s3_client,
     get_s3_output_config,
     is_job_timed_out,
@@ -482,16 +483,17 @@ def build_dataset_for_task_type(
 def calibrate_command_for_task_type(
     task_type: str, dataset_path: Path, output_dir: Path, config_path: Path
 ) -> List[str]:
+    cli = get_calibrate_agent_cli()
     if task_type == "stt":
         return [
-            "calibrate", "stt", "--eval-only",
+            cli, "stt", "--eval-only",
             "--dataset", str(dataset_path),
             "-o", str(output_dir),
             "--config", str(config_path),
         ]
     if task_type == "llm":
         return [
-            "calibrate", "llm",
+            cli, "llm",
             "-c", str(config_path),
             "--eval-only",
             "--dataset", str(dataset_path),
@@ -502,14 +504,14 @@ def calibrate_command_for_task_type(
         # conversation, no `--eval-only` flag — `calibrate general` only ever
         # grades pre-existing pairs.
         return [
-            "calibrate", "general",
+            cli, "general",
             "--dataset", str(dataset_path),
             "-c", str(config_path),
             "-o", str(output_dir),
         ]
     if task_type == "conversation":
         return [
-            "calibrate", "simulations",
+            cli, "simulations",
             "-t", "text",
             "-c", str(config_path),
             "--eval-only",
