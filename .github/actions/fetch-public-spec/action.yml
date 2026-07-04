@@ -6,6 +6,15 @@ description: >-
   the boot/env/fetch logic lives in exactly one place. Assumes the repo is
   already checked out.
 
+inputs:
+  public-api-base-url:
+    description: >-
+      PUBLIC_API_BASE_URL for the booted app. Pass the deployment URL when
+      generating the SDK so servers in the spec match production. Omit for the
+      localhost default.
+    required: false
+    default: ""
+
 runs:
   using: composite
   steps:
@@ -37,6 +46,7 @@ runs:
         MAX_CONCURRENT_JOBS_PER_ORG: "1"
         DEFAULT_MAX_ROWS_PER_EVAL: "20"
         SUPERADMIN_EMAIL: admin@example.com
+        PUBLIC_API_BASE_URL: ${{ inputs.public-api-base-url }}
       run: |
         (cd src && uv run uvicorn main:app --port 8000 --log-level warning &)
         for i in $(seq 1 30); do

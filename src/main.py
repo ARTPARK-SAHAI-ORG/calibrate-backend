@@ -153,10 +153,9 @@ PUBLIC_API_TAG = "Public API"
 # Name of the apiKey security scheme published on the public spec. Fern derives
 # the SDK's required `api_key` auth param from this being the sole scheme.
 PUBLIC_API_KEY_SCHEME = "ApiKeyAuth"
-# Default base URL in GET /public-api/openapi.json (`servers`). Mintlify, SDK
-# generation, and the public Swagger page read this. Override per deployment
-# (e.g. http://localhost:8000 in local .env).
-_DEFAULT_PUBLIC_API_BASE_URL = "https://pense-backend.artpark.ai"
+# Default base URL in GET /public-api/openapi.json (`servers`). Local dev uses
+# localhost; set PUBLIC_API_BASE_URL on each deployment to that host's URL.
+_DEFAULT_PUBLIC_API_BASE_URL = "http://localhost:8000"
 
 
 def _public_api_base_url() -> str:

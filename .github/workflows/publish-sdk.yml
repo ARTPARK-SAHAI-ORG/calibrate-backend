@@ -35,6 +35,8 @@ jobs:
       # Install deps, boot the app, and fetch its public spec into fern/openapi/.
       # Shared with validate-sdk.yml (one source of truth for the boot/env/fetch).
       - uses: ./.github/actions/fetch-public-spec
+        with:
+          public-api-base-url: ${{ secrets.PUBLIC_API_BASE_URL }}
 
       - name: Resolve SDK version
         id: version
