@@ -47,4 +47,4 @@ groups:
           client_class_name: Calibrate
           pyproject_toml: |
             [tool.poetry]
-            description = "Python SDK for the Calibrate API."
+            description = "Python SDK for the Calibrate agent evaluation platform API"
