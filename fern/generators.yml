@@ -40,11 +40,8 @@ groups:
           author: "Aman Dalmia"
           email: "aman.dalmia@artpark.in"
           license: "MIT"
-          package-description: "Python SDK for the Calibrate API."
+          description: "Python SDK for the Calibrate agent evaluation platform API."
         config:
           # Import path (pip install name stays package-name above).
           package_name: calibrate
           client_class_name: Calibrate
-          pyproject_toml: |
-            [tool.poetry]
-            description = "Python SDK for the Calibrate agent evaluation platform API"
