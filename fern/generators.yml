@@ -11,8 +11,8 @@ groups:
   python-sdk:
     generators:
       # Pin to a specific generator version once the first generation succeeds,
-      # for reproducible builds (see fern/README.md). `latest` is used until the
-      # initial publish confirms a known-good version.
+      # for reproducible builds. `latest` is used until the initial publish
+      # confirms a known-good version.
       - name: fernapi/fern-python-sdk
         version: latest
         output:
