@@ -159,6 +159,7 @@ def test_presigned_url_requires_auth(client):
 def test_presigned_url_happy_path(client, monkeypatch):
     h = _auth(client)["headers"]
     monkeypatch.setenv("S3_OUTPUT_BUCKET", "my-bucket")
+    monkeypatch.delenv("OBJECT_STORAGE_MODE", raising=False)
     with patch(
         "main.generate_presigned_upload_url",
         return_value="https://signed.example/x",
@@ -174,9 +175,40 @@ def test_presigned_url_happy_path(client, monkeypatch):
     assert body["s3_path"].startswith("s3://my-bucket/stt/media/")
 
 
+def test_presigned_url_local_storage_upload_roundtrip(client, monkeypatch, tmp_path):
+    h = _auth(client)["headers"]
+    monkeypatch.setenv("OBJECT_STORAGE_MODE", "local")
+    monkeypatch.delenv("S3_OUTPUT_BUCKET", raising=False)
+    monkeypatch.setenv("LOCAL_ARTIFACT_ROOT", str(tmp_path / "artifacts"))
+    # Upload URLs are built from LOCAL_ARTIFACT_BASE_URL, same as download URLs.
+    monkeypatch.setenv("LOCAL_ARTIFACT_BASE_URL", "http://testserver")
+
+    resp = client.post(
+        "/presigned-url",
+        json={"task_type": "stt", "content_type": "audio/wav", "extension": "wav"},
+        headers=h,
+    )
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["s3_path"].startswith("s3://local-dev-artifacts/stt/media/")
+    assert body["presigned_url"].startswith("http://testserver/local-artifacts/")
+
+    uploaded = client.put(
+        body["presigned_url"],
+        content=b"fake wav",
+        headers={"content-type": "audio/wav"},
+    )
+    assert uploaded.status_code == 204
+
+    downloaded = client.get(body["presigned_url"])
+    assert downloaded.status_code == 200
+    assert downloaded.content == b"fake wav"
+
+
 def test_presigned_url_validation(client, monkeypatch):
     h = _auth(client)["headers"]
     monkeypatch.setenv("S3_OUTPUT_BUCKET", "my-bucket")
+    monkeypatch.delenv("OBJECT_STORAGE_MODE", raising=False)
     resp = client.post(
         "/presigned-url",
         json={"task_type": "stt", "content_type": "audio/wav", "extension": ""},
@@ -204,6 +236,7 @@ def test_presigned_url_validation(client, monkeypatch):
 def test_presigned_url_failure(client, monkeypatch):
     h = _auth(client)["headers"]
     monkeypatch.setenv("S3_OUTPUT_BUCKET", "my-bucket")
+    monkeypatch.delenv("OBJECT_STORAGE_MODE", raising=False)
     with patch("main.generate_presigned_upload_url", return_value=None):
         resp = client.post(
             "/presigned-url",

@@ -136,6 +136,7 @@ def test_stt_evaluate_inflight_path(client, monkeypatch):
 def test_stt_evaluate_missing_bucket(client, monkeypatch):
     auth = _signup(client)
     monkeypatch.delenv("S3_OUTPUT_BUCKET", raising=False)
+    monkeypatch.delenv("OBJECT_STORAGE_MODE", raising=False)
     resp = client.post(
         "/stt/evaluate",
         json={
@@ -147,6 +148,30 @@ def test_stt_evaluate_missing_bucket(client, monkeypatch):
         headers=auth["headers"],
     )
     assert resp.status_code == 500
+
+
+def test_stt_evaluate_local_storage_without_bucket(client, monkeypatch, tmp_path):
+    auth = _signup(client)
+    monkeypatch.setenv("OBJECT_STORAGE_MODE", "local")
+    monkeypatch.delenv("S3_OUTPUT_BUCKET", raising=False)
+    monkeypatch.setenv("LOCAL_ARTIFACT_ROOT", str(tmp_path / "artifacts"))
+
+    with patch("routers.stt.can_start_job", return_value=False), patch(
+        "routers.stt.threading.Thread"
+    ):
+        resp = client.post(
+            "/stt/evaluate",
+            json={
+                "providers": ["openai"],
+                "language": "en",
+                "audio_paths": ["s3://local-dev-artifacts/stt/media/input.wav"],
+                "texts": ["hi"],
+            },
+            headers=auth["headers"],
+        )
+
+    assert resp.status_code == 200
+    assert resp.json()["status"] == "queued"
 
 
 def test_stt_evaluate_invalid_evaluator(client, monkeypatch):

@@ -114,6 +114,7 @@ JWT_SECRET_KEY=PASTE_OUTPUT_OF_openssl_rand_-base64_32
 JWT_EXPIRATION_HOURS=168
 
 # Object storage (AWS S3 — IAM instance role provides creds)
+OBJECT_STORAGE_MODE=s3
 S3_ENDPOINT_URL=
 S3_OUTPUT_BUCKET=calibrate-backend-artifacts
 AWS_ACCESS_KEY_ID=
@@ -396,6 +397,7 @@ JWT_SECRET_KEY=PASTE_OUTPUT_OF_openssl_rand_-base64_32
 JWT_EXPIRATION_HOURS=168
 
 # Object storage (GCS via S3 interop)
+OBJECT_STORAGE_MODE=s3
 S3_ENDPOINT_URL=https://storage.googleapis.com
 S3_OUTPUT_BUCKET=calibrate-backend-artifacts
 AWS_ACCESS_KEY_ID=<HMAC access key from step 2>

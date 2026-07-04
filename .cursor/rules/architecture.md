@@ -24,7 +24,7 @@ The backend wraps the `calibrate` CLI tool and orchestrates evaluation jobs whil
 | -------------------- | ----------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | **Framework**        | FastAPI                             | Async REST API framework                                                                                                                                                     |
 | **Database**         | SQLite                              | Persistent data storage                                                                                                                                                      |
-| **Storage**          | AWS S3                              | File/result storage                                                                                                                                                          |
+| **Storage**          | S3-compatible object storage / local dev disk | File/result storage                                                                                                                                                          |
 | **Authentication**   | Google OAuth + Email/Password + JWT | User authentication via Google ID tokens or email/password credentials, API access via JWT. API docs (`/docs`, `/redoc`, `/openapi.json`) are protected with HTTP Basic Auth |
 | **Monitoring**       | Sentry                              | Error tracking and performance monitoring                                                                                                                                    |
 | **Tracing**          | Langfuse (via OTEL)                 | LLM observability and tracing                                                                                                                                                |
@@ -967,7 +967,7 @@ When `model` is passed as a kwarg, it's included in the verification request pay
 - Run-level **`logs`** and per-provider **`logs`** are uploaded to S3 via the mechanisms in **S3 artifacts for STT/TTS eval jobs**
 - No separate `eval` and `leaderboard` commands needed
 
-### AWS S3
+### Artifact Storage
 
 Used for:
 
@@ -976,14 +976,19 @@ Used for:
 - Storing evaluation results (JSON, CSV, Excel files)
 - Presigned URLs for secure file access
 
-Required / common S3-related variables (full list and edge cases in **`ENV.md`**):
+Production defaults to S3-compatible object storage. Local development can set `OBJECT_STORAGE_MODE=local`, which stores artifacts under `LOCAL_ARTIFACT_ROOT` and serves upload/download URLs through the development-only `/local-artifacts/{key}` endpoint while preserving `s3://local-dev-artifacts/...` paths in API payloads. Set `LOCAL_ARTIFACT_BASE_URL` (usually `http://localhost:8000`) when generated upload/download URLs need to be absolute for a frontend running on a different origin; both the presigned upload URL and download URLs read this env var (there is no per-request base-URL fallback).
 
-- `S3_OUTPUT_BUCKET` — Target bucket for outputs (**required** when presigning or uploading)
-- `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY` — Optional; empty values are treated as unset (IAM role / other boto3 credential chains may apply)
-- `AWS_REGION` — Default **`ap-south-1`** if unset or empty
+Required / common object-storage variables (full list and edge cases in **`ENV.md`**):
+
+- `OBJECT_STORAGE_MODE` — `s3` (default/production) or `local` (development disk shim)
+- `LOCAL_ARTIFACT_ROOT` — Local artifact directory when `OBJECT_STORAGE_MODE=local`
+- `LOCAL_ARTIFACT_BASE_URL` — Optional backend base URL for absolute local artifact upload/download URLs
+- `S3_OUTPUT_BUCKET` — Target bucket for outputs (**required** when `OBJECT_STORAGE_MODE=s3`)
+- `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY` — Optional in S3 mode; empty values are treated as unset (IAM role / other boto3 credential chains may apply)
+- `AWS_REGION` — Default **`ap-south-1`** if unset or empty in S3 mode
 - `S3_ENDPOINT_URL` — Optional S3-compatible endpoint (e.g. GCS interop); when set, checksum behaviour is pinned for non-AWS endpoints ([`src/utils.py`](src/utils.py))
 
-**Uploading files to S3**: Routers use `upload_file_to_s3()` for single objects; **`upload_directory_tree_to_s3()`** and **`upload_top_level_files_to_s3()`** wrap it for directory batches (see STT/TTS and agent test sections). Never call `s3.upload_file(...)` directly for ad-hoc uploads. `upload_file_to_s3` guesses `Content-Type` from the file extension via `mimetypes.guess_type` (e.g. `.json` → `application/json`, `.wav` → `audio/wav`, `.mp3` → `audio/mpeg`). Files **without** an extension (e.g. calibrate's `logs`) get no `ContentType` unless extended later. Without `Content-Type`, boto3 defaults to `binary/octet-stream` for some clients. Existing objects uploaded before `Content-Type` guessing still behave as above.
+**Uploading files**: Routers use `upload_file_to_s3()` for single objects; **`upload_directory_tree_to_s3()`** and **`upload_top_level_files_to_s3()`** wrap it for directory batches (see STT/TTS and agent test sections). Despite the historical name, these helpers route to S3 in `OBJECT_STORAGE_MODE=s3` and local disk in `OBJECT_STORAGE_MODE=local`; never call `s3.upload_file(...)` directly for ad-hoc uploads. In S3 mode, `upload_file_to_s3` guesses `Content-Type` from the file extension via `mimetypes.guess_type` (e.g. `.json` → `application/json`, `.wav` → `audio/wav`, `.mp3` → `audio/mpeg`). Files **without** an extension (e.g. calibrate's `logs`) get no `ContentType` unless extended later. Without `Content-Type`, boto3 defaults to `binary/octet-stream` for some clients. Existing objects uploaded before `Content-Type` guessing still behave as above.
 
 ### Supported Providers
 
@@ -1008,7 +1013,7 @@ Required / common S3-related variables (full list and edge cases in **`ENV.md`**
 **Load-bearing facts** (not a complete list — see **`ENV.md`**):
 
 - **`DB_ROOT_DIR`** — **Required** before importing [`db.py`](src/db.py). SQLite path is **`{DB_ROOT_DIR}/pense.db`** (resolved at import time).
-- **`S3_OUTPUT_BUCKET`** — **Required** for code paths that presign or upload; optional `S3_ENDPOINT_URL` for S3-compatible storage (e.g. GCS interop).
+- **`OBJECT_STORAGE_MODE` / `S3_OUTPUT_BUCKET`** — `s3` is the default/production mode and requires `S3_OUTPUT_BUCKET`; `local` mode skips AWS and stores artifacts under `LOCAL_ARTIFACT_ROOT`.
 - **`JWT_SECRET_KEY`**, **`JWT_EXPIRATION_HOURS`** — JWT signing in [`auth_utils.py`](src/auth_utils.py); production must override the weak dev default if the secret is unset.
 - **`MAX_CONCURRENT_JOBS`** — Parsed with **`int(os.getenv(...))`** and **no fallback** in [`utils.py`](src/utils.py); the process expects it to be set wherever queue limits run (tests and **`docker-compose.yml`** use **`1`**). **Gotcha**: unset → `TypeError` when queue helpers run.
 - **`MAX_CONCURRENT_JOBS_PER_USER`** — Defaults to **`1`**; set to **`0`** to disable the per-user cap.

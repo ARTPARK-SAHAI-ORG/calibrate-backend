@@ -48,6 +48,7 @@ from utils import (
     TaskCreateResponse,
     get_s3_client,
     get_s3_output_config,
+    list_object_keys,
     can_start_simulation_job,
     try_start_queued_simulation_job,
     register_job_starter,
@@ -191,18 +192,14 @@ def _get_audio_urls_from_s3_key(
         audio_extensions = {".wav", ".mp3", ".ogg"}
         audio_files = []
 
-        paginator = s3.get_paginator("list_objects_v2")
-        for page in paginator.paginate(Bucket=s3_bucket, Prefix=s3_key_prefix):
-            if "Contents" in page:
-                for obj in page["Contents"]:
-                    key = obj["Key"]
-                    # Skip if it's a directory marker
-                    if key.endswith("/"):
-                        continue
-                    # Check if it's an audio file
-                    file_ext = Path(key).suffix.lower()
-                    if file_ext in audio_extensions:
-                        audio_files.append(key)
+        for key in list_object_keys(s3, s3_bucket, s3_key_prefix):
+            # Skip if it's a directory marker
+            if key.endswith("/"):
+                continue
+            # Check if it's an audio file
+            file_ext = Path(key).suffix.lower()
+            if file_ext in audio_extensions:
+                audio_files.append(key)
 
         # Group audio files by exchange number
         # Files are named like: 1_bot.wav, 1_user.wav, 2_bot.wav, 2_user.wav
