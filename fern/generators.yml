@@ -12,7 +12,6 @@ readme:
     The Calibrate Python SDK provides convenient, typed access to the Calibrate
     agent evaluation platform API. Authenticate with an API key (`sk_…`) scoped
     to your organization to run agent tests and poll their results.
-  apiReferenceLink: "${PUBLIC_API_BASE_URL}/public-api/docs"
   disabledSections:
     - "contributing"
   customSections:

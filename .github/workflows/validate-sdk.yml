@@ -39,8 +39,6 @@ jobs:
 
       - name: Validate Fern Python SDK config
         run: fern check
-        env:
-          PUBLIC_API_BASE_URL: ${{ secrets.PUBLIC_API_BASE_URL }}
 
       - name: Install Speakeasy CLI
         run: curl -fsSL https://go.speakeasy.com/cli-install.sh | sh
