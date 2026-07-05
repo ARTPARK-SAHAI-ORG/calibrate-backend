@@ -37,7 +37,9 @@ def test_patch_cli_auth_commands_hoists_login_logout(tmp_path: Path) -> None:
     assert (cli_dir / "internal/cli/logout.go").is_file()
 
     auth_go = (cli_dir / "internal/cli/auth.go").read_text()
+    assert "authCmd.Hidden = true" in auth_go
     assert "loginCmd.Hidden = true" in auth_go
+    assert "whoamiCmd.Hidden = true" in auth_go
     assert "logoutCmd.Hidden = true" in auth_go
 
     # Idempotent on re-run.
