@@ -28,5 +28,4 @@ fern/openapi/
 !.speakeasy/out/cli/.speakeasy/
 .speakeasy/logs/
 .speakeasy/workflow.lock
-.speakeasy/out/python/*
-!.speakeasy/out/python/.speakeasy/
+.speakeasy/out/python/

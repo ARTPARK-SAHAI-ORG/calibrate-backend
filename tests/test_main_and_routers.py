@@ -118,7 +118,7 @@ def test_public_api_docs_are_unauthenticated_and_filtered(client, monkeypatch):
             assert "Public API" not in op["tags"]
 
     # The public spec advertises ONLY the API-key (X-API-Key) scheme, and pins it
-    # as the sole `security` on every op. This is what makes Speakeasy generate an SDK
+    # as the sole `security` on every op. This is what makes Fern (SDK) and Speakeasy (CLI)
     # whose sole required auth param is `api_key` (no required `token`) — see the
     # SDK-auth bullet in CLAUDE.md. The auto-generated HTTPBearer scheme must be
     # gone so `Calibrate(api_key=...)` works.
