@@ -61,7 +61,7 @@ Add these to **this repo** → Settings → Environments → **Production**:
 
 ### Docs sync token (`DOCS_SYNC_REPO_TOKEN`)
 
-Separate from `PUSH_TO_REPO_TOKEN` because client repos live under **`dalmia/`** (personal) while Mintlify docs live under **`ARTPARK-SAHAI-ORG/calibrate`** (org).
+Separate from `PUSH_TO_REPO_TOKEN` because client repos live under **`dalmia/`** (personal) while the docs repo is **`ARTPARK-SAHAI-ORG/calibrate`** (org).
 
 1. GitHub → **Settings → Developer settings → Fine-grained personal access tokens → Generate**
 2. **Resource owner:** `ARTPARK-SAHAI-ORG`
