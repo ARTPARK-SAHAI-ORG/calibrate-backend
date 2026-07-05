@@ -14,6 +14,12 @@ from utils import get_calibrate_agent_cli
 logger = logging.getLogger(__name__)
 
 
+def _without_groq(providers: Dict[str, Any]) -> Dict[str, Any]:
+    return {
+        name: info for name, info in providers.items() if name.lower() != "groq"
+    }
+
+
 def _utc_now_iso() -> str:
     return datetime.utcnow().isoformat() + "Z"
 
@@ -184,12 +190,14 @@ class ProviderStatusMonitor:
             )
 
         try:
-            return parse_provider_status_stdout(stdout)
+            providers = _without_groq(parse_provider_status_stdout(stdout))
         except ValueError as exc:
             raise HTTPException(
                 status_code=500,
                 detail=str(exc),
             )
+
+        return providers
 
     async def refresh_cache(self) -> None:
         logger.info("Provider status refresh started")

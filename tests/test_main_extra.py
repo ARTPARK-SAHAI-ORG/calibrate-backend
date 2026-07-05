@@ -104,6 +104,31 @@ def test_provider_status_some_failed(client):
     assert body["failed_providers"] == {"deepgram": "x"}
 
 
+def test_provider_status_excludes_groq_by_default(client):
+    import provider_status
+
+    process = _make_fake_process(
+        0,
+        json.dumps(
+            {
+                "openai": {"status": "pass"},
+                "groq": {"status": "fail", "error": "HTTP 429"},
+            }
+        ).encode(),
+        b"",
+    )
+    with patch(
+        "provider_status.asyncio.create_subprocess_exec",
+        AsyncMock(return_value=process),
+    ):
+        asyncio.run(provider_status.provider_status_monitor.refresh_cache())
+        resp = client.get("/provider-status")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["success"] is True
+    assert set(body["all_providers"]) == {"openai"}
+
+
 def test_provider_status_subprocess_non_zero(client):
     import provider_status
 
