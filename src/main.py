@@ -418,7 +418,8 @@ async def get_presigned_url(
     )
 
 
-@app.api_route("/provider-status", methods=["GET", "HEAD"])
+@app.get("/provider-status")
+@app.head("/provider-status")
 async def get_provider_status(request: Request, refresh: bool = False):
     """
     Return the latest cached status for all configured providers.
