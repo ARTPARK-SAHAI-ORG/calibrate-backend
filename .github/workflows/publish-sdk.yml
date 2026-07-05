@@ -81,7 +81,7 @@ jobs:
 
       - name: Tag SDK repo to trigger its PyPI publish
         env:
-          GH_TOKEN: ${{ secrets.SDK_REPO_TOKEN }}
+          GH_TOKEN: ${{ secrets.PUSH_TO_REPO_TOKEN }}
         run: |
           SDK_REPO="dalmia/calibrate-python-sdk"
           TAG="v${{ needs.prepare.outputs.version }}"
