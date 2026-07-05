@@ -26,6 +26,9 @@ fern/openapi/
 # Speakeasy generated CLI tree (gen.yaml under .speakeasy/ is committed).
 .speakeasy/out/cli/*
 !.speakeasy/out/cli/.speakeasy/
+# Speakeasy generated MCP tree (gen.yaml under .speakeasy/ is committed).
+.speakeasy/out/mcp/*
+!.speakeasy/out/mcp/.speakeasy/
 .speakeasy/logs/
 .speakeasy/workflow.lock
 .speakeasy/out/python/

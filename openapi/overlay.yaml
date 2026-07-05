@@ -11,22 +11,86 @@ actions:
     update:
       x-speakeasy-group: agents
       x-speakeasy-name-override: list
+      x-speakeasy-mcp:
+        name: list-agents
+        title: List agents
+        scopes: [read]
+        readOnlyHint: true
+        openWorldHint: true
+        description: |
+          List every agent in the caller's organization. Returns each agent's
+          UUID, name, type, and config. Use this to discover which agents exist
+          before resolving names or launching test runs. Requires a Calibrate
+          API key (CALIBRATE_API_KEY).
   - target: $.paths['/agents/resolve'].post
     update:
       x-speakeasy-group: agents
       x-speakeasy-name-override: resolve
+      x-speakeasy-mcp:
+        name: resolve-agent-names
+        title: Resolve agent names to UUIDs
+        scopes: [write]
+        readOnlyHint: true
+        destructiveHint: false
+        idempotentHint: true
+        openWorldHint: true
+        description: |
+          Map human-friendly agent names to UUIDs within the caller's org. Each
+          name resolves to at most one agent; unknown names are returned under
+          not_found. Use this before run-agent-tests when you have names instead
+          of UUIDs. Does not create or modify agents.
   - target: $.paths['/agent-tests/agent/{agent_uuid}/run'].post
     update:
       x-speakeasy-group: agent_tests
       x-speakeasy-name-override: run
+      x-speakeasy-mcp:
+        name: run-agent-tests
+        title: Run agent tests
+        scopes: [write]
+        readOnlyHint: false
+        destructiveHint: false
+        idempotentHint: false
+        openWorldHint: true
+        description: |
+          Start a background LLM unit-test job for one agent. Runs all tests
+          linked to the agent unless test_uuids is provided. Returns a task_id
+          to poll with get-agent-test-run. The agent must belong to the caller's
+          org and have a verified connection; otherwise the call fails with 400
+          or 404.
   - target: $.paths['/agent-tests/run'].post
     update:
       x-speakeasy-group: agent_tests
       x-speakeasy-name-override: run_batch
+      x-speakeasy-mcp:
+        name: run-agent-tests-batch
+        title: Run agent tests (batch)
+        scopes: [write]
+        readOnlyHint: false
+        destructiveHint: false
+        idempotentHint: false
+        openWorldHint: true
+        description: |
+          Launch one test job per agent in the caller's org. Optionally restrict
+          to agent_names; omit or pass an empty list to run every org agent.
+          Agents with no linked tests or an unverified connection are skipped
+          (reported under skipped) rather than failing the batch. Returns
+          task_id values to poll with get-agent-test-run.
   - target: $.paths['/agent-tests/run/{task_id}'].get
     update:
       x-speakeasy-group: agent_tests
       x-speakeasy-name-override: get_run
+      x-speakeasy-mcp:
+        name: get-agent-test-run
+        title: Get agent test run status
+        scopes: [read]
+        readOnlyHint: true
+        openWorldHint: true
+        description: |
+          Poll the status and results of an agent test run by task_id. Returns
+          queued, in_progress, completed, failed, or aborted status. When
+          completed, includes per-test-case pass/fail results and evaluator
+          judgments. Use the task_id from run-agent-tests or
+          run-agent-tests-batch.
   - target: $.paths['/agents'].post
     update:
       x-speakeasy-group: agents

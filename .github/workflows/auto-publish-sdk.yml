@@ -1,4 +1,4 @@
-name: Auto-publish SDK and CLI
+name: Auto-publish SDK, CLI, and MCP
 
 # After a successful production deploy, publishes clients when the public OpenAPI
 # spec changed. Manual dispatch can force a publish or pin a version.
@@ -140,7 +140,7 @@ jobs:
 
           echo "should_publish=true" >> "$GITHUB_OUTPUT"
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
-          echo "Will publish SDK + CLI version $VERSION"
+          echo "Will publish SDK + CLI + MCP version $VERSION"
 
   publish:
     needs: detect
