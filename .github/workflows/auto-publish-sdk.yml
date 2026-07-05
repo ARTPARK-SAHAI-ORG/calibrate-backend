@@ -30,19 +30,13 @@ jobs:
     runs-on: ubuntu-latest
     environment: Production
     outputs:
-      publish_enabled: ${{ steps.check.outputs.publish_enabled }}
+      publish_enabled: ${{ steps.gate.outputs.publish_enabled }}
     steps:
-      - name: Check publish prerequisites
-        id: check
-        env:
-          SDK_AUTO_PUBLISH_ENABLED: ${{ secrets.SDK_AUTO_PUBLISH_ENABLED }}
-          PUSH_TO_REPO_TOKEN: ${{ secrets.PUSH_TO_REPO_TOKEN }}
-        run: |
-          if [ "$SDK_AUTO_PUBLISH_ENABLED" = "true" ] && [ -n "$PUSH_TO_REPO_TOKEN" ]; then
-            echo "publish_enabled=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "publish_enabled=false" >> "$GITHUB_OUTPUT"
-          fi
+      - uses: ./.github/actions/check-publish-gate
+        id: gate
+        with:
+          sdk_auto_publish_enabled: ${{ secrets.SDK_AUTO_PUBLISH_ENABLED }}
+          push_to_repo_token: ${{ secrets.PUSH_TO_REPO_TOKEN }}
 
   detect:
     needs: gate
