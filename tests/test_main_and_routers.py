@@ -1043,6 +1043,81 @@ def test_datasets_items_flow(client):
 
 
 # ---------------------------------------------------------------------------
+# Bulk-delete dataset items
+# ---------------------------------------------------------------------------
+
+
+def test_dataset_items_bulk_delete(client):
+    auth = _auth(client)
+    h = auth["headers"]
+    create = client.post(
+        "/datasets",
+        json={"name": f"d-{uuid.uuid4().hex[:6]}", "dataset_type": "tts"},
+        headers=h,
+    )
+    d_uuid = create.json()["uuid"]
+
+    def _add(n):
+        resp = client.post(
+            f"/datasets/{d_uuid}/items",
+            json=[{"text": f"t{i}"} for i in range(n)],
+            headers=h,
+        )
+        assert resp.status_code == 201
+        return [i["uuid"] for i in resp.json()]
+
+    uuids = _add(5)
+
+    # Neither item_uuids nor select_all → 400
+    bad = client.request("DELETE", f"/datasets/{d_uuid}/items", json={}, headers=h)
+    assert bad.status_code == 400
+
+    # Missing dataset → 404
+    assert (
+        client.request(
+            "DELETE", "/datasets/missing/items", json={"item_uuids": ["x"]}, headers=h
+        ).status_code
+        == 404
+    )
+
+    # Delete a subset; unknown / already-deleted uuids skipped silently
+    resp = client.request(
+        "DELETE",
+        f"/datasets/{d_uuid}/items",
+        json={"item_uuids": [uuids[0], uuids[1], "nope"]},
+        headers=h,
+    )
+    assert resp.status_code == 200
+    assert resp.json()["deleted_count"] == 2
+    # Re-deleting the same uuids now counts 0 (already soft-deleted)
+    again = client.request(
+        "DELETE",
+        f"/datasets/{d_uuid}/items",
+        json={"item_uuids": [uuids[0], uuids[1]]},
+        headers=h,
+    )
+    assert again.json()["deleted_count"] == 0
+    # 3 remain
+    assert client.get(f"/datasets/{d_uuid}", headers=h).json()["item_count"] == 3
+
+    # select_all clears the rest (item_uuids ignored)
+    resp = client.request(
+        "DELETE",
+        f"/datasets/{d_uuid}/items",
+        json={"select_all": True, "item_uuids": ["ignored"]},
+        headers=h,
+    )
+    assert resp.status_code == 200
+    assert resp.json()["deleted_count"] == 3
+    assert client.get(f"/datasets/{d_uuid}", headers=h).json()["item_count"] == 0
+    # select_all on an empty dataset → 0
+    resp = client.request(
+        "DELETE", f"/datasets/{d_uuid}/items", json={"select_all": True}, headers=h
+    )
+    assert resp.json()["deleted_count"] == 0
+
+
+# ---------------------------------------------------------------------------
 # STT-dataset items must include audio_path
 # ---------------------------------------------------------------------------
 
