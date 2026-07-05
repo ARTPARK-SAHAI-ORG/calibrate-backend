@@ -37,6 +37,7 @@ runs:
         MAX_CONCURRENT_JOBS_PER_ORG: "1"
         DEFAULT_MAX_ROWS_PER_EVAL: "20"
         SUPERADMIN_EMAIL: admin@example.com
+        PUBLIC_API_BASE_URL: ${{ env.PUBLIC_API_BASE_URL }}
       run: |
         (cd src && uv run uvicorn main:app --port 8000 --log-level warning &)
         for i in $(seq 1 30); do

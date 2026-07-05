@@ -22,15 +22,20 @@ permissions:
 jobs:
   speakeasy-check:
     runs-on: ubuntu-latest
+    environment: Production
     steps:
       - uses: actions/checkout@v4
 
       - uses: ./.github/actions/fetch-public-spec
+        env:
+          PUBLIC_API_BASE_URL: ${{ secrets.PUBLIC_API_BASE_URL }}
 
       - name: Install Speakeasy CLI
         run: curl -fsSL https://go.speakeasy.com/cli-install.sh | sh
 
       - name: Compile public OpenAPI source (merge spec + overlay)
+        env:
+          SPEAKEASY_API_KEY: ${{ secrets.SPEAKEASY_API_KEY }}
         run: speakeasy run -s calibrate-public-api -y
 
       - name: Lint compiled OpenAPI document
