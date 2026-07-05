@@ -231,10 +231,12 @@ class ProviderStatusMonitor:
     def clear_cache(self) -> None:
         self._cache = None
 
-    async def response(self) -> JSONResponse:
+    async def response(self, *, force_refresh: bool = False) -> JSONResponse:
+        if force_refresh:
+            await self.refresh_cache()
         async with self._cache_lock:
             cache_entry = self._cache
-        return self._response_from_cache(cache_entry)
+        return self._response_from_cache(cache_entry, force_refresh=force_refresh)
 
     def _cache_age_seconds(self, cache_entry: Dict[str, Any]) -> float:
         checked_at = cache_entry.get("checked_at")
@@ -246,6 +248,8 @@ class ProviderStatusMonitor:
     def _response_from_cache(
         self,
         cache_entry: Optional[Dict[str, Any]],
+        *,
+        force_refresh: bool = False,
     ) -> JSONResponse:
         if cache_entry is None:
             return JSONResponse(
@@ -254,17 +258,20 @@ class ProviderStatusMonitor:
                     "success": False,
                     "cached": False,
                     "message": "Provider status has not been checked yet",
+                    **({"refreshed": True} if force_refresh else {}),
                 },
             )
 
         age_seconds = self._cache_age_seconds(cache_entry)
         is_stale = age_seconds > self.cache_max_age_seconds
-        base_payload = {
+        base_payload: Dict[str, Any] = {
             "cached": True,
             "checked_at": cache_entry["checked_at"],
             "age_seconds": round(age_seconds, 3),
             "stale": is_stale,
         }
+        if force_refresh:
+            base_payload["refreshed"] = True
 
         if cache_entry.get("error_detail") is not None:
             return JSONResponse(

@@ -419,15 +419,18 @@ async def get_presigned_url(
 
 
 @app.api_route("/provider-status", methods=["GET", "HEAD"])
-async def get_provider_status():
+async def get_provider_status(request: Request, refresh: bool = False):
     """
     Return the latest cached status for all configured providers.
 
     A background task refreshes the cache by running `calibrate status`.
+    Pass ``?refresh=true`` on GET to ignore the cache and run a fresh check
+    synchronously (may take up to ``PROVIDER_STATUS_CHECK_TIMEOUT_SECONDS``).
     Returns 200 if all providers pass and 503 if any provider failed or the
     cached result is missing/stale.
     """
-    return await provider_status_monitor.response()
+    force_refresh = refresh and request.method == "GET"
+    return await provider_status_monitor.response(force_refresh=force_refresh)
 
 
 @app.get("/openrouter/providers")

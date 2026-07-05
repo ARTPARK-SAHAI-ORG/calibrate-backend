@@ -170,6 +170,66 @@ def test_provider_status_not_checked_yet(client):
     assert resp.json()["message"] == "Provider status has not been checked yet"
 
 
+def test_provider_status_force_refresh(client):
+    import provider_status
+
+    process = _make_fake_process(
+        0, json.dumps({"openai": {"status": "pass"}}).encode(), b""
+    )
+    with patch(
+        "provider_status.asyncio.create_subprocess_exec",
+        AsyncMock(return_value=process),
+    ):
+        resp = client.get("/provider-status", params={"refresh": True})
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["success"] is True
+    assert body["refreshed"] is True
+    assert body["cached"] is True
+
+
+def test_provider_status_force_refresh_bypasses_stale_cache(client):
+    import provider_status
+    from datetime import datetime, timedelta
+
+    stale_checked_at = (datetime.utcnow() - timedelta(hours=2)).isoformat() + "Z"
+    provider_status.provider_status_monitor._cache = {
+        "checked_at": stale_checked_at,
+        "providers": {"openai": {"status": "pass"}},
+        "error_status_code": None,
+        "error_detail": None,
+    }
+
+    process = _make_fake_process(
+        0,
+        json.dumps({"openai": {"status": "pass"}, "deepgram": {"status": "pass"}}).encode(),
+        b"",
+    )
+    with patch(
+        "provider_status.asyncio.create_subprocess_exec",
+        AsyncMock(return_value=process),
+    ):
+        resp = client.get("/provider-status", params={"refresh": True})
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["refreshed"] is True
+    assert body["stale"] is False
+    assert set(body["all_providers"]) == {"openai", "deepgram"}
+
+
+def test_provider_status_refresh_ignored_on_head(client):
+    import provider_status
+
+    with patch.object(
+        provider_status.provider_status_monitor,
+        "refresh_cache",
+        AsyncMock(),
+    ) as refresh_mock:
+        resp = client.head("/provider-status", params={"refresh": True})
+    assert resp.status_code == 503
+    refresh_mock.assert_not_called()
+
+
 def test_provider_status_parses_progress_event_output(app):
     import provider_status
 
