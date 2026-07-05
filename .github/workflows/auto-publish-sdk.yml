@@ -123,8 +123,6 @@ jobs:
   publish:
     needs: detect
     if: needs.detect.outputs.should_publish == 'true'
-    permissions:
-      contents: write
     uses: ./.github/workflows/publish-sdk.yml
     with:
       version: ${{ needs.detect.outputs.version }}

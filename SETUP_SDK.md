@@ -31,7 +31,6 @@ production GitHub release published
                  → sync-client-repo.sh → dalmia/calibrate-cli
                  → tag v<version> (PUSH_TO_REPO_TOKEN)
                  → calibrate-cli release.yaml → GoReleaser → GitHub Release + homebrew-tap
-       └─ record sdk-v<version> tag on this repo (version history only)
 ```
 
 Workflows: [`.github/workflows/auto-publish-sdk.yml`](.github/workflows/auto-publish-sdk.yml) (auto + manual gate), [`.github/workflows/publish-sdk.yml`](.github/workflows/publish-sdk.yml) (generate + push)  
