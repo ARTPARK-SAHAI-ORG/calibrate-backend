@@ -1,38 +1,19 @@
-# Fern generated client config.
-#
-# API definition: fetched live from the running backend's PUBLIC spec endpoint
-# (`/public-api/openapi.json`, which returns only `Public API`-tagged routes).
-# The publish workflow boots the app and points Fern at localhost, so generated
-# clients are built from the current code; to generate/preview locally, run the
-# server the same way (`cd src && uv run uvicorn main:app`). Clean SDK method
-# names come from openapi-overrides.yml (keep that list in sync with the public
-# routes — see CLAUDE.md). Publish is driven by .github/workflows/publish-sdk.yml
-# on an `sdk-v*` tag; version = tag minus the `sdk-v` prefix.
+# Fern config for calibrate-sdk and the Calibrate CLI.
+# OpenAPI spec: fetched from /public-api/openapi.json before generate (see publish-sdk.yml).
+# SDK method names: openapi-overrides.yml (must match public routes — tests enforce this).
 api:
   specs:
-    # openapi/openapi.json is fetched (gitignored) from the running app's
-    # /public-api/openapi.json by the publish workflow (a plain curl) before
-    # generating; overrides add clean SDK method names.
     - openapi: ./openapi/openapi.json
       overrides: ./openapi-overrides.yml
 groups:
   python-sdk:
     generators:
-      # Pinned for reproducible builds — a `latest` generator could silently
-      # change the SDK's shape (renamed methods, etc.) and publish it. Bump
-      # deliberately with `fern generator upgrade --group python-sdk`;
-      # validate-sdk.yml re-runs `fern check` on that PR.
       - name: fernapi/fern-python-sdk
         version: 5.15.2
         output:
           location: pypi
           package-name: calibrate-sdk
           token: ${PYPI_TOKEN}
-        # Sync generated source to a GitHub repo. This ALSO populates the
-        # `Repository` project URL in the published package's metadata — without
-        # it Fern emits an empty `Project-URL: Repository,`, which PyPI rejects
-        # with `400 Must have a URL`. `.fernignore` in the repo lets us keep a
-        # hand-written README (used as the PyPI long_description).
         github:
           repository: dalmia/calibrate-python-sdk
           mode: push
@@ -42,13 +23,10 @@ groups:
           license: "MIT"
           package-description: "Python SDK for the Calibrate agent evaluation platform API."
         config:
-          # Import path (pip install name stays package-name above).
           package_name: calibrate
           client_class_name: Calibrate
   cli:
     generators:
-      # Fern-generated cloud API client (`calibrate`). Offline evals use the
-      # separate PyPI package calibrate-agent (command: calibrate-agent).
       - name: fernapi/fern-cli
         version: 0.21.1
         github:
