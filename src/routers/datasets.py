@@ -1,8 +1,8 @@
 import logging
 from typing import List, Literal, Optional
 
-from fastapi import APIRouter, HTTPException, Depends
-from pydantic import BaseModel
+from fastapi import APIRouter, HTTPException, Depends, Path, Query
+from pydantic import BaseModel, Field
 
 from auth_utils import get_current_org, OrgContext
 from utils import presign_audio_path
@@ -31,45 +31,63 @@ router = APIRouter(prefix="/datasets", tags=["datasets"])
 
 
 class DatasetCreateRequest(BaseModel):
-    name: str
-    dataset_type: Literal["stt", "tts"]
+    name: str = Field(description="Human-readable dataset name")
+    dataset_type: Literal["stt", "tts"] = Field(
+        description="`stt` items carry audio + ground-truth text; `tts` items carry text only"
+    )
 
 
 class DatasetRenameRequest(BaseModel):
-    name: str
+    name: str = Field(description="New dataset name")
 
 
 class DatasetItemIn(BaseModel):
-    audio_path: Optional[str] = None  # required for STT datasets
-    text: str
+    audio_path: Optional[str] = Field(
+        None,
+        description="Audio location as an `s3://bucket/key` URI. **Required for STT datasets; must be omitted for TTS datasets**",
+    )
+    text: str = Field(
+        description="For STT, the ground-truth transcript; for TTS, the text to synthesize"
+    )
 
 
 class DatasetItemUpdate(BaseModel):
-    audio_path: Optional[str] = None
-    text: Optional[str] = None
+    audio_path: Optional[str] = Field(
+        None,
+        description="New audio `s3://bucket/key` URI. Omit the field to leave audio unchanged; **STT requires a value, TTS forbids one**",
+    )
+    text: Optional[str] = Field(
+        None, description="New item text. Omit to leave text unchanged"
+    )
 
 
 class DatasetItemResponse(BaseModel):
-    uuid: str
-    audio_path: Optional[str]
-    text: str
-    order_index: int
-    created_at: str
-    updated_at: Optional[str] = None
+    uuid: str = Field(description="Dataset item UUID (8-char identifier)")
+    audio_path: Optional[str] = Field(
+        description="Presigned download URL for the item's audio, or null for TTS items"
+    )
+    text: str = Field(description="Ground-truth transcript (STT) or synthesis text (TTS)")
+    order_index: int = Field(description="Zero-based position of the item within the dataset")
+    created_at: str = Field(description="Creation timestamp (ISO 8601 UTC)")
+    updated_at: Optional[str] = Field(
+        None, description="Last-update timestamp (ISO 8601 UTC), or null if never updated"
+    )
 
 
 class DatasetResponse(BaseModel):
-    uuid: str
-    name: str
-    dataset_type: str
-    item_count: int
-    eval_count: int
-    created_at: str
-    updated_at: str
+    uuid: str = Field(description="Dataset UUID (8-char identifier)")
+    name: str = Field(description="Human-readable dataset name")
+    dataset_type: str = Field(description="Dataset type (`stt` or `tts`)")
+    item_count: int = Field(description="Number of non-deleted items in the dataset")
+    eval_count: int = Field(description="Number of evaluation jobs that used this dataset")
+    created_at: str = Field(description="Creation timestamp (ISO 8601 UTC)")
+    updated_at: str = Field(description="Last-update timestamp (ISO 8601 UTC)")
 
 
 class DatasetDetailResponse(DatasetResponse):
-    items: List[DatasetItemResponse]
+    items: List[DatasetItemResponse] = Field(
+        description="All non-deleted items in the dataset, ordered by `order_index`"
+    )
 
 
 # ── Helpers ──────────────────────────────────────────────────────────────────
@@ -118,12 +136,12 @@ def _dataset_row_to_response(
 # ── Routes ───────────────────────────────────────────────────────────────────
 
 
-@router.post("", response_model=DatasetResponse, status_code=201)
+@router.post("", response_model=DatasetResponse, status_code=201, summary="Create dataset")
 async def create_new_dataset(
     request: DatasetCreateRequest,
     ctx: OrgContext = Depends(get_current_org),
 ):
-    """Create a new empty dataset."""
+    """Create a new empty dataset in the caller's current org. Add items separately."""
     dataset_uuid = create_dataset(
         name=request.name,
         dataset_type=request.dataset_type,
@@ -134,9 +152,11 @@ async def create_new_dataset(
     return _dataset_row_to_response(row, item_count=0, eval_count=0)
 
 
-@router.get("", response_model=List[DatasetResponse])
+@router.get("", response_model=List[DatasetResponse], summary="List datasets")
 async def list_datasets(
-    dataset_type: Optional[str] = None,
+    dataset_type: Optional[str] = Query(
+        None, description="Filter by dataset type (`stt` or `tts`). Omit to return all types"
+    ),
     ctx: OrgContext = Depends(get_current_org),
 ):
     """List all datasets for the caller's current org, optionally filtered by type."""
@@ -159,12 +179,12 @@ async def list_datasets(
     ]
 
 
-@router.get("/{dataset_id}", response_model=DatasetDetailResponse)
+@router.get("/{dataset_id}", response_model=DatasetDetailResponse, summary="Get dataset")
 async def get_dataset_detail(
-    dataset_id: str,
+    dataset_id: str = Path(description="Dataset UUID (8-char identifier)"),
     ctx: OrgContext = Depends(get_current_org),
 ):
-    """Get a dataset with all its items."""
+    """Retrieve a dataset along with all of its items."""
     row = get_dataset(dataset_id, org_uuid=ctx.org_uuid)
     if not row:
         raise HTTPException(status_code=404, detail="Dataset not found")
@@ -183,10 +203,10 @@ async def get_dataset_detail(
     )
 
 
-@router.patch("/{dataset_id}", response_model=DatasetResponse)
+@router.patch("/{dataset_id}", response_model=DatasetResponse, summary="Update dataset")
 async def rename_dataset(
-    dataset_id: str,
     request: DatasetRenameRequest,
+    dataset_id: str = Path(description="Dataset UUID (8-char identifier)"),
     ctx: OrgContext = Depends(get_current_org),
 ):
     """Rename a dataset."""
@@ -205,12 +225,12 @@ async def rename_dataset(
     )
 
 
-@router.delete("/{dataset_id}", status_code=204)
+@router.delete("/{dataset_id}", status_code=204, summary="Delete dataset")
 async def remove_dataset(
-    dataset_id: str,
+    dataset_id: str = Path(description="Dataset UUID (8-char identifier)"),
     ctx: OrgContext = Depends(get_current_org),
 ):
-    """Soft delete a dataset and all its items."""
+    """Soft-delete a dataset and all of its items."""
     row = get_dataset(dataset_id, org_uuid=ctx.org_uuid)
     if not row:
         raise HTTPException(status_code=404, detail="Dataset not found")
@@ -219,14 +239,17 @@ async def remove_dataset(
 
 
 @router.post(
-    "/{dataset_id}/items", response_model=List[DatasetItemResponse], status_code=201
+    "/{dataset_id}/items",
+    response_model=List[DatasetItemResponse],
+    status_code=201,
+    summary="Bulk create dataset items",
 )
 async def add_items(
-    dataset_id: str,
     items: List[DatasetItemIn],
+    dataset_id: str = Path(description="Dataset UUID (8-char identifier)"),
     ctx: OrgContext = Depends(get_current_org),
 ):
-    """Add one or more items to a dataset."""
+    """Append one or more items to a dataset (max 1000 per request). Items must match the dataset type."""
     if not items:
         raise HTTPException(status_code=400, detail="items list cannot be empty")
     if len(items) > 1000:
@@ -246,14 +269,18 @@ async def add_items(
     return [_item_row_to_response(i) for i in get_dataset_items_by_uuids(new_uuids)]
 
 
-@router.patch("/{dataset_id}/items/{item_uuid}", response_model=DatasetItemResponse)
+@router.patch(
+    "/{dataset_id}/items/{item_uuid}",
+    response_model=DatasetItemResponse,
+    summary="Update dataset item",
+)
 async def update_item(
-    dataset_id: str,
-    item_uuid: str,
     request: DatasetItemUpdate,
+    dataset_id: str = Path(description="Dataset UUID (8-char identifier)"),
+    item_uuid: str = Path(description="Dataset item UUID (8-char identifier)"),
     ctx: OrgContext = Depends(get_current_org),
 ):
-    """Update a dataset item's text or audio_path."""
+    """Update a dataset item's text and/or audio path. At least one field must be provided."""
     row = get_dataset(dataset_id, org_uuid=ctx.org_uuid)
     if not row:
         raise HTTPException(status_code=404, detail="Dataset not found")
@@ -290,13 +317,15 @@ async def update_item(
     return _item_row_to_response(item)
 
 
-@router.delete("/{dataset_id}/items/{item_uuid}", status_code=204)
+@router.delete(
+    "/{dataset_id}/items/{item_uuid}", status_code=204, summary="Delete dataset item"
+)
 async def remove_item(
-    dataset_id: str,
-    item_uuid: str,
+    dataset_id: str = Path(description="Dataset UUID (8-char identifier)"),
+    item_uuid: str = Path(description="Dataset item UUID (8-char identifier)"),
     ctx: OrgContext = Depends(get_current_org),
 ):
-    """Soft delete a single item from a dataset."""
+    """Soft-delete a single item from a dataset."""
     row = get_dataset(dataset_id, org_uuid=ctx.org_uuid)
     if not row:
         raise HTTPException(status_code=404, detail="Dataset not found")

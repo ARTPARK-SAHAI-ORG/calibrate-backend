@@ -1,6 +1,6 @@
 from typing import Optional, List
-from fastapi import APIRouter, HTTPException, Depends
-from pydantic import BaseModel
+from fastapi import APIRouter, HTTPException, Depends, Path
+from pydantic import BaseModel, Field
 
 from db import (
     create_scenario,
@@ -17,33 +17,41 @@ router = APIRouter(prefix="/scenarios", tags=["scenarios"])
 
 
 class ScenarioCreate(BaseModel):
-    name: str
-    description: Optional[str] = None
+    name: str = Field(description="Human-readable scenario name, unique within the org")
+    description: Optional[str] = Field(
+        None, description="Free-text description of the scenario. Omit to leave unset"
+    )
 
 
 class ScenarioUpdate(BaseModel):
-    name: Optional[str] = None
-    description: Optional[str] = None
+    name: Optional[str] = Field(
+        None, description="New scenario name, unique within the org. Omit to leave unchanged"
+    )
+    description: Optional[str] = Field(
+        None, description="New description. Omit to leave unchanged"
+    )
 
 
 class ScenarioResponse(BaseModel):
-    uuid: str
-    name: str
-    description: Optional[str] = None
-    created_at: str
-    updated_at: str
+    uuid: str = Field(description="Scenario UUID (8-char identifier)")
+    name: str = Field(description="Human-readable scenario name")
+    description: Optional[str] = Field(
+        None, description="Free-text description, or null if unset"
+    )
+    created_at: str = Field(description="Creation timestamp (ISO 8601 UTC)")
+    updated_at: str = Field(description="Last-update timestamp (ISO 8601 UTC)")
 
 
 class ScenarioCreateResponse(BaseModel):
-    uuid: str
-    message: str
+    uuid: str = Field(description="UUID (8-char identifier) of the newly created scenario")
+    message: str = Field(description="Human-readable success message")
 
 
-@router.post("", response_model=ScenarioCreateResponse)
+@router.post("", response_model=ScenarioCreateResponse, summary="Create scenario")
 async def create_scenario_endpoint(
     scenario: ScenarioCreate, ctx: OrgContext = Depends(get_current_org)
 ):
-    """Create a new scenario."""
+    """Create a new scenario in the caller's current org. The name must be unique within the org."""
     with ensure_name_unique("scenarios", scenario.name, ctx.org_uuid, entity="Scenario"):
         scenario_uuid = create_scenario(
             name=scenario.name,
@@ -56,31 +64,32 @@ async def create_scenario_endpoint(
     )
 
 
-@router.get("", response_model=List[ScenarioResponse])
+@router.get("", response_model=List[ScenarioResponse], summary="List scenarios")
 async def list_scenarios(ctx: OrgContext = Depends(get_current_org)):
     """List all scenarios for the caller's current org."""
     scenarios = get_all_scenarios(org_uuid=ctx.org_uuid)
     return scenarios
 
 
-@router.get("/{scenario_uuid}", response_model=ScenarioResponse)
+@router.get("/{scenario_uuid}", response_model=ScenarioResponse, summary="Get scenario")
 async def get_scenario_endpoint(
-    scenario_uuid: str, ctx: OrgContext = Depends(get_current_org)
+    scenario_uuid: str = Path(description="Scenario UUID (8-char identifier)"),
+    ctx: OrgContext = Depends(get_current_org),
 ):
-    """Get a scenario by UUID."""
+    """Retrieve a single scenario by UUID within the caller's org."""
     scenario = get_scenario(scenario_uuid)
     if not scenario or scenario.get("org_uuid") != ctx.org_uuid:
         raise HTTPException(status_code=404, detail="Scenario not found")
     return scenario
 
 
-@router.put("/{scenario_uuid}", response_model=ScenarioResponse)
+@router.put("/{scenario_uuid}", response_model=ScenarioResponse, summary="Update scenario")
 async def update_scenario_endpoint(
-    scenario_uuid: str,
     scenario: ScenarioUpdate,
+    scenario_uuid: str = Path(description="Scenario UUID (8-char identifier)"),
     ctx: OrgContext = Depends(get_current_org),
 ):
-    """Update a scenario."""
+    """Update a scenario's fields. Only the provided fields change; omitted fields are left as-is."""
     existing_scenario = get_scenario(scenario_uuid)
     if not existing_scenario or existing_scenario.get("org_uuid") != ctx.org_uuid:
         raise HTTPException(status_code=404, detail="Scenario not found")
@@ -105,11 +114,12 @@ async def update_scenario_endpoint(
     return updated_scenario
 
 
-@router.delete("/{scenario_uuid}")
+@router.delete("/{scenario_uuid}", summary="Delete scenario")
 async def delete_scenario_endpoint(
-    scenario_uuid: str, ctx: OrgContext = Depends(get_current_org)
+    scenario_uuid: str = Path(description="Scenario UUID (8-char identifier)"),
+    ctx: OrgContext = Depends(get_current_org),
 ):
-    """Delete a scenario."""
+    """Soft-delete a scenario by UUID."""
     existing_scenario = get_scenario(scenario_uuid)
     if not existing_scenario or existing_scenario.get("org_uuid") != ctx.org_uuid:
         raise HTTPException(status_code=404, detail="Scenario not found")

@@ -1,8 +1,8 @@
 from typing import List, Optional, Any, Dict
 from enum import Enum
 
-from fastapi import APIRouter, Query, Depends, HTTPException
-from pydantic import BaseModel
+from fastapi import APIRouter, Query, Depends, HTTPException, Path
+from pydantic import BaseModel, Field
 
 from db import get_all_jobs, get_job, delete_job, get_active_dataset_ids
 from auth_utils import get_current_org, OrgContext
@@ -25,19 +25,29 @@ class JobType(str, Enum):
 
 
 class JobListItem(BaseModel):
-    uuid: str
-    type: str
-    status: str
-    dataset_id: Optional[str] = None
-    dataset_name: Optional[str] = None
-    details: Optional[Dict[str, Any]] = None
-    results: Optional[Dict[str, Any]] = None
-    created_at: str
-    updated_at: str
+    uuid: str = Field(description="Job identifier (8-char UUID)")
+    type: str = Field(description="Underlying job type, e.g. `stt-eval`, `tts-eval`")
+    status: str = Field(description="Lifecycle state, e.g. `queued`, `in_progress`, `done`, `failed`")
+    dataset_id: Optional[str] = Field(
+        None,
+        description="Source dataset UUID; `null` when the dataset has since been deleted",
+    )
+    dataset_name: Optional[str] = Field(
+        None,
+        description="Source dataset name; `null` when the dataset has since been deleted",
+    )
+    details: Optional[Dict[str, Any]] = Field(
+        None, description="Job configuration and runtime metadata; `null` if unset"
+    )
+    results: Optional[Dict[str, Any]] = Field(
+        None, description="Job output payload; `null` until the job produces results"
+    )
+    created_at: str = Field(description="Creation timestamp (ISO 8601 UTC)")
+    updated_at: str = Field(description="Last-update timestamp (ISO 8601 UTC)")
 
 
 class JobsListResponse(BaseModel):
-    jobs: List[JobListItem]
+    jobs: List[JobListItem] = Field(description="Jobs, newest first")
 
 
 # Map user-friendly job type to actual job type in database
@@ -47,19 +57,16 @@ JOB_TYPE_MAP = {
 }
 
 
-@router.get("", response_model=JobsListResponse)
+@router.get("", response_model=JobsListResponse, summary="List jobs")
 async def list_jobs(
     job_type: Optional[JobType] = Query(
-        None, description="Filter jobs by type: 'stt' or 'tts'"
+        None, description="Filter jobs by type: `stt` or `tts`; omit for all types"
     ),
     ctx: OrgContext = Depends(get_current_org),
 ):
-    """
-    Get all jobs for the caller's current org, optionally filtered by job type.
-
-    Returns a list of all jobs with their UUID, type, status, details, results, and timestamps.
-    Jobs are sorted by created_at descending (most recent first).
-    """
+    """List jobs for the caller's current org, newest first. Optionally filter
+    by job type. A job's `dataset_id`/`dataset_name` are nulled out when the
+    source dataset has since been deleted."""
     db_job_type = JOB_TYPE_MAP.get(job_type) if job_type else None
 
     jobs = get_all_jobs(org_uuid=ctx.org_uuid, job_type=db_job_type)
@@ -94,11 +101,13 @@ async def list_jobs(
     return JobsListResponse(jobs=job_items)
 
 
-@router.delete("/{job_uuid}")
+@router.delete("/{job_uuid}", summary="Delete job")
 async def delete_job_endpoint(
-    job_uuid: str, ctx: OrgContext = Depends(get_current_org)
+    job_uuid: str = Path(description="Job UUID (8-char identifier)"),
+    ctx: OrgContext = Depends(get_current_org),
 ):
-    """Delete a job."""
+    """Delete a job. If it is still running, its processes are killed first and
+    the next queued eval job is started. Returns 404 if not in the caller's org."""
     job = get_job(job_uuid, org_uuid=ctx.org_uuid)
     if not job:
         raise HTTPException(status_code=404, detail="Job not found")

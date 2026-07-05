@@ -21,27 +21,31 @@ router = APIRouter(prefix="/auth", tags=["auth"])
 class GoogleLoginRequest(BaseModel):
     """Request body for Google login."""
 
-    id_token: str
+    id_token: str = Field(
+        description="Google OAuth ID token (JWT) obtained by the frontend from Google Sign-In"
+    )
 
 
 class UserResponse(BaseModel):
     """User response model."""
 
-    uuid: str
-    first_name: str
-    last_name: str
-    email: str
-    created_at: str
-    updated_at: str
+    uuid: str = Field(description="User identifier (8-char UUID)")
+    first_name: str = Field(description="User's given name")
+    last_name: str = Field(description="User's family name")
+    email: str = Field(description="User's email address (unique)")
+    created_at: str = Field(description="Account creation timestamp (ISO 8601 UTC)")
+    updated_at: str = Field(description="Last-update timestamp (ISO 8601 UTC)")
 
 
 class LoginResponse(BaseModel):
     """Response for successful login."""
 
-    access_token: str
-    token_type: str = "bearer"
-    user: UserResponse
-    message: str
+    access_token: str = Field(
+        description="JWT bearer token; send as `Authorization: Bearer <token>` on subsequent requests"
+    )
+    token_type: str = Field("bearer", description="Auth scheme for the token — always `bearer`")
+    user: UserResponse = Field(description="The authenticated user's profile")
+    message: str = Field(description="Human-readable status message")
 
 
 async def verify_google_token(id_token: str) -> dict:
@@ -81,23 +85,11 @@ async def verify_google_token(id_token: str) -> dict:
             raise HTTPException(status_code=500, detail="Failed to verify Google token")
 
 
-@router.post("/google", response_model=LoginResponse)
+@router.post("/google", response_model=LoginResponse, summary="Log in with Google")
 async def google_login(request: GoogleLoginRequest):
-    """
-    Authenticate a user with Google OAuth.
-
-    This endpoint:
-    1. Verifies the Google ID token with Google's servers
-    2. Extracts user info (email, name) from the token
-    3. Creates a new user or retrieves existing user by email
-    4. Returns the user info
-
-    Args:
-        request: Contains the Google ID token from the frontend
-
-    Returns:
-        LoginResponse with user info and success message
-    """
+    """Authenticate with a Google OAuth ID token. Verifies the token with
+    Google, creates the user on first login (or retrieves the existing one by
+    email), and returns a JWT access token plus the user profile."""
     # Verify the Google token
     token_info = await verify_google_token(request.id_token)
 
@@ -139,24 +131,22 @@ async def google_login(request: GoogleLoginRequest):
 
 
 class SignupRequest(BaseModel):
-    first_name: str = Field(..., min_length=1)
-    last_name: str = Field(..., min_length=1)
-    email: str = Field(..., min_length=3)
-    password: str = Field(..., min_length=6)
+    first_name: str = Field(..., min_length=1, description="User's given name")
+    last_name: str = Field(..., min_length=1, description="User's family name")
+    email: str = Field(..., min_length=3, description="Email address; must not already be registered")
+    password: str = Field(..., min_length=6, description="Plaintext password (min 6 chars); stored bcrypt-hashed")
 
 
 class CredentialLoginRequest(BaseModel):
-    email: str
-    password: str
+    email: str = Field(description="Registered email address")
+    password: str = Field(description="Account password")
 
 
-@router.post("/signup", response_model=LoginResponse)
+@router.post("/signup", response_model=LoginResponse, summary="Sign up with email and password")
 async def signup(request: SignupRequest):
-    """
-    Register a new user with email and password.
-
-    Returns a JWT access token and user info on success.
-    """
+    """Register a new user with email and password, returning a JWT access
+    token and the user profile. An email already registered with a password
+    yields 409; an invite stub row (no password yet) is hydrated in place."""
     # A row may already exist as a stub created by an org invite (no
     # password_hash set). `create_user_with_password` hydrates that stub in
     # place; it raises ValueError("email already registered") if the row
@@ -199,13 +189,10 @@ async def signup(request: SignupRequest):
     )
 
 
-@router.post("/login", response_model=LoginResponse)
+@router.post("/login", response_model=LoginResponse, summary="Log in with email and password")
 async def login(request: CredentialLoginRequest):
-    """
-    Authenticate a user with email and password.
-
-    Returns a JWT access token and user info on success.
-    """
+    """Authenticate with email and password, returning a JWT access token and
+    the user profile. Returns 401 on unknown email or wrong password."""
     user = get_user_by_email(request.email)
     if not user or not user.get("password_hash"):
         raise HTTPException(status_code=401, detail="Invalid email or password")

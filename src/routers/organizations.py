@@ -7,7 +7,7 @@ from `user_id` to `org_uuid` is a follow-up PR. Endpoints here only manage the
 org graph (orgs, members, active workspace) without changing existing routers.
 """
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Path
 from pydantic import BaseModel, Field
 from typing import List, Optional
 
@@ -27,34 +27,43 @@ router = APIRouter(prefix="/organizations", tags=["organizations"])
 
 
 class OrganizationResponse(BaseModel):
-    uuid: str
-    name: str
-    is_personal: bool
-    created_by_user_id: str
-    member_role: Optional[str] = None
-    created_at: str
-    updated_at: str
+    uuid: str = Field(description="Organization (workspace) identifier (8-char UUID)")
+    name: str = Field(description="Workspace display name")
+    is_personal: bool = Field(
+        description="`true` for the user's auto-created personal workspace, `false` for shared orgs"
+    )
+    created_by_user_id: str = Field(description="UUID of the user who created the org")
+    member_role: Optional[str] = Field(
+        None,
+        description="Caller's role in this org (`owner` | `admin`); `null` when not resolved",
+    )
+    created_at: str = Field(description="Creation timestamp (ISO 8601 UTC)")
+    updated_at: str = Field(description="Last-update timestamp (ISO 8601 UTC)")
 
 
 class CreateOrganizationRequest(BaseModel):
-    name: str = Field(..., min_length=1)
+    name: str = Field(..., min_length=1, description="Workspace name (non-empty)")
 
 
 class UpdateOrganizationRequest(BaseModel):
-    name: str = Field(..., min_length=1)
+    name: str = Field(..., min_length=1, description="New workspace name (non-empty)")
 
 
 class AddMemberRequest(BaseModel):
-    email: str = Field(..., min_length=3)
+    email: str = Field(
+        ...,
+        min_length=3,
+        description="Email of the user to add; a stub user is created if not yet registered",
+    )
 
 
 class MemberResponse(BaseModel):
-    user_id: str
-    email: str
-    first_name: str
-    last_name: str
-    role: str
-    created_at: str
+    user_id: str = Field(description="Member's user UUID (8-char identifier)")
+    email: str = Field(description="Member's email address")
+    first_name: str = Field(description="Member's given name")
+    last_name: str = Field(description="Member's family name")
+    role: str = Field(description="Member's role in the org (`owner` | `admin`)")
+    created_at: str = Field(description="When the member was added (ISO 8601 UTC)")
 
 
 def _require_membership(org_uuid: str, user_id: str) -> str:
@@ -70,49 +79,55 @@ def _require_membership(org_uuid: str, user_id: str) -> str:
     return role
 
 
-@router.get("", response_model=List[OrganizationResponse])
+@router.get("", response_model=List[OrganizationResponse], summary="List organizations")
 async def list_orgs(user_id: str = Depends(get_current_user_id)):
-    """List every org the caller is an active member of."""
+    """List every org (workspace) the caller is an active member of."""
     return [OrganizationResponse(**o) for o in list_organizations_for_user(user_id)]
 
 
-@router.post("", response_model=OrganizationResponse, status_code=201)
+@router.post("", response_model=OrganizationResponse, status_code=201, summary="Create organization")
 async def create_org(
     request: CreateOrganizationRequest,
     user_id: str = Depends(get_current_user_id),
 ):
-    """Create a new (non-personal) org with the caller as owner."""
+    """Create a new (non-personal) org (workspace) with the caller as owner."""
     org_uuid = create_organization(name=request.name, owner_user_id=user_id)
     org = get_organization(org_uuid)
     return OrganizationResponse(**org, member_role="owner")
 
 
-@router.patch("/{org_uuid}", response_model=OrganizationResponse)
+@router.patch("/{org_uuid}", response_model=OrganizationResponse, summary="Update organization")
 async def rename_org(
-    org_uuid: str,
-    request: UpdateOrganizationRequest,
+    org_uuid: str = Path(description="Organization UUID (8-char identifier)"),
+    request: UpdateOrganizationRequest = ...,
     user_id: str = Depends(get_current_user_id),
 ):
+    """Rename an org. The caller must be a member; returns 404 otherwise."""
     role = _require_membership(org_uuid, user_id)
     update_organization_name(org_uuid, request.name)
     org = get_organization(org_uuid)
     return OrganizationResponse(**org, member_role=role)
 
 
-@router.get("/{org_uuid}/members", response_model=List[MemberResponse])
+@router.get("/{org_uuid}/members", response_model=List[MemberResponse], summary="List members")
 async def list_members(
-    org_uuid: str, user_id: str = Depends(get_current_user_id)
+    org_uuid: str = Path(description="Organization UUID (8-char identifier)"),
+    user_id: str = Depends(get_current_user_id),
 ):
+    """List members of an org. The caller must be a member; returns 404 otherwise."""
     _require_membership(org_uuid, user_id)
     return [MemberResponse(**m) for m in list_organization_members(org_uuid)]
 
 
 @router.post(
-    "/{org_uuid}/members", response_model=MemberResponse, status_code=201
+    "/{org_uuid}/members",
+    response_model=MemberResponse,
+    status_code=201,
+    summary="Add member",
 )
 async def add_member(
-    org_uuid: str,
-    request: AddMemberRequest,
+    org_uuid: str = Path(description="Organization UUID (8-char identifier)"),
+    request: AddMemberRequest = ...,
     user_id: str = Depends(get_current_user_id),
 ):
     """Add a user to this org as admin. Creates a stub user if the email isn't
@@ -133,14 +148,14 @@ async def add_member(
     raise HTTPException(status_code=500, detail="Member not found after insert")
 
 
-@router.delete("/{org_uuid}/members/{target_user_id}", status_code=204)
+@router.delete("/{org_uuid}/members/{target_user_id}", status_code=204, summary="Remove member")
 async def remove_member(
-    org_uuid: str,
-    target_user_id: str,
+    org_uuid: str = Path(description="Organization UUID (8-char identifier)"),
+    target_user_id: str = Path(description="UUID of the member to remove (8-char identifier)"),
     user_id: str = Depends(get_current_user_id),
 ):
-    """Remove a member. Owners cannot be removed. Admins may remove themselves
-    or any other admin."""
+    """Remove a member from the org. Owners cannot be removed. Admins may remove
+    themselves or any other admin. Returns 404 if the member isn't found."""
     _require_membership(org_uuid, user_id)
     try:
         removed = remove_organization_member(org_uuid, target_user_id)

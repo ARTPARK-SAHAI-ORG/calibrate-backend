@@ -1,6 +1,6 @@
 from typing import Any, Dict, List, Optional
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Path, Query
 
 from db import (
     get_annotation_task,
@@ -28,11 +28,20 @@ from annotation_metrics import (
 router = APIRouter(prefix="/annotation-agreement", tags=["annotation-agreement"])
 
 
-@router.get("/trend")
+@router.get("/trend", summary="Get org agreement trend")
 async def agreement_trend(
-    bucket: str = Query("week", pattern="^(week|month|year)$"),
-    days: int = Query(90, ge=1, le=3650),
-    task_id: Optional[str] = Query(None),
+    bucket: str = Query(
+        "week",
+        pattern="^(week|month|year)$",
+        description="Time bucket for the trend series (`week`, `month`, or `year`)",
+    ),
+    days: int = Query(
+        90, ge=1, le=3650, description="Trailing window in days for the trend series"
+    ),
+    task_id: Optional[str] = Query(
+        None,
+        description="Annotation task UUID (8-char identifier). Restrict all metrics to this task; omit for org-wide",
+    ),
     ctx: OrgContext = Depends(get_current_org),
 ):
     """Org-wide human-vs-human agreement trend, plus per-evaluator
@@ -104,13 +113,25 @@ async def agreement_trend(
     }
 
 
-@router.get("/evaluator/{evaluator_uuid}/trend")
+@router.get("/evaluator/{evaluator_uuid}/trend", summary="Get evaluator agreement trend")
 async def evaluator_agreement_trend(
-    evaluator_uuid: str,
-    bucket: str = Query("week", pattern="^(week|month|year)$"),
-    days: int = Query(90, ge=1, le=3650),
-    task_id: Optional[str] = Query(None),
-    version_id: Optional[str] = Query(None),
+    evaluator_uuid: str = Path(description="Evaluator UUID (8-char identifier)"),
+    bucket: str = Query(
+        "week",
+        pattern="^(week|month|year)$",
+        description="Time bucket for the trend series (`week`, `month`, or `year`)",
+    ),
+    days: int = Query(
+        90, ge=1, le=3650, description="Trailing window in days for the trend series"
+    ),
+    task_id: Optional[str] = Query(
+        None,
+        description="Annotation task UUID (8-char identifier). Restrict all metrics to items in this task; omit for all tasks",
+    ),
+    version_id: Optional[str] = Query(
+        None,
+        description="Evaluator version UUID. Restrict all metrics to this version; omit for all versions",
+    ),
     ctx: OrgContext = Depends(get_current_org),
 ):
     """Human-vs-evaluator agreement trend for one evaluator, broken down by

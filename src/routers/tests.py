@@ -1,6 +1,6 @@
 from typing import ClassVar, Optional, List, Dict, Any, Literal
-from fastapi import APIRouter, HTTPException, Depends
-from pydantic import BaseModel, ConfigDict, model_validator
+from fastapi import APIRouter, HTTPException, Depends, Path
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from db import (
     create_test,
@@ -49,67 +49,115 @@ class EvaluatorRef(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    evaluator_uuid: str
-    variable_values: Optional[Dict[str, Any]] = None
+    evaluator_uuid: str = Field(description="Evaluator UUID (8-char identifier) to attach to the test")
+    variable_values: Optional[Dict[str, Any]] = Field(
+        None,
+        description="Values for the evaluator's `{{placeholder}}` variables, pinned per-test on the pivot. Omit to inherit the evaluator version's defaults",
+    )
 
 
 class TestCreate(BaseModel):
-    name: str
-    type: TestType
-    config: Optional[Dict[str, Any]] = None
-    evaluators: Optional[List[EvaluatorRef]] = None
+    name: str = Field(description="Human-readable test name, unique within the org")
+    type: TestType = Field(
+        description="Test kind (immutable after creation): `response` judges the generated reply, `tool_call` diffs generated tool calls, `conversation` judges the full conversation"
+    )
+    config: Optional[Dict[str, Any]] = Field(
+        None,
+        description="Calibrate test config (`history`, `evaluation`, optional `settings`). Omit to create an empty shell to fill in later",
+    )
+    evaluators: Optional[List[EvaluatorRef]] = Field(
+        None,
+        description="Evaluators to link. **Required (>=1) for `type=conversation`** (no fallback judge). Omit for `response`/`tool_call` to link none",
+    )
 
 
 class TestUpdate(BaseModel):
-    name: Optional[str] = None
-    type: Optional[TestType] = None
-    config: Optional[Dict[str, Any]] = None
-    evaluators: Optional[List[EvaluatorRef]] = None
+    name: Optional[str] = Field(None, description="New test name. Omit to leave unchanged")
+    type: Optional[TestType] = Field(
+        None,
+        description="Test type. Immutable — may only echo the existing value; a different value is rejected (400). Omit to leave unchanged",
+    )
+    config: Optional[Dict[str, Any]] = Field(
+        None, description="Replacement calibrate config. Omit to leave unchanged"
+    )
+    evaluators: Optional[List[EvaluatorRef]] = Field(
+        None,
+        description="Replacement evaluator links (replaces the existing set). Omit to leave links unchanged; an empty list clears them (**rejected for `conversation` tests**)",
+    )
 
 
 class TestResponse(BaseModel):
-    uuid: str
-    name: str
-    type: str
-    config: Optional[Dict[str, Any]] = None
-    created_at: str
-    updated_at: str
-    evaluators: List[Dict[str, Any]] = []
+    uuid: str = Field(description="Test UUID (8-char identifier)")
+    name: str = Field(description="Human-readable test name")
+    type: str = Field(description="Test kind: `response`, `tool_call`, or `conversation`")
+    config: Optional[Dict[str, Any]] = Field(
+        None, description="Calibrate test config (`history`, `evaluation`, optional `settings`)"
+    )
+    created_at: str = Field(description="Creation timestamp (ISO 8601 UTC)")
+    updated_at: str = Field(description="Last-update timestamp (ISO 8601 UTC)")
+    evaluators: List[Dict[str, Any]] = Field(
+        default=[],
+        description="Linked evaluators, resolved to their current live version at read time",
+    )
 
 
 class TestCreateResponse(BaseModel):
-    uuid: str
-    message: str
+    uuid: str = Field(description="UUID (8-char identifier) of the newly created test")
+    message: str = Field(description="Human-readable confirmation message")
 
 
 # --- Bulk upload models ---
 
 class ChatMessage(BaseModel):
-    role: Literal["system", "user", "assistant", "tool"]
-    content: Optional[str] = None
-    tool_calls: Optional[List[Dict[str, Any]]] = None
-    tool_call_id: Optional[str] = None
-    name: Optional[str] = None
+    role: Literal["system", "user", "assistant", "tool"] = Field(
+        description="Message author role in the conversation history"
+    )
+    content: Optional[str] = Field(
+        None, description="Message text. Omit for assistant messages that only carry `tool_calls`"
+    )
+    tool_calls: Optional[List[Dict[str, Any]]] = Field(
+        None, description="Tool calls issued by the assistant. Omit for plain text turns"
+    )
+    tool_call_id: Optional[str] = Field(
+        None, description="ID of the tool call this message responds to. **Required for `role=tool`**"
+    )
+    name: Optional[str] = Field(None, description="Tool name for `role=tool` messages. Omit otherwise")
 
 
 class ExpectedToolCall(BaseModel):
-    tool: str
-    arguments: Optional[Dict[str, Any]] = None
-    accept_any_arguments: bool = False
+    tool: str = Field(description="Name of the tool the agent is expected to call")
+    arguments: Optional[Dict[str, Any]] = Field(
+        None, description="Expected argument values, diffed against the generated call. Omit to expect no arguments"
+    )
+    accept_any_arguments: bool = Field(
+        False, description="When `true`, only the tool name must match and `arguments` is ignored"
+    )
 
 
 class BulkTestItem(BaseModel):
-    name: str
-    conversation_history: List[ChatMessage]
-    evaluators: Optional[List[EvaluatorRef]] = None
-    tool_calls: Optional[List[ExpectedToolCall]] = None
+    name: str = Field(description="Test name, unique within the batch")
+    conversation_history: List[ChatMessage] = Field(
+        description="Ordered messages ending at the user turn the agent should answer (must be non-empty)"
+    )
+    evaluators: Optional[List[EvaluatorRef]] = Field(
+        None, description="Evaluators to link. **Required for `response`/`conversation` batches**"
+    )
+    tool_calls: Optional[List[ExpectedToolCall]] = Field(
+        None, description="Expected tool calls. **Required for `tool_call` batches**"
+    )
 
 
 class BulkTestUpload(BaseModel):
-    type: TestType
-    tests: List[BulkTestItem]
-    agent_uuids: Optional[List[str]] = None
-    language: Optional[str] = None
+    type: TestType = Field(description="Test kind applied to every item in the batch")
+    tests: List[BulkTestItem] = Field(
+        description=f"Test items to create (non-empty, max {500} per request, names unique within the batch)"
+    )
+    agent_uuids: Optional[List[str]] = Field(
+        None, description="Agents (8-char UUIDs) to link every created test to. Omit to link none"
+    )
+    language: Optional[str] = Field(
+        None, description="Language written to each test's `config.settings.language`. Omit to leave unset"
+    )
 
     MAX_BATCH_SIZE: ClassVar[int] = 500
 
@@ -148,19 +196,21 @@ class BulkTestUpload(BaseModel):
 
 
 class BulkTestUploadResponse(BaseModel):
-    uuids: List[str]
-    count: int
-    message: str
-    warnings: Optional[List[str]] = None
+    uuids: List[str] = Field(description="UUIDs (8-char identifiers) of the created tests, in request order")
+    count: int = Field(description="Number of tests created")
+    message: str = Field(description="Human-readable confirmation message")
+    warnings: Optional[List[str]] = Field(
+        None, description="Non-fatal issues (e.g. agents some tests couldn't link to). Null when there were none"
+    )
 
 
 class BulkTestDelete(BaseModel):
-    test_uuids: List[str]
+    test_uuids: List[str] = Field(description="UUIDs (8-char identifiers) of the tests to delete (non-empty)")
 
 
 class BulkTestDeleteResponse(BaseModel):
-    deleted_count: int
-    message: str
+    deleted_count: int = Field(description="Number of tests actually deleted (excludes UUIDs not in the caller's org)")
+    message: str = Field(description="Human-readable confirmation message")
 
 
 def _validate_evaluators(
@@ -206,11 +256,11 @@ def _with_evaluators(test_dict: Dict[str, Any]) -> Dict[str, Any]:
     return {**test_dict, "evaluators": evaluators}
 
 
-@router.post("/bulk-delete", response_model=BulkTestDeleteResponse)
+@router.post("/bulk-delete", response_model=BulkTestDeleteResponse, summary="Bulk delete tests")
 async def bulk_delete_tests_endpoint(
     payload: BulkTestDelete, ctx: OrgContext = Depends(get_current_org)
 ):
-    """Bulk delete tests by UUIDs. Only deletes tests in the caller's current org."""
+    """Soft-delete multiple tests by UUID. Silently skips UUIDs outside the caller's org."""
     if not payload.test_uuids:
         raise HTTPException(status_code=400, detail="test_uuids must not be empty")
 
@@ -222,11 +272,16 @@ async def bulk_delete_tests_endpoint(
     )
 
 
-@router.post("/bulk", response_model=BulkTestUploadResponse)
+@router.post("/bulk", response_model=BulkTestUploadResponse, summary="Bulk create tests")
 async def bulk_upload_tests(
     payload: BulkTestUpload, ctx: OrgContext = Depends(get_current_org)
 ):
-    """Bulk upload LLM tests. All tests must be the same type (response or tool_call)."""
+    """Create many tests of one type in a single call, optionally linking them to agents.
+
+    All items share `type`; per-type requirements (evaluators for `response`/`conversation`,
+    tool calls for `tool_call`) are enforced up front. Agent-link failures are reported in
+    `warnings` rather than failing the batch.
+    """
     if payload.agent_uuids:
         for agent_uuid in payload.agent_uuids:
             agent = get_agent(agent_uuid)
@@ -299,11 +354,11 @@ async def bulk_upload_tests(
     )
 
 
-@router.post("", response_model=TestCreateResponse)
+@router.post("", response_model=TestCreateResponse, summary="Create test")
 async def create_test_endpoint(
     test: TestCreate, ctx: OrgContext = Depends(get_current_org)
 ):
-    """Create a new test."""
+    """Create a test in the caller's org. `conversation` tests require at least one evaluator (no fallback judge)."""
     # Conversation tests have no evaluator fallback (unlike `response`, which can
     # synthesize the default LLM judge from legacy string criteria) — without a
     # linked simulation evaluator a run produces an empty calibrate config with
@@ -332,29 +387,36 @@ async def create_test_endpoint(
     return TestCreateResponse(uuid=test_uuid, message="Test created successfully")
 
 
-@router.get("", response_model=List[TestResponse])
+@router.get("", response_model=List[TestResponse], summary="List tests")
 async def list_tests(ctx: OrgContext = Depends(get_current_org)):
-    """List all tests for the caller's current org."""
+    """List all tests for the caller's current org, each with its linked evaluators."""
     tests = get_all_tests(org_uuid=ctx.org_uuid)
     return [_with_evaluators(t) for t in tests]
 
 
-@router.get("/{test_uuid}", response_model=TestResponse)
+@router.get("/{test_uuid}", response_model=TestResponse, summary="Get test")
 async def get_test_endpoint(
-    test_uuid: str, ctx: OrgContext = Depends(get_current_org)
+    test_uuid: str = Path(description="Test UUID (8-char identifier)"),
+    ctx: OrgContext = Depends(get_current_org),
 ):
-    """Get a test by UUID."""
+    """Retrieve a single test by UUID, with its linked evaluators. 404 if outside the caller's org."""
     test = get_test(test_uuid)
     if not test or test.get("org_uuid") != ctx.org_uuid:
         raise HTTPException(status_code=404, detail="Test not found")
     return _with_evaluators(test)
 
 
-@router.put("/{test_uuid}", response_model=TestResponse)
+@router.put("/{test_uuid}", response_model=TestResponse, summary="Update test")
 async def update_test_endpoint(
-    test_uuid: str, test: TestUpdate, ctx: OrgContext = Depends(get_current_org)
+    test: TestUpdate,
+    test_uuid: str = Path(description="Test UUID (8-char identifier)"),
+    ctx: OrgContext = Depends(get_current_org),
 ):
-    """Update a test."""
+    """Update a test's name, config, and/or evaluator links.
+
+    `type` is immutable — sending a different value is rejected. Clearing all evaluators
+    is rejected for `conversation` tests. Only supplied fields change.
+    """
     existing_test = get_test(test_uuid)
     if not existing_test or existing_test.get("org_uuid") != ctx.org_uuid:
         raise HTTPException(status_code=404, detail="Test not found")
@@ -414,11 +476,12 @@ async def update_test_endpoint(
     return _with_evaluators(get_test(test_uuid))
 
 
-@router.delete("/{test_uuid}")
+@router.delete("/{test_uuid}", summary="Delete test")
 async def delete_test_endpoint(
-    test_uuid: str, ctx: OrgContext = Depends(get_current_org)
+    test_uuid: str = Path(description="Test UUID (8-char identifier)"),
+    ctx: OrgContext = Depends(get_current_org),
 ):
-    """Delete a test."""
+    """Soft-delete a test. 404 if it doesn't exist or is outside the caller's org."""
     existing_test = get_test(test_uuid)
     if not existing_test or existing_test.get("org_uuid") != ctx.org_uuid:
         raise HTTPException(status_code=404, detail="Test not found")

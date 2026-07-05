@@ -1,6 +1,6 @@
 from typing import Any, Dict, List, Optional
-from fastapi import APIRouter, HTTPException, Depends, Query
-from pydantic import BaseModel
+from fastapi import APIRouter, HTTPException, Depends, Path, Query
+from pydantic import BaseModel, Field
 
 from db import (
     create_annotator,
@@ -25,26 +25,35 @@ router = APIRouter(prefix="/annotators", tags=["annotators"])
 
 
 class AnnotatorCreate(BaseModel):
-    name: str
+    name: str = Field(description="Human-readable annotator name, unique within the org")
 
 
 class AnnotatorUpdate(BaseModel):
-    name: Optional[str] = None
+    name: Optional[str] = Field(
+        None, description="New annotator name (unique within the org). Omit to leave unchanged"
+    )
 
 
 class AnnotatorResponse(BaseModel):
-    uuid: str
-    name: str
-    created_at: str
-    updated_at: str
-    jobs_count: Optional[int] = None
-    current_agreement: Optional[float] = None
-    pair_count: Optional[int] = None
+    uuid: str = Field(description="Annotator UUID (8-char identifier)")
+    name: str = Field(description="Human-readable annotator name")
+    created_at: str = Field(description="Creation timestamp (ISO 8601 UTC)")
+    updated_at: str = Field(description="Last-update timestamp (ISO 8601 UTC)")
+    jobs_count: Optional[int] = Field(
+        None, description="Number of labelling jobs assigned to this annotator. `null` when not computed"
+    )
+    current_agreement: Optional[float] = Field(
+        None,
+        description="Latest pairwise mean agreement `[0, 1]` vs other annotators. `null` when there's no overlap to compute",
+    )
+    pair_count: Optional[int] = Field(
+        None, description="Number of comparable annotation pairs behind `current_agreement`. `null` when none exist"
+    )
 
 
 class AnnotatorCreateResponse(BaseModel):
-    uuid: str
-    message: str
+    uuid: str = Field(description="UUID of the newly created annotator (8-char identifier)")
+    message: str = Field(description="Human-readable success message")
 
 
 def _ensure_owned_annotator(annotator_uuid: str, org_uuid: str):
@@ -54,12 +63,12 @@ def _ensure_owned_annotator(annotator_uuid: str, org_uuid: str):
     return annotator
 
 
-@router.post("", response_model=AnnotatorCreateResponse)
+@router.post("", response_model=AnnotatorCreateResponse, summary="Create annotator")
 async def create_annotator_endpoint(
     payload: AnnotatorCreate,
     ctx: OrgContext = Depends(get_current_org),
 ):
-    """Create a new annotator. Name must be unique per org."""
+    """Create a new annotator in the caller's org. Name must be unique per org."""
     try:
         with ensure_name_unique(
             "annotators", payload.name, ctx.org_uuid, entity="Annotator"
@@ -74,17 +83,11 @@ async def create_annotator_endpoint(
     )
 
 
-@router.get("", response_model=List[AnnotatorResponse])
+@router.get("", response_model=List[AnnotatorResponse], summary="List annotators")
 async def list_annotators(ctx: OrgContext = Depends(get_current_org)):
-    """List all annotators on this org with their per-annotator stats:
+    """List all annotators in the caller's org with per-annotator stats:
     `jobs_count` and `current_agreement` (pairwise mean vs other annotators).
     Both are `null` when there's nothing to compute (no jobs / no overlap).
-
-    Bulk-fetches once: annotators, job counts, and the org's full annotation
-    set. Per-annotator agreement is then a Python-side filter over the
-    shared annotation list — `aggregate_agreement_for_annotator` already
-    selects only slots where the target annotator participated, so feeding
-    it the org-wide list is equivalent to the per-annotator query.
     """
     annotators = get_all_annotators(org_uuid=ctx.org_uuid)
     if not annotators:
@@ -107,16 +110,22 @@ async def list_annotators(ctx: OrgContext = Depends(get_current_org)):
     return out
 
 
-@router.get("/{annotator_uuid}")
+@router.get("/{annotator_uuid}", summary="Get annotator")
 async def get_annotator_endpoint(
-    annotator_uuid: str,
-    bucket: str = Query("month", pattern="^(week|month|year)$"),
-    days: int = Query(365, ge=1, le=3650),
+    annotator_uuid: str = Path(description="Annotator UUID (8-char identifier)"),
+    bucket: str = Query(
+        "month",
+        pattern="^(week|month|year)$",
+        description="Time bucket for the agreement trend series (`week`, `month`, or `year`)",
+    ),
+    days: int = Query(
+        365, ge=1, le=3650, description="Trailing window in days for the trend series"
+    ),
     ctx: OrgContext = Depends(get_current_org),
 ):
-    """Annotator detail: basic info, jobs assigned to this annotator (with
+    """Get one annotator's detail: basic info, jobs assigned to it (with
     task name + item/annotation counts), latest agreement vs other annotators,
-    and agreement trend series."""
+    and the agreement trend series."""
     annotator = _ensure_owned_annotator(annotator_uuid, ctx.org_uuid)
 
     jobs = get_jobs_for_annotator_detailed(annotator_uuid)
@@ -152,12 +161,13 @@ async def get_annotator_endpoint(
     }
 
 
-@router.put("/{annotator_uuid}", response_model=AnnotatorResponse)
+@router.put("/{annotator_uuid}", response_model=AnnotatorResponse, summary="Update annotator")
 async def update_annotator_endpoint(
-    annotator_uuid: str,
-    payload: AnnotatorUpdate,
+    annotator_uuid: str = Path(description="Annotator UUID (8-char identifier)"),
+    payload: AnnotatorUpdate = ...,
     ctx: OrgContext = Depends(get_current_org),
 ):
+    """Update an annotator's name. Returns 400 when nothing is provided to change."""
     _ensure_owned_annotator(annotator_uuid, ctx.org_uuid)
     try:
         with ensure_name_unique(
@@ -175,10 +185,12 @@ async def update_annotator_endpoint(
     return get_annotator(annotator_uuid)
 
 
-@router.delete("/{annotator_uuid}")
+@router.delete("/{annotator_uuid}", summary="Delete annotator")
 async def delete_annotator_endpoint(
-    annotator_uuid: str, ctx: OrgContext = Depends(get_current_org)
+    annotator_uuid: str = Path(description="Annotator UUID (8-char identifier)"),
+    ctx: OrgContext = Depends(get_current_org),
 ):
+    """Soft-delete an annotator by UUID."""
     _ensure_owned_annotator(annotator_uuid, ctx.org_uuid)
     deleted = delete_annotator(annotator_uuid)
     if not deleted:

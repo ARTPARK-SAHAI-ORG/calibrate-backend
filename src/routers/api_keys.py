@@ -11,7 +11,7 @@ requests with `Authorization: Bearer sk_…` or `X-API-Key: sk_…` — see
 import re
 from typing import List, Optional
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Path
 from pydantic import BaseModel, Field, field_validator
 
 from auth_utils import (
@@ -32,7 +32,12 @@ router = APIRouter(prefix="/api-keys", tags=["api-keys"])
 
 
 class CreateApiKeyRequest(BaseModel):
-    name: str = Field(..., min_length=1, max_length=200)
+    name: str = Field(
+        ...,
+        min_length=1,
+        max_length=200,
+        description="Human-readable label for the key (1–200 chars), shown in listings",
+    )
 
 
 def _masked(last_four: str) -> str:
@@ -65,13 +70,20 @@ class ApiKeyResponse(BaseModel):
     `masked_key` is a ready-to-render display string built from it.
     """
 
-    uuid: str
-    name: str
-    last_four: str
-    masked_key: str
-    last_used_at: Optional[str] = None
-    created_at: str
-    updated_at: str
+    uuid: str = Field(description="API key identifier (8-char UUID)")
+    name: str = Field(description="Human-readable label for the key")
+    last_four: str = Field(
+        description="Last 4 chars of the raw key — the only fragment retained after creation"
+    )
+    masked_key: str = Field(
+        description="Ready-to-render display string, e.g. `sk_••••1a2b`"
+    )
+    last_used_at: Optional[str] = Field(
+        None,
+        description="When the key last authenticated a request (ISO 8601 UTC); `null` if never used",
+    )
+    created_at: str = Field(description="Creation timestamp (ISO 8601 UTC)")
+    updated_at: str = Field(description="Last-update timestamp (ISO 8601 UTC)")
 
     # Stamp timestamps as explicit UTC (…Z) so the FE doesn't read them as local.
     @field_validator("created_at", "updated_at", "last_used_at")
@@ -91,15 +103,20 @@ class CreateApiKeyResponse(ApiKeyResponse):
     """Creation shape — carries the raw `key` exactly once. Show it, then never
     again; subsequent reads only ever return `masked_key` / `last_four`."""
 
-    key: str
+    key: str = Field(
+        description="The raw `sk_…` secret. **Returned exactly once, at creation** — store it now; it can never be retrieved again"
+    )
 
 
-@router.post("", response_model=CreateApiKeyResponse, status_code=201)
+@router.post(
+    "", response_model=CreateApiKeyResponse, status_code=201, summary="Create API key"
+)
 async def create_key(
     request: CreateApiKeyRequest,
     ctx: OrgContext = Depends(get_current_org),
 ):
-    """Mint a new API key for the caller's active org. Returns the raw key once."""
+    """Mint a new API key for the caller's active org. The raw `sk_…` key is
+    returned exactly once in this response and never again — store it now."""
     raw_key, key_prefix = generate_api_key()
     row = create_api_key(
         org_uuid=ctx.org_uuid,
@@ -112,18 +129,20 @@ async def create_key(
     return CreateApiKeyResponse.from_row(row, key=raw_key)
 
 
-@router.get("", response_model=List[ApiKeyResponse])
+@router.get("", response_model=List[ApiKeyResponse], summary="List API keys")
 async def list_keys(ctx: OrgContext = Depends(get_current_org)):
-    """List active API keys for the caller's active org (no raw keys)."""
+    """List active API keys for the caller's active org. Raw keys are never
+    returned — only `masked_key` / `last_four`."""
     return [ApiKeyResponse.from_row(k) for k in list_api_keys_for_org(ctx.org_uuid)]
 
 
-@router.delete("/{key_uuid}", status_code=204)
+@router.delete("/{key_uuid}", status_code=204, summary="Revoke API key")
 async def revoke_key(
-    key_uuid: str,
+    key_uuid: str = Path(description="API key UUID (8-char identifier)"),
     ctx: OrgContext = Depends(get_current_org),
 ):
-    """Revoke (soft-delete) an API key. 404 if it isn't in the caller's org."""
+    """Revoke (soft-delete) an API key, immediately disabling it for auth.
+    Returns 404 if it isn't in the caller's org."""
     if get_api_key(key_uuid, ctx.org_uuid) is None:
         raise HTTPException(status_code=404, detail="API key not found")
     soft_delete_api_key(key_uuid, ctx.org_uuid)
