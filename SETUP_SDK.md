@@ -31,6 +31,8 @@ production GitHub release published
                  → sync-client-repo.sh → dalmia/calibrate-cli
                  → tag v<version> (PUSH_TO_REPO_TOKEN)
                  → calibrate-cli release.yaml → GoReleaser → GitHub Release + homebrew-tap
+       └─ record sdk-v<version> tag on this repo (version history only)
+       └─ sync-docs → repository_dispatch on ARTPARK-SAHAI-ORG/calibrate (DOCS_SYNC_REPO_TOKEN)
 ```
 
 Workflows: [`.github/workflows/auto-publish-sdk.yml`](.github/workflows/auto-publish-sdk.yml) (auto + manual gate), [`.github/workflows/publish-sdk.yml`](.github/workflows/publish-sdk.yml) (generate + push)  
@@ -47,6 +49,7 @@ Add these to **this repo** → Settings → Environments → **Production**:
 | `PYPI_TOKEN` | Fern generate (metadata) | Passed to `fern generate`; actual PyPI upload is in `calibrate-python-sdk` CI |
 | `SPEAKEASY_API_KEY` | Speakeasy CLI generate + validate | From [speakeasy.com](https://www.speakeasy.com) |
 | `PUSH_TO_REPO_TOKEN` | CLI sync + tagging both client repos | Classic PAT with **`contents:write`** and **`workflow`** on `dalmia/calibrate-python-sdk` and `dalmia/calibrate-cli`. **Required for publish workflows to start** (gate check) as well as client-repo pushes. |
+| `DOCS_SYNC_REPO_TOKEN` | Docs OpenAPI sync dispatch (`sync-docs` job) | Fine-grained PAT on [`ARTPARK-SAHAI-ORG/calibrate`](https://github.com/ARTPARK-SAHAI-ORG/calibrate) with **Actions: Read and write** (see below) |
 | `PUBLIC_API_BASE_URL` | Fetch public OpenAPI spec | Production API URL injected into `servers` (e.g. `https://pense-backend.artpark.ai`) |
 
 ### PAT scopes (`PUSH_TO_REPO_TOKEN`)
@@ -55,6 +58,22 @@ Add these to **this repo** → Settings → Environments → **Production**:
 |-------|-----|
 | `contents:write` | Push CLI output via `sync-client-repo.sh`; create tags on both client repos |
 | `workflow` | Push Speakeasy-generated `.github/workflows/release.yaml` into `calibrate-cli` on each sync |
+
+### Docs sync token (`DOCS_SYNC_REPO_TOKEN`)
+
+Separate from `PUSH_TO_REPO_TOKEN` because client repos live under **`dalmia/`** (personal) while Mintlify docs live under **`ARTPARK-SAHAI-ORG/calibrate`** (org).
+
+1. GitHub → **Settings → Developer settings → Fine-grained personal access tokens → Generate**
+2. **Resource owner:** `ARTPARK-SAHAI-ORG`
+3. **Repository access:** Only `calibrate`
+4. **Permissions:** **Actions: Read and write** (triggers `repository_dispatch` → `sync-api-spec.yml`)
+5. **Expiration:** org policy caps at 366 days — GitHub emails before expiry; rotate annually and update the Production secret
+
+Add the token to **this repo** → Settings → Environments → **Production** as `DOCS_SYNC_REPO_TOKEN`.
+
+**Also on the calibrate repo** (not this repo): add `PUBLIC_API_BASE_URL` under Settings → Secrets and variables → Actions so the sync workflow can fetch the live spec.
+
+Requires [calibrate#108](https://github.com/ARTPARK-SAHAI-ORG/calibrate/pull/108) merged (`sync-api-spec.yml` with `repository_dispatch` listener).
 
 ## One-time: Python SDK (`calibrate-python-sdk`)
 

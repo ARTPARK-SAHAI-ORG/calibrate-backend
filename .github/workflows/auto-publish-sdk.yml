@@ -147,3 +147,19 @@ jobs:
     with:
       version: ${{ needs.detect.outputs.version }}
     secrets: inherit
+
+  # Mintlify API reference in ARTPARK-SAHAI-ORG/calibrate syncs openapi.json from the
+  # live public spec. Fire only when the spec actually changed (same gate as publish).
+  sync-docs:
+    needs: detect
+    if: needs.detect.outputs.should_publish == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Trigger docs OpenAPI sync
+        env:
+          GH_TOKEN: ${{ secrets.PUSH_TO_REPO_TOKEN }}
+        run: |
+          gh api repos/ARTPARK-SAHAI-ORG/calibrate/dispatches \
+            -f event_type=sync-api-spec \
+            -f "client_payload[version]=${{ needs.detect.outputs.version }}"
+          echo "Triggered sync-api-spec on ARTPARK-SAHAI-ORG/calibrate"
