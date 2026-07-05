@@ -1,13 +1,13 @@
 name: Publish SDK and CLI
 
-# Packages the public OpenAPI spec through Fern to publish:
+# Fetches the app's public OpenAPI spec and runs Fern to generate:
 #   - calibrate-sdk (Python SDK)
-#   - Calibrate CLI (uses that SDK)
-# Both are synced to their own GitHub repos; this workflow then auto-tags each
-# repo so its CI publishes the package (PyPI for SDK, release artifacts for CLI).
+#   - calibrate CLI (uses the SDK)
+# Both are pushed to their own repos (dalmia/calibrate-python-sdk, dalmia/calibrate-cli).
+# This workflow then auto-tags each repo so its CI publishes the package.
 #
-# Trigger:
-#   - Push an sdk-v* tag (e.g. sdk-v0.0.1 → version 0.0.1 on PyPI), or
+# To trigger:
+#   - Push an sdk-v* tag (e.g. sdk-v0.0.1 → PyPI version 0.0.1), or
 #   - Run manually from the Actions UI and enter the version directly (e.g. 0.0.1).
 on:
   push:
@@ -16,7 +16,7 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: "Version to publish (e.g. 0.0.1). Used as-is for PyPI — no sdk-v prefix."
+        description: "SDK version to publish (e.g. 0.1.0). Required for manual runs."
         required: true
 
 # Never let two publishes for the same version race.
