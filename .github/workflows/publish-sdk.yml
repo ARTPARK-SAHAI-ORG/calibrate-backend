@@ -113,6 +113,8 @@ jobs:
           speakeasy run -t calibrate-cli \
             --set-version "${{ needs.prepare.outputs.version }}" \
             --skip-testing -y
+          chmod +x ./.github/scripts/patch-goreleaser-config.sh
+          ./.github/scripts/patch-goreleaser-config.sh
           ./.github/scripts/sync-client-repo.sh \
             dalmia/calibrate-cli \
             .speakeasy/out/cli \
