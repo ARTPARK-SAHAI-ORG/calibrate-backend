@@ -7,7 +7,6 @@ on:
   workflow_run:
     workflows: ["Deploy to Production"]
     types: [completed]
-    branches: [main]
   workflow_dispatch:
     inputs:
       version:
@@ -124,6 +123,8 @@ jobs:
   publish:
     needs: detect
     if: needs.detect.outputs.should_publish == 'true'
+    permissions:
+      contents: write
     uses: ./.github/workflows/publish-sdk.yml
     with:
       version: ${{ needs.detect.outputs.version }}
