@@ -86,6 +86,7 @@ jobs:
       - name: Decide whether to publish
         id: plan
         env:
+          GH_TOKEN: ${{ secrets.PUSH_TO_REPO_TOKEN }}
           FORCE: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.force == 'true' }}
           INPUT_VERSION: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.version || '' }}
           HEAD_HASH: ${{ steps.head_hash.outputs.hash }}
