@@ -2,7 +2,7 @@ name: Auto-publish SDK and CLI
 
 # After a successful production deploy, publishes clients when the public OpenAPI
 # spec changed. Manual dispatch can force a publish or pin a version.
-# Only runs on the canonical upstream repo (not forks / self-hosted copies).
+# Gated by SDK_AUTO_PUBLISH_ENABLED (Production secret) — not set on forks/self-hosts.
 # Setup: SETUP_SDK.md
 on:
   workflow_run:
@@ -25,7 +25,7 @@ concurrency:
 jobs:
   detect:
     if: >-
-      github.repository == 'ARTPARK-SAHAI-ORG/calibrate-backend' &&
+      secrets.SDK_AUTO_PUBLISH_ENABLED == 'true' &&
       (github.event_name == 'workflow_dispatch' ||
        github.event.workflow_run.conclusion == 'success')
     runs-on: ubuntu-latest

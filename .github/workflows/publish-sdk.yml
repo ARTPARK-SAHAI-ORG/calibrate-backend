@@ -6,7 +6,7 @@ name: Publish SDK and CLI
 # Setup: SETUP_SDK.md
 #
 # Trigger: workflow_call (from auto-publish-sdk.yml), or workflow_dispatch.
-# Only runs on the canonical upstream repo (not forks / self-hosted copies).
+# Gated by SDK_AUTO_PUBLISH_ENABLED (Production secret) — not set on forks/self-hosts.
 on:
   workflow_dispatch:
     inputs:
@@ -29,7 +29,7 @@ permissions:
 
 jobs:
   prepare:
-    if: github.repository == 'ARTPARK-SAHAI-ORG/calibrate-backend'
+    if: secrets.SDK_AUTO_PUBLISH_ENABLED == 'true'
     runs-on: ubuntu-latest
     environment: Production
     outputs:
