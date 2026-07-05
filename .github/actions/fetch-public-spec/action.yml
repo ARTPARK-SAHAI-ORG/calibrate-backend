@@ -24,20 +24,5 @@ runs:
     - name: Fetch public OpenAPI spec from the app
       shell: bash
       env:
-        DB_ROOT_DIR: /tmp/sdk-openapi
-        JWT_SECRET_KEY: sdk-export-dummy-secret-key-32-chars-min
-        S3_OUTPUT_BUCKET: sdk-export-dummy-bucket
-        MAX_CONCURRENT_JOBS: "1"
-        MAX_CONCURRENT_JOBS_PER_ORG: "1"
-        DEFAULT_MAX_ROWS_PER_EVAL: "20"
-        SUPERADMIN_EMAIL: admin@example.com
         PUBLIC_API_BASE_URL: ${{ env.PUBLIC_API_BASE_URL }}
-      run: |
-        (cd src && uv run uvicorn main:app --port 8000 --log-level warning &)
-        for i in $(seq 1 30); do
-          curl -sf http://localhost:8000/public-api/openapi.json -o /dev/null && break
-          sleep 2
-        done
-        mkdir -p openapi
-        curl -sf http://localhost:8000/public-api/openapi.json -o openapi/openapi.json
-        test -s openapi/openapi.json || { echo "::error::Failed to fetch public OpenAPI spec"; exit 1; }
+      run: ./.github/scripts/fetch-public-openapi.sh

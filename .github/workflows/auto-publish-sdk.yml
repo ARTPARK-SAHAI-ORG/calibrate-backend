@@ -50,37 +50,28 @@ jobs:
         env:
           PUBLIC_API_BASE_URL: ${{ secrets.PUBLIC_API_BASE_URL }}
 
-      - name: Compute head spec hash
+      - name: Compute current release spec hash
         id: head_hash
         run: |
           HASH=$(python3 .github/scripts/normalize_openapi_hash.py openapi/openapi.json)
           echo "hash=$HASH" >> "$GITHUB_OUTPUT"
 
-      - name: Hash public OpenAPI spec at parent commit
-        id: parent_hash
+      - name: Compute previous release spec hash
+        id: parent_hash_done
+        env:
+          PUBLIC_API_BASE_URL: ${{ secrets.PUBLIC_API_BASE_URL }}
         run: |
-          pkill -f "uvicorn main:app" 2>/dev/null || true
-          sleep 2
+          chmod +x .github/scripts/fetch-public-openapi.sh
 
           if ! git rev-parse --verify HEAD~1 >/dev/null 2>&1; then
-            echo "hash=" >> "$GITHUB_OUTPUT"
             echo "missing_parent=true" >> "$GITHUB_OUTPUT"
             exit 0
           fi
 
           git checkout --quiet HEAD~1
-
-      - name: Fetch parent public OpenAPI spec
-        if: steps.parent_hash.outputs.missing_parent != 'true'
-        uses: ./.github/actions/fetch-public-spec
-        env:
-          PUBLIC_API_BASE_URL: ${{ secrets.PUBLIC_API_BASE_URL }}
-
-      - name: Compute parent spec hash
-        id: parent_hash_done
-        if: steps.parent_hash.outputs.missing_parent != 'true'
-        run: |
-          HASH=$(python3 .github/scripts/normalize_openapi_hash.py openapi/openapi.json)
+          uv sync --frozen
+          ./.github/scripts/fetch-public-openapi.sh openapi/openapi-parent.json
+          HASH=$(python3 .github/scripts/normalize_openapi_hash.py openapi/openapi-parent.json)
           echo "hash=$HASH" >> "$GITHUB_OUTPUT"
           echo "missing_parent=false" >> "$GITHUB_OUTPUT"
 
@@ -92,7 +83,7 @@ jobs:
           INPUT_VERSION: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.version || '' }}
           HEAD_HASH: ${{ steps.head_hash.outputs.hash }}
           PARENT_HASH: ${{ steps.parent_hash_done.outputs.hash }}
-          MISSING_PARENT: ${{ steps.parent_hash.outputs.missing_parent }}
+          MISSING_PARENT: ${{ steps.parent_hash_done.outputs.missing_parent }}
         run: |
           chmod +x .github/scripts/next-sdk-version.sh
 
