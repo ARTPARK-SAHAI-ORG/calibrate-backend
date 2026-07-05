@@ -5,19 +5,22 @@ name: Publish SDK and CLI
 #   - calibrate CLI via Speakeasy → dalmia/calibrate-cli
 # Setup: SETUP_SDK.md
 #
-# Trigger: push an sdk-v* tag, or workflow_dispatch with a version (e.g. 0.1.0).
+# Trigger: workflow_call (from auto-publish-sdk.yml), or workflow_dispatch.
 on:
-  push:
-    tags:
-      - "sdk-v*"
   workflow_dispatch:
     inputs:
       version:
         description: "Client version to publish (e.g. 0.1.0). Required for manual runs."
         required: true
+  workflow_call:
+    inputs:
+      version:
+        description: "Client version to publish (e.g. 0.1.0)."
+        required: true
+        type: string
 
 concurrency:
-  group: publish-clients-${{ github.ref }}
+  group: publish-clients-${{ inputs.version || github.event.inputs.version }}
   cancel-in-progress: false
 
 permissions:
@@ -39,12 +42,12 @@ jobs:
       - name: Resolve client version
         id: version
         run: |
-          VERSION="${{ github.event.inputs.version }}"
+          VERSION="${{ inputs.version }}"
           if [ -z "$VERSION" ]; then
-            VERSION="${GITHUB_REF_NAME#sdk-v}"
+            VERSION="${{ github.event.inputs.version }}"
           fi
           if [ -z "$VERSION" ]; then
-            echo "::error::No version resolved (not a tag push and no manual input)." >&2
+            echo "::error::No version resolved (workflow_call and workflow_dispatch require a version)." >&2
             exit 1
           fi
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
@@ -131,3 +134,23 @@ jobs:
           SHA=$(gh api "repos/$CLI_REPO/git/ref/heads/main" --jq .object.sha)
           gh api "repos/$CLI_REPO/git/refs" -f ref="refs/tags/$TAG" -f sha="$SHA"
           echo "Tagged $CLI_REPO @ $SHA as $TAG — its ci.yml will publish the CLI."
+
+  record-version:
+    needs: [prepare, publish-python-sdk, publish-cli]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Record sdk-v tag for version history
+        run: |
+          TAG="sdk-v${{ needs.prepare.outputs.version }}"
+          if git rev-parse "$TAG" >/dev/null 2>&1; then
+            echo "Tag $TAG already exists; skipping."
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git tag -a "$TAG" -m "SDK/CLI release ${{ needs.prepare.outputs.version }}"
+          git push origin "$TAG"

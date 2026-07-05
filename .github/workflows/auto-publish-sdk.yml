@@ -1,0 +1,129 @@
+name: Auto-publish SDK and CLI
+
+# After a successful production deploy, publishes clients when the public OpenAPI
+# spec changed. Manual dispatch can force a publish or pin a version.
+# Setup: SETUP_SDK.md
+on:
+  workflow_run:
+    workflows: ["Deploy to Production"]
+    types: [completed]
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Client version (e.g. 0.1.0). Leave empty to auto-bump patch."
+        required: false
+      force:
+        description: "Publish even when the public OpenAPI spec is unchanged"
+        type: boolean
+        default: false
+
+concurrency:
+  group: auto-publish-sdk
+  cancel-in-progress: false
+
+jobs:
+  detect:
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      github.event.workflow_run.conclusion == 'success'
+    runs-on: ubuntu-latest
+    environment: Production
+    outputs:
+      should_publish: ${{ steps.plan.outputs.should_publish }}
+      version: ${{ steps.plan.outputs.version }}
+    steps:
+      - name: Resolve target commit
+        id: target
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_run" ]; then
+            echo "sha=${{ github.event.workflow_run.head_sha }}" >> "$GITHUB_OUTPUT"
+          else
+            echo "sha=${{ github.sha }}" >> "$GITHUB_OUTPUT"
+          fi
+
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ steps.target.outputs.sha }}
+          fetch-depth: 2
+
+      - uses: ./.github/actions/fetch-public-spec
+        env:
+          PUBLIC_API_BASE_URL: ${{ secrets.PUBLIC_API_BASE_URL }}
+
+      - name: Compute head spec hash
+        id: head_hash
+        run: |
+          HASH=$(python3 .github/scripts/normalize_openapi_hash.py openapi/openapi.json)
+          echo "hash=$HASH" >> "$GITHUB_OUTPUT"
+
+      - name: Hash public OpenAPI spec at parent commit
+        id: parent_hash
+        run: |
+          pkill -f "uvicorn main:app" 2>/dev/null || true
+          sleep 2
+
+          if ! git rev-parse --verify HEAD~1 >/dev/null 2>&1; then
+            echo "hash=" >> "$GITHUB_OUTPUT"
+            echo "missing_parent=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          git checkout --quiet HEAD~1
+          uv sync --frozen
+          (cd src && uv run uvicorn main:app --port 8000 --log-level warning &)
+          for i in $(seq 1 30); do
+            curl -sf http://localhost:8000/public-api/openapi.json -o /dev/null && break
+            sleep 2
+          done
+          mkdir -p openapi
+          curl -sf http://localhost:8000/public-api/openapi.json -o openapi/openapi.json
+          test -s openapi/openapi.json
+          HASH=$(python3 .github/scripts/normalize_openapi_hash.py openapi/openapi.json)
+          echo "hash=$HASH" >> "$GITHUB_OUTPUT"
+          echo "missing_parent=false" >> "$GITHUB_OUTPUT"
+
+      - name: Decide whether to publish
+        id: plan
+        env:
+          FORCE: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.force == 'true' }}
+          INPUT_VERSION: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.version || '' }}
+          HEAD_HASH: ${{ steps.head_hash.outputs.hash }}
+          PARENT_HASH: ${{ steps.parent_hash.outputs.hash }}
+          MISSING_PARENT: ${{ steps.parent_hash.outputs.missing_parent }}
+        run: |
+          chmod +x .github/scripts/next-sdk-version.sh
+
+          if [ "$FORCE" = "true" ]; then
+            CHANGED=true
+          elif [ "$MISSING_PARENT" = "true" ]; then
+            CHANGED=true
+          elif [ "$HEAD_HASH" = "$PARENT_HASH" ]; then
+            CHANGED=false
+          else
+            CHANGED=true
+          fi
+
+          if [ "$CHANGED" != "true" ]; then
+            echo "Public OpenAPI spec unchanged; skipping client publish."
+            echo "should_publish=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          if [ -n "$INPUT_VERSION" ]; then
+            VERSION="$INPUT_VERSION"
+          else
+            VERSION="$(.github/scripts/next-sdk-version.sh)"
+          fi
+
+          echo "should_publish=true" >> "$GITHUB_OUTPUT"
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "Will publish SDK + CLI version $VERSION"
+
+  publish:
+    needs: detect
+    if: needs.detect.outputs.should_publish == 'true'
+    uses: ./.github/workflows/publish-sdk.yml
+    with:
+      version: ${{ needs.detect.outputs.version }}
+    secrets: inherit

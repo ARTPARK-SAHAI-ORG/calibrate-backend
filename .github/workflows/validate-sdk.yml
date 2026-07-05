@@ -13,7 +13,10 @@ on:
       - ".github/actions/fetch-public-spec/**"
       - ".github/workflows/validate-sdk.yml"
       - ".github/workflows/publish-sdk.yml"
+      - ".github/workflows/auto-publish-sdk.yml"
       - ".github/scripts/sync-client-repo.sh"
+      - ".github/scripts/normalize_openapi_hash.py"
+      - ".github/scripts/next-sdk-version.sh"
   workflow_dispatch:
 
 permissions:

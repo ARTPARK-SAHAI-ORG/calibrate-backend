@@ -12,24 +12,29 @@ How to configure and run client generation for the Calibrate **public API**:
 ## Architecture
 
 ```
-backend: sdk-v* tag or workflow_dispatch
+production GitHub release published
   │
-  ├─ prepare ─ fetch openapi/openapi.json (PUBLIC_API_BASE_URL → servers block)
+  ├─ Deploy to Production (deploy.yml)
   │
-  ├─ publish-python-sdk (parallel)
-  │    fern generate --group python-sdk
-  │    → push dalmia/calibrate-python-sdk (Fern GitHub App)
-  │    → tag v<version> (PUSH_TO_REPO_TOKEN)
-  │    → calibrate-python-sdk ci.yml → PyPI
-  │
-  └─ publish-cli (parallel)
-       speakeasy run -t calibrate-cli
-       → sync-client-repo.sh → dalmia/calibrate-cli (generated output incl. release workflow)
-       → tag v<version> (PUSH_TO_REPO_TOKEN)
-       → calibrate-cli release.yaml → GoReleaser → GitHub Release + homebrew-tap
+  └─ Auto-publish SDK and CLI (auto-publish-sdk.yml)
+       ├─ compare public OpenAPI spec hash vs parent commit
+       ├─ if changed → auto-bump patch from latest sdk-v* tag
+       └─ call publish-sdk.yml
+            ├─ prepare ─ fetch openapi/openapi.json (PUBLIC_API_BASE_URL → servers block)
+            ├─ publish-python-sdk (parallel)
+            │    fern generate --group python-sdk
+            │    → push dalmia/calibrate-python-sdk (Fern GitHub App)
+            │    → tag v<version> (PUSH_TO_REPO_TOKEN)
+            │    → calibrate-python-sdk ci.yml → PyPI
+            └─ publish-cli (parallel)
+                 speakeasy run -t calibrate-cli
+                 → sync-client-repo.sh → dalmia/calibrate-cli
+                 → tag v<version> (PUSH_TO_REPO_TOKEN)
+                 → calibrate-cli release.yaml → GoReleaser → GitHub Release + homebrew-tap
+       └─ record sdk-v<version> tag on this repo (version history only)
 ```
 
-Workflow: [`.github/workflows/publish-sdk.yml`](.github/workflows/publish-sdk.yml)  
+Workflows: [`.github/workflows/auto-publish-sdk.yml`](.github/workflows/auto-publish-sdk.yml) (auto + manual gate), [`.github/workflows/publish-sdk.yml`](.github/workflows/publish-sdk.yml) (generate + push)  
 Validate on PRs: [`.github/workflows/validate-sdk.yml`](.github/workflows/validate-sdk.yml)
 
 ## One-time: backend secrets
@@ -109,13 +114,11 @@ On each publish, generated output overwrites `calibrate-cli` except:
    - [`openapi/overlay.yaml`](openapi/overlay.yaml) (Speakeasy CLI names)  
    Enforced by [`tests/test_sdk_overrides.py`](tests/test_sdk_overrides.py).
 
-2. **Trigger** publish:
-   ```bash
-   git tag sdk-v0.0.5 && git push origin sdk-v0.0.5
-   ```
-   Or: Actions → **Publish SDK and CLI** → Run workflow → enter version.
+2. **Ship** — publish is automatic after **Deploy to Production** when the public OpenAPI spec changed (patch version auto-bumps from the latest `sdk-v*` tag). Manual options:
+   - Actions → **Auto-publish SDK and CLI** → Run workflow (optional `force` / `version`)
+   - Actions → **Publish SDK and CLI** → Run workflow → enter version (skips change detection)
 
-3. **Verify backend workflow** — both `publish-python-sdk` and `publish-cli` jobs green.
+3. **Verify backend workflow** — `auto-publish-sdk` (if used) then both `publish-python-sdk` and `publish-cli` jobs green.
 
 4. **Verify Python SDK** — `calibrate-python-sdk` CI ran on `v*` tag; new version on PyPI.
 
