@@ -42,6 +42,9 @@ def test_patch_cli_auth_commands_hoists_login_logout(tmp_path: Path) -> None:
     assert "whoamiCmd.Hidden = true" in auth_go
     assert "logoutCmd.Hidden = true" in auth_go
 
+    root_go = (cli_dir / "internal/cli/root.go").read_text()
+    assert "HiddenDefaultCmd = true" in root_go
+
     # Idempotent on re-run.
     subprocess.run(
         [str(PATCH_SCRIPT), str(cli_dir)],

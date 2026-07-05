@@ -1,7 +1,6 @@
 #!/usr/bin/env bash
-# Speakeasy emits auth login/logout under the "auth" group. Expose top-level
-# "calibrate login" / "calibrate logout" (whoami is already at root) and hide
-# the legacy auth group for backward compatibility.
+# Post-process Speakeasy CLI output: hoist login/logout, hide legacy auth group,
+# hide shell-completion setup from top-level help.
 set -euo pipefail
 
 DIR="${1:-.speakeasy/out/cli}"
@@ -11,12 +10,14 @@ LOGIN_GO="$DIR/internal/cli/login.go"
 LOGOUT_GO="$DIR/internal/cli/logout.go"
 
 if [[ ! -f "$ROOT_GO" || ! -f "$AUTH_GO" ]]; then
-  echo "No generated CLI at $DIR — skipping auth command patch"
+  echo "No generated CLI at $DIR — skipping CLI patch"
   exit 0
 fi
 
-if grep -q 'initLoginCmd(rootCmd)' "$ROOT_GO" && grep -q 'authCmd.Hidden = true' "$AUTH_GO"; then
-  echo "CLI auth commands already patched at $DIR"
+if grep -q 'initLoginCmd(rootCmd)' "$ROOT_GO" \
+  && grep -q 'authCmd.Hidden = true' "$AUTH_GO" \
+  && grep -q 'HiddenDefaultCmd = true' "$ROOT_GO"; then
+  echo "CLI already patched at $DIR"
   exit 0
 fi
 
@@ -28,6 +29,19 @@ from pathlib import Path
 root_go, auth_go, login_go, logout_go = map(Path, sys.argv[1:5])
 
 root_text = root_go.read_text()
+
+if "HiddenDefaultCmd = true" not in root_text:
+    root_text, n_completion = re.subn(
+        r"(\t\}\n)(\tif err := agents\.InitAgentsRoot\(rootCmd\); err != nil \{\n)",
+        r"\1\trootCmd.CompletionOptions.HiddenDefaultCmd = true\n\2",
+        root_text,
+        count=1,
+    )
+    if n_completion != 1:
+        raise SystemExit(f"::warning::{root_go}: could not hide completion command")
+    root_go.write_text(root_text)
+    root_text = root_go.read_text()
+
 if "initLoginCmd(rootCmd)" not in root_text:
     root_text, n = re.subn(
         r"(\tif err := initWhoamiCmd\(rootCmd\); err != nil \{\n"
