@@ -231,7 +231,7 @@ def _build_public_openapi() -> Dict[str, Any]:
             "type": "apiKey",
             "in": "header",
             "name": "X-API-Key",
-            "description": "Org-scoped API key. Create one under Settings → API keys.",
+            "description": "Workspace API key. Create one under Workspace settings → API keys.",
         }
     }
 
@@ -267,6 +267,7 @@ def public_swagger_ui():
     return get_swagger_ui_html(
         openapi_url="/public-api/openapi.json", title="Calibrate Public API"
     )
+
 
 # Include routers
 app.include_router(auth_router)
