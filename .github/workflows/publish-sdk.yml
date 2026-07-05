@@ -27,14 +27,15 @@ permissions:
   contents: read
 
 jobs:
-  clients:
+  prepare:
     runs-on: ubuntu-latest
     environment: Production
+    outputs:
+      version: ${{ steps.version.outputs.version }}
     steps:
       - uses: actions/checkout@v4
 
-      # Install deps, boot the app, and fetch its public spec into openapi/.
-      # Shared with validate-sdk.yml (one source of truth for the boot/env/fetch).
+      # Boot the app once; parallel publish jobs reuse the fetched spec artifact.
       - uses: ./.github/actions/fetch-public-spec
         env:
           PUBLIC_API_BASE_URL: ${{ secrets.PUBLIC_API_BASE_URL }}
@@ -53,25 +54,67 @@ jobs:
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
           echo "Publishing calibrate-sdk + calibrate CLI version $VERSION"
 
+      - name: Upload public OpenAPI spec
+        uses: actions/upload-artifact@v4
+        with:
+          name: public-openapi
+          path: openapi/openapi.json
+          retention-days: 1
+
+  publish-python-sdk:
+    needs: prepare
+    runs-on: ubuntu-latest
+    environment: Production
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download public OpenAPI spec
+        uses: actions/download-artifact@v4
+        with:
+          name: public-openapi
+          path: openapi
+
       - name: Install Speakeasy CLI
         run: curl -fsSL https://go.speakeasy.com/cli-install.sh | sh
 
-      # Generate locally, then rsync into the client repos. Speakeasy writes to
-      # .speakeasy/out/*; we push to dalmia/* with PUSH_TO_REPO_TOKEN (PAT with
-      # contents:write on calibrate-python-sdk, calibrate-cli, and homebrew-tap).
-      # PyPI / GitHub Releases are triggered by tagging those repos after sync.
       - name: Generate Python SDK + sync to repo
         env:
           SPEAKEASY_API_KEY: ${{ secrets.SPEAKEASY_API_KEY }}
           PUSH_TO_REPO_TOKEN: ${{ secrets.PUSH_TO_REPO_TOKEN }}
         run: |
           speakeasy run -t calibrate-python-sdk \
-            --set-version "${{ steps.version.outputs.version }}" \
+            --set-version "${{ needs.prepare.outputs.version }}" \
             --skip-testing -y
           ./.github/scripts/sync-client-repo.sh \
             dalmia/calibrate-python-sdk \
             .speakeasy/out/python \
-            "chore(sdk): release ${{ steps.version.outputs.version }}"
+            "chore(sdk): release ${{ needs.prepare.outputs.version }}"
+
+      - name: Tag SDK repo to trigger its PyPI publish
+        env:
+          GH_TOKEN: ${{ secrets.PUSH_TO_REPO_TOKEN }}
+        run: |
+          SDK_REPO="dalmia/calibrate-python-sdk"
+          TAG="v${{ needs.prepare.outputs.version }}"
+          SHA=$(gh api "repos/$SDK_REPO/git/ref/heads/main" --jq .object.sha)
+          gh api "repos/$SDK_REPO/git/refs" -f ref="refs/tags/$TAG" -f sha="$SHA"
+          echo "Tagged $SDK_REPO @ $SHA as $TAG — its ci.yml will publish to PyPI."
+
+  publish-cli:
+    needs: prepare
+    runs-on: ubuntu-latest
+    environment: Production
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download public OpenAPI spec
+        uses: actions/download-artifact@v4
+        with:
+          name: public-openapi
+          path: openapi
+
+      - name: Install Speakeasy CLI
+        run: curl -fsSL https://go.speakeasy.com/cli-install.sh | sh
 
       - name: Generate CLI + sync to repo
         env:
@@ -79,29 +122,19 @@ jobs:
           PUSH_TO_REPO_TOKEN: ${{ secrets.PUSH_TO_REPO_TOKEN }}
         run: |
           speakeasy run -t calibrate-cli \
-            --set-version "${{ steps.version.outputs.version }}" \
+            --set-version "${{ needs.prepare.outputs.version }}" \
             --skip-testing -y
           ./.github/scripts/sync-client-repo.sh \
             dalmia/calibrate-cli \
             .speakeasy/out/cli \
-            "chore(cli): release ${{ steps.version.outputs.version }}"
-
-      - name: Tag SDK repo to trigger its PyPI publish
-        env:
-          GH_TOKEN: ${{ secrets.PUSH_TO_REPO_TOKEN }}
-        run: |
-          SDK_REPO="dalmia/calibrate-python-sdk"
-          TAG="v${{ steps.version.outputs.version }}"
-          SHA=$(gh api "repos/$SDK_REPO/git/ref/heads/main" --jq .object.sha)
-          gh api "repos/$SDK_REPO/git/refs" -f ref="refs/tags/$TAG" -f sha="$SHA"
-          echo "Tagged $SDK_REPO @ $SHA as $TAG — its ci.yml will publish to PyPI."
+            "chore(cli): release ${{ needs.prepare.outputs.version }}"
 
       - name: Tag CLI repo to trigger its release workflow
         env:
           GH_TOKEN: ${{ secrets.PUSH_TO_REPO_TOKEN }}
         run: |
           CLI_REPO="dalmia/calibrate-cli"
-          TAG="v${{ steps.version.outputs.version }}"
+          TAG="v${{ needs.prepare.outputs.version }}"
           SHA=$(gh api "repos/$CLI_REPO/git/ref/heads/main" --jq .object.sha)
           gh api "repos/$CLI_REPO/git/refs" -f ref="refs/tags/$TAG" -f sha="$SHA"
           echo "Tagged $CLI_REPO @ $SHA as $TAG — its release workflow will build binaries."
