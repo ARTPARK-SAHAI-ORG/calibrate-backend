@@ -1,16 +1,13 @@
 name: Fetch public OpenAPI spec
 description: >-
   Install deps, boot the backend with throwaway env, and download its PUBLIC
-  OpenAPI spec (/public-api/openapi.json) into the gitignored file Fern reads
-  (fern/openapi/openapi.json). Shared by publish-sdk.yml and validate-sdk.yml so
-  the boot/env/fetch logic lives in exactly one place. Assumes the repo is
-  already checked out.
+  OpenAPI spec (/public-api/openapi.json) into the gitignored file at
+  openapi/openapi.json (shared by Speakeasy and Fern). Used by publish-sdk.yml
+  and validate-sdk.yml.
 
 runs:
   using: composite
   steps:
-    # calibrate-agent -> pipecat pulls in an audio dep that needs ALSA headers
-    # to `uv sync`; mirrors tests.yml. Needed so `import main` succeeds.
     - name: Install system dependencies
       shell: bash
       run: sudo apt-get update && sudo apt-get install -y libasound2-dev
@@ -24,9 +21,6 @@ runs:
       shell: bash
       run: uv sync --frozen
 
-    # Boot the app with throwaway env, wait until it serves, then curl the public
-    # spec to the local file Fern reads. The server is only needed for the curl —
-    # Fern generates from the file — so we don't keep it running.
     - name: Fetch public OpenAPI spec from the app
       shell: bash
       env:
@@ -37,12 +31,13 @@ runs:
         MAX_CONCURRENT_JOBS_PER_ORG: "1"
         DEFAULT_MAX_ROWS_PER_EVAL: "20"
         SUPERADMIN_EMAIL: admin@example.com
+        PUBLIC_API_BASE_URL: ${{ env.PUBLIC_API_BASE_URL }}
       run: |
         (cd src && uv run uvicorn main:app --port 8000 --log-level warning &)
         for i in $(seq 1 30); do
           curl -sf http://localhost:8000/public-api/openapi.json -o /dev/null && break
           sleep 2
         done
-        mkdir -p fern/openapi
-        curl -sf http://localhost:8000/public-api/openapi.json -o fern/openapi/openapi.json
-        test -s fern/openapi/openapi.json || { echo "::error::Failed to fetch public OpenAPI spec"; exit 1; }
+        mkdir -p openapi
+        curl -sf http://localhost:8000/public-api/openapi.json -o openapi/openapi.json
+        test -s openapi/openapi.json || { echo "::error::Failed to fetch public OpenAPI spec"; exit 1; }

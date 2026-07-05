@@ -150,7 +150,7 @@ def custom_openapi(_: HTTPBasicCredentials = Depends(_verify_docs_access)):
 # Basic-Auth'd /docs above. The schema is filtered from the full app schema,
 # so it stays in sync automatically as routes change.
 PUBLIC_API_TAG = "Public API"
-# Name of the apiKey security scheme published on the public spec. Fern derives
+# Name of the apiKey security scheme published on the public spec. Speakeasy derives
 # the SDK's required `api_key` auth param from this being the sole scheme.
 PUBLIC_API_KEY_SCHEME = "ApiKeyAuth"
 
@@ -186,7 +186,7 @@ def _build_public_openapi() -> Dict[str, Any]:
             #
             # Force the API-key scheme as the SOLE auth on every public op. The
             # underlying dep (`get_org_jwt_or_api_key`) also accepts a JWT bearer,
-            # but FastAPI's auto-generated `HTTPBearer` scheme would make Fern emit
+            # but FastAPI's auto-generated `HTTPBearer` scheme would make Speakeasy emit
             # a REQUIRED `token` constructor arg in the SDK (with `api_key`
             # optional) — so `Calibrate(api_key=…)` would TypeError. Pinning
             # `PUBLIC_API_KEY_SCHEME` here makes `api_key` the one required auth

@@ -1,33 +1,51 @@
 name: Validate SDK config
 
-# Runs `fern check` on PRs that touch the Fern SDK config, so a broken
-# generators.yml / openapi-overrides.yml is caught here instead of only when an
-# `sdk-v*` release tag is pushed (where it would fail the publish). Fetches the
-# public spec via ./.github/actions/fetch-public-spec (same as publish-sdk.yml),
-# then validates — it does not generate or publish anything.
+# Validates Speakeasy (Python SDK) + Fern (CLI) client-generation config on PRs
+# that touch those files. Fetches the public spec via fetch-public-spec (same as
+# publish-sdk.yml).
 on:
   pull_request:
     branches: [main]
     paths:
+      - ".speakeasy/**"
       - "fern/**"
+      - "openapi/overlay.yaml"
       - ".github/actions/fetch-public-spec/**"
       - ".github/workflows/validate-sdk.yml"
+      - ".github/workflows/publish-sdk.yml"
+      - ".github/scripts/sync-client-repo.sh"
   workflow_dispatch:
 
 permissions:
   contents: read
 
 jobs:
-  fern-check:
+  validate-clients:
     runs-on: ubuntu-latest
+    environment: Production
     steps:
       - uses: actions/checkout@v4
 
-      # Install deps, boot the app, and fetch its public spec into fern/openapi/.
       - uses: ./.github/actions/fetch-public-spec
+        env:
+          PUBLIC_API_BASE_URL: ${{ secrets.PUBLIC_API_BASE_URL }}
+
+      - name: Install Speakeasy CLI
+        run: curl -fsSL https://go.speakeasy.com/cli-install.sh | sh
+
+      - name: Compile public OpenAPI source (merge spec + overlay)
+        env:
+          SPEAKEASY_API_KEY: ${{ secrets.SPEAKEASY_API_KEY }}
+        run: speakeasy run -s calibrate-public-api -y
+
+      - name: Lint compiled OpenAPI document
+        run: speakeasy lint openapi -s openapi/compiled.yaml
+
+      - name: Validate Speakeasy config
+        run: speakeasy lint config -d .
 
       - name: Install Fern
         run: npm install -g fern-api
 
-      - name: Validate Fern config
+      - name: Validate Fern CLI config
         run: fern check

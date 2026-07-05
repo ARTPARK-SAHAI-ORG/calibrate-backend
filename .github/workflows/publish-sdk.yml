@@ -1,14 +1,11 @@
 name: Publish SDK and CLI
 
-# Fetches the app's public OpenAPI spec and runs Fern to generate:
-#   - calibrate-sdk (Python SDK)
-#   - calibrate CLI (uses the SDK)
-# Both are pushed to their own repos (dalmia/calibrate-python-sdk, dalmia/calibrate-cli).
-# This workflow then auto-tags each repo so its CI publishes the package.
+# Fetches the app's public OpenAPI spec once, then generates in parallel:
+#   - calibrate-sdk (Python) via Speakeasy → dalmia/calibrate-python-sdk
+#   - calibrate CLI via Fern → dalmia/calibrate-cli
+# Each job tags its repo so downstream CI publishes (PyPI / release artifacts).
 #
-# To trigger:
-#   - Push an sdk-v* tag (e.g. sdk-v0.0.1 → PyPI version 0.0.1), or
-#   - Run manually from the Actions UI and enter the version directly (e.g. 0.0.1).
+# Trigger: push an sdk-v* tag, or workflow_dispatch with a version (e.g. 0.1.0).
 on:
   push:
     tags:
@@ -16,10 +13,9 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: "SDK version to publish (e.g. 0.1.0). Required for manual runs."
+        description: "Client version to publish (e.g. 0.1.0). Required for manual runs."
         required: true
 
-# Never let two publishes for the same version race.
 concurrency:
   group: publish-clients-${{ github.ref }}
   cancel-in-progress: false
@@ -28,19 +24,19 @@ permissions:
   contents: read
 
 jobs:
-  clients:
+  prepare:
     runs-on: ubuntu-latest
     environment: Production
+    outputs:
+      version: ${{ steps.version.outputs.version }}
     steps:
       - uses: actions/checkout@v4
 
-      # Install deps, boot the app, and fetch its public spec into fern/openapi/.
-      # Shared with validate-sdk.yml (one source of truth for the boot/env/fetch).
       - uses: ./.github/actions/fetch-public-spec
         env:
           PUBLIC_API_BASE_URL: ${{ secrets.PUBLIC_API_BASE_URL }}
 
-      - name: Resolve generated client version
+      - name: Resolve client version
         id: version
         run: |
           VERSION="${{ github.event.inputs.version }}"
@@ -52,55 +48,81 @@ jobs:
             exit 1
           fi
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
-          echo "Publishing calibrate-sdk and Calibrate CLI version $VERSION"
+          echo "Publishing calibrate-sdk (Speakeasy) + Calibrate CLI (Fern) version $VERSION"
 
-      - name: Install Fern
-        run: npm install -g fern-api
+      - name: Upload public OpenAPI spec
+        uses: actions/upload-artifact@v4
+        with:
+          name: public-openapi
+          path: openapi/openapi.json
+          retention-days: 1
 
-      # github-mode: this PUSHES the generated SDK to dalmia/calibrate-python-sdk
-      # (and sets that repo up to publish). It does NOT publish to PyPI itself.
-      - name: Generate SDK + sync to repo
-        run: fern generate --group python-sdk --version "${{ steps.version.outputs.version }}" --log-level debug
+  publish-python-sdk:
+    needs: prepare
+    runs-on: ubuntu-latest
+    environment: Production
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download public OpenAPI spec
+        uses: actions/download-artifact@v4
+        with:
+          name: public-openapi
+          path: openapi
+
+      - name: Install Speakeasy CLI
+        run: curl -fsSL https://go.speakeasy.com/cli-install.sh | sh
+
+      - name: Generate Python SDK + sync to repo
         env:
-          FERN_TOKEN: ${{ secrets.FERN_TOKEN }}
-          PYPI_TOKEN: ${{ secrets.PYPI_TOKEN }}
+          SPEAKEASY_API_KEY: ${{ secrets.SPEAKEASY_API_KEY }}
+          PUSH_TO_REPO_TOKEN: ${{ secrets.PUSH_TO_REPO_TOKEN }}
+        run: |
+          speakeasy run -t calibrate-python-sdk \
+            --set-version "${{ needs.prepare.outputs.version }}" \
+            --skip-testing -y
+          ./.github/scripts/sync-client-repo.sh \
+            dalmia/calibrate-python-sdk \
+            .speakeasy/out/python \
+            "chore(sdk): release ${{ needs.prepare.outputs.version }}"
 
-      # github-mode: this PUSHES the generated CLI to dalmia/calibrate-cli
-      # (Fern also scaffolds that repo's release CI). It does NOT publish
-      # binaries itself — see the tag step below.
-      - name: Generate Calibrate CLI + sync to repo
-        run: fern generate --group cli --version "${{ steps.version.outputs.version }}" --log-level debug
-        env:
-          FERN_TOKEN: ${{ secrets.FERN_TOKEN }}
-
-      # The SDK repo's own ci.yml publishes to PyPI, but only when a tag is pushed
-      # THERE. So tag it automatically right after the sync — a single `sdk-v*` tag
-      # on THIS repo then drives the whole release (generate -> push -> tag -> publish).
-      # Needs SDK_REPO_TOKEN: a PAT with contents:write on dalmia/calibrate-python-sdk
-      # and dalmia/calibrate-cli.
-      # (The default GITHUB_TOKEN can't push to another repo, and — unlike a
-      # GITHUB_TOKEN push — a PAT-created tag DOES trigger the SDK repo's workflow.)
-      # The published version comes from the SDK repo's pyproject (set by --version
-      # above); this tag name only triggers the run.
       - name: Tag SDK repo to trigger its PyPI publish
         env:
-          GH_TOKEN: ${{ secrets.SDK_REPO_TOKEN }}
+          GH_TOKEN: ${{ secrets.PUSH_TO_REPO_TOKEN }}
         run: |
           SDK_REPO="dalmia/calibrate-python-sdk"
-          TAG="v${{ steps.version.outputs.version }}"
+          TAG="v${{ needs.prepare.outputs.version }}"
           SHA=$(gh api "repos/$SDK_REPO/git/ref/heads/main" --jq .object.sha)
           gh api "repos/$SDK_REPO/git/refs" -f ref="refs/tags/$TAG" -f sha="$SHA"
           echo "Tagged $SDK_REPO @ $SHA as $TAG — its ci.yml will publish to PyPI."
 
-      # Same pattern for the CLI repo — one sdk-v* tag drives SDK + CLI releases.
-      # Needs SDK_REPO_TOKEN with contents:write on dalmia/calibrate-cli too
-      # (the same PAT as the SDK repo works if scoped to both).
+  publish-cli:
+    needs: prepare
+    runs-on: ubuntu-latest
+    environment: Production
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download public OpenAPI spec
+        uses: actions/download-artifact@v4
+        with:
+          name: public-openapi
+          path: openapi
+
+      - name: Install Fern
+        run: npm install -g fern-api
+
+      - name: Generate Calibrate CLI + sync to repo
+        run: fern generate --group cli --version "${{ needs.prepare.outputs.version }}" --log-level debug
+        env:
+          FERN_TOKEN: ${{ secrets.FERN_TOKEN }}
+
       - name: Tag CLI repo to trigger its release publish
         env:
-          GH_TOKEN: ${{ secrets.SDK_REPO_TOKEN }}
+          GH_TOKEN: ${{ secrets.PUSH_TO_REPO_TOKEN }}
         run: |
           CLI_REPO="dalmia/calibrate-cli"
-          TAG="v${{ steps.version.outputs.version }}"
+          TAG="v${{ needs.prepare.outputs.version }}"
           SHA=$(gh api "repos/$CLI_REPO/git/ref/heads/main" --jq .object.sha)
           gh api "repos/$CLI_REPO/git/refs" -f ref="refs/tags/$TAG" -f sha="$SHA"
           echo "Tagged $CLI_REPO @ $SHA as $TAG — its ci.yml will publish the CLI."
