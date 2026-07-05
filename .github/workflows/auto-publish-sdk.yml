@@ -23,12 +23,30 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  detect:
+  gate:
     if: >-
-      secrets.SDK_AUTO_PUBLISH_ENABLED == 'true' &&
-      secrets.PUSH_TO_REPO_TOKEN != '' &&
-      (github.event_name == 'workflow_dispatch' ||
-       github.event.workflow_run.conclusion == 'success')
+      github.event_name == 'workflow_dispatch' ||
+      github.event.workflow_run.conclusion == 'success'
+    runs-on: ubuntu-latest
+    environment: Production
+    outputs:
+      publish_enabled: ${{ steps.check.outputs.publish_enabled }}
+    steps:
+      - name: Check publish prerequisites
+        id: check
+        env:
+          SDK_AUTO_PUBLISH_ENABLED: ${{ secrets.SDK_AUTO_PUBLISH_ENABLED }}
+          PUSH_TO_REPO_TOKEN: ${{ secrets.PUSH_TO_REPO_TOKEN }}
+        run: |
+          if [ "$SDK_AUTO_PUBLISH_ENABLED" = "true" ] && [ -n "$PUSH_TO_REPO_TOKEN" ]; then
+            echo "publish_enabled=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "publish_enabled=false" >> "$GITHUB_OUTPUT"
+          fi
+
+  detect:
+    needs: gate
+    if: needs.gate.outputs.publish_enabled == 'true'
     runs-on: ubuntu-latest
     environment: Production
     outputs:
