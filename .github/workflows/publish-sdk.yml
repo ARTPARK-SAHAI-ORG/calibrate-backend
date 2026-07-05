@@ -3,7 +3,7 @@ name: Publish SDK, CLI, and MCP
 # Fetches the app's public OpenAPI spec once, then generates in parallel:
 #   - calibrate-sdk (Python) via Fern → dalmia/calibrate-python-sdk
 #   - calibrate CLI via Speakeasy → dalmia/calibrate-cli
-#   - calibrate MCP via Speakeasy (second account) → dalmia/calibrate-mcp
+#   - calibrate MCP via Speakeasy → dalmia/calibrate-mcp
 # Setup: SETUP_SDK.md
 #
 # Trigger: workflow_call (from auto-publish-sdk.yml), or workflow_dispatch.
