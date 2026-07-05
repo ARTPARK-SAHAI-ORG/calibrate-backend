@@ -157,7 +157,7 @@ jobs:
     steps:
       - name: Trigger docs OpenAPI sync
         env:
-          GH_TOKEN: ${{ secrets.PUSH_TO_REPO_TOKEN }}
+          GH_TOKEN: ${{ secrets.DOCS_SYNC_REPO_TOKEN }}
         run: |
           gh api repos/ARTPARK-SAHAI-ORG/calibrate/dispatches \
             -f event_type=sync-api-spec \
