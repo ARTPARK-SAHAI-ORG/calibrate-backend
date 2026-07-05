@@ -3,7 +3,7 @@ name: Publish SDK and CLI
 # Fetches the app's public OpenAPI spec once, then generates in parallel:
 #   - calibrate-sdk (Python) via Fern → dalmia/calibrate-python-sdk
 #   - calibrate CLI via Speakeasy → dalmia/calibrate-cli
-# Each job tags its repo so downstream CI publishes (PyPI / release artifacts).
+# Setup: SETUP_SDK.md
 #
 # Trigger: push an sdk-v* tag, or workflow_dispatch with a version (e.g. 0.1.0).
 on:
