@@ -6,7 +6,7 @@ set -euo pipefail
 REPO="${1:?owner/repo required}"
 SRC_DIR="${2:?generated source dir required}"
 MESSAGE="${3:?commit message required}"
-TOKEN="${SDK_REPO_TOKEN:?SDK_REPO_TOKEN is required}"
+TOKEN="${PUSH_TO_REPO_TOKEN:?PUSH_TO_REPO_TOKEN is required}"
 
 if [ ! -d "$SRC_DIR" ]; then
   echo "::error::Generated directory not found: $SRC_DIR" >&2

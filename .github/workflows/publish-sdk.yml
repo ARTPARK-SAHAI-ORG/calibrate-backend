@@ -57,13 +57,13 @@ jobs:
         run: curl -fsSL https://go.speakeasy.com/cli-install.sh | sh
 
       # Generate locally, then rsync into the client repos. Speakeasy writes to
-      # .speakeasy/out/*; we push to dalmia/* with SDK_REPO_TOKEN (PAT with
-      # contents:write on both repos). PyPI / GitHub Releases are triggered by
-      # tagging those repos after the sync (same pattern as the old Fern flow).
+      # .speakeasy/out/*; we push to dalmia/* with PUSH_TO_REPO_TOKEN (PAT with
+      # contents:write on calibrate-python-sdk, calibrate-cli, and homebrew-tap).
+      # PyPI / GitHub Releases are triggered by tagging those repos after sync.
       - name: Generate Python SDK + sync to repo
         env:
           SPEAKEASY_API_KEY: ${{ secrets.SPEAKEASY_API_KEY }}
-          SDK_REPO_TOKEN: ${{ secrets.SDK_REPO_TOKEN }}
+          PUSH_TO_REPO_TOKEN: ${{ secrets.PUSH_TO_REPO_TOKEN }}
         run: |
           speakeasy run -t calibrate-python-sdk \
             --set-version "${{ steps.version.outputs.version }}" \
@@ -76,7 +76,7 @@ jobs:
       - name: Generate CLI + sync to repo
         env:
           SPEAKEASY_API_KEY: ${{ secrets.SPEAKEASY_API_KEY }}
-          SDK_REPO_TOKEN: ${{ secrets.SDK_REPO_TOKEN }}
+          PUSH_TO_REPO_TOKEN: ${{ secrets.PUSH_TO_REPO_TOKEN }}
         run: |
           speakeasy run -t calibrate-cli \
             --set-version "${{ steps.version.outputs.version }}" \
@@ -88,7 +88,7 @@ jobs:
 
       - name: Tag SDK repo to trigger its PyPI publish
         env:
-          GH_TOKEN: ${{ secrets.SDK_REPO_TOKEN }}
+          GH_TOKEN: ${{ secrets.PUSH_TO_REPO_TOKEN }}
         run: |
           SDK_REPO="dalmia/calibrate-python-sdk"
           TAG="v${{ steps.version.outputs.version }}"
@@ -98,7 +98,7 @@ jobs:
 
       - name: Tag CLI repo to trigger its release workflow
         env:
-          GH_TOKEN: ${{ secrets.SDK_REPO_TOKEN }}
+          GH_TOKEN: ${{ secrets.PUSH_TO_REPO_TOKEN }}
         run: |
           CLI_REPO="dalmia/calibrate-cli"
           TAG="v${{ steps.version.outputs.version }}"
