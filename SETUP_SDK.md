@@ -78,8 +78,12 @@ Built-in `GITHUB_TOKEN` covers the GitHub Release on `calibrate-cli` itself.
 #### Generate a GPG signing key
 
 ```bash
+# Generate a passphrase first — use when gpg prompts, then store as CLI_GPG_PASSPHRASE
+openssl rand -base64 32
+
 gpg --full-generate-key
 # RSA, sign only, 4096-bit, no expiry (or set expiry + rotate)
+# Paste the openssl output when prompted for the key passphrase
 
 gpg --list-secret-keys --keyid-format long
 gpg --armor --export-secret-keys <KEY_ID>   # → CLI_GPG_SECRET_KEY
