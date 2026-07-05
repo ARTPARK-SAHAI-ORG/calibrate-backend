@@ -8,7 +8,7 @@ import traceback
 import threading
 import logging
 from pathlib import Path
-from typing import List, Optional
+from typing import Any, Dict, List, Optional
 
 from fastapi import APIRouter, HTTPException, Depends
 from pydantic import BaseModel, ConfigDict
@@ -55,6 +55,12 @@ from utils import (
 
 # Job types that share the same queue
 EVAL_JOB_TYPES = ["stt-eval", "tts-eval", "annotation-eval"]
+
+
+def _is_job_aborted(task_id: str) -> bool:
+    """Check if an STT eval job was aborted by the user."""
+    job = get_job(task_id)
+    return bool(job and (job.get("details") or {}).get("aborted"))
 
 
 def _resolve_evaluators_for_job(
@@ -428,11 +434,40 @@ def run_evaluation_task(
                     # Poll for process completion with heartbeat to keep updated_at fresh
                     # This prevents the job from being marked as timed out during long runs
                     HEARTBEAT_INTERVAL = 2  # seconds
+                    aborted = False
                     while process.poll() is None:
+                        if _is_job_aborted(task_id):
+                            logger.info(
+                                f"STT eval {task_id} aborted, killing process group and stopping"
+                            )
+                            kill_process_group(process.pid, task_id)
+                            try:
+                                process.wait(timeout=5)
+                            except subprocess.TimeoutExpired:
+                                process.kill()
+                                try:
+                                    process.wait(timeout=5)
+                                except subprocess.TimeoutExpired:
+                                    pass
+                            aborted = True
+                            break
                         time.sleep(HEARTBEAT_INTERVAL)
                         if process.poll() is None:
                             # Process still running, send heartbeat to refresh updated_at
                             update_job(task_id)
+
+                    # Re-check the abort flag after the loop exits: an abort
+                    # request may arrive AFTER the subprocess has exited
+                    # naturally (so we never set `aborted` via the inner
+                    # branch) but BEFORE the worker reaches the final
+                    # update_job below. Without this guard, the normal
+                    # completion path overwrites the abort endpoint's
+                    # status=done / error=user_aborted with success.
+                    if aborted or _is_job_aborted(task_id):
+                        logger.info(
+                            f"STT eval {task_id} was aborted by user, skipping final processing"
+                        )
+                        return
 
                 # Read stdout/stderr
                 with open(stdout_path, "r") as f:
@@ -558,6 +593,15 @@ def run_evaluation_task(
                     failed = [r.provider for r in provider_results if not r.success]
                     error_msg = f"Some providers failed: {', '.join(failed)}"
 
+                # Last-chance abort check: results parsing + S3 upload above
+                # can take seconds-to-minutes, plenty of room for an abort
+                # request to arrive after the post-loop guard.
+                if _is_job_aborted(task_id):
+                    logger.info(
+                        f"STT eval {task_id} aborted before final update, skipping"
+                    )
+                    return
+
                 # Update job with results
                 update_job(
                     task_id,
@@ -570,6 +614,11 @@ def run_evaluation_task(
                 )
 
             except subprocess.CalledProcessError as e:
+                if _is_job_aborted(task_id):
+                    logger.info(
+                        f"STT eval {task_id} aborted, skipping error update"
+                    )
+                    return
                 traceback.print_exc()
                 capture_exception_to_sentry(e)
                 error_results = {
@@ -602,6 +651,11 @@ def run_evaluation_task(
                     results=error_results,
                 )
             except Exception as e:
+                if _is_job_aborted(task_id):
+                    logger.info(
+                        f"STT eval {task_id} aborted, skipping error update"
+                    )
+                    return
                 traceback.print_exc()
                 capture_exception_to_sentry(e)
                 error_results = {
@@ -635,13 +689,18 @@ def run_evaluation_task(
                 )
 
     except Exception as e:
-        traceback.print_exc()
-        capture_exception_to_sentry(e)
-        update_job(
-            task_id,
-            status=TaskStatus.FAILED.value,
-            results={"error": f"Task failed: {str(e)}"},
-        )
+        if _is_job_aborted(task_id):
+            logger.info(
+                f"STT eval {task_id} aborted, skipping error update"
+            )
+        else:
+            traceback.print_exc()
+            capture_exception_to_sentry(e)
+            update_job(
+                task_id,
+                status=TaskStatus.FAILED.value,
+                results={"error": f"Task failed: {str(e)}"},
+            )
     finally:
         # Try to start the next queued job
         try_start_queued_job(EVAL_JOB_TYPES)
@@ -742,6 +801,132 @@ class VisibilityRequest(BaseModel):
 class VisibilityResponse(BaseModel):
     is_public: bool
     share_token: str | None = None
+
+
+@router.post("/evaluate/{task_id}/abort", response_model=TaskStatusResponse)
+async def abort_stt_evaluation(
+    task_id: str, user_id: str = Depends(get_current_user_id)
+):
+    """Abort a running STT evaluation job, preserving partial provider results.
+
+    Kills the running calibrate subprocess, collects whatever each provider
+    managed to write to disk, and saves the partial results with status=done.
+    """
+    job = get_job(task_id, user_id=user_id)
+    if not job or job.get("type") != "stt-eval":
+        raise HTTPException(status_code=404, detail="Task not found")
+
+    if job.get("status") != TaskStatus.IN_PROGRESS.value:
+        raise HTTPException(
+            status_code=400, detail="Can only abort in-progress jobs"
+        )
+
+    details = job.get("details") or {}
+
+    # Mark aborted FIRST so the polling loop's guard fires immediately.
+    update_job(task_id, details={"aborted": True})
+
+    # Kill running process group
+    pid = details.get("pid") or details.get("pgid")
+    if pid:
+        kill_process_group(pid, task_id)
+
+    # Collect partial results from disk (best effort) and upload partials.
+    requested_providers = details.get("providers", [])
+    output_dir_str = details.get("output_dir")
+    intermediate_map: Dict[str, Dict[str, Any]] = {}
+    if output_dir_str:
+        try:
+            output_dir = Path(output_dir_str)
+            if output_dir.exists():
+                intermediate = _collect_intermediate_results(
+                    output_dir,
+                    requested_providers,
+                    len(details.get("audio_paths") or []),
+                )
+                intermediate_map = {
+                    r.provider: r.model_dump() for r in intermediate
+                }
+                try:
+                    s3 = get_s3_client()
+                    s3_bucket = details.get("s3_bucket") or get_s3_output_config()
+                    upload_directory_tree_to_s3(
+                        s3,
+                        output_dir,
+                        s3_bucket,
+                        f"stt/evals/{task_id}/outputs",
+                    )
+                except Exception as exc:
+                    logger.warning(
+                        f"Failed to upload partial outputs for aborted STT job {task_id}: {exc}"
+                    )
+        except Exception as exc:
+            logger.warning(
+                f"Failed to collect intermediate results on abort: {exc}"
+            )
+
+    # Re-read results from the DB right before the final write. The
+    # worker may have committed a fresher `provider_results` snapshot
+    # between our initial read and now (kill_process_group sends SIGTERM;
+    # the subprocess takes a moment to die, and the polling thread can
+    # land one more write in that window). Using the stale snapshot
+    # would overwrite those newer partials.
+    fresh_job = get_job(task_id, user_id=user_id) or {}
+    results = dict(fresh_job.get("results") or {})
+    existing_provider_results = results.get("provider_results", []) or []
+    existing_success_map = {
+        pr.get("provider"): pr
+        for pr in existing_provider_results
+        if pr.get("success") is True
+    }
+
+    merged_results: List[Dict[str, Any]] = []
+    if intermediate_map or existing_provider_results:
+        for provider in requested_providers:
+            if provider in existing_success_map:
+                merged_results.append(existing_success_map[provider])
+            elif provider in intermediate_map:
+                merged_results.append(intermediate_map[provider])
+            else:
+                merged_results.append(
+                    {
+                        "provider": provider,
+                        "success": False,
+                        "metrics": None,
+                        "results": None,
+                    }
+                )
+
+    if not merged_results and existing_provider_results:
+        merged_results = existing_provider_results
+
+    results["provider_results"] = merged_results
+    results["error"] = "user_aborted"
+
+    update_job(
+        task_id,
+        status=TaskStatus.DONE.value,
+        results=results,
+    )
+
+    # Drain queue
+    try_start_queued_job(EVAL_JOB_TYPES)
+
+    # Re-read for fresh state
+    updated = get_job(task_id, user_id=user_id) or {}
+    updated_results = updated.get("results") or {}
+    return TaskStatusResponse(
+        task_id=task_id,
+        status=TaskStatus.DONE.value,
+        language=details.get("language"),
+        dataset_id=details.get("dataset_id"),
+        dataset_name=details.get("dataset_name"),
+        provider_results=updated_results.get("provider_results"),
+        leaderboard_summary=updated_results.get("leaderboard_summary"),
+        error=updated_results.get("error"),
+        is_public=bool(updated.get("is_public")),
+        share_token=updated.get("share_token"),
+    )
 
 
 @router.patch("/evaluate/{task_id}/visibility", response_model=VisibilityResponse)

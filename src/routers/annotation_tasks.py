@@ -70,6 +70,7 @@ from utils import (
     TaskStatus,
     can_start_job,
     compute_share_token_toggle,
+    kill_process_group,
     try_start_queued_job,
 )
 from auth_utils import get_current_org, OrgContext
@@ -1941,6 +1942,79 @@ async def get_evaluator_run_job(
     # backfilled on first run; see annotation_eval_runner._run_job).
     shaped["items"] = get_eval_job_items(job_uuid)
     return shaped
+
+
+@router.post("/{task_uuid}/evaluator-runs/{job_uuid}/abort")
+async def abort_evaluator_run_job(
+    task_uuid: str,
+    job_uuid: str,
+    user_id: str = Depends(get_current_user_id),
+):
+    """Abort a running evaluator-run job, preserving partial evaluator_runs rows.
+
+    Kills the running calibrate subprocess and marks the job as done. Any
+    `evaluator_runs` rows the worker has already inserted up to this point
+    are retained. The runner is responsible for noticing the abort flag
+    (set here before the SIGTERM) and skipping its final overwrite.
+    """
+    _ensure_owned_task(task_uuid, user_id)
+    job = get_job(job_uuid, user_id=user_id)
+    if (
+        not job
+        or job.get("type") != ANNOTATION_EVAL_JOB_TYPE
+        or (job.get("details") or {}).get("task_id") != task_uuid
+    ):
+        raise HTTPException(status_code=404, detail="Job not found")
+
+    if job.get("status") != TaskStatus.IN_PROGRESS.value:
+        raise HTTPException(
+            status_code=400, detail="Can only abort in-progress jobs"
+        )
+
+    details = job.get("details") or {}
+
+    # Mark aborted FIRST so the runner's polling guard fires immediately.
+    update_job(job_uuid, details={"aborted": True})
+
+    pid = details.get("pid") or details.get("pgid")
+    if pid:
+        kill_process_group(pid, job_uuid)
+
+    # Re-read the job before the final write. The runner has its own
+    # abort guards but may have committed `details.{metrics,s3_prefix}`
+    # or partial `results` between our initial read and now; preserve
+    # those by merging rather than overwriting.
+    fresh_job = get_job(job_uuid, user_id=user_id) or {}
+    fresh_results = dict(fresh_job.get("results") or {})
+    fresh_results["error"] = "user_aborted"
+
+    update_job(
+        job_uuid,
+        status=TaskStatus.DONE.value,
+        results=fresh_results,
+        details={"completed_at": _utcnow_str_for_abort()},
+    )
+
+    try:
+        try_start_queued_job(EVAL_JOB_TYPES)
+    except Exception:
+        pass
+
+    updated = get_job(job_uuid, user_id=user_id) or {}
+    return {
+        "task_id": job_uuid,
+        "status": TaskStatus.DONE.value,
+        "results": updated.get("results"),
+    }
+
+
+def _utcnow_str_for_abort() -> str:
+    """SQLite CURRENT_TIMESTAMP-style UTC string for the abort path. Kept
+    local to avoid pulling in `annotation_eval_runner._utcnow_str` (private)
+    or adding a tiny new util just for this one call site."""
+    from datetime import datetime as _dt
+
+    return _dt.utcnow().strftime("%Y-%m-%d %H:%M:%S")
 
 
 @router.delete("/{task_uuid}/evaluator-runs/{job_uuid}")
