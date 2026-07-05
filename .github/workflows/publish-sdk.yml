@@ -1,8 +1,8 @@
 name: Publish SDK and CLI
 
 # Fetches the app's public OpenAPI spec once, then generates in parallel:
-#   - calibrate-sdk (Python) via Speakeasy → dalmia/calibrate-python-sdk
-#   - calibrate CLI via Fern → dalmia/calibrate-cli
+#   - calibrate-sdk (Python) via Fern → dalmia/calibrate-python-sdk
+#   - calibrate CLI via Speakeasy → dalmia/calibrate-cli
 # Each job tags its repo so downstream CI publishes (PyPI / release artifacts).
 #
 # Trigger: push an sdk-v* tag, or workflow_dispatch with a version (e.g. 0.1.0).
@@ -48,7 +48,7 @@ jobs:
             exit 1
           fi
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
-          echo "Publishing calibrate-sdk (Speakeasy) + Calibrate CLI (Fern) version $VERSION"
+          echo "Publishing calibrate-sdk (Fern) + Calibrate CLI (Speakeasy) version $VERSION"
 
       - name: Upload public OpenAPI spec
         uses: actions/upload-artifact@v4
@@ -70,25 +70,18 @@ jobs:
           name: public-openapi
           path: openapi
 
-      - name: Install Speakeasy CLI
-        run: curl -fsSL https://go.speakeasy.com/cli-install.sh | sh
+      - name: Install Fern
+        run: npm install -g fern-api
 
       - name: Generate Python SDK + sync to repo
+        run: fern generate --group python-sdk --version "${{ needs.prepare.outputs.version }}" --log-level debug
         env:
-          SPEAKEASY_API_KEY: ${{ secrets.SPEAKEASY_API_KEY }}
-          PUSH_TO_REPO_TOKEN: ${{ secrets.PUSH_TO_REPO_TOKEN }}
-        run: |
-          speakeasy run -t calibrate-python-sdk \
-            --set-version "${{ needs.prepare.outputs.version }}" \
-            --skip-testing -y
-          ./.github/scripts/sync-client-repo.sh \
-            dalmia/calibrate-python-sdk \
-            .speakeasy/out/python \
-            "chore(sdk): release ${{ needs.prepare.outputs.version }}"
+          FERN_TOKEN: ${{ secrets.FERN_TOKEN }}
+          PYPI_TOKEN: ${{ secrets.PYPI_TOKEN }}
 
       - name: Tag SDK repo to trigger its PyPI publish
         env:
-          GH_TOKEN: ${{ secrets.PUSH_TO_REPO_TOKEN }}
+          GH_TOKEN: ${{ secrets.SDK_REPO_TOKEN }}
         run: |
           SDK_REPO="dalmia/calibrate-python-sdk"
           TAG="v${{ needs.prepare.outputs.version }}"
@@ -109,13 +102,21 @@ jobs:
           name: public-openapi
           path: openapi
 
-      - name: Install Fern
-        run: npm install -g fern-api
+      - name: Install Speakeasy CLI
+        run: curl -fsSL https://go.speakeasy.com/cli-install.sh | sh
 
       - name: Generate Calibrate CLI + sync to repo
-        run: fern generate --group cli --version "${{ needs.prepare.outputs.version }}" --log-level debug
         env:
-          FERN_TOKEN: ${{ secrets.FERN_TOKEN }}
+          SPEAKEASY_API_KEY: ${{ secrets.SPEAKEASY_API_KEY }}
+          PUSH_TO_REPO_TOKEN: ${{ secrets.PUSH_TO_REPO_TOKEN }}
+        run: |
+          speakeasy run -t calibrate-cli \
+            --set-version "${{ needs.prepare.outputs.version }}" \
+            --skip-testing -y
+          ./.github/scripts/sync-client-repo.sh \
+            dalmia/calibrate-cli \
+            .speakeasy/out/cli \
+            "chore(cli): release ${{ needs.prepare.outputs.version }}"
 
       - name: Tag CLI repo to trigger its release publish
         env:

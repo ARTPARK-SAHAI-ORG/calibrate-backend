@@ -1,6 +1,6 @@
 name: Validate SDK config
 
-# Validates Speakeasy (Python SDK) + Fern (CLI) client-generation config on PRs
+# Validates Fern (Python SDK) + Speakeasy (CLI) client-generation config on PRs
 # that touch those files. Fetches the public spec via fetch-public-spec (same as
 # publish-sdk.yml).
 on:
@@ -30,6 +30,12 @@ jobs:
         env:
           PUBLIC_API_BASE_URL: ${{ secrets.PUBLIC_API_BASE_URL }}
 
+      - name: Install Fern
+        run: npm install -g fern-api
+
+      - name: Validate Fern Python SDK config
+        run: fern check
+
       - name: Install Speakeasy CLI
         run: curl -fsSL https://go.speakeasy.com/cli-install.sh | sh
 
@@ -43,9 +49,3 @@ jobs:
 
       - name: Validate Speakeasy config
         run: speakeasy lint config -d .
-
-      - name: Install Fern
-        run: npm install -g fern-api
-
-      - name: Validate Fern CLI config
-        run: fern check

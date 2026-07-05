@@ -1,7 +1,7 @@
 """Guard: public-route naming overlays must cover exactly the Public API routes.
 
-Python SDK (Speakeasy) reads openapi/overlay.yaml; Fern CLI reads
-fern/openapi-overrides.yml. A missing entry ships ugly auto-derived names.
+Python SDK (Fern) reads fern/openapi-overrides.yml; Speakeasy CLI reads
+openapi/overlay.yaml. A missing entry ships ugly auto-derived names.
 See CLAUDE.md, "Public API docs are tag-gated" (the SYNC RULE).
 """
 

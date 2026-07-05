@@ -23,8 +23,8 @@ openapi/openapi.json
 openapi/compiled.yaml
 fern/openapi/
 
-# Speakeasy generated Python SDK tree (gen.yaml under .speakeasy/ is committed).
-.speakeasy/out/python/*
-!.speakeasy/out/python/.speakeasy/
+# Speakeasy generated CLI tree (gen.yaml under .speakeasy/ is committed).
+.speakeasy/out/cli/*
+!.speakeasy/out/cli/.speakeasy/
 .speakeasy/logs/
 .speakeasy/workflow.lock

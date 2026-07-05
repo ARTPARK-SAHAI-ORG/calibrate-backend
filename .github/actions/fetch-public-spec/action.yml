@@ -2,7 +2,7 @@ name: Fetch public OpenAPI spec
 description: >-
   Install deps, boot the backend with throwaway env, and download its PUBLIC
   OpenAPI spec (/public-api/openapi.json) into the gitignored file at
-  openapi/openapi.json (shared by Speakeasy and Fern). Used by publish-sdk.yml
+  openapi/openapi.json (shared by Fern Python SDK and Speakeasy CLI). Used by publish-sdk.yml
   and validate-sdk.yml.
 
 runs:

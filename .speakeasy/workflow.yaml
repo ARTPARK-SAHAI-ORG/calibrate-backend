@@ -10,7 +10,7 @@ sources:
         registry:
             location: registry.speakeasyapi.dev/artpark/calibrate/calibrate-public-api
 targets:
-    calibrate-python-sdk:
-        target: python
+    calibrate-cli:
+        target: cli
         source: calibrate-public-api
-        output: .speakeasy/out/python
+        output: .speakeasy/out/cli
