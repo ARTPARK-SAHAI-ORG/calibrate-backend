@@ -69,15 +69,17 @@ jobs:
           fi
 
           git checkout --quiet HEAD~1
-          uv sync --frozen
-          (cd src && uv run uvicorn main:app --port 8000 --log-level warning &)
-          for i in $(seq 1 30); do
-            curl -sf http://localhost:8000/public-api/openapi.json -o /dev/null && break
-            sleep 2
-          done
-          mkdir -p openapi
-          curl -sf http://localhost:8000/public-api/openapi.json -o openapi/openapi.json
-          test -s openapi/openapi.json
+
+      - name: Fetch parent public OpenAPI spec
+        if: steps.parent_hash.outputs.missing_parent != 'true'
+        uses: ./.github/actions/fetch-public-spec
+        env:
+          PUBLIC_API_BASE_URL: ${{ secrets.PUBLIC_API_BASE_URL }}
+
+      - name: Compute parent spec hash
+        id: parent_hash_done
+        if: steps.parent_hash.outputs.missing_parent != 'true'
+        run: |
           HASH=$(python3 .github/scripts/normalize_openapi_hash.py openapi/openapi.json)
           echo "hash=$HASH" >> "$GITHUB_OUTPUT"
           echo "missing_parent=false" >> "$GITHUB_OUTPUT"
@@ -89,7 +91,7 @@ jobs:
           FORCE: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.force == 'true' }}
           INPUT_VERSION: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.version || '' }}
           HEAD_HASH: ${{ steps.head_hash.outputs.hash }}
-          PARENT_HASH: ${{ steps.parent_hash.outputs.hash }}
+          PARENT_HASH: ${{ steps.parent_hash_done.outputs.hash }}
           MISSING_PARENT: ${{ steps.parent_hash.outputs.missing_parent }}
         run: |
           chmod +x .github/scripts/next-sdk-version.sh
