@@ -18,7 +18,10 @@ readme:
     agent evaluation platform API. Authenticate with an API key (`sk_…`) scoped
     to your organization to run agent tests and poll their results.
   # bannerLink: "https://<host>/path/to/banner.png"  # add once a banner asset exists
-  apiReferenceLink: "https://pense-backend.artpark.ai/public-api/docs"
+  # Host is not committed: Fern expands ${PUBLIC_API_BASE_URL} at generate time
+  # (same secret used to fetch the public spec). The fern generate/check steps in
+  # publish-sdk.yml and validate-sdk.yml export it.
+  apiReferenceLink: "${PUBLIC_API_BASE_URL}/public-api/docs"
   disabledSections:
     - "contributing"
   customSections:
