@@ -1,0 +1,20 @@
+workflowVersion: 1.0.0
+speakeasyVersion: 1.788.1
+sources:
+    calibrate-public-api:
+        inputs:
+            - location: openapi/openapi.json
+        overlays:
+            - location: openapi/overlay.yaml
+        output: openapi/compiled.yaml
+        registry:
+            location: registry.speakeasyapi.dev/artpark/calibrate/calibrate-public-api
+targets:
+    calibrate-cli:
+        target: cli
+        source: calibrate-public-api
+        output: .speakeasy/out/cli
+    calibrate-python-sdk:
+        target: python
+        source: calibrate-public-api
+        output: .speakeasy/out/python

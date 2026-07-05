@@ -1,0 +1,29 @@
+# Speakeasy overlay: clean SDK/CLI method names for each Public API route.
+# Wired in .speakeasy/workflow.yaml. KEEP IN SYNC with routes tagged
+# `Public API` in main.py. Enforced by tests/test_sdk_overrides.py.
+
+overlay: 1.0.0
+info:
+  title: Calibrate public API client naming
+  version: 0.0.1
+actions:
+  - target: $.paths['/agents'].get
+    update:
+      x-speakeasy-group: agents
+      x-speakeasy-name-override: list
+  - target: $.paths['/agents/resolve'].post
+    update:
+      x-speakeasy-group: agents
+      x-speakeasy-name-override: resolve
+  - target: $.paths['/agent-tests/agent/{agent_uuid}/run'].post
+    update:
+      x-speakeasy-group: agent_tests
+      x-speakeasy-name-override: run
+  - target: $.paths['/agent-tests/run'].post
+    update:
+      x-speakeasy-group: agent_tests
+      x-speakeasy-name-override: run_batch
+  - target: $.paths['/agent-tests/run/{task_id}'].get
+    update:
+      x-speakeasy-group: agent_tests
+      x-speakeasy-name-override: get_run
