@@ -51,7 +51,7 @@ class ScenarioCreateResponse(BaseModel):
 async def create_scenario_endpoint(
     scenario: ScenarioCreate, ctx: OrgContext = Depends(get_current_org)
 ):
-    """Create a new scenario in the caller's current workspace. The name must be unique within the workspace."""
+    """Create a new scenario in your workspace. The name must be unique within the workspace."""
     with ensure_name_unique("scenarios", scenario.name, ctx.org_uuid, entity="Scenario"):
         scenario_uuid = create_scenario(
             name=scenario.name,
@@ -66,7 +66,7 @@ async def create_scenario_endpoint(
 
 @router.get("", response_model=List[ScenarioResponse], summary="List scenarios")
 async def list_scenarios(ctx: OrgContext = Depends(get_current_org)):
-    """List all scenarios for the caller's current workspace."""
+    """List all scenarios for your workspace."""
     scenarios = get_all_scenarios(org_uuid=ctx.org_uuid)
     return scenarios
 
@@ -76,7 +76,7 @@ async def get_scenario_endpoint(
     scenario_uuid: str = Path(description="Scenario UUID (8-char identifier)"),
     ctx: OrgContext = Depends(get_current_org),
 ):
-    """Retrieve a single scenario by UUID within the caller's workspace."""
+    """Retrieve a single scenario by UUID within your workspace."""
     scenario = get_scenario(scenario_uuid)
     if not scenario or scenario.get("org_uuid") != ctx.org_uuid:
         raise HTTPException(status_code=404, detail="Scenario not found")

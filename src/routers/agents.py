@@ -210,7 +210,7 @@ class AgentCreate(BaseModel):
     name: str = Field(description="Human-readable agent name, unique within the workspace")
     type: Literal["agent", "connection"] = Field(
         "agent",
-        description="`agent` applies managed defaults deep-merged under any supplied `config`; `connection` stores the caller config as-is (must eventually contain `agent_url`)",
+        description="`agent` applies managed defaults deep-merged under any supplied `config`; `connection` stores the config you supply as-is (must eventually contain `agent_url`)",
     )
     config: Optional[Dict[str, Any]] = Field(
         None,
@@ -240,7 +240,7 @@ class AgentResponse(BaseModel):
     uuid: str = Field(description="Agent UUID (8-char identifier)")
     name: str = Field(description="Human-readable agent name, unique within the workspace")
     type: Literal["agent", "connection"] = Field(
-        description="`agent` (managed defaults) or `connection` (caller-supplied config)"
+        description="`agent` (managed defaults) or `connection` (config you supply)"
     )
     config: Optional[Dict[str, Any]] = Field(
         None, description="Behavioral config; null when the agent has none"
@@ -269,7 +269,7 @@ class AgentDuplicateResponse(BaseModel):
 
 class ResolveAgentNamesRequest(BaseModel):
     names: List[str] = Field(
-        description="Agent names to resolve to UUIDs within the caller's workspace"
+        description="Agent names to resolve to UUIDs within your workspace"
     )
 
 
@@ -449,12 +449,12 @@ async def resolve_agent_names(
 async def create_agent_endpoint(
     agent: AgentCreate, ctx: OrgContext = Depends(get_current_org)
 ):
-    """Create a new agent in the caller's workspace.
+    """Create a new agent in your workspace.
 
     For `type=agent`, sensible defaults (system_prompt, llm.model, stt, tts,
     settings — overridable via DEFAULT_AGENT_* env vars) are applied, and any
-    caller `config` is deep-merged on top so partial overrides replace only the
-    named fields. For `type=connection`, no defaults are injected — the config
+    `config` you supply is deep-merged on top so partial overrides replace only
+    the named fields. For `type=connection`, no defaults are injected — the config
     (which must eventually contain `agent_url`) is stored as-is.
     """
     if agent.type == "agent":
@@ -480,7 +480,7 @@ async def create_agent_endpoint(
     summary="List agents",
 )
 async def list_agents(ctx: OrgContext = Depends(get_org_jwt_or_api_key)):
-    """List all agents in the caller's workspace."""
+    """List all agents in your workspace."""
     # Public API. Auth via get_org_jwt_or_api_key (JWT for the web app, API key
     # for CI); the run/poll and /resolve endpoints accept the same key, so CI can
     # enumerate agent UUIDs without knowing names up front.
@@ -493,7 +493,7 @@ async def get_agent_endpoint(
     agent_uuid: str = Path(description="Agent UUID (8-char identifier)"),
     ctx: OrgContext = Depends(get_current_org),
 ):
-    """Retrieve a single agent by UUID. 404s if it isn't in the caller's workspace."""
+    """Retrieve a single agent by UUID. 404s if it isn't in your workspace."""
     agent = get_agent(agent_uuid)
     if not agent or agent.get("org_uuid") != ctx.org_uuid:
         raise HTTPException(status_code=404, detail="Agent not found")
@@ -508,7 +508,7 @@ async def update_agent_endpoint(
 ):
     """Update an agent's name and/or config. Changing `agent_url` or
     `agent_headers` in the config resets all connection/benchmark verification
-    flags. 404s if the agent isn't in the caller's workspace; 400 if no fields change.
+    flags. 404s if the agent isn't in your workspace; 400 if no fields change.
     """
     existing_agent = get_agent(agent_uuid)
     if not existing_agent or existing_agent.get("org_uuid") != ctx.org_uuid:
@@ -557,7 +557,7 @@ async def delete_agent_endpoint(
     agent_uuid: str = Path(description="Agent UUID (8-char identifier)"),
     ctx: OrgContext = Depends(get_current_org),
 ):
-    """Soft-delete an agent. 404s if it isn't in the caller's workspace."""
+    """Soft-delete an agent. 404s if it isn't in your workspace."""
     existing_agent = get_agent(agent_uuid)
     if not existing_agent or existing_agent.get("org_uuid") != ctx.org_uuid:
         raise HTTPException(status_code=404, detail="Agent not found")

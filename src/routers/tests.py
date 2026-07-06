@@ -209,7 +209,7 @@ class BulkTestDelete(BaseModel):
 
 
 class BulkTestDeleteResponse(BaseModel):
-    deleted_count: int = Field(description="Number of tests actually deleted (excludes UUIDs not in the caller's workspace)")
+    deleted_count: int = Field(description="Number of tests actually deleted (excludes UUIDs not in your workspace)")
     message: str = Field(description="Human-readable confirmation message")
 
 
@@ -260,7 +260,7 @@ def _with_evaluators(test_dict: Dict[str, Any]) -> Dict[str, Any]:
 async def bulk_delete_tests_endpoint(
     payload: BulkTestDelete, ctx: OrgContext = Depends(get_current_org)
 ):
-    """Soft-delete multiple tests by UUID. Silently skips UUIDs outside the caller's workspace."""
+    """Soft-delete multiple tests by UUID. Silently skips UUIDs outside your workspace."""
     if not payload.test_uuids:
         raise HTTPException(status_code=400, detail="test_uuids must not be empty")
 
@@ -358,7 +358,7 @@ async def bulk_upload_tests(
 async def create_test_endpoint(
     test: TestCreate, ctx: OrgContext = Depends(get_current_org)
 ):
-    """Create a test in the caller's workspace. `conversation` tests require at least one evaluator (no fallback judge)."""
+    """Create a test in your workspace. `conversation` tests require at least one evaluator (no fallback judge)."""
     # Conversation tests have no evaluator fallback (unlike `response`, which can
     # synthesize the default LLM judge from legacy string criteria) — without a
     # linked simulation evaluator a run produces an empty calibrate config with
@@ -389,7 +389,7 @@ async def create_test_endpoint(
 
 @router.get("", response_model=List[TestResponse], summary="List tests")
 async def list_tests(ctx: OrgContext = Depends(get_current_org)):
-    """List all tests for the caller's current workspace, each with its linked evaluators."""
+    """List all tests for your workspace, each with its linked evaluators."""
     tests = get_all_tests(org_uuid=ctx.org_uuid)
     return [_with_evaluators(t) for t in tests]
 
@@ -399,7 +399,7 @@ async def get_test_endpoint(
     test_uuid: str = Path(description="Test UUID (8-char identifier)"),
     ctx: OrgContext = Depends(get_current_org),
 ):
-    """Retrieve a single test by UUID, with its linked evaluators. 404 if outside the caller's workspace."""
+    """Retrieve a single test by UUID, with its linked evaluators. 404 if outside your workspace."""
     test = get_test(test_uuid)
     if not test or test.get("org_uuid") != ctx.org_uuid:
         raise HTTPException(status_code=404, detail="Test not found")
@@ -481,7 +481,7 @@ async def delete_test_endpoint(
     test_uuid: str = Path(description="Test UUID (8-char identifier)"),
     ctx: OrgContext = Depends(get_current_org),
 ):
-    """Soft-delete a test. 404 if it doesn't exist or is outside the caller's workspace."""
+    """Soft-delete a test. 404 if it doesn't exist or is outside your workspace."""
     existing_test = get_test(test_uuid)
     if not existing_test or existing_test.get("org_uuid") != ctx.org_uuid:
         raise HTTPException(status_code=404, detail="Test not found")

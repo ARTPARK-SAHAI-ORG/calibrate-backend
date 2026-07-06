@@ -58,7 +58,7 @@ the description when it's a soft delete), **Create** (not "Add"/"New").
 ## Descriptions
 
 - First sentence: verb-first statement of intent — `Retrieve a ...`,
-  `Create a new ...`, `Soft-delete a ...`, `List the ... for the caller's workspace.`
+  `Create a new ...`, `Soft-delete a ...`, `List the ... in your workspace.`
 - Then, only if non-obvious, add short sentences for: one-time-only return values,
   irreversibility, default filters/ordering (`newest first`, `active by default`),
   scoping, required conditions, or auth mode (JWT vs API key).
@@ -81,7 +81,7 @@ async def delete_api_key(...):
 ```python
 @router.get("", response_model=list[AgentResponse], summary="List agents")
 async def list_agents(...):
-    """List agents for the caller's current workspace. Accepts a JWT or an API key."""
+    """List all agents in your workspace."""
 ```
 
 ## Path & query params
@@ -114,7 +114,7 @@ class AgentCreate(BaseModel):
     name: str = Field(description="Human-readable agent name, unique within the workspace")
     type: Literal["agent", "connection"] = Field(
         "agent",
-        description="`agent` applies managed defaults; `connection` stores the caller config as-is",
+        description="`agent` applies managed defaults; `connection` stores the config you supply as-is",
     )
     config: dict[str, Any] | None = Field(
         None, description="Behavioral config. Deep-merged over defaults for `type=agent`; omit to use defaults"
@@ -138,6 +138,10 @@ Field description conventions:
   `/org-limits` route) — only the prose changes.
 - Say **"API key"**, never `sk_…` or "secret". Don't print the key's literal
   prefix; describe headers as `Authorization: Bearer <api-key>` / `X-API-Key`.
+- **Address the reader directly, in second person.** Say **"your workspace"** and
+  **"you"** — never "the caller", "the caller's workspace", "the requesting user",
+  or other third-person indirection. (In *code comments* and internal helper
+  docstrings, "caller" correctly means the calling function — leave those.)
 
 ## Non-negotiables specific to this repo
 

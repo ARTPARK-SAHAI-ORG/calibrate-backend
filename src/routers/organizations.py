@@ -81,7 +81,7 @@ def _require_membership(org_uuid: str, user_id: str) -> str:
 
 @router.get("", response_model=List[OrganizationResponse], summary="List workspaces")
 async def list_orgs(user_id: str = Depends(get_current_user_id)):
-    """List every workspace (workspace) the caller is an active member of."""
+    """List every workspace you are an active member of."""
     return [OrganizationResponse(**o) for o in list_organizations_for_user(user_id)]
 
 
@@ -90,7 +90,7 @@ async def create_org(
     request: CreateOrganizationRequest,
     user_id: str = Depends(get_current_user_id),
 ):
-    """Create a new (non-personal) workspace (workspace) with the caller as owner."""
+    """Create a new (non-personal) workspace with you as owner."""
     org_uuid = create_organization(name=request.name, owner_user_id=user_id)
     org = get_organization(org_uuid)
     return OrganizationResponse(**org, member_role="owner")
@@ -102,7 +102,7 @@ async def rename_org(
     request: UpdateOrganizationRequest = ...,
     user_id: str = Depends(get_current_user_id),
 ):
-    """Rename an workspace. The caller must be a member; returns 404 otherwise."""
+    """Rename a workspace. You must be a member; returns 404 otherwise."""
     role = _require_membership(org_uuid, user_id)
     update_organization_name(org_uuid, request.name)
     org = get_organization(org_uuid)
@@ -114,7 +114,7 @@ async def list_members(
     org_uuid: str = Path(description="Workspace UUID (8-char identifier)"),
     user_id: str = Depends(get_current_user_id),
 ):
-    """List members of an workspace. The caller must be a member; returns 404 otherwise."""
+    """List members of a workspace. You must be a member; returns 404 otherwise."""
     _require_membership(org_uuid, user_id)
     return [MemberResponse(**m) for m in list_organization_members(org_uuid)]
 

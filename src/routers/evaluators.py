@@ -62,7 +62,7 @@ class OutputConfig(BaseModel):
 class VariableSpec(BaseModel):
     name: str = Field(description="`{{placeholder}}` name used in the system prompt (immutable across versions)")
     description: Optional[str] = Field(None, description="Human-readable description of the variable. Omit if self-evident")
-    default: Optional[str] = Field(None, description="Default value used when a caller omits this variable. Omit for no default")
+    default: Optional[str] = Field(None, description="Default value used when you omit this variable. Omit for no default")
 
 
 class EvaluatorVersionCreate(BaseModel):
@@ -320,7 +320,7 @@ def _evaluator_response(evaluator: Dict[str, Any]) -> EvaluatorResponse:
 async def create_evaluator_endpoint(
     payload: EvaluatorCreate, ctx: OrgContext = Depends(get_current_org)
 ):
-    """Create a custom evaluator in the caller's workspace along with its first version, which is set live."""
+    """Create a custom evaluator in your workspace along with its first version, which is set live."""
     _ensure_unique_evaluator_name(payload.name, ctx.org_uuid)
     with name_uniqueness_guard("Evaluator"):
         evaluator_uuid = create_evaluator(
@@ -419,7 +419,7 @@ async def list_evaluators(
     ),
     ctx: OrgContext = Depends(get_current_org),
 ):
-    """List evaluators visible to the caller's workspace (custom + seeded defaults), each with its inlined live version."""
+    """List evaluators visible to your workspace (custom + seeded defaults), each with its inlined live version."""
     evaluators = get_all_evaluators(
         org_uuid=ctx.org_uuid,
         include_defaults=include_defaults,
@@ -502,7 +502,7 @@ async def duplicate_evaluator_endpoint(
     evaluator_uuid: str = Path(description="UUID (8-char identifier) of the evaluator to copy"),
     ctx: OrgContext = Depends(get_current_org),
 ):
-    """Copy any visible evaluator (including a seeded default) into a new editable custom evaluator owned by the caller."""
+    """Copy any visible evaluator (including a seeded default) into a new editable custom evaluator that you own."""
     _visible_or_404(get_evaluator(evaluator_uuid), ctx.org_uuid)
     _ensure_unique_evaluator_name(payload.name, ctx.org_uuid)
     with name_uniqueness_guard("Evaluator"):

@@ -49,7 +49,7 @@ class ToolCreateResponse(BaseModel):
 async def create_tool_endpoint(
     tool: ToolCreate, ctx: OrgContext = Depends(get_current_org)
 ):
-    """Create a new tool in the caller's current workspace. The name must be unique within the workspace."""
+    """Create a new tool in your workspace. The name must be unique within the workspace."""
     with ensure_name_unique("tools", tool.name, ctx.org_uuid, entity="Tool"):
         tool_uuid = create_tool(
             name=tool.name,
@@ -63,7 +63,7 @@ async def create_tool_endpoint(
 
 @router.get("", response_model=List[ToolResponse], summary="List tools")
 async def list_tools(ctx: OrgContext = Depends(get_current_org)):
-    """List all tools for the caller's current workspace."""
+    """List all tools for your workspace."""
     tools = get_all_tools(org_uuid=ctx.org_uuid)
     return tools
 
@@ -73,7 +73,7 @@ async def get_tool_endpoint(
     tool_uuid: str = Path(description="Tool UUID (8-char identifier)"),
     ctx: OrgContext = Depends(get_current_org),
 ):
-    """Retrieve a single tool by UUID within the caller's workspace."""
+    """Retrieve a single tool by UUID within your workspace."""
     tool = get_tool(tool_uuid)
     if not tool or tool.get("org_uuid") != ctx.org_uuid:
         raise HTTPException(status_code=404, detail="Tool not found")

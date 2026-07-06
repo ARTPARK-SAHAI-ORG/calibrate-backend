@@ -68,7 +68,7 @@ async def create_annotator_endpoint(
     payload: AnnotatorCreate,
     ctx: OrgContext = Depends(get_current_org),
 ):
-    """Create a new annotator in the caller's workspace. Name must be unique per workspace."""
+    """Create a new annotator in your workspace. Name must be unique per workspace."""
     try:
         with ensure_name_unique(
             "annotators", payload.name, ctx.org_uuid, entity="Annotator"
@@ -85,7 +85,7 @@ async def create_annotator_endpoint(
 
 @router.get("", response_model=List[AnnotatorResponse], summary="List annotators")
 async def list_annotators(ctx: OrgContext = Depends(get_current_org)):
-    """List all annotators in the caller's workspace with per-annotator stats:
+    """List all annotators in your workspace with per-annotator stats:
     `jobs_count` and `current_agreement` (pairwise mean vs other annotators).
     Both are `null` when there's nothing to compute (no jobs / no overlap).
     """

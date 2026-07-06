@@ -51,7 +51,7 @@ class OrgLimitsCreateResponse(BaseModel):
 
 @router.get("/me/max-rows-per-eval", summary="Get own max rows per eval")
 async def get_max_rows_per_eval(ctx: OrgContext = Depends(get_current_org)):
-    """Get the max rows per eval for the caller's current workspace. Falls back to
+    """Get the max rows per eval for your workspace. Falls back to
     the server default (`DEFAULT_MAX_ROWS_PER_EVAL`) when no workspace-specific
     limit is set."""
     limits = get_org_limits(ctx.org_uuid)
@@ -64,7 +64,7 @@ async def get_max_rows_per_eval(ctx: OrgContext = Depends(get_current_org)):
 async def create_org_limits_endpoint(
     data: OrgLimitsCreate, user_id: str = Depends(require_superadmin)
 ):
-    """Create limits for an workspace. Superadmin only. Returns 404 if the workspace
+    """Create limits for a workspace. Superadmin only. Returns 404 if the workspace
     doesn't exist and 409 if limits already exist (use PUT to update)."""
     if not get_organization(data.org_uuid):
         raise HTTPException(status_code=404, detail="Organization not found")
@@ -91,7 +91,7 @@ async def get_org_limits_endpoint(
     target_org_uuid: str = Path(description="Target workspace UUID (8-char identifier)"),
     ctx: OrgContext = Depends(get_current_org),
 ):
-    """Get limits for an workspace. The caller must be a member of the target workspace (or
+    """Get limits for a workspace. You must be a member of the target workspace (or
     a superadmin). Returns 404 if not permitted or no limits are set."""
     if get_member_role(target_org_uuid, ctx.user_id) is None and not is_superadmin_user(ctx.user_id):
         raise HTTPException(status_code=404, detail="Organization limits not found")
@@ -107,7 +107,7 @@ async def update_org_limits_endpoint(
     data: OrgLimitsUpdate = ...,
     user_id: str = Depends(require_superadmin),
 ):
-    """Update limits for an workspace. Superadmin only. Returns 404 if no limits row
+    """Update limits for a workspace. Superadmin only. Returns 404 if no limits row
     exists for the workspace."""
     updated = update_org_limits(org_uuid=target_org_uuid, limits=data.limits)
     if not updated:
@@ -120,7 +120,7 @@ async def delete_org_limits_endpoint(
     target_org_uuid: str = Path(description="Target workspace UUID (8-char identifier)"),
     user_id: str = Depends(require_superadmin),
 ):
-    """Delete limits for an workspace, reverting it to the server default. Superadmin
+    """Delete limits for a workspace, reverting it to the server default. Superadmin
     only. Returns 404 if no limits row exists for the workspace."""
     deleted = delete_org_limits(target_org_uuid)
     if not deleted:

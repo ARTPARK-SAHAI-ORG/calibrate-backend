@@ -226,7 +226,7 @@ async def create_annotation_task_endpoint(
     payload: AnnotationTaskCreate,
     ctx: OrgContext = Depends(get_current_org),
 ):
-    """Create a new annotation task in the caller's workspace. Optionally link
+    """Create a new annotation task in your workspace. Optionally link
     evaluators in the same call. Name must be unique per workspace."""
     if payload.type not in ANNOTATION_TASK_TYPES:
         raise HTTPException(
@@ -259,7 +259,7 @@ async def create_annotation_task_endpoint(
 
 @router.get("", response_model=List[AnnotationTaskResponse], summary="List annotation tasks")
 async def list_annotation_tasks(ctx: OrgContext = Depends(get_current_org)):
-    """List all annotation tasks in the caller's workspace, each with its linked
+    """List all annotation tasks in your workspace, each with its linked
     evaluators. `items`/`jobs` are omitted here — use the single-task fetch."""
     tasks = get_all_annotation_tasks(org_uuid=ctx.org_uuid)
     for task in tasks:

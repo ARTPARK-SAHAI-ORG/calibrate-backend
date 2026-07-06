@@ -186,7 +186,7 @@ class AgentResponse(BaseModel):
     uuid: str = Field(description="Agent UUID (8-char identifier)")
     name: str = Field(description="Human-readable agent name")
     type: Literal["agent", "connection"] = Field(
-        description="`agent` (managed defaults) or `connection` (caller-supplied config)"
+        description="`agent` (managed defaults) or `connection` (config you supply)"
     )
     config: Dict[str, Any] | None = Field(
         None, description="Behavioral config; null when the agent has none"
@@ -205,7 +205,7 @@ class RunTestRequest(BaseModel):
 class BatchRunRequest(BaseModel):
     agent_names: Optional[List[str]] = Field(
         None,
-        description="Agent names to run (validated up front — any unknown name 404s and no jobs start). Omit/null/empty to run every agent in the caller's workspace",
+        description="Agent names to run (validated up front — any unknown name 404s and no jobs start). Omit/null/empty to run every agent in your workspace",
     )
 
 
@@ -622,7 +622,7 @@ async def get_all_test_runs_for_user(
     ),
 ):
     """List all test runs (unit tests and benchmarks) across every agent in the
-    caller's current workspace, newest-updated first. Each item carries `agent_id` and
+    your workspace, newest-updated first. Each item carries `agent_id` and
     `agent_name` so the frontend can group or label by agent."""
     jobs = get_agent_test_jobs_for_org(ctx.org_uuid, job_type=type)
 
@@ -732,7 +732,7 @@ async def bulk_delete_agent_tests(
     ctx: OrgContext = Depends(get_current_org),
 ):
     """Soft-delete the named tests (and their link rows), unlike `/bulk-unlink`
-    which only unlinks. Only tests in the caller's CURRENT WORKSPACE that are linked to
+    which only unlinks. Only tests in your workspace that are linked to
     `agent_uuid` are deleted — UUIDs from other workspaces or not linked to this agent
     are silently skipped, so this can't touch a foreign test or probe for foreign
     UUIDs. Deleting a test cascades to remove its links across every agent, not
@@ -2173,9 +2173,9 @@ async def run_tests_batch(
 
     - **Provided (non-empty)** — run only those agents. Names are unique per workspace
       and **all are validated up front**: if any doesn't resolve to a
-      (non-deleted) agent in the caller's workspace, the call 404s with the offending
+      (non-deleted) agent in your workspace, the call 404s with the offending
       names and NO jobs are created.
-    - **Omitted / null / empty** — run every agent in the caller's workspace.
+    - **Omitted / null / empty** — run every agent in your workspace.
 
     For each selected agent, its linked tests are launched as one job. Agents
     with no linked tests or an unverified connection are reported under
@@ -2269,7 +2269,7 @@ async def update_test_run_visibility(
 ):
     """Toggle public sharing for an agent test run. Enabling it mints (or reuses)
     a share token; disabling it clears the token. 404s if the run isn't owned by
-    the caller's workspace."""
+    your workspace."""
     job = _load_owned_agent_test_job(task_id, ctx)
 
     if body.is_public:
@@ -3063,7 +3063,7 @@ async def update_benchmark_visibility(
 ):
     """Toggle public sharing for a benchmark run. Enabling it mints (or reuses) a
     share token; disabling it clears the token. 404s if the run isn't owned by
-    the caller's workspace."""
+    your workspace."""
     job = _load_owned_agent_test_job(task_id, ctx)
 
     if body.is_public:
@@ -3148,7 +3148,7 @@ async def delete_agent_test_job_endpoint(
 ):
     """Delete an agent test or benchmark job. Only members of the parent agent's
     workspace can delete. Deleting a running job triggers the next queued job to start.
-    404s if the job isn't owned by the caller's workspace."""
+    404s if the job isn't owned by your workspace."""
     job = get_agent_test_job(job_uuid)
     if not job:
         raise HTTPException(status_code=404, detail="Job not found")

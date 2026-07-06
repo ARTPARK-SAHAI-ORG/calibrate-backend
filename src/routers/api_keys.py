@@ -1,6 +1,6 @@
 """API keys router — credentials for programmatic API access.
 
-A key is scoped to the caller's active workspace (resolved via `get_current_org`, i.e.
+A key is scoped to your workspace (resolved via `get_current_org`, i.e.
 the `X-Org-UUID` header or the personal workspace). The API key is returned
 exactly once, on creation; afterwards only its prefix and bcrypt hash are stored,
 so it can be listed/revoked but never re-displayed. Authenticate downstream
@@ -115,7 +115,7 @@ async def create_key(
     request: CreateApiKeyRequest,
     ctx: OrgContext = Depends(get_current_org),
 ):
-    """Mint a new API key for the caller's active workspace. The API key is
+    """Mint a new API key for your workspace. The API key is
     returned exactly once in this response and never again — store it now."""
     raw_key, key_prefix = generate_api_key()
     row = create_api_key(
@@ -131,7 +131,7 @@ async def create_key(
 
 @router.get("", response_model=List[ApiKeyResponse], summary="List API keys")
 async def list_keys(ctx: OrgContext = Depends(get_current_org)):
-    """List active API keys for the caller's active workspace. Raw keys are never
+    """List active API keys for your workspace. Raw keys are never
     returned — only `masked_key` / `last_four`."""
     return [ApiKeyResponse.from_row(k) for k in list_api_keys_for_org(ctx.org_uuid)]
 
@@ -142,7 +142,7 @@ async def revoke_key(
     ctx: OrgContext = Depends(get_current_org),
 ):
     """Revoke (soft-delete) an API key, immediately disabling it for auth.
-    Returns 404 if it isn't in the caller's workspace."""
+    Returns 404 if it isn't in your workspace."""
     if get_api_key(key_uuid, ctx.org_uuid) is None:
         raise HTTPException(status_code=404, detail="API key not found")
     soft_delete_api_key(key_uuid, ctx.org_uuid)

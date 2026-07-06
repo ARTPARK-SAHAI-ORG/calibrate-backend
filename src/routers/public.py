@@ -397,7 +397,7 @@ async def get_public_default_evaluators(
         description="Comma-separated evaluator types to include (`stt,tts,llm,llm-general,conversation`); omit for all",
     ),
 ):
-    """List public-safe default evaluator metadata for callers holding a valid
+    """List public-safe default evaluator metadata if you hold a valid
     share token. Omits prompts, judge models, owner metadata, and any
     custom/private evaluators. No authentication required."""
     _ensure_valid_public_share_token(share_token)
