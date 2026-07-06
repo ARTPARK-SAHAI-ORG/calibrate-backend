@@ -137,7 +137,7 @@ router = APIRouter(prefix="/annotation-tasks", tags=["annotation-tasks"])
 
 
 class AnnotationTaskCreate(BaseModel):
-    name: str = Field(description="Human-readable task name, unique within the org")
+    name: str = Field(description="Human-readable task name, unique within the workspace")
     type: str = Field(
         description="Task type — one of the `ANNOTATION_TASK_TYPES` (`stt | tts | llm | llm-general | conversation`); governs the item payload shape and which evaluators apply"
     )
@@ -146,13 +146,13 @@ class AnnotationTaskCreate(BaseModel):
     )
     evaluator_ids: Optional[List[str]] = Field(
         None,
-        description="Evaluator UUIDs to link at creation, in order. Each must be owned by the org (or a seeded default). Omit to create with no evaluators linked",
+        description="Evaluator UUIDs to link at creation, in order. Each must be owned by the workspace (or a seeded default). Omit to create with no evaluators linked",
     )
 
 
 class AnnotationTaskUpdate(BaseModel):
     name: Optional[str] = Field(
-        None, description="New task name (unique within the org). Omit to leave unchanged"
+        None, description="New task name (unique within the workspace). Omit to leave unchanged"
     )
     description: Optional[str] = Field(
         None, description="New task description. Omit to leave unchanged"
@@ -192,7 +192,7 @@ class AnnotationTaskCreateResponse(BaseModel):
 
 class EvaluatorLinkRequest(BaseModel):
     evaluator_id: str = Field(
-        description="Evaluator UUID (8-char identifier) to link. Must be owned by the org or a seeded default"
+        description="Evaluator UUID (8-char identifier) to link. Must be owned by the workspace or a seeded default"
     )
 
 
@@ -226,8 +226,8 @@ async def create_annotation_task_endpoint(
     payload: AnnotationTaskCreate,
     ctx: OrgContext = Depends(get_current_org),
 ):
-    """Create a new annotation task in the caller's org. Optionally link
-    evaluators in the same call. Name must be unique per org."""
+    """Create a new annotation task in the caller's workspace. Optionally link
+    evaluators in the same call. Name must be unique per workspace."""
     if payload.type not in ANNOTATION_TASK_TYPES:
         raise HTTPException(
             status_code=400,
@@ -259,7 +259,7 @@ async def create_annotation_task_endpoint(
 
 @router.get("", response_model=List[AnnotationTaskResponse], summary="List annotation tasks")
 async def list_annotation_tasks(ctx: OrgContext = Depends(get_current_org)):
-    """List all annotation tasks in the caller's org, each with its linked
+    """List all annotation tasks in the caller's workspace, each with its linked
     evaluators. `items`/`jobs` are omitted here — use the single-task fetch."""
     tasks = get_all_annotation_tasks(org_uuid=ctx.org_uuid)
     for task in tasks:
@@ -464,7 +464,7 @@ class BulkItemsRequest(BaseModel):
     )
     annotator_id: Optional[str] = Field(
         None,
-        description="Annotator UUID to attribute seeded annotations to. **Required when any item carries `annotations`.** Must be owned by the org; all seeded annotations land on one synthesised job for this annotator",
+        description="Annotator UUID to attribute seeded annotations to. **Required when any item carries `annotations`.** Must be owned by the workspace; all seeded annotations land on one synthesised job for this annotator",
     )
 
 
@@ -1020,7 +1020,7 @@ async def list_item_annotations(
 
 class CreateJobsRequest(BaseModel):
     annotator_ids: List[str] = Field(
-        description="Annotator UUIDs to create jobs for — one job per annotator. Must be non-empty and owned by the org"
+        description="Annotator UUIDs to create jobs for — one job per annotator. Must be non-empty and owned by the workspace"
     )
     item_ids: List[str] = Field(
         default=[],

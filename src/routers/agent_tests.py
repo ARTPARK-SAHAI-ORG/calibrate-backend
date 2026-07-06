@@ -205,7 +205,7 @@ class RunTestRequest(BaseModel):
 class BatchRunRequest(BaseModel):
     agent_names: Optional[List[str]] = Field(
         None,
-        description="Agent names to run (validated up front — any unknown name 404s and no jobs start). Omit/null/empty to run every agent in the caller's org",
+        description="Agent names to run (validated up front — any unknown name 404s and no jobs start). Omit/null/empty to run every agent in the caller's workspace",
     )
 
 
@@ -445,7 +445,7 @@ class GlobalTestRunListItem(AgentTestRunListItem):
 
 class GlobalTestRunsResponse(BaseModel):
     runs: List[GlobalTestRunListItem] = Field(
-        description="Test runs across every agent in the org, newest-updated first"
+        description="Test runs across every agent in the workspace, newest-updated first"
     )
 
 
@@ -612,7 +612,7 @@ async def get_agent_test_runs(
 
 
 @router.get(
-    "/runs", response_model=GlobalTestRunsResponse, summary="List test runs for org"
+    "/runs", response_model=GlobalTestRunsResponse, summary="List test runs for workspace"
 )
 async def get_all_test_runs_for_user(
     ctx: OrgContext = Depends(get_current_org),
@@ -622,7 +622,7 @@ async def get_all_test_runs_for_user(
     ),
 ):
     """List all test runs (unit tests and benchmarks) across every agent in the
-    caller's current org, newest-updated first. Each item carries `agent_id` and
+    caller's current workspace, newest-updated first. Each item carries `agent_id` and
     `agent_name` so the frontend can group or label by agent."""
     jobs = get_agent_test_jobs_for_org(ctx.org_uuid, job_type=type)
 
@@ -732,8 +732,8 @@ async def bulk_delete_agent_tests(
     ctx: OrgContext = Depends(get_current_org),
 ):
     """Soft-delete the named tests (and their link rows), unlike `/bulk-unlink`
-    which only unlinks. Only tests in the caller's CURRENT ORG that are linked to
-    `agent_uuid` are deleted — UUIDs from other orgs or not linked to this agent
+    which only unlinks. Only tests in the caller's CURRENT WORKSPACE that are linked to
+    `agent_uuid` are deleted — UUIDs from other workspaces or not linked to this agent
     are silently skipped, so this can't touch a foreign test or probe for foreign
     UUIDs. Deleting a test cascades to remove its links across every agent, not
     just this one. Cross-agent deletes require separate calls.
@@ -2062,8 +2062,8 @@ async def run_agent_test(
     specified tests (or all linked tests when `test_uuids` is omitted). The
     agent's connection must be verified first (400 otherwise) — every test type
     runs the agent live. Returns a task ID to poll for status and results.
-    Accepts a JWT (frontend) or an `sk_` API key; the agent must belong to the
-    caller's org or this 404s.
+    Accepts a JWT (frontend) or an API key; the agent must belong to the
+    caller's workspace or this 404s.
     """
     # Verify agent exists and belongs to the caller's org.
     agent = get_agent(agent_uuid)
@@ -2118,7 +2118,7 @@ def _run_tests_for_agents(
     Agents with no linked tests or an unverified connection are skipped and
     reported under ``skipped`` rather than aborting the whole batch. Each launched
     agent yields one ``llm-unit-test`` job (its task_id), subject to the normal
-    per-org concurrency queue — over-limit jobs come back ``queued``.
+    per-workspace concurrency queue — over-limit jobs come back ``queued``.
     """
     runs: List[BatchTestRun] = []
     skipped: List[BatchTestSkip] = []
@@ -2172,18 +2172,18 @@ async def run_tests_batch(
 
     Scope is driven by the optional ``agent_names`` payload:
 
-    - **Provided (non-empty)** — run only those agents. Names are unique per org
+    - **Provided (non-empty)** — run only those agents. Names are unique per workspace
       and **all are validated up front**: if any doesn't resolve to a
-      (non-deleted) agent in the caller's org, the call 404s with the offending
+      (non-deleted) agent in the caller's workspace, the call 404s with the offending
       names and NO jobs are created.
-    - **Omitted / null / empty** — run every agent in the caller's org.
+    - **Omitted / null / empty** — run every agent in the caller's workspace.
 
     For each selected agent, its linked tests are launched as one job. Agents
     with no linked tests or an unverified connection are reported under
-    ``skipped`` instead of failing the batch. Subject to the normal per-org
+    ``skipped`` instead of failing the batch. Subject to the normal per-workspace
     concurrency queue, so over-limit jobs come back ``queued``.
 
-    Auth accepts a JWT (frontend) or an `sk_` API key (programmatic clients).
+    Auth accepts a JWT (frontend) or an API key (programmatic clients).
     Returns one ``runs`` entry per launched agent with ``agent_name``,
     ``agent_uuid``, ``task_id``, and ``status``.
     """
@@ -2223,14 +2223,14 @@ async def run_tests_batch(
 
 
 def _load_owned_agent_test_job(task_id: str, ctx: OrgContext) -> Dict[str, Any]:
-    """Fetch an agent-test job and assert the caller's org owns it.
+    """Fetch an agent-test job and assert the caller's workspace owns it.
 
     Ownership is derived through the job's parent agent (``agent_test_jobs`` has
-    no org column of its own). Returns the job dict on success; raises 404 with
-    the same generic ``"Task not found"`` detail for the missing / cross-org /
+    no workspace column of its own). Returns the job dict on success; raises 404 with
+    the same generic ``"Task not found"`` detail for the missing / cross-workspace /
     orphaned cases so existence is never leaked. A soft-deleted agent makes its
     runs unreadable here (``get_agent`` filters ``deleted_at``), consistent with
-    the org-wide runs list. Used by the run/benchmark status and visibility
+    the workspace-wide runs list. Used by the run/benchmark status and visibility
     endpoints — keep the rule in this one place.
     """
     job = get_agent_test_job(task_id)
@@ -2271,7 +2271,7 @@ async def update_test_run_visibility(
 ):
     """Toggle public sharing for an agent test run. Enabling it mints (or reuses)
     a share token; disabling it clears the token. 404s if the run isn't owned by
-    the caller's org."""
+    the caller's workspace."""
     job = _load_owned_agent_test_job(task_id, ctx)
 
     if body.is_public:
@@ -2297,7 +2297,7 @@ async def get_agent_test_run_status(
 ):
     """Retrieve the status of an agent test run, plus the results once done.
 
-    Accepts a JWT (frontend) or an `sk_` API key, and requires org ownership of
+    Accepts a JWT (frontend) or an API key, and requires workspace ownership of
     the run. Unauthenticated access to a completed run is only possible once it
     is made public, via the share-token endpoint in the public router.
     """
@@ -3065,7 +3065,7 @@ async def update_benchmark_visibility(
 ):
     """Toggle public sharing for a benchmark run. Enabling it mints (or reuses) a
     share token; disabling it clears the token. 404s if the run isn't owned by
-    the caller's org."""
+    the caller's workspace."""
     job = _load_owned_agent_test_job(task_id, ctx)
 
     if body.is_public:
@@ -3091,7 +3091,7 @@ async def get_benchmark_status(
     """Retrieve the status of a benchmark run, plus per-model results and the
     leaderboard once done.
 
-    Requires a valid JWT and org ownership of the run. Unauthenticated access to
+    Requires a valid JWT and workspace ownership of the run. Unauthenticated access to
     a completed run is only possible once it is made public, via the share-token
     endpoint in the public router.
     """
@@ -3149,8 +3149,8 @@ async def delete_agent_test_job_endpoint(
     ctx: OrgContext = Depends(get_current_org),
 ):
     """Delete an agent test or benchmark job. Only members of the parent agent's
-    org can delete. Deleting a running job triggers the next queued job to start.
-    404s if the job isn't owned by the caller's org."""
+    workspace can delete. Deleting a running job triggers the next queued job to start.
+    404s if the job isn't owned by the caller's workspace."""
     job = get_agent_test_job(job_uuid)
     if not job:
         raise HTTPException(status_code=404, detail="Job not found")

@@ -64,7 +64,7 @@ async def list_jobs(
     ),
     ctx: OrgContext = Depends(get_current_org),
 ):
-    """List jobs for the caller's current org, newest first. Optionally filter
+    """List jobs for the caller's current workspace, newest first. Optionally filter
     by job type. A job's `dataset_id`/`dataset_name` are nulled out when the
     source dataset has since been deleted."""
     db_job_type = JOB_TYPE_MAP.get(job_type) if job_type else None
@@ -107,7 +107,7 @@ async def delete_job_endpoint(
     ctx: OrgContext = Depends(get_current_org),
 ):
     """Delete a job. If it is still running, its processes are killed first and
-    the next queued eval job is started. Returns 404 if not in the caller's org."""
+    the next queued eval job is started. Returns 404 if not in the caller's workspace."""
     job = get_job(job_uuid, org_uuid=ctx.org_uuid)
     if not job:
         raise HTTPException(status_code=404, detail="Job not found")

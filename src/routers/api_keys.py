@@ -1,10 +1,10 @@
 """API keys router — credentials for programmatic API access.
 
-A key is scoped to the caller's active org (resolved via `get_current_org`, i.e.
-the `X-Org-UUID` header or the personal org). The raw `sk_…` key is returned
+A key is scoped to the caller's active workspace (resolved via `get_current_org`, i.e.
+the `X-Org-UUID` header or the personal workspace). The API key is returned
 exactly once, on creation; afterwards only its prefix and bcrypt hash are stored,
 so it can be listed/revoked but never re-displayed. Authenticate downstream
-requests with `Authorization: Bearer sk_…` or `X-API-Key: sk_…` — see
+requests with `Authorization: Bearer <api-key>` or `X-API-Key: <api-key>` — see
 `auth_utils.get_org_jwt_or_api_key`.
 """
 
@@ -41,7 +41,7 @@ class CreateApiKeyRequest(BaseModel):
 
 
 def _masked(last_four: str) -> str:
-    """Display form once the raw key is gone, e.g. `sk_••••1a2b`."""
+    """Display form once the raw key is gone, e.g. `••••1a2b`."""
     return f"{API_KEY_PREFIX}••••{last_four}"
 
 
@@ -76,7 +76,7 @@ class ApiKeyResponse(BaseModel):
         description="Last 4 chars of the raw key — the only fragment retained after creation"
     )
     masked_key: str = Field(
-        description="Ready-to-render display string, e.g. `sk_••••1a2b`"
+        description="Ready-to-render display string, e.g. `••••1a2b`"
     )
     last_used_at: Optional[str] = Field(
         None,
@@ -104,7 +104,7 @@ class CreateApiKeyResponse(ApiKeyResponse):
     again; subsequent reads only ever return `masked_key` / `last_four`."""
 
     key: str = Field(
-        description="The raw `sk_…` secret. **Returned exactly once, at creation** — store it now; it can never be retrieved again"
+        description="The API key. **Returned exactly once, at creation** — store it now; it can never be retrieved again"
     )
 
 
@@ -115,7 +115,7 @@ async def create_key(
     request: CreateApiKeyRequest,
     ctx: OrgContext = Depends(get_current_org),
 ):
-    """Mint a new API key for the caller's active org. The raw `sk_…` key is
+    """Mint a new API key for the caller's active workspace. The API key is
     returned exactly once in this response and never again — store it now."""
     raw_key, key_prefix = generate_api_key()
     row = create_api_key(
@@ -131,7 +131,7 @@ async def create_key(
 
 @router.get("", response_model=List[ApiKeyResponse], summary="List API keys")
 async def list_keys(ctx: OrgContext = Depends(get_current_org)):
-    """List active API keys for the caller's active org. Raw keys are never
+    """List active API keys for the caller's active workspace. Raw keys are never
     returned — only `masked_key` / `last_four`."""
     return [ApiKeyResponse.from_row(k) for k in list_api_keys_for_org(ctx.org_uuid)]
 
@@ -142,7 +142,7 @@ async def revoke_key(
     ctx: OrgContext = Depends(get_current_org),
 ):
     """Revoke (soft-delete) an API key, immediately disabling it for auth.
-    Returns 404 if it isn't in the caller's org."""
+    Returns 404 if it isn't in the caller's workspace."""
     if get_api_key(key_uuid, ctx.org_uuid) is None:
         raise HTTPException(status_code=404, detail="API key not found")
     soft_delete_api_key(key_uuid, ctx.org_uuid)

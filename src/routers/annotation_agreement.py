@@ -28,7 +28,7 @@ from annotation_metrics import (
 router = APIRouter(prefix="/annotation-agreement", tags=["annotation-agreement"])
 
 
-@router.get("/trend", summary="Get org agreement trend")
+@router.get("/trend", summary="Get workspace agreement trend")
 async def agreement_trend(
     bucket: str = Query(
         "week",
@@ -40,13 +40,13 @@ async def agreement_trend(
     ),
     task_id: Optional[str] = Query(
         None,
-        description="Annotation task UUID (8-char identifier). Restrict all metrics to this task; omit for org-wide",
+        description="Annotation task UUID (8-char identifier). Restrict all metrics to this task; omit for workspace-wide",
     ),
     ctx: OrgContext = Depends(get_current_org),
 ):
     """Org-wide human-vs-human agreement trend, plus per-evaluator
     human-vs-evaluator alignment for every evaluator that has produced at
-    least one run on the org's data.
+    least one run on the workspace's data.
 
     Pass `task_id` to restrict all metrics to a single annotation task.
 

@@ -33,6 +33,16 @@ HTTP_METHODS = {"get", "post", "put", "patch", "delete"}
 PATH_PARAM_FUNCS = {"Path", "PathParam"}
 _PATH_TOKEN = re.compile(r"\{([^{}:]+)(?::[^{}]+)?\}")
 
+# Terminology gate for user-facing doc text (see the api-writing-style skill).
+# The lookarounds exempt code identifiers/paths (org_uuid, get_current_org,
+# X-Org-UUID, /org-limits, ...) — only the standalone prose word is banned.
+_BANNED_TERMS = [
+    (re.compile(r"(?<![\w`\-])[Oo]rgs?(?![\w`\-])"), "say 'workspace', not 'org'"),
+    (re.compile(r"(?<![\w`\-])[Oo]rganizations?(?![\w`\-])"), "say 'workspace', not 'organization'"),
+    (re.compile(r"(?<!\w)sk_"), "don't reference the raw 'sk_…' key — say 'API key'"),
+    (re.compile(r"\bsecret\b"), "say 'API key', not 'secret'"),
+]
+
 REPO_ROOT = Path(__file__).resolve().parent.parent
 ROUTERS_DIR = REPO_ROOT / "src" / "routers"
 
@@ -168,6 +178,36 @@ def _route_decorator(func) -> Optional[ast.Call]:
     return None
 
 
+def _doc_string_nodes(tree: ast.Module):
+    """Every user-facing doc string literal: docstrings + summary=/description=."""
+    out = []
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.Module, ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef)):
+            body = getattr(node, "body", [])
+            if (
+                body
+                and isinstance(body[0], ast.Expr)
+                and isinstance(body[0].value, ast.Constant)
+                and isinstance(body[0].value.value, str)
+            ):
+                out.append(body[0].value)
+        if isinstance(node, ast.Call):
+            for kw in node.keywords:
+                if kw.arg in ("summary", "description") and isinstance(kw.value, ast.Constant) and isinstance(kw.value.value, str):
+                    out.append(kw.value)
+    return out
+
+
+def _check_terminology(tree: ast.Module, rel: str) -> list[str]:
+    out = []
+    for node in _doc_string_nodes(tree):
+        text = node.value
+        for pat, msg in _BANNED_TERMS:
+            if pat.search(text):
+                out.append(f"{rel}:{node.lineno}: banned term in doc text — {msg}")
+    return out
+
+
 def find_violations(routers_dir: Path = ROUTERS_DIR) -> list[str]:
     violations: list[str] = []
     for path in sorted(routers_dir.glob("*.py")):
@@ -187,6 +227,7 @@ def find_violations(routers_dir: Path = ROUTERS_DIR) -> list[str]:
                 dec = _route_decorator(node)
                 if dec is not None:
                     violations.extend(_check_route(node, dec, rel))
+        violations.extend(_check_terminology(tree, rel))
     return violations
 
 

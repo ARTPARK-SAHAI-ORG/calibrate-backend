@@ -57,7 +57,7 @@ class EvaluatorRef(BaseModel):
 
 
 class TestCreate(BaseModel):
-    name: str = Field(description="Human-readable test name, unique within the org")
+    name: str = Field(description="Human-readable test name, unique within the workspace")
     type: TestType = Field(
         description="Test kind (immutable after creation): `response` judges the generated reply, `tool_call` diffs generated tool calls, `conversation` judges the full conversation"
     )
@@ -209,14 +209,14 @@ class BulkTestDelete(BaseModel):
 
 
 class BulkTestDeleteResponse(BaseModel):
-    deleted_count: int = Field(description="Number of tests actually deleted (excludes UUIDs not in the caller's org)")
+    deleted_count: int = Field(description="Number of tests actually deleted (excludes UUIDs not in the caller's workspace)")
     message: str = Field(description="Human-readable confirmation message")
 
 
 def _validate_evaluators(
     refs: List[EvaluatorRef], org_uuid: str, test_type: str
 ) -> List[Dict[str, Any]]:
-    """Validate that each referenced evaluator is visible to the org and that its
+    """Validate that each referenced evaluator is visible to the workspace and that its
     `evaluator_type` matches the test's type (`response`/`tool_call` ⇒ `llm`,
     `conversation` ⇒ `simulation`). Returns db-ready refs."""
     required_evaluator_type = REQUIRED_EVALUATOR_TYPE_BY_TEST_TYPE.get(test_type)
@@ -260,7 +260,7 @@ def _with_evaluators(test_dict: Dict[str, Any]) -> Dict[str, Any]:
 async def bulk_delete_tests_endpoint(
     payload: BulkTestDelete, ctx: OrgContext = Depends(get_current_org)
 ):
-    """Soft-delete multiple tests by UUID. Silently skips UUIDs outside the caller's org."""
+    """Soft-delete multiple tests by UUID. Silently skips UUIDs outside the caller's workspace."""
     if not payload.test_uuids:
         raise HTTPException(status_code=400, detail="test_uuids must not be empty")
 
@@ -358,7 +358,7 @@ async def bulk_upload_tests(
 async def create_test_endpoint(
     test: TestCreate, ctx: OrgContext = Depends(get_current_org)
 ):
-    """Create a test in the caller's org. `conversation` tests require at least one evaluator (no fallback judge)."""
+    """Create a test in the caller's workspace. `conversation` tests require at least one evaluator (no fallback judge)."""
     # Conversation tests have no evaluator fallback (unlike `response`, which can
     # synthesize the default LLM judge from legacy string criteria) — without a
     # linked simulation evaluator a run produces an empty calibrate config with
@@ -389,7 +389,7 @@ async def create_test_endpoint(
 
 @router.get("", response_model=List[TestResponse], summary="List tests")
 async def list_tests(ctx: OrgContext = Depends(get_current_org)):
-    """List all tests for the caller's current org, each with its linked evaluators."""
+    """List all tests for the caller's current workspace, each with its linked evaluators."""
     tests = get_all_tests(org_uuid=ctx.org_uuid)
     return [_with_evaluators(t) for t in tests]
 
@@ -399,7 +399,7 @@ async def get_test_endpoint(
     test_uuid: str = Path(description="Test UUID (8-char identifier)"),
     ctx: OrgContext = Depends(get_current_org),
 ):
-    """Retrieve a single test by UUID, with its linked evaluators. 404 if outside the caller's org."""
+    """Retrieve a single test by UUID, with its linked evaluators. 404 if outside the caller's workspace."""
     test = get_test(test_uuid)
     if not test or test.get("org_uuid") != ctx.org_uuid:
         raise HTTPException(status_code=404, detail="Test not found")
@@ -481,7 +481,7 @@ async def delete_test_endpoint(
     test_uuid: str = Path(description="Test UUID (8-char identifier)"),
     ctx: OrgContext = Depends(get_current_org),
 ):
-    """Soft-delete a test. 404 if it doesn't exist or is outside the caller's org."""
+    """Soft-delete a test. 404 if it doesn't exist or is outside the caller's workspace."""
     existing_test = get_test(test_uuid)
     if not existing_test or existing_test.get("org_uuid") != ctx.org_uuid:
         raise HTTPException(status_code=404, detail="Test not found")

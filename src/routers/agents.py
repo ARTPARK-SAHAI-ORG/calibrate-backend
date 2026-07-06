@@ -207,7 +207,7 @@ def _deep_merge(base: Dict[str, Any], override: Dict[str, Any]) -> Dict[str, Any
 
 
 class AgentCreate(BaseModel):
-    name: str = Field(description="Human-readable agent name, unique within the org")
+    name: str = Field(description="Human-readable agent name, unique within the workspace")
     type: Literal["agent", "connection"] = Field(
         "agent",
         description="`agent` applies managed defaults deep-merged under any supplied `config`; `connection` stores the caller config as-is (must eventually contain `agent_url`)",
@@ -238,7 +238,7 @@ class AgentUpdate(BaseModel):
 
 class AgentResponse(BaseModel):
     uuid: str = Field(description="Agent UUID (8-char identifier)")
-    name: str = Field(description="Human-readable agent name, unique within the org")
+    name: str = Field(description="Human-readable agent name, unique within the workspace")
     type: Literal["agent", "connection"] = Field(
         description="`agent` (managed defaults) or `connection` (caller-supplied config)"
     )
@@ -256,7 +256,7 @@ class AgentCreateResponse(BaseModel):
 
 class AgentDuplicateRequest(BaseModel):
     name: str = Field(
-        description="Name for the duplicated agent, unique within the org"
+        description="Name for the duplicated agent, unique within the workspace"
     )
 
 
@@ -269,16 +269,16 @@ class AgentDuplicateResponse(BaseModel):
 
 class ResolveAgentNamesRequest(BaseModel):
     names: List[str] = Field(
-        description="Agent names to resolve to UUIDs within the caller's org"
+        description="Agent names to resolve to UUIDs within the caller's workspace"
     )
 
 
 class ResolveAgentNamesResponse(BaseModel):
     resolved: Dict[str, str] = Field(
-        description="Map of requested name → agent UUID (8-char) for every name that matched an agent in the org"
+        description="Map of requested name → agent UUID (8-char) for every name that matched an agent in the workspace"
     )
     not_found: List[str] = Field(
-        description="Requested names with no matching (non-deleted) agent in the org"
+        description="Requested names with no matching (non-deleted) agent in the workspace"
     )
 
 
@@ -424,13 +424,13 @@ async def resolve_agent_names(
     request: ResolveAgentNamesRequest,
     ctx: OrgContext = Depends(get_org_jwt_or_api_key),
 ):
-    """Resolve a list of agent names to their UUIDs within the caller's org.
+    """Resolve a list of agent names to their UUIDs within the caller's workspace.
 
-    Auth accepts either a JWT (frontend) or an `sk_` API key (programmatic
+    Auth accepts either a JWT (frontend) or an API key (programmatic
     clients) via `get_org_jwt_or_api_key`, so CI tooling can map human-friendly
     agent names to the UUIDs the run/poll endpoints expect. Agent names are
-    unique per org, so each name resolves to at most one agent. Names with no
-    matching (non-deleted) agent in the org are returned under `not_found`.
+    unique per workspace, so each name resolves to at most one agent. Names with no
+    matching (non-deleted) agent in the workspace are returned under `not_found`.
     """
     agents = get_all_agents(org_uuid=ctx.org_uuid)
     name_to_uuid = {agent["name"]: agent["uuid"] for agent in agents}
@@ -450,7 +450,7 @@ async def resolve_agent_names(
 async def create_agent_endpoint(
     agent: AgentCreate, ctx: OrgContext = Depends(get_current_org)
 ):
-    """Create a new agent in the caller's org.
+    """Create a new agent in the caller's workspace.
 
     For `type=agent`, sensible defaults (system_prompt, llm.model, stt, tts,
     settings — overridable via DEFAULT_AGENT_* env vars) are applied, and any
@@ -481,11 +481,11 @@ async def create_agent_endpoint(
     summary="List agents",
 )
 async def list_agents(ctx: OrgContext = Depends(get_org_jwt_or_api_key)):
-    """List all agents for the caller's current org.
+    """List all agents for the caller's current workspace.
 
-    Auth accepts either a JWT (frontend) or an `sk_` API key (programmatic
+    Auth accepts either a JWT (frontend) or an API key (programmatic
     clients) via `get_org_jwt_or_api_key`, so CI tooling can enumerate every
-    agent UUID in the org without knowing names up front (the run/poll and
+    agent UUID in the workspace without knowing names up front (the run/poll and
     `/resolve` endpoints accept the same key).
     """
     agents = get_all_agents(org_uuid=ctx.org_uuid)
@@ -497,7 +497,7 @@ async def get_agent_endpoint(
     agent_uuid: str = Path(description="Agent UUID (8-char identifier)"),
     ctx: OrgContext = Depends(get_current_org),
 ):
-    """Retrieve a single agent by UUID. 404s if it isn't in the caller's org."""
+    """Retrieve a single agent by UUID. 404s if it isn't in the caller's workspace."""
     agent = get_agent(agent_uuid)
     if not agent or agent.get("org_uuid") != ctx.org_uuid:
         raise HTTPException(status_code=404, detail="Agent not found")
@@ -512,7 +512,7 @@ async def update_agent_endpoint(
 ):
     """Update an agent's name and/or config. Changing `agent_url` or
     `agent_headers` in the config resets all connection/benchmark verification
-    flags. 404s if the agent isn't in the caller's org; 400 if no fields change.
+    flags. 404s if the agent isn't in the caller's workspace; 400 if no fields change.
     """
     existing_agent = get_agent(agent_uuid)
     if not existing_agent or existing_agent.get("org_uuid") != ctx.org_uuid:
@@ -561,7 +561,7 @@ async def delete_agent_endpoint(
     agent_uuid: str = Path(description="Agent UUID (8-char identifier)"),
     ctx: OrgContext = Depends(get_current_org),
 ):
-    """Soft-delete an agent. 404s if it isn't in the caller's org."""
+    """Soft-delete an agent. 404s if it isn't in the caller's workspace."""
     existing_agent = get_agent(agent_uuid)
     if not existing_agent or existing_agent.get("org_uuid") != ctx.org_uuid:
         raise HTTPException(status_code=404, detail="Agent not found")

@@ -58,7 +58,7 @@ the description when it's a soft delete), **Create** (not "Add"/"New").
 ## Descriptions
 
 - First sentence: verb-first statement of intent — `Retrieve a ...`,
-  `Create a new ...`, `Soft-delete a ...`, `List the ... for the caller's org.`
+  `Create a new ...`, `Soft-delete a ...`, `List the ... for the caller's workspace.`
 - Then, only if non-obvious, add short sentences for: one-time-only return values,
   irreversibility, default filters/ordering (`newest first`, `active by default`),
   scoping, required conditions, or auth mode (JWT vs API key).
@@ -74,7 +74,7 @@ async def delete_api_key(...):
 ```python
 @router.get("", response_model=list[AgentResponse], summary="List agents")
 async def list_agents(...):
-    """List agents for the caller's current org. Accepts a JWT or an `sk_` API key."""
+    """List agents for the caller's current workspace. Accepts a JWT or an API key."""
 ```
 
 ## Path & query params
@@ -104,7 +104,7 @@ optional fields default to `None` and their description says what omission means
 from pydantic import BaseModel, Field
 
 class AgentCreate(BaseModel):
-    name: str = Field(description="Human-readable agent name, unique within the org")
+    name: str = Field(description="Human-readable agent name, unique within the workspace")
     type: Literal["agent", "connection"] = Field(
         "agent",
         description="`agent` applies managed defaults; `connection` stores the caller config as-is",
@@ -122,6 +122,15 @@ Field description conventions:
 - For enums/`Literal`, describe each value briefly with backticks.
 - Response-only fields (`uuid`, `created_at`, `masked_key`, `message`) still get a
   short description — they show up in the SDK and docs too.
+
+## Terminology (user-facing docs)
+
+- Say **"workspace"**, never "org" / "organization", in any doc text (summaries,
+  docstrings, field/param descriptions). Code identifiers are exempt and stay as-is
+  (`org_uuid`, `get_current_org`, `OrgContext`, the `X-Org-UUID` header, the
+  `/org-limits` route) — only the prose changes.
+- Say **"API key"**, never `sk_…` or "secret". Don't print the key's literal
+  prefix; describe headers as `Authorization: Bearer <api-key>` / `X-API-Key`.
 
 ## Non-negotiables specific to this repo
 

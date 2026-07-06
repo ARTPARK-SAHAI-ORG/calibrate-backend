@@ -17,7 +17,7 @@ router = APIRouter(prefix="/personas", tags=["personas"])
 
 
 class PersonaCreate(BaseModel):
-    name: str = Field(description="Human-readable persona name, unique within the org")
+    name: str = Field(description="Human-readable persona name, unique within the workspace")
     description: Optional[str] = Field(
         None, description="Free-text description of the persona. Omit to leave unset"
     )
@@ -28,7 +28,7 @@ class PersonaCreate(BaseModel):
 
 class PersonaUpdate(BaseModel):
     name: Optional[str] = Field(
-        None, description="New persona name, unique within the org. Omit to leave unchanged"
+        None, description="New persona name, unique within the workspace. Omit to leave unchanged"
     )
     description: Optional[str] = Field(
         None, description="New description. Omit to leave unchanged"
@@ -60,7 +60,7 @@ class PersonaCreateResponse(BaseModel):
 async def create_persona_endpoint(
     persona: PersonaCreate, ctx: OrgContext = Depends(get_current_org)
 ):
-    """Create a new persona in the caller's current org. The name must be unique within the org."""
+    """Create a new persona in the caller's current workspace. The name must be unique within the workspace."""
     with ensure_name_unique("personas", persona.name, ctx.org_uuid, entity="Persona"):
         persona_uuid = create_persona(
             name=persona.name,
@@ -76,7 +76,7 @@ async def create_persona_endpoint(
 
 @router.get("", response_model=List[PersonaResponse], summary="List personas")
 async def list_personas(ctx: OrgContext = Depends(get_current_org)):
-    """List all personas for the caller's current org."""
+    """List all personas for the caller's current workspace."""
     personas = get_all_personas(org_uuid=ctx.org_uuid)
     return personas
 
@@ -86,7 +86,7 @@ async def get_persona_endpoint(
     persona_uuid: str = Path(description="Persona UUID (8-char identifier)"),
     ctx: OrgContext = Depends(get_current_org),
 ):
-    """Retrieve a single persona by UUID within the caller's org."""
+    """Retrieve a single persona by UUID within the caller's workspace."""
     persona = get_persona(persona_uuid)
     if not persona or persona.get("org_uuid") != ctx.org_uuid:
         raise HTTPException(status_code=404, detail="Persona not found")

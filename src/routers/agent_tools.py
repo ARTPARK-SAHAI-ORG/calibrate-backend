@@ -95,7 +95,7 @@ async def create_agent_tool_links(
     ctx: OrgContext = Depends(get_current_org),
 ):
     """Link one or more tools to an agent. The agent AND every tool must belong
-    to the caller's org — cross-org linking is rejected as 404. Already-linked
+    to the caller's workspace — cross-workspace linking is rejected as 404. Already-linked
     tools are skipped, so the call is idempotent."""
     _require_owned_agent(agent_tools.agent_uuid, ctx.org_uuid)
     for tool_uuid in agent_tools.tool_uuids:
@@ -124,7 +124,7 @@ async def create_agent_tool_links(
     "", response_model=List[AgentToolResponse], summary="List agent-tool links"
 )
 async def list_agent_tools(ctx: OrgContext = Depends(get_current_org)):
-    """List all agent-tool links scoped to the caller's org."""
+    """List all agent-tool links scoped to the caller's workspace."""
     return get_all_agent_tools(org_uuid=ctx.org_uuid)
 
 
@@ -137,7 +137,7 @@ async def get_agent_tools(
     agent_uuid: str = Path(description="Agent UUID (8-char identifier)"),
     ctx: OrgContext = Depends(get_current_org),
 ):
-    """List the tools linked to an agent. 404s if the agent isn't in the caller's org."""
+    """List the tools linked to an agent. 404s if the agent isn't in the caller's workspace."""
     _require_owned_agent(agent_uuid, ctx.org_uuid)
     return get_tools_for_agent(agent_uuid)
 
@@ -151,7 +151,7 @@ async def get_tool_agents(
     tool_uuid: str = Path(description="Tool UUID (8-char identifier)"),
     ctx: OrgContext = Depends(get_current_org),
 ):
-    """List the agents a tool is linked to. 404s if the tool isn't in the caller's org."""
+    """List the agents a tool is linked to. 404s if the tool isn't in the caller's workspace."""
     _require_owned_tool(tool_uuid, ctx.org_uuid)
     return get_agents_for_tool(tool_uuid)
 
@@ -161,7 +161,7 @@ async def delete_agent_tool_link(
     agent_tool: AgentToolDelete, ctx: OrgContext = Depends(get_current_org)
 ):
     """Unlink a tool from an agent. Requires the agent to be in the caller's
-    org — the tool's org doesn't matter on delete (the link being torn down
+    workspace — the tool's workspace doesn't matter on delete (the link being torn down
     was created by someone who already had access)."""
     _require_owned_agent(agent_tool.agent_uuid, ctx.org_uuid)
     deleted = remove_tool_from_agent(agent_tool.agent_uuid, agent_tool.tool_uuid)

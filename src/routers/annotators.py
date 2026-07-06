@@ -25,12 +25,12 @@ router = APIRouter(prefix="/annotators", tags=["annotators"])
 
 
 class AnnotatorCreate(BaseModel):
-    name: str = Field(description="Human-readable annotator name, unique within the org")
+    name: str = Field(description="Human-readable annotator name, unique within the workspace")
 
 
 class AnnotatorUpdate(BaseModel):
     name: Optional[str] = Field(
-        None, description="New annotator name (unique within the org). Omit to leave unchanged"
+        None, description="New annotator name (unique within the workspace). Omit to leave unchanged"
     )
 
 
@@ -68,7 +68,7 @@ async def create_annotator_endpoint(
     payload: AnnotatorCreate,
     ctx: OrgContext = Depends(get_current_org),
 ):
-    """Create a new annotator in the caller's org. Name must be unique per org."""
+    """Create a new annotator in the caller's workspace. Name must be unique per workspace."""
     try:
         with ensure_name_unique(
             "annotators", payload.name, ctx.org_uuid, entity="Annotator"
@@ -85,7 +85,7 @@ async def create_annotator_endpoint(
 
 @router.get("", response_model=List[AnnotatorResponse], summary="List annotators")
 async def list_annotators(ctx: OrgContext = Depends(get_current_org)):
-    """List all annotators in the caller's org with per-annotator stats:
+    """List all annotators in the caller's workspace with per-annotator stats:
     `jobs_count` and `current_agreement` (pairwise mean vs other annotators).
     Both are `null` when there's nothing to compute (no jobs / no overlap).
     """

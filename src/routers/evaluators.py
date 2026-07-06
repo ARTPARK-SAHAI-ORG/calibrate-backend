@@ -96,7 +96,7 @@ DataTypeLiteral = Literal["text", "audio"]
 
 
 class EvaluatorCreate(BaseModel):
-    name: str = Field(..., min_length=1, description="Evaluator name, unique within the org")
+    name: str = Field(..., min_length=1, description="Evaluator name, unique within the workspace")
     description: Optional[str] = Field(None, description="Human-readable description. Omit to leave blank")
     evaluator_type: EvaluatorTypeLiteral = Field(
         "llm",
@@ -140,7 +140,7 @@ class EvaluatorUpdate(BaseModel):
 
 
 class EvaluatorDuplicateRequest(BaseModel):
-    name: str = Field(..., min_length=1, description="Name for the new copy, unique within the org")
+    name: str = Field(..., min_length=1, description="Name for the new copy, unique within the workspace")
 
 
 class EvaluatorVersionResponse(BaseModel):
@@ -222,7 +222,7 @@ class SetLiveVersionRequest(BaseModel):
 
 
 def _owner_check(evaluator: Dict[str, Any], org_uuid: str) -> None:
-    """Seeded defaults (org_uuid IS NULL) are visible to every org but mutable by no one."""
+    """Seeded defaults (org_uuid IS NULL) are visible to every workspace but mutable by no one."""
     if evaluator.get("org_uuid") is None:
         raise HTTPException(status_code=403, detail="Default evaluators cannot be modified")
     if evaluator.get("org_uuid") != org_uuid:
@@ -320,7 +320,7 @@ def _evaluator_response(evaluator: Dict[str, Any]) -> EvaluatorResponse:
 async def create_evaluator_endpoint(
     payload: EvaluatorCreate, ctx: OrgContext = Depends(get_current_org)
 ):
-    """Create a custom evaluator in the caller's org along with its first version, which is set live."""
+    """Create a custom evaluator in the caller's workspace along with its first version, which is set live."""
     _ensure_unique_evaluator_name(payload.name, ctx.org_uuid)
     with name_uniqueness_guard("Evaluator"):
         evaluator_uuid = create_evaluator(
@@ -415,11 +415,11 @@ async def list_evaluators(
         None, description="Filter by medium (`text`/`audio`). Omit for all"
     ),
     include_defaults: bool = Query(
-        True, description="When `true`, include seeded default evaluators alongside the org's custom ones"
+        True, description="When `true`, include seeded default evaluators alongside the workspace's custom ones"
     ),
     ctx: OrgContext = Depends(get_current_org),
 ):
-    """List evaluators visible to the caller's org (custom + seeded defaults), each with its inlined live version."""
+    """List evaluators visible to the caller's workspace (custom + seeded defaults), each with its inlined live version."""
     evaluators = get_all_evaluators(
         org_uuid=ctx.org_uuid,
         include_defaults=include_defaults,

@@ -295,7 +295,7 @@ class SimulationCreate(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    name: str = Field(description="Human-readable simulation name, unique within the org")
+    name: str = Field(description="Human-readable simulation name, unique within the workspace")
     agent_uuid: Optional[str] = Field(None, description="Agent (8-char UUID) under test. Omit to create without an agent")
     persona_uuids: Optional[List[str]] = Field(None, description="Personas (8-char UUIDs) to link. Omit to link none")
     scenario_uuids: Optional[List[str]] = Field(None, description="Scenarios (8-char UUIDs) to link. Omit to link none")
@@ -595,7 +595,7 @@ def apply_simulation_job_evaluator_enrichment(
 async def create_simulation_endpoint(
     simulation: SimulationCreate, ctx: OrgContext = Depends(get_current_org)
 ):
-    """Create a simulation in the caller's org, optionally linking an agent, personas, scenarios, and `conversation` evaluators."""
+    """Create a simulation in the caller's workspace, optionally linking an agent, personas, scenarios, and `conversation` evaluators."""
     if simulation.agent_uuid:
         agent = get_agent(simulation.agent_uuid)
         if not agent or agent.get("org_uuid") != ctx.org_uuid:
@@ -659,7 +659,7 @@ async def create_simulation_endpoint(
 
 @router.get("", response_model=List[SimulationListResponse], summary="List simulations")
 async def list_simulations(ctx: OrgContext = Depends(get_current_org)):
-    """List all simulations for the caller's current org, each with its linked agent summary."""
+    """List all simulations for the caller's current workspace, each with its linked agent summary."""
     simulations = get_all_simulations(org_uuid=ctx.org_uuid)
     result = []
     for sim in simulations:
@@ -896,7 +896,7 @@ async def get_simulation_endpoint(
     simulation_uuid: str = PathParam(description="Simulation UUID (8-char identifier)"),
     ctx: OrgContext = Depends(get_current_org),
 ):
-    """Retrieve a simulation by UUID with its linked agent, personas, scenarios, and evaluators. 404 if outside the caller's org."""
+    """Retrieve a simulation by UUID with its linked agent, personas, scenarios, and evaluators. 404 if outside the caller's workspace."""
     simulation = get_simulation(simulation_uuid)
     if not simulation or simulation.get("org_uuid") != ctx.org_uuid:
         raise HTTPException(status_code=404, detail="Simulation not found")
@@ -1067,7 +1067,7 @@ async def delete_simulation_endpoint(
     simulation_uuid: str = PathParam(description="Simulation UUID (8-char identifier)"),
     ctx: OrgContext = Depends(get_current_org),
 ):
-    """Soft-delete a simulation. 404 if it doesn't exist or is outside the caller's org."""
+    """Soft-delete a simulation. 404 if it doesn't exist or is outside the caller's workspace."""
     existing_simulation = get_simulation(simulation_uuid)
     if (
         not existing_simulation
@@ -2330,7 +2330,7 @@ async def run_simulation_endpoint(
     """Launch a background text or voice simulation run for the linked agent across its personas x scenarios.
 
     Requires a linked agent, at least one persona, and one scenario. Voice runs are unsupported
-    in agent-connection mode. Subject to the org's concurrency queue, so the run may start `queued`.
+    in agent-connection mode. Subject to the workspace's concurrency queue, so the run may start `queued`.
     Returns a task ID to poll for status and results.
     """
     simulation = get_simulation(simulation_uuid)
@@ -2515,7 +2515,7 @@ async def delete_simulation_job_endpoint(
     job_uuid: str = PathParam(description="Simulation run/job UUID (8-char identifier)"),
     ctx: OrgContext = Depends(get_current_org),
 ):
-    """Delete a simulation run/job. If it was in progress, its process is killed and the next queued job starts. Scoped to the parent simulation's org."""
+    """Delete a simulation run/job. If it was in progress, its process is killed and the next queued job starts. Scoped to the parent simulation's workspace."""
     simulation_job = get_simulation_job(job_uuid)
     if not simulation_job:
         raise HTTPException(status_code=404, detail="Job not found")
