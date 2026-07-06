@@ -278,7 +278,7 @@ class ResolveAgentNamesResponse(BaseModel):
         description="Map of requested name → agent UUID (8-char) for every name that matched an agent in the workspace"
     )
     not_found: List[str] = Field(
-        description="Requested names with no matching (non-deleted) agent in the workspace"
+        description="Requested names with no matching agent in the workspace"
     )
 
 
@@ -427,7 +427,7 @@ async def resolve_agent_names(
     """Resolve agent names to their UUIDs within the workspace.
 
     Names are unique per workspace, so each resolves to at most one agent.
-    Names with no matching (non-deleted) agent are returned under `not_found`.
+    Names with no matching agent are returned under `not_found`.
     """
     # Public API. Auth via get_org_jwt_or_api_key (JWT for the web app, API key
     # for CI). Maps human-friendly names to the UUIDs the run/poll endpoints expect.
