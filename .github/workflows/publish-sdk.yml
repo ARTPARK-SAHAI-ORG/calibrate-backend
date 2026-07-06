@@ -28,7 +28,11 @@ permissions:
   contents: read
 
 jobs:
+  # Only gate on the manual dispatch path. When invoked via workflow_call
+  # (from auto-publish-sdk.yml), the caller's gate has already run — no need
+  # to re-check the same secrets.
   gate:
+    if: github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
     environment: Production
     outputs:
@@ -44,7 +48,9 @@ jobs:
 
   prepare:
     needs: gate
-    if: needs.gate.outputs.publish_enabled == 'yes'
+    if: >-
+      always() &&
+      (needs.gate.result == 'skipped' || needs.gate.outputs.publish_enabled == 'yes')
     runs-on: ubuntu-latest
     environment: Production
     outputs:
