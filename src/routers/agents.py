@@ -206,6 +206,33 @@ def _deep_merge(base: Dict[str, Any], override: Dict[str, Any]) -> Dict[str, Any
     return result
 
 
+_VERIFICATION_CONFIG_KEYS = (
+    "connection_verified",
+    "connection_verified_at",
+    "connection_verified_error",
+    "benchmark_models_verified",
+)
+
+
+def _strip_verification_fields(
+    config: Optional[Dict[str, Any]]
+) -> Optional[Dict[str, Any]]:
+    """Remove server-owned verification flags from a caller-supplied config dict.
+
+    Only `POST /agents/{uuid}/verify-connection` may set these — it's the sole
+    place that runs `_validate_agent_url`'s SSRF guard before contacting
+    `agent_url`. An API-key client self-attesting `connection_verified=true`
+    would skip that check entirely and let the job runner hit an arbitrary
+    URL, so API-key writes always have these keys stripped regardless of
+    whether they arrive via the dedicated fields or smuggled inside `config`.
+    """
+    if not config:
+        return config
+    for key in _VERIFICATION_CONFIG_KEYS:
+        config.pop(key, None)
+    return config
+
+
 class AgentCreate(BaseModel):
     name: str = Field(description="Human-readable agent name, unique within the workspace")
     type: Literal["agent", "connection"] = Field(
@@ -463,6 +490,9 @@ async def create_agent_endpoint(
     else:
         merged_config = agent.config
 
+    if ctx.auth_method == "api_key":
+        merged_config = _strip_verification_fields(merged_config)
+
     with ensure_name_unique("agents", agent.name, ctx.org_uuid, entity="Agent"):
         agent_uuid = create_agent(
             name=agent.name,
@@ -539,7 +569,12 @@ async def update_agent_endpoint(
             agent.config["connection_verified_error"] = None
             agent.config["benchmark_models_verified"] = {}
 
-    if (
+    if ctx.auth_method == "api_key":
+        # API-key clients can't self-attest verification — see
+        # `_strip_verification_fields`. They must call the JWT-only
+        # `/agents/{uuid}/verify-connection` to actually flip these flags.
+        agent.config = _strip_verification_fields(agent.config)
+    elif (
         agent.connection_verified is not None
         or agent.benchmark_models_verified is not None
     ):
@@ -609,10 +644,7 @@ async def duplicate_agent_endpoint(
     if new_config:
         new_config = copy.deepcopy(new_config)
         # Strip verification flags — the duplicated agent's connection is unverified
-        new_config.pop("connection_verified", None)
-        new_config.pop("connection_verified_at", None)
-        new_config.pop("connection_verified_error", None)
-        new_config.pop("benchmark_models_verified", None)
+        new_config = _strip_verification_fields(new_config)
 
     with ensure_name_unique("agents", new_name, ctx.org_uuid, entity="Agent"):
         new_agent_uuid = create_agent(
