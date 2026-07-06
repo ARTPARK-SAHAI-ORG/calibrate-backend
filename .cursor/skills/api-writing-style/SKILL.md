@@ -64,6 +64,13 @@ the description when it's a soft delete), **Create** (not "Add"/"New").
   scoping, required conditions, or auth mode (JWT vs API key).
 - Keep it to ~1–3 sentences for CRUD. Complex/job endpoints may use a short list.
 - Don't restate the params — describe *behavior*, not the signature.
+- **Don't document authentication in the description.** The security scheme
+  already renders as an "Authorizations" section, so drop "Accepts a JWT or an
+  API key"-style boilerplate.
+- **Never leak internal symbols or backstory.** No dependency/function names
+  (e.g. `get_org_jwt_or_api_key`), no CI/use-case narrative, no cross-endpoint
+  asides. That context belongs in a code comment or a guide — not the public
+  description. Keep the blurb about *this* resource and what the call does.
 
 ```python
 @router.delete("/{api_key_id}", summary="Delete API key")

@@ -2062,10 +2062,9 @@ async def run_agent_test(
     specified tests (or all linked tests when `test_uuids` is omitted). The
     agent's connection must be verified first (400 otherwise) — every test type
     runs the agent live. Returns a task ID to poll for status and results.
-    Accepts a JWT (frontend) or an API key; the agent must belong to the
-    caller's workspace or this 404s.
     """
-    # Verify agent exists and belongs to the caller's org.
+    # Public API (auth via get_org_jwt_or_api_key). Verify the agent exists and
+    # belongs to the caller's workspace (404 otherwise).
     agent = get_agent(agent_uuid)
     if not agent or agent.get("org_uuid") != ctx.org_uuid:
         raise HTTPException(status_code=404, detail="Agent not found")
@@ -2181,12 +2180,11 @@ async def run_tests_batch(
     For each selected agent, its linked tests are launched as one job. Agents
     with no linked tests or an unverified connection are reported under
     ``skipped`` instead of failing the batch. Subject to the normal per-workspace
-    concurrency queue, so over-limit jobs come back ``queued``.
-
-    Auth accepts a JWT (frontend) or an API key (programmatic clients).
-    Returns one ``runs`` entry per launched agent with ``agent_name``,
-    ``agent_uuid``, ``task_id``, and ``status``.
+    concurrency queue, so over-limit jobs come back ``queued``. Returns one
+    ``runs`` entry per launched agent with ``agent_name``, ``agent_uuid``,
+    ``task_id``, and ``status``.
     """
+    # Public API (auth via get_org_jwt_or_api_key).
     agent_names = request.agent_names if request else None
 
     org_agents = get_all_agents(org_uuid=ctx.org_uuid)
@@ -2295,12 +2293,12 @@ async def get_agent_test_run_status(
     task_id: str = PathParam(description="Test run job UUID (8-char identifier)"),
     ctx: OrgContext = Depends(get_org_jwt_or_api_key),
 ):
-    """Retrieve the status of an agent test run, plus the results once done.
+    """Retrieve the status of an agent test run, plus its results once complete.
 
-    Accepts a JWT (frontend) or an API key, and requires workspace ownership of
-    the run. Unauthenticated access to a completed run is only possible once it
-    is made public, via the share-token endpoint in the public router.
+    The run is scoped to its owning workspace. A completed run becomes publicly
+    viewable only after it is shared via the public share-token endpoint.
     """
+    # Public API (auth via get_org_jwt_or_api_key); ownership enforced below.
     job = _load_owned_agent_test_job(task_id, ctx)
 
     status = job["status"]

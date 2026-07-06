@@ -424,14 +424,13 @@ async def resolve_agent_names(
     request: ResolveAgentNamesRequest,
     ctx: OrgContext = Depends(get_org_jwt_or_api_key),
 ):
-    """Resolve a list of agent names to their UUIDs within the caller's workspace.
+    """Resolve agent names to their UUIDs within the workspace.
 
-    Auth accepts either a JWT (frontend) or an API key (programmatic
-    clients) via `get_org_jwt_or_api_key`, so CI tooling can map human-friendly
-    agent names to the UUIDs the run/poll endpoints expect. Agent names are
-    unique per workspace, so each name resolves to at most one agent. Names with no
-    matching (non-deleted) agent in the workspace are returned under `not_found`.
+    Names are unique per workspace, so each resolves to at most one agent.
+    Names with no matching (non-deleted) agent are returned under `not_found`.
     """
+    # Public API. Auth via get_org_jwt_or_api_key (JWT for the web app, API key
+    # for CI). Maps human-friendly names to the UUIDs the run/poll endpoints expect.
     agents = get_all_agents(org_uuid=ctx.org_uuid)
     name_to_uuid = {agent["name"]: agent["uuid"] for agent in agents}
 
@@ -481,13 +480,10 @@ async def create_agent_endpoint(
     summary="List agents",
 )
 async def list_agents(ctx: OrgContext = Depends(get_org_jwt_or_api_key)):
-    """List all agents for the caller's current workspace.
-
-    Auth accepts either a JWT (frontend) or an API key (programmatic
-    clients) via `get_org_jwt_or_api_key`, so CI tooling can enumerate every
-    agent UUID in the workspace without knowing names up front (the run/poll and
-    `/resolve` endpoints accept the same key).
-    """
+    """List all agents in the caller's workspace."""
+    # Public API. Auth via get_org_jwt_or_api_key (JWT for the web app, API key
+    # for CI); the run/poll and /resolve endpoints accept the same key, so CI can
+    # enumerate agent UUIDs without knowing names up front.
     agents = get_all_agents(org_uuid=ctx.org_uuid)
     return agents
 
