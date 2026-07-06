@@ -5,9 +5,8 @@ description: House style for writing FastAPI endpoint summaries, descriptions, a
 
 # API Writing Style
 
-House style for documenting FastAPI endpoints and their models in this backend.
-Inferred from the Coval REST API reference (https://docs.coval.ai/api-reference)
-and adapted to FastAPI (docstrings + `summary=` + Pydantic `Field(description=...)`).
+House style for documenting FastAPI endpoints and their models in this backend
+(docstrings + `summary=` + Pydantic `Field(description=...)`).
 
 Goal: every operation reads consistently in `/docs`, `/redoc`, and the generated
 public SDK — a short imperative title, one crisp sentence of intent, non-obvious

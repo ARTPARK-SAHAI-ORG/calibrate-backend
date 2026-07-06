@@ -1,8 +1,27 @@
 #!/usr/bin/env bash
-# Run the unit test suite before committing to main.
-# On other branches, do nothing.
+# Pre-commit checks:
+#   1. On ANY branch: enforce the api-writing-style skill when routers change.
+#   2. On main only: run the full unit test suite.
 
 branch=$(git symbolic-ref --short HEAD 2>/dev/null)
+
+# 1) API doc-style gate — runs on every branch, but only when a router changed.
+if git diff --cached --name-only --diff-filter=ACMR | grep -qE '^src/routers/.*\.py$'; then
+    if ! command -v uv >/dev/null 2>&1; then
+        echo "✗ uv not found on PATH — install uv or run 'uv run python scripts/check_api_docs_style.py' manually." >&2
+        exit 1
+    fi
+    echo "→ pre-commit: checking API doc style (api-writing-style skill)..."
+    if ! uv run python scripts/check_api_docs_style.py; then
+        echo ""
+        echo "✗ API doc-style check failed. Commit aborted."
+        echo "  Fix the routes/models above per .cursor/skills/api-writing-style/SKILL.md,"
+        echo "  or run 'git commit --no-verify' to bypass."
+        exit 1
+    fi
+fi
+
+# 2) Full test suite — main only.
 if [ "$branch" != "main" ]; then
     exit 0
 fi
