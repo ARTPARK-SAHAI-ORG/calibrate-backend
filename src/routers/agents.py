@@ -448,9 +448,14 @@ async def resolve_agent_names(
     return ResolveAgentNamesResponse(resolved=resolved, not_found=not_found)
 
 
-@router.post("", response_model=AgentCreateResponse, summary="Create agent")
+@router.post(
+    "",
+    response_model=AgentCreateResponse,
+    tags=["Public API"],
+    summary="Create agent",
+)
 async def create_agent_endpoint(
-    agent: AgentCreate, ctx: OrgContext = Depends(get_current_org)
+    agent: AgentCreate, ctx: OrgContext = Depends(get_org_jwt_or_api_key)
 ):
     """Create a new agent in your workspace. For `type=agent`, defaults are deep-merged with any config you supply."""
     if agent.type == "agent":
@@ -484,13 +489,18 @@ async def list_agents(ctx: OrgContext = Depends(get_org_jwt_or_api_key)):
     return agents
 
 
-@router.get("/{agent_uuid}", response_model=AgentResponse, summary="Get agent")
+@router.get(
+    "/{agent_uuid}",
+    response_model=AgentResponse,
+    tags=["Public API"],
+    summary="Get agent",
+)
 async def get_agent_endpoint(
     agent_uuid: str = Path(
         description="The agent to retrieve. Must be in your workspace.",
         examples=["f47ac10b-58cc-4372-a567-0e02b2c3d479"],
     ),
-    ctx: OrgContext = Depends(get_current_org),
+    ctx: OrgContext = Depends(get_org_jwt_or_api_key),
 ):
     """Get an agent in your workspace."""
     agent = get_agent(agent_uuid)
@@ -499,14 +509,19 @@ async def get_agent_endpoint(
     return agent
 
 
-@router.put("/{agent_uuid}", response_model=AgentResponse, summary="Update agent")
+@router.put(
+    "/{agent_uuid}",
+    response_model=AgentResponse,
+    tags=["Public API"],
+    summary="Update agent",
+)
 async def update_agent_endpoint(
     agent_uuid: str = Path(
         description="The agent to update. Must be in your workspace.",
         examples=["f47ac10b-58cc-4372-a567-0e02b2c3d479"],
     ),
     agent: AgentUpdate = ...,
-    ctx: OrgContext = Depends(get_current_org),
+    ctx: OrgContext = Depends(get_org_jwt_or_api_key),
 ):
     """Update an agent's name and/or config. Changing `agent_url` or `agent_headers` resets connection and benchmark verification flags."""
     existing_agent = get_agent(agent_uuid)

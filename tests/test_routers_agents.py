@@ -165,3 +165,61 @@ def test_list_agents_requires_auth(client):
 
     bad = client.get("/agents", headers={"X-API-Key": "sk_not-a-real-key"})
     assert bad.status_code == 401
+
+
+def test_create_agent_with_api_key(client):
+    """POST /agents accepts an sk_ API key."""
+    h = _signup(client)
+    raw = _raw_key(client, h)
+    name = f"key-create-{uuid.uuid4().hex[:6]}"
+    r = client.post(
+        "/agents", json={"name": name, "type": "agent"}, headers={"X-API-Key": raw}
+    )
+    assert r.status_code == 200, r.text
+    assert r.json()["uuid"]
+
+
+def test_get_agent_with_api_key(client):
+    """GET /agents/{uuid} accepts an sk_ API key."""
+    h = _signup(client)
+    agent = _create_agent(client, h, f"key-get-{uuid.uuid4().hex[:6]}")
+    raw = _raw_key(client, h)
+    r = client.get(f"/agents/{agent['uuid']}", headers={"X-API-Key": raw})
+    assert r.status_code == 200, r.text
+    assert r.json()["uuid"] == agent["uuid"]
+
+
+def test_update_agent_with_api_key(client):
+    """PUT /agents/{uuid} accepts an sk_ API key."""
+    h = _signup(client)
+    agent = _create_agent(client, h, f"key-upd-{uuid.uuid4().hex[:6]}")
+    raw = _raw_key(client, h)
+    new_name = f"key-upd-new-{uuid.uuid4().hex[:6]}"
+    r = client.put(
+        f"/agents/{agent['uuid']}",
+        json={"name": new_name},
+        headers={"X-API-Key": raw},
+    )
+    assert r.status_code == 200, r.text
+    assert r.json()["name"] == new_name
+
+
+def test_create_agent_invalid_api_key(client):
+    """POST /agents with a bogus key must 401."""
+    r = client.post(
+        "/agents",
+        json={"name": f"bad-{uuid.uuid4().hex[:6]}", "type": "agent"},
+        headers={"X-API-Key": "bad"},
+    )
+    assert r.status_code == 401
+
+
+def test_get_agent_wrong_org_api_key(client):
+    """A key from another org must not read an agent — 404 (existence-leak parity)."""
+    ha = _signup(client)
+    agent = _create_agent(client, ha, f"other-org-{uuid.uuid4().hex[:6]}")
+
+    hb = _signup(client)
+    raw_b = _raw_key(client, hb)
+    r = client.get(f"/agents/{agent['uuid']}", headers={"X-API-Key": raw_b})
+    assert r.status_code == 404
