@@ -39,17 +39,11 @@ REQUIRED_EVALUATOR_TYPE_BY_TEST_TYPE: Dict[str, str] = {
 }
 
 
+# Linked evaluators resolve to the live version at run time (not pinned per test).
 class EvaluatorRef(BaseModel):
-    """Reference to an evaluator attached to a test. The pivot stores the live
-    version as of write time (`set_test_evaluators` in `db.py`), but test RUNS
-    always resolve the evaluator's *current* live version at run time — see
-    `get_evaluators_for_test`. So editing an evaluator after linking it changes
-    what future runs of the test use (no per-test version pinning, unlike
-    simulations/STT/TTS)."""
-
     model_config = ConfigDict(extra="forbid")
 
-    evaluator_uuid: str = Field(description="Evaluator UUID (8-char identifier) to attach to the test")
+    evaluator_uuid: str = Field(description="Evaluator to attach to the test")
     variable_values: Optional[Dict[str, Any]] = Field(
         None,
         description="Values for the evaluator's `{{placeholder}}` variables, pinned per-test on the pivot. Omit to inherit the evaluator version's defaults",
@@ -87,7 +81,7 @@ class TestUpdate(BaseModel):
 
 
 class TestResponse(BaseModel):
-    uuid: str = Field(description="Test UUID (8-char identifier)")
+    uuid: str = Field(description="Test ID")
     name: str = Field(description="Human-readable test name")
     type: str = Field(description="Test kind: `response`, `tool_call`, or `conversation`")
     config: Optional[Dict[str, Any]] = Field(
@@ -102,7 +96,7 @@ class TestResponse(BaseModel):
 
 
 class TestCreateResponse(BaseModel):
-    uuid: str = Field(description="UUID (8-char identifier) of the newly created test")
+    uuid: str = Field(description="ID of the newly created test")
     message: str = Field(description="Human-readable confirmation message")
 
 
@@ -153,7 +147,7 @@ class BulkTestUpload(BaseModel):
         description=f"Test items to create (non-empty, max {500} per request, names unique within the batch)"
     )
     agent_uuids: Optional[List[str]] = Field(
-        None, description="Agents (8-char UUIDs) to link every created test to. Omit to link none"
+        None, description="Agents (IDs) to link every created test to. Omit to link none"
     )
     language: Optional[str] = Field(
         None, description="Language written to each test's `config.settings.language`. Omit to leave unset"
@@ -196,7 +190,7 @@ class BulkTestUpload(BaseModel):
 
 
 class BulkTestUploadResponse(BaseModel):
-    uuids: List[str] = Field(description="UUIDs (8-char identifiers) of the created tests, in request order")
+    uuids: List[str] = Field(description="IDs of the created tests, in request order")
     count: int = Field(description="Number of tests created")
     message: str = Field(description="Human-readable confirmation message")
     warnings: Optional[List[str]] = Field(
@@ -205,11 +199,11 @@ class BulkTestUploadResponse(BaseModel):
 
 
 class BulkTestDelete(BaseModel):
-    test_uuids: List[str] = Field(description="UUIDs (8-char identifiers) of the tests to delete (non-empty)")
+    test_uuids: List[str] = Field(description="IDs of the tests to delete (non-empty)")
 
 
 class BulkTestDeleteResponse(BaseModel):
-    deleted_count: int = Field(description="Number of tests actually deleted (excludes UUIDs not in your workspace)")
+    deleted_count: int = Field(description="Number of tests actually deleted (excludes IDs not in your workspace)")
     message: str = Field(description="Human-readable confirmation message")
 
 
@@ -260,7 +254,7 @@ def _with_evaluators(test_dict: Dict[str, Any]) -> Dict[str, Any]:
 async def bulk_delete_tests_endpoint(
     payload: BulkTestDelete, ctx: OrgContext = Depends(get_current_org)
 ):
-    """Soft-delete multiple tests by UUID. Silently skips UUIDs outside your workspace."""
+    """Soft-delete multiple tests by ID."""
     if not payload.test_uuids:
         raise HTTPException(status_code=400, detail="test_uuids must not be empty")
 
@@ -276,12 +270,7 @@ async def bulk_delete_tests_endpoint(
 async def bulk_upload_tests(
     payload: BulkTestUpload, ctx: OrgContext = Depends(get_current_org)
 ):
-    """Create many tests of one type in a single call, optionally linking them to agents.
-
-    All items share `type`; per-type requirements (evaluators for `response`/`conversation`,
-    tool calls for `tool_call`) are enforced up front. Agent-link failures are reported in
-    `warnings` rather than failing the batch.
-    """
+    """Create many tests of one type in a single call, optionally linking them to agents."""
     if payload.agent_uuids:
         for agent_uuid in payload.agent_uuids:
             agent = get_agent(agent_uuid)
@@ -358,7 +347,7 @@ async def bulk_upload_tests(
 async def create_test_endpoint(
     test: TestCreate, ctx: OrgContext = Depends(get_current_org)
 ):
-    """Create a test in your workspace. `conversation` tests require at least one evaluator (no fallback judge)."""
+    """Create a test in your workspace."""
     # Conversation tests have no evaluator fallback (unlike `response`, which can
     # synthesize the default LLM judge from legacy string criteria) — without a
     # linked simulation evaluator a run produces an empty calibrate config with
@@ -396,10 +385,13 @@ async def list_tests(ctx: OrgContext = Depends(get_current_org)):
 
 @router.get("/{test_uuid}", response_model=TestResponse, summary="Get test")
 async def get_test_endpoint(
-    test_uuid: str = Path(description="Test UUID (8-char identifier)"),
+    test_uuid: str = Path(
+        description="Test to retrieve",
+        examples=["b1c2d3e4-f5a6-7890-bcde-f12345678901"],
+    ),
     ctx: OrgContext = Depends(get_current_org),
 ):
-    """Retrieve a single test by UUID, with its linked evaluators. 404 if outside your workspace."""
+    """Get a test by ID, including its linked evaluators."""
     test = get_test(test_uuid)
     if not test or test.get("org_uuid") != ctx.org_uuid:
         raise HTTPException(status_code=404, detail="Test not found")
@@ -409,14 +401,13 @@ async def get_test_endpoint(
 @router.put("/{test_uuid}", response_model=TestResponse, summary="Update test")
 async def update_test_endpoint(
     test: TestUpdate,
-    test_uuid: str = Path(description="Test UUID (8-char identifier)"),
+    test_uuid: str = Path(
+        description="Test to update",
+        examples=["b1c2d3e4-f5a6-7890-bcde-f12345678901"],
+    ),
     ctx: OrgContext = Depends(get_current_org),
 ):
-    """Update a test's name, config, and/or evaluator links.
-
-    `type` is immutable — sending a different value is rejected. Clearing all evaluators
-    is rejected for `conversation` tests. Only supplied fields change.
-    """
+    """Update a test's name, config, and/or evaluator links."""
     existing_test = get_test(test_uuid)
     if not existing_test or existing_test.get("org_uuid") != ctx.org_uuid:
         raise HTTPException(status_code=404, detail="Test not found")
@@ -478,10 +469,13 @@ async def update_test_endpoint(
 
 @router.delete("/{test_uuid}", summary="Delete test")
 async def delete_test_endpoint(
-    test_uuid: str = Path(description="Test UUID (8-char identifier)"),
+    test_uuid: str = Path(
+        description="Test to delete",
+        examples=["b1c2d3e4-f5a6-7890-bcde-f12345678901"],
+    ),
     ctx: OrgContext = Depends(get_current_org),
 ):
-    """Soft-delete a test. 404 if it doesn't exist or is outside your workspace."""
+    """Soft-delete a test."""
     existing_test = get_test(test_uuid)
     if not existing_test or existing_test.get("org_uuid") != ctx.org_uuid:
         raise HTTPException(status_code=404, detail="Test not found")

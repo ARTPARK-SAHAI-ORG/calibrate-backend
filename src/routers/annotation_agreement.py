@@ -40,20 +40,11 @@ async def agreement_trend(
     ),
     task_id: Optional[str] = Query(
         None,
-        description="Annotation task UUID (8-char identifier). Restrict all metrics to this task; omit for workspace-wide",
+        description="Annotation task to scope metrics to. Omit for workspace-wide trends",
     ),
     ctx: OrgContext = Depends(get_current_org),
 ):
-    """Org-wide human-vs-human agreement trend, plus per-evaluator
-    human-vs-evaluator alignment for every evaluator that has produced at
-    least one run on the workspace's data.
-
-    Pass `task_id` to restrict all metrics to a single annotation task.
-
-    Returns:
-      - `human_human`: `{ current, pair_count, series }`.
-      - `evaluators`: list of `{ evaluator_id, name, current, pair_count, series }`.
-    """
+    """Get human-vs-human agreement trends for your workspace and per-evaluator human alignment."""
     if task_id:
         task = get_annotation_task(task_id)
         if not task or task.get("org_uuid") != ctx.org_uuid:
@@ -115,7 +106,10 @@ async def agreement_trend(
 
 @router.get("/evaluator/{evaluator_uuid}/trend", summary="Get evaluator agreement trend")
 async def evaluator_agreement_trend(
-    evaluator_uuid: str = Path(description="Evaluator UUID (8-char identifier)"),
+    evaluator_uuid: str = Path(
+        description="Evaluator to chart agreement for",
+        examples=["f47ac10b-58cc-4372-a567-0e02b2c3d479"],
+    ),
     bucket: str = Query(
         "week",
         pattern="^(week|month|year)$",
@@ -126,26 +120,15 @@ async def evaluator_agreement_trend(
     ),
     task_id: Optional[str] = Query(
         None,
-        description="Annotation task UUID (8-char identifier). Restrict all metrics to items in this task; omit for all tasks",
+        description="Annotation task to scope metrics to. Omit to include all tasks",
     ),
     version_id: Optional[str] = Query(
         None,
-        description="Evaluator version UUID. Restrict all metrics to this version; omit for all versions",
+        description="Evaluator version to scope metrics to. Omit to include all versions",
     ),
     ctx: OrgContext = Depends(get_current_org),
 ):
-    """Human-vs-evaluator agreement trend for one evaluator, broken down by
-    version and by annotation task.
-
-    Optional filters:
-      - `task_id`: restrict all metrics to items in a single task.
-      - `version_id`: restrict all metrics to a single evaluator version.
-
-    Returns:
-      - `overall`: `{ current, pair_count, series }` across all matching runs.
-      - `versions`: list of `{ version_id, version_number, is_live, current, pair_count, series }`.
-      - `tasks`: list of `{ task_id, task_name, current, pair_count, series }`.
-    """
+    """Get human-vs-evaluator agreement trends for one evaluator, broken down by version and task."""
     evaluator = get_evaluator(evaluator_uuid)
     if not evaluator:
         raise HTTPException(status_code=404, detail="Evaluator not found")

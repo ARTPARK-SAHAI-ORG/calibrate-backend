@@ -1,21 +1,8 @@
-"""
-Public read-only endpoints for shared eval/run results.
+"""Public endpoints for shared eval and run results.
 
-These routes bypass authentication entirely — they are excluded from the
-auth middleware by design so that anyone with a valid share_token can view
-the results without logging in.
-
-URL scheme:
-  GET /public/evaluators/defaults?share_token=...&types=stt,tts
-  GET /public/stt/{share_token}
-  GET /public/tts/{share_token}
-  GET /public/test-run/{share_token}
-  GET /public/benchmark/{share_token}
-  GET /public/simulation-run/{share_token}
-  GET /public/annotation-eval/{share_token}
-  GET /public/annotation-jobs/{public_token}             (annotator: read+write)
-  POST /public/annotation-jobs/{public_token}/annotations (annotator: upsert)
-  GET /public/annotation-jobs/view/{view_token}          (viewer: read-only)
+View STT/TTS runs, agent tests, benchmarks, simulations, and annotation
+results via share links — no sign-in required. Annotator labelling jobs use
+a separate token for read-write access.
 """
 
 import logging
@@ -88,10 +75,10 @@ router = APIRouter(prefix="/public", tags=["public"])
 
 
 class PublicSTTResponse(BaseModel):
-    task_id: str = Field(description="STT eval job identifier (8-char UUID)")
+    task_id: str = Field(description="STT eval job ID")
     status: str = Field(description="Job status, e.g. `in_progress`, `done`, `failed`")
     language: Optional[str] = Field(None, description="Evaluated language code; `null` if unset")
-    dataset_id: Optional[str] = Field(None, description="Source dataset UUID; `null` if unavailable")
+    dataset_id: Optional[str] = Field(None, description="Source dataset ID; `null` if unavailable")
     dataset_name: Optional[str] = Field(None, description="Source dataset name; `null` if unavailable")
     provider_results: Optional[List[ProviderResult]] = Field(
         None, description="Per-provider transcription results and metrics; `null` until available"
@@ -103,10 +90,10 @@ class PublicSTTResponse(BaseModel):
 
 
 class PublicTTSResponse(BaseModel):
-    task_id: str = Field(description="TTS eval job identifier (8-char UUID)")
+    task_id: str = Field(description="TTS eval job ID")
     status: str = Field(description="Job status, e.g. `in_progress`, `done`, `failed`")
     language: Optional[str] = Field(None, description="Evaluated language code; `null` if unset")
-    dataset_id: Optional[str] = Field(None, description="Source dataset UUID; `null` if unavailable")
+    dataset_id: Optional[str] = Field(None, description="Source dataset ID; `null` if unavailable")
     dataset_name: Optional[str] = Field(None, description="Source dataset name; `null` if unavailable")
     provider_results: Optional[List[ProviderResult]] = Field(
         None, description="Per-provider synthesis results and metrics; `null` until available"
@@ -118,17 +105,17 @@ class PublicTTSResponse(BaseModel):
 
 
 class PublicTestRunResponse(BaseModel):
-    task_id: str = Field(description="LLM test run job identifier (8-char UUID)")
+    task_id: str = Field(description="LLM test run job ID")
     status: str = Field(description="Run status, e.g. `in_progress`, `done`, `failed`")
     total_tests: Optional[int] = Field(None, description="Total test cases in the run; `null` until known")
-    passed: Optional[int] = Field(None, description="Number of test cases that passed; `null` until computed")
-    failed: Optional[int] = Field(None, description="Number of test cases that failed; `null` until computed")
+    passed: Optional[int] = Field(None, description="Test cases that passed; `null` until computed")
+    failed: Optional[int] = Field(None, description="Test cases that failed; `null` until computed")
     # Top-level evaluator block — name/description/output_type/rubric
     # shared across every judge_results row. Rows reference back via
     # `evaluator_uuid` so the rubric isn't duplicated per test case.
     evaluators: Optional[List[Dict[str, Any]]] = Field(
         None,
-        description="Shared evaluator definitions (name/description/output_type/rubric); rows reference these by `evaluator_uuid`",
+        description="Shared evaluator definitions (name, description, output type, rubric); rows reference these by evaluator ID",
     )
     results: Optional[List[Dict[str, Any]]] = Field(
         None, description="Per-test-case results; `null` until the run produces them"
@@ -153,7 +140,7 @@ class PublicTestRunResponse(BaseModel):
 
 
 class PublicBenchmarkResponse(BaseModel):
-    task_id: str = Field(description="LLM benchmark job identifier (8-char UUID)")
+    task_id: str = Field(description="LLM benchmark job ID")
     status: str = Field(description="Run status, e.g. `in_progress`, `done`, `failed`")
     # Same as PublicTestRunResponse.evaluators — shared by every model's
     # test_results inside model_results[] (all models run the same suite).
@@ -171,11 +158,11 @@ class PublicBenchmarkResponse(BaseModel):
 
 
 class PublicSimulationRunResponse(BaseModel):
-    task_id: str = Field(description="Simulation run job identifier (8-char UUID)")
+    task_id: str = Field(description="Simulation run job ID")
     name: str = Field(description="Display name for the run, e.g. `Run 1`")
     status: str = Field(description="Run status, e.g. `in_progress`, `done`, `failed`")
     type: str = Field(description="Simulation type (`text` | `voice`)")
-    updated_at: str = Field(description="Last-update timestamp (ISO 8601 UTC)")
+    updated_at: str = Field(description="When the run was last updated (ISO 8601 UTC)")
     total_simulations: Optional[int] = Field(None, description="Number of simulations in the run; `null` until known")
     metrics: Optional[Dict[str, Any]] = Field(None, description="Aggregated run metrics; `null` until computed")
     simulation_results: Optional[List[Dict[str, Any]]] = Field(
@@ -189,19 +176,19 @@ class PublicSimulationRunResponse(BaseModel):
 
 
 class PublicAnnotationEvalTaskRef(BaseModel):
-    uuid: str = Field(description="Annotation task identifier (8-char UUID)")
+    uuid: str = Field(description="Annotation task ID")
     name: str = Field(description="Annotation task name")
     type: str = Field(description="Annotation task type (e.g. `stt`, `llm`, `conversation`)")
     description: Optional[str] = Field(None, description="Task description; `null` if unset")
 
 
 class PublicAnnotationEvalResponse(BaseModel):
-    task_id: str = Field(description="Parent annotation task UUID (8-char identifier)")
-    job_uuid: str = Field(description="Annotation evaluator-run job UUID (8-char identifier)")
-    status: str = Field(description="Run status; public links only expose `done` runs")
-    created_at: Optional[str] = Field(None, description="Creation timestamp (ISO 8601 UTC); `null` if unset")
-    completed_at: Optional[str] = Field(None, description="Completion timestamp (ISO 8601 UTC); `null` if unset")
-    updated_at: Optional[str] = Field(None, description="Last-update timestamp (ISO 8601 UTC); `null` if unset")
+    task_id: str = Field(description="Parent annotation task ID")
+    job_uuid: str = Field(description="Annotation evaluator-run job ID")
+    status: str = Field(description="Run status; share links only expose completed runs")
+    created_at: Optional[str] = Field(None, description="When the run was created (ISO 8601 UTC); `null` if unset")
+    completed_at: Optional[str] = Field(None, description="When the run finished (ISO 8601 UTC); `null` if unset")
+    updated_at: Optional[str] = Field(None, description="When the run was last updated (ISO 8601 UTC); `null` if unset")
     task: PublicAnnotationEvalTaskRef = Field(description="Parent annotation task summary")
     # `details` mirrors the authenticated GET shape so a shared FE component
     # can read `job.details?.evaluators` against either endpoint without
@@ -209,7 +196,7 @@ class PublicAnnotationEvalResponse(BaseModel):
     # fields (pid, pgid, s3_prefix, user_id) are intentionally stripped.
     details: Optional[Dict[str, Any]] = Field(
         None,
-        description="Safe-to-share job metadata; operational fields (pid, pgid, s3_prefix, user_id) are stripped",
+        description="Safe-to-share job metadata; operational fields are stripped",
     )
     # Top-level mirrors retained for the existing public consumers that
     # were already reading them. Both shapes carry the same data.
@@ -220,7 +207,7 @@ class PublicAnnotationEvalResponse(BaseModel):
     items: Optional[List[Dict[str, Any]]] = Field(None, description="Evaluated items; `null` if none")
     runs: Optional[List[Dict[str, Any]]] = Field(
         None,
-        description="Per-item evaluator run rows; each keys back into `evaluators[]` via `(evaluator_id, evaluator_version_id)`",
+        description="Per-item evaluator run rows; each keys back into `evaluators[]` by evaluator and version ID",
     )
     human_agreement: Optional[Dict[str, Any]] = Field(
         None, description="Human-vs-evaluator agreement metrics; `null` if unavailable"
@@ -235,7 +222,7 @@ class PublicDefaultEvaluatorVersionResponse(BaseModel):
 
 
 class PublicDefaultEvaluatorResponse(BaseModel):
-    uuid: str = Field(description="Evaluator identifier (8-char UUID)")
+    uuid: str = Field(description="Evaluator ID")
     name: str = Field(description="Evaluator display name")
     description: Optional[str] = Field(None, description="Evaluator description; `null` if unset")
     evaluator_type: str = Field(description="Semantic category (`stt`, `tts`, `llm`, `llm-general`, `conversation`)")
@@ -391,15 +378,13 @@ def _public_default_evaluator_response(
     summary="List public default evaluators",
 )
 async def get_public_default_evaluators(
-    share_token: str = Query(..., min_length=1, description="Valid public share token gating access"),
+    share_token: str = Query(..., min_length=1, description="Share token that grants access to the linked run"),
     types: Optional[str] = Query(
         None,
-        description="Comma-separated evaluator types to include (`stt,tts,llm,llm-general,conversation`); omit for all",
+        description="Evaluator types to include, comma-separated (`stt`, `tts`, `llm`, `llm-general`, `conversation`); omit for all",
     ),
 ):
-    """List public-safe default evaluator metadata if you hold a valid
-    share token. Omits prompts, judge models, owner metadata, and any
-    custom/private evaluators. No authentication required."""
+    """List default evaluator metadata when you have a valid share token."""
     _ensure_valid_public_share_token(share_token)
     requested_types = _parse_evaluator_types(types)
 
@@ -415,11 +400,9 @@ async def get_public_default_evaluators(
 
 @router.get("/stt/{share_token}", response_model=PublicSTTResponse, summary="Get shared STT run")
 async def get_public_stt(
-    share_token: str = Path(description="Public share token for the STT run"),
+    share_token: str = Path(description="Share token for the STT run"),
 ):
-    """Get a publicly shared STT evaluation result. No authentication required —
-    accessible to anyone with the `share_token`. Returns 404 if the token is
-    unknown or the run has been made private again."""
+    """Get a shared STT evaluation result."""
     job = get_job_by_share_token(share_token, job_type="stt-eval")
     if not job:
         raise HTTPException(status_code=404, detail="Not found")
@@ -489,11 +472,9 @@ async def get_public_stt(
 
 @router.get("/tts/{share_token}", response_model=PublicTTSResponse, summary="Get shared TTS run")
 async def get_public_tts(
-    share_token: str = Path(description="Public share token for the TTS run"),
+    share_token: str = Path(description="Share token for the TTS run"),
 ):
-    """Get a publicly shared TTS evaluation result. No authentication required —
-    accessible to anyone with the `share_token`. Returns 404 if the token is
-    unknown or the run has been made private again."""
+    """Get a shared TTS evaluation result."""
     job = get_job_by_share_token(share_token, job_type="tts-eval")
     if not job:
         raise HTTPException(status_code=404, detail="Not found")
@@ -548,11 +529,9 @@ async def get_public_tts(
 
 @router.get("/test-run/{share_token}", response_model=PublicTestRunResponse, summary="Get shared test run")
 async def get_public_test_run(
-    share_token: str = Path(description="Public share token for the LLM test run"),
+    share_token: str = Path(description="Share token for the LLM test run"),
 ):
-    """Get a publicly shared LLM test run result. No authentication required —
-    accessible to anyone with the `share_token`. Returns 404 if the token is
-    unknown or the run has been made private again."""
+    """Get a shared LLM test run result."""
     job = get_agent_test_job_by_share_token(share_token, job_type="llm-unit-test")
     if not job:
         raise HTTPException(status_code=404, detail="Not found")
@@ -590,11 +569,9 @@ async def get_public_test_run(
 
 @router.get("/benchmark/{share_token}", response_model=PublicBenchmarkResponse, summary="Get shared benchmark")
 async def get_public_benchmark(
-    share_token: str = Path(description="Public share token for the LLM benchmark run"),
+    share_token: str = Path(description="Share token for the LLM benchmark run"),
 ):
-    """Get a publicly shared LLM benchmark result. No authentication required —
-    accessible to anyone with the `share_token`. Returns 404 if the token is
-    unknown or the run has been made private again."""
+    """Get a shared LLM benchmark result."""
     job = get_agent_test_job_by_share_token(share_token, job_type="llm-benchmark")
     if not job:
         raise HTTPException(status_code=404, detail="Not found")
@@ -627,12 +604,9 @@ async def get_public_benchmark(
 
 @router.get("/simulation-run/{share_token}", response_model=PublicSimulationRunResponse, summary="Get shared simulation run")
 async def get_public_simulation_run(
-    share_token: str = Path(description="Public share token for the simulation run"),
+    share_token: str = Path(description="Share token for the simulation run"),
 ):
-    """Get a publicly shared simulation run result. No authentication required —
-    accessible to anyone with the `share_token`. Presigned audio URLs are
-    regenerated on-the-fly for voice simulations. Returns 404 if the token is
-    unknown or the run has been made private again."""
+    """Get a shared simulation run result."""
     job = get_simulation_job_by_share_token(share_token)
     if not job:
         raise HTTPException(status_code=404, detail="Not found")
@@ -677,13 +651,10 @@ async def get_public_simulation_run(
     summary="Get shared annotation eval run",
 )
 async def get_public_annotation_eval(
-    share_token: str = Path(description="Public share token for the annotation evaluator-run job"),
+    share_token: str = Path(description="Share token for the annotation evaluator-run job"),
 ):
-    """Get a publicly shared annotation evaluator-run job result. No
-    authentication required. Only `done` runs are exposed — in-flight or failed
-    runs return 404, as do unknown or re-privatized tokens. Mirrors the
-    authenticated `GET /annotation-tasks/{task_uuid}/evaluator-runs/{job_uuid}`
-    shape so the frontend can render the same view."""
+    """Get a shared annotation evaluator-run result."""
+    # Only `done` runs are exposed; in-flight or failed runs return 404.
     job = get_job_by_share_token(share_token, job_type=ANNOTATION_EVAL_JOB_TYPE)
     if not job:
         raise HTTPException(status_code=404, detail="Not found")
@@ -835,15 +806,7 @@ def _build_annotation_job_payload(
 def get_public_annotation_job_view(
     view_token: str = Path(description="Read-only view token for the annotation job"),
 ):
-    """Read-only public view of one annotator's completed labelling job,
-    served behind a separate `view_token` toggled on by the owner via
-    `PATCH /annotation-tasks/{task_uuid}/jobs/{job_uuid}/visibility`.
-
-    Returns the same shape as the annotator route (`/public/annotation-jobs/
-    {public_token}`) but with `read_only: true`. There is intentionally NO
-    `POST /annotation-jobs/view/{view_token}/annotations` companion — a leaked
-    view_token cannot be coerced into writing labels because the upsert path
-    only accepts the annotator's `public_token`."""
+    """Get a read-only view of an annotator's labelling job."""
     job = get_annotation_job_by_view_token(view_token)
     if not job:
         raise HTTPException(status_code=404, detail="Not found")
@@ -852,17 +815,9 @@ def get_public_annotation_job_view(
 
 @router.get("/annotation-jobs/{token}", summary="Get annotation job for annotator")
 def get_public_annotation_job(
-    token: str = Path(description="Annotator's `public_token` for the labelling job"),
+    token: str = Path(description="Annotator token for the labelling job"),
 ):
-    """Everything an annotator needs to render their job page:
-
-    - Job + status
-    - Annotator's name (so the page can greet them)
-    - Task type + linked evaluators (drives form rendering: binary toggle vs
-      rating scale, plus per-evaluator name/description/output_config)
-    - Items (with their parsed `payload`)
-    - Existing annotations on this job (so the page can resume in-progress work)
-    """
+    """Get everything you need to render an annotator's labelling job page."""
     job = _resolve_public_annotation_job(token)
     return _build_annotation_job_payload(job, read_only=False)
 
@@ -870,35 +825,27 @@ def get_public_annotation_job(
 class PublicAnnotationEntry(BaseModel):
     evaluator_id: Optional[str] = Field(
         None,
-        description="Evaluator UUID this judgement is for; `null` marks a row-level overall annotation",
+        description="Evaluator ID this judgement is for; `null` marks a row-level overall annotation",
     )
     value: Optional[Dict[str, Any]] = Field(
-        None, description="The judgement payload (shape depends on the evaluator's output type); `null` to clear"
+        None, description="Judgement payload (shape depends on the evaluator's output type); `null` to clear"
     )
 
 
 class PublicAnnotationUpsertRequest(BaseModel):
-    item_id: str = Field(description="UUID of the job item being annotated (8-char identifier)")
+    item_id: str = Field(description="Job item you are annotating")
     annotations: List[PublicAnnotationEntry] = Field(
-        description="Judgements to upsert — one entry per evaluator, plus optionally one row-level entry"
+        description="Judgements to save — one entry per evaluator, plus optionally one row-level entry"
     )
 
 
 @router.post("/annotation-jobs/{token}/annotations", summary="Upsert annotations for item")
 def upsert_public_annotations(
-    token: str = Path(description="Annotator's `public_token` for the labelling job"),
+    token: str = Path(description="Annotator token for the labelling job"),
     payload: PublicAnnotationUpsertRequest = ...,
 ):
-    """Upsert all judgements for one item in one call. Pass one entry per
-    evaluator (plus optionally one with `evaluator_id = null` for a row-level
-    overall annotation).
-
-    Side effects:
-      - The job auto-flips from `pending` -> `in_progress` on the first save.
-      - After saving, the job auto-flips to `completed` (with `completed_at`)
-        when every item in the job has annotations for every evaluator linked
-        to the task. Row-level annotations are NOT required.
-    """
+    """Save all judgements for one item in a single request."""
+    # First save moves the job from `pending` to `in_progress`; all slots filled moves it to `completed`.
     job = _resolve_public_annotation_job(token)
     if not payload.annotations:
         raise HTTPException(

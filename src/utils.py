@@ -16,7 +16,7 @@ import boto3
 from botocore.config import Config
 import openpyxl
 import sentry_sdk
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 logger = logging.getLogger(__name__)
 
@@ -159,10 +159,25 @@ class ProviderResult(BaseModel):
 
 
 class TaskCreateResponse(BaseModel):
-    task_id: str
-    status: str
-    dataset_id: Optional[str] = None
-    dataset_name: Optional[str] = None
+    task_id: str = Field(
+        min_length=36,
+        max_length=36,
+        description="Unique identifier for this evaluation job",
+        examples=["a3b2c1d0-e5f4-3210-abcd-ef1234567890"],
+    )
+    status: str = Field(
+        description="Current status of the evaluation job: `queued` or `in_progress`"
+    )
+    dataset_id: Optional[str] = Field(
+        None,
+        min_length=36,
+        max_length=36,
+        description="ID of the dataset being evaluated",
+        examples=["f47ac10b-58cc-4372-a567-0e02b2c3d479"],
+    )
+    dataset_name: Optional[str] = Field(
+        None, description="Name of the dataset being evaluated"
+    )
 
 
 class TaskStatusResponse(BaseModel):

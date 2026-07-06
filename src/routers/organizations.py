@@ -1,10 +1,6 @@
-"""Workspaces (workspaces) router.
+"""Manage workspaces and membership.
 
-The "workspace" terminology lives in DB/code; the UI calls them workspaces.
-
-For now membership simply gates access — the actual switch of entity scoping
-from `user_id` to `org_uuid` is a follow-up PR. Endpoints here only manage the
-workspace graph (workspaces, members, active workspace) without changing existing routers.
+Create workspaces, rename them, and add or remove members.
 """
 
 from fastapi import APIRouter, Depends, HTTPException, Path
@@ -27,38 +23,38 @@ router = APIRouter(prefix="/organizations", tags=["organizations"])
 
 
 class OrganizationResponse(BaseModel):
-    uuid: str = Field(description="Workspace (workspace) identifier (8-char UUID)")
+    uuid: str = Field(description="Workspace ID")
     name: str = Field(description="Workspace display name")
     is_personal: bool = Field(
-        description="`true` for the user's auto-created personal workspace, `false` for shared workspaces"
+        description="`true` for your auto-created personal workspace, `false` for shared workspaces"
     )
-    created_by_user_id: str = Field(description="UUID of the user who created the workspace")
+    created_by_user_id: str = Field(description="ID of the user who created the workspace")
     member_role: Optional[str] = Field(
         None,
-        description="Caller's role in this workspace (`owner` | `admin`); `null` when not resolved",
+        description="Your role in this workspace (`owner` | `admin`); `null` when not resolved",
     )
-    created_at: str = Field(description="Creation timestamp (ISO 8601 UTC)")
-    updated_at: str = Field(description="Last-update timestamp (ISO 8601 UTC)")
+    created_at: str = Field(description="When the workspace was created (ISO 8601 UTC)")
+    updated_at: str = Field(description="When the workspace was last updated (ISO 8601 UTC)")
 
 
 class CreateOrganizationRequest(BaseModel):
-    name: str = Field(..., min_length=1, description="Workspace name (non-empty)")
+    name: str = Field(..., min_length=1, description="Display name for the new workspace")
 
 
 class UpdateOrganizationRequest(BaseModel):
-    name: str = Field(..., min_length=1, description="New workspace name (non-empty)")
+    name: str = Field(..., min_length=1, description="New display name for the workspace")
 
 
 class AddMemberRequest(BaseModel):
     email: str = Field(
         ...,
         min_length=3,
-        description="Email of the user to add; a stub user is created if not yet registered",
+        description="Email of the person to add; a stub account is created if they have not signed up yet",
     )
 
 
 class MemberResponse(BaseModel):
-    user_id: str = Field(description="Member's user UUID (8-char identifier)")
+    user_id: str = Field(description="Member's user ID")
     email: str = Field(description="Member's email address")
     first_name: str = Field(description="Member's given name")
     last_name: str = Field(description="Member's family name")
@@ -98,11 +94,14 @@ async def create_org(
 
 @router.patch("/{org_uuid}", response_model=OrganizationResponse, summary="Update workspace")
 async def rename_org(
-    org_uuid: str = Path(description="Workspace UUID (8-char identifier)"),
+    org_uuid: str = Path(
+        description="The workspace to rename. You must be a member.",
+        examples=["f47ac10b-58cc-4372-a567-0e02b2c3d479"],
+    ),
     request: UpdateOrganizationRequest = ...,
     user_id: str = Depends(get_current_user_id),
 ):
-    """Rename a workspace. You must be a member; returns 404 otherwise."""
+    """Rename a workspace you belong to."""
     role = _require_membership(org_uuid, user_id)
     update_organization_name(org_uuid, request.name)
     org = get_organization(org_uuid)
@@ -111,10 +110,13 @@ async def rename_org(
 
 @router.get("/{org_uuid}/members", response_model=List[MemberResponse], summary="List members")
 async def list_members(
-    org_uuid: str = Path(description="Workspace UUID (8-char identifier)"),
+    org_uuid: str = Path(
+        description="The workspace whose members to list. You must be a member.",
+        examples=["f47ac10b-58cc-4372-a567-0e02b2c3d479"],
+    ),
     user_id: str = Depends(get_current_user_id),
 ):
-    """List members of a workspace. You must be a member; returns 404 otherwise."""
+    """List members of a workspace you belong to."""
     _require_membership(org_uuid, user_id)
     return [MemberResponse(**m) for m in list_organization_members(org_uuid)]
 
@@ -126,13 +128,15 @@ async def list_members(
     summary="Add member",
 )
 async def add_member(
-    org_uuid: str = Path(description="Workspace UUID (8-char identifier)"),
+    org_uuid: str = Path(
+        description="The workspace to add a member to. You must be a member.",
+        examples=["f47ac10b-58cc-4372-a567-0e02b2c3d479"],
+    ),
     request: AddMemberRequest = ...,
     user_id: str = Depends(get_current_user_id),
 ):
-    """Add a user to this workspace as admin. Creates a stub user if the email isn't
-    yet registered — when that person signs up, the existing row is hydrated
-    and they immediately see this workspace."""
+    """Add a member to a workspace as admin."""
+    # Stub accounts are hydrated when the invitee signs up; they then see this workspace immediately.
     _require_membership(org_uuid, user_id)
     try:
         member = add_organization_member(
@@ -150,12 +154,17 @@ async def add_member(
 
 @router.delete("/{org_uuid}/members/{target_user_id}", status_code=204, summary="Remove member")
 async def remove_member(
-    org_uuid: str = Path(description="Workspace UUID (8-char identifier)"),
-    target_user_id: str = Path(description="UUID of the member to remove (8-char identifier)"),
+    org_uuid: str = Path(
+        description="The workspace to remove the member from. You must be a member.",
+        examples=["f47ac10b-58cc-4372-a567-0e02b2c3d479"],
+    ),
+    target_user_id: str = Path(
+        description="The member to remove",
+        examples=["f47ac10b-58cc-4372-a567-0e02b2c3d479"],
+    ),
     user_id: str = Depends(get_current_user_id),
 ):
-    """Remove a member from the workspace. Owners cannot be removed. Admins may remove
-    themselves or any other admin. Returns 404 if the member isn't found."""
+    """Remove a member from a workspace. Owners cannot be removed."""
     _require_membership(org_uuid, user_id)
     try:
         removed = remove_organization_member(org_uuid, target_user_id)

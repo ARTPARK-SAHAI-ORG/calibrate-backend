@@ -25,12 +25,12 @@ class JobType(str, Enum):
 
 
 class JobListItem(BaseModel):
-    uuid: str = Field(description="Job identifier (8-char UUID)")
+    uuid: str = Field(description="Job ID")
     type: str = Field(description="Underlying job type, e.g. `stt-eval`, `tts-eval`")
     status: str = Field(description="Lifecycle state, e.g. `queued`, `in_progress`, `done`, `failed`")
     dataset_id: Optional[str] = Field(
         None,
-        description="Source dataset UUID; `null` when the dataset has since been deleted",
+        description="Source dataset ID; `null` when the dataset has since been deleted",
     )
     dataset_name: Optional[str] = Field(
         None,
@@ -64,9 +64,7 @@ async def list_jobs(
     ),
     ctx: OrgContext = Depends(get_current_org),
 ):
-    """List jobs for your workspace, newest first. Optionally filter
-    by job type. A job's `dataset_id`/`dataset_name` are nulled out when the
-    source dataset has since been deleted."""
+    """List jobs for your workspace, newest first."""
     db_job_type = JOB_TYPE_MAP.get(job_type) if job_type else None
 
     jobs = get_all_jobs(org_uuid=ctx.org_uuid, job_type=db_job_type)
@@ -103,11 +101,13 @@ async def list_jobs(
 
 @router.delete("/{job_uuid}", summary="Delete job")
 async def delete_job_endpoint(
-    job_uuid: str = Path(description="Job UUID (8-char identifier)"),
+    job_uuid: str = Path(
+        description="Job to delete",
+        examples=["a3b2c1d0-e5f4-3210-abcd-ef1234567890"],
+    ),
     ctx: OrgContext = Depends(get_current_org),
 ):
-    """Delete a job. If it is still running, its processes are killed first and
-    the next queued eval job is started. Returns 404 if not in your workspace."""
+    """Delete a job, stopping it first if it is still running."""
     job = get_job(job_uuid, org_uuid=ctx.org_uuid)
     if not job:
         raise HTTPException(status_code=404, detail="Job not found")

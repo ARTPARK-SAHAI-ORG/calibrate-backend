@@ -1,11 +1,11 @@
 """Evaluators router.
 
 Replaces the legacy `metrics` router. Adds:
-  - Default (seeded) vs custom (per-user) evaluators
-  - Versioned prompts with judge_model, rating scale, variables
-  - Duplicate-to-custom
-  - Live-version selection
-  - API-key-authenticated invocation endpoint
+ - Default (seeded) vs custom (per-user) evaluators
+ - Versioned prompts with judge_model, rating scale, variables
+ - Duplicate-to-custom
+ - Live-version selection
+ - API-key-authenticated invocation endpoint
 """
 
 from typing import Any, Dict, List, Literal, Optional
@@ -39,7 +39,7 @@ router = APIRouter(prefix="/evaluators", tags=["evaluators"])
 
 class OutputScaleEntry(BaseModel):
     """One entry in an evaluator's output_config.scale. `value` is bool|number|string
-    depending on output_type."""
+ depending on output_type."""
 
     value: Any = Field(
         description="Scale point value: `bool` for `binary` (2 entries), numeric for `rating` (N>=2 entries)"
@@ -68,9 +68,9 @@ class VariableSpec(BaseModel):
 class EvaluatorVersionCreate(BaseModel):
     """Version-level config — prompt, model, variables, and the rubric (output_config).
 
-    The rubric is version-owned so links that pin a version (tests, simulations) get
-    reproducible judge prompts even if the evaluator's live version is later changed.
-    """
+ The rubric is version-owned so links that pin a version (tests, simulations) get
+ reproducible judge prompts even if the evaluator's live version is later changed.
+ """
 
     judge_model: str = Field(description="Model that runs the judge (e.g. an OpenRouter model slug)")
     system_prompt: str = Field(description="Judge system prompt; may contain `{{variable}}` placeholders")
@@ -96,7 +96,7 @@ DataTypeLiteral = Literal["text", "audio"]
 
 
 class EvaluatorCreate(BaseModel):
-    name: str = Field(..., min_length=1, description="Evaluator name, unique within the workspace")
+    name: str = Field(..., min_length=1, description="Evaluator name, unique within your workspace")
     description: Optional[str] = Field(None, description="Human-readable description. Omit to leave blank")
     evaluator_type: EvaluatorTypeLiteral = Field(
         "llm",
@@ -140,11 +140,11 @@ class EvaluatorUpdate(BaseModel):
 
 
 class EvaluatorDuplicateRequest(BaseModel):
-    name: str = Field(..., min_length=1, description="Name for the new copy, unique within the workspace")
+    name: str = Field(..., min_length=1, description="Name for the new copy, unique within your workspace")
 
 
 class EvaluatorVersionResponse(BaseModel):
-    uuid: str = Field(description="Version UUID (8-char identifier)")
+    uuid: str = Field(description="Version ID")
     version_number: int = Field(description="1-based version number, incrementing per evaluator")
     judge_model: str = Field(description="Model that runs the judge for this version")
     system_prompt: str = Field(description="Judge system prompt, with `{{variable}}` placeholders unrendered")
@@ -158,15 +158,15 @@ class EvaluatorVersionResponse(BaseModel):
 class EvaluatorResponseBase(BaseModel):
     """Identity + classification fields shared by every evaluator response.
 
-    `live_version_id` is the FK pointer to the current live version. List
-    views inline the full version on `live_version` because there's no
-    `versions[]` to look it up in. Detail views skip the inlined block and
-    expose `versions[]` instead — clients resolve the live version by
-    matching `live_version_id` to a version entry's `uuid` (avoids
-    duplicating the same version payload twice in the same response).
-    """
+ `live_version_id` is the FK pointer to the current live version. List
+ views inline the full version on `live_version` because there's no
+ `versions[]` to look it up in. Detail views skip the inlined block and
+ expose `versions[]` instead — clients resolve the live version by
+ matching `live_version_id` to a version entry's `uuid` (avoids
+ duplicating the same version payload twice in the same response).
+ """
 
-    uuid: str = Field(description="Evaluator UUID (8-char identifier)")
+    uuid: str = Field(description="Evaluator ID")
     name: str = Field(description="Evaluator name")
     description: Optional[str] = Field(None, description="Human-readable description, or null")
     evaluator_type: str = Field(description="Semantic category (`tts`/`stt`/`llm`/`llm-general`/`conversation`)")
@@ -174,11 +174,12 @@ class EvaluatorResponseBase(BaseModel):
     kind: str = Field(description="`single` or `side_by_side`")
     output_type: str = Field(description="`binary` or `rating`")
     owner_user_id: Optional[str] = Field(
-        None, description="Creator user id; null for seeded default evaluators (visible to all, editable by none)"
+        None,
+        description="Creator user ID; null for seeded defaults visible in your workspace but not editable by you",
     )
     slug: Optional[str] = Field(None, description="Stable slug for seeded defaults; null for custom evaluators")
     live_version_id: Optional[str] = Field(
-        None, description="UUID of the current live version; null if none is set"
+        None, description="ID of the current live version; null if none is set"
     )
     created_at: str = Field(description="Creation timestamp (ISO 8601 UTC)")
     updated_at: str = Field(description="Last-update timestamp (ISO 8601 UTC)")
@@ -205,17 +206,17 @@ class EvaluatorDetailResponse(EvaluatorResponseBase):
 
 
 class EvaluatorCreateResponse(BaseModel):
-    uuid: str = Field(description="UUID (8-char identifier) of the created (or duplicated) evaluator")
-    version_uuid: str = Field(description="UUID of its initial/live version")
+    uuid: str = Field(description="ID of the created (or duplicated) evaluator")
+    version_uuid: str = Field(description="ID of its initial/live version")
 
 
 class VersionCreateResponse(BaseModel):
-    version_uuid: str = Field(description="UUID of the newly created version")
+    version_uuid: str = Field(description="ID of the newly created version")
     version_number: int = Field(description="1-based number assigned to the new version")
 
 
 class SetLiveVersionRequest(BaseModel):
-    version_uuid: str = Field(description="UUID of the version to mark as live (must belong to this evaluator)")
+    version_uuid: str = Field(description="ID of the version to mark as live (must belong to this evaluator)")
 
 
 # ============ Helpers ============
@@ -356,8 +357,8 @@ async def create_evaluator_endpoint(
 
 class DefaultPromptResponse(BaseModel):
     """Canonical default prompt for a given purpose. Used by the frontend to prefill the
-    create-evaluator form. The `name` field is null for `purpose=conversation` because there's
-    no seeded conversation evaluator — the prompt is just a template."""
+ create-evaluator form. The `name` field is null for `purpose=conversation` because there's
+ no seeded conversation evaluator — the prompt is just a template."""
 
     purpose: Literal["llm", "llm-general", "stt", "tts", "conversation"] = Field(
         description="Evaluation purpose this default prompt targets"
@@ -382,13 +383,7 @@ async def get_default_prompt(
     ),
     _user_id: str = Depends(get_current_user_id),
 ):
-    """Return the canonical default prompt + suggested config for a given purpose.
-
-    For `llm`, `stt`, `tts` this matches the seeded default evaluator. For `conversation`
-    there is no seeded evaluator — the response gives a template the frontend can use
-    to prefill a "create conversation evaluator" form (the user replaces the literal
-    `<ENTER EVALUATION CRITERIA HERE>` placeholder in the prompt with their criteria).
-    """
+    """Get the canonical default prompt and suggested config for prefilling the create-evaluator form."""
     if purpose not in DEFAULT_PROMPTS_BY_PURPOSE:
         raise HTTPException(status_code=404, detail=f"Unknown purpose: {purpose}")
     p = DEFAULT_PROMPTS_BY_PURPOSE[purpose]
@@ -415,11 +410,11 @@ async def list_evaluators(
         None, description="Filter by medium (`text`/`audio`). Omit for all"
     ),
     include_defaults: bool = Query(
-        True, description="When `true`, include seeded default evaluators alongside the workspace's custom ones"
+        True, description="When `true`, include seeded default evaluators alongside your workspace's custom ones"
     ),
     ctx: OrgContext = Depends(get_current_org),
 ):
-    """List evaluators visible to your workspace (custom + seeded defaults), each with its inlined live version."""
+    """List evaluators visible in your workspace, each with its inlined live version."""
     evaluators = get_all_evaluators(
         org_uuid=ctx.org_uuid,
         include_defaults=include_defaults,
@@ -431,10 +426,13 @@ async def list_evaluators(
 
 @router.get("/{evaluator_uuid}", response_model=EvaluatorDetailResponse, summary="Get evaluator")
 async def get_evaluator_endpoint(
-    evaluator_uuid: str = Path(description="Evaluator UUID (8-char identifier)"),
+    evaluator_uuid: str = Path(
+        description="Evaluator to retrieve. Must be in your workspace.",
+        examples=["f47ac10b-58cc-4372-a567-0e02b2c3d479"],
+    ),
     ctx: OrgContext = Depends(get_current_org),
 ):
-    """Retrieve one evaluator with its full version history and the live version's index."""
+    """Get one evaluator with its full version history."""
     evaluator = _visible_or_404(get_evaluator(evaluator_uuid), ctx.org_uuid)
     base = _evaluator_response(evaluator)
     output_type = evaluator.get("output_type", "binary")
@@ -455,10 +453,13 @@ async def get_evaluator_endpoint(
 @router.put("/{evaluator_uuid}", response_model=EvaluatorResponse, summary="Update evaluator")
 async def update_evaluator_endpoint(
     payload: EvaluatorUpdate,
-    evaluator_uuid: str = Path(description="Evaluator UUID (8-char identifier)"),
+    evaluator_uuid: str = Path(
+        description="Evaluator to update. Must be in your workspace.",
+        examples=["f47ac10b-58cc-4372-a567-0e02b2c3d479"],
+    ),
     ctx: OrgContext = Depends(get_current_org),
 ):
-    """Update an evaluator's identity/classification fields. Seeded defaults are read-only (403). Only supplied fields change."""
+    """Update an evaluator's name, description, and classification fields."""
     existing = _visible_or_404(get_evaluator(evaluator_uuid), ctx.org_uuid)
     _owner_check(existing, ctx.org_uuid)
     if payload.name is not None:
@@ -485,10 +486,13 @@ async def update_evaluator_endpoint(
 
 @router.delete("/{evaluator_uuid}", summary="Delete evaluator")
 async def delete_evaluator_endpoint(
-    evaluator_uuid: str = Path(description="Evaluator UUID (8-char identifier)"),
+    evaluator_uuid: str = Path(
+        description="Evaluator to delete. Must be in your workspace.",
+        examples=["f47ac10b-58cc-4372-a567-0e02b2c3d479"],
+    ),
     ctx: OrgContext = Depends(get_current_org),
 ):
-    """Soft-delete a custom evaluator. Seeded defaults cannot be deleted (403)."""
+    """Soft-delete a custom evaluator in your workspace."""
     existing = _visible_or_404(get_evaluator(evaluator_uuid), ctx.org_uuid)
     _owner_check(existing, ctx.org_uuid)
     if not delete_evaluator(evaluator_uuid):
@@ -499,7 +503,10 @@ async def delete_evaluator_endpoint(
 @router.post("/{evaluator_uuid}/duplicate", response_model=EvaluatorCreateResponse, summary="Duplicate evaluator")
 async def duplicate_evaluator_endpoint(
     payload: EvaluatorDuplicateRequest,
-    evaluator_uuid: str = Path(description="UUID (8-char identifier) of the evaluator to copy"),
+    evaluator_uuid: str = Path(
+        description="Evaluator to copy. Must be visible in your workspace.",
+        examples=["f47ac10b-58cc-4372-a567-0e02b2c3d479"],
+    ),
     ctx: OrgContext = Depends(get_current_org),
 ):
     """Copy any visible evaluator (including a seeded default) into a new editable custom evaluator that you own."""
@@ -525,7 +532,10 @@ async def duplicate_evaluator_endpoint(
 
 @router.get("/{evaluator_uuid}/versions", response_model=List[EvaluatorVersionResponse], summary="List evaluator versions")
 async def list_versions(
-    evaluator_uuid: str = Path(description="Evaluator UUID (8-char identifier)"),
+    evaluator_uuid: str = Path(
+        description="Evaluator whose versions to list. Must be in your workspace.",
+        examples=["f47ac10b-58cc-4372-a567-0e02b2c3d479"],
+    ),
     ctx: OrgContext = Depends(get_current_org),
 ):
     """List an evaluator's full version history, oldest first."""
@@ -543,10 +553,13 @@ async def list_versions(
 @router.post("/{evaluator_uuid}/versions", response_model=VersionCreateResponse, summary="Create evaluator version")
 async def create_version(
     payload: EvaluatorVersionCreateRequest,
-    evaluator_uuid: str = Path(description="Evaluator UUID (8-char identifier)"),
+    evaluator_uuid: str = Path(
+        description="Evaluator to add a version to. Must be in your workspace.",
+        examples=["f47ac10b-58cc-4372-a567-0e02b2c3d479"],
+    ),
     ctx: OrgContext = Depends(get_current_org),
 ):
-    """Add a new version to a custom evaluator. Variable names must match the prior version (only descriptions/defaults may change). Set `make_live` to promote it immediately."""
+    """Add a new version to a custom evaluator in your workspace."""
     existing = _visible_or_404(get_evaluator(evaluator_uuid), ctx.org_uuid)
     _owner_check(existing, ctx.org_uuid)
     cfg = payload.output_config.model_dump(exclude_none=True) if payload.output_config else None
@@ -572,10 +585,13 @@ async def create_version(
 @router.post("/{evaluator_uuid}/versions/live", summary="Set live version")
 async def mark_live(
     payload: SetLiveVersionRequest,
-    evaluator_uuid: str = Path(description="Evaluator UUID (8-char identifier)"),
+    evaluator_uuid: str = Path(
+        description="Evaluator whose live version to set. Must be in your workspace.",
+        examples=["f47ac10b-58cc-4372-a567-0e02b2c3d479"],
+    ),
     ctx: OrgContext = Depends(get_current_org),
 ):
-    """Point a custom evaluator's live version at an existing version. Future links and LLM-test runs resolve this version."""
+    """Set which version is the evaluator's live version."""
     existing = _visible_or_404(get_evaluator(evaluator_uuid), ctx.org_uuid)
     _owner_check(existing, ctx.org_uuid)
     ok = set_evaluator_live_version(evaluator_uuid, payload.version_uuid)
@@ -599,10 +615,13 @@ class PromptPreviewRequest(BaseModel):
 @router.post("/{evaluator_uuid}/preview-prompt", summary="Preview evaluator prompt")
 async def preview_prompt(
     payload: PromptPreviewRequest,
-    evaluator_uuid: str = Path(description="Evaluator UUID (8-char identifier)"),
+    evaluator_uuid: str = Path(
+        description="Evaluator whose prompt to preview. Must be in your workspace.",
+        examples=["f47ac10b-58cc-4372-a567-0e02b2c3d479"],
+    ),
     ctx: OrgContext = Depends(get_current_org),
 ):
-    """Render a version's system prompt with the supplied variables and return the resolved text (no judge call)."""
+    """Render a version's system prompt with the supplied variables and return the resolved text."""
     evaluator = _visible_or_404(get_evaluator(evaluator_uuid), ctx.org_uuid)
     version_uuid = payload.version_uuid or evaluator.get("live_version_id")
     if not version_uuid:

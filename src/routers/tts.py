@@ -177,23 +177,23 @@ class TTSEvaluationRequest(BaseModel):
 
     dataset_id: Optional[str] = Field(
         None,
-        description="Reuse an existing TTS dataset by UUID. **Provide this OR inline `texts`, not both**",
+        description="Existing TTS dataset to evaluate. Must be in your workspace. **Provide this OR inline `texts`, not both**",
     )
     texts: Optional[List[str]] = Field(
         None,
-        description="Inline texts to synthesize, one per item. **Required when `dataset_id` is omitted**",
+        description="Texts to synthesize, one per item. **Required when `dataset_id` is omitted**",
     )
     dataset_name: Optional[str] = Field(
         None,
-        description="Name to save the inline texts under as a new dataset. Ignored when `dataset_id` is set; omit to skip saving",
+        description="Name for a new dataset saved from inline inputs. Ignored when `dataset_id` is set; omit to skip saving",
     )
     providers: List[str] = Field(
-        description='TTS providers to benchmark, e.g. `["smallest", "cartesia", "openai"]`. At least one required'
+        description='TTS providers to compare, e.g. `["smallest", "cartesia", "openai"]`. At least one required'
     )
-    language: str = Field(description='Language to synthesize, e.g. `"english"` or `"hindi"`')
+    language: str = Field(description='Language to synthesize in, e.g. `"english"` or `"hindi"`')
     evaluator_uuids: Optional[List[str]] = Field(
         None,
-        description="Evaluator UUIDs to score this run; each must have `evaluator_type == 'tts'`. Omit to use the seeded TTS default. Each is pinned to its live version at submission for a stable rubric",
+        description="Evaluators to score synthesized audio; each must be a `tts` evaluator in your workspace. Omit to use the default TTS evaluator",
     )
 
 
@@ -675,11 +675,11 @@ def run_tts_evaluation_task(
         try_start_queued_job(EVAL_JOB_TYPES)
 
 
-@router.post("/evaluate", response_model=TaskCreateResponse, summary="Launch TTS evaluation")
+@router.post("/evaluate", response_model=TaskCreateResponse, summary="Run TTS evaluation")
 async def evaluate_tts(
     request: TTSEvaluationRequest, ctx: OrgContext = Depends(get_current_org)
 ):
-    """Launch a background job that benchmarks multiple TTS providers over text inputs. Returns a task ID; poll the status endpoint for progress and results. Over-limit jobs come back `queued`."""
+    """Benchmark TTS providers against text inputs as a background job."""
     if not request.providers:
         raise HTTPException(
             status_code=400,
@@ -776,10 +776,13 @@ class VisibilityResponse(BaseModel):
 )
 async def update_tts_visibility(
     body: VisibilityRequest,
-    task_id: str = PathParam(description="TTS evaluation task ID (8-char identifier)"),
+    task_id: str = PathParam(
+        description="The TTS evaluation to update. Must be in your workspace.",
+        examples=["f47ac10b-58cc-4372-a567-0e02b2c3d479"],
+    ),
     ctx: OrgContext = Depends(get_current_org),
 ):
-    """Toggle public sharing for a TTS evaluation job. Enabling issues a share token; disabling clears it."""
+    """Update public sharing for a TTS evaluation."""
     job = get_job(task_id, org_uuid=ctx.org_uuid)
     if not job or job.get("type") != "tts-eval":
         raise HTTPException(status_code=404, detail="Task not found")
@@ -799,10 +802,13 @@ async def update_tts_visibility(
     summary="Get TTS evaluation status",
 )
 async def get_tts_evaluation_status(
-    task_id: str = PathParam(description="TTS evaluation task ID (8-char identifier)"),
+    task_id: str = PathParam(
+        description="The TTS evaluation to poll. Must be in your workspace.",
+        examples=["f47ac10b-58cc-4372-a567-0e02b2c3d479"],
+    ),
     ctx: OrgContext = Depends(get_current_org),
 ):
-    """Get the status of a TTS evaluation task, including per-provider results (with presigned audio URLs) and the leaderboard once done. In-progress jobs return partial results read from disk."""
+    """Get the status and results of a TTS evaluation."""
     job = get_job(task_id, org_uuid=ctx.org_uuid)
     if not job:
         raise HTTPException(status_code=404, detail="Task not found")

@@ -31,14 +31,14 @@ router = APIRouter(prefix="/datasets", tags=["datasets"])
 
 
 class DatasetCreateRequest(BaseModel):
-    name: str = Field(description="Human-readable dataset name")
+    name: str = Field(description="Human-readable dataset name, unique within the workspace")
     dataset_type: Literal["stt", "tts"] = Field(
         description="`stt` items carry audio + ground-truth text; `tts` items carry text only"
     )
 
 
 class DatasetRenameRequest(BaseModel):
-    name: str = Field(description="New dataset name")
+    name: str = Field(description="New dataset name, unique within the workspace")
 
 
 class DatasetItemIn(BaseModel):
@@ -62,9 +62,10 @@ class DatasetItemUpdate(BaseModel):
 
 
 class DatasetItemResponse(BaseModel):
-    uuid: str = Field(description="Dataset item UUID (8-char identifier)")
+    uuid: str = Field(description="Dataset item ID")
     audio_path: Optional[str] = Field(
-        description="Presigned download URL for the item's audio, or null for TTS items"
+        None,
+        description="Presigned download URL for the item's audio, or null for TTS items",
     )
     text: str = Field(description="Ground-truth transcript (STT) or synthesis text (TTS)")
     order_index: int = Field(description="Zero-based position of the item within the dataset")
@@ -75,10 +76,10 @@ class DatasetItemResponse(BaseModel):
 
 
 class DatasetResponse(BaseModel):
-    uuid: str = Field(description="Dataset UUID (8-char identifier)")
+    uuid: str = Field(description="Dataset ID")
     name: str = Field(description="Human-readable dataset name")
     dataset_type: str = Field(description="Dataset type (`stt` or `tts`)")
-    item_count: int = Field(description="Number of non-deleted items in the dataset")
+    item_count: int = Field(description="Number of items in the dataset")
     eval_count: int = Field(description="Number of evaluation jobs that used this dataset")
     created_at: str = Field(description="Creation timestamp (ISO 8601 UTC)")
     updated_at: str = Field(description="Last-update timestamp (ISO 8601 UTC)")
@@ -86,7 +87,7 @@ class DatasetResponse(BaseModel):
 
 class DatasetDetailResponse(DatasetResponse):
     items: List[DatasetItemResponse] = Field(
-        description="All non-deleted items in the dataset, ordered by `order_index`"
+        description="All items in the dataset, ordered by `order_index`"
     )
 
 
@@ -181,10 +182,13 @@ async def list_datasets(
 
 @router.get("/{dataset_id}", response_model=DatasetDetailResponse, summary="Get dataset")
 async def get_dataset_detail(
-    dataset_id: str = Path(description="Dataset UUID (8-char identifier)"),
+    dataset_id: str = Path(
+        description="The dataset to retrieve. Must be in your workspace.",
+        examples=["f47ac10b-58cc-4372-a567-0e02b2c3d479"],
+    ),
     ctx: OrgContext = Depends(get_current_org),
 ):
-    """Retrieve a dataset along with all of its items."""
+    """Get a dataset with all of its items."""
     row = get_dataset(dataset_id, org_uuid=ctx.org_uuid)
     if not row:
         raise HTTPException(status_code=404, detail="Dataset not found")
@@ -206,7 +210,10 @@ async def get_dataset_detail(
 @router.patch("/{dataset_id}", response_model=DatasetResponse, summary="Update dataset")
 async def rename_dataset(
     request: DatasetRenameRequest,
-    dataset_id: str = Path(description="Dataset UUID (8-char identifier)"),
+    dataset_id: str = Path(
+        description="The dataset to rename. Must be in your workspace.",
+        examples=["f47ac10b-58cc-4372-a567-0e02b2c3d479"],
+    ),
     ctx: OrgContext = Depends(get_current_org),
 ):
     """Rename a dataset."""
@@ -227,10 +234,13 @@ async def rename_dataset(
 
 @router.delete("/{dataset_id}", status_code=204, summary="Delete dataset")
 async def remove_dataset(
-    dataset_id: str = Path(description="Dataset UUID (8-char identifier)"),
+    dataset_id: str = Path(
+        description="The dataset to delete. Must be in your workspace.",
+        examples=["f47ac10b-58cc-4372-a567-0e02b2c3d479"],
+    ),
     ctx: OrgContext = Depends(get_current_org),
 ):
-    """Soft-delete a dataset and all of its items."""
+    """Delete a dataset and all of its items."""
     row = get_dataset(dataset_id, org_uuid=ctx.org_uuid)
     if not row:
         raise HTTPException(status_code=404, detail="Dataset not found")
@@ -246,10 +256,13 @@ async def remove_dataset(
 )
 async def add_items(
     items: List[DatasetItemIn],
-    dataset_id: str = Path(description="Dataset UUID (8-char identifier)"),
+    dataset_id: str = Path(
+        description="The dataset to add items to. Must be in your workspace.",
+        examples=["f47ac10b-58cc-4372-a567-0e02b2c3d479"],
+    ),
     ctx: OrgContext = Depends(get_current_org),
 ):
-    """Append one or more items to a dataset (max 1000 per request). Items must match the dataset type."""
+    """Append items to a dataset."""
     if not items:
         raise HTTPException(status_code=400, detail="items list cannot be empty")
     if len(items) > 1000:
@@ -276,11 +289,17 @@ async def add_items(
 )
 async def update_item(
     request: DatasetItemUpdate,
-    dataset_id: str = Path(description="Dataset UUID (8-char identifier)"),
-    item_uuid: str = Path(description="Dataset item UUID (8-char identifier)"),
+    dataset_id: str = Path(
+        description="The dataset containing the item. Must be in your workspace.",
+        examples=["f47ac10b-58cc-4372-a567-0e02b2c3d479"],
+    ),
+    item_uuid: str = Path(
+        description="The dataset item to update.",
+        examples=["a3b2c1d0-e5f4-3210-abcd-ef1234567890"],
+    ),
     ctx: OrgContext = Depends(get_current_org),
 ):
-    """Update a dataset item's text and/or audio path. At least one field must be provided."""
+    """Update a dataset item's text and/or audio."""
     row = get_dataset(dataset_id, org_uuid=ctx.org_uuid)
     if not row:
         raise HTTPException(status_code=404, detail="Dataset not found")
@@ -321,11 +340,17 @@ async def update_item(
     "/{dataset_id}/items/{item_uuid}", status_code=204, summary="Delete dataset item"
 )
 async def remove_item(
-    dataset_id: str = Path(description="Dataset UUID (8-char identifier)"),
-    item_uuid: str = Path(description="Dataset item UUID (8-char identifier)"),
+    dataset_id: str = Path(
+        description="The dataset containing the item. Must be in your workspace.",
+        examples=["f47ac10b-58cc-4372-a567-0e02b2c3d479"],
+    ),
+    item_uuid: str = Path(
+        description="The dataset item to delete.",
+        examples=["a3b2c1d0-e5f4-3210-abcd-ef1234567890"],
+    ),
     ctx: OrgContext = Depends(get_current_org),
 ):
-    """Soft-delete a single item from a dataset."""
+    """Delete a dataset item."""
     row = get_dataset(dataset_id, org_uuid=ctx.org_uuid)
     if not row:
         raise HTTPException(status_code=404, detail="Dataset not found")

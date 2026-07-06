@@ -15,6 +15,8 @@ from auth_utils import get_current_org, OrgContext
 
 router = APIRouter(prefix="/personas", tags=["personas"])
 
+_EXAMPLE_ID = "f47ac10b-58cc-4372-a567-0e02b2c3d479"
+
 
 class PersonaCreate(BaseModel):
     name: str = Field(description="Human-readable persona name, unique within the workspace")
@@ -22,7 +24,7 @@ class PersonaCreate(BaseModel):
         None, description="Free-text description of the persona. Omit to leave unset"
     )
     config: Optional[Dict[str, Any]] = Field(
-        None, description="Behavioral config as a free-form JSON object. Omit to leave unset"
+        None, description="Behavioral config. Omit to leave unset"
     )
 
 
@@ -34,25 +36,35 @@ class PersonaUpdate(BaseModel):
         None, description="New description. Omit to leave unchanged"
     )
     config: Optional[Dict[str, Any]] = Field(
-        None, description="New behavioral config (JSON object). Omit to leave unchanged"
+        None, description="New behavioral config. Omit to leave unchanged"
     )
 
 
 class PersonaResponse(BaseModel):
-    uuid: str = Field(description="Persona UUID (8-char identifier)")
+    uuid: str = Field(
+        min_length=36,
+        max_length=36,
+        description="ID of the persona",
+        examples=[_EXAMPLE_ID],
+    )
     name: str = Field(description="Human-readable persona name")
     description: Optional[str] = Field(
         None, description="Free-text description, or null if unset"
     )
     config: Optional[Dict[str, Any]] = Field(
-        None, description="Behavioral config (JSON object), or null if unset"
+        None, description="Behavioral config, or null if unset"
     )
-    created_at: str = Field(description="Creation timestamp (ISO 8601 UTC)")
-    updated_at: str = Field(description="Last-update timestamp (ISO 8601 UTC)")
+    created_at: str = Field(description="When the persona was created (ISO 8601 UTC)")
+    updated_at: str = Field(description="When the persona was last updated (ISO 8601 UTC)")
 
 
 class PersonaCreateResponse(BaseModel):
-    uuid: str = Field(description="UUID (8-char identifier) of the newly created persona")
+    uuid: str = Field(
+        min_length=36,
+        max_length=36,
+        description="ID of the newly created persona",
+        examples=[_EXAMPLE_ID],
+    )
     message: str = Field(description="Human-readable success message")
 
 
@@ -60,7 +72,7 @@ class PersonaCreateResponse(BaseModel):
 async def create_persona_endpoint(
     persona: PersonaCreate, ctx: OrgContext = Depends(get_current_org)
 ):
-    """Create a new persona in your workspace. The name must be unique within the workspace."""
+    """Create a new persona in your workspace."""
     with ensure_name_unique("personas", persona.name, ctx.org_uuid, entity="Persona"):
         persona_uuid = create_persona(
             name=persona.name,
@@ -76,17 +88,20 @@ async def create_persona_endpoint(
 
 @router.get("", response_model=List[PersonaResponse], summary="List personas")
 async def list_personas(ctx: OrgContext = Depends(get_current_org)):
-    """List all personas for your workspace."""
+    """List all personas in your workspace."""
     personas = get_all_personas(org_uuid=ctx.org_uuid)
     return personas
 
 
 @router.get("/{persona_uuid}", response_model=PersonaResponse, summary="Get persona")
 async def get_persona_endpoint(
-    persona_uuid: str = Path(description="Persona UUID (8-char identifier)"),
+    persona_uuid: str = Path(
+        description="The persona to retrieve. Must be in your workspace.",
+        examples=[_EXAMPLE_ID],
+    ),
     ctx: OrgContext = Depends(get_current_org),
 ):
-    """Retrieve a single persona by UUID within your workspace."""
+    """Get a persona in your workspace."""
     persona = get_persona(persona_uuid)
     if not persona or persona.get("org_uuid") != ctx.org_uuid:
         raise HTTPException(status_code=404, detail="Persona not found")
@@ -96,7 +111,10 @@ async def get_persona_endpoint(
 @router.put("/{persona_uuid}", response_model=PersonaResponse, summary="Update persona")
 async def update_persona_endpoint(
     persona: PersonaUpdate,
-    persona_uuid: str = Path(description="Persona UUID (8-char identifier)"),
+    persona_uuid: str = Path(
+        description="The persona to update. Must be in your workspace.",
+        examples=[_EXAMPLE_ID],
+    ),
     ctx: OrgContext = Depends(get_current_org),
 ):
     """Update a persona's fields. Only the provided fields change; omitted fields are left as-is."""
@@ -127,10 +145,13 @@ async def update_persona_endpoint(
 
 @router.delete("/{persona_uuid}", summary="Delete persona")
 async def delete_persona_endpoint(
-    persona_uuid: str = Path(description="Persona UUID (8-char identifier)"),
+    persona_uuid: str = Path(
+        description="The persona to delete. Must be in your workspace.",
+        examples=[_EXAMPLE_ID],
+    ),
     ctx: OrgContext = Depends(get_current_org),
 ):
-    """Soft-delete a persona by UUID."""
+    """Soft-delete a persona in your workspace."""
     existing_persona = get_persona(persona_uuid)
     if not existing_persona or existing_persona.get("org_uuid") != ctx.org_uuid:
         raise HTTPException(status_code=404, detail="Persona not found")

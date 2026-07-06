@@ -152,7 +152,9 @@ def test_public_api_docs_are_unauthenticated_and_filtered(client, monkeypatch):
     full_schemas = full.get("components", {}).get("schemas", {})
     # Public response models are present...
     assert "ResolveAgentNamesResponse" in pub_schemas  # POST /agents/resolve
+    assert "AgentTestRunCreateResponse" in pub_schemas  # POST /agent-tests/agent/{uuid}/run
     assert "BatchTestRunResponse" in pub_schemas  # POST /agent-tests/run
+    assert "TaskCreateResponse" not in pub_schemas  # STT/TTS eval shape — not public API
     # ...nested refs are pulled in transitively...
     assert "BatchTestSkip" in pub_schemas  # referenced by BatchTestRunResponse
     # ...but it's a strict subset of the full set, and internal-only models are gone.

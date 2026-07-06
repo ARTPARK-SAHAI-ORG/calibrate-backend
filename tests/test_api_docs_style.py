@@ -78,6 +78,24 @@ def test_checker_allows_code_identifiers_in_doc_text(tmp_path):
     assert checker.find_violations(tmp_path) == []
 
 
+def test_checker_flags_uuid_and_caller_in_doc_text(tmp_path):
+    """Doc text must say 'ID', not 'UUID'; address reader as 'you'/'your workspace'."""
+    (tmp_path / "uuid.py").write_text(
+        "from fastapi import APIRouter\n"
+        "from pydantic import BaseModel, Field\n"
+        "router = APIRouter()\n"
+        "class Thing(BaseModel):\n"
+        "    name: str = Field(description='Agent UUID for the caller')\n"
+        "@router.get('/things', summary='List things')\n"
+        "async def list_things():\n"
+        "    '''List things in the caller\\'s workspace.'''\n"
+        "    return []\n"
+    )
+    joined = "\n".join(checker.find_violations(tmp_path))
+    assert "not 'UUID'" in joined
+    assert "your workspace" in joined
+
+
 def test_checker_accepts_a_good_module(tmp_path):
     (tmp_path / "good.py").write_text(
         "from fastapi import APIRouter, Path\n"
@@ -86,7 +104,7 @@ def test_checker_accepts_a_good_module(tmp_path):
         "class Thing(BaseModel):\n"
         "    name: str = Field(description='The name')\n"
         "@router.get('/things/{thing_id}', summary='Get thing')\n"
-        "async def get_thing(thing_id: str = Path(description='Thing UUID')):\n"
+        "async def get_thing(thing_id: str = Path(description='The thing to retrieve')):\n"
         "    '''Retrieve a thing by id.'''\n"
         "    return {}\n"
     )

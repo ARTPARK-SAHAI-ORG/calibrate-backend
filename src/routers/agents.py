@@ -214,7 +214,7 @@ class AgentCreate(BaseModel):
     )
     config: Optional[Dict[str, Any]] = Field(
         None,
-        description="Behavioral config (system_prompt, llm, stt, tts, settings, …). For `type=agent` it is deep-merged over the DEFAULT_AGENT_* defaults; for `type=connection` it is stored verbatim. Omit for `type=agent` to use pure defaults",
+        description="Behavioral config (system_prompt, llm, stt, tts, settings, …). Deep-merged over defaults for `type=agent`; stored as-is for `type=connection`. Omit for `type=agent` to use defaults",
     )
 
 
@@ -237,20 +237,30 @@ class AgentUpdate(BaseModel):
 
 
 class AgentResponse(BaseModel):
-    uuid: str = Field(description="Agent UUID (8-char identifier)")
-    name: str = Field(description="Human-readable agent name, unique within the workspace")
+    uuid: str = Field(
+        min_length=36,
+        max_length=36,
+        description="ID of the agent",
+        examples=["f47ac10b-58cc-4372-a567-0e02b2c3d479"],
+    )
+    name: str = Field(description="Human-readable name of the agent")
     type: Literal["agent", "connection"] = Field(
-        description="`agent` (managed defaults) or `connection` (config you supply)"
+        description="`agent` (managed defaults) or `connection` (your own endpoint)"
     )
     config: Optional[Dict[str, Any]] = Field(
-        None, description="Behavioral config; null when the agent has none"
+        None, description="Agent configuration"
     )
-    created_at: str = Field(description="Creation timestamp (ISO 8601 UTC)")
-    updated_at: str = Field(description="Last-update timestamp (ISO 8601 UTC)")
+    created_at: str = Field(description="When the agent was created (ISO 8601 UTC)")
+    updated_at: str = Field(description="When the agent was last updated (ISO 8601 UTC)")
 
 
 class AgentCreateResponse(BaseModel):
-    uuid: str = Field(description="UUID of the newly created agent (8-char identifier)")
+    uuid: str = Field(
+        min_length=36,
+        max_length=36,
+        description="ID of the newly created agent",
+        examples=["f47ac10b-58cc-4372-a567-0e02b2c3d479"],
+    )
     message: str = Field(description="Human-readable confirmation message")
 
 
@@ -262,30 +272,34 @@ class AgentDuplicateRequest(BaseModel):
 
 class AgentDuplicateResponse(BaseModel):
     uuid: str = Field(
-        description="UUID of the newly created duplicate agent (8-char identifier)"
+        min_length=36,
+        max_length=36,
+        description="ID of the newly created duplicate agent",
+        examples=["f47ac10b-58cc-4372-a567-0e02b2c3d479"],
     )
     message: str = Field(description="Human-readable confirmation message")
 
 
 class ResolveAgentNamesRequest(BaseModel):
     names: List[str] = Field(
-        description="Agent names to resolve to UUIDs within your workspace"
+        description="Agent names to resolve to IDs",
+        examples=[["my-agent", "support-bot"]],
     )
 
 
 class ResolveAgentNamesResponse(BaseModel):
     resolved: Dict[str, str] = Field(
-        description="Map of requested name → agent UUID (8-char) for every name that matched an agent in the workspace"
+        description="Map of name to agent ID for each name that matched"
     )
     not_found: List[str] = Field(
-        description="Requested names with no matching agent in the workspace"
+        description="Names with no matching agent in your workspace"
     )
 
 
 class VerifyConnectionRequest(BaseModel):
     agent_url: Optional[str] = Field(
         None,
-        description="Public HTTP(S) agent endpoint to verify. **Required for the pre-save endpoint** (no agent UUID); ignored by the saved-agent endpoint, which reads `agent_url` from the stored config",
+        description="Public HTTP(S) agent endpoint to verify. **Required for the pre-save endpoint** (no agent ID); ignored by the saved-agent endpoint, which reads `agent_url` from the stored config",
     )
     agent_headers: Optional[Dict[str, str]] = Field(
         None,
@@ -323,11 +337,7 @@ async def verify_agent_connection_presave(
     request: VerifyConnectionRequest,
     ctx: OrgContext = Depends(get_current_org),
 ):
-    """Verify an agent connection before it is saved (no agent UUID needed).
-
-    Requires `agent_url` in the request body. Nothing is persisted — this only
-    checks reachability so the frontend can validate before creating the agent.
-    """
+    """Verify an agent connection before saving an agent. Nothing is persisted."""
     if not request.agent_url:
         raise HTTPException(status_code=400, detail="agent_url is required")
 
@@ -346,17 +356,14 @@ async def verify_agent_connection_presave(
     summary="Verify saved agent connection",
 )
 async def verify_agent_connection(
-    agent_uuid: str = Path(description="Agent UUID (8-char identifier)"),
+    agent_uuid: str = Path(
+        description="The agent whose connection to verify. Must be in your workspace.",
+        examples=["f47ac10b-58cc-4372-a567-0e02b2c3d479"],
+    ),
     request: VerifyConnectionRequest = ...,
     ctx: OrgContext = Depends(get_current_org),
 ):
-    """Verify a saved agent's connection and persist the result in its config.
-
-    Reads `agent_url` from the stored config (400 if absent). Omit `model` for a
-    basic check (required before LLM unit tests or text simulations); pass a
-    `model` for a model-specific check (required per model before benchmarking).
-    Only successful results are persisted.
-    """
+    """Verify a saved agent's connection and persist the result when successful."""
     agent = get_agent(agent_uuid)
     if not agent or agent.get("org_uuid") != ctx.org_uuid:
         raise HTTPException(status_code=404, detail="Agent not found")
@@ -418,17 +425,13 @@ async def verify_agent_connection(
     "/resolve",
     response_model=ResolveAgentNamesResponse,
     tags=["Public API"],
-    summary="Resolve agent names to UUIDs",
+    summary="Resolve agent names to IDs",
 )
 async def resolve_agent_names(
     request: ResolveAgentNamesRequest,
     ctx: OrgContext = Depends(get_org_jwt_or_api_key),
 ):
-    """Resolve agent names to their UUIDs within the workspace.
-
-    Names are unique per workspace, so each resolves to at most one agent.
-    Names with no matching agent are returned under `not_found`.
-    """
+    """Resolve agent names to their IDs."""
     # Public API. Auth via get_org_jwt_or_api_key (JWT for the web app, API key
     # for CI). Maps human-friendly names to the UUIDs the run/poll endpoints expect.
     agents = get_all_agents(org_uuid=ctx.org_uuid)
@@ -449,14 +452,7 @@ async def resolve_agent_names(
 async def create_agent_endpoint(
     agent: AgentCreate, ctx: OrgContext = Depends(get_current_org)
 ):
-    """Create a new agent in your workspace.
-
-    For `type=agent`, sensible defaults (system_prompt, llm.model, stt, tts,
-    settings — overridable via DEFAULT_AGENT_* env vars) are applied, and any
-    `config` you supply is deep-merged on top so partial overrides replace only
-    the named fields. For `type=connection`, no defaults are injected — the config
-    (which must eventually contain `agent_url`) is stored as-is.
-    """
+    """Create a new agent in your workspace. For `type=agent`, defaults are deep-merged with any config you supply."""
     if agent.type == "agent":
         merged_config = _deep_merge(_default_agent_config(), agent.config or {})
     else:
@@ -490,10 +486,13 @@ async def list_agents(ctx: OrgContext = Depends(get_org_jwt_or_api_key)):
 
 @router.get("/{agent_uuid}", response_model=AgentResponse, summary="Get agent")
 async def get_agent_endpoint(
-    agent_uuid: str = Path(description="Agent UUID (8-char identifier)"),
+    agent_uuid: str = Path(
+        description="The agent to retrieve. Must be in your workspace.",
+        examples=["f47ac10b-58cc-4372-a567-0e02b2c3d479"],
+    ),
     ctx: OrgContext = Depends(get_current_org),
 ):
-    """Retrieve a single agent by UUID. 404s if it isn't in your workspace."""
+    """Get an agent in your workspace."""
     agent = get_agent(agent_uuid)
     if not agent or agent.get("org_uuid") != ctx.org_uuid:
         raise HTTPException(status_code=404, detail="Agent not found")
@@ -502,14 +501,14 @@ async def get_agent_endpoint(
 
 @router.put("/{agent_uuid}", response_model=AgentResponse, summary="Update agent")
 async def update_agent_endpoint(
-    agent_uuid: str = Path(description="Agent UUID (8-char identifier)"),
+    agent_uuid: str = Path(
+        description="The agent to update. Must be in your workspace.",
+        examples=["f47ac10b-58cc-4372-a567-0e02b2c3d479"],
+    ),
     agent: AgentUpdate = ...,
     ctx: OrgContext = Depends(get_current_org),
 ):
-    """Update an agent's name and/or config. Changing `agent_url` or
-    `agent_headers` in the config resets all connection/benchmark verification
-    flags. 404s if the agent isn't in your workspace; 400 if no fields change.
-    """
+    """Update an agent's name and/or config. Changing `agent_url` or `agent_headers` resets connection and benchmark verification flags."""
     existing_agent = get_agent(agent_uuid)
     if not existing_agent or existing_agent.get("org_uuid") != ctx.org_uuid:
         raise HTTPException(status_code=404, detail="Agent not found")
@@ -554,10 +553,13 @@ async def update_agent_endpoint(
 
 @router.delete("/{agent_uuid}", summary="Delete agent")
 async def delete_agent_endpoint(
-    agent_uuid: str = Path(description="Agent UUID (8-char identifier)"),
+    agent_uuid: str = Path(
+        description="The agent to delete. Must be in your workspace.",
+        examples=["f47ac10b-58cc-4372-a567-0e02b2c3d479"],
+    ),
     ctx: OrgContext = Depends(get_current_org),
 ):
-    """Soft-delete an agent. 404s if it isn't in your workspace."""
+    """Soft-delete an agent in your workspace."""
     existing_agent = get_agent(agent_uuid)
     if not existing_agent or existing_agent.get("org_uuid") != ctx.org_uuid:
         raise HTTPException(status_code=404, detail="Agent not found")
@@ -574,16 +576,14 @@ async def delete_agent_endpoint(
     summary="Duplicate agent",
 )
 async def duplicate_agent_endpoint(
-    agent_uuid: str = Path(description="UUID of the agent to duplicate (8-char identifier)"),
+    agent_uuid: str = Path(
+        description="The agent to duplicate. Must be in your workspace.",
+        examples=["f47ac10b-58cc-4372-a567-0e02b2c3d479"],
+    ),
     request: AgentDuplicateRequest = ...,
     ctx: OrgContext = Depends(get_current_org),
 ):
-    """Duplicate an agent along with its linked tools and tests.
-
-    Copies the agent under the provided name (config included) plus every linked
-    tool and test. Connection/benchmark verification flags are stripped, so the
-    copy starts unverified. Returns the new agent UUID.
-    """
+    """Duplicate an agent along with its linked tools and tests. Verification flags are not copied."""
     original_agent = get_agent(agent_uuid)
     if not original_agent or original_agent.get("org_uuid") != ctx.org_uuid:
         raise HTTPException(status_code=404, detail="Agent not found")

@@ -41,6 +41,10 @@ _BANNED_TERMS = [
     (re.compile(r"(?<![\w`\-])[Oo]rganizations?(?![\w`\-])"), "say 'workspace', not 'organization'"),
     (re.compile(r"(?<!\w)sk_"), "don't reference the raw 'sk_…' key — say 'API key'"),
     (re.compile(r"\bsecret\b"), "say 'API key', not 'secret'"),
+    (re.compile(r"(?<![\w`/])\bUUIDs?\b(?![\w`])"), "say 'ID', not 'UUID' in user-facing docs"),
+    (re.compile(r"\bthe caller(?:'s)?\b"), "address the reader directly ('you' / 'your workspace')"),
+    (re.compile(r"\bcaller's workspace\b"), "say 'your workspace'"),
+    (re.compile(r"\b8-char\b"), "IDs are UUID v4 (36 chars) — don't say '8-char'"),
 ]
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -178,19 +182,41 @@ def _route_decorator(func) -> Optional[ast.Call]:
     return None
 
 
+def _is_route_function(func) -> bool:
+    return _route_decorator(func) is not None
+
+
 def _doc_string_nodes(tree: ast.Module):
-    """Every user-facing doc string literal: docstrings + summary=/description=."""
+    """User-facing doc text: module, route, model class docstrings, summary=/description=."""
     out = []
+    models = _model_class_names(tree)
+    body = tree.body
+    if (
+        body
+        and isinstance(body[0], ast.Expr)
+        and isinstance(body[0].value, ast.Constant)
+        and isinstance(body[0].value.value, str)
+    ):
+        out.append(body[0].value)
     for node in ast.walk(tree):
-        if isinstance(node, (ast.Module, ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef)):
-            body = getattr(node, "body", [])
+        if isinstance(node, ast.ClassDef) and node.name in models:
+            b = node.body
             if (
-                body
-                and isinstance(body[0], ast.Expr)
-                and isinstance(body[0].value, ast.Constant)
-                and isinstance(body[0].value.value, str)
+                b
+                and isinstance(b[0], ast.Expr)
+                and isinstance(b[0].value, ast.Constant)
+                and isinstance(b[0].value.value, str)
             ):
-                out.append(body[0].value)
+                out.append(b[0].value)
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and _is_route_function(node):
+            b = node.body
+            if (
+                b
+                and isinstance(b[0], ast.Expr)
+                and isinstance(b[0].value, ast.Constant)
+                and isinstance(b[0].value.value, str)
+            ):
+                out.append(b[0].value)
         if isinstance(node, ast.Call):
             for kw in node.keywords:
                 if kw.arg in ("summary", "description") and isinstance(kw.value, ast.Constant) and isinstance(kw.value.value, str):

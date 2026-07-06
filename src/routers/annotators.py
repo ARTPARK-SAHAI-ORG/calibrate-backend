@@ -25,34 +25,34 @@ router = APIRouter(prefix="/annotators", tags=["annotators"])
 
 
 class AnnotatorCreate(BaseModel):
-    name: str = Field(description="Human-readable annotator name, unique within the workspace")
+    name: str = Field(description="Human-readable annotator name, unique within your workspace")
 
 
 class AnnotatorUpdate(BaseModel):
     name: Optional[str] = Field(
-        None, description="New annotator name (unique within the workspace). Omit to leave unchanged"
+        None, description="New annotator name, unique within your workspace. Omit to leave unchanged"
     )
 
 
 class AnnotatorResponse(BaseModel):
-    uuid: str = Field(description="Annotator UUID (8-char identifier)")
+    uuid: str = Field(description="Annotator ID")
     name: str = Field(description="Human-readable annotator name")
     created_at: str = Field(description="Creation timestamp (ISO 8601 UTC)")
     updated_at: str = Field(description="Last-update timestamp (ISO 8601 UTC)")
     jobs_count: Optional[int] = Field(
-        None, description="Number of labelling jobs assigned to this annotator. `null` when not computed"
+        None, description="Number of labelling jobs assigned to this annotator. Null when not computed"
     )
     current_agreement: Optional[float] = Field(
         None,
-        description="Latest pairwise mean agreement `[0, 1]` vs other annotators. `null` when there's no overlap to compute",
+        description="Latest pairwise mean agreement with other annotators, from 0 to 1. Null when there is no overlap to compute",
     )
     pair_count: Optional[int] = Field(
-        None, description="Number of comparable annotation pairs behind `current_agreement`. `null` when none exist"
+        None, description="Number of comparable annotation pairs behind the current agreement score. Null when none exist"
     )
 
 
 class AnnotatorCreateResponse(BaseModel):
-    uuid: str = Field(description="UUID of the newly created annotator (8-char identifier)")
+    uuid: str = Field(description="ID of the newly created annotator")
     message: str = Field(description="Human-readable success message")
 
 
@@ -68,7 +68,7 @@ async def create_annotator_endpoint(
     payload: AnnotatorCreate,
     ctx: OrgContext = Depends(get_current_org),
 ):
-    """Create a new annotator in your workspace. Name must be unique per workspace."""
+    """Create an annotator in your workspace."""
     try:
         with ensure_name_unique(
             "annotators", payload.name, ctx.org_uuid, entity="Annotator"
@@ -85,10 +85,7 @@ async def create_annotator_endpoint(
 
 @router.get("", response_model=List[AnnotatorResponse], summary="List annotators")
 async def list_annotators(ctx: OrgContext = Depends(get_current_org)):
-    """List all annotators in your workspace with per-annotator stats:
-    `jobs_count` and `current_agreement` (pairwise mean vs other annotators).
-    Both are `null` when there's nothing to compute (no jobs / no overlap).
-    """
+    """List annotators in your workspace with job counts and agreement stats."""
     annotators = get_all_annotators(org_uuid=ctx.org_uuid)
     if not annotators:
         return []
@@ -112,9 +109,12 @@ async def list_annotators(ctx: OrgContext = Depends(get_current_org)):
 
 @router.get("/{annotator_uuid}", summary="Get annotator")
 async def get_annotator_endpoint(
-    annotator_uuid: str = Path(description="Annotator UUID (8-char identifier)"),
+    annotator_uuid: str = Path(
+        description="Annotator to retrieve. Must be in your workspace.",
+        examples=["f47ac10b-58cc-4372-a567-0e02b2c3d479"],
+    ),
     bucket: str = Query(
-        "month",
+        "week",
         pattern="^(week|month|year)$",
         description="Time bucket for the agreement trend series (`week`, `month`, or `year`)",
     ),
@@ -123,9 +123,7 @@ async def get_annotator_endpoint(
     ),
     ctx: OrgContext = Depends(get_current_org),
 ):
-    """Get one annotator's detail: basic info, jobs assigned to it (with
-    task name + item/annotation counts), latest agreement vs other annotators,
-    and the agreement trend series."""
+    """Get one annotator with assigned jobs and an agreement trend series."""
     annotator = _ensure_owned_annotator(annotator_uuid, ctx.org_uuid)
 
     jobs = get_jobs_for_annotator_detailed(annotator_uuid)
@@ -163,11 +161,14 @@ async def get_annotator_endpoint(
 
 @router.put("/{annotator_uuid}", response_model=AnnotatorResponse, summary="Update annotator")
 async def update_annotator_endpoint(
-    annotator_uuid: str = Path(description="Annotator UUID (8-char identifier)"),
+    annotator_uuid: str = Path(
+        description="Annotator to update. Must be in your workspace.",
+        examples=["f47ac10b-58cc-4372-a567-0e02b2c3d479"],
+    ),
     payload: AnnotatorUpdate = ...,
     ctx: OrgContext = Depends(get_current_org),
 ):
-    """Update an annotator's name. Returns 400 when nothing is provided to change."""
+    """Update an annotator's name."""
     _ensure_owned_annotator(annotator_uuid, ctx.org_uuid)
     try:
         with ensure_name_unique(
@@ -187,10 +188,13 @@ async def update_annotator_endpoint(
 
 @router.delete("/{annotator_uuid}", summary="Delete annotator")
 async def delete_annotator_endpoint(
-    annotator_uuid: str = Path(description="Annotator UUID (8-char identifier)"),
+    annotator_uuid: str = Path(
+        description="Annotator to delete. Must be in your workspace.",
+        examples=["f47ac10b-58cc-4372-a567-0e02b2c3d479"],
+    ),
     ctx: OrgContext = Depends(get_current_org),
 ):
-    """Soft-delete an annotator by UUID."""
+    """Soft-delete an annotator in your workspace."""
     _ensure_owned_annotator(annotator_uuid, ctx.org_uuid)
     deleted = delete_annotator(annotator_uuid)
     if not deleted:

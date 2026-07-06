@@ -15,6 +15,8 @@ from auth_utils import get_current_org, OrgContext
 
 router = APIRouter(prefix="/scenarios", tags=["scenarios"])
 
+_EXAMPLE_ID = "f47ac10b-58cc-4372-a567-0e02b2c3d479"
+
 
 class ScenarioCreate(BaseModel):
     name: str = Field(description="Human-readable scenario name, unique within the workspace")
@@ -33,17 +35,27 @@ class ScenarioUpdate(BaseModel):
 
 
 class ScenarioResponse(BaseModel):
-    uuid: str = Field(description="Scenario UUID (8-char identifier)")
+    uuid: str = Field(
+        min_length=36,
+        max_length=36,
+        description="ID of the scenario",
+        examples=[_EXAMPLE_ID],
+    )
     name: str = Field(description="Human-readable scenario name")
     description: Optional[str] = Field(
         None, description="Free-text description, or null if unset"
     )
-    created_at: str = Field(description="Creation timestamp (ISO 8601 UTC)")
-    updated_at: str = Field(description="Last-update timestamp (ISO 8601 UTC)")
+    created_at: str = Field(description="When the scenario was created (ISO 8601 UTC)")
+    updated_at: str = Field(description="When the scenario was last updated (ISO 8601 UTC)")
 
 
 class ScenarioCreateResponse(BaseModel):
-    uuid: str = Field(description="UUID (8-char identifier) of the newly created scenario")
+    uuid: str = Field(
+        min_length=36,
+        max_length=36,
+        description="ID of the newly created scenario",
+        examples=[_EXAMPLE_ID],
+    )
     message: str = Field(description="Human-readable success message")
 
 
@@ -51,7 +63,7 @@ class ScenarioCreateResponse(BaseModel):
 async def create_scenario_endpoint(
     scenario: ScenarioCreate, ctx: OrgContext = Depends(get_current_org)
 ):
-    """Create a new scenario in your workspace. The name must be unique within the workspace."""
+    """Create a new scenario in your workspace."""
     with ensure_name_unique("scenarios", scenario.name, ctx.org_uuid, entity="Scenario"):
         scenario_uuid = create_scenario(
             name=scenario.name,
@@ -66,17 +78,20 @@ async def create_scenario_endpoint(
 
 @router.get("", response_model=List[ScenarioResponse], summary="List scenarios")
 async def list_scenarios(ctx: OrgContext = Depends(get_current_org)):
-    """List all scenarios for your workspace."""
+    """List all scenarios in your workspace."""
     scenarios = get_all_scenarios(org_uuid=ctx.org_uuid)
     return scenarios
 
 
 @router.get("/{scenario_uuid}", response_model=ScenarioResponse, summary="Get scenario")
 async def get_scenario_endpoint(
-    scenario_uuid: str = Path(description="Scenario UUID (8-char identifier)"),
+    scenario_uuid: str = Path(
+        description="The scenario to retrieve. Must be in your workspace.",
+        examples=[_EXAMPLE_ID],
+    ),
     ctx: OrgContext = Depends(get_current_org),
 ):
-    """Retrieve a single scenario by UUID within your workspace."""
+    """Get a scenario in your workspace."""
     scenario = get_scenario(scenario_uuid)
     if not scenario or scenario.get("org_uuid") != ctx.org_uuid:
         raise HTTPException(status_code=404, detail="Scenario not found")
@@ -86,7 +101,10 @@ async def get_scenario_endpoint(
 @router.put("/{scenario_uuid}", response_model=ScenarioResponse, summary="Update scenario")
 async def update_scenario_endpoint(
     scenario: ScenarioUpdate,
-    scenario_uuid: str = Path(description="Scenario UUID (8-char identifier)"),
+    scenario_uuid: str = Path(
+        description="The scenario to update. Must be in your workspace.",
+        examples=[_EXAMPLE_ID],
+    ),
     ctx: OrgContext = Depends(get_current_org),
 ):
     """Update a scenario's fields. Only the provided fields change; omitted fields are left as-is."""
@@ -116,10 +134,13 @@ async def update_scenario_endpoint(
 
 @router.delete("/{scenario_uuid}", summary="Delete scenario")
 async def delete_scenario_endpoint(
-    scenario_uuid: str = Path(description="Scenario UUID (8-char identifier)"),
+    scenario_uuid: str = Path(
+        description="The scenario to delete. Must be in your workspace.",
+        examples=[_EXAMPLE_ID],
+    ),
     ctx: OrgContext = Depends(get_current_org),
 ):
-    """Soft-delete a scenario by UUID."""
+    """Soft-delete a scenario in your workspace."""
     existing_scenario = get_scenario(scenario_uuid)
     if not existing_scenario or existing_scenario.get("org_uuid") != ctx.org_uuid:
         raise HTTPException(status_code=404, detail="Scenario not found")

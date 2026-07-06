@@ -276,13 +276,12 @@ def _get_audio_urls_from_s3_key(
 
 
 class EvaluatorRef(BaseModel):
-    """Reference to an evaluator attached to a simulation. The pivot pins the evaluator's live
-    version at write time."""
+    """Reference to an evaluator linked to a simulation."""
 
     model_config = ConfigDict(extra="forbid")
 
     evaluator_uuid: str = Field(
-        description="Evaluator UUID (8-char identifier); must be a `conversation`-type evaluator with a live version"
+        description="Evaluator to link. Must be a `conversation`-type evaluator with a live version in your workspace"
     )
     variable_values: Optional[Dict[str, Any]] = Field(
         None,
@@ -291,27 +290,33 @@ class EvaluatorRef(BaseModel):
 
 
 class SimulationCreate(BaseModel):
-    """Create body must use `evaluators` with evaluator UUIDs — not legacy metric UUIDs or aliases."""
+    """Create body must use `evaluators` with evaluator IDs — not legacy metric IDs or aliases."""
 
     model_config = ConfigDict(extra="forbid")
 
     name: str = Field(description="Human-readable simulation name, unique within the workspace")
-    agent_uuid: Optional[str] = Field(None, description="Agent (8-char UUID) under test. Omit to create without an agent")
-    persona_uuids: Optional[List[str]] = Field(None, description="Personas (8-char UUIDs) to link. Omit to link none")
-    scenario_uuids: Optional[List[str]] = Field(None, description="Scenarios (8-char UUIDs) to link. Omit to link none")
+    agent_uuid: Optional[str] = Field(
+        None, description="Agent under test. Must be in your workspace. Omit to create without an agent"
+    )
+    persona_uuids: Optional[List[str]] = Field(
+        None, description="Personas to link. Must be in your workspace. Omit to link none"
+    )
+    scenario_uuids: Optional[List[str]] = Field(
+        None, description="Scenarios to link. Must be in your workspace. Omit to link none"
+    )
     evaluators: Optional[List[EvaluatorRef]] = Field(
         None, description="`conversation` evaluators to link. Omit to link none"
     )
 
 
 class SimulationUpdate(BaseModel):
-    """Update body must use `evaluators` with evaluator UUIDs — not legacy metric UUIDs or aliases."""
+    """Update body must use `evaluators` with evaluator IDs — not legacy metric IDs or aliases."""
 
     model_config = ConfigDict(extra="forbid")
 
     name: Optional[str] = Field(None, description="New name. Omit to leave unchanged")
     agent_uuid: Optional[str] = Field(
-        None, description="New agent UUID; empty string (`\"\"`) clears the agent. Omit to leave unchanged"
+        None, description="Agent to link. Must be in your workspace. Empty string (`\"\"`) clears the agent. Omit to leave unchanged"
     )
     persona_uuids: Optional[List[str]] = Field(
         None, description="Replacement persona set (replaces existing). Omit to leave unchanged"
@@ -380,7 +385,7 @@ def _resolve_simulation_evaluator_ref(
 
 
 class PersonaResponse(BaseModel):
-    uuid: str = Field(description="Persona UUID (8-char identifier)")
+    uuid: str = Field(description="Persona ID")
     name: str = Field(description="Persona name")
     description: Optional[str] = Field(None, description="Persona description, or null")
     config: Optional[Dict[str, Any]] = Field(
@@ -391,7 +396,7 @@ class PersonaResponse(BaseModel):
 
 
 class ScenarioResponse(BaseModel):
-    uuid: str = Field(description="Scenario UUID (8-char identifier)")
+    uuid: str = Field(description="Scenario ID")
     name: str = Field(description="Scenario name")
     description: Optional[str] = Field(None, description="Scenario description, or null")
     created_at: str = Field(description="Creation timestamp (ISO 8601 UTC)")
@@ -399,7 +404,7 @@ class ScenarioResponse(BaseModel):
 
 
 class EvaluatorResponse(BaseModel):
-    uuid: str = Field(description="Evaluator UUID (8-char identifier)")
+    uuid: str = Field(description="Evaluator ID")
     name: str = Field(description="Evaluator name")
     description: Optional[str] = Field(None, description="Evaluator description, or null")
     evaluator_type: str = Field("conversation", description="Semantic category (always `conversation` for simulations)")
@@ -407,7 +412,7 @@ class EvaluatorResponse(BaseModel):
     kind: str = Field("single", description="`single` or `side_by_side`")
     output_type: str = Field("binary", description="`binary` or `rating`")
     output_config: Optional[Dict[str, Any]] = Field(None, description="Rubric pinned at link time, or null")
-    evaluator_version_id: str = Field(description="Version UUID pinned on the pivot at link time")
+    evaluator_version_id: str = Field(description="Version ID pinned on the pivot at link time")
     version_number: int = Field(description="1-based number of the pinned version")
     judge_model: str = Field(description="Judge model for the pinned version")
     variables: Optional[List[Dict[str, Any]]] = Field(None, description="Declared prompt variables, or null")
@@ -415,10 +420,10 @@ class EvaluatorResponse(BaseModel):
 
 
 class AgentSummaryResponse(BaseModel):
-    uuid: str = Field(description="Agent UUID (8-char identifier)")
+    uuid: str = Field(description="Agent ID")
     name: str = Field(description="Agent name")
     type: Literal["agent", "connection"] = Field(
-        description="`agent` = Calibrate-managed agent; `connection` = external agent endpoint"
+        description="`agent` applies managed defaults; `connection` stores the config you supply as-is"
     )
     config: Optional[Dict[str, Any]] = Field(None, description="Agent config, or null")
     created_at: str = Field(description="Creation timestamp (ISO 8601 UTC)")
@@ -426,7 +431,7 @@ class AgentSummaryResponse(BaseModel):
 
 
 class SimulationListResponse(BaseModel):
-    uuid: str = Field(description="Simulation UUID (8-char identifier)")
+    uuid: str = Field(description="Simulation ID")
     name: str = Field(description="Simulation name")
     agent: Optional[AgentSummaryResponse] = Field(None, description="Linked agent summary, or null if none linked")
     created_at: str = Field(description="Creation timestamp (ISO 8601 UTC)")
@@ -434,7 +439,7 @@ class SimulationListResponse(BaseModel):
 
 
 class SimulationDetailResponse(BaseModel):
-    uuid: str = Field(description="Simulation UUID (8-char identifier)")
+    uuid: str = Field(description="Simulation ID")
     name: str = Field(description="Simulation name")
     agent: Optional[AgentSummaryResponse] = Field(None, description="Linked agent summary, or null if none linked")
     created_at: str = Field(description="Creation timestamp (ISO 8601 UTC)")
@@ -445,12 +450,15 @@ class SimulationDetailResponse(BaseModel):
 
 
 class SimulationCreateResponse(BaseModel):
-    uuid: str = Field(description="UUID (8-char identifier) of the newly created simulation")
+    uuid: str = Field(description="ID of the newly created simulation")
     message: str = Field(description="Human-readable confirmation message")
 
 
 class RunSimulationRequest(BaseModel):
-    type: str = Field(..., description="Simulation run type: `text` or `voice` (voice is unsupported in agent-connection mode)")
+    type: str = Field(
+        ...,
+        description="Run mode: `text` for chat simulations, `voice` for spoken simulations (**unsupported with `connection` agents**)",
+    )
 
     @field_validator("type")
     @classmethod
@@ -464,14 +472,14 @@ class EvaluationCriterionResult(BaseModel):
     name: str = Field(description="Evaluator name at run time")
     value: float = Field(description="Judge score (0/1 for binary, or the rating value)")
     reasoning: str = Field(description="Judge's explanation for the score")
-    evaluator_uuid: Optional[str] = Field(None, description="Source evaluator UUID, echoed from the run; null if unresolved")
+    evaluator_uuid: Optional[str] = Field(None, description="Source evaluator ID, echoed from the run; null if unresolved")
     description: Optional[str] = Field(None, description="Evaluator's current description, or null")
 
 
 class SimulationEvaluatorRef(BaseModel):
-    """Running snapshot order matches calibrate `evaluators` / per-row IDs in evaluation_results."""
+    """Evaluator snapshot included with run status."""
 
-    evaluator_uuid: str = Field(description="Evaluator UUID (8-char identifier); stable reference to use across renames")
+    evaluator_uuid: str = Field(description="Evaluator ID for stable reference across renames")
     name: str = Field(description="Evaluator's current DB name at response time")
     description: Optional[str] = Field(None, description="Evaluator's current DB description at response time, or null")
 
@@ -479,7 +487,7 @@ class SimulationEvaluatorRef(BaseModel):
 class SimulationCaseResult(BaseModel):
     """Result for a single persona-scenario simulation"""
 
-    simulation_name: str = Field(description="Run directory name, e.g. `simulation_persona_1_scenario_1`")
+    simulation_name: str = Field(description="Case identifier within the run, e.g. `simulation_persona_1_scenario_1`")
     persona: Optional[Dict[str, Any]] = Field(
         None, description="Full persona object (label, characteristics, gender, language), or null"
     )
@@ -500,10 +508,10 @@ class SimulationCaseResult(BaseModel):
 
 
 class SimulationRunStatusResponse(BaseModel):
-    task_id: str = Field(description="Run/job UUID (8-char identifier)")
+    task_id: str = Field(description="Simulation run ID")
     name: str = Field(description='Display name in `Run {index}` form (creation order)')
-    status: str = Field(description="Job status (`queued`, `in_progress`, `done`, `failed`)")
-    type: str = Field(description="Simulation type (`text` or `voice`)")
+    status: str = Field(description="Run status (`queued`, `in_progress`, `done`, `failed`)")
+    type: str = Field(description="Run mode (`text` or `voice`)")
     updated_at: str = Field(description="Last-update timestamp (ISO 8601 UTC)")
     total_simulations: Optional[int] = Field(
         None, description="Expected number of persona x scenario cases; null before it's known"
@@ -516,7 +524,7 @@ class SimulationRunStatusResponse(BaseModel):
         None, description="Per-case results, or null if none yet"
     )
     evaluators: Optional[List[SimulationEvaluatorRef]] = Field(
-        None, description="Evaluators used, in calibrate config order; null if none"
+        None, description="Evaluators used for this run, in link order; null if none"
     )
     error: Optional[str] = Field(None, description="Failure message; null unless the run failed")
     is_public: bool = Field(False, description="Whether the run is shared via a public link")
@@ -524,10 +532,10 @@ class SimulationRunStatusResponse(BaseModel):
 
 
 class SimulationRunListItem(BaseModel):
-    uuid: str = Field(description="Run/job UUID (8-char identifier)")
+    uuid: str = Field(description="Simulation run ID")
     name: str = Field(description='Display name in `Run {index}` form (creation order)')
-    status: str = Field(description="Job status (`queued`, `in_progress`, `done`, `failed`)")
-    type: str = Field(description="Simulation type (`text` or `voice`)")
+    status: str = Field(description="Run status (`queued`, `in_progress`, `done`, `failed`)")
+    type: str = Field(description="Run mode (`text` or `voice`)")
     updated_at: str = Field(description="Last-update timestamp (ISO 8601 UTC)")
 
 
@@ -696,13 +704,16 @@ class VisibilityResponse(BaseModel):
     share_token: str | None = Field(None, description="Share token when public; null when private")
 
 
-@router.patch("/run/{task_id}/visibility", response_model=VisibilityResponse, summary="Update run visibility")
+@router.patch("/run/{task_id}/visibility", response_model=VisibilityResponse, summary="Update simulation run visibility")
 async def update_simulation_run_visibility(
     body: VisibilityRequest,
-    task_id: str = PathParam(description="Simulation run/job UUID (8-char identifier)"),
+    task_id: str = PathParam(
+        description="The simulation run to update. Must be in your workspace.",
+        examples=["f47ac10b-58cc-4372-a567-0e02b2c3d479"],
+    ),
     ctx: OrgContext = Depends(get_current_org),
 ):
-    """Toggle public sharing for a simulation run. Publishing mints a share token (reused if one already exists); un-publishing clears it."""
+    """Update public sharing for a simulation run."""
     job = get_simulation_job(task_id)
     if not job:
         raise HTTPException(status_code=404, detail="Task not found")
@@ -725,17 +736,15 @@ async def update_simulation_run_visibility(
     return VisibilityResponse(is_public=body.is_public, share_token=share_token)
 
 
-@router.get("/run/{task_id}", response_model=SimulationRunStatusResponse, summary="Get run status")
+@router.get("/run/{task_id}", response_model=SimulationRunStatusResponse, summary="Get simulation run status")
 async def get_simulation_run_status(
-    task_id: str = PathParam(description="Simulation run/job UUID (8-char identifier)"),
+    task_id: str = PathParam(
+        description="The simulation run to poll. Must be in your workspace.",
+        examples=["f47ac10b-58cc-4372-a567-0e02b2c3d479"],
+    ),
     ctx: OrgContext = Depends(get_current_org),
 ):
-    """Poll a simulation run's status and results.
-
-    Returns per-case results and aggregated metrics once done. In-progress voice runs
-    include intermediate transcripts; presigned audio URLs are generated on the fly for
-    done runs. Stale in-progress jobs (15 min of inactivity) are marked failed here.
-    """
+    """Get the status and results of a simulation run."""
     job = get_simulation_job(task_id)
     if not job:
         raise HTTPException(status_code=404, detail="Task not found")
@@ -853,10 +862,13 @@ async def get_simulation_run_status(
 
 @router.get("/{simulation_uuid}/runs", response_model=SimulationRunsResponse, summary="List simulation runs")
 async def get_simulation_runs(
-    simulation_uuid: str = PathParam(description="Simulation UUID (8-char identifier)"),
+    simulation_uuid: str = PathParam(
+        description="The simulation whose runs to list. Must be in your workspace.",
+        examples=["f47ac10b-58cc-4372-a567-0e02b2c3d479"],
+    ),
     ctx: OrgContext = Depends(get_current_org),
 ):
-    """List all runs for a simulation, most recently updated first. Run names reflect creation order (`Run 1` is oldest)."""
+    """List runs for a simulation, most recently updated first."""
     simulation = get_simulation(simulation_uuid)
     if not simulation or simulation.get("org_uuid") != ctx.org_uuid:
         raise HTTPException(status_code=404, detail="Simulation not found")
@@ -893,10 +905,13 @@ async def get_simulation_runs(
 
 @router.get("/{simulation_uuid}", response_model=SimulationDetailResponse, summary="Get simulation")
 async def get_simulation_endpoint(
-    simulation_uuid: str = PathParam(description="Simulation UUID (8-char identifier)"),
+    simulation_uuid: str = PathParam(
+        description="The simulation to retrieve. Must be in your workspace.",
+        examples=["f47ac10b-58cc-4372-a567-0e02b2c3d479"],
+    ),
     ctx: OrgContext = Depends(get_current_org),
 ):
-    """Retrieve a simulation by UUID with its linked agent, personas, scenarios, and evaluators. 404 if outside your workspace."""
+    """Get a simulation with its linked agent, personas, scenarios, and evaluators."""
     simulation = get_simulation(simulation_uuid)
     if not simulation or simulation.get("org_uuid") != ctx.org_uuid:
         raise HTTPException(status_code=404, detail="Simulation not found")
@@ -935,10 +950,13 @@ async def get_simulation_endpoint(
 @router.put("/{simulation_uuid}", response_model=SimulationDetailResponse, summary="Update simulation")
 async def update_simulation_endpoint(
     simulation: SimulationUpdate,
-    simulation_uuid: str = PathParam(description="Simulation UUID (8-char identifier)"),
+    simulation_uuid: str = PathParam(
+        description="The simulation to update. Must be in your workspace.",
+        examples=["f47ac10b-58cc-4372-a567-0e02b2c3d479"],
+    ),
     ctx: OrgContext = Depends(get_current_org),
 ):
-    """Update a simulation's name, agent, and linked personas/scenarios/evaluators. Supplied link lists replace the existing sets; an empty `agent_uuid` clears the agent."""
+    """Update a simulation's name, agent, and linked personas, scenarios, and evaluators."""
     existing_simulation = get_simulation(simulation_uuid)
     if (
         not existing_simulation
@@ -1064,10 +1082,13 @@ async def update_simulation_endpoint(
 
 @router.delete("/{simulation_uuid}", summary="Delete simulation")
 async def delete_simulation_endpoint(
-    simulation_uuid: str = PathParam(description="Simulation UUID (8-char identifier)"),
+    simulation_uuid: str = PathParam(
+        description="The simulation to delete. Must be in your workspace.",
+        examples=["f47ac10b-58cc-4372-a567-0e02b2c3d479"],
+    ),
     ctx: OrgContext = Depends(get_current_org),
 ):
-    """Soft-delete a simulation. 404 if it doesn't exist or is outside your workspace."""
+    """Delete a simulation from your workspace."""
     existing_simulation = get_simulation(simulation_uuid)
     if (
         not existing_simulation
@@ -2324,15 +2345,13 @@ def run_simulation_task(
 @router.post("/{simulation_uuid}/run", response_model=TaskCreateResponse, summary="Run simulation")
 async def run_simulation_endpoint(
     request: RunSimulationRequest,
-    simulation_uuid: str = PathParam(description="Simulation UUID (8-char identifier)"),
+    simulation_uuid: str = PathParam(
+        description="The simulation to run. Must be in your workspace.",
+        examples=["f47ac10b-58cc-4372-a567-0e02b2c3d479"],
+    ),
     ctx: OrgContext = Depends(get_current_org),
 ):
-    """Launch a background text or voice simulation run for the linked agent across its personas x scenarios.
-
-    Requires a linked agent, at least one persona, and one scenario. Voice runs are unsupported
-    in agent-connection mode. Subject to the workspace's concurrency queue, so the run may start `queued`.
-    Returns a task ID to poll for status and results.
-    """
+    """Run a simulation as a background job."""
     simulation = get_simulation(simulation_uuid)
     if not simulation or simulation.get("org_uuid") != ctx.org_uuid:
         raise HTTPException(status_code=404, detail="Simulation not found")
@@ -2422,14 +2441,13 @@ async def run_simulation_endpoint(
 
 @router.post("/run/{job_uuid}/abort", response_model=SimulationRunStatusResponse, summary="Abort simulation run")
 async def abort_simulation_run(
-    job_uuid: str = PathParam(description="Simulation run/job UUID (8-char identifier)"),
+    job_uuid: str = PathParam(
+        description="The in-progress simulation run to abort. Must be in your workspace.",
+        examples=["f47ac10b-58cc-4372-a567-0e02b2c3d479"],
+    ),
     ctx: OrgContext = Depends(get_current_org),
 ):
-    """Abort an in-progress simulation run, preserving results collected so far.
-
-    Kills the running process, marks incomplete cases as aborted, and saves partial results
-    with status `done`. Only in-progress runs can be aborted. Returns the full run results.
-    """
+    """Abort an in-progress simulation run, keeping partial results collected so far."""
     simulation_job = get_simulation_job(job_uuid)
     if not simulation_job:
         raise HTTPException(status_code=404, detail="Job not found")
@@ -2512,10 +2530,13 @@ async def abort_simulation_run(
 
 @router.delete("/run/{job_uuid}", summary="Delete simulation run")
 async def delete_simulation_job_endpoint(
-    job_uuid: str = PathParam(description="Simulation run/job UUID (8-char identifier)"),
+    job_uuid: str = PathParam(
+        description="The simulation run to delete. Must be in your workspace.",
+        examples=["f47ac10b-58cc-4372-a567-0e02b2c3d479"],
+    ),
     ctx: OrgContext = Depends(get_current_org),
 ):
-    """Delete a simulation run/job. If it was in progress, its process is killed and the next queued job starts. Scoped to the parent simulation's workspace."""
+    """Delete a simulation run."""
     simulation_job = get_simulation_job(job_uuid)
     if not simulation_job:
         raise HTTPException(status_code=404, detail="Job not found")

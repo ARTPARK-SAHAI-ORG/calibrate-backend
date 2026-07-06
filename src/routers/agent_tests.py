@@ -138,27 +138,44 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/agent-tests", tags=["agent-tests"])
 
+# Doc-only examples — IDs are `str(uuid.uuid4())` (36-char UUID v4).
+_EXAMPLE_AGENT_UUID = "f47ac10b-58cc-4372-a567-0e02b2c3d479"
+_EXAMPLE_TASK_UUID = "a3b2c1d0-e5f4-3210-abcd-ef1234567890"
+_EXAMPLE_TEST_UUID = "b1c2d3e4-f5a6-7890-bcde-f12345678901"
+
 
 class AgentTestsCreate(BaseModel):
     agent_uuid: str = Field(
-        description="UUID of the agent to link tests to (8-char identifier)"
+        description="Agent to link tests to. Must be in your workspace.",
+        examples=[_EXAMPLE_AGENT_UUID],
     )
     test_uuids: List[str] = Field(
-        description="Test UUIDs (8-char) to link. Already-linked tests are skipped"
+        description="Tests to link. Already-linked tests are skipped",
+        examples=[[_EXAMPLE_TEST_UUID]],
     )
 
 
 class AgentTestDelete(BaseModel):
-    agent_uuid: str = Field(description="Agent UUID (8-char identifier)")
+    agent_uuid: str = Field(
+        description="Agent to unlink the test from",
+        examples=[_EXAMPLE_AGENT_UUID],
+    )
     test_uuid: str = Field(
-        description="UUID of the test to unlink from the agent (8-char identifier)"
+        description="Test to unlink from the agent",
+        examples=[_EXAMPLE_TEST_UUID],
     )
 
 
 class AgentTestResponse(BaseModel):
-    id: int = Field(description="Auto-increment link row id")
-    agent_id: str = Field(description="Linked agent UUID (8-char identifier)")
-    test_id: str = Field(description="Linked test UUID (8-char identifier)")
+    id: int = Field(description="Auto-increment link row ID")
+    agent_id: str = Field(
+        description="Linked agent ID",
+        examples=[_EXAMPLE_AGENT_UUID],
+    )
+    test_id: str = Field(
+        description="Linked test ID",
+        examples=[_EXAMPLE_TEST_UUID],
+    )
     created_at: str = Field(description="Link creation timestamp (ISO 8601 UTC)")
 
 
@@ -170,7 +187,10 @@ class AgentTestsCreateResponse(BaseModel):
 
 
 class TestResponse(BaseModel):
-    uuid: str = Field(description="Test UUID (8-char identifier)")
+    uuid: str = Field(
+        description="Test ID",
+        examples=[_EXAMPLE_TEST_UUID],
+    )
     name: str = Field(description="Human-readable test name")
     type: str = Field(
         description="Test type: `response`, `tool_call`, or `conversation`"
@@ -183,7 +203,10 @@ class TestResponse(BaseModel):
 
 
 class AgentResponse(BaseModel):
-    uuid: str = Field(description="Agent UUID (8-char identifier)")
+    uuid: str = Field(
+        description="Agent ID",
+        examples=[_EXAMPLE_AGENT_UUID],
+    )
     name: str = Field(description="Human-readable agent name")
     type: Literal["agent", "connection"] = Field(
         description="`agent` (managed defaults) or `connection` (config you supply)"
@@ -198,41 +221,70 @@ class AgentResponse(BaseModel):
 class RunTestRequest(BaseModel):
     test_uuids: Optional[List[str]] = Field(
         None,
-        description="Test UUIDs (8-char) to run; each must exist. Omit/null/empty to run every test linked to the agent (400 if none are linked)",
+        description="Tests to run. Omit to run all tests linked to the agent",
+        examples=[[_EXAMPLE_TEST_UUID]],
+    )
+
+
+class AgentTestRunCreateResponse(BaseModel):
+    task_id: str = Field(
+        min_length=36,
+        max_length=36,
+        description="Test run job ID. Poll for status and results",
+        examples=[_EXAMPLE_TASK_UUID],
+    )
+    status: str = Field(
+        description="Current status of the test run: `queued` or `in_progress`"
     )
 
 
 class BatchRunRequest(BaseModel):
     agent_names: Optional[List[str]] = Field(
         None,
-        description="Agent names to run (validated up front — any unknown name 404s and no jobs start). Omit/null/empty to run every agent in your workspace",
+        description="Agents to run. Omit to run every agent in your workspace",
+        examples=[["my-agent", "support-bot"]],
     )
 
 
 class BatchTestRun(BaseModel):
-    agent_name: str = Field(description="Name of the agent this run was launched for")
-    agent_uuid: str = Field(description="Agent UUID (8-char identifier)")
-    task_id: str = Field(description="UUID of the launched test job; poll for status")
+    agent_name: str = Field(description="Name of the agent")
+    agent_uuid: str = Field(
+        min_length=36,
+        max_length=36,
+        description="ID of the agent that was run",
+        examples=[_EXAMPLE_AGENT_UUID],
+    )
+    task_id: str = Field(
+        min_length=36,
+        max_length=36,
+        description="Test run job ID. Poll for status and results",
+        examples=[_EXAMPLE_TASK_UUID],
+    )
     status: str = Field(
-        description="Initial job status: `in_progress` or `queued` (over the concurrency limit)"
+        description="Initial status: `queued` or `in_progress`"
     )
 
 
 class BatchTestSkip(BaseModel):
     agent_name: str = Field(description="Name of the skipped agent")
-    agent_uuid: str = Field(description="Agent UUID (8-char identifier)")
+    agent_uuid: str = Field(
+        min_length=36,
+        max_length=36,
+        description="ID of the skipped agent",
+        examples=[_EXAMPLE_AGENT_UUID],
+    )
     reason: str = Field(
-        description="Why the agent was skipped: `no_linked_tests` or `connection_not_verified`"
+        description="Why the agent was skipped, e.g. `no_linked_tests` or `connection_not_verified`"
     )
 
 
 class BatchTestRunResponse(BaseModel):
     runs: List[BatchTestRun] = Field(
-        description="One entry per agent whose tests were launched"
+        description="Test runs that were launched"
     )
     skipped: List[BatchTestSkip] = Field(
         default=[],
-        description="Agents skipped (no linked tests or unverified connection) rather than failing the batch",
+        description="Agents that were skipped instead of failing the batch",
     )
 
 
@@ -257,35 +309,9 @@ class TestOutput(BaseModel):
 
 
 class JudgeResult(BaseModel):
-    """One evaluator's verdict for a response-type test case.
-
-    Per-row data only — anything constant across rows for the same evaluator
-    (name, description, output_type, output_config, scale_min/max) lives on
-    the response-level `evaluators[]` block; look it up by `evaluator_uuid`.
-
-    `evaluator_uuid` is None for legacy runs that pre-date the evaluator-
-    snapshot capture or when the evaluator can't be resolved from the
-    snapshot.
-
-    Exactly one of `match` (binary) / `score` (rating) is set per entry;
-    both are None for tool-call tests, but tool-call tests don't carry
-    `judge_results`.
-
-    `variable_values` are the {{var}} substitutions used for this evaluator
-    on this test case, frozen from `test_evaluators.variable_values` at
-    submission time — stays on the row because it varies per test case.
-
-    `value_name` is the human-readable label for `match`/`score` resolved
-    against the rubric the run actually used (snapshot's
-    `output_config.scale.name`). Falls back to `Correct`/`Wrong` for binary
-    or the stringified score for rating when the snapshot lacks named
-    scale entries (e.g. legacy runs captured before the rubric was
-    snapshotted).
-    """
-
     evaluator_uuid: Optional[str] = Field(
         None,
-        description="UUID (8-char) of the evaluator that produced this verdict; null for legacy runs or when the evaluator can't be resolved from the snapshot",
+        description="ID of the evaluator that produced this verdict; null for legacy runs or when the evaluator can't be resolved from the snapshot",
     )
     reasoning: Optional[str] = Field(
         None, description="Judge's rationale for this verdict"
@@ -309,8 +335,6 @@ class JudgeResult(BaseModel):
 
 
 class TestCaseResult(BaseModel):
-    """Result for a single test case matching calibrate results.json structure"""
-
     test_case_id: Optional[str] = Field(
         None, description="Identifier of the test case within the run"
     )
@@ -345,15 +369,24 @@ class TestCaseResult(BaseModel):
 
 
 class TestRunStatusResponse(BaseModel):
-    task_id: str = Field(description="Test run job UUID (8-char identifier)")
+    task_id: str = Field(
+        min_length=36,
+        max_length=36,
+        description="Test run job ID",
+        examples=[_EXAMPLE_TASK_UUID],
+    )
     status: str = Field(
-        description="Job status: `queued`, `in_progress`, `done`, or `failed`"
+        description="Current status: `queued`, `in_progress`, `done`, or `failed`"
     )
     total_tests: Optional[int] = Field(
-        None, description="Total test cases in the run; null until known"
+        None, description="Total number of test cases; null until known"
     )
-    passed: Optional[int] = Field(None, description="Count of passing cases; null until done")
-    failed: Optional[int] = Field(None, description="Count of failing cases; null until done")
+    passed: Optional[int] = Field(
+        None, description="Number of test cases that passed; null until done"
+    )
+    failed: Optional[int] = Field(
+        None, description="Number of test cases that failed; null until done"
+    )
     latency_ms: Optional[Dict[str, Any]] = Field(
         None,
         description="Aggregated response latency `{p50, p95, p99, count}` (ms; `p50` ≈ the old mean). Null for eval-only runs",
@@ -384,7 +417,10 @@ class TestRunStatusResponse(BaseModel):
 
 
 class AgentTestRunListItem(BaseModel):
-    uuid: str = Field(description="Test run job UUID (8-char identifier)")
+    uuid: str = Field(
+        description="Test run job ID",
+        examples=[_EXAMPLE_TASK_UUID],
+    )
     name: str = Field(
         description="Display name, e.g. `Run {index}` (unit test) or `Benchmark {index}`"
     )
@@ -437,15 +473,16 @@ class AgentTestRunsResponse(BaseModel):
 
 
 class GlobalTestRunListItem(AgentTestRunListItem):
-    """AgentTestRunListItem extended with agent identity for the global view."""
-
-    agent_id: str = Field(description="UUID of the agent this run belongs to (8-char identifier)")
+    agent_id: str = Field(
+        description="Agent this run belongs to",
+        examples=[_EXAMPLE_AGENT_UUID],
+    )
     agent_name: str = Field(description="Name of the agent this run belongs to")
 
 
 class GlobalTestRunsResponse(BaseModel):
     runs: List[GlobalTestRunListItem] = Field(
-        description="Test runs across every agent in the workspace, newest-updated first"
+        description="Test runs across every agent in your workspace, newest-updated first"
     )
 
 
@@ -453,8 +490,7 @@ class GlobalTestRunsResponse(BaseModel):
     "", response_model=AgentTestsCreateResponse, summary="Link tests to agent"
 )
 async def create_agent_test_links(agent_tests: AgentTestsCreate):
-    """Link one or more tests to an agent. Already-linked tests are skipped, so
-    the call is idempotent. 404s if the agent or any test doesn't exist."""
+    """Link one or more tests to an agent. Already-linked tests are skipped."""
     # Verify agent exists
     agent = get_agent(agent_tests.agent_uuid)
     if not agent:
@@ -502,9 +538,12 @@ async def list_agent_tests():
     summary="List tests for agent",
 )
 async def get_agent_tests_endpoint(
-    agent_uuid: str = PathParam(description="Agent UUID (8-char identifier)"),
+    agent_uuid: str = PathParam(
+        description="Agent whose linked tests to list",
+        examples=[_EXAMPLE_AGENT_UUID],
+    ),
 ):
-    """List the tests linked to an agent. 404s if the agent doesn't exist."""
+    """List the tests linked to an agent."""
     # Verify agent exists
     agent = get_agent(agent_uuid)
     if not agent:
@@ -575,10 +614,12 @@ def _build_agent_test_run_item_fields(job: Dict[str, Any], name: str) -> Dict[st
     summary="List test runs for agent",
 )
 async def get_agent_test_runs(
-    agent_uuid: str = PathParam(description="Agent UUID (8-char identifier)"),
+    agent_uuid: str = PathParam(
+        description="Agent whose test runs to list",
+        examples=[_EXAMPLE_AGENT_UUID],
+    ),
 ):
-    """List all test runs (unit tests and benchmarks) for an agent, each with its
-    UUID, status, type, display name, and results. 404s if the agent doesn't exist."""
+    """List test runs for an agent, including status and results."""
     # Verify agent exists
     agent = get_agent(agent_uuid)
     if not agent:
@@ -621,9 +662,7 @@ async def get_all_test_runs_for_user(
         description="Filter by job type: `llm-unit-test` or `llm-benchmark`. Omit to return both",
     ),
 ):
-    """List all test runs (unit tests and benchmarks) across every agent in the
-    your workspace, newest-updated first. Each item carries `agent_id` and
-    `agent_name` so the frontend can group or label by agent."""
+    """List all test runs in your workspace, newest first."""
     jobs = get_agent_test_jobs_for_org(ctx.org_uuid, job_type=type)
 
     # Per-agent counters for naming ("Run 1", "Benchmark 2", …).
@@ -666,9 +705,12 @@ async def get_all_test_runs_for_user(
     summary="List agents for test",
 )
 async def get_test_agents(
-    test_uuid: str = PathParam(description="Test UUID (8-char identifier)"),
+    test_uuid: str = PathParam(
+        description="Test whose linked agents to list",
+        examples=[_EXAMPLE_TEST_UUID],
+    ),
 ):
-    """List the agents a test is linked to. 404s if the test doesn't exist."""
+    """List the agents linked to a test."""
     # Verify test exists
     test = get_test(test_uuid)
     if not test:
@@ -680,7 +722,7 @@ async def get_test_agents(
 
 @router.delete("", summary="Unlink test from agent")
 async def delete_agent_test_link(agent_test: AgentTestDelete):
-    """Unlink a single test from an agent. 404s if the link doesn't exist."""
+    """Unlink a test from an agent."""
     deleted = remove_test_from_agent(agent_test.agent_uuid, agent_test.test_uuid)
     if not deleted:
         raise HTTPException(status_code=404, detail="Agent-test link not found")
@@ -688,17 +730,19 @@ async def delete_agent_test_link(agent_test: AgentTestDelete):
 
 
 class AgentTestBulkDelete(BaseModel):
-    agent_uuid: str = Field(description="Agent UUID (8-char identifier)")
+    agent_uuid: str = Field(
+        description="Agent to unlink tests from",
+        examples=[_EXAMPLE_AGENT_UUID],
+    )
     test_uuids: List[str] = Field(
-        description="Test UUIDs (8-char) to unlink from the agent; must be non-empty"
+        description="Tests to unlink from the agent; must be non-empty",
+        examples=[[_EXAMPLE_TEST_UUID]],
     )
 
 
 @router.post("/bulk-unlink", summary="Bulk unlink tests from agent")
 async def bulk_delete_agent_test_links(payload: AgentTestBulkDelete):
-    """Unlink multiple tests from an agent in one call. The tests themselves are
-    kept — only the links are removed. 400 if `test_uuids` is empty; 404 if the
-    agent doesn't exist."""
+    """Unlink multiple tests from an agent."""
     if not payload.test_uuids:
         raise HTTPException(status_code=400, detail="test_uuids must not be empty")
 
@@ -719,10 +763,12 @@ async def bulk_delete_agent_test_links(payload: AgentTestBulkDelete):
 
 class AgentTestsBulkDeleteAll(BaseModel):
     agent_uuid: str = Field(
-        description="Agent UUID (8-char) used as a scope check — every requested test must be linked to it"
+        description="Agent whose linked tests define the deletion scope",
+        examples=[_EXAMPLE_AGENT_UUID],
     )
     test_uuids: List[str] = Field(
-        description="Explicit set of test UUIDs (8-char) to soft-delete; must be non-empty. There is no implicit 'delete every test' mode",
+        description="Tests to soft-delete; must be non-empty. Only tests linked to this agent in your workspace are deleted — others are skipped",
+        examples=[[_EXAMPLE_TEST_UUID]],
     )
 
 
@@ -731,13 +777,11 @@ async def bulk_delete_agent_tests(
     payload: AgentTestsBulkDeleteAll,
     ctx: OrgContext = Depends(get_current_org),
 ):
-    """Soft-delete the named tests (and their link rows), unlike `/bulk-unlink`
-    which only unlinks. Only tests in your workspace that are linked to
-    `agent_uuid` are deleted — UUIDs from other workspaces or not linked to this agent
-    are silently skipped, so this can't touch a foreign test or probe for foreign
-    UUIDs. Deleting a test cascades to remove its links across every agent, not
-    just this one. Cross-agent deletes require separate calls.
-    """
+    """Soft-delete tests linked to an agent, removing their links across every agent."""
+    # Unlike `/bulk-unlink`, this deletes the test rows (not just links). Only
+    # tests in your workspace that are linked to `agent_uuid` are deleted;
+    # foreign or unlinked IDs are silently skipped. Deleting a test cascades
+    # to remove its links across every agent, not just this one.
     if not payload.test_uuids:
         raise HTTPException(status_code=400, detail="test_uuids must not be empty")
 
@@ -2047,22 +2091,19 @@ def _launch_agent_test_run(
 
 @router.post(
     "/agent/{agent_uuid}/run",
-    response_model=TaskCreateResponse,
+    response_model=AgentTestRunCreateResponse,
     tags=["Public API"],
     summary="Run agent tests",
 )
 async def run_agent_test(
-    agent_uuid: str = PathParam(description="Agent UUID (8-char identifier)"),
+    agent_uuid: str = PathParam(
+        description="The agent to test. Must be in your workspace.",
+        examples=[_EXAMPLE_AGENT_UUID],
+    ),
     request: RunTestRequest = ...,
     ctx: OrgContext = Depends(get_org_jwt_or_api_key),
 ):
-    """Run one or more tests for an agent as a background job.
-
-    Runs the calibrate LLM tests command with the agent's config over the
-    specified tests (or all linked tests when `test_uuids` is omitted). The
-    agent's connection must be verified first (400 otherwise) — every test type
-    runs the agent live. Returns a task ID to poll for status and results.
-    """
+    """Run tests for an agent as a background job."""
     # Public API (auth via get_org_jwt_or_api_key). Verify the agent exists and
     # belongs to the caller's workspace (404 otherwise).
     agent = get_agent(agent_uuid)
@@ -2106,7 +2147,7 @@ async def run_agent_test(
         raise HTTPException(status_code=500, detail=str(e))
 
     job_id, initial_status = _launch_agent_test_run(agent, tests, s3_bucket)
-    return TaskCreateResponse(task_id=job_id, status=initial_status)
+    return AgentTestRunCreateResponse(task_id=job_id, status=initial_status)
 
 
 def _run_tests_for_agents(
@@ -2167,23 +2208,7 @@ async def run_tests_batch(
     request: Optional[BatchRunRequest] = None,
     ctx: OrgContext = Depends(get_org_jwt_or_api_key),
 ):
-    """Run every linked test for a set of agents, one ``llm-unit-test`` job per agent.
-
-    Scope is driven by the optional ``agent_names`` payload:
-
-    - **Provided (non-empty)** — run only those agents. Names are unique per workspace
-      and **all are validated up front**: if any doesn't resolve to a
-      (non-deleted) agent in your workspace, the call 404s with the offending
-      names and NO jobs are created.
-    - **Omitted / null / empty** — run every agent in your workspace.
-
-    For each selected agent, its linked tests are launched as one job. Agents
-    with no linked tests or an unverified connection are reported under
-    ``skipped`` instead of failing the batch. Subject to the normal per-workspace
-    concurrency queue, so over-limit jobs come back ``queued``. Returns one
-    ``runs`` entry per launched agent with ``agent_name``, ``agent_uuid``,
-    ``task_id``, and ``status``.
-    """
+    """Run agent tests for every agent in your workspace, or for a selected set."""
     # Public API (auth via get_org_jwt_or_api_key).
     agent_names = request.agent_names if request else None
 
@@ -2263,13 +2288,14 @@ class VisibilityResponse(BaseModel):
     summary="Update test run visibility",
 )
 async def update_test_run_visibility(
-    task_id: str = PathParam(description="Test run job UUID (8-char identifier)"),
+    task_id: str = PathParam(
+        description="Test run whose sharing settings to update",
+        examples=[_EXAMPLE_TASK_UUID],
+    ),
     body: VisibilityRequest = ...,
     ctx: OrgContext = Depends(get_current_org),
 ):
-    """Toggle public sharing for an agent test run. Enabling it mints (or reuses)
-    a share token; disabling it clears the token. 404s if the run isn't owned by
-    your workspace."""
+    """Toggle public sharing for a test run."""
     job = _load_owned_agent_test_job(task_id, ctx)
 
     if body.is_public:
@@ -2290,14 +2316,13 @@ async def update_test_run_visibility(
     summary="Get test run status",
 )
 async def get_agent_test_run_status(
-    task_id: str = PathParam(description="Test run job UUID (8-char identifier)"),
+    task_id: str = PathParam(
+        description="Test run to poll for status and results",
+        examples=[_EXAMPLE_TASK_UUID],
+    ),
     ctx: OrgContext = Depends(get_org_jwt_or_api_key),
 ):
-    """Retrieve the status of an agent test run, plus its results once complete.
-
-    The run is scoped to its owning workspace. A completed run becomes publicly
-    viewable only after it is shared via the public share-token endpoint.
-    """
+    """Get the status and results of a test run."""
     # Public API (auth via get_org_jwt_or_api_key); ownership enforced below.
     job = _load_owned_agent_test_job(task_id, ctx)
 
@@ -2361,7 +2386,8 @@ class BenchmarkRequest(BaseModel):
     )
     test_uuids: Optional[List[str]] = Field(
         None,
-        description="Subset of the agent's linked tests to benchmark. Each uuid **must be linked to the agent** (404 otherwise). Omit/null/empty to run all linked tests",
+        description="Subset of the agent's linked tests to benchmark. Each ID must be linked to the agent. Omit to run all linked tests",
+        examples=[[_EXAMPLE_TEST_UUID]],
     )
 
 
@@ -2394,7 +2420,10 @@ class ModelResult(BaseModel):
 
 
 class BenchmarkStatusResponse(BaseModel):
-    task_id: str = Field(description="Benchmark run job UUID (8-char identifier)")
+    task_id: str = Field(
+        description="Benchmark run job ID",
+        examples=[_EXAMPLE_TASK_UUID],
+    )
     status: str = Field(
         description="Job status: `queued`, `in_progress`, `done`, or `failed`"
     )
@@ -2925,19 +2954,14 @@ def run_benchmark_task(
     summary="Run agent benchmark",
 )
 async def run_agent_benchmark(
-    agent_uuid: str = PathParam(description="Agent UUID (8-char identifier)"),
+    agent_uuid: str = PathParam(
+        description="Agent to benchmark. Must be in your workspace.",
+        examples=[_EXAMPLE_AGENT_UUID],
+    ),
     request: BenchmarkRequest = ...,
     ctx: OrgContext = Depends(get_current_org),
 ):
-    """Run a benchmark comparing multiple models on the same tests as a
-    background job.
-
-    Runs the calibrate LLM tests command per model, then builds a leaderboard.
-    Scope defaults to all of the agent's linked tests; `test_uuids` narrows it to
-    a subset (each must be linked to the agent, 404 otherwise). For connection
-    agents, every requested model must already be verified (400 otherwise).
-    Returns a task ID to poll for status and results.
-    """
+    """Run a multi-model benchmark on an agent's linked tests as a background job."""
     # Verify agent exists and belongs to the caller's org.
     agent = get_agent(agent_uuid)
     if not agent or agent.get("org_uuid") != ctx.org_uuid:
@@ -3057,13 +3081,14 @@ async def run_agent_benchmark(
     summary="Update benchmark visibility",
 )
 async def update_benchmark_visibility(
-    task_id: str = PathParam(description="Benchmark run job UUID (8-char identifier)"),
+    task_id: str = PathParam(
+        description="Benchmark run whose sharing settings to update",
+        examples=[_EXAMPLE_TASK_UUID],
+    ),
     body: VisibilityRequest = ...,
     ctx: OrgContext = Depends(get_current_org),
 ):
-    """Toggle public sharing for a benchmark run. Enabling it mints (or reuses) a
-    share token; disabling it clears the token. 404s if the run isn't owned by
-    your workspace."""
+    """Toggle public sharing for a benchmark run."""
     job = _load_owned_agent_test_job(task_id, ctx)
 
     if body.is_public:
@@ -3083,16 +3108,13 @@ async def update_benchmark_visibility(
     summary="Get benchmark status",
 )
 async def get_benchmark_status(
-    task_id: str = PathParam(description="Benchmark run job UUID (8-char identifier)"),
+    task_id: str = PathParam(
+        description="Benchmark run to poll for status and results",
+        examples=[_EXAMPLE_TASK_UUID],
+    ),
     ctx: OrgContext = Depends(get_current_org),
 ):
-    """Retrieve the status of a benchmark run, plus per-model results and the
-    leaderboard once done.
-
-    Requires a valid JWT and workspace ownership of the run. Unauthenticated access to
-    a completed run is only possible once it is made public, via the share-token
-    endpoint in the public router.
-    """
+    """Get the status and results of a benchmark run."""
     job = _load_owned_agent_test_job(task_id, ctx)
 
     status = job["status"]
@@ -3143,12 +3165,13 @@ async def get_benchmark_status(
 
 @router.delete("/job/{job_uuid}", summary="Delete test job")
 async def delete_agent_test_job_endpoint(
-    job_uuid: str = PathParam(description="Test/benchmark job UUID (8-char identifier)"),
+    job_uuid: str = PathParam(
+        description="Test or benchmark job to delete",
+        examples=[_EXAMPLE_TASK_UUID],
+    ),
     ctx: OrgContext = Depends(get_current_org),
 ):
-    """Delete an agent test or benchmark job. Only members of the parent agent's
-    workspace can delete. Deleting a running job triggers the next queued job to start.
-    404s if the job isn't owned by your workspace."""
+    """Delete an agent test or benchmark job."""
     job = get_agent_test_job(job_uuid)
     if not job:
         raise HTTPException(status_code=404, detail="Job not found")
