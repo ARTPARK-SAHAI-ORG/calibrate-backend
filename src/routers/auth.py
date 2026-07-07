@@ -41,7 +41,7 @@ class LoginResponse(BaseModel):
     access_token: str = Field(
         description="JWT to send as `Authorization: Bearer <token>` on later requests"
     )
-    token_type: str = Field("bearer", description="Token scheme — always `bearer`")
+    token_type: str = Field("bearer", description="Always `bearer`")
     user: UserResponse = Field(description="Your profile")
     message: str = Field(description="Status message")
 

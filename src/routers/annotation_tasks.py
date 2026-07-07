@@ -215,7 +215,7 @@ class EvaluatorLinkRequest(BaseModel):
 
 class EvaluatorOrderRequest(BaseModel):
     evaluator_ids: List[str] = Field(
-        description="Full ordered list of currently-linked evaluator IDs. **Must match the active linked set exactly** — this endpoint reorders, it does not link/unlink. Send `[]` only when the task has no linked evaluators"
+        description="Full ordered list of currently-linked evaluator IDs. **Must match the active linked set exactly.** This endpoint reorders, it does not link/unlink. Send `[]` only when the task has no linked evaluators"
     )
 
 
@@ -465,7 +465,7 @@ class AnnotationItemPayload(BaseModel):
     )
     annotations: Optional[Dict[str, Any]] = Field(
         None,
-        description="Optional human annotations to seed with the item, keyed by evaluator ID (each must be currently linked to the task). Each value is `{'value': <bool|number|string>, 'reasoning'?: str}` for every output_type — binary uses a bool in `value`, rating a number. Only the keys `value`/`score`/`rating`/`label`/`binary` count toward agreement aggregates. **When any item carries this, `BulkItemsRequest.annotator_id` is required.**",
+        description="Optional human annotations to seed with the item, keyed by evaluator ID (each must be currently linked to the task). Each value is `{'value': <bool|number|string>, 'reasoning'?: str}` for every output_type. Binary uses a bool in `value`, rating a number. Only the keys `value`/`score`/`rating`/`label`/`binary` count toward agreement aggregates. **When any item carries this, `BulkItemsRequest.annotator_id` is required.**",
     )
 
 
@@ -1031,7 +1031,7 @@ async def list_item_annotations(
 
 class CreateJobsRequest(BaseModel):
     annotator_ids: List[str] = Field(
-        description="Annotator IDs to assign — one labelling job per annotator. Must be non-empty and in your workspace"
+        description="Annotator IDs to assign, one labelling job per annotator. Must be non-empty and in your workspace"
     )
     item_ids: List[str] = Field(
         default=[],

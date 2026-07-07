@@ -338,15 +338,15 @@ class JudgeResult(BaseModel):
     )
     match: Optional[bool] = Field(
         None,
-        description="Binary evaluator pass/fail. **Set only for binary evaluators** (else null — `score` is set instead)",
+        description="Pass/fail verdict, for binary evaluators",
     )
     score: Optional[float] = Field(
         None,
-        description="Rating evaluator numeric score. **Set only for rating evaluators** (else null — `match` is set instead)",
+        description="Numeric score, for rating evaluators",
     )
     value_name: Optional[str] = Field(
         None,
-        description="Human-readable label for `match`/`score` resolved against the run's rubric. Falls back to `Correct`/`Wrong` (binary) or the stringified score (rating) when the snapshot lacks named scale entries",
+        description="Readable label for the verdict, from the run's rubric",
     )
     variable_values: Optional[Dict[str, Any]] = Field(
         None,
@@ -380,11 +380,11 @@ class TestCaseResult(BaseModel):
     )
     latency_ms: Optional[float] = Field(
         None,
-        description="Response-generation latency in milliseconds for the agent under test (not the judge). Present only for live runs. Null for in-progress runs. Float, since external agents may self-report a fractional value",
+        description="Response latency in milliseconds for the agent under test, not the judge",
     )
     cost: Optional[float] = Field(
         None,
-        description="Per-case cost in USD, lifted from calibrate's nested `output.cost`. Null when the provider/agent reports none (e.g. `--provider openai`)",
+        description="Cost of this case in USD",
     )
 
 
@@ -399,7 +399,7 @@ class RunEvaluator(BaseModel):
     )
     output_config: Optional[Dict[str, Any]] = Field(
         None,
-        description="Rubric — the scale values, labels, and colors a verdict maps to",
+        description="Rubric: the scale values, labels, and colors a verdict maps to",
     )
     scale_min: Optional[float] = Field(
         None, description="Lowest rating value. Set for rating evaluators"
@@ -819,7 +819,7 @@ class AgentTestsBulkDeleteAll(BaseModel):
         examples=[_EXAMPLE_AGENT_UUID],
     )
     test_uuids: List[str] = Field(
-        description="Tests to soft-delete. Must be non-empty. Only tests linked to this agent in your workspace are deleted — others are skipped",
+        description="Tests to soft-delete. Must be non-empty. Only tests linked to this agent in your workspace are deleted. Others are skipped",
         examples=[[_EXAMPLE_TEST_UUID]],
     )
 

@@ -67,7 +67,7 @@ class ApiKeyResponse(BaseModel):
     )
     name: str = Field(description="Human-readable label for the key")
     last_four: str = Field(
-        description="Last four characters of the key — the only fragment kept after creation"
+        description="Last four characters of the key"
     )
     masked_key: str = Field(
         description="Masked display form of the key for listings"
@@ -95,7 +95,7 @@ class ApiKeyResponse(BaseModel):
 
 class CreateApiKeyResponse(ApiKeyResponse):
     key: str = Field(
-        description="The API key. **Returned exactly once at creation** — store it now. It cannot be retrieved again"
+        description="The API key. **Returned exactly once at creation.** Store it now. It cannot be retrieved again"
     )
 
 

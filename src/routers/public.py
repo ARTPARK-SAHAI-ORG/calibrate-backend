@@ -916,7 +916,7 @@ class PublicAnnotationUpsertRequest(BaseModel):
         examples=[_EXAMPLE_ITEM_UUID],
     )
     annotations: List[PublicAnnotationEntry] = Field(
-        description="Judgements to save — one entry per evaluator, plus optionally one row-level entry"
+        description="Judgements to save, one entry per evaluator, plus optionally one row-level entry"
     )
 
 

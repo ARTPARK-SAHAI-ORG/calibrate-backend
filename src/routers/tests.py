@@ -64,9 +64,9 @@ class TestCreate(BaseModel):
     type: TestType = Field(
         description=(
             "What the test judges:\n\n"
-            "- `response` — judges the generated reply\n"
-            "- `tool_call` — diffs the generated tool calls\n"
-            "- `conversation` — judges the full conversation"
+            "- `response`: judges the generated reply\n"
+            "- `tool_call`: diffs the generated tool calls\n"
+            "- `conversation`: judges the full conversation"
         )
     )
     config: Optional[Dict[str, Any]] = Field(
@@ -83,7 +83,7 @@ class TestUpdate(BaseModel):
     name: Optional[str] = Field(None, description="New test name. Omit to leave unchanged")
     type: Optional[TestType] = Field(
         None,
-        description="Test type. Immutable — may only echo the existing value. A different value is rejected (400). Omit to leave unchanged",
+        description="Test type. Immutable, may only echo the existing value. A different value is rejected (400). Omit to leave unchanged",
     )
     config: Optional[Dict[str, Any]] = Field(
         None, description="Replacement calibrate config. Omit to leave unchanged"
