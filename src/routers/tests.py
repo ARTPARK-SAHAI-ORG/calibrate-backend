@@ -154,7 +154,7 @@ class TestUpdate(BaseModel):
     )
     evaluators: Optional[List[EvaluatorRef]] = Field(
         None,
-        description="New evaluator links for the test. Omit to leave unchanged. An empty list clears them",
+        description="New evaluator links for the test. Omit to leave unchanged. An empty list clears them, except on `conversation` tests, which must keep at least one",
     )
 
 

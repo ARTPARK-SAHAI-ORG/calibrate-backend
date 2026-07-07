@@ -150,6 +150,30 @@ def test_bulk_create_rejects_system_role(client):
     assert r.status_code == 422, r.text
 
 
+def test_update_conversation_test_rejects_clearing_evaluators(client):
+    """A conversation test must keep >=1 evaluator: PUT with an empty
+    `evaluators` list is 400, so the description's 'clears them' promise
+    correctly excludes conversation tests."""
+    jwt = _signup(client)
+    evaluators = client.get("/evaluators", headers=jwt).json()
+    conv_ev = next(e for e in evaluators if e.get("evaluator_type") == "conversation")
+    created = client.post(
+        "/tests",
+        json={
+            "name": f"conv-{uuid.uuid4().hex[:6]}",
+            "type": "conversation",
+            "evaluators": [{"evaluator_uuid": conv_ev["uuid"]}],
+        },
+        headers=jwt,
+    )
+    assert created.status_code == 200, created.text
+    t_uuid = created.json()["uuid"]
+
+    cleared = client.put(f"/tests/{t_uuid}", json={"evaluators": []}, headers=jwt)
+    assert cleared.status_code == 400, cleared.text
+    assert "at least one evaluator" in cleared.text
+
+
 def test_create_test_invalid_api_key(client):
     """POST /tests with a bogus key must 401."""
     r = client.post(
