@@ -128,7 +128,7 @@ async def list_keys(ctx: OrgContext = Depends(get_current_org)):
 @router.delete("/{key_uuid}", status_code=204, summary="Revoke API key")
 async def revoke_key(
     key_uuid: str = Path(
-        description="The API key to revoke. Must be in your workspace.",
+        description="The API key to revoke.",
         examples=["f47ac10b-58cc-4372-a567-0e02b2c3d479"],
     ),
     ctx: OrgContext = Depends(get_current_org),

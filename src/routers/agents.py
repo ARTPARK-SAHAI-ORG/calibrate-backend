@@ -382,7 +382,7 @@ async def verify_agent_connection_presave(
 )
 async def verify_agent_connection(
     agent_uuid: str = Path(
-        description="The agent whose connection to verify. Must be in your workspace.",
+        description="The agent whose connection to verify.",
         examples=["f47ac10b-58cc-4372-a567-0e02b2c3d479"],
     ),
     request: VerifyConnectionRequest = ...,
@@ -525,7 +525,7 @@ async def list_agents(ctx: OrgContext = Depends(get_org_jwt_or_api_key)):
 )
 async def get_agent_endpoint(
     agent_uuid: str = Path(
-        description="The agent to retrieve. Must be in your workspace.",
+        description="The agent to retrieve.",
         examples=["f47ac10b-58cc-4372-a567-0e02b2c3d479"],
     ),
     ctx: OrgContext = Depends(get_org_jwt_or_api_key),
@@ -545,7 +545,7 @@ async def get_agent_endpoint(
 )
 async def update_agent_endpoint(
     agent_uuid: str = Path(
-        description="The agent to update. Must be in your workspace.",
+        description="The agent to update.",
         examples=["f47ac10b-58cc-4372-a567-0e02b2c3d479"],
     ),
     agent: AgentUpdate = ...,
@@ -602,7 +602,7 @@ async def update_agent_endpoint(
 @router.delete("/{agent_uuid}", summary="Delete agent")
 async def delete_agent_endpoint(
     agent_uuid: str = Path(
-        description="The agent to delete. Must be in your workspace.",
+        description="The agent to delete.",
         examples=["f47ac10b-58cc-4372-a567-0e02b2c3d479"],
     ),
     ctx: OrgContext = Depends(get_current_org),
@@ -625,7 +625,7 @@ async def delete_agent_endpoint(
 )
 async def duplicate_agent_endpoint(
     agent_uuid: str = Path(
-        description="The agent to duplicate. Must be in your workspace.",
+        description="The agent to duplicate.",
         examples=["f47ac10b-58cc-4372-a567-0e02b2c3d479"],
     ),
     request: AgentDuplicateRequest = ...,

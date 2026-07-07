@@ -153,7 +153,7 @@ class AgentTestsCreate(BaseModel):
     agent_uuid: str = Field(
         min_length=36,
         max_length=36,
-        description="Agent to link tests to. Must be in your workspace.",
+        description="Agent to link tests to.",
         examples=[_EXAMPLE_AGENT_UUID],
     )
     test_uuids: List[str] = Field(
@@ -2147,7 +2147,7 @@ def _launch_agent_test_run(
 )
 async def run_agent_test(
     agent_uuid: str = PathParam(
-        description="The agent to test. Must be in your workspace.",
+        description="The agent to test.",
         examples=[_EXAMPLE_AGENT_UUID],
     ),
     request: RunTestRequest = ...,
@@ -3010,7 +3010,7 @@ def run_benchmark_task(
 )
 async def run_agent_benchmark(
     agent_uuid: str = PathParam(
-        description="Agent to benchmark. Must be in your workspace.",
+        description="Agent to benchmark.",
         examples=[_EXAMPLE_AGENT_UUID],
     ),
     request: BenchmarkRequest = ...,

@@ -122,7 +122,7 @@ async def list_annotators(ctx: OrgContext = Depends(get_current_org)):
 @router.get("/{annotator_uuid}", summary="Get annotator")
 async def get_annotator_endpoint(
     annotator_uuid: str = Path(
-        description="Annotator to retrieve. Must be in your workspace.",
+        description="Annotator to retrieve.",
         examples=["f47ac10b-58cc-4372-a567-0e02b2c3d479"],
     ),
     bucket: str = Query(
@@ -174,7 +174,7 @@ async def get_annotator_endpoint(
 @router.put("/{annotator_uuid}", response_model=AnnotatorResponse, summary="Update annotator")
 async def update_annotator_endpoint(
     annotator_uuid: str = Path(
-        description="Annotator to update. Must be in your workspace.",
+        description="Annotator to update.",
         examples=["f47ac10b-58cc-4372-a567-0e02b2c3d479"],
     ),
     payload: AnnotatorUpdate = ...,
@@ -201,7 +201,7 @@ async def update_annotator_endpoint(
 @router.delete("/{annotator_uuid}", summary="Delete annotator")
 async def delete_annotator_endpoint(
     annotator_uuid: str = Path(
-        description="Annotator to delete. Must be in your workspace.",
+        description="Annotator to delete.",
         examples=["f47ac10b-58cc-4372-a567-0e02b2c3d479"],
     ),
     ctx: OrgContext = Depends(get_current_org),

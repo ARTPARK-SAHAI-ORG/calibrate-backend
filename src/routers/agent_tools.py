@@ -26,7 +26,7 @@ class AgentToolsCreate(BaseModel):
     agent_uuid: str = Field(
         min_length=36,
         max_length=36,
-        description="The agent to link tools to. Must be in your workspace.",
+        description="The agent to link tools to.",
         examples=[_EXAMPLE_ID],
     )
     tool_uuids: List[str] = Field(
@@ -39,7 +39,7 @@ class AgentToolDelete(BaseModel):
     agent_uuid: str = Field(
         min_length=36,
         max_length=36,
-        description="The agent to unlink a tool from. Must be in your workspace.",
+        description="The agent to unlink a tool from.",
         examples=[_EXAMPLE_ID],
     )
     tool_uuid: str = Field(
@@ -168,7 +168,7 @@ async def list_agent_tools(ctx: OrgContext = Depends(get_current_org)):
 )
 async def get_agent_tools(
     agent_uuid: str = Path(
-        description="The agent whose linked tools to list. Must be in your workspace.",
+        description="The agent whose linked tools to list.",
         examples=[_EXAMPLE_ID],
     ),
     ctx: OrgContext = Depends(get_current_org),
@@ -185,7 +185,7 @@ async def get_agent_tools(
 )
 async def get_tool_agents(
     tool_uuid: str = Path(
-        description="The tool whose linked agents to list. Must be in your workspace.",
+        description="The tool whose linked agents to list.",
         examples=[_EXAMPLE_ID],
     ),
     ctx: OrgContext = Depends(get_current_org),

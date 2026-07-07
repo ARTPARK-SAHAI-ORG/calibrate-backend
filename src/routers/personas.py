@@ -96,7 +96,7 @@ async def list_personas(ctx: OrgContext = Depends(get_current_org)):
 @router.get("/{persona_uuid}", response_model=PersonaResponse, summary="Get persona")
 async def get_persona_endpoint(
     persona_uuid: str = Path(
-        description="The persona to retrieve. Must be in your workspace.",
+        description="The persona to retrieve.",
         examples=[_EXAMPLE_ID],
     ),
     ctx: OrgContext = Depends(get_current_org),
@@ -112,7 +112,7 @@ async def get_persona_endpoint(
 async def update_persona_endpoint(
     persona: PersonaUpdate,
     persona_uuid: str = Path(
-        description="The persona to update. Must be in your workspace.",
+        description="The persona to update.",
         examples=[_EXAMPLE_ID],
     ),
     ctx: OrgContext = Depends(get_current_org),
@@ -146,7 +146,7 @@ async def update_persona_endpoint(
 @router.delete("/{persona_uuid}", summary="Delete persona")
 async def delete_persona_endpoint(
     persona_uuid: str = Path(
-        description="The persona to delete. Must be in your workspace.",
+        description="The persona to delete.",
         examples=[_EXAMPLE_ID],
     ),
     ctx: OrgContext = Depends(get_current_org),

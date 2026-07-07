@@ -310,14 +310,14 @@ class SimulationCreate(BaseModel):
         None,
         min_length=36,
         max_length=36,
-        description="Agent under test. Must be in your workspace. Omit to create without an agent",
+        description="Agent under test. Omit to create without an agent",
         examples=[_EXAMPLE_ID],
     )
     persona_uuids: Optional[List[str]] = Field(
-        None, description="Personas to link. Must be in your workspace. Omit to link none"
+        None, description="Personas to link. Omit to link none"
     )
     scenario_uuids: Optional[List[str]] = Field(
-        None, description="Scenarios to link. Must be in your workspace. Omit to link none"
+        None, description="Scenarios to link. Omit to link none"
     )
     evaluators: Optional[List[EvaluatorRef]] = Field(
         None, description="`conversation` evaluators to link. Omit to link none"
@@ -331,7 +331,7 @@ class SimulationUpdate(BaseModel):
 
     name: Optional[str] = Field(None, description="New name. Omit to leave unchanged")
     agent_uuid: Optional[str] = Field(
-        None, description="Agent to link. Must be in your workspace. Empty string (`\"\"`) clears the agent. Omit to leave unchanged"
+        None, description="Agent to link. Empty string (`\"\"`) clears the agent. Omit to leave unchanged"
     )
     persona_uuids: Optional[List[str]] = Field(
         None, description="Replacement persona set (replaces existing). Omit to leave unchanged"
@@ -779,7 +779,7 @@ class VisibilityResponse(BaseModel):
 async def update_simulation_run_visibility(
     body: VisibilityRequest,
     task_id: str = PathParam(
-        description="The simulation run to update. Must be in your workspace.",
+        description="The simulation run to update.",
         examples=["f47ac10b-58cc-4372-a567-0e02b2c3d479"],
     ),
     ctx: OrgContext = Depends(get_current_org),
@@ -810,7 +810,7 @@ async def update_simulation_run_visibility(
 @router.get("/run/{task_id}", response_model=SimulationRunStatusResponse, summary="Get simulation run status")
 async def get_simulation_run_status(
     task_id: str = PathParam(
-        description="The simulation run to poll. Must be in your workspace.",
+        description="The simulation run to poll.",
         examples=["f47ac10b-58cc-4372-a567-0e02b2c3d479"],
     ),
     ctx: OrgContext = Depends(get_current_org),
@@ -934,7 +934,7 @@ async def get_simulation_run_status(
 @router.get("/{simulation_uuid}/runs", response_model=SimulationRunsResponse, summary="List simulation runs")
 async def get_simulation_runs(
     simulation_uuid: str = PathParam(
-        description="The simulation whose runs to list. Must be in your workspace.",
+        description="The simulation whose runs to list.",
         examples=["f47ac10b-58cc-4372-a567-0e02b2c3d479"],
     ),
     ctx: OrgContext = Depends(get_current_org),
@@ -977,7 +977,7 @@ async def get_simulation_runs(
 @router.get("/{simulation_uuid}", response_model=SimulationDetailResponse, summary="Get simulation")
 async def get_simulation_endpoint(
     simulation_uuid: str = PathParam(
-        description="The simulation to retrieve. Must be in your workspace.",
+        description="The simulation to retrieve.",
         examples=["f47ac10b-58cc-4372-a567-0e02b2c3d479"],
     ),
     ctx: OrgContext = Depends(get_current_org),
@@ -1022,7 +1022,7 @@ async def get_simulation_endpoint(
 async def update_simulation_endpoint(
     simulation: SimulationUpdate,
     simulation_uuid: str = PathParam(
-        description="The simulation to update. Must be in your workspace.",
+        description="The simulation to update.",
         examples=["f47ac10b-58cc-4372-a567-0e02b2c3d479"],
     ),
     ctx: OrgContext = Depends(get_current_org),
@@ -1154,7 +1154,7 @@ async def update_simulation_endpoint(
 @router.delete("/{simulation_uuid}", summary="Delete simulation")
 async def delete_simulation_endpoint(
     simulation_uuid: str = PathParam(
-        description="The simulation to delete. Must be in your workspace.",
+        description="The simulation to delete.",
         examples=["f47ac10b-58cc-4372-a567-0e02b2c3d479"],
     ),
     ctx: OrgContext = Depends(get_current_org),
@@ -2417,7 +2417,7 @@ def run_simulation_task(
 async def run_simulation_endpoint(
     request: RunSimulationRequest,
     simulation_uuid: str = PathParam(
-        description="The simulation to run. Must be in your workspace.",
+        description="The simulation to run.",
         examples=["f47ac10b-58cc-4372-a567-0e02b2c3d479"],
     ),
     ctx: OrgContext = Depends(get_current_org),
@@ -2513,7 +2513,7 @@ async def run_simulation_endpoint(
 @router.post("/run/{job_uuid}/abort", response_model=SimulationRunStatusResponse, summary="Abort simulation run")
 async def abort_simulation_run(
     job_uuid: str = PathParam(
-        description="The in-progress simulation run to abort. Must be in your workspace.",
+        description="The in-progress simulation run to abort.",
         examples=["f47ac10b-58cc-4372-a567-0e02b2c3d479"],
     ),
     ctx: OrgContext = Depends(get_current_org),
@@ -2602,7 +2602,7 @@ async def abort_simulation_run(
 @router.delete("/run/{job_uuid}", summary="Delete simulation run")
 async def delete_simulation_job_endpoint(
     job_uuid: str = PathParam(
-        description="The simulation run to delete. Must be in your workspace.",
+        description="The simulation run to delete.",
         examples=["f47ac10b-58cc-4372-a567-0e02b2c3d479"],
     ),
     ctx: OrgContext = Depends(get_current_org),

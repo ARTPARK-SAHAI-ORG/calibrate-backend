@@ -467,7 +467,7 @@ async def list_evaluators(
 @router.get("/{evaluator_uuid}", response_model=EvaluatorDetailResponse, summary="Get evaluator")
 async def get_evaluator_endpoint(
     evaluator_uuid: str = Path(
-        description="Evaluator to retrieve. Must be in your workspace.",
+        description="Evaluator to retrieve.",
         examples=["f47ac10b-58cc-4372-a567-0e02b2c3d479"],
     ),
     ctx: OrgContext = Depends(get_current_org),
@@ -494,7 +494,7 @@ async def get_evaluator_endpoint(
 async def update_evaluator_endpoint(
     payload: EvaluatorUpdate,
     evaluator_uuid: str = Path(
-        description="Evaluator to update. Must be in your workspace.",
+        description="Evaluator to update.",
         examples=["f47ac10b-58cc-4372-a567-0e02b2c3d479"],
     ),
     ctx: OrgContext = Depends(get_current_org),
@@ -527,7 +527,7 @@ async def update_evaluator_endpoint(
 @router.delete("/{evaluator_uuid}", summary="Delete evaluator")
 async def delete_evaluator_endpoint(
     evaluator_uuid: str = Path(
-        description="Evaluator to delete. Must be in your workspace.",
+        description="Evaluator to delete.",
         examples=["f47ac10b-58cc-4372-a567-0e02b2c3d479"],
     ),
     ctx: OrgContext = Depends(get_current_org),
@@ -573,7 +573,7 @@ async def duplicate_evaluator_endpoint(
 @router.get("/{evaluator_uuid}/versions", response_model=List[EvaluatorVersionResponse], summary="List evaluator versions")
 async def list_versions(
     evaluator_uuid: str = Path(
-        description="Evaluator whose versions to list. Must be in your workspace.",
+        description="Evaluator whose versions to list.",
         examples=["f47ac10b-58cc-4372-a567-0e02b2c3d479"],
     ),
     ctx: OrgContext = Depends(get_current_org),
@@ -594,7 +594,7 @@ async def list_versions(
 async def create_version(
     payload: EvaluatorVersionCreateRequest,
     evaluator_uuid: str = Path(
-        description="Evaluator to add a version to. Must be in your workspace.",
+        description="Evaluator to add a version to.",
         examples=["f47ac10b-58cc-4372-a567-0e02b2c3d479"],
     ),
     ctx: OrgContext = Depends(get_current_org),
@@ -626,7 +626,7 @@ async def create_version(
 async def mark_live(
     payload: SetLiveVersionRequest,
     evaluator_uuid: str = Path(
-        description="Evaluator whose live version to set. Must be in your workspace.",
+        description="Evaluator whose live version to set.",
         examples=["f47ac10b-58cc-4372-a567-0e02b2c3d479"],
     ),
     ctx: OrgContext = Depends(get_current_org),
@@ -660,7 +660,7 @@ class PromptPreviewRequest(BaseModel):
 async def preview_prompt(
     payload: PromptPreviewRequest,
     evaluator_uuid: str = Path(
-        description="Evaluator whose prompt to preview. Must be in your workspace.",
+        description="Evaluator whose prompt to preview.",
         examples=["f47ac10b-58cc-4372-a567-0e02b2c3d479"],
     ),
     ctx: OrgContext = Depends(get_current_org),

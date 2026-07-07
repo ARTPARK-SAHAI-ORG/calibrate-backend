@@ -196,7 +196,7 @@ async def list_datasets(
 @router.get("/{dataset_id}", response_model=DatasetDetailResponse, summary="Get dataset")
 async def get_dataset_detail(
     dataset_id: str = Path(
-        description="The dataset to retrieve. Must be in your workspace.",
+        description="The dataset to retrieve.",
         examples=["f47ac10b-58cc-4372-a567-0e02b2c3d479"],
     ),
     ctx: OrgContext = Depends(get_current_org),
@@ -224,7 +224,7 @@ async def get_dataset_detail(
 async def rename_dataset(
     request: DatasetRenameRequest,
     dataset_id: str = Path(
-        description="The dataset to rename. Must be in your workspace.",
+        description="The dataset to rename.",
         examples=["f47ac10b-58cc-4372-a567-0e02b2c3d479"],
     ),
     ctx: OrgContext = Depends(get_current_org),
@@ -248,7 +248,7 @@ async def rename_dataset(
 @router.delete("/{dataset_id}", status_code=204, summary="Delete dataset")
 async def remove_dataset(
     dataset_id: str = Path(
-        description="The dataset to delete. Must be in your workspace.",
+        description="The dataset to delete.",
         examples=["f47ac10b-58cc-4372-a567-0e02b2c3d479"],
     ),
     ctx: OrgContext = Depends(get_current_org),
@@ -270,7 +270,7 @@ async def remove_dataset(
 async def add_items(
     items: List[DatasetItemIn],
     dataset_id: str = Path(
-        description="The dataset to add items to. Must be in your workspace.",
+        description="The dataset to add items to.",
         examples=["f47ac10b-58cc-4372-a567-0e02b2c3d479"],
     ),
     ctx: OrgContext = Depends(get_current_org),
@@ -303,7 +303,7 @@ async def add_items(
 async def update_item(
     request: DatasetItemUpdate,
     dataset_id: str = Path(
-        description="The dataset containing the item. Must be in your workspace.",
+        description="The dataset containing the item.",
         examples=["f47ac10b-58cc-4372-a567-0e02b2c3d479"],
     ),
     item_uuid: str = Path(
@@ -354,7 +354,7 @@ async def update_item(
 )
 async def remove_item(
     dataset_id: str = Path(
-        description="The dataset containing the item. Must be in your workspace.",
+        description="The dataset containing the item.",
         examples=["f47ac10b-58cc-4372-a567-0e02b2c3d479"],
     ),
     item_uuid: str = Path(

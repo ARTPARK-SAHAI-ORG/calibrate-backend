@@ -86,7 +86,7 @@ async def list_scenarios(ctx: OrgContext = Depends(get_current_org)):
 @router.get("/{scenario_uuid}", response_model=ScenarioResponse, summary="Get scenario")
 async def get_scenario_endpoint(
     scenario_uuid: str = Path(
-        description="The scenario to retrieve. Must be in your workspace.",
+        description="The scenario to retrieve.",
         examples=[_EXAMPLE_ID],
     ),
     ctx: OrgContext = Depends(get_current_org),
@@ -102,7 +102,7 @@ async def get_scenario_endpoint(
 async def update_scenario_endpoint(
     scenario: ScenarioUpdate,
     scenario_uuid: str = Path(
-        description="The scenario to update. Must be in your workspace.",
+        description="The scenario to update.",
         examples=[_EXAMPLE_ID],
     ),
     ctx: OrgContext = Depends(get_current_org),
@@ -135,7 +135,7 @@ async def update_scenario_endpoint(
 @router.delete("/{scenario_uuid}", summary="Delete scenario")
 async def delete_scenario_endpoint(
     scenario_uuid: str = Path(
-        description="The scenario to delete. Must be in your workspace.",
+        description="The scenario to delete.",
         examples=[_EXAMPLE_ID],
     ),
     ctx: OrgContext = Depends(get_current_org),

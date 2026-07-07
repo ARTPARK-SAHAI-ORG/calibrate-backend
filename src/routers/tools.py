@@ -83,7 +83,7 @@ async def list_tools(ctx: OrgContext = Depends(get_current_org)):
 @router.get("/{tool_uuid}", response_model=ToolResponse, summary="Get tool")
 async def get_tool_endpoint(
     tool_uuid: str = Path(
-        description="The tool to retrieve. Must be in your workspace.",
+        description="The tool to retrieve.",
         examples=[_EXAMPLE_ID],
     ),
     ctx: OrgContext = Depends(get_current_org),
@@ -99,7 +99,7 @@ async def get_tool_endpoint(
 async def update_tool_endpoint(
     tool: ToolUpdate,
     tool_uuid: str = Path(
-        description="The tool to update. Must be in your workspace.",
+        description="The tool to update.",
         examples=[_EXAMPLE_ID],
     ),
     ctx: OrgContext = Depends(get_current_org),
@@ -129,7 +129,7 @@ async def update_tool_endpoint(
 @router.delete("/{tool_uuid}", summary="Delete tool")
 async def delete_tool_endpoint(
     tool_uuid: str = Path(
-        description="The tool to delete. Must be in your workspace.",
+        description="The tool to delete.",
         examples=[_EXAMPLE_ID],
     ),
     ctx: OrgContext = Depends(get_current_org),

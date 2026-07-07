@@ -241,7 +241,7 @@ class STTEvaluationRequest(BaseModel):
         None,
         min_length=36,
         max_length=36,
-        description="Existing STT dataset to evaluate. Must be in your workspace. **Provide this OR inline `audio_paths` + `texts`, not both**",
+        description="Existing STT dataset to evaluate. **Provide this OR inline `audio_paths` + `texts`, not both**",
         examples=[_EXAMPLE_ID],
     )
     audio_paths: Optional[List[str]] = Field(
@@ -766,7 +766,7 @@ class VisibilityResponse(BaseModel):
 async def update_stt_visibility(
     body: VisibilityRequest,
     task_id: str = PathParam(
-        description="The STT evaluation to update. Must be in your workspace.",
+        description="The STT evaluation to update.",
         examples=["f47ac10b-58cc-4372-a567-0e02b2c3d479"],
     ),
     ctx: OrgContext = Depends(get_current_org),
@@ -792,7 +792,7 @@ async def update_stt_visibility(
 )
 async def get_evaluation_status(
     task_id: str = PathParam(
-        description="The STT evaluation to poll. Must be in your workspace.",
+        description="The STT evaluation to poll.",
         examples=["f47ac10b-58cc-4372-a567-0e02b2c3d479"],
     ),
     ctx: OrgContext = Depends(get_current_org),

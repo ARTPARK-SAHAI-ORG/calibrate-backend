@@ -181,7 +181,7 @@ class TTSEvaluationRequest(BaseModel):
         None,
         min_length=36,
         max_length=36,
-        description="Existing TTS dataset to evaluate. Must be in your workspace. **Provide this OR inline `texts`, not both**",
+        description="Existing TTS dataset to evaluate. **Provide this OR inline `texts`, not both**",
         examples=[_EXAMPLE_ID],
     )
     texts: Optional[List[str]] = Field(
@@ -782,7 +782,7 @@ class VisibilityResponse(BaseModel):
 async def update_tts_visibility(
     body: VisibilityRequest,
     task_id: str = PathParam(
-        description="The TTS evaluation to update. Must be in your workspace.",
+        description="The TTS evaluation to update.",
         examples=["f47ac10b-58cc-4372-a567-0e02b2c3d479"],
     ),
     ctx: OrgContext = Depends(get_current_org),
@@ -808,7 +808,7 @@ async def update_tts_visibility(
 )
 async def get_tts_evaluation_status(
     task_id: str = PathParam(
-        description="The TTS evaluation to poll. Must be in your workspace.",
+        description="The TTS evaluation to poll.",
         examples=["f47ac10b-58cc-4372-a567-0e02b2c3d479"],
     ),
     ctx: OrgContext = Depends(get_current_org),

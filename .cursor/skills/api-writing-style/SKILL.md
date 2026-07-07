@@ -88,7 +88,7 @@ async def run_tests_batch(...):
 ```python
 # Path param — purpose + example; NO min_length on path (422 before your 404)
 agent_uuid: str = PathParam(
-    description="The agent to test. Must be in your workspace.",
+    description="The agent to test.",
     examples=["f47ac10b-58cc-4372-a567-0e02b2c3d479"],
 )
 
@@ -192,7 +192,7 @@ async def list_agents(...):
 from fastapi import Path, Query
 
 agent_uuid: str = Path(
-    description="The agent to test. Must be in your workspace.",
+    description="The agent to test.",
     examples=["f47ac10b-58cc-4372-a567-0e02b2c3d479"],
 )
 limit: int = Query(50, ge=1, le=1_000_000, description="Maximum number of results to return")
@@ -224,7 +224,7 @@ class AgentCreate(BaseModel):
 
 Field conventions:
 - **Lead with what the thing is and what it's for**, not its format
-- Ownership/scoping in a second sentence when relevant (`Must be in your workspace.`)
+- **Don't add workspace-scoping filler** ("Must be in your workspace.") to a path param identifying a resource you act on — it's self-evident (cross-workspace access just 404s). Keep an ownership/scope note only when it carries real information (e.g. "or a seeded default", a link constraint)
 - `min_length=36`/`max_length=36` + `examples` on **body/response models only**
 - Mark conditional requirements in **bold**: `**Required for type=connection.**`
 - **Never re-list an enum's own values in its description** (see enum section)

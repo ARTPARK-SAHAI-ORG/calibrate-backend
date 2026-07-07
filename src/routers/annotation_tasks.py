@@ -280,7 +280,7 @@ async def list_annotation_tasks(ctx: OrgContext = Depends(get_current_org)):
 @router.get("/{task_uuid}", response_model=AnnotationTaskResponse, summary="Get annotation task")
 async def get_annotation_task_endpoint(
     task_uuid: str = Path(
-        description="Task to retrieve. Must be in your workspace.",
+        description="Task to retrieve.",
         examples=["f47ac10b-58cc-4372-a567-0e02b2c3d479"],
     ),
     ctx: OrgContext = Depends(get_current_org),
@@ -321,7 +321,7 @@ async def get_annotation_task_endpoint(
 @router.put("/{task_uuid}", response_model=AnnotationTaskResponse, summary="Update annotation task")
 async def update_annotation_task_endpoint(
     task_uuid: str = Path(
-        description="Annotation task to act on. Must be in your workspace.",
+        description="Annotation task to act on.",
         examples=["f47ac10b-58cc-4372-a567-0e02b2c3d479"],
     ),
     payload: AnnotationTaskUpdate = ...,
@@ -351,7 +351,7 @@ async def update_annotation_task_endpoint(
 @router.delete("/{task_uuid}", summary="Delete annotation task")
 async def delete_annotation_task_endpoint(
     task_uuid: str = Path(
-        description="Annotation task to act on. Must be in your workspace.",
+        description="Annotation task to act on.",
         examples=["f47ac10b-58cc-4372-a567-0e02b2c3d479"],
     ),
     ctx: OrgContext = Depends(get_current_org),
@@ -370,7 +370,7 @@ async def delete_annotation_task_endpoint(
 @router.get("/{task_uuid}/evaluators", summary="List task evaluators")
 async def list_task_evaluators(
     task_uuid: str = Path(
-        description="Annotation task to act on. Must be in your workspace.",
+        description="Annotation task to act on.",
         examples=["f47ac10b-58cc-4372-a567-0e02b2c3d479"],
     ),
     ctx: OrgContext = Depends(get_current_org),
@@ -419,7 +419,7 @@ async def list_task_evaluators(
 @router.post("/{task_uuid}/evaluators", summary="Link evaluator to task")
 async def link_evaluator_to_task(
     task_uuid: str = Path(
-        description="Annotation task to act on. Must be in your workspace.",
+        description="Annotation task to act on.",
         examples=["f47ac10b-58cc-4372-a567-0e02b2c3d479"],
     ),
     payload: EvaluatorLinkRequest = ...,
@@ -435,7 +435,7 @@ async def link_evaluator_to_task(
 @router.put("/{task_uuid}/evaluators/order", summary="Reorder task evaluators")
 async def reorder_task_evaluators(
     task_uuid: str = Path(
-        description="Annotation task to act on. Must be in your workspace.",
+        description="Annotation task to act on.",
         examples=["f47ac10b-58cc-4372-a567-0e02b2c3d479"],
     ),
     payload: EvaluatorOrderRequest = ...,
@@ -477,7 +477,7 @@ class BulkItemsRequest(BaseModel):
         None,
         min_length=36,
         max_length=36,
-        description="Annotator to attribute seeded annotations to. **Required when any item carries annotations.** Must be in your workspace",
+        description="Annotator to attribute seeded annotations to. **Required when any item carries annotations.**",
         examples=[_EXAMPLE_ID],
     )
 
@@ -485,7 +485,7 @@ class BulkItemsRequest(BaseModel):
 @router.get("/{task_uuid}/items", summary="List task items")
 async def list_task_items(
     task_uuid: str = Path(
-        description="Annotation task to act on. Must be in your workspace.",
+        description="Annotation task to act on.",
         examples=["f47ac10b-58cc-4372-a567-0e02b2c3d479"],
     ),
     ctx: OrgContext = Depends(get_current_org),
@@ -510,7 +510,7 @@ class AnnotatedItemsCheckRequest(BaseModel):
 @router.post("/{task_uuid}/items/annotated-check", summary="Check annotated items")
 async def check_annotated_items(
     task_uuid: str = Path(
-        description="Annotation task to act on. Must be in your workspace.",
+        description="Annotation task to act on.",
         examples=["f47ac10b-58cc-4372-a567-0e02b2c3d479"],
     ),
     payload: AnnotatedItemsCheckRequest = ...,
@@ -562,7 +562,7 @@ async def check_annotated_items(
 @router.post("/{task_uuid}/items", summary="Bulk create items")
 async def bulk_create_items(
     task_uuid: str = Path(
-        description="Annotation task to act on. Must be in your workspace.",
+        description="Annotation task to act on.",
         examples=["f47ac10b-58cc-4372-a567-0e02b2c3d479"],
     ),
     payload: BulkItemsRequest = ...,
@@ -842,7 +842,7 @@ class BulkUpdateItemsRequest(BaseModel):
 @router.put("/{task_uuid}/items", summary="Bulk update items")
 async def bulk_update_items(
     task_uuid: str = Path(
-        description="Annotation task to act on. Must be in your workspace.",
+        description="Annotation task to act on.",
         examples=["f47ac10b-58cc-4372-a567-0e02b2c3d479"],
     ),
     payload: BulkUpdateItemsRequest = ...,
@@ -960,7 +960,7 @@ class BulkDeleteItemsRequest(BaseModel):
 @router.delete("/{task_uuid}/items", summary="Bulk delete items")
 async def bulk_delete_items(
     task_uuid: str = Path(
-        description="Annotation task to act on. Must be in your workspace.",
+        description="Annotation task to act on.",
         examples=["f47ac10b-58cc-4372-a567-0e02b2c3d479"],
     ),
     payload: BulkDeleteItemsRequest = ...,
@@ -989,7 +989,7 @@ async def bulk_delete_items(
 @router.get("/{task_uuid}/items/{item_uuid}", summary="Get item")
 async def get_item(
     task_uuid: str = Path(
-        description="Annotation task to act on. Must be in your workspace.",
+        description="Annotation task to act on.",
         examples=["f47ac10b-58cc-4372-a567-0e02b2c3d479"],
     ),
     item_uuid: str = Path(
@@ -1009,7 +1009,7 @@ async def get_item(
 @router.get("/{task_uuid}/items/{item_uuid}/annotations", summary="List item annotations")
 async def list_item_annotations(
     task_uuid: str = Path(
-        description="Annotation task to act on. Must be in your workspace.",
+        description="Annotation task to act on.",
         examples=["f47ac10b-58cc-4372-a567-0e02b2c3d479"],
     ),
     item_uuid: str = Path(
@@ -1054,7 +1054,7 @@ class CreateJobsRequest(BaseModel):
 @router.get("/{task_uuid}/jobs", summary="List labelling jobs")
 async def list_task_jobs(
     task_uuid: str = Path(
-        description="Annotation task to act on. Must be in your workspace.",
+        description="Annotation task to act on.",
         examples=["f47ac10b-58cc-4372-a567-0e02b2c3d479"],
     ),
     ctx: OrgContext = Depends(get_current_org),
@@ -1067,7 +1067,7 @@ async def list_task_jobs(
 @router.post("/{task_uuid}/jobs", summary="Create labelling jobs")
 async def create_jobs(
     task_uuid: str = Path(
-        description="Annotation task to act on. Must be in your workspace.",
+        description="Annotation task to act on.",
         examples=["f47ac10b-58cc-4372-a567-0e02b2c3d479"],
     ),
     payload: CreateJobsRequest = ...,
@@ -1186,7 +1186,7 @@ async def create_jobs(
 @router.get("/{task_uuid}/jobs/{job_uuid}", summary="Get labelling job")
 async def get_annotation_job_endpoint(
     task_uuid: str = Path(
-        description="Annotation task to act on. Must be in your workspace.",
+        description="Annotation task to act on.",
         examples=["f47ac10b-58cc-4372-a567-0e02b2c3d479"],
     ),
     job_uuid: str = Path(
@@ -1213,7 +1213,7 @@ class BulkDeleteJobsRequest(BaseModel):
 @router.delete("/{task_uuid}/jobs", summary="Bulk delete labelling jobs")
 async def bulk_delete_annotation_jobs_endpoint(
     task_uuid: str = Path(
-        description="Annotation task to act on. Must be in your workspace.",
+        description="Annotation task to act on.",
         examples=["f47ac10b-58cc-4372-a567-0e02b2c3d479"],
     ),
     payload: BulkDeleteJobsRequest = ...,
@@ -1230,7 +1230,7 @@ async def bulk_delete_annotation_jobs_endpoint(
 @router.delete("/{task_uuid}/jobs/{job_uuid}", summary="Delete labelling job")
 async def delete_annotation_job_endpoint(
     task_uuid: str = Path(
-        description="Annotation task to act on. Must be in your workspace.",
+        description="Annotation task to act on.",
         examples=["f47ac10b-58cc-4372-a567-0e02b2c3d479"],
     ),
     job_uuid: str = Path(
@@ -1270,7 +1270,7 @@ class AnnotationJobVisibilityResponse(BaseModel):
 )
 async def update_annotation_job_visibility_endpoint(
     task_uuid: str = Path(
-        description="Annotation task to act on. Must be in your workspace.",
+        description="Annotation task to act on.",
         examples=["f47ac10b-58cc-4372-a567-0e02b2c3d479"],
     ),
     job_uuid: str = Path(
@@ -1336,7 +1336,7 @@ class AnnotationUpsertRequest(BaseModel):
 @router.post("/{task_uuid}/annotations", summary="Upsert annotation")
 async def upsert_annotation_endpoint(
     task_uuid: str = Path(
-        description="Annotation task to act on. Must be in your workspace.",
+        description="Annotation task to act on.",
         examples=["f47ac10b-58cc-4372-a567-0e02b2c3d479"],
     ),
     payload: AnnotationUpsertRequest = ...,
@@ -1416,7 +1416,7 @@ class EvaluatorRunStartRequest(BaseModel):
 @router.post("/{task_uuid}/evaluator-runs", summary="Run evaluators on items")
 async def start_evaluator_run(
     task_uuid: str = Path(
-        description="Annotation task to act on. Must be in your workspace.",
+        description="Annotation task to act on.",
         examples=["f47ac10b-58cc-4372-a567-0e02b2c3d479"],
     ),
     payload: EvaluatorRunStartRequest = ...,
@@ -1752,7 +1752,7 @@ def _shape_eval_job_for_response(job: Dict[str, Any]) -> Dict[str, Any]:
 @router.get("/{task_uuid}/evaluator-runs", summary="List evaluator runs")
 async def list_evaluator_run_jobs(
     task_uuid: str = Path(
-        description="Annotation task to act on. Must be in your workspace.",
+        description="Annotation task to act on.",
         examples=["f47ac10b-58cc-4372-a567-0e02b2c3d479"],
     ),
     ctx: OrgContext = Depends(get_current_org),
@@ -2007,7 +2007,7 @@ def _human_agreement_for_run(
 @router.get("/{task_uuid}/evaluator-runs/{job_uuid}", summary="Get evaluator run")
 async def get_evaluator_run_job(
     task_uuid: str = Path(
-        description="Annotation task to act on. Must be in your workspace.",
+        description="Annotation task to act on.",
         examples=["f47ac10b-58cc-4372-a567-0e02b2c3d479"],
     ),
     job_uuid: str = Path(
@@ -2050,7 +2050,7 @@ async def get_evaluator_run_job(
 @router.delete("/{task_uuid}/evaluator-runs/{job_uuid}", summary="Delete evaluator run")
 async def delete_evaluator_run_job(
     task_uuid: str = Path(
-        description="Annotation task to act on. Must be in your workspace.",
+        description="Annotation task to act on.",
         examples=["f47ac10b-58cc-4372-a567-0e02b2c3d479"],
     ),
     job_uuid: str = Path(
@@ -2108,7 +2108,7 @@ class EvaluatorRunVisibilityResponse(BaseModel):
 )
 async def update_evaluator_run_visibility(
     task_uuid: str = Path(
-        description="Annotation task to act on. Must be in your workspace.",
+        description="Annotation task to act on.",
         examples=["f47ac10b-58cc-4372-a567-0e02b2c3d479"],
     ),
     job_uuid: str = Path(
@@ -2146,7 +2146,7 @@ async def update_evaluator_run_visibility(
 @router.get("/{task_uuid}/items/{item_uuid}/evaluator-runs", summary="List item evaluator runs")
 async def list_item_evaluator_runs(
     task_uuid: str = Path(
-        description="Annotation task to act on. Must be in your workspace.",
+        description="Annotation task to act on.",
         examples=["f47ac10b-58cc-4372-a567-0e02b2c3d479"],
     ),
     item_uuid: str = Path(
@@ -2201,7 +2201,7 @@ def _evaluator_alignment_block(
 @router.get("/{task_uuid}/agreement", summary="Get task agreement")
 async def task_agreement(
     task_uuid: str = Path(
-        description="Annotation task to act on. Must be in your workspace.",
+        description="Annotation task to act on.",
         examples=["f47ac10b-58cc-4372-a567-0e02b2c3d479"],
     ),
     bucket: str = Query(
@@ -2245,7 +2245,7 @@ async def task_agreement(
 @router.get("/{task_uuid}/summary", summary="Get task summary")
 async def task_summary(
     task_uuid: str = Path(
-        description="Annotation task to act on. Must be in your workspace.",
+        description="Annotation task to act on.",
         examples=["f47ac10b-58cc-4372-a567-0e02b2c3d479"],
     ),
     item_id: Optional[str] = Query(
@@ -2639,7 +2639,7 @@ async def task_summary(
 @router.delete("/{task_uuid}/evaluators/{evaluator_uuid}", summary="Unlink evaluator from task")
 async def unlink_evaluator_from_task(
     task_uuid: str = Path(
-        description="Annotation task to act on. Must be in your workspace.",
+        description="Annotation task to act on.",
         examples=["f47ac10b-58cc-4372-a567-0e02b2c3d479"],
     ),
     evaluator_uuid: str = Path(
