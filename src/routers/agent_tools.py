@@ -157,7 +157,7 @@ async def create_agent_tool_links(
     "", response_model=List[AgentToolResponse], summary="List agent-tool links"
 )
 async def list_agent_tools(ctx: OrgContext = Depends(get_current_org)):
-    """List all agent-tool links in your workspace."""
+    """List all agent-tool links."""
     return get_all_agent_tools(org_uuid=ctx.org_uuid)
 
 

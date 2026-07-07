@@ -61,7 +61,7 @@ class ToolCreateResponse(BaseModel):
 async def create_tool_endpoint(
     tool: ToolCreate, ctx: OrgContext = Depends(get_current_org)
 ):
-    """Create a new tool in your workspace."""
+    """Create a new tool."""
     with ensure_name_unique("tools", tool.name, ctx.org_uuid, entity="Tool"):
         tool_uuid = create_tool(
             name=tool.name,
@@ -75,7 +75,7 @@ async def create_tool_endpoint(
 
 @router.get("", response_model=List[ToolResponse], summary="List tools")
 async def list_tools(ctx: OrgContext = Depends(get_current_org)):
-    """List all tools in your workspace."""
+    """List all tools."""
     tools = get_all_tools(org_uuid=ctx.org_uuid)
     return tools
 
@@ -88,7 +88,7 @@ async def get_tool_endpoint(
     ),
     ctx: OrgContext = Depends(get_current_org),
 ):
-    """Get a tool in your workspace."""
+    """Get a tool."""
     tool = get_tool(tool_uuid)
     if not tool or tool.get("org_uuid") != ctx.org_uuid:
         raise HTTPException(status_code=404, detail="Tool not found")
@@ -134,7 +134,7 @@ async def delete_tool_endpoint(
     ),
     ctx: OrgContext = Depends(get_current_org),
 ):
-    """Soft-delete a tool in your workspace."""
+    """Soft-delete a tool."""
     existing_tool = get_tool(tool_uuid)
     if not existing_tool or existing_tool.get("org_uuid") != ctx.org_uuid:
         raise HTTPException(status_code=404, detail="Tool not found")

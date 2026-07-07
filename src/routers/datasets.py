@@ -155,7 +155,7 @@ async def create_new_dataset(
     request: DatasetCreateRequest,
     ctx: OrgContext = Depends(get_current_org),
 ):
-    """Create a new empty dataset in your workspace. Add items separately."""
+    """Create a new empty dataset. Add items separately."""
     dataset_uuid = create_dataset(
         name=request.name,
         dataset_type=request.dataset_type,
@@ -173,7 +173,7 @@ async def list_datasets(
     ),
     ctx: OrgContext = Depends(get_current_org),
 ):
-    """List all datasets for your workspace, optionally filtered by type."""
+    """List all datasets, optionally filtered by type."""
     if dataset_type and dataset_type not in ("stt", "tts"):
         raise HTTPException(
             status_code=400, detail="dataset_type must be 'stt' or 'tts'"

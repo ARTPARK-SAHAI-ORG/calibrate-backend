@@ -80,7 +80,7 @@ async def create_annotator_endpoint(
     payload: AnnotatorCreate,
     ctx: OrgContext = Depends(get_current_org),
 ):
-    """Create an annotator in your workspace."""
+    """Create an annotator."""
     try:
         with ensure_name_unique(
             "annotators", payload.name, ctx.org_uuid, entity="Annotator"
@@ -97,7 +97,7 @@ async def create_annotator_endpoint(
 
 @router.get("", response_model=List[AnnotatorResponse], summary="List annotators")
 async def list_annotators(ctx: OrgContext = Depends(get_current_org)):
-    """List annotators in your workspace with job counts and agreement stats."""
+    """List annotators with job counts and agreement stats."""
     annotators = get_all_annotators(org_uuid=ctx.org_uuid)
     if not annotators:
         return []
@@ -206,7 +206,7 @@ async def delete_annotator_endpoint(
     ),
     ctx: OrgContext = Depends(get_current_org),
 ):
-    """Soft-delete an annotator in your workspace."""
+    """Soft-delete an annotator."""
     _ensure_owned_annotator(annotator_uuid, ctx.org_uuid)
     deleted = delete_annotator(annotator_uuid)
     if not deleted:

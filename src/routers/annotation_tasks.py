@@ -243,7 +243,7 @@ async def create_annotation_task_endpoint(
     payload: AnnotationTaskCreate,
     ctx: OrgContext = Depends(get_current_org),
 ):
-    """Create an annotation task in your workspace."""
+    """Create an annotation task."""
     if payload.evaluator_ids:
         for evaluator_id in payload.evaluator_ids:
             _ensure_owned_evaluator(evaluator_id, ctx.org_uuid)
@@ -270,7 +270,7 @@ async def create_annotation_task_endpoint(
 
 @router.get("", response_model=List[AnnotationTaskResponse], summary="List annotation tasks")
 async def list_annotation_tasks(ctx: OrgContext = Depends(get_current_org)):
-    """List annotation tasks in your workspace with linked evaluators."""
+    """List annotation tasks with linked evaluators."""
     tasks = get_all_annotation_tasks(org_uuid=ctx.org_uuid)
     for task in tasks:
         task["evaluators"] = get_evaluators_for_annotation_task(task["uuid"])
@@ -356,7 +356,7 @@ async def delete_annotation_task_endpoint(
     ),
     ctx: OrgContext = Depends(get_current_org),
 ):
-    """Soft-delete an annotation task in your workspace."""
+    """Soft-delete an annotation task."""
     _ensure_owned_task(task_uuid, ctx.org_uuid)
     deleted = delete_annotation_task(task_uuid)
     if not deleted:

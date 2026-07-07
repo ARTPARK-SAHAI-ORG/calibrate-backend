@@ -71,7 +71,7 @@ async def list_jobs(
     ),
     ctx: OrgContext = Depends(get_current_org),
 ):
-    """List jobs for your workspace, newest first."""
+    """List jobs, newest first."""
     db_job_type = JOB_TYPE_MAP.get(job_type) if job_type else None
 
     jobs = get_all_jobs(org_uuid=ctx.org_uuid, job_type=db_job_type)

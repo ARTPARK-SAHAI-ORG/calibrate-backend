@@ -63,7 +63,7 @@ class ScenarioCreateResponse(BaseModel):
 async def create_scenario_endpoint(
     scenario: ScenarioCreate, ctx: OrgContext = Depends(get_current_org)
 ):
-    """Create a new scenario in your workspace."""
+    """Create a new scenario."""
     with ensure_name_unique("scenarios", scenario.name, ctx.org_uuid, entity="Scenario"):
         scenario_uuid = create_scenario(
             name=scenario.name,
@@ -78,7 +78,7 @@ async def create_scenario_endpoint(
 
 @router.get("", response_model=List[ScenarioResponse], summary="List scenarios")
 async def list_scenarios(ctx: OrgContext = Depends(get_current_org)):
-    """List all scenarios in your workspace."""
+    """List all scenarios."""
     scenarios = get_all_scenarios(org_uuid=ctx.org_uuid)
     return scenarios
 
@@ -91,7 +91,7 @@ async def get_scenario_endpoint(
     ),
     ctx: OrgContext = Depends(get_current_org),
 ):
-    """Get a scenario in your workspace."""
+    """Get a scenario."""
     scenario = get_scenario(scenario_uuid)
     if not scenario or scenario.get("org_uuid") != ctx.org_uuid:
         raise HTTPException(status_code=404, detail="Scenario not found")
@@ -140,7 +140,7 @@ async def delete_scenario_endpoint(
     ),
     ctx: OrgContext = Depends(get_current_org),
 ):
-    """Soft-delete a scenario in your workspace."""
+    """Soft-delete a scenario."""
     existing_scenario = get_scenario(scenario_uuid)
     if not existing_scenario or existing_scenario.get("org_uuid") != ctx.org_uuid:
         raise HTTPException(status_code=404, detail="Scenario not found")

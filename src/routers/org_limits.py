@@ -75,7 +75,7 @@ class OrgLimitsCreateResponse(BaseModel):
 
 @router.get("/me/max-rows-per-eval", summary="Get own max rows per eval")
 async def get_max_rows_per_eval(ctx: OrgContext = Depends(get_current_org)):
-    """Get the max rows per eval for your workspace."""
+    """Get the max rows per eval."""
     # Falls back to DEFAULT_MAX_ROWS_PER_EVAL when no workspace-specific limit is set.
     limits = get_org_limits(ctx.org_uuid)
     if limits and "max_rows_per_eval" in limits.get("limits", {}):

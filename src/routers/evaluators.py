@@ -361,7 +361,7 @@ def _evaluator_response(evaluator: Dict[str, Any]) -> EvaluatorResponse:
 async def create_evaluator_endpoint(
     payload: EvaluatorCreate, ctx: OrgContext = Depends(get_current_org)
 ):
-    """Create a custom evaluator in your workspace along with its first version, which is set live."""
+    """Create a custom evaluator along with its first version, which is set live."""
     _ensure_unique_evaluator_name(payload.name, ctx.org_uuid)
     with name_uniqueness_guard("Evaluator"):
         evaluator_uuid = create_evaluator(
@@ -454,7 +454,7 @@ async def list_evaluators(
     ),
     ctx: OrgContext = Depends(get_current_org),
 ):
-    """List evaluators visible in your workspace, each with its inlined live version."""
+    """List evaluators visible, each with its inlined live version."""
     evaluators = get_all_evaluators(
         org_uuid=ctx.org_uuid,
         include_defaults=include_defaults,
@@ -532,7 +532,7 @@ async def delete_evaluator_endpoint(
     ),
     ctx: OrgContext = Depends(get_current_org),
 ):
-    """Soft-delete a custom evaluator in your workspace."""
+    """Soft-delete a custom evaluator."""
     existing = _visible_or_404(get_evaluator(evaluator_uuid), ctx.org_uuid)
     _owner_check(existing, ctx.org_uuid)
     if not delete_evaluator(evaluator_uuid):
@@ -599,7 +599,7 @@ async def create_version(
     ),
     ctx: OrgContext = Depends(get_current_org),
 ):
-    """Add a new version to a custom evaluator in your workspace."""
+    """Add a new version to a custom evaluator."""
     existing = _visible_or_404(get_evaluator(evaluator_uuid), ctx.org_uuid)
     _owner_check(existing, ctx.org_uuid)
     cfg = payload.output_config.model_dump(exclude_none=True) if payload.output_config else None

@@ -106,7 +106,7 @@ async def create_key(
     request: CreateApiKeyRequest,
     ctx: OrgContext = Depends(get_current_org),
 ):
-    """Create an API key for your workspace."""
+    """Create an API key."""
     raw_key, key_prefix = generate_api_key()
     row = create_api_key(
         org_uuid=ctx.org_uuid,
@@ -121,7 +121,7 @@ async def create_key(
 
 @router.get("", response_model=List[ApiKeyResponse], summary="List API keys")
 async def list_keys(ctx: OrgContext = Depends(get_current_org)):
-    """List active API keys in your workspace."""
+    """List active API keys."""
     return [ApiKeyResponse.from_row(k) for k in list_api_keys_for_org(ctx.org_uuid)]
 
 
@@ -133,7 +133,7 @@ async def revoke_key(
     ),
     ctx: OrgContext = Depends(get_current_org),
 ):
-    """Revoke an API key in your workspace."""
+    """Revoke an API key."""
     if get_api_key(key_uuid, ctx.org_uuid) is None:
         raise HTTPException(status_code=404, detail="API key not found")
     soft_delete_api_key(key_uuid, ctx.org_uuid)

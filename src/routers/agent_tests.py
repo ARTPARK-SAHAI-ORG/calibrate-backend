@@ -708,7 +708,7 @@ async def get_all_test_runs_for_user(
         description="Filter by job type. Omit to return both",
     ),
 ):
-    """List all test runs in your workspace, newest first."""
+    """List all test runs, newest first."""
     jobs = get_agent_test_jobs_for_org(ctx.org_uuid, job_type=type)
 
     # Per-agent counters for naming ("Run 1", "Benchmark 2", …).
@@ -2261,7 +2261,7 @@ async def run_tests_batch(
     request: Optional[BatchRunRequest] = None,
     ctx: OrgContext = Depends(get_org_jwt_or_api_key),
 ):
-    """Run agent tests for every agent in your workspace, or for a selected set."""
+    """Run agent tests for every agent, or for a selected set."""
     # Public API (auth via get_org_jwt_or_api_key).
     agent_names = request.agent_names if request else None
 

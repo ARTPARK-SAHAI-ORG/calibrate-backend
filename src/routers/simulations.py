@@ -674,7 +674,7 @@ def apply_simulation_job_evaluator_enrichment(
 async def create_simulation_endpoint(
     simulation: SimulationCreate, ctx: OrgContext = Depends(get_current_org)
 ):
-    """Create a simulation in your workspace, optionally linking an agent, personas, scenarios, and `conversation` evaluators."""
+    """Create a simulation, optionally linking an agent, personas, scenarios, and `conversation` evaluators."""
     if simulation.agent_uuid:
         agent = get_agent(simulation.agent_uuid)
         if not agent or agent.get("org_uuid") != ctx.org_uuid:
@@ -738,7 +738,7 @@ async def create_simulation_endpoint(
 
 @router.get("", response_model=List[SimulationListResponse], summary="List simulations")
 async def list_simulations(ctx: OrgContext = Depends(get_current_org)):
-    """List all simulations for your workspace, each with its linked agent summary."""
+    """List all simulations, each with its linked agent summary."""
     simulations = get_all_simulations(org_uuid=ctx.org_uuid)
     result = []
     for sim in simulations:

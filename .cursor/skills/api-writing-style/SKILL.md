@@ -51,10 +51,10 @@ One sentence. What the call does — full stop.
 
 | Route | Summary | Description |
 |---|---|---|
-| `GET /agents` | List agents | List all agents in your workspace. |
+| `GET /agents` | List agents | List all agents. |
 | `POST /agents/resolve` | Resolve agent names to IDs | Resolve agent names to their IDs. |
 | `POST /agent-tests/agent/{agent_uuid}/run` | Run agent tests | Run tests for an agent as a background job. |
-| `POST /agent-tests/run` | Run agent tests in batch | Run agent tests for every agent in your workspace, or for a selected set. |
+| `POST /agent-tests/run` | Run agent tests in batch | Run agent tests for every agent, or for a selected set. |
 | `GET /agent-tests/run/{task_id}` | Get test run status | Get the status and results of a test run. |
 
 **Never put in the endpoint heading:**
@@ -63,6 +63,7 @@ One sentence. What the call does — full stop.
 - Response field names (`` `not_found` ``, `` `skipped` ``, `` `task_id` ``)
 - HTTP status codes or error behavior ("404 if…", "400 otherwise")
 - Request-param semantics already on the field ("omit `agent_names` to…")
+- **Workspace scope** ("in your workspace", "for your workspace") — every resource is workspace-scoped by default, so saying it is filler
 - **Which fields the operation touches** ("Update an agent's name and/or config" → just **"Update an agent."**) or PATCH semantics ("only the provided fields change") — what's updatable and the omit behavior live on the body fields
 - Internal preconditions or workflow ("connection must be verified", "call verify-connection")
 - Implementation backstory ("runs the calibrate LLM command", job types, queue behavior)
@@ -78,7 +79,7 @@ async def resolve_agent_names(...):
 
 @router.post("/run", summary="Run agent tests in batch", tags=["Public API"])
 async def run_tests_batch(...):
-    """Run agent tests for every agent in your workspace, or for a selected set."""
+    """Run agent tests for every agent, or for a selected set."""
     # omit-vs-select → BatchRunRequest.agent_names Field description
 ```
 
@@ -184,7 +185,7 @@ async def delete_api_key(...):
 
 @router.get("", response_model=list[AgentResponse], summary="List agents", tags=["Public API"])
 async def list_agents(...):
-    """List all agents in your workspace."""
+    """List all agents."""
 ```
 
 ## Path & query params
