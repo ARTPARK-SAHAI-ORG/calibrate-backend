@@ -42,6 +42,11 @@ _TEST_TYPE_DESCRIPTION = (
     "- `conversation`: judges the full conversation"
 )
 
+# Test name uniqueness is workspace-scoped on single create; bulk create adds
+# batch-level uniqueness on top (both are enforced). Share the base so the two
+# never drift.
+_TEST_NAME_DESCRIPTION = "Name of the test, unique within the workspace"
+
 # Each test type pins the evaluator_type it accepts. `conversation` tests judge whole
 # simulated conversations, so only `conversation` evaluators apply; `response`/`tool_call`
 # tests judge a single LLM reply, so only `llm` evaluators apply.
@@ -69,7 +74,7 @@ class EvaluatorRef(BaseModel):
 
 
 class TestCreate(BaseModel):
-    name: str = Field(description="Name of the test, unique within the workspace")
+    name: str = Field(description=_TEST_NAME_DESCRIPTION)
     type: TestType = Field(description=_TEST_TYPE_DESCRIPTION)
     config: Optional[Dict[str, Any]] = Field(
         None,
@@ -156,7 +161,7 @@ class ExpectedToolCall(BaseModel):
 
 
 class BulkTestItem(BaseModel):
-    name: str = Field(description="Test name, unique within the batch")
+    name: str = Field(description=_TEST_NAME_DESCRIPTION + " and within the batch")
     conversation_history: List[ChatMessage] = Field(
         description="Ordered messages ending at the user turn the agent should answer (must be non-empty)"
     )
