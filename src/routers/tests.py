@@ -62,7 +62,12 @@ class EvaluatorRef(BaseModel):
 class TestCreate(BaseModel):
     name: str = Field(description="Human-readable test name, unique within the workspace")
     type: TestType = Field(
-        description="Test kind (immutable after creation): `response` judges the generated reply, `tool_call` diffs generated tool calls, `conversation` judges the full conversation"
+        description=(
+            "What the test judges:\n\n"
+            "- `response` — judges the generated reply\n"
+            "- `tool_call` — diffs the generated tool calls\n"
+            "- `conversation` — judges the full conversation"
+        )
     )
     config: Optional[Dict[str, Any]] = Field(
         None,
