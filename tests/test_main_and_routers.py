@@ -1261,6 +1261,36 @@ def test_agent_verify_and_duplicate(client):
         == 404
     )
 
+    # Duplicating an agent must not copy a poisoned cross-org link: simulate a
+    # link that bypassed /agent-tests creation some other way (e.g. a stale
+    # pre-fix row) and confirm the duplicate doesn't inherit the foreign test.
+    from db import add_test_to_agent
+
+    evaluators = client.get("/evaluators", headers=other["headers"]).json()
+    llm_ev = next(e for e in evaluators if e.get("evaluator_type") == "llm")
+    victim_test = client.post(
+        "/tests",
+        json={
+            "name": f"victim-t-{uuid.uuid4().hex[:6]}",
+            "type": "response",
+            "config": {"history": [], "evaluation": {"type": "response"}},
+            "evaluators": [{"evaluator_uuid": llm_ev["uuid"]}],
+        },
+        headers=other["headers"],
+    ).json()
+    add_test_to_agent(agent_id=a_uuid, test_id=victim_test["uuid"])
+
+    dup2 = client.post(
+        f"/agents/{a_uuid}/duplicate",
+        json={"name": f"a-dup2-{uuid.uuid4().hex[:6]}"},
+        headers=h,
+    )
+    assert dup2.status_code == 200
+    copied_tests = client.get(
+        f"/agent-tests/agent/{dup2.json()['uuid']}/tests", headers=h
+    ).json()
+    assert victim_test["uuid"] not in {t["uuid"] for t in copied_tests}
+
     # PUT with no-op (just-name) → 200
     upd = client.put(f"/agents/{a_uuid}", json={"name": a_uuid}, headers=h)
     assert upd.status_code in (200, 409)

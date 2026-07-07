@@ -117,29 +117,41 @@ def test_agent_tests_link_crud(client):
     link = client.post(
         "/agent-tests",
         json={"agent_uuid": agent["uuid"], "test_uuids": [test_a["uuid"]]},
+        headers=h,
     )
     assert link.status_code == 200
     # Re-link (idempotent — skip already linked)
     again = client.post(
         "/agent-tests",
         json={"agent_uuid": agent["uuid"], "test_uuids": [test_a["uuid"], test_b["uuid"]]},
+        headers=h,
     )
     assert again.status_code == 200
 
     # List
-    assert client.get("/agent-tests").status_code == 200
+    assert client.get("/agent-tests", headers=h).status_code == 200
     assert (
-        client.get(f"/agent-tests/agent/{agent['uuid']}/tests").status_code == 200
+        client.get(f"/agent-tests/agent/{agent['uuid']}/tests", headers=h).status_code
+        == 200
     )
     assert (
-        client.get(f"/agent-tests/test/{test_a['uuid']}/agents").status_code == 200
+        client.get(
+            f"/agent-tests/test/{test_a['uuid']}/agents", headers=h
+        ).status_code
+        == 200
     )
-    assert client.get("/agent-tests/test/missing/agents").status_code == 404
-    assert client.get("/agent-tests/agent/missing/tests").status_code == 404
-    assert client.get("/agent-tests/agent/missing/runs").status_code == 404
+    assert (
+        client.get("/agent-tests/test/missing/agents", headers=h).status_code == 404
+    )
+    assert (
+        client.get("/agent-tests/agent/missing/tests", headers=h).status_code == 404
+    )
+    assert (
+        client.get("/agent-tests/agent/missing/runs", headers=h).status_code == 404
+    )
 
     # Runs list (no runs yet)
-    runs = client.get(f"/agent-tests/agent/{agent['uuid']}/runs")
+    runs = client.get(f"/agent-tests/agent/{agent['uuid']}/runs", headers=h)
     assert runs.status_code == 200
     assert runs.json()["runs"] == []
 
@@ -157,11 +169,13 @@ def test_agent_tests_link_crud(client):
     empty = client.post(
         "/agent-tests/bulk-unlink",
         json={"agent_uuid": agent["uuid"], "test_uuids": []},
+        headers=h,
     )
     assert empty.status_code == 400
     bulk_unlink = client.post(
         "/agent-tests/bulk-unlink",
         json={"agent_uuid": agent["uuid"], "test_uuids": [test_a["uuid"]]},
+        headers=h,
     )
     assert bulk_unlink.status_code == 200
 
@@ -169,6 +183,7 @@ def test_agent_tests_link_crud(client):
     missing = client.post(
         "/agent-tests/bulk-unlink",
         json={"agent_uuid": NONEXISTENT_UUID, "test_uuids": [test_b["uuid"]]},
+        headers=h,
     )
     assert missing.status_code == 404
 
@@ -239,7 +254,7 @@ def test_agent_runs_list_surfaces_perf_aggregates(client):
         },
     )
 
-    resp = client.get(f"/agent-tests/agent/{agent['uuid']}/runs")
+    resp = client.get(f"/agent-tests/agent/{agent['uuid']}/runs", headers=h)
     assert resp.status_code == 200
     run = resp.json()["runs"][0]
     assert run["latency_ms"] == {"p50": 1851.0, "p95": 1851.0, "p99": 1851.0, "count": 1}
@@ -262,6 +277,7 @@ def test_agent_tests_link_with_missing(client):
     resp = client.post(
         "/agent-tests",
         json={"agent_uuid": NONEXISTENT_UUID, "test_uuids": []},
+        headers=h,
     )
     assert resp.status_code == 404
 
@@ -270,6 +286,7 @@ def test_agent_tests_link_with_missing(client):
     bad = client.post(
         "/agent-tests",
         json={"agent_uuid": agent["uuid"], "test_uuids": [NONEXISTENT_UUID_2]},
+        headers=h,
     )
     assert bad.status_code == 404
 
@@ -281,8 +298,197 @@ def test_agent_tests_delete_link_not_found(client):
         "DELETE",
         "/agent-tests",
         json={"agent_uuid": NONEXISTENT_UUID, "test_uuid": NONEXISTENT_UUID_2},
+        headers=h,
     )
     assert resp.status_code == 404
+
+
+def test_agent_tests_link_endpoints_reject_unauthenticated(client):
+    """Every /agent-tests link CRUD + list endpoint used to have zero auth.
+    Each must now reject a request with no Authorization header (403,
+    HTTPBearer), matching the convention already used by run/benchmark."""
+    auth = _signup(client)
+    h = auth["headers"]
+    agent = _create_agent(client, h)
+    test = _create_test(client, h)
+    client.post(
+        "/agent-tests",
+        json={"agent_uuid": agent["uuid"], "test_uuids": [test["uuid"]]},
+        headers=h,
+    )
+
+    assert (
+        client.post(
+            "/agent-tests",
+            json={"agent_uuid": agent["uuid"], "test_uuids": [test["uuid"]]},
+        ).status_code
+        == 403
+    )
+    assert client.get("/agent-tests").status_code == 403
+    assert (
+        client.get(f"/agent-tests/agent/{agent['uuid']}/tests").status_code == 403
+    )
+    assert (
+        client.get(f"/agent-tests/agent/{agent['uuid']}/runs").status_code == 403
+    )
+    assert (
+        client.get(f"/agent-tests/test/{test['uuid']}/agents").status_code == 403
+    )
+    assert (
+        client.request(
+            "DELETE",
+            "/agent-tests",
+            json={"agent_uuid": agent["uuid"], "test_uuid": test["uuid"]},
+        ).status_code
+        == 403
+    )
+    assert (
+        client.post(
+            "/agent-tests/bulk-unlink",
+            json={"agent_uuid": agent["uuid"], "test_uuids": [test["uuid"]]},
+        ).status_code
+        == 403
+    )
+
+
+def test_agent_tests_cross_org_reads_and_writes_404(client):
+    """A caller from org B must not be able to read or mutate org A's
+    agent-test links, even knowing the real uuids (existence-leak parity,
+    matching how a missing uuid already 404s elsewhere in this router)."""
+    org_a = _signup(client)
+    ha = org_a["headers"]
+    agent_a = _create_agent(client, ha)
+    test_a = _create_test(client, ha)
+    client.post(
+        "/agent-tests",
+        json={"agent_uuid": agent_a["uuid"], "test_uuids": [test_a["uuid"]]},
+        headers=ha,
+    )
+
+    org_b = _signup(client)
+    hb = org_b["headers"]
+    agent_b = _create_agent(client, hb)
+    test_b = _create_test(client, hb)
+
+    # Org B cannot link its own agent to org A's test...
+    assert (
+        client.post(
+            "/agent-tests",
+            json={"agent_uuid": agent_b["uuid"], "test_uuids": [test_a["uuid"]]},
+            headers=hb,
+        ).status_code
+        == 404
+    )
+    # ...nor org A's agent (even if the uuid is known) to org B's own test.
+    assert (
+        client.post(
+            "/agent-tests",
+            json={"agent_uuid": agent_a["uuid"], "test_uuids": [test_b["uuid"]]},
+            headers=hb,
+        ).status_code
+        == 404
+    )
+
+    # Reads: org B sees none of org A's links/tests/agents.
+    assert (
+        client.get(
+            f"/agent-tests/agent/{agent_a['uuid']}/tests", headers=hb
+        ).status_code
+        == 404
+    )
+    assert (
+        client.get(
+            f"/agent-tests/agent/{agent_a['uuid']}/runs", headers=hb
+        ).status_code
+        == 404
+    )
+    assert (
+        client.get(
+            f"/agent-tests/test/{test_a['uuid']}/agents", headers=hb
+        ).status_code
+        == 404
+    )
+    org_b_list = client.get("/agent-tests", headers=hb).json()
+    assert all(link["agent_id"] != agent_a["uuid"] for link in org_b_list)
+
+    # Writes: org B cannot delete/unlink org A's link.
+    assert (
+        client.request(
+            "DELETE",
+            "/agent-tests",
+            json={"agent_uuid": agent_a["uuid"], "test_uuid": test_a["uuid"]},
+            headers=hb,
+        ).status_code
+        == 404
+    )
+    assert (
+        client.post(
+            "/agent-tests/bulk-unlink",
+            json={"agent_uuid": agent_a["uuid"], "test_uuids": [test_a["uuid"]]},
+            headers=hb,
+        ).status_code
+        == 404
+    )
+
+    # Org A's link survived every one of org B's attempts.
+    assert client.get(
+        f"/agent-tests/agent/{agent_a['uuid']}/tests", headers=ha
+    ).json()
+
+
+def test_agent_tests_poisoned_link_does_not_leak_through_run_or_benchmark(
+    client, monkeypatch
+):
+    """Regression test for the confirmed exploit chain: an attacker used to be
+    able to link a foreign org's test to their own agent via the unauthenticated
+    POST /agent-tests, then run/benchmark it through their own legitimately
+    authenticated agent, reading the foreign test's content back via the result.
+
+    Both halves must now be closed:
+    1. Link creation itself is org-scoped (this 404s below).
+    2. Even a link that exists at the DB layer (e.g. a stale pre-fix row, or a
+       future write path that forgets the check) is NOT trusted by run/benchmark
+       — each independently re-verifies org on every linked test.
+    """
+    victim = _signup(client)
+    victim_test = _create_test(client, victim["headers"])
+
+    attacker = _signup(client)
+    ha = attacker["headers"]
+    attacker_agent = _create_agent(client, ha)
+
+    # 1. The link itself can no longer be created cross-org.
+    link_attempt = client.post(
+        "/agent-tests",
+        json={
+            "agent_uuid": attacker_agent["uuid"],
+            "test_uuids": [victim_test["uuid"]],
+        },
+        headers=ha,
+    )
+    assert link_attempt.status_code == 404
+
+    # 2. Simulate a poisoned row that bypassed creation some other way (e.g. a
+    # stale row from before this fix shipped), and confirm run/benchmark still
+    # refuse to use it.
+    from db import add_test_to_agent
+
+    add_test_to_agent(agent_id=attacker_agent["uuid"], test_id=victim_test["uuid"])
+
+    run_resp = client.post(
+        f"/agent-tests/agent/{attacker_agent['uuid']}/run", json={}, headers=ha
+    )
+    assert run_resp.status_code == 400
+    assert "no tests linked" in run_resp.json()["detail"].lower()
+
+    monkeypatch.setenv("S3_OUTPUT_BUCKET", "test-bucket")
+    benchmark_resp = client.post(
+        f"/agent-tests/agent/{attacker_agent['uuid']}/benchmark",
+        json={"models": ["openai/gpt-4"]},
+        headers=ha,
+    )
+    assert benchmark_resp.status_code == 400
+    assert "no tests linked" in benchmark_resp.json()["detail"].lower()
 
 
 # ---------------------------------------------------------------------------
@@ -352,6 +558,7 @@ def test_run_agent_test_queued_path(client, monkeypatch):
     client.post(
         "/agent-tests",
         json={"agent_uuid": agent["uuid"], "test_uuids": [test["uuid"]]},
+        headers=h,
     )
 
     monkeypatch.setenv("S3_OUTPUT_BUCKET", "test-bucket")
@@ -432,6 +639,7 @@ def test_run_conversation_test_queued_path(client, monkeypatch):
     client.post(
         "/agent-tests",
         json={"agent_uuid": agent["uuid"], "test_uuids": [conv["uuid"]]},
+        headers=h,
     )
 
     monkeypatch.setenv("S3_OUTPUT_BUCKET", "test-bucket")
@@ -508,6 +716,7 @@ def test_benchmark_allows_conversation_tests(client, monkeypatch):
     client.post(
         "/agent-tests",
         json={"agent_uuid": agent["uuid"], "test_uuids": [conv["uuid"]]},
+        headers=h,
     )
 
     monkeypatch.setenv("S3_OUTPUT_BUCKET", "test-bucket")
@@ -652,6 +861,7 @@ def test_run_agent_benchmark_validation(client):
     client.post(
         "/agent-tests",
         json={"agent_uuid": agent["uuid"], "test_uuids": [test["uuid"]]},
+        headers=h,
     )
     unlinked = _create_test(client, h)  # exists but not linked to this agent
     bad_subset = client.post(
@@ -676,6 +886,7 @@ def test_run_agent_benchmark_subset_scoping(client, monkeypatch):
         client.post(
             "/agent-tests",
             json={"agent_uuid": agent["uuid"], "test_uuids": [t["uuid"]]},
+            headers=h,
         )
 
     monkeypatch.setenv("S3_OUTPUT_BUCKET", "test-bucket")
@@ -700,6 +911,7 @@ def test_run_agent_benchmark_queued_path(client, monkeypatch):
     client.post(
         "/agent-tests",
         json={"agent_uuid": agent["uuid"], "test_uuids": [test["uuid"]]},
+        headers=h,
     )
 
     monkeypatch.setenv("S3_OUTPUT_BUCKET", "test-bucket")
@@ -767,6 +979,7 @@ def test_agent_test_inflight(client, monkeypatch):
     client.post(
         "/agent-tests",
         json={"agent_uuid": agent["uuid"], "test_uuids": [test["uuid"]]},
+        headers=h,
     )
 
     monkeypatch.setenv("S3_OUTPUT_BUCKET", "test-bucket")
@@ -797,10 +1010,12 @@ def test_run_tests_batch_by_names(client, monkeypatch):
     client.post(
         "/agent-tests",
         json={"agent_uuid": a1["uuid"], "test_uuids": [t1["uuid"]]},
+        headers=h,
     )
     client.post(
         "/agent-tests",
         json={"agent_uuid": a2["uuid"], "test_uuids": [t2["uuid"]]},
+        headers=h,
     )
 
     monkeypatch.setenv("S3_OUTPUT_BUCKET", "test-bucket")
@@ -864,6 +1079,7 @@ def test_run_tests_batch_skips_unverified(client, monkeypatch):
     client.post(
         "/agent-tests",
         json={"agent_uuid": agent["uuid"], "test_uuids": [test["uuid"]]},
+        headers=h,
     )
     # Make it a connection-type agent that hasn't been verified.
     db.update_agent(
@@ -903,6 +1119,7 @@ def test_run_tests_batch_all_agents(client, monkeypatch):
     client.post(
         "/agent-tests",
         json={"agent_uuid": a1["uuid"], "test_uuids": [t1["uuid"]]},
+        headers=h,
     )
 
     monkeypatch.setenv("S3_OUTPUT_BUCKET", "test-bucket")
@@ -941,3 +1158,34 @@ def test_run_tests_batch_all_agents(client, monkeypatch):
     other_data = other_resp.json()
     assert other_data["runs"] == []
     assert other_data["skipped"] == []
+
+
+def test_run_tests_batch_ignores_poisoned_link(client, monkeypatch):
+    """_run_tests_for_agents must re-verify org on every linked test rather
+    than trusting the link table, same as the single-agent run/benchmark
+    endpoints (see test_agent_tests_poisoned_link_does_not_leak_through_run_or_benchmark)."""
+    from db import add_test_to_agent
+
+    victim = _signup(client)
+    victim_test = _create_test(client, victim["headers"])
+
+    attacker = _signup(client)
+    ha = attacker["headers"]
+    name = f"agent-{uuid.uuid4().hex[:6]}"
+    agent = _create_agent(client, ha, name=name)
+    # Simulate a poisoned row bypassing link creation some other way.
+    add_test_to_agent(agent_id=agent["uuid"], test_id=victim_test["uuid"])
+
+    monkeypatch.setenv("S3_OUTPUT_BUCKET", "test-bucket")
+    with patch(
+        "routers.agent_tests.can_start_agent_test_job", return_value=False
+    ), patch("threading.Thread"):
+        resp = client.post("/agent-tests/run", json={"agent_names": [name]}, headers=ha)
+    assert resp.status_code == 200, resp.text
+    data = resp.json()
+    # The poisoned link doesn't count as a real linked test, so the agent is
+    # skipped exactly like one with no links at all — never runs the victim's test.
+    assert data["runs"] == []
+    assert data["skipped"] == [
+        {"agent_name": name, "agent_uuid": agent["uuid"], "reason": "no_linked_tests"}
+    ]
