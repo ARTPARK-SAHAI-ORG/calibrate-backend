@@ -160,6 +160,10 @@ EvalJobType = Literal["stt-eval", "tts-eval", "annotation-eval"]
 AnnotationTaskTypeLiteral = Literal["stt", "tts", "llm", "llm-general", "conversation"]
 TestTypeLiteral = Literal["response", "tool_call", "conversation"]
 MemberRoleLiteral = Literal["owner", "admin"]  # mirrors DB CHECK(role IN ('owner','admin'))
+# Status a job can carry at *creation* time: it either starts immediately
+# (`in_progress`) or waits for a concurrency slot (`queued`). Narrower than
+# TaskStatus so create-response docs advertise only the reachable values.
+InitialTaskStatus = Literal["queued", "in_progress"]
 
 
 class EvaluatorRunEntry(BaseModel):
@@ -189,7 +193,7 @@ class EvaluatorRunEntry(BaseModel):
         description="Pinned evaluator version ID at job-submit time",
     )
     output_type: Optional[OutputTypeLiteral] = Field(
-        None, description="Output type (`binary` or `rating`); drives per-row typing"
+        None, description="Output type; drives per-row typing"
     )
 
 
@@ -210,8 +214,8 @@ class TaskCreateResponse(BaseModel):
         description="Unique identifier for this evaluation job",
         examples=["a3b2c1d0-e5f4-3210-abcd-ef1234567890"],
     )
-    status: TaskStatus = Field(
-        description="Current status of the evaluation job: `queued` or `in_progress`"
+    status: InitialTaskStatus = Field(
+        description="Current status of the evaluation job"
     )
     dataset_id: Optional[str] = Field(
         None,
@@ -232,7 +236,7 @@ class TaskStatusResponse(BaseModel):
         description="Evaluation job ID",
     )
     status: TaskStatus = Field(
-        description="Current status: `queued`, `in_progress`, `done`, or `failed`"
+        description="Current status of the evaluation job"
     )
     language: Optional[str] = None
     dataset_id: Optional[str] = Field(

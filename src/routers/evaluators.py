@@ -104,7 +104,7 @@ class EvaluatorCreate(BaseModel):
         description="Semantic category: `tts` judges TTS audio, `stt` one transcript, `llm` a reply with history, `llm-general` a standalone input->output pair, `conversation` a full conversation",
     )
     data_type: DataTypeLiteral = Field(
-        "text", description="Medium the judge consumes: `text` or `audio` (the only field gating audio routing)"
+        "text", description="Medium the judge consumes; the only field gating audio routing"
     )
     kind: Literal["single", "side_by_side"] = Field(
         "single", description="`single` judges one output; `side_by_side` compares two and picks a winner"
@@ -131,12 +131,12 @@ class EvaluatorUpdate(BaseModel):
     evaluator_type: Optional[EvaluatorTypeLiteral] = Field(
         None, description="New semantic category. Omit to leave unchanged"
     )
-    data_type: Optional[DataTypeLiteral] = Field(None, description="New medium (`text`/`audio`). Omit to leave unchanged")
+    data_type: Optional[DataTypeLiteral] = Field(None, description="New medium. Omit to leave unchanged")
     kind: Optional[Literal["single", "side_by_side"]] = Field(
-        None, description="New kind (`single`/`side_by_side`). Omit to leave unchanged"
+        None, description="New scoring mode. Omit to leave unchanged"
     )
     output_type: Optional[Literal["binary", "rating"]] = Field(
-        None, description="New output type (`binary`/`rating`). Omit to leave unchanged"
+        None, description="New output shape. Omit to leave unchanged"
     )
 
 
@@ -181,11 +181,11 @@ class EvaluatorResponseBase(BaseModel):
     name: str = Field(description="Evaluator name")
     description: Optional[str] = Field(None, description="Human-readable description, or null")
     evaluator_type: EvaluatorTypeLiteral = Field(
-        description="Semantic category (`tts`/`stt`/`llm`/`llm-general`/`conversation`)"
+        description="Semantic category"
     )
-    data_type: DataTypeLiteral = Field(description="Medium the judge consumes (`text`/`audio`)")
-    kind: Literal["single", "side_by_side"] = Field(description="`single` or `side_by_side`")
-    output_type: Literal["binary", "rating"] = Field(description="`binary` or `rating`")
+    data_type: DataTypeLiteral = Field(description="Medium the judge consumes")
+    kind: Literal["single", "side_by_side"] = Field(description="Scoring mode: single output vs. side-by-side comparison")
+    output_type: Literal["binary", "rating"] = Field(description="Output shape: pass/fail or numeric score")
     owner_user_id: Optional[str] = Field(
         None,
         min_length=36,
@@ -409,9 +409,9 @@ class DefaultPromptResponse(BaseModel):
     system_prompt: str = Field(description="Suggested judge system prompt for prefilling the create form")
     judge_model: str = Field(description="Suggested judge model")
     evaluator_type: EvaluatorTypeLiteral = Field(description="Suggested semantic category")
-    data_type: DataTypeLiteral = Field(description="Suggested medium (`text`/`audio`)")
-    kind: Literal["single", "side_by_side"] = Field(description="Suggested kind (`single`/`side_by_side`)")
-    output_type: Literal["binary", "rating"] = Field(description="Suggested output type (`binary`/`rating`)")
+    data_type: DataTypeLiteral = Field(description="Suggested medium")
+    kind: Literal["single", "side_by_side"] = Field(description="Suggested scoring mode")
+    output_type: Literal["binary", "rating"] = Field(description="Suggested output shape")
     output_config: Optional[Dict[str, Any]] = Field(None, description="Suggested rubric, or null")
     variables: List[Dict[str, Any]] = Field(default=[], description="Suggested prompt variables (empty if none)")
 
@@ -447,7 +447,7 @@ async def list_evaluators(
         None, description="Filter by semantic category. Omit for all types"
     ),
     data_type: Optional[DataTypeLiteral] = Query(
-        None, description="Filter by medium (`text`/`audio`). Omit for all"
+        None, description="Filter by medium. Omit for all"
     ),
     include_defaults: bool = Query(
         True, description="When `true`, include seeded default evaluators alongside your workspace's custom ones"

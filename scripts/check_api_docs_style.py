@@ -11,6 +11,9 @@ boot) and flags routes/models that violate the house style:
      `description`.
   4. Every field on a Pydantic model (a `BaseModel` subclass, transitively) has a
      `Field(..., description=...)` with a non-empty description.
+  5. No enum/`Literal` field or param re-lists its own values in the description
+     (the docs renderer auto-lists them) — a run of >=2 of the type's own
+     backticked values separated only by connectors is flagged.
 
 Run directly (`uv run python scripts/check_api_docs_style.py`) — exits non-zero
 and prints one line per violation. `tests/test_api_docs_style.py` reuses
@@ -31,7 +34,16 @@ from typing import Optional
 
 HTTP_METHODS = {"get", "post", "put", "patch", "delete"}
 PATH_PARAM_FUNCS = {"Path", "PathParam"}
+DOC_PARAM_FUNCS = {"Field", "Query", "Path", "PathParam", "Body"}
 _PATH_TOKEN = re.compile(r"\{([^{}:]+)(?::[^{}]+)?\}")
+
+# Modules that define shared enum/Literal aliases reused across routers
+# (TaskStatus, EvaluatorKindLiteral, ...). Loaded once so a field annotated
+# with one of these names can be resolved to its allowed values.
+_ENUM_DEF_MODULES = ("utils.py", "pagination.py")
+
+# Connector-only run between two values: `a`, `b` / `a` or `b` / `a`/`b` / `a` | `b`.
+_ENUM_CONNECTOR = r"(?:\s*(?:,|/|\||or|and)\s*)+"
 
 # Terminology gate for user-facing doc text (see the api-writing-style skill).
 # The lookarounds exempt code identifiers/paths (org_uuid, get_current_org,
@@ -72,6 +84,84 @@ def _is_field_call(node: Optional[ast.expr]) -> bool:
     return name == "Field"
 
 
+def _literal_values(node: ast.expr) -> Optional[tuple[str, ...]]:
+    """Extract string members of a `Literal[...]` subscript, else None."""
+    if not (isinstance(node, ast.Subscript) and isinstance(node.value, ast.Name) and node.value.id == "Literal"):
+        return None
+    sl = node.slice
+    elts = sl.elts if isinstance(sl, ast.Tuple) else [sl]
+    vals = [e.value for e in elts if isinstance(e, ast.Constant) and isinstance(e.value, str)]
+    return tuple(vals) if vals else None
+
+
+def _collect_enum_values(tree: ast.Module) -> dict[str, tuple[str, ...]]:
+    """Map each `X = Literal[...]` alias and `class X(str, Enum)` name to its string values."""
+    out: dict[str, tuple[str, ...]] = {}
+    for node in tree.body:
+        # `NAME = Literal["a", "b", ...]`
+        if isinstance(node, ast.Assign) and len(node.targets) == 1 and isinstance(node.targets[0], ast.Name):
+            vals = _literal_values(node.value)
+            if vals:
+                out[node.targets[0].id] = vals
+        elif isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name) and node.value:
+            vals = _literal_values(node.value)
+            if vals:
+                out[node.target.id] = vals
+        # `class X(str, Enum): A = "a"` — collect string-constant member values.
+        elif isinstance(node, ast.ClassDef) and any(
+            (isinstance(b, ast.Name) and b.id == "Enum") or (isinstance(b, ast.Attribute) and b.attr == "Enum")
+            for b in node.bases
+        ):
+            members = [
+                s.value.value
+                for s in node.body
+                if isinstance(s, ast.Assign) and isinstance(s.value, ast.Constant) and isinstance(s.value.value, str)
+            ]
+            if members:
+                out[node.name] = tuple(members)
+    return out
+
+
+def _annotation_values(ann: Optional[ast.expr], registry: dict[str, tuple[str, ...]]) -> Optional[tuple[str, ...]]:
+    """Resolve a field/param annotation to its enum values (inline Literal, alias, or enum)."""
+    if ann is None:
+        return None
+    if isinstance(ann, ast.Name):
+        return registry.get(ann.id)
+    inline = _literal_values(ann)
+    if inline:
+        return inline
+    # Unwrap Optional[X] / List[X] / X | None.
+    if isinstance(ann, ast.Subscript):
+        sl = ann.slice
+        parts = sl.elts if isinstance(sl, ast.Tuple) else [sl]
+        for p in parts:
+            v = _annotation_values(p, registry)
+            if v:
+                return v
+    if isinstance(ann, ast.BinOp) and isinstance(ann.op, ast.BitOr):
+        return _annotation_values(ann.left, registry) or _annotation_values(ann.right, registry)
+    return None
+
+
+def _relists_enum(desc: str, values: tuple[str, ...]) -> bool:
+    """True if the description re-lists the type's own values (a run of ≥2 backticked
+    values separated only by connectors) — redundant with what the docs renderer
+    auto-lists. Descriptions that *explain* each value (real words between them) pass."""
+    if len(values) < 2:
+        return False
+    alt = "|".join(re.escape(v) for v in sorted(values, key=len, reverse=True))
+    pat = re.compile(rf"`(?:{alt})`{_ENUM_CONNECTOR}`(?:{alt})`")
+    return bool(pat.search(desc))
+
+
+def _field_description(call: ast.Call) -> Optional[str]:
+    for kw in call.keywords:
+        if kw.arg == "description" and isinstance(kw.value, ast.Constant) and isinstance(kw.value.value, str):
+            return kw.value.value
+    return None
+
+
 def _model_class_names(tree: ast.Module) -> set[str]:
     """Names of classes that are Pydantic models (inherit BaseModel, transitively)."""
     classes = [n for n in ast.walk(tree) if isinstance(n, ast.ClassDef)]
@@ -96,7 +186,7 @@ def _model_class_names(tree: ast.Module) -> set[str]:
     return models
 
 
-def _check_model_fields(cls: ast.ClassDef, rel: str) -> list[str]:
+def _check_model_fields(cls: ast.ClassDef, rel: str, registry: dict[str, tuple[str, ...]]) -> list[str]:
     out = []
     for stmt in cls.body:
         if not isinstance(stmt, ast.AnnAssign) or not isinstance(stmt.target, ast.Name):
@@ -112,6 +202,15 @@ def _check_model_fields(cls: ast.ClassDef, rel: str) -> list[str]:
             out.append(f"{loc}: field is not documented with Field(description=...)")
         elif not _has_description_kw(stmt.value):
             out.append(f"{loc}: Field(...) is missing a non-empty description=")
+        else:
+            values = _annotation_values(ann, registry)
+            desc = _field_description(stmt.value)
+            if values and desc and _relists_enum(desc, values):
+                out.append(
+                    f"{loc}: description re-lists the enum's values — the docs renderer "
+                    f"auto-lists them; state the field's purpose (or explain what each "
+                    f"value means), don't restate the value set"
+                )
     return out
 
 
@@ -132,7 +231,16 @@ def _arg_defaults(func) -> dict[str, ast.expr]:
     return defaults
 
 
-def _check_route(func, decorator: ast.Call, rel: str) -> list[str]:
+def _param_annotations(func) -> dict[str, ast.expr]:
+    """Map every argument name to its annotation node (or None)."""
+    a = func.args
+    out: dict[str, Optional[ast.expr]] = {}
+    for arg in list(a.posonlyargs) + list(a.args) + list(a.kwonlyargs):
+        out[arg.arg] = arg.annotation
+    return out
+
+
+def _check_route(func, decorator: ast.Call, rel: str, registry: dict[str, tuple[str, ...]]) -> list[str]:
     out = []
     name = func.name
     loc = f"{rel}:{func.lineno} {name}"
@@ -167,6 +275,23 @@ def _check_route(func, decorator: ast.Call, rel: str) -> list[str]:
                     f"{loc}: path param '{pname}' needs Path(description=...) "
                     f"(imported as PathParam where pathlib.Path is used)"
                 )
+
+    # Query/Path params whose type is an enum must not re-list their values.
+    annotations = _param_annotations(func)
+    for pname, dflt in _arg_defaults(func).items():
+        if not (isinstance(dflt, ast.Call) and dflt.func):
+            continue
+        fn = dflt.func
+        fname = fn.id if isinstance(fn, ast.Name) else (fn.attr if isinstance(fn, ast.Attribute) else None)
+        if fname not in DOC_PARAM_FUNCS:
+            continue
+        desc = _field_description(dflt)
+        values = _annotation_values(annotations.get(pname), registry)
+        if values and desc and _relists_enum(desc, values):
+            out.append(
+                f"{loc}: param '{pname}' description re-lists the enum's values — the docs "
+                f"renderer auto-lists them; state the param's purpose instead"
+            )
     return out
 
 
@@ -234,8 +359,20 @@ def _check_terminology(tree: ast.Module, rel: str) -> list[str]:
     return out
 
 
+def _shared_enum_registry() -> dict[str, tuple[str, ...]]:
+    """Enum/Literal aliases defined in shared modules, reused across routers."""
+    registry: dict[str, tuple[str, ...]] = {}
+    src_dir = REPO_ROOT / "src"
+    for name in _ENUM_DEF_MODULES:
+        path = src_dir / name
+        if path.exists():
+            registry.update(_collect_enum_values(ast.parse(path.read_text(), filename=str(path))))
+    return registry
+
+
 def find_violations(routers_dir: Path = ROUTERS_DIR) -> list[str]:
     violations: list[str] = []
+    shared = _shared_enum_registry()
     for path in sorted(routers_dir.glob("*.py")):
         if path.name == "__init__.py":
             continue
@@ -245,14 +382,16 @@ def find_violations(routers_dir: Path = ROUTERS_DIR) -> list[str]:
             rel = path.name
         tree = ast.parse(path.read_text(), filename=str(path))
         models = _model_class_names(tree)
+        # Shared aliases plus any defined in this router itself (e.g. JobType, TestType).
+        registry = {**shared, **_collect_enum_values(tree)}
 
         for node in ast.walk(tree):
             if isinstance(node, ast.ClassDef) and node.name in models:
-                violations.extend(_check_model_fields(node, rel))
+                violations.extend(_check_model_fields(node, rel, registry))
             elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
                 dec = _route_decorator(node)
                 if dec is not None:
-                    violations.extend(_check_route(node, dec, rel))
+                    violations.extend(_check_route(node, dec, rel, registry))
         violations.extend(_check_terminology(tree, rel))
     return violations
 

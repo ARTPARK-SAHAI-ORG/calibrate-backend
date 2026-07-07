@@ -31,8 +31,8 @@ class JobListItem(BaseModel):
         max_length=36,
         description="Job ID",
     )
-    type: EvalJobType = Field(description="Underlying job type, e.g. `stt-eval`, `tts-eval`")
-    status: TaskStatus = Field(description="Lifecycle state, e.g. `queued`, `in_progress`, `done`, `failed`")
+    type: EvalJobType = Field(description="Underlying job type")
+    status: TaskStatus = Field(description="Lifecycle state")
     dataset_id: Optional[str] = Field(
         None,
         min_length=36,
@@ -67,7 +67,7 @@ JOB_TYPE_MAP = {
 @router.get("", response_model=JobsListResponse, summary="List jobs")
 async def list_jobs(
     job_type: Optional[JobType] = Query(
-        None, description="Filter jobs by type: `stt` or `tts`; omit for all types"
+        None, description="Filter jobs by type; omit for all types"
     ),
     ctx: OrgContext = Depends(get_current_org),
 ):

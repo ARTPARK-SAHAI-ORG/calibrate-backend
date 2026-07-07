@@ -96,6 +96,50 @@ def test_checker_flags_uuid_and_caller_in_doc_text(tmp_path):
     assert "your workspace" in joined
 
 
+def test_checker_flags_enum_value_relist(tmp_path):
+    """A description that re-lists a Literal/enum's own values is redundant with the
+    docs renderer's auto-generated options list, and must be flagged."""
+    (tmp_path / "relist.py").write_text(
+        "from typing import Literal\n"
+        "from fastapi import APIRouter, Query\n"
+        "from pydantic import BaseModel, Field\n"
+        "from utils import TaskStatus\n"
+        "router = APIRouter()\n"
+        "class Thing(BaseModel):\n"
+        "    kind: Literal['single', 'side_by_side'] = Field(description='`single` or `side_by_side`')\n"
+        "    status: TaskStatus = Field(description='Status: `queued`, `in_progress`, `done`, or `failed`')\n"
+        "@router.get('/things', summary='List things')\n"
+        "async def list_things(kind: Literal['single', 'side_by_side'] = Query('single', description='`single` or `side_by_side`')):\n"
+        "    '''List things.'''\n"
+        "    return []\n"
+    )
+    joined = "\n".join(checker.find_violations(tmp_path))
+    assert "Thing.kind: description re-lists" in joined  # inline Literal field
+    assert "Thing.status: description re-lists" in joined  # shared enum alias
+    assert "param 'kind' description re-lists" in joined  # query param
+
+
+def test_checker_allows_enum_value_gloss(tmp_path):
+    """Explaining what each value *means* (real words per value) is allowed; only a
+    bare connector-separated restatement of the values is banned."""
+    (tmp_path / "gloss.py").write_text(
+        "from typing import Literal\n"
+        "from fastapi import APIRouter\n"
+        "from pydantic import BaseModel, Field\n"
+        "router = APIRouter()\n"
+        "class Thing(BaseModel):\n"
+        "    type: Literal['agent', 'connection'] = Field(\n"
+        "        description='`agent` applies managed defaults; `connection` stores the config you supply',\n"
+        "    )\n"
+        "    status: Literal['queued', 'in_progress'] = Field(description='Current status of the run')\n"
+        "@router.get('/things', summary='List things')\n"
+        "async def list_things():\n"
+        "    '''List things.'''\n"
+        "    return []\n"
+    )
+    assert checker.find_violations(tmp_path) == []
+
+
 def test_checker_accepts_a_good_module(tmp_path):
     (tmp_path / "good.py").write_text(
         "from fastapi import APIRouter, Path\n"

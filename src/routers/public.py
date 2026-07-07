@@ -93,7 +93,7 @@ class PublicSTTResponse(BaseModel):
         description="STT eval job ID",
         examples=[_EXAMPLE_TASK_UUID],
     )
-    status: TaskStatus = Field(description="Job status, e.g. `in_progress`, `done`, `failed`")
+    status: TaskStatus = Field(description="Job status")
     language: Optional[str] = Field(None, description="Evaluated language code; `null` if unset")
     dataset_id: Optional[str] = Field(
         None,
@@ -119,7 +119,7 @@ class PublicTTSResponse(BaseModel):
         description="TTS eval job ID",
         examples=[_EXAMPLE_TASK_UUID],
     )
-    status: TaskStatus = Field(description="Job status, e.g. `in_progress`, `done`, `failed`")
+    status: TaskStatus = Field(description="Job status")
     language: Optional[str] = Field(None, description="Evaluated language code; `null` if unset")
     dataset_id: Optional[str] = Field(
         None,
@@ -145,7 +145,7 @@ class PublicTestRunResponse(BaseModel):
         description="LLM test run job ID",
         examples=[_EXAMPLE_TASK_UUID],
     )
-    status: TaskStatus = Field(description="Run status, e.g. `in_progress`, `done`, `failed`")
+    status: TaskStatus = Field(description="Run status")
     total_tests: Optional[int] = Field(None, description="Total test cases in the run; `null` until known")
     passed: Optional[int] = Field(None, description="Test cases that passed; `null` until computed")
     failed: Optional[int] = Field(None, description="Test cases that failed; `null` until computed")
@@ -185,7 +185,7 @@ class PublicBenchmarkResponse(BaseModel):
         description="LLM benchmark job ID",
         examples=[_EXAMPLE_TASK_UUID],
     )
-    status: TaskStatus = Field(description="Run status, e.g. `in_progress`, `done`, `failed`")
+    status: TaskStatus = Field(description="Run status")
     # Same as PublicTestRunResponse.evaluators — shared by every model's
     # test_results inside model_results[] (all models run the same suite).
     evaluators: Optional[List[Dict[str, Any]]] = Field(
@@ -209,8 +209,8 @@ class PublicSimulationRunResponse(BaseModel):
         examples=[_EXAMPLE_TASK_UUID],
     )
     name: str = Field(description="Display name for the run, e.g. `Run 1`")
-    status: TaskStatus = Field(description="Run status, e.g. `in_progress`, `done`, `failed`")
-    type: SimulationRunType = Field(description="Simulation type (`text` | `voice`)")
+    status: TaskStatus = Field(description="Run status")
+    type: SimulationRunType = Field(description="Simulation type")
     updated_at: str = Field(description="When the run was last updated (ISO 8601 UTC)")
     total_simulations: Optional[int] = Field(None, description="Number of simulations in the run; `null` until known")
     metrics: Optional[Dict[str, Any]] = Field(None, description="Aggregated run metrics; `null` until computed")
@@ -233,7 +233,7 @@ class PublicAnnotationEvalTaskRef(BaseModel):
     )
     name: str = Field(description="Annotation task name")
     type: AnnotationTaskTypeLiteral = Field(
-        description="Annotation task type (e.g. `stt`, `llm`, `conversation`)"
+        description="Annotation task type"
     )
     description: Optional[str] = Field(None, description="Task description; `null` if unset")
 
@@ -297,9 +297,9 @@ class PublicDefaultEvaluatorResponse(BaseModel):
     name: str = Field(description="Evaluator display name")
     description: Optional[str] = Field(None, description="Evaluator description; `null` if unset")
     evaluator_type: EvaluatorTypeLiteral = Field(
-        description="Semantic category (`stt`, `tts`, `llm`, `llm-general`, `conversation`)"
+        description="Semantic category"
     )
-    output_type: OutputTypeLiteral = Field(description="Output shape (`binary` | `rating`)")
+    output_type: OutputTypeLiteral = Field(description="Output shape")
     live_version: Optional[PublicDefaultEvaluatorVersionResponse] = Field(
         None, description="Public-safe fields of the live version; `null` if none is set"
     )
