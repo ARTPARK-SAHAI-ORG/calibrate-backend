@@ -95,31 +95,121 @@ actions:
     update:
       x-speakeasy-group: agents
       x-speakeasy-name-override: create
+      x-speakeasy-mcp:
+        name: create-agent
+        title: Create agent
+        scopes: [write]
+        readOnlyHint: false
+        destructiveHint: false
+        idempotentHint: false
+        openWorldHint: true
+        description: |
+          Create a new agent in the caller's organization. Provide the agent's
+          name, type, and config. Returns the created agent including its UUID.
+          Requires a Calibrate API key (CALIBRATE_API_KEY).
   - target: $.paths['/agents/{agent_uuid}'].get
     update:
       x-speakeasy-group: agents
       x-speakeasy-name-override: get
+      x-speakeasy-mcp:
+        name: get-agent
+        title: Get agent
+        scopes: [read]
+        readOnlyHint: true
+        openWorldHint: true
+        description: |
+          Fetch a single agent by UUID within the caller's org. Returns the
+          agent's name, type, and config. Fails with 404 if the agent does not
+          exist or belongs to another org.
   - target: $.paths['/agents/{agent_uuid}'].put
     update:
       x-speakeasy-group: agents
       x-speakeasy-name-override: update
+      x-speakeasy-mcp:
+        name: update-agent
+        title: Update agent
+        scopes: [write]
+        readOnlyHint: false
+        destructiveHint: false
+        idempotentHint: true
+        openWorldHint: true
+        description: |
+          Update an existing agent by UUID within the caller's org. Supply the
+          fields to change (name, type, config). Returns the updated agent.
+          Fails with 404 if the agent does not exist or belongs to another org.
   - target: $.paths['/tests'].post
     update:
       x-speakeasy-group: tests
       x-speakeasy-name-override: create
+      x-speakeasy-mcp:
+        name: create-test
+        title: Create test
+        scopes: [write]
+        readOnlyHint: false
+        destructiveHint: false
+        idempotentHint: false
+        openWorldHint: true
+        description: |
+          Create a new test in the caller's organization. Provide the test's
+          name, type, and config. Returns the created test including its UUID.
+          Requires a Calibrate API key (CALIBRATE_API_KEY).
   - target: $.paths['/tests'].get
     update:
       x-speakeasy-group: tests
       x-speakeasy-name-override: list
+      x-speakeasy-mcp:
+        name: list-tests
+        title: List tests
+        scopes: [read]
+        readOnlyHint: true
+        openWorldHint: true
+        description: |
+          List every test in the caller's organization. Returns each test's
+          UUID, name, type, and config. Use this to discover which tests exist
+          before creating runs.
   - target: $.paths['/tests/bulk'].post
     update:
       x-speakeasy-group: tests
       x-speakeasy-name-override: bulk_create
+      x-speakeasy-mcp:
+        name: bulk-create-tests
+        title: Create tests (bulk)
+        scopes: [write]
+        readOnlyHint: false
+        destructiveHint: false
+        idempotentHint: false
+        openWorldHint: true
+        description: |
+          Create multiple tests in the caller's organization in one call. Provide
+          a list of test definitions (name, type, config). Returns the created
+          tests including their UUIDs.
   - target: $.paths['/tests/{test_uuid}'].get
     update:
       x-speakeasy-group: tests
       x-speakeasy-name-override: get
+      x-speakeasy-mcp:
+        name: get-test
+        title: Get test
+        scopes: [read]
+        readOnlyHint: true
+        openWorldHint: true
+        description: |
+          Fetch a single test by UUID within the caller's org. Returns the
+          test's name, type, and config. Fails with 404 if the test does not
+          exist or belongs to another org.
   - target: $.paths['/tests/{test_uuid}'].put
     update:
       x-speakeasy-group: tests
       x-speakeasy-name-override: update
+      x-speakeasy-mcp:
+        name: update-test
+        title: Update test
+        scopes: [write]
+        readOnlyHint: false
+        destructiveHint: false
+        idempotentHint: true
+        openWorldHint: true
+        description: |
+          Update an existing test by UUID within the caller's org. Supply the
+          fields to change (name, config). Returns the updated test. Fails with
+          404 if the test does not exist or belongs to another org.
