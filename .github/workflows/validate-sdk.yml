@@ -26,13 +26,10 @@ permissions:
 jobs:
   validate-clients:
     runs-on: ubuntu-latest
-    environment: Production
     steps:
       - uses: actions/checkout@v4
 
       - uses: ./.github/actions/fetch-public-spec
-        env:
-          PUBLIC_API_BASE_URL: ${{ secrets.PUBLIC_API_BASE_URL }}
 
       - name: Install Fern
         run: npm install -g fern-api
@@ -43,10 +40,10 @@ jobs:
       - name: Install Speakeasy CLI
         run: curl -fsSL https://go.speakeasy.com/cli-install.sh | sh
 
+      # --skip-upload-spec: compile overlay locally only; no registry auth needed.
+      # Fork PRs do not receive repo secrets (SPEAKEASY_API_KEY), so this must stay offline.
       - name: Compile public OpenAPI source (merge spec + overlay)
-        env:
-          SPEAKEASY_API_KEY: ${{ secrets.SPEAKEASY_API_KEY }}
-        run: speakeasy run -s calibrate-public-api -y
+        run: speakeasy run -s calibrate-public-api -y --skip-upload-spec
 
       - name: Lint compiled OpenAPI document
         run: speakeasy lint openapi -s openapi/compiled.yaml
