@@ -366,6 +366,48 @@ class TestUpdate(BaseModel):
     )
 ```
 
+### Divergence: context-appropriate vs. a real defect
+
+The same field appearing on create/update/response/bulk models **should** read
+differently when the context differs — that is NOT an inconsistency to "fix":
+
+- **Input-to-set vs. current-state.** `config` on Update means "the config you're
+  writing"; on Response it means "the config as it is now". `"New config for the
+  test. Omit to leave unchanged"` (update) vs `"Config for the test (…)"`
+  (response) is correct and intended.
+- **Update fields** say `"New <thing>. Omit to leave unchanged"` (not
+  "Replacement" — plainer, and matches the codebase's own update wording).
+- **Create fields** may carry extra input-only behavior (deep-merge rules,
+  `agent_url` requirement) that the response gloss omits.
+
+Only two things count as a defect worth consolidating:
+
+1. **Degraded/divergent gloss of the same *meaning*.** An enum's value-meaning
+   explained richly on one model and tersely (or re-listed) on another — e.g. the
+   agent `type` enum glossed five different ways across `AgentResponse` models.
+   The value's meaning must read the same wherever it's explained; factor it into
+   a shared constant (or, across files, one string used verbatim).
+2. **Factual mismatch with enforced behavior.** A description that contradicts or
+   under-states what the code actually enforces — e.g. bulk test `name` said
+   "unique within the batch" but the handler also rejects workspace-wide
+   collisions. Read the validator/DB guard before trusting a scoping claim.
+
+Do NOT mass-normalize create/update/response into one template — that erases the
+legitimate context differences above. Audit for the two defect classes only.
+
+### Describe the field, don't editorialize
+
+State what the field is. Don't append unsolicited advice, opinions, or asides
+about how the system *should* be used or where other things *ought* to live.
+
+```
+BAD:  "Message author role. The agent's system prompt lives in its config, not here"
+GOOD: "Message author role in the conversation history"
+```
+
+If a value is genuinely invalid as input, enforce it in the type (narrow the
+`Literal`), don't lecture about it in the description.
+
 ### Don't repeat the unit that's already in the field name
 
 `latency_ms`/`total_tokens`/`cost_usd` already carry the unit. Never write

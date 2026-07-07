@@ -207,7 +207,7 @@ class TestResponse(BaseModel):
         description="Test ID",
         examples=[_EXAMPLE_TEST_UUID],
     )
-    name: str = Field(description="Test name")
+    name: str = Field(description="Name of the test")
     type: TestTypeLiteral = Field(
         description="Test type"
     )
@@ -356,10 +356,10 @@ class JudgeResult(BaseModel):
 
 class TestCaseResult(BaseModel):
     test_case_id: Optional[str] = Field(
-        None, description="Identifier of the test case within the run"
+        None, description="ID of the test case within the run"
     )
     name: Optional[str] = Field(
-        None, description="Test name"
+        None, description="Name of the test"
     )
     passed: Optional[bool] = Field(
         None, description="Whether the case passed. Present only when done"
@@ -389,8 +389,8 @@ class TestCaseResult(BaseModel):
 
 
 class TestRunEvaluator(BaseModel):
-    uuid: Optional[str] = Field(None, description="Evaluator ID")
-    name: Optional[str] = Field(None, description="Evaluator name")
+    uuid: Optional[str] = Field(None, description="ID of the evaluator")
+    name: Optional[str] = Field(None, description="Name of the evaluator")
     description: Optional[str] = Field(
         None, description="What the evaluator checks"
     )
