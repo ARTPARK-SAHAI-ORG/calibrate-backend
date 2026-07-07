@@ -356,6 +356,28 @@ def test_recover_llm_benchmark_starts_thread():
         thread_mock.return_value.start.assert_called_once()
 
 
+def test_recover_llm_unit_test_cross_org_test_raises():
+    """A snapshot test_uuid whose org doesn't match the agent's must raise,
+    same as a missing test — guards against a poisoned pre-fix snapshot
+    surviving in a queued job's details across a restart."""
+    import pytest
+
+    with patch(
+        "job_recovery.get_agent", return_value={"uuid": "a", "org_uuid": "org-a"}
+    ), patch(
+        "job_recovery.get_test", return_value={"uuid": "t", "org_uuid": "org-b"}
+    ):
+        with pytest.raises(ValueError):
+            job_recovery._recover_llm_unit_test_job(
+                "j-1",
+                {
+                    "agent_uuid": "a",
+                    "test_uuids": ["t"],
+                    "s3_bucket": "b",
+                },
+            )
+
+
 def test_recover_llm_benchmark_missing_agent():
     import pytest
 
@@ -367,6 +389,27 @@ def test_recover_llm_benchmark_missing_agent():
                     "agent_uuid": "missing",
                     "test_uuids": [],
                     "models": [],
+                    "s3_bucket": "b",
+                },
+            )
+
+
+def test_recover_llm_benchmark_cross_org_test_raises():
+    """Same cross-org snapshot guard as the unit-test recovery path."""
+    import pytest
+
+    with patch(
+        "job_recovery.get_agent", return_value={"uuid": "a", "org_uuid": "org-a"}
+    ), patch(
+        "job_recovery.get_test", return_value={"uuid": "t", "org_uuid": "org-b"}
+    ):
+        with pytest.raises(ValueError):
+            job_recovery._recover_llm_benchmark_job(
+                "j-1",
+                {
+                    "agent_uuid": "a",
+                    "test_uuids": ["t"],
+                    "models": ["m"],
                     "s3_bucket": "b",
                 },
             )

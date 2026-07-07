@@ -27,6 +27,7 @@ from db import (
     get_agent,
     get_all_agents,
     get_test,
+    get_all_tests,
     get_tools_for_agent,
     get_evaluators_for_test,
     get_evaluator_by_slug,
@@ -78,10 +79,13 @@ def _start_llm_unit_test_job_from_queue(job: dict) -> bool:
     if not agent:
         return False
 
+    # Re-check org on every test in the snapshot rather than trusting it as-is
+    # (see the matching comment in run_agent_test) — the snapshot was written
+    # at queue time and could predate a fix to whatever created it.
     tests = []
     for test_uuid in test_uuids:
         test = get_test(test_uuid)
-        if test:
+        if test and test.get("org_uuid") == agent.get("org_uuid"):
             tests.append(test)
 
     if not tests:
@@ -113,10 +117,13 @@ def _start_llm_benchmark_job_from_queue(job: dict) -> bool:
     if not agent:
         return False
 
+    # Re-check org on every test in the snapshot rather than trusting it as-is
+    # (see the matching comment in run_agent_test) — the snapshot was written
+    # at queue time and could predate a fix to whatever created it.
     tests = []
     for test_uuid in test_uuids:
         test = get_test(test_uuid)
-        if test:
+        if test and test.get("org_uuid") == agent.get("org_uuid"):
             tests.append(test)
 
     if not tests or not models:
@@ -512,17 +519,24 @@ class GlobalTestRunsResponse(BaseModel):
 @router.post(
     "", response_model=AgentTestsCreateResponse, summary="Link tests to agent"
 )
-async def create_agent_test_links(agent_tests: AgentTestsCreate):
+async def create_agent_test_links(
+    agent_tests: AgentTestsCreate,
+    ctx: OrgContext = Depends(get_current_org),
+):
     """Link one or more tests to an agent. Already-linked tests are skipped."""
-    # Verify agent exists
+    # Verify agent exists and belongs to the caller's org.
     agent = get_agent(agent_tests.agent_uuid)
-    if not agent:
+    if not agent or agent.get("org_uuid") != ctx.org_uuid:
         raise HTTPException(status_code=404, detail="Agent not found")
 
-    # Verify all tests exist
+    # Verify all tests exist and belong to the caller's org — a cross-org
+    # uuid must 404 identically to a missing one (existence-leak parity).
+    # This is also what keeps agent_tests link rows single-org: nothing
+    # downstream (run/benchmark) can trust a link unless creation itself
+    # is scoped.
     for test_uuid in agent_tests.test_uuids:
         test = get_test(test_uuid)
-        if not test:
+        if not test or test.get("org_uuid") != ctx.org_uuid:
             raise HTTPException(status_code=404, detail=f"Test {test_uuid} not found")
 
     link_ids = []
@@ -549,9 +563,19 @@ async def create_agent_test_links(agent_tests: AgentTestsCreate):
 @router.get(
     "", response_model=List[AgentTestResponse], summary="List agent-test links"
 )
-async def list_agent_tests():
-    """List all agent-test links."""
-    links = get_all_agent_tests()
+async def list_agent_tests(ctx: OrgContext = Depends(get_current_org)):
+    """List all agent-test links in your workspace."""
+    # Filter by BOTH sides of the link, not just the agent — a stale or
+    # future-poisoned row could link one of your own agents to a foreign
+    # test, and that test_id shouldn't leak here either.
+    org_agent_uuids = {a["uuid"] for a in get_all_agents(org_uuid=ctx.org_uuid)}
+    org_test_uuids = {t["uuid"] for t in get_all_tests(org_uuid=ctx.org_uuid)}
+    links = [
+        link
+        for link in get_all_agent_tests()
+        if link.get("agent_id") in org_agent_uuids
+        and link.get("test_id") in org_test_uuids
+    ]
     return links
 
 
@@ -565,14 +589,17 @@ async def get_agent_tests_endpoint(
         description="Agent whose linked tests to list",
         examples=[_EXAMPLE_AGENT_UUID],
     ),
+    ctx: OrgContext = Depends(get_current_org),
 ):
     """List the tests linked to an agent."""
-    # Verify agent exists
+    # Verify agent exists and belongs to the caller's org.
     agent = get_agent(agent_uuid)
-    if not agent:
+    if not agent or agent.get("org_uuid") != ctx.org_uuid:
         raise HTTPException(status_code=404, detail="Agent not found")
 
-    tests = get_tests_for_agent(agent_uuid)
+    tests = [
+        t for t in get_tests_for_agent(agent_uuid) if t.get("org_uuid") == ctx.org_uuid
+    ]
     return tests
 
 
@@ -641,11 +668,12 @@ async def get_agent_test_runs(
         description="Agent whose test runs to list",
         examples=[_EXAMPLE_AGENT_UUID],
     ),
+    ctx: OrgContext = Depends(get_current_org),
 ):
     """List test runs for an agent, including status and results."""
-    # Verify agent exists
+    # Verify agent exists and belongs to the caller's org.
     agent = get_agent(agent_uuid)
-    if not agent:
+    if not agent or agent.get("org_uuid") != ctx.org_uuid:
         raise HTTPException(status_code=404, detail="Agent not found")
 
     # Get all jobs for this agent
@@ -732,20 +760,30 @@ async def get_test_agents(
         description="Test whose linked agents to list",
         examples=[_EXAMPLE_TEST_UUID],
     ),
+    ctx: OrgContext = Depends(get_current_org),
 ):
     """List the agents linked to a test."""
-    # Verify test exists
+    # Verify test exists and belongs to the caller's org.
     test = get_test(test_uuid)
-    if not test:
+    if not test or test.get("org_uuid") != ctx.org_uuid:
         raise HTTPException(status_code=404, detail="Test not found")
 
-    agents = get_agents_for_test(test_uuid)
+    agents = [
+        a for a in get_agents_for_test(test_uuid) if a.get("org_uuid") == ctx.org_uuid
+    ]
     return agents
 
 
 @router.delete("", summary="Unlink test from agent")
-async def delete_agent_test_link(agent_test: AgentTestDelete):
+async def delete_agent_test_link(
+    agent_test: AgentTestDelete,
+    ctx: OrgContext = Depends(get_current_org),
+):
     """Unlink a test from an agent."""
+    agent = get_agent(agent_test.agent_uuid)
+    if not agent or agent.get("org_uuid") != ctx.org_uuid:
+        raise HTTPException(status_code=404, detail="Agent not found")
+
     deleted = remove_test_from_agent(agent_test.agent_uuid, agent_test.test_uuid)
     if not deleted:
         raise HTTPException(status_code=404, detail="Agent-test link not found")
@@ -766,13 +804,16 @@ class AgentTestBulkDelete(BaseModel):
 
 
 @router.post("/bulk-unlink", summary="Bulk unlink tests from agent")
-async def bulk_delete_agent_test_links(payload: AgentTestBulkDelete):
+async def bulk_delete_agent_test_links(
+    payload: AgentTestBulkDelete,
+    ctx: OrgContext = Depends(get_current_org),
+):
     """Unlink multiple tests from an agent."""
     if not payload.test_uuids:
         raise HTTPException(status_code=400, detail="test_uuids must not be empty")
 
     agent = get_agent(payload.agent_uuid)
-    if not agent:
+    if not agent or agent.get("org_uuid") != ctx.org_uuid:
         raise HTTPException(status_code=404, detail="Agent not found")
 
     deleted_count = bulk_remove_tests_from_agent(
@@ -2162,8 +2203,15 @@ async def run_agent_test(
                 )
             tests.append(test)
     else:
-        # No test_uuids provided — run all tests linked to the agent
-        tests = get_tests_for_agent(agent_uuid)
+        # No test_uuids provided — run all tests linked to the agent. Re-check
+        # org on every linked test rather than trusting the link table as-is:
+        # link creation is scoped today, but this guards against stale rows
+        # from before that fix, or any future write path that isn't.
+        tests = [
+            t
+            for t in get_tests_for_agent(agent_uuid)
+            if t.get("org_uuid") == ctx.org_uuid
+        ]
         if not tests:
             raise HTTPException(
                 status_code=400,
@@ -2204,7 +2252,13 @@ def _run_tests_for_agents(
             )
             continue
 
-        tests = get_tests_for_agent(agent["uuid"])
+        # Re-check org on every linked test rather than trusting the link
+        # table as-is (see the matching comment in run_agent_test).
+        tests = [
+            t
+            for t in get_tests_for_agent(agent["uuid"])
+            if t.get("org_uuid") == agent.get("org_uuid")
+        ]
         if not tests:
             skipped.append(
                 BatchTestSkip(
@@ -3022,7 +3076,12 @@ async def run_agent_benchmark(
             )
 
     # Benchmarks run the agent's linked tests, optionally narrowed to a subset.
-    linked_tests = get_tests_for_agent(agent_uuid)
+    # Re-check org on every linked test rather than trusting the link table
+    # as-is (see the matching comment in run_agent_test) — this also protects
+    # the test_uuids-subset branch below, since it derives from linked_tests.
+    linked_tests = [
+        t for t in get_tests_for_agent(agent_uuid) if t.get("org_uuid") == ctx.org_uuid
+    ]
     if not linked_tests:
         raise HTTPException(
             status_code=400,

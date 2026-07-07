@@ -400,10 +400,14 @@ def _recover_llm_unit_test_job(job_id: str, details: dict):
     if not agent:
         raise ValueError(f"Agent {agent_uuid} not found")
 
+    # Re-check org on every test in the snapshot rather than trusting it as-is
+    # (see the matching comment in routers/agent_tests.py's run_agent_test) —
+    # the snapshot was written at job-creation time and could predate a fix
+    # to whatever created it. Treat a cross-org test the same as a missing one.
     tests = []
     for test_uuid in test_uuids:
         test = get_test(test_uuid)
-        if not test:
+        if not test or test.get("org_uuid") != agent.get("org_uuid"):
             raise ValueError(f"Test {test_uuid} not found")
         tests.append(test)
 
@@ -432,10 +436,14 @@ def _recover_llm_benchmark_job(job_id: str, details: dict):
     if not agent:
         raise ValueError(f"Agent {agent_uuid} not found")
 
+    # Re-check org on every test in the snapshot rather than trusting it as-is
+    # (see the matching comment in routers/agent_tests.py's run_agent_test) —
+    # the snapshot was written at job-creation time and could predate a fix
+    # to whatever created it. Treat a cross-org test the same as a missing one.
     tests = []
     for test_uuid in test_uuids:
         test = get_test(test_uuid)
-        if not test:
+        if not test or test.get("org_uuid") != agent.get("org_uuid"):
             raise ValueError(f"Test {test_uuid} not found")
         tests.append(test)
 

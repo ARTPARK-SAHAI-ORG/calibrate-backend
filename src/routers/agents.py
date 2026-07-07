@@ -666,8 +666,14 @@ async def duplicate_agent_endpoint(
                 f"Failed to link tool {tool['uuid']} to duplicated agent: {e}"
             )
 
-    # Copy all linked tests
-    linked_tests = get_tests_for_agent(agent_uuid)
+    # Copy all linked tests. Re-check org on every linked test rather than
+    # trusting the link table as-is (see the matching comment in
+    # routers/agent_tests.py's run_agent_test) — safe by construction today
+    # since agent_uuid is already org-verified above, but this guards against
+    # stale rows from before that fix, or any future write path that isn't.
+    linked_tests = [
+        t for t in get_tests_for_agent(agent_uuid) if t.get("org_uuid") == ctx.org_uuid
+    ]
     for test in linked_tests:
         try:
             add_test_to_agent(new_agent_uuid, test["uuid"])
