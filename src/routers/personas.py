@@ -19,7 +19,7 @@ _EXAMPLE_ID = "f47ac10b-58cc-4372-a567-0e02b2c3d479"
 
 
 class PersonaCreate(BaseModel):
-    name: str = Field(description="Human-readable persona name, unique within the workspace")
+    name: str = Field(description="Persona name, unique within the workspace")
     description: Optional[str] = Field(
         None, description="Free-text description of the persona. Omit to leave unset"
     )
@@ -47,7 +47,7 @@ class PersonaResponse(BaseModel):
         description="ID of the persona",
         examples=[_EXAMPLE_ID],
     )
-    name: str = Field(description="Human-readable persona name")
+    name: str = Field(description="Persona name")
     description: Optional[str] = Field(
         None, description="Free-text description, or null if unset"
     )
@@ -65,7 +65,7 @@ class PersonaCreateResponse(BaseModel):
         description="ID of the newly created persona",
         examples=[_EXAMPLE_ID],
     )
-    message: str = Field(description="Human-readable success message")
+    message: str = Field(description="Success message")
 
 
 @router.post("", response_model=PersonaCreateResponse, summary="Create persona")

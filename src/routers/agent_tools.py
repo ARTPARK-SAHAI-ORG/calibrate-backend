@@ -70,7 +70,7 @@ class AgentToolsCreateResponse(BaseModel):
     ids: List[int] = Field(
         description="Link row IDs created this call (excludes tools that were already linked)"
     )
-    message: str = Field(description="Human-readable confirmation message")
+    message: str = Field(description="Confirmation message")
 
 
 class ToolResponse(BaseModel):
@@ -80,7 +80,7 @@ class ToolResponse(BaseModel):
         description="ID of the tool",
         examples=[_EXAMPLE_ID],
     )
-    name: str = Field(description="Human-readable tool name")
+    name: str = Field(description="Tool name")
     description: str = Field(description="What the tool does")
     config: Dict[str, Any] | None = Field(
         None, description="Tool configuration. Null when the tool has none"
@@ -96,7 +96,7 @@ class AgentResponse(BaseModel):
         description="ID of the agent",
         examples=[_EXAMPLE_ID],
     )
-    name: str = Field(description="Human-readable agent name")
+    name: str = Field(description="Agent name")
     type: Literal["agent", "connection"] = Field(
         description="`agent` applies managed defaults. `connection` stores the config you supply as-is"
     )

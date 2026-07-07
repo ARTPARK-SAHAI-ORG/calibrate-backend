@@ -27,7 +27,7 @@ _EXAMPLE_ID = "f47ac10b-58cc-4372-a567-0e02b2c3d479"
 
 
 class AnnotatorCreate(BaseModel):
-    name: str = Field(description="Human-readable annotator name, unique within your workspace")
+    name: str = Field(description="Annotator name, unique within your workspace")
 
 
 class AnnotatorUpdate(BaseModel):
@@ -43,7 +43,7 @@ class AnnotatorResponse(BaseModel):
         description="Annotator ID",
         examples=[_EXAMPLE_ID],
     )
-    name: str = Field(description="Human-readable annotator name")
+    name: str = Field(description="Annotator name")
     created_at: str = Field(description="Creation timestamp (ISO 8601 UTC)")
     updated_at: str = Field(description="Last-update timestamp (ISO 8601 UTC)")
     jobs_count: Optional[int] = Field(
@@ -65,7 +65,7 @@ class AnnotatorCreateResponse(BaseModel):
         description="ID of the newly created annotator",
         examples=[_EXAMPLE_ID],
     )
-    message: str = Field(description="Human-readable success message")
+    message: str = Field(description="Success message")
 
 
 def _ensure_owned_annotator(annotator_uuid: str, org_uuid: str):

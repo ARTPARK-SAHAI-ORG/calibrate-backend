@@ -197,7 +197,7 @@ class AgentTestsCreateResponse(BaseModel):
     ids: List[int] = Field(
         description="Link row ids created this call (excludes tests that were already linked)"
     )
-    message: str = Field(description="Human-readable confirmation message")
+    message: str = Field(description="Confirmation message")
 
 
 class TestResponse(BaseModel):
@@ -207,7 +207,7 @@ class TestResponse(BaseModel):
         description="Test ID",
         examples=[_EXAMPLE_TEST_UUID],
     )
-    name: str = Field(description="Human-readable test name")
+    name: str = Field(description="Test name")
     type: TestTypeLiteral = Field(
         description="Test type"
     )
@@ -225,7 +225,7 @@ class AgentResponse(BaseModel):
         description="Agent ID",
         examples=[_EXAMPLE_AGENT_UUID],
     )
-    name: str = Field(description="Human-readable agent name")
+    name: str = Field(description="Agent name")
     type: Literal["agent", "connection"] = Field(
         description="`agent` (managed defaults) or `connection` (config you supply)"
     )
@@ -2448,7 +2448,7 @@ class ModelResult(BaseModel):
     success: Optional[bool] = Field(
         None, description="Whether this model's run succeeded. Null while queued/processing"
     )
-    message: str = Field(description="Human-readable status/result message for this model")
+    message: str = Field(description="Status/result message for this model")
     total_tests: Optional[int] = Field(None, description="Total test cases for this model. Null until known")
     passed: Optional[int] = Field(None, description="Count of passing cases. Null until done")
     failed: Optional[int] = Field(None, description="Count of failing cases. Null until done")

@@ -19,7 +19,7 @@ _EXAMPLE_ID = "f47ac10b-58cc-4372-a567-0e02b2c3d479"
 
 
 class ScenarioCreate(BaseModel):
-    name: str = Field(description="Human-readable scenario name, unique within the workspace")
+    name: str = Field(description="Scenario name, unique within the workspace")
     description: Optional[str] = Field(
         None, description="Free-text description of the scenario. Omit to leave unset"
     )
@@ -41,7 +41,7 @@ class ScenarioResponse(BaseModel):
         description="ID of the scenario",
         examples=[_EXAMPLE_ID],
     )
-    name: str = Field(description="Human-readable scenario name")
+    name: str = Field(description="Scenario name")
     description: Optional[str] = Field(
         None, description="Free-text description, or null if unset"
     )
@@ -56,7 +56,7 @@ class ScenarioCreateResponse(BaseModel):
         description="ID of the newly created scenario",
         examples=[_EXAMPLE_ID],
     )
-    message: str = Field(description="Human-readable success message")
+    message: str = Field(description="Success message")
 
 
 @router.post("", response_model=ScenarioCreateResponse, summary="Create scenario")

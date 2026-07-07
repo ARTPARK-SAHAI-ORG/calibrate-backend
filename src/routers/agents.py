@@ -234,7 +234,7 @@ def _strip_verification_fields(
 
 
 class AgentCreate(BaseModel):
-    name: str = Field(description="Human-readable agent name, unique within the workspace")
+    name: str = Field(description="Agent name, unique within the workspace")
     type: Literal["agent", "connection"] = Field(
         "agent",
         description="`agent` (built inside Calibrate) applies managed defaults deep-merged under any supplied `config`. `connection` (your existing agent, via its own endpoint) stores the config you supply as-is (must eventually contain `agent_url`)",
@@ -270,7 +270,7 @@ class AgentResponse(BaseModel):
         description="ID of the agent",
         examples=["f47ac10b-58cc-4372-a567-0e02b2c3d479"],
     )
-    name: str = Field(description="Human-readable name of the agent")
+    name: str = Field(description="Name of the agent")
     type: Literal["agent", "connection"] = Field(
         description="`agent` (built inside Calibrate) or `connection` (your existing agent connected to Calibrate)"
     )
@@ -288,7 +288,7 @@ class AgentCreateResponse(BaseModel):
         description="ID of the newly created agent",
         examples=["f47ac10b-58cc-4372-a567-0e02b2c3d479"],
     )
-    message: str = Field(description="Human-readable confirmation message")
+    message: str = Field(description="Confirmation message")
 
 
 class AgentDuplicateRequest(BaseModel):
@@ -304,7 +304,7 @@ class AgentDuplicateResponse(BaseModel):
         description="ID of the newly created duplicate agent",
         examples=["f47ac10b-58cc-4372-a567-0e02b2c3d479"],
     )
-    message: str = Field(description="Human-readable confirmation message")
+    message: str = Field(description="Confirmation message")
 
 
 class ResolveAgentNamesRequest(BaseModel):

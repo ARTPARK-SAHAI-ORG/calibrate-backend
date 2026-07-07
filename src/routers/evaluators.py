@@ -66,7 +66,7 @@ class OutputConfig(BaseModel):
 
 class VariableSpec(BaseModel):
     name: str = Field(description="`{{placeholder}}` name used in the system prompt (immutable across versions)")
-    description: Optional[str] = Field(None, description="Human-readable description of the variable. Omit if self-evident")
+    description: Optional[str] = Field(None, description="Description of the variable. Omit if self-evident")
     default: Optional[str] = Field(None, description="Default value used when you omit this variable. Omit for no default")
 
 
@@ -98,7 +98,7 @@ class EvaluatorVersionCreateRequest(EvaluatorVersionCreate):
 
 class EvaluatorCreate(BaseModel):
     name: str = Field(..., min_length=1, description="Evaluator name, unique within your workspace")
-    description: Optional[str] = Field(None, description="Human-readable description. Omit to leave blank")
+    description: Optional[str] = Field(None, description="Description. Omit to leave blank")
     evaluator_type: EvaluatorTypeLiteral = Field(
         "llm",
         description="Semantic category: `tts` judges TTS audio, `stt` one transcript, `llm` a reply with history, `llm-general` a standalone input->output pair, `conversation` a full conversation",
@@ -157,7 +157,7 @@ class EvaluatorVersionResponse(BaseModel):
     output_config: Optional[Dict[str, Any]] = Field(
         None, description="Rubric for this version. Binary versions fall back to the default Correct/Wrong scale"
     )
-    variables: Optional[List[Dict[str, Any]]] = Field(None, description="Declared prompt variables, or null if none")
+    variables: Optional[List[Dict[str, Any]]] = Field(None, description="Declared prompt variables")
     created_at: str = Field(description="Version creation timestamp (ISO 8601 UTC)")
 
 
@@ -179,7 +179,7 @@ class EvaluatorResponseBase(BaseModel):
         examples=[_EXAMPLE_EVALUATOR_UUID],
     )
     name: str = Field(description="Evaluator name")
-    description: Optional[str] = Field(None, description="Human-readable description, or null")
+    description: Optional[str] = Field(None, description="What the evaluator checks")
     evaluator_type: EvaluatorTypeLiteral = Field(
         description="Semantic category"
     )
@@ -412,7 +412,7 @@ class DefaultPromptResponse(BaseModel):
     data_type: DataTypeLiteral = Field(description="Suggested medium")
     kind: Literal["single", "side_by_side"] = Field(description="Suggested scoring mode")
     output_type: Literal["binary", "rating"] = Field(description="Suggested output shape")
-    output_config: Optional[Dict[str, Any]] = Field(None, description="Suggested rubric, or null")
+    output_config: Optional[Dict[str, Any]] = Field(None, description="Suggested rubric")
     variables: List[Dict[str, Any]] = Field(default=[], description="Suggested prompt variables (empty if none)")
 
 

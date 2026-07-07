@@ -32,7 +32,7 @@ class CreateApiKeyRequest(BaseModel):
         ...,
         min_length=1,
         max_length=200,
-        description="Human-readable label shown in your key listings",
+        description="Label shown in your key listings",
     )
 
 
@@ -65,7 +65,7 @@ class ApiKeyResponse(BaseModel):
         max_length=36,
         description="API key ID",
     )
-    name: str = Field(description="Human-readable label for the key")
+    name: str = Field(description="Label for the key")
     last_four: str = Field(
         description="Last four characters of the key"
     )

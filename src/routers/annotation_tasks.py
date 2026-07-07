@@ -139,7 +139,7 @@ _EXAMPLE_ID = "f47ac10b-58cc-4372-a567-0e02b2c3d479"
 
 
 class AnnotationTaskCreate(BaseModel):
-    name: str = Field(description="Human-readable task name, unique within your workspace")
+    name: str = Field(description="Task name, unique within your workspace")
     type: AnnotationTaskTypeLiteral = Field(
         description="Task type. Governs item payload shape and applicable evaluators"
     )
@@ -168,7 +168,7 @@ class AnnotationTaskResponse(BaseModel):
         description="Task ID",
         examples=[_EXAMPLE_ID],
     )
-    name: str = Field(description="Human-readable task name")
+    name: str = Field(description="Task name")
     type: AnnotationTaskTypeLiteral = Field(
         description="Task type (`stt | tts | llm | llm-general | conversation`)"
     )
@@ -201,7 +201,7 @@ class AnnotationTaskCreateResponse(BaseModel):
         description="ID of the newly created task",
         examples=[_EXAMPLE_ID],
     )
-    message: str = Field(description="Human-readable success message")
+    message: str = Field(description="Success message")
 
 
 class EvaluatorLinkRequest(BaseModel):

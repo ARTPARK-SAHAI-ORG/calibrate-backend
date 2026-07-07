@@ -34,7 +34,7 @@ _EXAMPLE_ITEM_UUID = "6ba7b810-9dad-11d1-80b4-00c04fd430c8"
 
 
 class DatasetCreateRequest(BaseModel):
-    name: str = Field(description="Human-readable dataset name, unique within the workspace")
+    name: str = Field(description="Dataset name, unique within the workspace")
     dataset_type: Literal["stt", "tts"] = Field(
         description="`stt` items carry audio + ground-truth text. `tts` items carry text only"
     )
@@ -90,7 +90,7 @@ class DatasetResponse(BaseModel):
         description="Dataset ID",
         examples=[_EXAMPLE_DATASET_UUID],
     )
-    name: str = Field(description="Human-readable dataset name")
+    name: str = Field(description="Dataset name")
     dataset_type: str = Field(description="Dataset type (`stt` or `tts`)")
     item_count: int = Field(description="Number of items in the dataset")
     eval_count: int = Field(description="Number of evaluation jobs that used this dataset")

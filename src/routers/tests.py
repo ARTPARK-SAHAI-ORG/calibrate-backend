@@ -60,7 +60,7 @@ class EvaluatorRef(BaseModel):
 
 
 class TestCreate(BaseModel):
-    name: str = Field(description="Human-readable test name, unique within the workspace")
+    name: str = Field(description="Test name, unique within the workspace")
     type: TestType = Field(
         description=(
             "What the test judges:\n\n"
@@ -101,7 +101,7 @@ class TestResponse(BaseModel):
         description="Test ID",
         examples=[_EXAMPLE_TEST_UUID],
     )
-    name: str = Field(description="Human-readable test name")
+    name: str = Field(description="Test name")
     type: TestType = Field(description="Test kind")
     config: Optional[Dict[str, Any]] = Field(
         None, description="Calibrate test config (`history`, `evaluation`, optional `settings`)"
@@ -121,7 +121,7 @@ class TestCreateResponse(BaseModel):
         description="ID of the newly created test",
         examples=[_EXAMPLE_TEST_UUID],
     )
-    message: str = Field(description="Human-readable confirmation message")
+    message: str = Field(description="Confirmation message")
 
 
 # --- Bulk upload models ---
@@ -221,7 +221,7 @@ class BulkTestUploadResponse(BaseModel):
         examples=[[_EXAMPLE_TEST_UUID]],
     )
     count: int = Field(description="Number of tests created")
-    message: str = Field(description="Human-readable confirmation message")
+    message: str = Field(description="Confirmation message")
     warnings: Optional[List[str]] = Field(
         None, description="Non-fatal issues (e.g. agents some tests couldn't link to). Null when there were none"
     )
@@ -236,7 +236,7 @@ class BulkTestDelete(BaseModel):
 
 class BulkTestDeleteResponse(BaseModel):
     deleted_count: int = Field(description="Number of tests actually deleted (excludes IDs not in your workspace)")
-    message: str = Field(description="Human-readable confirmation message")
+    message: str = Field(description="Confirmation message")
 
 
 def _validate_evaluators(

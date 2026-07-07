@@ -12,7 +12,7 @@ _EXAMPLE_ID = "f47ac10b-58cc-4372-a567-0e02b2c3d479"
 
 
 class ToolCreate(BaseModel):
-    name: str = Field(description="Human-readable tool name, unique within the workspace")
+    name: str = Field(description="Tool name, unique within the workspace")
     description: str = Field(description="What the tool does. Surfaced to agents and the UI")
     config: Optional[Dict[str, Any]] = Field(
         None, description="Tool config (e.g. JSON schema, parameters). Omit to leave unset"
@@ -38,7 +38,7 @@ class ToolResponse(BaseModel):
         description="ID of the tool",
         examples=[_EXAMPLE_ID],
     )
-    name: str = Field(description="Human-readable tool name")
+    name: str = Field(description="Tool name")
     description: str = Field(description="What the tool does")
     config: Optional[Dict[str, Any]] = Field(
         None, description="Tool config, or null if unset"
@@ -54,7 +54,7 @@ class ToolCreateResponse(BaseModel):
         description="ID of the newly created tool",
         examples=[_EXAMPLE_ID],
     )
-    message: str = Field(description="Human-readable success message")
+    message: str = Field(description="Success message")
 
 
 @router.post("", response_model=ToolCreateResponse, summary="Create tool")

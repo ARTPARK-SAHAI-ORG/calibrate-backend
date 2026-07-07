@@ -304,7 +304,7 @@ class SimulationCreate(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    name: str = Field(description="Human-readable simulation name, unique within the workspace")
+    name: str = Field(description="Simulation name, unique within the workspace")
     agent_uuid: Optional[str] = Field(
         None,
         min_length=36,
@@ -507,7 +507,7 @@ class SimulationCreateResponse(BaseModel):
         description="ID of the newly created simulation",
         examples=[_EXAMPLE_ID],
     )
-    message: str = Field(description="Human-readable confirmation message")
+    message: str = Field(description="Confirmation message")
 
 
 class RunSimulationRequest(BaseModel):
