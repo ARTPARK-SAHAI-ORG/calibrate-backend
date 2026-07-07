@@ -369,6 +369,9 @@ def test_run_agent_test_queued_path(client, monkeypatch):
     assert client.get(f"/agent-tests/run/{task_id}").status_code == 403
     got = client.get(f"/agent-tests/run/{task_id}", headers=h)
     assert got.status_code == 200
+    # results_s3_prefix is an internal storage key — never exposed in the API
+    # response (the frontend doesn't read it either).
+    assert "results_s3_prefix" not in got.json()
 
     # Another org's user cannot poll this run → 404
     other_poll = _signup(client)

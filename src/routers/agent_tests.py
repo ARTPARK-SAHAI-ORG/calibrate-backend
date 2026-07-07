@@ -450,9 +450,6 @@ class TestRunStatusResponse(BaseModel):
     results: Optional[List[TestCaseResult]] = Field(
         None, description="Results for each test case. Null until available"
     )
-    results_s3_prefix: Optional[str] = Field(
-        None, description="S3 key prefix for the raw result artifacts. Null until uploaded"
-    )
     error: bool = Field(False, description="True if the run failed")
     is_public: bool = Field(False, description="Whether the run is shared publicly")
     share_token: Optional[str] = Field(
