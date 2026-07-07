@@ -33,6 +33,7 @@ from pydantic import BaseModel
 from fastapi.middleware.cors import CORSMiddleware
 
 from db import init_db, NameAlreadyExistsError
+from api_errors import http_exception_handler, normalize_error_content
 from auth_utils import get_current_user_id
 from routers.auth import router as auth_router
 from routers.agents import router as agents_router
@@ -113,6 +114,8 @@ def _verify_docs_access(
 
 app = FastAPI(docs_url=None, redoc_url=None, openapi_url=None, lifespan=lifespan)
 
+app.add_exception_handler(HTTPException, http_exception_handler)
+
 
 @app.exception_handler(NameAlreadyExistsError)
 async def _name_already_exists_handler(_: Request, exc: NameAlreadyExistsError):
@@ -125,7 +128,13 @@ async def _name_already_exists_handler(_: Request, exc: NameAlreadyExistsError):
     """
     return JSONResponse(
         status_code=409,
-        content={"detail": f"{exc.entity_label} name already exists"},
+        content=normalize_error_content(
+            409,
+            {
+                "code": "CONFLICT",
+                "message": f"{exc.entity_label} name already exists",
+            },
+        ),
     )
 
 

@@ -178,7 +178,7 @@ def test_create_simulation_rejects_non_conversation_evaluator(client):
         headers=h,
     )
     assert resp.status_code == 400
-    assert "conversation" in resp.json()["detail"]
+    assert "conversation" in resp.json()["error"]["message"]
 
 
 def test_update_simulation_basic(client):

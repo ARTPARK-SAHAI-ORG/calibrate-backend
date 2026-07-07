@@ -1871,7 +1871,7 @@ def test_annotation_eval_llm_general_payload_validation(client):
         headers=h,
     )
     assert resp.status_code == 400
-    assert "input" in resp.json()["detail"]
+    assert "input" in resp.json()["error"]["message"]
 
 
 def test_annotation_eval_unsupported_task_type(client):
