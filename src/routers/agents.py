@@ -237,7 +237,7 @@ class AgentCreate(BaseModel):
     name: str = Field(description="Human-readable agent name, unique within the workspace")
     type: Literal["agent", "connection"] = Field(
         "agent",
-        description="`agent` applies managed defaults deep-merged under any supplied `config`. `connection` stores the config you supply as-is (must eventually contain `agent_url`)",
+        description="`agent` (built inside Calibrate) applies managed defaults deep-merged under any supplied `config`. `connection` (your existing agent, via its own endpoint) stores the config you supply as-is (must eventually contain `agent_url`)",
     )
     config: Optional[Dict[str, Any]] = Field(
         None,
@@ -272,7 +272,7 @@ class AgentResponse(BaseModel):
     )
     name: str = Field(description="Human-readable name of the agent")
     type: Literal["agent", "connection"] = Field(
-        description="`agent` (managed defaults) or `connection` (your own endpoint)"
+        description="`agent` (built inside Calibrate) or `connection` (your existing agent connected to Calibrate)"
     )
     config: Optional[Dict[str, Any]] = Field(
         None, description="Agent configuration"
