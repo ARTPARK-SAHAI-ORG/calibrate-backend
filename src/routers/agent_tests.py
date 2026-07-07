@@ -313,7 +313,7 @@ class ToolCallOutput(BaseModel):
     )
     output: Optional[Any] = Field(
         None,
-        description="Tool execution result (any JSON value). Present only for agent-connection tests where the external agent runs the tool and echoes its return value. Null for calibrate-agent mode (tools are declared, never executed) or agents that don't echo it",
+        description="Tool execution result (any JSON value). Present only when the agent runs the tool and returns its result",
     )
 
 
@@ -331,7 +331,7 @@ class JudgeResult(BaseModel):
         None,
         min_length=36,
         max_length=36,
-        description="ID of the evaluator that produced this verdict. Null for legacy runs or when the evaluator can't be resolved from the snapshot",
+        description="ID of the evaluator that produced this verdict",
     )
     reasoning: Optional[str] = Field(
         None, description="Judge's rationale for this verdict"
@@ -350,7 +350,7 @@ class JudgeResult(BaseModel):
     )
     variable_values: Optional[Dict[str, Any]] = Field(
         None,
-        description="`{{var}}` substitutions used for this evaluator on this test case, frozen at submission time. Null when none",
+        description="`{{var}}` substitutions used for this evaluator on this test case",
     )
 
 
@@ -359,14 +359,14 @@ class TestCaseResult(BaseModel):
         None, description="Identifier of the test case within the run"
     )
     name: Optional[str] = Field(
-        None, description="Test name. Present during in-progress and done states"
+        None, description="Test name"
     )
     passed: Optional[bool] = Field(
         None, description="Whether the case passed. Present only when done"
     )
     reasoning: Optional[str] = Field(
         None,
-        description="LLM judge reasoning or deterministic tool-call diff. Null for passing tool-call tests",
+        description="Judge reasoning, or the tool-call diff for tool-call tests",
     )
     output: Optional[TestOutput] = Field(
         None, description="The agent's output for this case. Present only when done"

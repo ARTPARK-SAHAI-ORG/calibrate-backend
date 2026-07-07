@@ -55,7 +55,7 @@ class EvaluatorRef(BaseModel):
     )
     variable_values: Optional[Dict[str, Any]] = Field(
         None,
-        description="Values for the evaluator's `{{placeholder}}` variables, pinned per-test on the pivot. Omit to inherit the evaluator version's defaults",
+        description="Values for the evaluator's `{{placeholder}}` variables, pinned per test. Omit to inherit the evaluator version's defaults",
     )
 
 
