@@ -139,13 +139,13 @@ def test_snapshot_evaluators_for_job_details():
 
     out = _snapshot_evaluators_for_job_details(
         [
-            {"uuid": "ev-1", "name": "Safety"},
+            {"uuid": "f47ac10b-58cc-4372-a567-0e02b2c3d479", "name": "Safety"},
             {"name": "no-uuid"},  # skipped
             {"uuid": "ev-2"},  # missing name → empty
         ]
     )
     assert out == [
-        {"uuid": "ev-1", "name": "Safety"},
+        {"uuid": "f47ac10b-58cc-4372-a567-0e02b2c3d479", "name": "Safety"},
         {"uuid": "ev-2", "name": ""},
     ]
 
@@ -153,23 +153,23 @@ def test_snapshot_evaluators_for_job_details():
 def test_apply_simulation_job_evaluator_enrichment():
     from routers.simulations import apply_simulation_job_evaluator_enrichment
 
-    details = {"evaluators": [{"uuid": "ev-1", "name": "Safety"}]}
+    details = {"evaluators": [{"uuid": "f47ac10b-58cc-4372-a567-0e02b2c3d479", "name": "Safety"}]}
     sim_results = [
         {
             "evaluation_results": [
-                {"evaluator_id": "ev-1", "value": 0.9},
+                {"evaluator_id": "f47ac10b-58cc-4372-a567-0e02b2c3d479", "value": 0.9},
             ]
         }
     ]
     with patch(
         "routers.simulations.get_evaluator",
-        return_value={"uuid": "ev-1", "name": "Safety", "description": "d"},
+        return_value={"uuid": "f47ac10b-58cc-4372-a567-0e02b2c3d479", "name": "Safety", "description": "d"},
     ):
         evaluators_out, sim_out = apply_simulation_job_evaluator_enrichment(
             details, sim_results
         )
-    assert evaluators_out and evaluators_out[0].evaluator_uuid == "ev-1"
-    assert sim_out[0]["evaluation_results"][0]["evaluator_uuid"] == "ev-1"
+    assert evaluators_out and evaluators_out[0].evaluator_uuid == "f47ac10b-58cc-4372-a567-0e02b2c3d479"
+    assert sim_out[0]["evaluation_results"][0]["evaluator_uuid"] == "f47ac10b-58cc-4372-a567-0e02b2c3d479"
 
 
 def test_apply_simulation_job_evaluator_enrichment_no_snaps():

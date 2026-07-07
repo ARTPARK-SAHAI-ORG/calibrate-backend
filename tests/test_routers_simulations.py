@@ -118,7 +118,7 @@ def test_create_simulation_unknown_agent_404(client):
     auth = _signup(client)
     resp = client.post(
         "/simulations",
-        json={"name": f"sim-{uuid.uuid4().hex[:6]}", "agent_uuid": "missing"},
+        json={"name": f"sim-{uuid.uuid4().hex[:6]}", "agent_uuid": "00000000-0000-4000-8000-000000000001"},
         headers=auth["headers"],
     )
     assert resp.status_code == 404
@@ -156,7 +156,7 @@ def test_create_simulation_with_invalid_evaluator(client):
         "/simulations",
         json={
             "name": f"sim-{uuid.uuid4().hex[:6]}",
-            "evaluators": [{"evaluator_uuid": "missing-ev"}],
+            "evaluators": [{"evaluator_uuid": "00000000-0000-4000-8000-000000000001"}],
         },
         headers=auth["headers"],
     )
@@ -210,7 +210,7 @@ def test_update_simulation_basic(client):
     # Update with unknown agent → 404
     bad = client.put(
         f"/simulations/{sim_uuid}",
-        json={"agent_uuid": "missing"},
+        json={"agent_uuid": "00000000-0000-4000-8000-000000000001"},
         headers=h,
     )
     assert bad.status_code == 404
@@ -225,16 +225,16 @@ def test_update_simulation_basic(client):
 
     # Update with bogus persona / scenario uuids
     bad_p = client.put(
-        f"/simulations/{sim_uuid}", json={"persona_uuids": ["missing"]}, headers=h
+        f"/simulations/{sim_uuid}", json={"persona_uuids": ["00000000-0000-4000-8000-000000000001"]}, headers=h
     )
     assert bad_p.status_code == 404
     bad_s = client.put(
-        f"/simulations/{sim_uuid}", json={"scenario_uuids": ["missing"]}, headers=h
+        f"/simulations/{sim_uuid}", json={"scenario_uuids": ["00000000-0000-4000-8000-000000000001"]}, headers=h
     )
     assert bad_s.status_code == 404
     bad_e = client.put(
         f"/simulations/{sim_uuid}",
-        json={"evaluators": [{"evaluator_uuid": "missing"}]},
+        json={"evaluators": [{"evaluator_uuid": "00000000-0000-4000-8000-000000000001"}]},
         headers=h,
     )
     assert bad_e.status_code == 404

@@ -8,6 +8,7 @@ from unittest.mock import patch
 import pytest
 from fastapi.testclient import TestClient
 
+from conftest import NONEXISTENT_UUID, NONEXISTENT_UUID_2
 
 @pytest.fixture(scope="module")
 def app():
@@ -167,7 +168,7 @@ def test_agent_tests_link_crud(client):
     # Bulk-unlink missing agent
     missing = client.post(
         "/agent-tests/bulk-unlink",
-        json={"agent_uuid": "missing", "test_uuids": [test_b["uuid"]]},
+        json={"agent_uuid": NONEXISTENT_UUID, "test_uuids": [test_b["uuid"]]},
     )
     assert missing.status_code == 404
 
@@ -190,7 +191,7 @@ def test_agent_tests_link_crud(client):
     # Bulk-delete with missing agent
     missing_del = client.post(
         "/agent-tests/bulk-delete-tests",
-        json={"agent_uuid": "missing", "test_uuids": ["x"]},
+        json={"agent_uuid": NONEXISTENT_UUID, "test_uuids": [NONEXISTENT_UUID_2]},
         headers=h,
     )
     assert missing_del.status_code == 404
@@ -260,7 +261,7 @@ def test_agent_tests_link_with_missing(client):
     # Missing agent
     resp = client.post(
         "/agent-tests",
-        json={"agent_uuid": "missing-agent", "test_uuids": []},
+        json={"agent_uuid": NONEXISTENT_UUID, "test_uuids": []},
     )
     assert resp.status_code == 404
 
@@ -268,7 +269,7 @@ def test_agent_tests_link_with_missing(client):
     # Missing test
     bad = client.post(
         "/agent-tests",
-        json={"agent_uuid": agent["uuid"], "test_uuids": ["missing-test"]},
+        json={"agent_uuid": agent["uuid"], "test_uuids": [NONEXISTENT_UUID_2]},
     )
     assert bad.status_code == 404
 
@@ -279,7 +280,7 @@ def test_agent_tests_delete_link_not_found(client):
     resp = client.request(
         "DELETE",
         "/agent-tests",
-        json={"agent_uuid": "x", "test_uuid": "y"},
+        json={"agent_uuid": NONEXISTENT_UUID, "test_uuid": NONEXISTENT_UUID_2},
     )
     assert resp.status_code == 404
 
@@ -310,7 +311,7 @@ def test_run_agent_test_validation(client, monkeypatch):
     # Provide bogus test_uuids
     bad = client.post(
         f"/agent-tests/agent/{agent['uuid']}/run",
-        json={"test_uuids": ["missing"]},
+        json={"test_uuids": [NONEXISTENT_UUID]},
         headers=h,
     )
     assert bad.status_code == 404

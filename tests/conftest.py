@@ -10,6 +10,13 @@ import sys
 import tempfile
 from pathlib import Path
 
+# Valid 36-char UUID v4 placeholders for tests (min_length=36 on API models).
+NONEXISTENT_UUID = "00000000-0000-4000-8000-000000000001"
+NONEXISTENT_UUID_2 = "00000000-0000-4000-8000-000000000002"
+EXAMPLE_UUID = "f47ac10b-58cc-4372-a567-0e02b2c3d479"
+EXAMPLE_UUID_2 = "6ba7b810-9dad-11d1-80b4-00c04fd430c8"
+EXAMPLE_VERSION_UUID = "6ba7b811-9dad-11d1-80b4-00c04fd430c8"
+
 # These must be set before any `src/` module is imported.
 _TEST_DB_ROOT = tempfile.mkdtemp(prefix="pense-test-db-")
 os.environ.setdefault("DB_ROOT_DIR", _TEST_DB_ROOT)

@@ -8,6 +8,8 @@ from unittest.mock import patch
 import pytest
 from fastapi.testclient import TestClient
 
+from conftest import NONEXISTENT_UUID, NONEXISTENT_UUID_2
+
 
 @pytest.fixture(scope="module")
 def app():
@@ -66,7 +68,7 @@ def test_annotation_task_crud(client):
     # invalid evaluator
     bad_ev = client.post(
         "/annotation-tasks",
-        json={"name": "x", "type": "llm", "evaluator_ids": ["missing"]},
+        json={"name": "x", "type": "llm", "evaluator_ids": ["00000000-0000-4000-8000-000000000001"]},
         headers=h,
     )
     assert bad_ev.status_code == 404
@@ -538,7 +540,7 @@ def test_annotation_jobs_crud(client):
     # Bad annotator
     bad_a = client.post(
         f"/annotation-tasks/{task_uuid}/jobs",
-        json={"annotator_ids": ["missing"], "item_ids": items},
+        json={"annotator_ids": ["00000000-0000-4000-8000-000000000001"], "item_ids": items},
         headers=h,
     )
     assert bad_a.status_code == 404
@@ -546,7 +548,7 @@ def test_annotation_jobs_crud(client):
     # Bad item
     bad_i = client.post(
         f"/annotation-tasks/{task_uuid}/jobs",
-        json={"annotator_ids": [annotator["uuid"]], "item_ids": ["missing"]},
+        json={"annotator_ids": [annotator["uuid"]], "item_ids": ["00000000-0000-4000-8000-000000000001"]},
         headers=h,
     )
     assert bad_i.status_code == 400
@@ -589,7 +591,7 @@ def test_annotation_jobs_crud(client):
     # Annotation upsert against missing job
     bad_upsert = client.post(
         f"/annotation-tasks/{task_uuid}/annotations",
-        json={"job_id": "missing", "item_id": items[0], "value": {"value": True}},
+        json={"job_id": "00000000-0000-4000-8000-000000000001", "item_id": items[0], "value": {"value": True}},
         headers=h,
     )
     assert bad_upsert.status_code == 404
@@ -597,7 +599,7 @@ def test_annotation_jobs_crud(client):
     # Annotation upsert with bad item
     bad_item = client.post(
         f"/annotation-tasks/{task_uuid}/annotations",
-        json={"job_id": job_uuid, "item_id": "missing", "value": {"value": True}},
+        json={"job_id": job_uuid, "item_id": "00000000-0000-4000-8000-000000000001", "value": {"value": True}},
         headers=h,
     )
     assert bad_item.status_code == 404
@@ -608,7 +610,7 @@ def test_annotation_jobs_crud(client):
         json={
             "job_id": job_uuid,
             "item_id": items[0],
-            "evaluator_id": "missing",
+            "evaluator_id": "00000000-0000-4000-8000-000000000001",
             "value": {"value": True},
         },
         headers=h,
@@ -1074,7 +1076,7 @@ def test_bulk_delete_annotation_jobs(client):
 
     # Delete two of the three jobs in `task_uuid`, mixed in with an unknown
     # UUID and a foreign-task UUID. Expect deleted_count=2.
-    targets = [created[0]["uuid"], created[1]["uuid"], "missing", other_job["uuid"]]
+    targets = [created[0]["uuid"], created[1]["uuid"], "00000000-0000-4000-8000-000000000001", other_job["uuid"]]
     bulk = client.request(
         "DELETE",
         f"/annotation-tasks/{task_uuid}/jobs",
@@ -1146,7 +1148,7 @@ def test_annotated_check(client):
     # Missing annotator
     bad = client.post(
         f"/annotation-tasks/{task_uuid}/items/annotated-check",
-        json={"annotator_id": "missing", "names": ["x"]},
+        json={"annotator_id": "00000000-0000-4000-8000-000000000001", "names": ["x"]},
         headers=h,
     )
     assert bad.status_code == 404
@@ -1382,7 +1384,7 @@ def test_annotation_task_agreement_and_summary(client):
     # Missing item id → 404
     missing_summary = client.get(
         f"/annotation-tasks/{task_uuid}/summary",
-        params={"item_id": "missing"},
+        params={"item_id": "00000000-0000-4000-8000-000000000001"},
         headers=h,
     )
     assert missing_summary.status_code == 404
@@ -1796,7 +1798,7 @@ def test_evaluator_runs_endpoints(client, monkeypatch):
         f"/annotation-tasks/{task_uuid}/evaluator-runs",
         json={
             "evaluators": [{"evaluator_id": llm_ev["uuid"]}],
-            "item_ids": ["missing"],
+            "item_ids": ["00000000-0000-4000-8000-000000000001"],
         },
         headers=h,
     )

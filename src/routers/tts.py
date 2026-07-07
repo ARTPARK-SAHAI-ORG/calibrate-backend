@@ -91,6 +91,8 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/tts", tags=["tts"])
 
+_EXAMPLE_ID = "f47ac10b-58cc-4372-a567-0e02b2c3d479"
+
 
 def _collect_tts_intermediate_results(
     output_dir: Path,
@@ -177,7 +179,10 @@ class TTSEvaluationRequest(BaseModel):
 
     dataset_id: Optional[str] = Field(
         None,
+        min_length=36,
+        max_length=36,
         description="Existing TTS dataset to evaluate. Must be in your workspace. **Provide this OR inline `texts`, not both**",
+        examples=[_EXAMPLE_ID],
     )
     texts: Optional[List[str]] = Field(
         None,

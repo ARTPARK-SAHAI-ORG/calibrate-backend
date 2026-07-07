@@ -179,6 +179,8 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/stt", tags=["stt"])
 
+_EXAMPLE_ID = "f47ac10b-58cc-4372-a567-0e02b2c3d479"
+
 
 def _collect_intermediate_results(
     output_dir: Path, providers: list, expected_total: int
@@ -237,7 +239,10 @@ class STTEvaluationRequest(BaseModel):
 
     dataset_id: Optional[str] = Field(
         None,
+        min_length=36,
+        max_length=36,
         description="Existing STT dataset to evaluate. Must be in your workspace. **Provide this OR inline `audio_paths` + `texts`, not both**",
+        examples=[_EXAMPLE_ID],
     )
     audio_paths: Optional[List[str]] = Field(
         None,

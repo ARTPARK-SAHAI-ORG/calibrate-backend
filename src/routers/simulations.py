@@ -71,6 +71,8 @@ from datetime import datetime
 # Job types that share the same queue
 SIMULATION_JOB_TYPES = ["text", "voice"]
 
+_EXAMPLE_ID = "f47ac10b-58cc-4372-a567-0e02b2c3d479"
+
 
 def _is_job_aborted(task_id: str) -> bool:
     """Check if a simulation job was aborted by the user."""
@@ -281,7 +283,10 @@ class EvaluatorRef(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     evaluator_uuid: str = Field(
-        description="Evaluator to link. Must be a `conversation`-type evaluator with a live version in your workspace"
+        min_length=36,
+        max_length=36,
+        description="Evaluator to link. Must be a `conversation`-type evaluator with a live version in your workspace",
+        examples=[_EXAMPLE_ID],
     )
     variable_values: Optional[Dict[str, Any]] = Field(
         None,
@@ -296,7 +301,11 @@ class SimulationCreate(BaseModel):
 
     name: str = Field(description="Human-readable simulation name, unique within the workspace")
     agent_uuid: Optional[str] = Field(
-        None, description="Agent under test. Must be in your workspace. Omit to create without an agent"
+        None,
+        min_length=36,
+        max_length=36,
+        description="Agent under test. Must be in your workspace. Omit to create without an agent",
+        examples=[_EXAMPLE_ID],
     )
     persona_uuids: Optional[List[str]] = Field(
         None, description="Personas to link. Must be in your workspace. Omit to link none"
@@ -385,7 +394,12 @@ def _resolve_simulation_evaluator_ref(
 
 
 class PersonaResponse(BaseModel):
-    uuid: str = Field(description="Persona ID")
+    uuid: str = Field(
+        min_length=36,
+        max_length=36,
+        description="Persona ID",
+        examples=[_EXAMPLE_ID],
+    )
     name: str = Field(description="Persona name")
     description: Optional[str] = Field(None, description="Persona description, or null")
     config: Optional[Dict[str, Any]] = Field(
@@ -396,7 +410,12 @@ class PersonaResponse(BaseModel):
 
 
 class ScenarioResponse(BaseModel):
-    uuid: str = Field(description="Scenario ID")
+    uuid: str = Field(
+        min_length=36,
+        max_length=36,
+        description="Scenario ID",
+        examples=[_EXAMPLE_ID],
+    )
     name: str = Field(description="Scenario name")
     description: Optional[str] = Field(None, description="Scenario description, or null")
     created_at: str = Field(description="Creation timestamp (ISO 8601 UTC)")
@@ -404,7 +423,12 @@ class ScenarioResponse(BaseModel):
 
 
 class EvaluatorResponse(BaseModel):
-    uuid: str = Field(description="Evaluator ID")
+    uuid: str = Field(
+        min_length=36,
+        max_length=36,
+        description="Evaluator ID",
+        examples=[_EXAMPLE_ID],
+    )
     name: str = Field(description="Evaluator name")
     description: Optional[str] = Field(None, description="Evaluator description, or null")
     evaluator_type: str = Field("conversation", description="Semantic category (always `conversation` for simulations)")
@@ -412,7 +436,12 @@ class EvaluatorResponse(BaseModel):
     kind: str = Field("single", description="`single` or `side_by_side`")
     output_type: str = Field("binary", description="`binary` or `rating`")
     output_config: Optional[Dict[str, Any]] = Field(None, description="Rubric pinned at link time, or null")
-    evaluator_version_id: str = Field(description="Version ID pinned on the pivot at link time")
+    evaluator_version_id: str = Field(
+        min_length=36,
+        max_length=36,
+        description="Version ID pinned on the pivot at link time",
+        examples=[_EXAMPLE_ID],
+    )
     version_number: int = Field(description="1-based number of the pinned version")
     judge_model: str = Field(description="Judge model for the pinned version")
     variables: Optional[List[Dict[str, Any]]] = Field(None, description="Declared prompt variables, or null")
@@ -420,7 +449,12 @@ class EvaluatorResponse(BaseModel):
 
 
 class AgentSummaryResponse(BaseModel):
-    uuid: str = Field(description="Agent ID")
+    uuid: str = Field(
+        min_length=36,
+        max_length=36,
+        description="Agent ID",
+        examples=[_EXAMPLE_ID],
+    )
     name: str = Field(description="Agent name")
     type: Literal["agent", "connection"] = Field(
         description="`agent` applies managed defaults; `connection` stores the config you supply as-is"
@@ -431,7 +465,12 @@ class AgentSummaryResponse(BaseModel):
 
 
 class SimulationListResponse(BaseModel):
-    uuid: str = Field(description="Simulation ID")
+    uuid: str = Field(
+        min_length=36,
+        max_length=36,
+        description="Simulation ID",
+        examples=[_EXAMPLE_ID],
+    )
     name: str = Field(description="Simulation name")
     agent: Optional[AgentSummaryResponse] = Field(None, description="Linked agent summary, or null if none linked")
     created_at: str = Field(description="Creation timestamp (ISO 8601 UTC)")
@@ -439,7 +478,12 @@ class SimulationListResponse(BaseModel):
 
 
 class SimulationDetailResponse(BaseModel):
-    uuid: str = Field(description="Simulation ID")
+    uuid: str = Field(
+        min_length=36,
+        max_length=36,
+        description="Simulation ID",
+        examples=[_EXAMPLE_ID],
+    )
     name: str = Field(description="Simulation name")
     agent: Optional[AgentSummaryResponse] = Field(None, description="Linked agent summary, or null if none linked")
     created_at: str = Field(description="Creation timestamp (ISO 8601 UTC)")
@@ -450,7 +494,12 @@ class SimulationDetailResponse(BaseModel):
 
 
 class SimulationCreateResponse(BaseModel):
-    uuid: str = Field(description="ID of the newly created simulation")
+    uuid: str = Field(
+        min_length=36,
+        max_length=36,
+        description="ID of the newly created simulation",
+        examples=[_EXAMPLE_ID],
+    )
     message: str = Field(description="Human-readable confirmation message")
 
 
@@ -472,14 +521,25 @@ class EvaluationCriterionResult(BaseModel):
     name: str = Field(description="Evaluator name at run time")
     value: float = Field(description="Judge score (0/1 for binary, or the rating value)")
     reasoning: str = Field(description="Judge's explanation for the score")
-    evaluator_uuid: Optional[str] = Field(None, description="Source evaluator ID, echoed from the run; null if unresolved")
+    evaluator_uuid: Optional[str] = Field(
+        None,
+        min_length=36,
+        max_length=36,
+        description="Source evaluator ID, echoed from the run; null if unresolved",
+        examples=[_EXAMPLE_ID],
+    )
     description: Optional[str] = Field(None, description="Evaluator's current description, or null")
 
 
 class SimulationEvaluatorRef(BaseModel):
     """Evaluator snapshot included with run status."""
 
-    evaluator_uuid: str = Field(description="Evaluator ID for stable reference across renames")
+    evaluator_uuid: str = Field(
+        min_length=36,
+        max_length=36,
+        description="Evaluator ID for stable reference across renames",
+        examples=[_EXAMPLE_ID],
+    )
     name: str = Field(description="Evaluator's current DB name at response time")
     description: Optional[str] = Field(None, description="Evaluator's current DB description at response time, or null")
 
@@ -508,7 +568,12 @@ class SimulationCaseResult(BaseModel):
 
 
 class SimulationRunStatusResponse(BaseModel):
-    task_id: str = Field(description="Simulation run ID")
+    task_id: str = Field(
+        min_length=36,
+        max_length=36,
+        description="Simulation run ID",
+        examples=[_EXAMPLE_ID],
+    )
     name: str = Field(description='Display name in `Run {index}` form (creation order)')
     status: str = Field(description="Run status (`queued`, `in_progress`, `done`, `failed`)")
     type: str = Field(description="Run mode (`text` or `voice`)")
@@ -532,7 +597,12 @@ class SimulationRunStatusResponse(BaseModel):
 
 
 class SimulationRunListItem(BaseModel):
-    uuid: str = Field(description="Simulation run ID")
+    uuid: str = Field(
+        min_length=36,
+        max_length=36,
+        description="Simulation run ID",
+        examples=[_EXAMPLE_ID],
+    )
     name: str = Field(description='Display name in `Run {index}` form (creation order)')
     status: str = Field(description="Run status (`queued`, `in_progress`, `done`, `failed`)")
     type: str = Field(description="Run mode (`text` or `voice`)")

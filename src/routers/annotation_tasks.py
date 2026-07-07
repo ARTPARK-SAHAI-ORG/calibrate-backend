@@ -135,6 +135,8 @@ def _enrich_evaluators_with_live_version(
 
 router = APIRouter(prefix="/annotation-tasks", tags=["annotation-tasks"])
 
+_EXAMPLE_ID = "f47ac10b-58cc-4372-a567-0e02b2c3d479"
+
 
 class AnnotationTaskCreate(BaseModel):
     name: str = Field(description="Human-readable task name, unique within your workspace")
@@ -160,7 +162,12 @@ class AnnotationTaskUpdate(BaseModel):
 
 
 class AnnotationTaskResponse(BaseModel):
-    uuid: str = Field(description="Task ID")
+    uuid: str = Field(
+        min_length=36,
+        max_length=36,
+        description="Task ID",
+        examples=[_EXAMPLE_ID],
+    )
     name: str = Field(description="Human-readable task name")
     type: str = Field(description="Task type (`stt | tts | llm | llm-general | conversation`)")
     description: Optional[str] = Field(None, description="Free-text task description, if any")
@@ -186,13 +193,21 @@ class AnnotationTaskResponse(BaseModel):
 
 
 class AnnotationTaskCreateResponse(BaseModel):
-    uuid: str = Field(description="ID of the newly created task")
+    uuid: str = Field(
+        min_length=36,
+        max_length=36,
+        description="ID of the newly created task",
+        examples=[_EXAMPLE_ID],
+    )
     message: str = Field(description="Human-readable success message")
 
 
 class EvaluatorLinkRequest(BaseModel):
     evaluator_id: str = Field(
-        description="Evaluator to link. Must be in your workspace or a seeded default"
+        min_length=36,
+        max_length=36,
+        description="Evaluator to link. Must be in your workspace or a seeded default",
+        examples=[_EXAMPLE_ID],
     )
 
 
@@ -463,7 +478,10 @@ class BulkItemsRequest(BaseModel):
     )
     annotator_id: Optional[str] = Field(
         None,
+        min_length=36,
+        max_length=36,
         description="Annotator to attribute seeded annotations to. **Required when any item carries annotations.** Must be in your workspace",
+        examples=[_EXAMPLE_ID],
     )
 
 
@@ -481,7 +499,12 @@ async def list_task_items(
 
 
 class AnnotatedItemsCheckRequest(BaseModel):
-    annotator_id: str = Field(description="Annotator ID to check against")
+    annotator_id: str = Field(
+        min_length=36,
+        max_length=36,
+        description="Annotator ID to check against",
+        examples=[_EXAMPLE_ID],
+    )
     names: List[str] = Field(
         description="Item names in upload row order (`payload.name`); the response reports back by row index"
     )
@@ -802,7 +825,12 @@ async def bulk_create_items(
 
 
 class ItemUpdatePayload(BaseModel):
-    uuid: str = Field(description="ID of the item to update")
+    uuid: str = Field(
+        min_length=36,
+        max_length=36,
+        description="ID of the item to update",
+        examples=[_EXAMPLE_ID],
+    )
     payload: Any = Field(
         description="Replacement free-form payload for the item. `payload['name']` stays required and unique within the task"
     )
@@ -1284,12 +1312,23 @@ async def update_annotation_job_visibility_endpoint(
 
 class AnnotationUpsertRequest(BaseModel):
     job_id: str = Field(
-        description="Labelling job ID the annotation belongs to. The item and evaluator must be in this job's snapshot"
+        min_length=36,
+        max_length=36,
+        description="Labelling job ID the annotation belongs to. The item and evaluator must be in this job's snapshot",
+        examples=[_EXAMPLE_ID],
     )
-    item_id: str = Field(description="Item ID being annotated (must be in the job's snapshot)")
+    item_id: str = Field(
+        min_length=36,
+        max_length=36,
+        description="Item ID being annotated (must be in the job's snapshot)",
+        examples=[_EXAMPLE_ID],
+    )
     evaluator_id: Optional[str] = Field(
         None,
+        min_length=36,
+        max_length=36,
         description="Evaluator ID being judged (must be in the job's snapshot). Omit (`None`) for the row-level overall annotation",
+        examples=[_EXAMPLE_ID],
     )
     value: Optional[Dict[str, Any]] = Field(
         None,
@@ -1345,10 +1384,17 @@ async def upsert_annotation_endpoint(
 
 class EvaluatorRunRequestEntry(BaseModel):
     evaluator_id: str = Field(
-        description="Evaluator ID to run (must be linked to the task)"
+        min_length=36,
+        max_length=36,
+        description="Evaluator ID to run (must be linked to the task)",
+        examples=[_EXAMPLE_ID],
     )
     evaluator_version_id: Optional[str] = Field(
-        None, description="Evaluator version ID to run. Omit to use the evaluator's live version"
+        None,
+        min_length=36,
+        max_length=36,
+        description="Evaluator version ID to run. Omit to use the evaluator's live version",
+        examples=[_EXAMPLE_ID],
     )
 
 

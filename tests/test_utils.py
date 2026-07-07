@@ -147,17 +147,17 @@ def test_build_tool_configs_structured_and_webhook():
 
 def test_pydantic_models():
     entry = EvaluatorRunEntry(
-        evaluator_uuid="uuid-1",
+        evaluator_uuid="f47ac10b-58cc-4372-a567-0e02b2c3d479",
         metric_key="quality",
         aggregate={"mean": 0.9},
         output_type="rating",
     )
-    assert entry.evaluator_uuid == "uuid-1"
+    assert entry.evaluator_uuid == "f47ac10b-58cc-4372-a567-0e02b2c3d479"
     pr = ProviderResult(provider="openai", success=True, metrics={"wer": 0.1})
     assert pr.success is True
-    create = TaskCreateResponse(task_id="t", status="queued")
+    create = TaskCreateResponse(task_id="f47ac10b-58cc-4372-a567-0e02b2c3d479", status="queued")
     assert create.status == "queued"
-    status = TaskStatusResponse(task_id="t", status="done", provider_results=[pr])
+    status = TaskStatusResponse(task_id="f47ac10b-58cc-4372-a567-0e02b2c3d479", status="done", provider_results=[pr])
     assert status.provider_results[0].provider == "openai"
 
     # TaskStatus enum
@@ -695,15 +695,15 @@ def test_read_evaluators_map_from_config(tmp_path):
 def test_build_evaluator_runs_for_eval_job():
     runs = build_evaluator_runs_for_eval_job(
         {"Safety": {"type": "binary", "pass_rate": 0.9}},
-        {"Safety": "uuid-safety"},
+        {"Safety": "6ba7b810-9dad-11d1-80b4-00c04fd430c8"},
     )
-    assert runs and runs[0].evaluator_uuid == "uuid-safety"
+    assert runs and runs[0].evaluator_uuid == "6ba7b810-9dad-11d1-80b4-00c04fd430c8"
     # missing map entry → skipped
     assert build_evaluator_runs_for_eval_job(
         {"Safety": {"type": "binary"}}, {}
     ) == []
     # non-dict metrics → []
-    assert build_evaluator_runs_for_eval_job("not a dict", {"x": "y"}) == []
+    assert build_evaluator_runs_for_eval_job("not a dict", {"00000000-0000-4000-8000-000000000001": "00000000-0000-4000-8000-000000000002"}) == []
 
 
 def test_coerce_evaluator_score_binary_and_rating():
@@ -728,13 +728,13 @@ def test_coerce_evaluator_score_binary_and_rating():
 def test_post_process_provider_results_flow():
     snapshots = [
         {
-            "uuid": "eval-uuid",
+            "uuid": "6ba7b810-9dad-11d1-80b4-00c04fd430c8",
             "name": "Safety",
             "output_type": "binary",
-            "evaluator_version_id": "v-1",
+            "evaluator_version_id": "6ba7b811-9dad-11d1-80b4-00c04fd430c8",
         }
     ]
-    metric_key_map = {"Safety": "eval-uuid"}
+    metric_key_map = {"Safety": "6ba7b810-9dad-11d1-80b4-00c04fd430c8"}
 
     provider_results = [
         {
@@ -752,10 +752,10 @@ def test_post_process_provider_results_flow():
         evaluator_id_by_metric_key=metric_key_map,
     )
     pr = provider_results[0]
-    assert pr["evaluator_runs"][0]["evaluator_uuid"] == "eval-uuid"
-    assert pr["results"][0]["evaluator_outputs"]["eval-uuid"]["value"] is True
+    assert pr["evaluator_runs"][0]["evaluator_uuid"] == "6ba7b810-9dad-11d1-80b4-00c04fd430c8"
+    assert pr["results"][0]["evaluator_outputs"]["6ba7b810-9dad-11d1-80b4-00c04fd430c8"]["value"] is True
     assert pr["results"][0]["wer"] == 0.1
-    assert pr["results"][1]["evaluator_outputs"]["eval-uuid"]["error"] is True
+    assert pr["results"][1]["evaluator_outputs"]["6ba7b810-9dad-11d1-80b4-00c04fd430c8"]["error"] is True
 
     # Empty input → no-op
     post_process_provider_results(None)

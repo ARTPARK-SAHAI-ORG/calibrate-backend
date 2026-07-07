@@ -119,7 +119,7 @@ def test_perf_aggregate_means_accept_floats():
     from routers.agent_tests import TestRunStatusResponse, ModelResult
 
     resp = TestRunStatusResponse(
-        task_id="t",
+        task_id="f47ac10b-58cc-4372-a567-0e02b2c3d479",
         status="done",
         total_tokens={"mean": 4378.5, "min": 4369, "max": 4387, "count": 2},
         latency_ms={"p50": 1955.7, "p95": 2050.0, "p99": 2060.4, "count": 2},

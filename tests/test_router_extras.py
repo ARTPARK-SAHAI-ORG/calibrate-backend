@@ -134,7 +134,7 @@ def test_evaluators_full_lifecycle(client):
     # Bad version → 404
     bad_live = client.post(
         f"/evaluators/{ev_uuid}/versions/live",
-        json={"version_uuid": "missing"},
+        json={"version_uuid": "00000000-0000-4000-8000-000000000001"},
         headers=h,
     )
     assert bad_live.status_code == 404
@@ -159,7 +159,7 @@ def test_evaluators_full_lifecycle(client):
     # Preview missing version
     bad_preview = client.post(
         f"/evaluators/{ev_uuid}/preview-prompt",
-        json={"version_uuid": "missing"},
+        json={"version_uuid": "00000000-0000-4000-8000-000000000001"},
         headers=h,
     )
     assert bad_preview.status_code == 404
@@ -306,7 +306,7 @@ def test_bulk_test_upload(client):
         "/tests/bulk",
         json={
             "type": "response",
-            "agent_uuids": ["missing-agent"],
+            "agent_uuids": ["00000000-0000-4000-8000-000000000001"],
             "tests": [
                 {
                     "name": "t1",

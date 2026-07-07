@@ -26,6 +26,9 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/datasets", tags=["datasets"])
 
+_EXAMPLE_DATASET_UUID = "f47ac10b-58cc-4372-a567-0e02b2c3d479"
+_EXAMPLE_ITEM_UUID = "6ba7b810-9dad-11d1-80b4-00c04fd430c8"
+
 
 # ── Request / Response models ────────────────────────────────────────────────
 
@@ -62,7 +65,12 @@ class DatasetItemUpdate(BaseModel):
 
 
 class DatasetItemResponse(BaseModel):
-    uuid: str = Field(description="Dataset item ID")
+    uuid: str = Field(
+        min_length=36,
+        max_length=36,
+        description="Dataset item ID",
+        examples=[_EXAMPLE_ITEM_UUID],
+    )
     audio_path: Optional[str] = Field(
         None,
         description="Presigned download URL for the item's audio, or null for TTS items",
@@ -76,7 +84,12 @@ class DatasetItemResponse(BaseModel):
 
 
 class DatasetResponse(BaseModel):
-    uuid: str = Field(description="Dataset ID")
+    uuid: str = Field(
+        min_length=36,
+        max_length=36,
+        description="Dataset ID",
+        examples=[_EXAMPLE_DATASET_UUID],
+    )
     name: str = Field(description="Human-readable dataset name")
     dataset_type: str = Field(description="Dataset type (`stt` or `tts`)")
     item_count: int = Field(description="Number of items in the dataset")

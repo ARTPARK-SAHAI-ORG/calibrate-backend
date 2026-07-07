@@ -146,6 +146,8 @@ _EXAMPLE_TEST_UUID = "b1c2d3e4-f5a6-7890-bcde-f12345678901"
 
 class AgentTestsCreate(BaseModel):
     agent_uuid: str = Field(
+        min_length=36,
+        max_length=36,
         description="Agent to link tests to. Must be in your workspace.",
         examples=[_EXAMPLE_AGENT_UUID],
     )
@@ -157,10 +159,14 @@ class AgentTestsCreate(BaseModel):
 
 class AgentTestDelete(BaseModel):
     agent_uuid: str = Field(
+        min_length=36,
+        max_length=36,
         description="Agent to unlink the test from",
         examples=[_EXAMPLE_AGENT_UUID],
     )
     test_uuid: str = Field(
+        min_length=36,
+        max_length=36,
         description="Test to unlink from the agent",
         examples=[_EXAMPLE_TEST_UUID],
     )
@@ -169,10 +175,14 @@ class AgentTestDelete(BaseModel):
 class AgentTestResponse(BaseModel):
     id: int = Field(description="Auto-increment link row ID")
     agent_id: str = Field(
+        min_length=36,
+        max_length=36,
         description="Linked agent ID",
         examples=[_EXAMPLE_AGENT_UUID],
     )
     test_id: str = Field(
+        min_length=36,
+        max_length=36,
         description="Linked test ID",
         examples=[_EXAMPLE_TEST_UUID],
     )
@@ -188,6 +198,8 @@ class AgentTestsCreateResponse(BaseModel):
 
 class TestResponse(BaseModel):
     uuid: str = Field(
+        min_length=36,
+        max_length=36,
         description="Test ID",
         examples=[_EXAMPLE_TEST_UUID],
     )
@@ -204,6 +216,8 @@ class TestResponse(BaseModel):
 
 class AgentResponse(BaseModel):
     uuid: str = Field(
+        min_length=36,
+        max_length=36,
         description="Agent ID",
         examples=[_EXAMPLE_AGENT_UUID],
     )
@@ -274,7 +288,7 @@ class BatchTestSkip(BaseModel):
         examples=[_EXAMPLE_AGENT_UUID],
     )
     reason: str = Field(
-        description="Why the agent was skipped, e.g. `no_linked_tests` or `connection_not_verified`"
+        description="Why this agent was not run"
     )
 
 
@@ -311,6 +325,8 @@ class TestOutput(BaseModel):
 class JudgeResult(BaseModel):
     evaluator_uuid: Optional[str] = Field(
         None,
+        min_length=36,
+        max_length=36,
         description="ID of the evaluator that produced this verdict; null for legacy runs or when the evaluator can't be resolved from the snapshot",
     )
     reasoning: Optional[str] = Field(
@@ -418,6 +434,8 @@ class TestRunStatusResponse(BaseModel):
 
 class AgentTestRunListItem(BaseModel):
     uuid: str = Field(
+        min_length=36,
+        max_length=36,
         description="Test run job ID",
         examples=[_EXAMPLE_TASK_UUID],
     )
@@ -474,6 +492,8 @@ class AgentTestRunsResponse(BaseModel):
 
 class GlobalTestRunListItem(AgentTestRunListItem):
     agent_id: str = Field(
+        min_length=36,
+        max_length=36,
         description="Agent this run belongs to",
         examples=[_EXAMPLE_AGENT_UUID],
     )
@@ -731,6 +751,8 @@ async def delete_agent_test_link(agent_test: AgentTestDelete):
 
 class AgentTestBulkDelete(BaseModel):
     agent_uuid: str = Field(
+        min_length=36,
+        max_length=36,
         description="Agent to unlink tests from",
         examples=[_EXAMPLE_AGENT_UUID],
     )
@@ -763,6 +785,8 @@ async def bulk_delete_agent_test_links(payload: AgentTestBulkDelete):
 
 class AgentTestsBulkDeleteAll(BaseModel):
     agent_uuid: str = Field(
+        min_length=36,
+        max_length=36,
         description="Agent whose linked tests define the deletion scope",
         examples=[_EXAMPLE_AGENT_UUID],
     )
@@ -2421,6 +2445,8 @@ class ModelResult(BaseModel):
 
 class BenchmarkStatusResponse(BaseModel):
     task_id: str = Field(
+        min_length=36,
+        max_length=36,
         description="Benchmark run job ID",
         examples=[_EXAMPLE_TASK_UUID],
     )

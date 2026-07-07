@@ -23,12 +23,20 @@ router = APIRouter(prefix="/organizations", tags=["organizations"])
 
 
 class OrganizationResponse(BaseModel):
-    uuid: str = Field(description="Workspace ID")
+    uuid: str = Field(
+        min_length=36,
+        max_length=36,
+        description="Workspace ID",
+    )
     name: str = Field(description="Workspace display name")
     is_personal: bool = Field(
         description="`true` for your auto-created personal workspace, `false` for shared workspaces"
     )
-    created_by_user_id: str = Field(description="ID of the user who created the workspace")
+    created_by_user_id: str = Field(
+        min_length=36,
+        max_length=36,
+        description="ID of the user who created the workspace",
+    )
     member_role: Optional[str] = Field(
         None,
         description="Your role in this workspace (`owner` | `admin`); `null` when not resolved",
@@ -54,7 +62,11 @@ class AddMemberRequest(BaseModel):
 
 
 class MemberResponse(BaseModel):
-    user_id: str = Field(description="Member's user ID")
+    user_id: str = Field(
+        min_length=36,
+        max_length=36,
+        description="Member's user ID",
+    )
     email: str = Field(description="Member's email address")
     first_name: str = Field(description="Member's given name")
     last_name: str = Field(description="Member's family name")

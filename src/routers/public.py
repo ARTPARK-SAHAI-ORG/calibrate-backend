@@ -68,6 +68,13 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/public", tags=["public"])
 
+_EXAMPLE_TASK_UUID = "a3b2c1d0-e5f4-3210-abcd-ef1234567890"
+_EXAMPLE_DATASET_UUID = "f47ac10b-58cc-4372-a567-0e02b2c3d479"
+_EXAMPLE_EVALUATOR_UUID = "6ba7b810-9dad-11d1-80b4-00c04fd430c8"
+_EXAMPLE_JOB_UUID = "b1c2d3e4-f5a6-7890-bcde-f12345678901"
+_EXAMPLE_ITEM_UUID = "c1d2e3f4-a5b6-4789-abcd-ef0123456789"
+_EXAMPLE_ANNOTATION_TASK_UUID = "d4e5f6a7-b8c9-4012-def0-234567890abc"
+
 
 # ---------------------------------------------------------------------------
 # Response models
@@ -75,10 +82,21 @@ router = APIRouter(prefix="/public", tags=["public"])
 
 
 class PublicSTTResponse(BaseModel):
-    task_id: str = Field(description="STT eval job ID")
+    task_id: str = Field(
+        min_length=36,
+        max_length=36,
+        description="STT eval job ID",
+        examples=[_EXAMPLE_TASK_UUID],
+    )
     status: str = Field(description="Job status, e.g. `in_progress`, `done`, `failed`")
     language: Optional[str] = Field(None, description="Evaluated language code; `null` if unset")
-    dataset_id: Optional[str] = Field(None, description="Source dataset ID; `null` if unavailable")
+    dataset_id: Optional[str] = Field(
+        None,
+        min_length=36,
+        max_length=36,
+        description="Source dataset ID; `null` if unavailable",
+        examples=[_EXAMPLE_DATASET_UUID],
+    )
     dataset_name: Optional[str] = Field(None, description="Source dataset name; `null` if unavailable")
     provider_results: Optional[List[ProviderResult]] = Field(
         None, description="Per-provider transcription results and metrics; `null` until available"
@@ -90,10 +108,21 @@ class PublicSTTResponse(BaseModel):
 
 
 class PublicTTSResponse(BaseModel):
-    task_id: str = Field(description="TTS eval job ID")
+    task_id: str = Field(
+        min_length=36,
+        max_length=36,
+        description="TTS eval job ID",
+        examples=[_EXAMPLE_TASK_UUID],
+    )
     status: str = Field(description="Job status, e.g. `in_progress`, `done`, `failed`")
     language: Optional[str] = Field(None, description="Evaluated language code; `null` if unset")
-    dataset_id: Optional[str] = Field(None, description="Source dataset ID; `null` if unavailable")
+    dataset_id: Optional[str] = Field(
+        None,
+        min_length=36,
+        max_length=36,
+        description="Source dataset ID; `null` if unavailable",
+        examples=[_EXAMPLE_DATASET_UUID],
+    )
     dataset_name: Optional[str] = Field(None, description="Source dataset name; `null` if unavailable")
     provider_results: Optional[List[ProviderResult]] = Field(
         None, description="Per-provider synthesis results and metrics; `null` until available"
@@ -105,7 +134,12 @@ class PublicTTSResponse(BaseModel):
 
 
 class PublicTestRunResponse(BaseModel):
-    task_id: str = Field(description="LLM test run job ID")
+    task_id: str = Field(
+        min_length=36,
+        max_length=36,
+        description="LLM test run job ID",
+        examples=[_EXAMPLE_TASK_UUID],
+    )
     status: str = Field(description="Run status, e.g. `in_progress`, `done`, `failed`")
     total_tests: Optional[int] = Field(None, description="Total test cases in the run; `null` until known")
     passed: Optional[int] = Field(None, description="Test cases that passed; `null` until computed")
@@ -140,7 +174,12 @@ class PublicTestRunResponse(BaseModel):
 
 
 class PublicBenchmarkResponse(BaseModel):
-    task_id: str = Field(description="LLM benchmark job ID")
+    task_id: str = Field(
+        min_length=36,
+        max_length=36,
+        description="LLM benchmark job ID",
+        examples=[_EXAMPLE_TASK_UUID],
+    )
     status: str = Field(description="Run status, e.g. `in_progress`, `done`, `failed`")
     # Same as PublicTestRunResponse.evaluators — shared by every model's
     # test_results inside model_results[] (all models run the same suite).
@@ -158,7 +197,12 @@ class PublicBenchmarkResponse(BaseModel):
 
 
 class PublicSimulationRunResponse(BaseModel):
-    task_id: str = Field(description="Simulation run job ID")
+    task_id: str = Field(
+        min_length=36,
+        max_length=36,
+        description="Simulation run job ID",
+        examples=[_EXAMPLE_TASK_UUID],
+    )
     name: str = Field(description="Display name for the run, e.g. `Run 1`")
     status: str = Field(description="Run status, e.g. `in_progress`, `done`, `failed`")
     type: str = Field(description="Simulation type (`text` | `voice`)")
@@ -176,15 +220,30 @@ class PublicSimulationRunResponse(BaseModel):
 
 
 class PublicAnnotationEvalTaskRef(BaseModel):
-    uuid: str = Field(description="Annotation task ID")
+    uuid: str = Field(
+        min_length=36,
+        max_length=36,
+        description="Annotation task ID",
+        examples=[_EXAMPLE_ANNOTATION_TASK_UUID],
+    )
     name: str = Field(description="Annotation task name")
     type: str = Field(description="Annotation task type (e.g. `stt`, `llm`, `conversation`)")
     description: Optional[str] = Field(None, description="Task description; `null` if unset")
 
 
 class PublicAnnotationEvalResponse(BaseModel):
-    task_id: str = Field(description="Parent annotation task ID")
-    job_uuid: str = Field(description="Annotation evaluator-run job ID")
+    task_id: str = Field(
+        min_length=36,
+        max_length=36,
+        description="Parent annotation task ID",
+        examples=[_EXAMPLE_ANNOTATION_TASK_UUID],
+    )
+    job_uuid: str = Field(
+        min_length=36,
+        max_length=36,
+        description="Annotation evaluator-run job ID",
+        examples=[_EXAMPLE_JOB_UUID],
+    )
     status: str = Field(description="Run status; share links only expose completed runs")
     created_at: Optional[str] = Field(None, description="When the run was created (ISO 8601 UTC); `null` if unset")
     completed_at: Optional[str] = Field(None, description="When the run finished (ISO 8601 UTC); `null` if unset")
@@ -222,7 +281,12 @@ class PublicDefaultEvaluatorVersionResponse(BaseModel):
 
 
 class PublicDefaultEvaluatorResponse(BaseModel):
-    uuid: str = Field(description="Evaluator ID")
+    uuid: str = Field(
+        min_length=36,
+        max_length=36,
+        description="Evaluator ID",
+        examples=[_EXAMPLE_EVALUATOR_UUID],
+    )
     name: str = Field(description="Evaluator display name")
     description: Optional[str] = Field(None, description="Evaluator description; `null` if unset")
     evaluator_type: str = Field(description="Semantic category (`stt`, `tts`, `llm`, `llm-general`, `conversation`)")
@@ -825,7 +889,10 @@ def get_public_annotation_job(
 class PublicAnnotationEntry(BaseModel):
     evaluator_id: Optional[str] = Field(
         None,
+        min_length=36,
+        max_length=36,
         description="Evaluator ID this judgement is for; `null` marks a row-level overall annotation",
+        examples=[_EXAMPLE_EVALUATOR_UUID],
     )
     value: Optional[Dict[str, Any]] = Field(
         None, description="Judgement payload (shape depends on the evaluator's output type); `null` to clear"
@@ -833,7 +900,12 @@ class PublicAnnotationEntry(BaseModel):
 
 
 class PublicAnnotationUpsertRequest(BaseModel):
-    item_id: str = Field(description="Job item you are annotating")
+    item_id: str = Field(
+        min_length=36,
+        max_length=36,
+        description="Job item you are annotating",
+        examples=[_EXAMPLE_ITEM_UUID],
+    )
     annotations: List[PublicAnnotationEntry] = Field(
         description="Judgements to save — one entry per evaluator, plus optionally one row-level entry"
     )

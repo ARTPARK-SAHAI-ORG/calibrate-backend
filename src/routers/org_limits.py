@@ -35,6 +35,8 @@ class OrgLimits(BaseModel):
 
 class OrgLimitsCreate(BaseModel):
     org_uuid: str = Field(
+        min_length=36,
+        max_length=36,
         description="Workspace to create limits for",
         examples=["f47ac10b-58cc-4372-a567-0e02b2c3d479"],
     )
@@ -46,8 +48,14 @@ class OrgLimitsUpdate(BaseModel):
 
 
 class OrgLimitsResponse(BaseModel):
-    uuid: str = Field(description="Limits record ID")
+    uuid: str = Field(
+        min_length=36,
+        max_length=36,
+        description="Limits record ID",
+    )
     org_uuid: str = Field(
+        min_length=36,
+        max_length=36,
         description="Workspace these limits apply to",
         examples=["f47ac10b-58cc-4372-a567-0e02b2c3d479"],
     )
@@ -57,7 +65,11 @@ class OrgLimitsResponse(BaseModel):
 
 
 class OrgLimitsCreateResponse(BaseModel):
-    uuid: str = Field(description="ID of the newly created limits record")
+    uuid: str = Field(
+        min_length=36,
+        max_length=36,
+        description="ID of the newly created limits record",
+    )
     message: str = Field(description="Status message")
 
 

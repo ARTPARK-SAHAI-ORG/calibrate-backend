@@ -652,7 +652,7 @@ def test_tests_router_crud(client):
             "name": f"bad-{uuid.uuid4().hex[:6]}",
             "type": "response",
             "config": None,
-            "evaluators": [{"evaluator_uuid": "non-existent"}],
+            "evaluators": [{"evaluator_uuid": "00000000-0000-4000-8000-000000000001"}],
         },
         headers=h,
     )
@@ -837,8 +837,8 @@ def test_validate_evaluators_rejects_unknown_test_type():
 
     with pytest.raises(HTTPException) as exc:
         _validate_evaluators(
-            [EvaluatorRef(evaluator_uuid="whatever")],
-            org_uuid="org-1",
+            [EvaluatorRef(evaluator_uuid="f47ac10b-58cc-4372-a567-0e02b2c3d479")],
+            org_uuid="f47ac10b-58cc-4372-a567-0e02b2c3d479",
             test_type="bogus-type",
         )
     assert exc.value.status_code == 400
@@ -1343,7 +1343,7 @@ def test_agent_tools_router(client):
     # Link with missing agent → 404
     bad_agent = client.post(
         "/agent-tools",
-        json={"agent_uuid": "missing-agent", "tool_uuids": [tool["uuid"]]},
+        json={"agent_uuid": "00000000-0000-4000-8000-000000000001", "tool_uuids": [tool["uuid"]]},
         headers=h,
     )
     assert bad_agent.status_code == 404
@@ -1351,7 +1351,7 @@ def test_agent_tools_router(client):
     # Link with missing tool → 404
     bad_tool = client.post(
         "/agent-tools",
-        json={"agent_uuid": agent["uuid"], "tool_uuids": ["missing-tool"]},
+        json={"agent_uuid": agent["uuid"], "tool_uuids": ["00000000-0000-4000-8000-000000000002"]},
         headers=h,
     )
     assert bad_tool.status_code == 404
@@ -1428,7 +1428,7 @@ def test_org_limits_router(client, monkeypatch):
     # Create limits for an unknown org → 404
     bad = client.post(
         "/org-limits",
-        json={"org_uuid": "nope", "limits": {"max_rows_per_eval": 50}},
+        json={"org_uuid": "00000000-0000-4000-8000-000000000001", "limits": {"max_rows_per_eval": 50}},
         headers=h,
     )
     assert bad.status_code == 404

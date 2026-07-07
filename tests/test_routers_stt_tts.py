@@ -184,7 +184,7 @@ def test_stt_evaluate_invalid_evaluator(client, monkeypatch):
             "language": "en",
             "audio_paths": ["s3://b/k.wav"],
             "texts": ["hi"],
-            "evaluator_uuids": ["does-not-exist"],
+            "evaluator_uuids": ["00000000-0000-4000-8000-000000000001"],
         },
         headers=auth["headers"],
     )

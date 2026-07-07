@@ -25,11 +25,17 @@ class JobType(str, Enum):
 
 
 class JobListItem(BaseModel):
-    uuid: str = Field(description="Job ID")
+    uuid: str = Field(
+        min_length=36,
+        max_length=36,
+        description="Job ID",
+    )
     type: str = Field(description="Underlying job type, e.g. `stt-eval`, `tts-eval`")
     status: str = Field(description="Lifecycle state, e.g. `queued`, `in_progress`, `done`, `failed`")
     dataset_id: Optional[str] = Field(
         None,
+        min_length=36,
+        max_length=36,
         description="Source dataset ID; `null` when the dataset has since been deleted",
     )
     dataset_name: Optional[str] = Field(

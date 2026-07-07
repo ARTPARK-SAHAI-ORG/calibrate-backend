@@ -33,6 +33,10 @@ from llm_judge import render_template
 
 router = APIRouter(prefix="/evaluators", tags=["evaluators"])
 
+_EXAMPLE_EVALUATOR_UUID = "f47ac10b-58cc-4372-a567-0e02b2c3d479"
+_EXAMPLE_VERSION_UUID = "6ba7b810-9dad-11d1-80b4-00c04fd430c8"
+_EXAMPLE_USER_UUID = "a3b2c1d0-e5f4-3210-abcd-ef1234567890"
+
 
 # ============ Pydantic models ============
 
@@ -144,7 +148,12 @@ class EvaluatorDuplicateRequest(BaseModel):
 
 
 class EvaluatorVersionResponse(BaseModel):
-    uuid: str = Field(description="Version ID")
+    uuid: str = Field(
+        min_length=36,
+        max_length=36,
+        description="Version ID",
+        examples=[_EXAMPLE_VERSION_UUID],
+    )
     version_number: int = Field(description="1-based version number, incrementing per evaluator")
     judge_model: str = Field(description="Model that runs the judge for this version")
     system_prompt: str = Field(description="Judge system prompt, with `{{variable}}` placeholders unrendered")
@@ -166,7 +175,12 @@ class EvaluatorResponseBase(BaseModel):
  duplicating the same version payload twice in the same response).
  """
 
-    uuid: str = Field(description="Evaluator ID")
+    uuid: str = Field(
+        min_length=36,
+        max_length=36,
+        description="Evaluator ID",
+        examples=[_EXAMPLE_EVALUATOR_UUID],
+    )
     name: str = Field(description="Evaluator name")
     description: Optional[str] = Field(None, description="Human-readable description, or null")
     evaluator_type: str = Field(description="Semantic category (`tts`/`stt`/`llm`/`llm-general`/`conversation`)")
@@ -175,11 +189,18 @@ class EvaluatorResponseBase(BaseModel):
     output_type: str = Field(description="`binary` or `rating`")
     owner_user_id: Optional[str] = Field(
         None,
+        min_length=36,
+        max_length=36,
         description="Creator user ID; null for seeded defaults visible in your workspace but not editable by you",
+        examples=[_EXAMPLE_USER_UUID],
     )
     slug: Optional[str] = Field(None, description="Stable slug for seeded defaults; null for custom evaluators")
     live_version_id: Optional[str] = Field(
-        None, description="ID of the current live version; null if none is set"
+        None,
+        min_length=36,
+        max_length=36,
+        description="ID of the current live version; null if none is set",
+        examples=[_EXAMPLE_VERSION_UUID],
     )
     created_at: str = Field(description="Creation timestamp (ISO 8601 UTC)")
     updated_at: str = Field(description="Last-update timestamp (ISO 8601 UTC)")
@@ -206,17 +227,37 @@ class EvaluatorDetailResponse(EvaluatorResponseBase):
 
 
 class EvaluatorCreateResponse(BaseModel):
-    uuid: str = Field(description="ID of the created (or duplicated) evaluator")
-    version_uuid: str = Field(description="ID of its initial/live version")
+    uuid: str = Field(
+        min_length=36,
+        max_length=36,
+        description="ID of the created (or duplicated) evaluator",
+        examples=[_EXAMPLE_EVALUATOR_UUID],
+    )
+    version_uuid: str = Field(
+        min_length=36,
+        max_length=36,
+        description="ID of its initial/live version",
+        examples=[_EXAMPLE_VERSION_UUID],
+    )
 
 
 class VersionCreateResponse(BaseModel):
-    version_uuid: str = Field(description="ID of the newly created version")
+    version_uuid: str = Field(
+        min_length=36,
+        max_length=36,
+        description="ID of the newly created version",
+        examples=[_EXAMPLE_VERSION_UUID],
+    )
     version_number: int = Field(description="1-based number assigned to the new version")
 
 
 class SetLiveVersionRequest(BaseModel):
-    version_uuid: str = Field(description="ID of the version to mark as live (must belong to this evaluator)")
+    version_uuid: str = Field(
+        min_length=36,
+        max_length=36,
+        description="ID of the version to mark as live (must belong to this evaluator)",
+        examples=[_EXAMPLE_VERSION_UUID],
+    )
 
 
 # ============ Helpers ============
@@ -605,7 +646,11 @@ async def mark_live(
 
 class PromptPreviewRequest(BaseModel):
     version_uuid: Optional[str] = Field(
-        None, description="Version to render. Omit to use the evaluator's live version"
+        None,
+        min_length=36,
+        max_length=36,
+        description="Version to render. Omit to use the evaluator's live version",
+        examples=[_EXAMPLE_VERSION_UUID],
     )
     variables: Optional[Dict[str, Any]] = Field(
         None, description="Values substituted into `{{placeholders}}`. Omit to render with none"

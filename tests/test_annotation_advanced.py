@@ -106,7 +106,7 @@ def test_bulk_items_with_annotations_validation(client):
                     "annotations": {llm_ev["uuid"]: {"value": True}},
                 }
             ],
-            "annotator_id": "missing",
+            "annotator_id": "00000000-0000-4000-8000-000000000001",
         },
         headers=h,
     )
@@ -277,7 +277,7 @@ def test_public_annotation_job_upsert_flow(client):
     bad_item = client.post(
         f"/public/annotation-jobs/{public_token}/annotations",
         json={
-            "item_id": "missing-item",
+            "item_id": "00000000-0000-4000-8000-000000000001",
             "annotations": [
                 {"evaluator_id": llm_ev["uuid"], "value": {"value": True}}
             ],
@@ -291,7 +291,7 @@ def test_public_annotation_job_upsert_flow(client):
         json={
             "item_id": items[0],
             "annotations": [
-                {"evaluator_id": "missing-ev", "value": {"value": True}}
+                {"evaluator_id": "00000000-0000-4000-8000-000000000001", "value": {"value": True}}
             ],
         },
     )

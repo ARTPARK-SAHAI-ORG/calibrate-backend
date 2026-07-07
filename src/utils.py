@@ -137,14 +137,23 @@ class EvaluatorRunEntry(BaseModel):
     release).
     """
 
-    evaluator_uuid: str
+    evaluator_uuid: str = Field(
+        min_length=36,
+        max_length=36,
+        description="ID of the evaluator",
+    )
     metric_key: (
         str  # key as emitted in metrics.json (derived from CLI/config at run time)
     )
     aggregate: Dict[str, Any]
     name: Optional[str] = None  # filled on API read from DB + job snapshot
     description: Optional[str] = None  # filled on API read from current DB row
-    evaluator_version_id: Optional[str] = None  # pinned at job-submit time
+    evaluator_version_id: Optional[str] = Field(
+        None,
+        min_length=36,
+        max_length=36,
+        description="Pinned evaluator version ID at job-submit time",
+    )
     output_type: Optional[str] = None  # "binary" | "rating" — drives per-row typing
 
 
@@ -181,10 +190,19 @@ class TaskCreateResponse(BaseModel):
 
 
 class TaskStatusResponse(BaseModel):
-    task_id: str
+    task_id: str = Field(
+        min_length=36,
+        max_length=36,
+        description="Evaluation job ID",
+    )
     status: str
     language: Optional[str] = None
-    dataset_id: Optional[str] = None
+    dataset_id: Optional[str] = Field(
+        None,
+        min_length=36,
+        max_length=36,
+        description="Source dataset ID",
+    )
     dataset_name: Optional[str] = None
     provider_results: Optional[List[ProviderResult]] = None
     leaderboard_summary: Optional[List[Dict[str, Any]]] = None

@@ -26,6 +26,10 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/tests", tags=["tests"])
 
+_EXAMPLE_TEST_UUID = "b1c2d3e4-f5a6-7890-bcde-f12345678901"
+_EXAMPLE_EVALUATOR_UUID = "f47ac10b-58cc-4372-a567-0e02b2c3d479"
+_EXAMPLE_AGENT_UUID = "a3b2c1d0-e5f4-3210-abcd-ef1234567890"
+
 
 TestType = Literal["response", "tool_call", "conversation"]
 
@@ -43,7 +47,12 @@ REQUIRED_EVALUATOR_TYPE_BY_TEST_TYPE: Dict[str, str] = {
 class EvaluatorRef(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    evaluator_uuid: str = Field(description="Evaluator to attach to the test")
+    evaluator_uuid: str = Field(
+        min_length=36,
+        max_length=36,
+        description="Evaluator to attach to the test",
+        examples=[_EXAMPLE_EVALUATOR_UUID],
+    )
     variable_values: Optional[Dict[str, Any]] = Field(
         None,
         description="Values for the evaluator's `{{placeholder}}` variables, pinned per-test on the pivot. Omit to inherit the evaluator version's defaults",
@@ -81,7 +90,12 @@ class TestUpdate(BaseModel):
 
 
 class TestResponse(BaseModel):
-    uuid: str = Field(description="Test ID")
+    uuid: str = Field(
+        min_length=36,
+        max_length=36,
+        description="Test ID",
+        examples=[_EXAMPLE_TEST_UUID],
+    )
     name: str = Field(description="Human-readable test name")
     type: str = Field(description="Test kind: `response`, `tool_call`, or `conversation`")
     config: Optional[Dict[str, Any]] = Field(
@@ -96,7 +110,12 @@ class TestResponse(BaseModel):
 
 
 class TestCreateResponse(BaseModel):
-    uuid: str = Field(description="ID of the newly created test")
+    uuid: str = Field(
+        min_length=36,
+        max_length=36,
+        description="ID of the newly created test",
+        examples=[_EXAMPLE_TEST_UUID],
+    )
     message: str = Field(description="Human-readable confirmation message")
 
 
@@ -147,7 +166,9 @@ class BulkTestUpload(BaseModel):
         description=f"Test items to create (non-empty, max {500} per request, names unique within the batch)"
     )
     agent_uuids: Optional[List[str]] = Field(
-        None, description="Agents (IDs) to link every created test to. Omit to link none"
+        None,
+        description="Agents (IDs) to link every created test to. Omit to link none",
+        examples=[[_EXAMPLE_AGENT_UUID]],
     )
     language: Optional[str] = Field(
         None, description="Language written to each test's `config.settings.language`. Omit to leave unset"
@@ -190,7 +211,10 @@ class BulkTestUpload(BaseModel):
 
 
 class BulkTestUploadResponse(BaseModel):
-    uuids: List[str] = Field(description="IDs of the created tests, in request order")
+    uuids: List[str] = Field(
+        description="IDs of the created tests, in request order",
+        examples=[[_EXAMPLE_TEST_UUID]],
+    )
     count: int = Field(description="Number of tests created")
     message: str = Field(description="Human-readable confirmation message")
     warnings: Optional[List[str]] = Field(
@@ -199,7 +223,10 @@ class BulkTestUploadResponse(BaseModel):
 
 
 class BulkTestDelete(BaseModel):
-    test_uuids: List[str] = Field(description="IDs of the tests to delete (non-empty)")
+    test_uuids: List[str] = Field(
+        description="IDs of the tests to delete (non-empty)",
+        examples=[[_EXAMPLE_TEST_UUID]],
+    )
 
 
 class BulkTestDeleteResponse(BaseModel):

@@ -25,7 +25,11 @@ class GoogleLoginRequest(BaseModel):
 
 
 class UserResponse(BaseModel):
-    uuid: str = Field(description="Your user ID")
+    uuid: str = Field(
+        min_length=36,
+        max_length=36,
+        description="Your user ID",
+    )
     first_name: str = Field(description="Your given name")
     last_name: str = Field(description="Your family name")
     email: str = Field(description="Your email address")

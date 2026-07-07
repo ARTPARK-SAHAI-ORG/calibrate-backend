@@ -23,6 +23,8 @@ from annotation_metrics import (
 
 router = APIRouter(prefix="/annotators", tags=["annotators"])
 
+_EXAMPLE_ID = "f47ac10b-58cc-4372-a567-0e02b2c3d479"
+
 
 class AnnotatorCreate(BaseModel):
     name: str = Field(description="Human-readable annotator name, unique within your workspace")
@@ -35,7 +37,12 @@ class AnnotatorUpdate(BaseModel):
 
 
 class AnnotatorResponse(BaseModel):
-    uuid: str = Field(description="Annotator ID")
+    uuid: str = Field(
+        min_length=36,
+        max_length=36,
+        description="Annotator ID",
+        examples=[_EXAMPLE_ID],
+    )
     name: str = Field(description="Human-readable annotator name")
     created_at: str = Field(description="Creation timestamp (ISO 8601 UTC)")
     updated_at: str = Field(description="Last-update timestamp (ISO 8601 UTC)")
@@ -52,7 +59,12 @@ class AnnotatorResponse(BaseModel):
 
 
 class AnnotatorCreateResponse(BaseModel):
-    uuid: str = Field(description="ID of the newly created annotator")
+    uuid: str = Field(
+        min_length=36,
+        max_length=36,
+        description="ID of the newly created annotator",
+        examples=[_EXAMPLE_ID],
+    )
     message: str = Field(description="Human-readable success message")
 
 
@@ -114,7 +126,7 @@ async def get_annotator_endpoint(
         examples=["f47ac10b-58cc-4372-a567-0e02b2c3d479"],
     ),
     bucket: str = Query(
-        "week",
+        "month",
         pattern="^(week|month|year)$",
         description="Time bucket for the agreement trend series (`week`, `month`, or `year`)",
     ),

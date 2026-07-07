@@ -60,7 +60,11 @@ def _to_utc_iso(ts: Optional[str]) -> Optional[str]:
 
 
 class ApiKeyResponse(BaseModel):
-    uuid: str = Field(description="API key ID")
+    uuid: str = Field(
+        min_length=36,
+        max_length=36,
+        description="API key ID",
+    )
     name: str = Field(description="Human-readable label for the key")
     last_four: str = Field(
         description="Last four characters of the key — the only fragment kept after creation"

@@ -72,8 +72,8 @@ def test_simulation_to_conversation_migration():
     inserted raw to bypass the API-layer validators that now reject the old
     value."""
     user_uuid = db.create_user("M", "G", _u("mig") + "@example.com")
-    ev_uuid = _uuid.uuid4().hex
-    task_uuid = _uuid.uuid4().hex
+    ev_uuid = str(_uuid.uuid4())
+    task_uuid = str(_uuid.uuid4())
     with db.get_db_connection() as conn:
         cur = conn.cursor()
         cur.execute(
@@ -124,7 +124,7 @@ def test_legacy_api_keys_table_is_dropped_and_recreated():
         cur.execute(
             "INSERT INTO api_keys (uuid, user_id, key_hash, key_prefix, name) "
             "VALUES (?, 'u1', 'h', 'sk_abc', 'legacy')",
-            (_uuid.uuid4().hex,),
+            (str(_uuid.uuid4()),),
         )
         conn.commit()
 

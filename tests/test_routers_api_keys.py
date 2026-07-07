@@ -37,6 +37,35 @@ def _signup(client):
     return {"Authorization": f"Bearer {body['access_token']}"}
 
 
+def _create_evaluator(client, h):
+    """Create an LLM evaluator; return its uuid (36-char, hyphenated).
+
+    Avoid GET /evaluators here — the session DB may contain legacy 32-char hex
+    ids from other modules, and list responses now enforce min_length=36.
+    """
+    created = client.post(
+        "/evaluators",
+        json={
+            "name": f"ev-{uuid.uuid4()}",
+            "description": "d",
+            "evaluator_type": "llm",
+            "data_type": "text",
+            "kind": "single",
+            "output_type": "binary",
+            "version": {
+                "judge_model": "openai/gpt-4",
+                "system_prompt": "Judge {{x}}",
+                "variables": [{"name": "x"}],
+            },
+        },
+        headers=h,
+    )
+    assert created.status_code == 200, created.text
+    ev_uuid = created.json()["uuid"]
+    assert len(ev_uuid) == 36
+    return ev_uuid
+
+
 def _create_linked_agent(client, h):
     """Create an agent + a response test linked to it; return the agent dict."""
     agent = client.post(
@@ -44,15 +73,14 @@ def _create_linked_agent(client, h):
         json={"name": f"a-{uuid.uuid4().hex[:6]}", "type": "agent"},
         headers=h,
     ).json()
-    evaluators = client.get("/evaluators", headers=h).json()
-    llm_ev = next(e for e in evaluators if e.get("evaluator_type") == "llm")
+    ev_uuid = _create_evaluator(client, h)
     test = client.post(
         "/tests",
         json={
             "name": f"t-{uuid.uuid4().hex[:6]}",
             "type": "response",
             "config": {"history": [], "evaluation": {"type": "response"}},
-            "evaluators": [{"evaluator_uuid": llm_ev["uuid"]}],
+            "evaluators": [{"evaluator_uuid": ev_uuid}],
         },
         headers=h,
     ).json()
