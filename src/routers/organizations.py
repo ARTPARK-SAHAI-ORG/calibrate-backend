@@ -40,7 +40,7 @@ class OrganizationResponse(BaseModel):
     )
     member_role: Optional[MemberRoleLiteral] = Field(
         None,
-        description="Your role in this workspace (`owner` | `admin`); `null` when not resolved",
+        description="Your role in this workspace; `null` when not resolved",
     )
     created_at: str = Field(description="When the workspace was created (ISO 8601 UTC)")
     updated_at: str = Field(description="When the workspace was last updated (ISO 8601 UTC)")
@@ -72,7 +72,7 @@ class MemberResponse(BaseModel):
     first_name: str = Field(description="Member's given name")
     last_name: str = Field(description="Member's family name")
     role: MemberRoleLiteral = Field(
-        description="Member's role in the workspace (`owner` | `admin`)"
+        description="Member's role in the workspace"
     )
     created_at: str = Field(description="When the member was added (ISO 8601 UTC)")
 

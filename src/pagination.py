@@ -88,7 +88,7 @@ def make_sort_params(
             self,
             sort_by: str = Query(default, description=description),
             order: Literal["asc", "desc"] = Query(
-                default_order, description="`asc` or `desc`."
+                default_order, description="Sort direction."
             ),
         ):
             if sort_by not in allowed:

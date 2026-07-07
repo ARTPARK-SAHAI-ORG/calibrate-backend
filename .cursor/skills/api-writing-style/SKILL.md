@@ -221,8 +221,52 @@ Field conventions:
 - Ownership/scoping in a second sentence when relevant (`Must be in your workspace.`)
 - `min_length=36`/`max_length=36` + `examples` on **body/response models only**
 - Mark conditional requirements in **bold**: `**Required for type=connection.**`
-- For `Literal`/enums, describe each value briefly with backticks
+- **Never re-list an enum's own values in its description** (see next section)
 - Response fields (`task_id`, `status`, `uuid`) get purpose-first descriptions — they surface in the SDK
+
+## Enums / `Literal` — never re-list the values
+
+The docs renderer (Mintlify) already renders every allowed value of a `Literal`
+or enum field from the schema — it shows an `enum<string>` type badge **plus** an
+auto-generated **"Available options: …"** line listing them all. Restating those
+values in the `description` is pure duplication: it desyncs the moment the enum
+changes, and a *partial* re-list (e.g. "status: `queued` or `in_progress`" above a
+five-value options line) actively misleads.
+
+**Rule:** the description states the field's **purpose**, never the value set.
+
+```python
+# BAD — re-lists what the renderer already shows
+status: TaskStatus = Field(description="Current status: `queued`, `in_progress`, `done`, or `failed`")
+kind: EvaluatorKindLiteral = Field(description="`single` or `side_by_side`")
+
+# GOOD — purpose only; the renderer lists the values
+status: TaskStatus = Field(description="Current status of the test run")
+kind: EvaluatorKindLiteral = Field(description="Scoring mode: single output vs. side-by-side comparison")
+```
+
+**The one exception — explaining what each value *means*.** If a value needs a
+gloss the renderer can't derive, write the gloss (real words per value), never a
+bare restatement. This reads as prose, not a value list:
+
+```python
+# GOOD — each value carries meaning the schema can't
+type: Literal["agent", "connection"] = Field(
+    description="`agent` applies managed defaults; `connection` stores the config you supply as-is",
+)
+```
+
+**Narrow the type instead of narrowing in prose.** When a field can only hold a
+subset at a given point in the lifecycle, encode that in the type so the renderer
+lists exactly the reachable values — don't type the full enum and then caveat it
+in prose. Create-response `status` can only be `queued`/`in_progress`, so it uses
+`InitialTaskStatus` (a two-value `Literal` in [utils.py](../../../src/utils.py)),
+not the full `TaskStatus`.
+
+This is a house-style convention (not machine-checked): when reviewing or writing
+a route, watch for any enum/`Literal` field or param whose description contains a
+run of ≥2 of that type's own backticked values separated only by connectors, and
+rewrite it to state purpose instead.
 
 ## Terminology (user-facing docs)
 
@@ -251,6 +295,7 @@ Field conventions:
 - [ ] Docstring: verb-first; one sentence if `tags=["Public API"]`
 - [ ] Every path/query param has a purpose-first description (+ `examples` for IDs)
 - [ ] Every request/response model field has `Field(description=...)`
+- [ ] No enum/`Literal` field re-lists its own values in the description (state purpose; narrow the type for lifecycle subsets)
 - [ ] Optional fields explain what omission does
 - [ ] No UUID/sk_/org/caller in prose; second person throughout
 - [ ] No path/method/name/tags change (response_model change OK when dedicating a shape)

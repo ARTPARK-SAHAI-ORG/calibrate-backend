@@ -439,9 +439,9 @@ class EvaluatorResponse(BaseModel):
     evaluator_type: EvaluatorTypeLiteral = Field(
         "conversation", description="Semantic category (always `conversation` for simulations)"
     )
-    data_type: DataTypeLiteral = Field("text", description="Medium the judge consumes (`text`/`audio`)")
-    kind: EvaluatorKindLiteral = Field("single", description="`single` or `side_by_side`")
-    output_type: OutputTypeLiteral = Field("binary", description="`binary` or `rating`")
+    data_type: DataTypeLiteral = Field("text", description="Medium the judge consumes")
+    kind: EvaluatorKindLiteral = Field("single", description="Scoring mode: single output vs. side-by-side comparison")
+    output_type: OutputTypeLiteral = Field("binary", description="Output shape: pass/fail or numeric score")
     output_config: Optional[Dict[str, Any]] = Field(None, description="Rubric pinned at link time, or null")
     evaluator_version_id: str = Field(
         min_length=36,
@@ -575,8 +575,8 @@ class SimulationRunStatusResponse(BaseModel):
         examples=[_EXAMPLE_ID],
     )
     name: str = Field(description='Display name in `Run {index}` form (creation order)')
-    status: TaskStatus = Field(description="Run status (`queued`, `in_progress`, `done`, `failed`)")
-    type: SimulationRunType = Field(description="Run mode (`text` or `voice`)")
+    status: TaskStatus = Field(description="Run status")
+    type: SimulationRunType = Field(description="Run mode")
     updated_at: str = Field(description="Last-update timestamp (ISO 8601 UTC)")
     total_simulations: Optional[int] = Field(
         None, description="Expected number of persona x scenario cases; null before it's known"
@@ -604,8 +604,8 @@ class SimulationRunListItem(BaseModel):
         examples=[_EXAMPLE_ID],
     )
     name: str = Field(description='Display name in `Run {index}` form (creation order)')
-    status: TaskStatus = Field(description="Run status (`queued`, `in_progress`, `done`, `failed`)")
-    type: SimulationRunType = Field(description="Run mode (`text` or `voice`)")
+    status: TaskStatus = Field(description="Run status")
+    type: SimulationRunType = Field(description="Run mode")
     updated_at: str = Field(description="Last-update timestamp (ISO 8601 UTC)")
 
 

@@ -141,7 +141,7 @@ _EXAMPLE_ID = "f47ac10b-58cc-4372-a567-0e02b2c3d479"
 class AnnotationTaskCreate(BaseModel):
     name: str = Field(description="Human-readable task name, unique within your workspace")
     type: AnnotationTaskTypeLiteral = Field(
-        description="Task type (`stt`, `tts`, `llm`, `llm-general`, or `conversation`); governs item payload shape and applicable evaluators"
+        description="Task type; governs item payload shape and applicable evaluators"
     )
     description: Optional[str] = Field(
         None, description="Free-text task description. Omit for none"
