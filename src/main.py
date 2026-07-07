@@ -1,4 +1,5 @@
 import os
+import copy
 import uuid
 import asyncio
 import logging
@@ -228,6 +229,31 @@ def _strip_freeform_titles(node: Any) -> None:
             _strip_freeform_titles(item)
 
 
+# Request fields that only JWT (frontend) callers can set — API-key writes have
+# them stripped server-side (see agents._strip_verification_fields), so they're
+# inert and misleading in the API-key-facing public spec and its generated SDK/
+# code samples. Kept on the model (the frontend uses them) but hidden from the
+# public spec only. Keyed by component-schema name.
+_PUBLIC_SPEC_HIDDEN_FIELDS: Dict[str, tuple] = {
+    "AgentUpdate": ("connection_verified", "benchmark_models_verified"),
+}
+
+
+def _strip_hidden_public_fields(schemas: Dict[str, Any]) -> None:
+    """Drop JWT-only request fields from the public component schemas."""
+    for model, fields in _PUBLIC_SPEC_HIDDEN_FIELDS.items():
+        schema = schemas.get(model)
+        if not schema:
+            continue
+        props = schema.get("properties")
+        if props:
+            for f in fields:
+                props.pop(f, None)
+        req = schema.get("required")
+        if req:
+            schema["required"] = [r for r in req if r not in fields]
+
+
 def _build_public_openapi() -> Dict[str, Any]:
     full = app.openapi()
     public_paths: Dict[str, Any] = {}
@@ -275,9 +301,11 @@ def _build_public_openapi() -> Dict[str, Any]:
 
     components: Dict[str, Any] = dict(full.get("components", {}))
     if all_schemas:
-        components["schemas"] = {
-            name: schema for name, schema in all_schemas.items() if name in needed
-        }
+        # Deep-copy: the strip passes below mutate these schemas, and the source
+        # objects are shared with the cached `app.openapi()` (internal /docs).
+        components["schemas"] = copy.deepcopy(
+            {name: schema for name, schema in all_schemas.items() if name in needed}
+        )
     # Expose ONLY the API-key scheme on the public spec — see the per-op
     # `security` override above for why the auto-generated bearer scheme is
     # dropped. `X-API-Key: sk_…` is the SDK's auth path.
@@ -295,6 +323,7 @@ def _build_public_openapi() -> Dict[str, Any]:
     # `Config`-style type chip. Real model titles in `components.schemas` stay.
     _strip_freeform_titles(public_paths)
     _strip_freeform_titles(components.get("schemas", {}))
+    _strip_hidden_public_fields(components.get("schemas", {}))
 
     return {
         "openapi": full.get("openapi", "3.1.0"),

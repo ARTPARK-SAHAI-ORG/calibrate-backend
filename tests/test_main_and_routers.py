@@ -153,6 +153,15 @@ def test_public_api_docs_are_unauthenticated_and_filtered(client, monkeypatch):
     # public override must not have leaked back into the shared cached schema.
     assert "HTTPBearer" in full["components"]["securitySchemes"]
 
+    # JWT-only request fields (verification flags API-key writes have stripped)
+    # are hidden from the public AgentUpdate schema, but stay on the internal one.
+    pub_agent_update = pub_top["components"]["schemas"]["AgentUpdate"]["properties"]
+    assert "connection_verified" not in pub_agent_update
+    assert "benchmark_models_verified" not in pub_agent_update
+    assert {"name", "config"} <= set(pub_agent_update)
+    full_agent_update = full["components"]["schemas"]["AgentUpdate"]["properties"]
+    assert "connection_verified" in full_agent_update  # still there internally
+
     # Components are trimmed to ONLY the schemas the public paths reference
     # (transitively) — internal/JWT-only model shapes must not leak.
     import json
