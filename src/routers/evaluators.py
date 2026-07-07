@@ -499,7 +499,7 @@ async def update_evaluator_endpoint(
     ),
     ctx: OrgContext = Depends(get_current_org),
 ):
-    """Update an evaluator."""
+    """Update an evaluator, the judge used to grade outputs."""
     existing = _visible_or_404(get_evaluator(evaluator_uuid), ctx.org_uuid)
     _owner_check(existing, ctx.org_uuid)
     if payload.name is not None:

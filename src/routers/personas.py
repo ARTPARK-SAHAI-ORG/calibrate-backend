@@ -88,7 +88,7 @@ async def create_persona_endpoint(
 
 @router.get("", response_model=List[PersonaResponse], summary="List personas")
 async def list_personas(ctx: OrgContext = Depends(get_current_org)):
-    """List all personas."""
+    """List your personas, each with its config."""
     personas = get_all_personas(org_uuid=ctx.org_uuid)
     return personas
 
@@ -101,7 +101,7 @@ async def get_persona_endpoint(
     ),
     ctx: OrgContext = Depends(get_current_org),
 ):
-    """Get a persona."""
+    """Get one persona by ID, including its config."""
     persona = get_persona(persona_uuid)
     if not persona or persona.get("org_uuid") != ctx.org_uuid:
         raise HTTPException(status_code=404, detail="Persona not found")
@@ -117,7 +117,7 @@ async def update_persona_endpoint(
     ),
     ctx: OrgContext = Depends(get_current_org),
 ):
-    """Update a persona."""
+    """Update a persona, a simulated user profile used in simulations."""
     existing_persona = get_persona(persona_uuid)
     if not existing_persona or existing_persona.get("org_uuid") != ctx.org_uuid:
         raise HTTPException(status_code=404, detail="Persona not found")

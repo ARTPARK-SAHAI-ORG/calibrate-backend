@@ -2607,7 +2607,7 @@ async def delete_simulation_job_endpoint(
     ),
     ctx: OrgContext = Depends(get_current_org),
 ):
-    """Delete a simulation run."""
+    """Delete a simulation run and its results."""
     simulation_job = get_simulation_job(job_uuid)
     if not simulation_job:
         raise HTTPException(status_code=404, detail="Job not found")

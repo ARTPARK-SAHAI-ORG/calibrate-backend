@@ -80,7 +80,7 @@ async def create_annotator_endpoint(
     payload: AnnotatorCreate,
     ctx: OrgContext = Depends(get_current_org),
 ):
-    """Create an annotator."""
+    """Create an annotator, a human labeller who can be assigned annotation tasks."""
     try:
         with ensure_name_unique(
             "annotators", payload.name, ctx.org_uuid, entity="Annotator"

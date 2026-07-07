@@ -399,7 +399,7 @@ async def bulk_upload_tests(
 async def create_test_endpoint(
     test: TestCreate, ctx: OrgContext = Depends(get_org_jwt_or_api_key)
 ):
-    """Create a test."""
+    """Create a test that runs your agent against a conversation and grades its reply, tool calls, or the full conversation."""
     # Conversation tests have no evaluator fallback (unlike `response`, which can
     # synthesize the default LLM judge from legacy string criteria) — without a
     # linked simulation evaluator a run produces an empty calibrate config with
@@ -435,7 +435,7 @@ async def create_test_endpoint(
     summary="List tests",
 )
 async def list_tests(ctx: OrgContext = Depends(get_org_jwt_or_api_key)):
-    """List all tests, each with its linked evaluators."""
+    """List your tests, each with its linked evaluators."""
     tests = get_all_tests(org_uuid=ctx.org_uuid)
     return [_with_evaluators(t) for t in tests]
 
@@ -474,7 +474,7 @@ async def update_test_endpoint(
     ),
     ctx: OrgContext = Depends(get_org_jwt_or_api_key),
 ):
-    """Update a test."""
+    """Update a test's config or the evaluators it is graded by."""
     existing_test = get_test(test_uuid)
     if not existing_test or existing_test.get("org_uuid") != ctx.org_uuid:
         raise HTTPException(status_code=404, detail="Test not found")

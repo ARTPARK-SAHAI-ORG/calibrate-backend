@@ -56,15 +56,35 @@ remove the `Public API` tag as part of a docs-only pass.
 
 ### Endpoint heading (summary + docstring)
 
-One sentence. What the call does — full stop.
+One sentence that **adds what the entity is, or what the call returns** — never
+a bare restatement of the summary, never scope/impl filler. The summary is the
+verb + noun ("Create test"); the docstring must earn its place by saying
+something the title doesn't.
+
+- **BAD — bare restatement** (as useless as filler): summary "Create test",
+  docstring `"""Create a test."""`. The reader learned nothing.
+- **GOOD — adds what the entity is**: `"""Create a test that runs your agent
+  against a conversation and grades its reply, tool calls, or the full
+  conversation."""`
+- **For GET/list/poll, add what you get back**: `"""Poll a test run for its
+  status, per-case results, and judge verdicts."""` (cf. Coval: "Retrieve
+  detailed information about a specific simulation run.")
+- **For a lesser-known entity, gloss it in an appositive**: `"""Update a persona,
+  a simulated user profile used in simulations."""`
+- Still **one sentence**, still no scope filler ("in your workspace"), no field
+  enumeration ("name and/or config"), no implementation (deep-merge, job types).
+
+The model to imitate — Coval's descriptions add purpose, not padding:
+"Launch a new simulation run **to evaluate an agent against test cases using a
+persona**."
 
 | Route | Summary | Description |
 |---|---|---|
-| `GET /agents` | List agents | List all agents. |
-| `POST /agents/resolve` | Resolve agent names to IDs | Resolve agent names to their IDs. |
-| `POST /agent-tests/agent/{agent_uuid}/run` | Run agent tests | Run tests for an agent as a background job. |
+| `GET /agents` | List agents | List your agents, each with its type and config. |
+| `POST /agents/resolve` | Resolve agent names to IDs | Look up agent IDs by name, to reference agents in other calls. |
+| `POST /agent-tests/agent/{agent_uuid}/run` | Run agent tests | Run an agent's linked tests as a background job, returning a task ID to poll. |
 | `POST /agent-tests/run` | Run agent tests in batch | Run agent tests for every agent, or for a selected set. |
-| `GET /agent-tests/run/{task_id}` | Get test run status | Get the status and results of a test run. |
+| `GET /agent-tests/run/{task_id}` | Get test run status | Poll a test run for its status, per-case results, and judge verdicts. |
 
 **Never put in the endpoint heading:**
 
@@ -137,7 +157,7 @@ models** must match. Never invent `a1b2c3d4`-style placeholders.
 ### Public API checklist
 
 - [ ] `summary=` — imperative, no period, says **ID** not UUID
-- [ ] Docstring — **one sentence**, no fields/errors/auth/implementation
+- [ ] Docstring — **one sentence that adds what the entity is / what it returns** (not a bare restatement of the summary); no fields/errors/auth/impl/scope filler
 - [ ] Path params — purpose-first `description` + real UUID `examples`; no length constraints
 - [ ] Request fields — what it is + what omitting it does
 - [ ] Response fields — what each value means; error/shape detail here, not in heading

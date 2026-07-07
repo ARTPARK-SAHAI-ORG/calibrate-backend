@@ -243,7 +243,7 @@ async def create_annotation_task_endpoint(
     payload: AnnotationTaskCreate,
     ctx: OrgContext = Depends(get_current_org),
 ):
-    """Create an annotation task."""
+    """Create an annotation task for annotators to label items against evaluators."""
     if payload.evaluator_ids:
         for evaluator_id in payload.evaluator_ids:
             _ensure_owned_evaluator(evaluator_id, ctx.org_uuid)
@@ -327,7 +327,7 @@ async def update_annotation_task_endpoint(
     payload: AnnotationTaskUpdate = ...,
     ctx: OrgContext = Depends(get_current_org),
 ):
-    """Update an annotation task."""
+    """Update an annotation task, a labelling task for annotators."""
     _ensure_owned_task(task_uuid, ctx.org_uuid)
     with ensure_name_unique(
         "annotation_tasks",

@@ -106,7 +106,7 @@ async def create_key(
     request: CreateApiKeyRequest,
     ctx: OrgContext = Depends(get_current_org),
 ):
-    """Create an API key."""
+    """Create an API key for programmatic access to the API."""
     raw_key, key_prefix = generate_api_key()
     row = create_api_key(
         org_uuid=ctx.org_uuid,
@@ -133,7 +133,7 @@ async def revoke_key(
     ),
     ctx: OrgContext = Depends(get_current_org),
 ):
-    """Revoke an API key."""
+    """Revoke an API key so it can no longer authenticate requests."""
     if get_api_key(key_uuid, ctx.org_uuid) is None:
         raise HTTPException(status_code=404, detail="API key not found")
     soft_delete_api_key(key_uuid, ctx.org_uuid)

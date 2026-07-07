@@ -78,7 +78,7 @@ async def create_scenario_endpoint(
 
 @router.get("", response_model=List[ScenarioResponse], summary="List scenarios")
 async def list_scenarios(ctx: OrgContext = Depends(get_current_org)):
-    """List all scenarios."""
+    """List your scenarios, each with its config."""
     scenarios = get_all_scenarios(org_uuid=ctx.org_uuid)
     return scenarios
 
@@ -91,7 +91,7 @@ async def get_scenario_endpoint(
     ),
     ctx: OrgContext = Depends(get_current_org),
 ):
-    """Get a scenario."""
+    """Get one scenario by ID, including its config."""
     scenario = get_scenario(scenario_uuid)
     if not scenario or scenario.get("org_uuid") != ctx.org_uuid:
         raise HTTPException(status_code=404, detail="Scenario not found")
@@ -107,7 +107,7 @@ async def update_scenario_endpoint(
     ),
     ctx: OrgContext = Depends(get_current_org),
 ):
-    """Update a scenario."""
+    """Update a scenario, the situation and goal a simulation plays out."""
     existing_scenario = get_scenario(scenario_uuid)
     if not existing_scenario or existing_scenario.get("org_uuid") != ctx.org_uuid:
         raise HTTPException(status_code=404, detail="Scenario not found")

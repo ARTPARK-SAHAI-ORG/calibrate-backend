@@ -573,7 +573,7 @@ async def create_agent_test_links(agent_tests: AgentTestsCreate):
     "", response_model=List[AgentTestResponse], summary="List agent-test links"
 )
 async def list_agent_tests():
-    """List all agent-test links."""
+    """List which tests are linked to which agents."""
     links = get_all_agent_tests()
     return links
 
@@ -768,7 +768,7 @@ async def get_test_agents(
 
 @router.delete("", summary="Unlink test from agent")
 async def delete_agent_test_link(agent_test: AgentTestDelete):
-    """Unlink a test from an agent."""
+    """Unlink a test from an agent so it no longer runs for that agent."""
     deleted = remove_test_from_agent(agent_test.agent_uuid, agent_test.test_uuid)
     if not deleted:
         raise HTTPException(status_code=404, detail="Agent-test link not found")
@@ -2153,7 +2153,7 @@ async def run_agent_test(
     request: RunTestRequest = ...,
     ctx: OrgContext = Depends(get_org_jwt_or_api_key),
 ):
-    """Run tests for an agent as a background job."""
+    """Run an agent's linked tests as a background job, returning a task ID to poll."""
     # Public API (auth via get_org_jwt_or_api_key). Verify the agent exists and
     # belongs to the caller's workspace (404 otherwise).
     agent = get_agent(agent_uuid)
@@ -2375,7 +2375,7 @@ async def get_agent_test_run_status(
     ),
     ctx: OrgContext = Depends(get_org_jwt_or_api_key),
 ):
-    """Get the status and results of a test run."""
+    """Poll a test run for its status, per-case results, and judge verdicts."""
     # Public API (auth via get_org_jwt_or_api_key); ownership enforced below.
     job = _load_owned_agent_test_job(task_id, ctx)
 
