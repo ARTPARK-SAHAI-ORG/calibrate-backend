@@ -71,7 +71,7 @@ class TestCreate(BaseModel):
     )
     config: Optional[Dict[str, Any]] = Field(
         None,
-        description="Calibrate test config (`history`, `evaluation`, optional `settings`). Omit to create an empty shell to fill in later",
+        description="Calibrate test config (`history`, `evaluation`, optional `settings`). Omit to create the test with no config and set it later via update",
     )
     evaluators: Optional[List[EvaluatorRef]] = Field(
         None,
