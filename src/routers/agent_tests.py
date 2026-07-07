@@ -380,7 +380,7 @@ class TestCaseResult(BaseModel):
     )
     latency_ms: Optional[float] = Field(
         None,
-        description="Response latency in milliseconds for the agent under test, not the judge",
+        description="Response latency in milliseconds for the agent under test",
     )
     cost: Optional[float] = Field(
         None,
