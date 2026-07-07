@@ -165,7 +165,7 @@ class PublicTestRunResponse(BaseModel):
     # or token usage reported).
     latency_ms: Optional[Dict[str, Any]] = Field(
         None,
-        description="Aggregated latency (`{p50, p95, p99, count}`). `null` for eval-only runs or when not reported",
+        description="Aggregated latency (`{p50, p95, p99, count}`). `null` when not reported",
     )
     cost: Optional[Dict[str, Any]] = Field(
         None,

@@ -379,7 +379,7 @@ class TestCaseResult(BaseModel):
     )
     latency_ms: Optional[float] = Field(
         None,
-        description="Response-generation latency in ms for the agent under test (not the judge). Present only for live runs. Null for in-progress and eval-only runs. Float, since external agents may self-report a fractional value",
+        description="Response-generation latency in milliseconds for the agent under test (not the judge). Present only for live runs. Null for in-progress runs. Float, since external agents may self-report a fractional value",
     )
     cost: Optional[float] = Field(
         None,
@@ -408,7 +408,7 @@ class TestRunStatusResponse(BaseModel):
     )
     latency_ms: Optional[Dict[str, Any]] = Field(
         None,
-        description="Aggregated response latency in milliseconds: `{p50, p95, p99, count}`. Null for eval-only runs",
+        description="Aggregated response latency in milliseconds: `{p50, p95, p99, count}`",
     )
     cost: Optional[Dict[str, Any]] = Field(
         None,
@@ -2438,7 +2438,7 @@ class ModelResult(BaseModel):
     )
     latency_ms: Optional[Dict[str, Any]] = Field(
         None,
-        description="Aggregated latency in milliseconds: `{p50, p95, p99, count}`. Null when calibrate omits it (eval-only/openai) or before this model's metrics are ready",
+        description="Aggregated latency in milliseconds: `{p50, p95, p99, count}`. Null before this model's metrics are ready",
     )
     cost: Optional[Dict[str, Any]] = Field(
         None, description="Aggregated cost `{mean, min, max, count}` (USD). Null when unavailable"
