@@ -212,10 +212,10 @@ optional fields default to `None` and their description says what omission means
 
 ```python
 class AgentCreate(BaseModel):
-    name: str = Field(description="Human-readable agent name, unique within the workspace")
+    name: str = Field(description="Name of the agent, unique within the workspace")
     type: Literal["agent", "connection"] = Field(
         "agent",
-        description="`agent` applies managed defaults; `connection` stores the config you supply as-is",
+        description="`agent` (built inside Calibrate) applies managed defaults. `connection` (your existing agent) stores the config you supply as-is",
     )
     config: dict[str, Any] | None = Field(
         None, description="Behavioral config. Deep-merged over defaults for `type=agent`; omit to use defaults"
@@ -320,6 +320,50 @@ cost: Optional[float] = Field(None, description="Per-case cost in USD, lifted fr
 # GOOD — the shape, the unit, done
 latency_ms: Optional[Dict[str, Any]] = Field(None, description="Aggregated response latency in milliseconds: `{p50, p95, p99, count}`")
 cost: Optional[float] = Field(None, description="Cost of this case in USD")
+```
+
+### Concise ≠ cryptic — write a natural phrase, not a two-word label
+
+Cutting filler does **not** mean compressing into terse shorthand. Each
+description should read as a plain, self-explanatory phrase a first-time reader
+understands without decoding. Prefer the natural sentence fragment over a clipped
+noun-label.
+
+```
+BAD (cryptic label)      GOOD (natural phrase)
+"Test ID"                "Unique ID for the test"
+"Test kind"              (the real gloss of what each value judges)
+"Creation timestamp"     "Timestamp when the test was created"
+"Calibrate test config"  "Config for the test (`history`, `evaluation`, ...)"
+```
+
+The bar: filler out, but enough words in to be unambiguous on its own. "Name of
+the test" over "Test name" when a whole model is being read top-to-bottom, so the
+fields read as consistent phrases rather than a telegram.
+
+### Reuse one constant for a description shared across models
+
+When the same field appears on several models (a `type`/`status` enum on the
+create, update, response, and bulk models), don't hand-copy the gloss into each —
+they drift (one gets the rich bulleted gloss, another degrades to "Test kind").
+Define a module-level constant and reference it everywhere, appending
+per-model context with `+` where needed:
+
+```python
+_TEST_TYPE_DESCRIPTION = (
+    "What the test judges:\n\n"
+    "- `response`: judges the generated reply\n"
+    "- `tool_call`: diffs the generated tool calls\n"
+    "- `conversation`: judges the full conversation"
+)
+
+class TestCreate(BaseModel):
+    type: TestType = Field(description=_TEST_TYPE_DESCRIPTION)
+
+class TestUpdate(BaseModel):
+    type: Optional[TestType] = Field(
+        None, description=_TEST_TYPE_DESCRIPTION + "\n\nImmutable. Omit, or send the existing value."
+    )
 ```
 
 ### Don't repeat the unit that's already in the field name

@@ -33,6 +33,15 @@ _EXAMPLE_AGENT_UUID = "a3b2c1d0-e5f4-3210-abcd-ef1234567890"
 
 TestType = Literal["response", "tool_call", "conversation"]
 
+# Shared across every `type` field (create/update/response/bulk) so the gloss
+# stays identical everywhere it renders.
+_TEST_TYPE_DESCRIPTION = (
+    "What the test judges:\n\n"
+    "- `response`: judges the generated reply\n"
+    "- `tool_call`: diffs the generated tool calls\n"
+    "- `conversation`: judges the full conversation"
+)
+
 # Each test type pins the evaluator_type it accepts. `conversation` tests judge whole
 # simulated conversations, so only `conversation` evaluators apply; `response`/`tool_call`
 # tests judge a single LLM reply, so only `llm` evaluators apply.
@@ -60,18 +69,11 @@ class EvaluatorRef(BaseModel):
 
 
 class TestCreate(BaseModel):
-    name: str = Field(description="Test name, unique within the workspace")
-    type: TestType = Field(
-        description=(
-            "What the test judges:\n\n"
-            "- `response`: judges the generated reply\n"
-            "- `tool_call`: diffs the generated tool calls\n"
-            "- `conversation`: judges the full conversation"
-        )
-    )
+    name: str = Field(description="Name of the test, unique within the workspace")
+    type: TestType = Field(description=_TEST_TYPE_DESCRIPTION)
     config: Optional[Dict[str, Any]] = Field(
         None,
-        description="Calibrate test config (`history`, `evaluation`, optional `settings`). Omit to create the test with no config and set it later via update",
+        description="Config for the test (`history`, `evaluation`, optional `settings`). Omit to create the test with no config and set it later via update",
     )
     evaluators: Optional[List[EvaluatorRef]] = Field(
         None,
@@ -83,7 +85,8 @@ class TestUpdate(BaseModel):
     name: Optional[str] = Field(None, description="New test name. Omit to leave unchanged")
     type: Optional[TestType] = Field(
         None,
-        description="Test type. Immutable, may only echo the existing value. A different value is rejected (400). Omit to leave unchanged",
+        description=_TEST_TYPE_DESCRIPTION
+        + "\n\nImmutable. Omit, or send the existing value. A different value is rejected (400).",
     )
     config: Optional[Dict[str, Any]] = Field(
         None, description="Replacement calibrate config. Omit to leave unchanged"
@@ -98,16 +101,16 @@ class TestResponse(BaseModel):
     uuid: str = Field(
         min_length=36,
         max_length=36,
-        description="Test ID",
+        description="Unique ID for the test",
         examples=[_EXAMPLE_TEST_UUID],
     )
-    name: str = Field(description="Test name")
-    type: TestType = Field(description="Test kind")
+    name: str = Field(description="Name of the test")
+    type: TestType = Field(description=_TEST_TYPE_DESCRIPTION)
     config: Optional[Dict[str, Any]] = Field(
-        None, description="Calibrate test config (`history`, `evaluation`, optional `settings`)"
+        None, description="Config for the test (`history`, `evaluation`, optional `settings`)"
     )
-    created_at: str = Field(description="Creation timestamp (ISO 8601 UTC)")
-    updated_at: str = Field(description="Last-update timestamp (ISO 8601 UTC)")
+    created_at: str = Field(description="Timestamp when the test was created (ISO 8601 UTC)")
+    updated_at: str = Field(description="Timestamp when the test was last updated (ISO 8601 UTC)")
     evaluators: List[Dict[str, Any]] = Field(
         default=[],
         description="Linked evaluators, resolved to their current live version at read time",
@@ -166,7 +169,9 @@ class BulkTestItem(BaseModel):
 
 
 class BulkTestUpload(BaseModel):
-    type: TestType = Field(description="Test kind applied to every item in the batch")
+    type: TestType = Field(
+        description=_TEST_TYPE_DESCRIPTION + "\n\nApplied to every test in the batch."
+    )
     tests: List[BulkTestItem] = Field(
         description=f"Test items to create (non-empty, max {500} per request, names unique within the batch)"
     )
