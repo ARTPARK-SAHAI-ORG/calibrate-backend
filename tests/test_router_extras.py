@@ -463,7 +463,7 @@ def test_create_conversation_test_requires_evaluator(client):
         headers=h,
     )
     assert resp.status_code == 400
-    assert "evaluator" in resp.json()["detail"].lower()
+    assert "evaluator" in resp.json()["error"]["message"].lower()
 
 
 def test_update_conversation_test_cannot_clear_evaluators(client):
@@ -490,7 +490,7 @@ def test_update_conversation_test_cannot_clear_evaluators(client):
         headers=h,
     )
     assert cleared.status_code == 400
-    assert "evaluator" in cleared.json()["detail"].lower()
+    assert "evaluator" in cleared.json()["error"]["message"].lower()
 
 
 # ---------------------------------------------------------------------------
