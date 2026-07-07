@@ -30,6 +30,7 @@ from db import (
     update_evaluator,
 )
 from llm_judge import render_template
+from utils import EvaluatorTypeLiteral, DataTypeLiteral
 
 router = APIRouter(prefix="/evaluators", tags=["evaluators"])
 
@@ -93,10 +94,6 @@ class EvaluatorVersionCreateRequest(EvaluatorVersionCreate):
     make_live: bool = Field(
         False, description="When `true`, immediately point the evaluator's live version at this new version"
     )
-
-
-EvaluatorTypeLiteral = Literal["tts", "stt", "llm", "llm-general", "conversation"]
-DataTypeLiteral = Literal["text", "audio"]
 
 
 class EvaluatorCreate(BaseModel):
