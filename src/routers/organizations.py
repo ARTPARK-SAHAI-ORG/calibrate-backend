@@ -40,7 +40,7 @@ class OrganizationResponse(BaseModel):
     )
     member_role: Optional[MemberRoleLiteral] = Field(
         None,
-        description="Your role in this workspace; `null` when not resolved",
+        description="Your role in this workspace. `null` when not resolved",
     )
     created_at: str = Field(description="When the workspace was created (ISO 8601 UTC)")
     updated_at: str = Field(description="When the workspace was last updated (ISO 8601 UTC)")
@@ -58,7 +58,7 @@ class AddMemberRequest(BaseModel):
     email: str = Field(
         ...,
         min_length=3,
-        description="Email of the person to add; a stub account is created if they have not signed up yet",
+        description="Email of the person to add. A stub account is created if they have not signed up yet",
     )
 
 

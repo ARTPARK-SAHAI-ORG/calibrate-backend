@@ -83,14 +83,14 @@ class TestUpdate(BaseModel):
     name: Optional[str] = Field(None, description="New test name. Omit to leave unchanged")
     type: Optional[TestType] = Field(
         None,
-        description="Test type. Immutable — may only echo the existing value; a different value is rejected (400). Omit to leave unchanged",
+        description="Test type. Immutable — may only echo the existing value. A different value is rejected (400). Omit to leave unchanged",
     )
     config: Optional[Dict[str, Any]] = Field(
         None, description="Replacement calibrate config. Omit to leave unchanged"
     )
     evaluators: Optional[List[EvaluatorRef]] = Field(
         None,
-        description="Replacement evaluator links (replaces the existing set). Omit to leave links unchanged; an empty list clears them (**rejected for `conversation` tests**)",
+        description="Replacement evaluator links (replaces the existing set). Omit to leave links unchanged. An empty list clears them (**rejected for `conversation` tests**)",
     )
 
 

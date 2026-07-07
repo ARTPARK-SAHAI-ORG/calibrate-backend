@@ -78,10 +78,10 @@ class EvaluatorVersionCreate(BaseModel):
  """
 
     judge_model: str = Field(description="Model that runs the judge (e.g. an OpenRouter model slug)")
-    system_prompt: str = Field(description="Judge system prompt; may contain `{{variable}}` placeholders")
+    system_prompt: str = Field(description="Judge system prompt. May contain `{{variable}}` placeholders")
     output_config: Optional[OutputConfig] = Field(
         None,
-        description="Rubric definition. **Required for `output_type=rating`**; omit for `binary` to use the default Correct/Wrong scale",
+        description="Rubric definition. **Required for `output_type=rating`**. Omit for `binary` to use the default Correct/Wrong scale",
     )
     variables: Optional[List[VariableSpec]] = Field(
         None, description="Declared prompt variables. Omit if the prompt has no `{{placeholders}}`"
@@ -104,15 +104,15 @@ class EvaluatorCreate(BaseModel):
         description="Semantic category: `tts` judges TTS audio, `stt` one transcript, `llm` a reply with history, `llm-general` a standalone input->output pair, `conversation` a full conversation",
     )
     data_type: DataTypeLiteral = Field(
-        "text", description="Medium the judge consumes; the only field gating audio routing"
+        "text", description="Medium the judge consumes. The only field gating audio routing"
     )
     kind: Literal["single", "side_by_side"] = Field(
-        "single", description="`single` judges one output; `side_by_side` compares two and picks a winner"
+        "single", description="`single` judges one output. `side_by_side` compares two and picks a winner"
     )
     output_type: Literal["binary", "rating"] = Field(
-        "binary", description="`binary` = pass/fail; `rating` = numeric scale (requires `version.output_config.scale`)"
+        "binary", description="`binary` = pass/fail. `rating` = numeric scale (requires `version.output_config.scale`)"
     )
-    version: EvaluatorVersionCreate = Field(description="Initial version (prompt, model, rubric, variables); set as live on creation")
+    version: EvaluatorVersionCreate = Field(description="Initial version (prompt, model, rubric, variables). Set as live on creation")
 
     @model_validator(mode="after")
     def _validate_output(self):
@@ -155,7 +155,7 @@ class EvaluatorVersionResponse(BaseModel):
     judge_model: str = Field(description="Model that runs the judge for this version")
     system_prompt: str = Field(description="Judge system prompt, with `{{variable}}` placeholders unrendered")
     output_config: Optional[Dict[str, Any]] = Field(
-        None, description="Rubric for this version; binary versions fall back to the default Correct/Wrong scale"
+        None, description="Rubric for this version. Binary versions fall back to the default Correct/Wrong scale"
     )
     variables: Optional[List[Dict[str, Any]]] = Field(None, description="Declared prompt variables, or null if none")
     created_at: str = Field(description="Version creation timestamp (ISO 8601 UTC)")
@@ -190,15 +190,15 @@ class EvaluatorResponseBase(BaseModel):
         None,
         min_length=36,
         max_length=36,
-        description="Creator user ID; null for seeded defaults visible in your workspace but not editable by you",
+        description="Creator user ID. Null for seeded defaults visible in your workspace but not editable by you",
         examples=[_EXAMPLE_USER_UUID],
     )
-    slug: Optional[str] = Field(None, description="Stable slug for seeded defaults; null for custom evaluators")
+    slug: Optional[str] = Field(None, description="Stable slug for seeded defaults. Null for custom evaluators")
     live_version_id: Optional[str] = Field(
         None,
         min_length=36,
         max_length=36,
-        description="ID of the current live version; null if none is set",
+        description="ID of the current live version. Null if none is set",
         examples=[_EXAMPLE_VERSION_UUID],
     )
     created_at: str = Field(description="Creation timestamp (ISO 8601 UTC)")
@@ -209,7 +209,7 @@ class EvaluatorResponse(EvaluatorResponseBase):
     # List shape: no `versions[]` here, so we inline the live version for
     # the FE.
     live_version: Optional[EvaluatorVersionResponse] = Field(
-        None, description="Full live version inlined for list views; null if the evaluator has no live version"
+        None, description="Full live version inlined for list views. Null if the evaluator has no live version"
     )
 
 
@@ -221,7 +221,7 @@ class EvaluatorDetailResponse(EvaluatorResponseBase):
     # scanning `versions[]` by uuid.
     versions: List[EvaluatorVersionResponse] = Field(description="Full version history, oldest first")
     live_version_index: Optional[int] = Field(
-        None, description="Array position of the live version within `versions[]`; null if unset or unresolved"
+        None, description="Array position of the live version within `versions[]`. Null if unset or unresolved"
     )
 
 
@@ -404,7 +404,7 @@ class DefaultPromptResponse(BaseModel):
         description="Evaluation purpose this default prompt targets"
     )
     name: Optional[str] = Field(
-        None, description="Seeded evaluator name; null for `conversation` (template only, no seeded evaluator)"
+        None, description="Seeded evaluator name. Null for `conversation` (template only, no seeded evaluator)"
     )
     system_prompt: str = Field(description="Suggested judge system prompt for prefilling the create form")
     judge_model: str = Field(description="Suggested judge model")

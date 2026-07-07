@@ -83,7 +83,7 @@ class ToolResponse(BaseModel):
     name: str = Field(description="Human-readable tool name")
     description: str = Field(description="What the tool does")
     config: Dict[str, Any] | None = Field(
-        None, description="Tool configuration; null when the tool has none"
+        None, description="Tool configuration. Null when the tool has none"
     )
     created_at: str = Field(description="When the tool was created (ISO 8601 UTC)")
     updated_at: str = Field(description="When the tool was last updated (ISO 8601 UTC)")
@@ -98,10 +98,10 @@ class AgentResponse(BaseModel):
     )
     name: str = Field(description="Human-readable agent name")
     type: Literal["agent", "connection"] = Field(
-        description="`agent` applies managed defaults; `connection` stores the config you supply as-is"
+        description="`agent` applies managed defaults. `connection` stores the config you supply as-is"
     )
     config: Dict[str, Any] | None = Field(
-        None, description="Behavioral config; null when the agent has none"
+        None, description="Behavioral config. Null when the agent has none"
     )
     created_at: str = Field(description="When the agent was created (ISO 8601 UTC)")
     updated_at: str = Field(description="When the agent was last updated (ISO 8601 UTC)")

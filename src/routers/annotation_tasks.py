@@ -141,7 +141,7 @@ _EXAMPLE_ID = "f47ac10b-58cc-4372-a567-0e02b2c3d479"
 class AnnotationTaskCreate(BaseModel):
     name: str = Field(description="Human-readable task name, unique within your workspace")
     type: AnnotationTaskTypeLiteral = Field(
-        description="Task type; governs item payload shape and applicable evaluators"
+        description="Task type. Governs item payload shape and applicable evaluators"
     )
     description: Optional[str] = Field(
         None, description="Free-text task description. Omit for none"
@@ -186,11 +186,11 @@ class AnnotationTaskResponse(BaseModel):
     # empty (use the dedicated /items and /jobs endpoints for those views).
     items: List[Dict[str, Any]] = Field(
         default=[],
-        description="Task items with per-item agreement stats. Populated on the single-task fetch only; empty on the list endpoint",
+        description="Task items with per-item agreement stats. Populated on the single-task fetch only. Empty on the list endpoint",
     )
     jobs: List[Dict[str, Any]] = Field(
         default=[],
-        description="Labelling jobs for the task. Populated on the single-task fetch only; empty on the list endpoint",
+        description="Labelling jobs for the task. Populated on the single-task fetch only. Empty on the list endpoint",
     )
 
 
@@ -443,7 +443,7 @@ async def reorder_task_evaluators(
 ):
     """Reorder evaluators linked to a task.
 
- The request must list every currently linked evaluator ID in the desired order; this endpoint reorders only and does not link or unlink evaluators."""
+ The request must list every currently linked evaluator ID in the desired order. This endpoint reorders only and does not link or unlink evaluators."""
     _ensure_owned_task(task_uuid, ctx.org_uuid)
     try:
         reorder_evaluators_for_annotation_task(task_uuid, payload.evaluator_ids)
@@ -503,7 +503,7 @@ class AnnotatedItemsCheckRequest(BaseModel):
         examples=[_EXAMPLE_ID],
     )
     names: List[str] = Field(
-        description="Item names in upload row order (`payload.name`); the response reports back by row index"
+        description="Item names in upload row order (`payload.name`). The response reports back by row index"
     )
 
 
@@ -918,10 +918,10 @@ def _resolve_target_item_ids(
       (same field/match rule as the summary endpoint's `?q=`). The explicit
       `item_ids` list is ignored — `select_all` is the source of truth so
       stale checkboxes can't sneak through.
-    - `select_all=False`: returns `item_ids` verbatim; `q` is ignored.
+    - `select_all=False`: returns `item_ids` verbatim. `q` is ignored.
 
     Pass `items` to reuse an already-loaded task item list (avoids a second
-    `get_annotation_items_for_task` round-trip); omitted ⇒ fetched lazily and
+    `get_annotation_items_for_task` round-trip). Omitted ⇒ fetched lazily and
     only when `select_all=True`.
 
     Returns the raw resolved list (may be empty). Callers decide whether
@@ -945,7 +945,7 @@ def _resolve_target_item_ids(
 class BulkDeleteItemsRequest(BaseModel):
     item_ids: List[str] = Field(
         default=[],
-        description="Item IDs to delete. **Required (non-empty) when `select_all=false`**; ignored when `select_all=true`",
+        description="Item IDs to delete. **Required (non-empty) when `select_all=false`**. Ignored when `select_all=true`",
     )
     select_all: bool = Field(
         False,
@@ -1035,7 +1035,7 @@ class CreateJobsRequest(BaseModel):
     )
     item_ids: List[str] = Field(
         default=[],
-        description="Item IDs to assign. **Required (non-empty) when `select_all=false`**; ignored when `select_all=true`",
+        description="Item IDs to assign. **Required (non-empty) when `select_all=false`**. Ignored when `select_all=true`",
     )
     select_all: bool = Field(
         False,
@@ -1047,7 +1047,7 @@ class CreateJobsRequest(BaseModel):
     )
     evaluator_ids: Optional[List[str]] = Field(
         None,
-        description="Optional subset of the task's linked evaluators to show in these jobs (must be a subset of the live links; empty list ⇒ 400). Applies to every annotator's job. Omit (`None`) to snapshot every linked evaluator",
+        description="Optional subset of the task's linked evaluators to show in these jobs (must be a subset of the live links. Empty list ⇒ 400). Applies to every annotator's job. Omit (`None`) to snapshot every linked evaluator",
     )
 
 
@@ -1251,7 +1251,7 @@ async def delete_annotation_job_endpoint(
 
 class AnnotationJobVisibilityRequest(BaseModel):
     is_public: bool = Field(
-        description="`true` opts the job into a read-only public viewer link; `false` disables it"
+        description="`true` opts the job into a read-only public viewer link. `false` disables it"
     )
 
 
@@ -1259,7 +1259,7 @@ class AnnotationJobVisibilityResponse(BaseModel):
     is_public: bool = Field(description="Current public-viewer state after the toggle")
     view_token: Optional[str] = Field(
         None,
-        description="Read-only viewer token for the public labelling job viewer. Present when public; null when disabled",
+        description="Read-only viewer token for the public labelling job viewer. Present when public. Null when disabled",
     )
 
 
@@ -1401,11 +1401,11 @@ class EvaluatorRunStartRequest(BaseModel):
     )
     item_ids: List[str] = Field(
         default=[],
-        description="Item IDs to run on. **Required (non-empty) when `select_all=false`**; ignored when `select_all=true`",
+        description="Item IDs to run on. **Required (non-empty) when `select_all=false`**. Ignored when `select_all=true`",
     )
     select_all: bool = Field(
         False,
-        description="When `true`, run on every item in the task (optionally filtered by `q`); the live set is snapshotted at submission time",
+        description="When `true`, run on every item in the task (optionally filtered by `q`). The live set is snapshotted at submission time",
     )
     q: Optional[str] = Field(
         None,
@@ -2089,7 +2089,7 @@ async def delete_evaluator_run_job(
 
 class EvaluatorRunVisibilityRequest(BaseModel):
     is_public: bool = Field(
-        description="`true` enables a public share link for the completed run; `false` disables it"
+        description="`true` enables a public share link for the completed run. `false` disables it"
     )
 
 
@@ -2097,7 +2097,7 @@ class EvaluatorRunVisibilityResponse(BaseModel):
     is_public: bool = Field(description="Current public-sharing state after the toggle")
     share_token: Optional[str] = Field(
         None,
-        description="Public share token for the run. Present when public; `null` when disabled. Reused across off→on cycles",
+        description="Public share token for the run. Present when public. `null` when disabled. Reused across off→on cycles",
     )
 
 

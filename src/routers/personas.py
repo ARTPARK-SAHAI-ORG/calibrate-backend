@@ -117,7 +117,7 @@ async def update_persona_endpoint(
     ),
     ctx: OrgContext = Depends(get_current_org),
 ):
-    """Update a persona's fields. Only the provided fields change; omitted fields are left as-is."""
+    """Update a persona's fields. Only the provided fields change. Omitted fields are left as-is."""
     existing_persona = get_persona(persona_uuid)
     if not existing_persona or existing_persona.get("org_uuid") != ctx.org_uuid:
         raise HTTPException(status_code=404, detail="Persona not found")

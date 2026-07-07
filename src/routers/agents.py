@@ -193,7 +193,7 @@ def _default_agent_config() -> Dict[str, Any]:
 def _deep_merge(base: Dict[str, Any], override: Dict[str, Any]) -> Dict[str, Any]:
     """Recursively merge `override` into a copy of `base`. Caller wins per key.
 
-    Dict-vs-dict at the same key recurses; anything else (scalar, list, None)
+    Dict-vs-dict at the same key recurses. Anything else (scalar, list, None)
     in `override` replaces the corresponding `base` value entirely.
     """
     result = copy.deepcopy(base)
@@ -237,11 +237,11 @@ class AgentCreate(BaseModel):
     name: str = Field(description="Human-readable agent name, unique within the workspace")
     type: Literal["agent", "connection"] = Field(
         "agent",
-        description="`agent` applies managed defaults deep-merged under any supplied `config`; `connection` stores the config you supply as-is (must eventually contain `agent_url`)",
+        description="`agent` applies managed defaults deep-merged under any supplied `config`. `connection` stores the config you supply as-is (must eventually contain `agent_url`)",
     )
     config: Optional[Dict[str, Any]] = Field(
         None,
-        description="Behavioral config (system_prompt, llm, stt, tts, settings, …). Deep-merged over defaults for `type=agent`; stored as-is for `type=connection`. Omit for `type=agent` to use defaults",
+        description="Behavioral config (system_prompt, llm, stt, tts, settings, …). Deep-merged over defaults for `type=agent`. Stored as-is for `type=connection`. Omit for `type=agent` to use defaults",
     )
 
 
@@ -326,7 +326,7 @@ class ResolveAgentNamesResponse(BaseModel):
 class VerifyConnectionRequest(BaseModel):
     agent_url: Optional[str] = Field(
         None,
-        description="Public HTTP(S) agent endpoint to verify. **Required for the pre-save endpoint** (no agent ID); ignored by the saved-agent endpoint, which reads `agent_url` from the stored config",
+        description="Public HTTP(S) agent endpoint to verify. **Required for the pre-save endpoint** (no agent ID). Ignored by the saved-agent endpoint, which reads `agent_url` from the stored config",
     )
     agent_headers: Optional[Dict[str, str]] = Field(
         None,
@@ -334,7 +334,7 @@ class VerifyConnectionRequest(BaseModel):
     )
     model: Optional[str] = Field(
         None,
-        description="Model to verify. Omit for a basic connection check; provide it for a model-specific check required before benchmarking that model",
+        description="Model to verify. Omit for a basic connection check. Provide it for a model-specific check required before benchmarking that model",
     )
     messages: Optional[List[Dict[str, str]]] = Field(
         None,
@@ -347,11 +347,11 @@ class VerifyConnectionResponse(BaseModel):
         description="True if the agent responded successfully to the verification probe"
     )
     error: Optional[str] = Field(
-        None, description="Failure reason; null on success"
+        None, description="Failure reason. Null on success"
     )
     sample_response: Optional[Dict[str, Any]] = Field(
         None,
-        description="Sample output returned by the agent during verification; null when unavailable",
+        description="Sample output returned by the agent during verification. Null when unavailable",
     )
 
 

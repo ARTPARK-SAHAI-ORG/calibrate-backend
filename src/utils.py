@@ -193,7 +193,7 @@ class EvaluatorRunEntry(BaseModel):
         description="Pinned evaluator version ID at job-submit time",
     )
     output_type: Optional[OutputTypeLiteral] = Field(
-        None, description="Output type; drives per-row typing"
+        None, description="Output type. Drives per-row typing"
     )
 
 
@@ -509,7 +509,7 @@ def upload_top_level_files_to_s3(
 ) -> None:
     """Upload only regular files directly under ``local_dir`` (e.g. run-level ``logs``, ``leaderboard.csv``).
 
-    Subdirectories are ignored; use :func:`upload_directory_tree_to_s3` for a full tree.
+    Subdirectories are ignored. Use :func:`upload_directory_tree_to_s3` for a full tree.
     """
     if not local_dir or not local_dir.is_dir():
         return
@@ -1158,7 +1158,7 @@ _NUMERIC_ROW_KEYS = frozenset(
 
 
 def _coerce_numeric(value: Any) -> Any:
-    """Return float(value) when the string parses as numeric; otherwise unchanged."""
+    """Return float(value) when the string parses as numeric. Otherwise unchanged."""
     if value is None or isinstance(value, (int, float, bool)):
         return value
     if isinstance(value, str):
@@ -1259,7 +1259,7 @@ def post_process_provider_results(
        the only string we *know* identifies an evaluator output column.
        Falls back to the snapshot's display name when the map is missing
        (in-progress jobs whose config.json hasn't landed, or pre-migration
-       legacy data); the fallback path is vulnerable to collisions with
+       legacy data). The fallback path is vulnerable to collisions with
        built-in row columns (``id``, ``gt``, ``pred``, ``wer``, ...) and
        with duplicate evaluator names, so it's a back-compat path only.
     4. Values are typed: binary → ``bool``, rating → numeric. Known numeric
@@ -1445,7 +1445,7 @@ def compute_share_token_toggle(
       the FE never displays a share URL while the link is dead.
 
     ``token_factory`` defaults to ``str(uuid.uuid4())`` for parity with
-    the historical STT/TTS/annotation-eval shapes; pass
+    the historical STT/TTS/annotation-eval shapes. Pass
     ``secrets.token_urlsafe(24)`` for the labelling-job ``view_token``.
     """
     if token_factory is None:

@@ -74,7 +74,7 @@ class ApiKeyResponse(BaseModel):
     )
     last_used_at: Optional[str] = Field(
         None,
-        description="When the key last authenticated a request; `null` if never used",
+        description="When the key last authenticated a request. `null` if never used",
     )
     created_at: str = Field(description="When the key was created (ISO 8601 UTC)")
     updated_at: str = Field(description="When the key was last updated (ISO 8601 UTC)")
@@ -95,7 +95,7 @@ class ApiKeyResponse(BaseModel):
 
 class CreateApiKeyResponse(ApiKeyResponse):
     key: str = Field(
-        description="The API key. **Returned exactly once at creation** — store it now; it cannot be retrieved again"
+        description="The API key. **Returned exactly once at creation** — store it now. It cannot be retrieved again"
     )
 
 

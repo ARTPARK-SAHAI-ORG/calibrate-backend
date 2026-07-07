@@ -211,7 +211,7 @@ class TestResponse(BaseModel):
         description="Test type"
     )
     config: Dict[str, Any] | None = Field(
-        None, description="Test configuration; null when the test has none"
+        None, description="Test configuration. Null when the test has none"
     )
     created_at: str = Field(description="Creation timestamp (ISO 8601 UTC)")
     updated_at: str = Field(description="Last-update timestamp (ISO 8601 UTC)")
@@ -229,7 +229,7 @@ class AgentResponse(BaseModel):
         description="`agent` (managed defaults) or `connection` (config you supply)"
     )
     config: Dict[str, Any] | None = Field(
-        None, description="Behavioral config; null when the agent has none"
+        None, description="Behavioral config. Null when the agent has none"
     )
     created_at: str = Field(description="Creation timestamp (ISO 8601 UTC)")
     updated_at: str = Field(description="Last-update timestamp (ISO 8601 UTC)")
@@ -308,20 +308,20 @@ class BatchTestRunResponse(BaseModel):
 class ToolCallOutput(BaseModel):
     tool: str = Field(description="Name of the tool the agent called")
     arguments: Optional[Dict[str, Any]] = Field(
-        None, description="Arguments the agent passed to the tool; null if none"
+        None, description="Arguments the agent passed to the tool. Null if none"
     )
     output: Optional[Any] = Field(
         None,
-        description="Tool execution result (any JSON value). Present only for agent-connection tests where the external agent runs the tool and echoes its return value; null for calibrate-agent mode (tools are declared, never executed) or agents that don't echo it",
+        description="Tool execution result (any JSON value). Present only for agent-connection tests where the external agent runs the tool and echoes its return value. Null for calibrate-agent mode (tools are declared, never executed) or agents that don't echo it",
     )
 
 
 class TestOutput(BaseModel):
     response: Optional[str] = Field(
-        None, description="The agent's generated reply; null for tool-call-only cases"
+        None, description="The agent's generated reply. Null for tool-call-only cases"
     )
     tool_calls: Optional[List[ToolCallOutput]] = Field(
-        None, description="Tool calls the agent generated; null when it made none"
+        None, description="Tool calls the agent generated. Null when it made none"
     )
 
 
@@ -330,18 +330,18 @@ class JudgeResult(BaseModel):
         None,
         min_length=36,
         max_length=36,
-        description="ID of the evaluator that produced this verdict; null for legacy runs or when the evaluator can't be resolved from the snapshot",
+        description="ID of the evaluator that produced this verdict. Null for legacy runs or when the evaluator can't be resolved from the snapshot",
     )
     reasoning: Optional[str] = Field(
         None, description="Judge's rationale for this verdict"
     )
     match: Optional[bool] = Field(
         None,
-        description="Binary evaluator pass/fail. **Set only for binary evaluators** (else null; `score` is set instead)",
+        description="Binary evaluator pass/fail. **Set only for binary evaluators** (else null — `score` is set instead)",
     )
     score: Optional[float] = Field(
         None,
-        description="Rating evaluator numeric score. **Set only for rating evaluators** (else null; `match` is set instead)",
+        description="Rating evaluator numeric score. **Set only for rating evaluators** (else null — `match` is set instead)",
     )
     value_name: Optional[str] = Field(
         None,
@@ -349,7 +349,7 @@ class JudgeResult(BaseModel):
     )
     variable_values: Optional[Dict[str, Any]] = Field(
         None,
-        description="`{{var}}` substitutions used for this evaluator on this test case, frozen at submission time; null when none",
+        description="`{{var}}` substitutions used for this evaluator on this test case, frozen at submission time. Null when none",
     )
 
 
@@ -358,14 +358,14 @@ class TestCaseResult(BaseModel):
         None, description="Identifier of the test case within the run"
     )
     name: Optional[str] = Field(
-        None, description="Test name; present during in-progress and done states"
+        None, description="Test name. Present during in-progress and done states"
     )
     passed: Optional[bool] = Field(
         None, description="Whether the case passed. Present only when done"
     )
     reasoning: Optional[str] = Field(
         None,
-        description="LLM judge reasoning or deterministic tool-call diff; null for passing tool-call tests",
+        description="LLM judge reasoning or deterministic tool-call diff. Null for passing tool-call tests",
     )
     output: Optional[TestOutput] = Field(
         None, description="The agent's output for this case. Present only when done"
@@ -375,11 +375,11 @@ class TestCaseResult(BaseModel):
     )
     judge_results: Optional[List[JudgeResult]] = Field(
         None,
-        description="Per-evaluator verdicts for response/conversation tests; null for tool-call tests or in-progress rows",
+        description="Per-evaluator verdicts for response/conversation tests. Null for tool-call tests or in-progress rows",
     )
     latency_ms: Optional[float] = Field(
         None,
-        description="Response-generation latency in ms for the agent under test (not the judge). Present only for live runs; null for in-progress and eval-only runs. Float, since external agents may self-report a fractional value",
+        description="Response-generation latency in ms for the agent under test (not the judge). Present only for live runs. Null for in-progress and eval-only runs. Float, since external agents may self-report a fractional value",
     )
     cost: Optional[float] = Field(
         None,
@@ -398,13 +398,13 @@ class TestRunStatusResponse(BaseModel):
         description="Current status of the test run"
     )
     total_tests: Optional[int] = Field(
-        None, description="Total number of test cases; null until known"
+        None, description="Total number of test cases. Null until known"
     )
     passed: Optional[int] = Field(
-        None, description="Number of test cases that passed; null until done"
+        None, description="Number of test cases that passed. Null until done"
     )
     failed: Optional[int] = Field(
-        None, description="Number of test cases that failed; null until done"
+        None, description="Number of test cases that failed. Null until done"
     )
     latency_ms: Optional[Dict[str, Any]] = Field(
         None,
@@ -423,15 +423,15 @@ class TestRunStatusResponse(BaseModel):
         description="Top-level evaluator block (name/description/output_type/rubric) shared across every `judge_results` row, which references back via `evaluator_uuid` so the rubric isn't duplicated per case",
     )
     results: Optional[List[TestCaseResult]] = Field(
-        None, description="Per-test-case results; null until available"
+        None, description="Per-test-case results. Null until available"
     )
     results_s3_prefix: Optional[str] = Field(
-        None, description="S3 key prefix for the raw result artifacts; null until uploaded"
+        None, description="S3 key prefix for the raw result artifacts. Null until uploaded"
     )
     error: bool = Field(False, description="True if the run failed")
     is_public: bool = Field(False, description="Whether the run is shared publicly")
     share_token: Optional[str] = Field(
-        None, description="Public share token; null unless the run is public"
+        None, description="Public share token. Null unless the run is public"
     )
 
 
@@ -451,39 +451,39 @@ class AgentTestRunListItem(BaseModel):
     type: AgentTestJobType = Field(description="Job type")
     updated_at: str = Field(description="Last-update timestamp (ISO 8601 UTC)")
     evaluators: Optional[List[Dict[str, Any]]] = Field(
-        None, description="Top-level evaluator block; see `TestRunStatusResponse.evaluators`"
+        None, description="Top-level evaluator block. See `TestRunStatusResponse.evaluators`"
     )
     total_tests: Optional[int] = Field(
-        None, description="Total test cases (unit-test runs); null for benchmarks or until known"
+        None, description="Total test cases (unit-test runs). Null for benchmarks or until known"
     )
-    passed: Optional[int] = Field(None, description="Count of passing cases; null until done")
-    failed: Optional[int] = Field(None, description="Count of failing cases; null until done")
+    passed: Optional[int] = Field(None, description="Count of passing cases. Null until done")
+    failed: Optional[int] = Field(None, description="Count of failing cases. Null until done")
     results: Optional[List[TestCaseResult]] = Field(
-        None, description="Per-test-case results for unit-test runs; null otherwise"
+        None, description="Per-test-case results for unit-test runs. Null otherwise"
     )
     latency_ms: Optional[Dict[str, Any]] = Field(
         None,
-        description="Aggregated latency for unit-test runs; null for benchmarks (per-model on `model_results`)",
+        description="Aggregated latency for unit-test runs. Null for benchmarks (per-model on `model_results`)",
     )
     cost: Optional[Dict[str, Any]] = Field(
-        None, description="Aggregated cost for unit-test runs; null for benchmarks"
+        None, description="Aggregated cost for unit-test runs. Null for benchmarks"
     )
     total_tokens: Optional[Dict[str, Any]] = Field(
-        None, description="Aggregated token usage for unit-test runs; null for benchmarks"
+        None, description="Aggregated token usage for unit-test runs. Null for benchmarks"
     )
     model_results: Optional[List[Dict[str, Any]]] = Field(
-        None, description="Per-model results (benchmark runs); null for unit-test runs"
+        None, description="Per-model results (benchmark runs). Null for unit-test runs"
     )
     leaderboard_summary: Optional[List[Dict[str, Any]]] = Field(
-        None, description="Leaderboard rows comparing models (benchmark runs); null otherwise"
+        None, description="Leaderboard rows comparing models (benchmark runs). Null otherwise"
     )
     results_s3_prefix: Optional[str] = Field(
-        None, description="S3 key prefix for the raw result artifacts; null until uploaded"
+        None, description="S3 key prefix for the raw result artifacts. Null until uploaded"
     )
     error: bool = Field(False, description="True if the run failed")
     is_public: bool = Field(False, description="Whether the run is shared publicly")
     share_token: Optional[str] = Field(
-        None, description="Public share token; null unless the run is public"
+        None, description="Public share token. Null unless the run is public"
     )
 
 
@@ -760,7 +760,7 @@ class AgentTestBulkDelete(BaseModel):
         examples=[_EXAMPLE_AGENT_UUID],
     )
     test_uuids: List[str] = Field(
-        description="Tests to unlink from the agent; must be non-empty",
+        description="Tests to unlink from the agent. Must be non-empty",
         examples=[[_EXAMPLE_TEST_UUID]],
     )
 
@@ -794,7 +794,7 @@ class AgentTestsBulkDeleteAll(BaseModel):
         examples=[_EXAMPLE_AGENT_UUID],
     )
     test_uuids: List[str] = Field(
-        description="Tests to soft-delete; must be non-empty. Only tests linked to this agent in your workspace are deleted — others are skipped",
+        description="Tests to soft-delete. Must be non-empty. Only tests linked to this agent in your workspace are deleted — others are skipped",
         examples=[[_EXAMPLE_TEST_UUID]],
     )
 
@@ -1156,7 +1156,7 @@ def _parse_agent_test_results(results_data: Optional[List[dict]]) -> List[dict]:
     """Parse results.json data into the format expected by the API.
 
     `judge_results` is preserved as the raw calibrate-emitted dict
-    (``{<calibrate_name>: {reasoning, match|score}}``) for response-type tests; it
+    (``{<calibrate_name>: {reasoning, match|score}}``) for response-type tests. It
     is later converted to a structured list (with evaluator UUIDs and current DB
     names) by ``_enrich_test_results_with_evaluators`` at API read time.
     Tool-call tests have no ``judge_results`` from calibrate, so the field is None.
@@ -2045,7 +2045,7 @@ def _agent_connection_unverified(agent: Dict[str, Any]) -> bool:
     """True when a connection-type agent hasn't passed connection verification.
 
     Every test type runs the agent live, so an unverified connection means a run
-    would fail. The single-agent endpoint turns this into a 400; the batch
+    would fail. The single-agent endpoint turns this into a 400. The batch
     endpoints use it to skip-and-report rather than failing the whole batch.
     """
     agent_config = agent.get("config") or {}
@@ -2063,7 +2063,7 @@ def _launch_agent_test_run(
 
     Shared by the single-agent run endpoint and the batch run endpoints. Returns
     ``(task_id, status)``. The caller owns agent-ownership, connection-verified,
-    and non-empty ``tests`` checks; this just snapshots config and dispatches.
+    and non-empty ``tests`` checks. This just snapshots config and dispatches.
     """
     agent_uuid = agent["uuid"]
     org_uuid = agent.get("org_uuid")
@@ -2279,7 +2279,7 @@ def _load_owned_agent_test_job(task_id: str, ctx: OrgContext) -> Dict[str, Any]:
     """Fetch an agent-test job and assert the caller's workspace owns it.
 
     Ownership is derived through the job's parent agent (``agent_test_jobs`` has
-    no workspace column of its own). Returns the job dict on success; raises 404 with
+    no workspace column of its own). Returns the job dict on success. Raises 404 with
     the same generic ``"Task not found"`` detail for the missing / cross-workspace /
     orphaned cases so existence is never leaked. A soft-deleted agent makes its
     runs unreadable here (``get_agent`` filters ``deleted_at``), consistent with
@@ -2300,7 +2300,7 @@ def _load_owned_agent_test_job(task_id: str, ctx: OrgContext) -> Dict[str, Any]:
 
 class VisibilityRequest(BaseModel):
     is_public: bool = Field(
-        description="True to make the run publicly shareable (mints a share token); False to make it private"
+        description="True to make the run publicly shareable (mints a share token). False to make it private"
     )
 
 
@@ -2308,7 +2308,7 @@ class VisibilityResponse(BaseModel):
     is_public: bool = Field(description="Whether the run is now shared publicly")
     share_token: str | None = Field(
         None,
-        description="Share token to build the public URL; null when the run is private",
+        description="Share token to build the public URL. Null when the run is private",
     )
 
 
@@ -2412,7 +2412,7 @@ async def get_agent_test_run_status(
 
 class BenchmarkRequest(BaseModel):
     models: List[str] = Field(
-        description="Model names to benchmark on the same tests; must be non-empty"
+        description="Model names to benchmark on the same tests. Must be non-empty"
     )
     test_uuids: Optional[List[str]] = Field(
         None,
@@ -2424,28 +2424,28 @@ class BenchmarkRequest(BaseModel):
 class ModelResult(BaseModel):
     model: str = Field(description="Model name these results are for")
     success: Optional[bool] = Field(
-        None, description="Whether this model's run succeeded; null while queued/processing"
+        None, description="Whether this model's run succeeded. Null while queued/processing"
     )
     message: str = Field(description="Human-readable status/result message for this model")
-    total_tests: Optional[int] = Field(None, description="Total test cases for this model; null until known")
-    passed: Optional[int] = Field(None, description="Count of passing cases; null until done")
-    failed: Optional[int] = Field(None, description="Count of failing cases; null until done")
+    total_tests: Optional[int] = Field(None, description="Total test cases for this model. Null until known")
+    passed: Optional[int] = Field(None, description="Count of passing cases. Null until done")
+    failed: Optional[int] = Field(None, description="Count of failing cases. Null until done")
     evaluator_summary: Optional[List[Dict[str, Any]]] = Field(
-        None, description="Per-evaluator aggregate summary for this model; null until done"
+        None, description="Per-evaluator aggregate summary for this model. Null until done"
     )
     test_results: Optional[List[Dict[str, Any]]] = Field(
-        None, description="Per-test-case results for this model; null until available"
+        None, description="Per-test-case results for this model. Null until available"
     )
     latency_ms: Optional[Dict[str, Any]] = Field(
         None,
         description="Aggregated latency in milliseconds: `{p50, p95, p99, count}`. Null when calibrate omits it (eval-only/openai) or before this model's metrics are ready",
     )
     cost: Optional[Dict[str, Any]] = Field(
-        None, description="Aggregated cost `{mean, min, max, count}` (USD); null when unavailable"
+        None, description="Aggregated cost `{mean, min, max, count}` (USD). Null when unavailable"
     )
     total_tokens: Optional[Dict[str, Any]] = Field(
         None,
-        description="Aggregated token usage `{mean, min, max, count}` (values are `Any` — `mean` may be fractional); null when unavailable",
+        description="Aggregated token usage `{mean, min, max, count}` (values are `Any` — `mean` may be fractional). Null when unavailable",
     )
 
 
@@ -2461,21 +2461,21 @@ class BenchmarkStatusResponse(BaseModel):
     )
     evaluators: Optional[List[Dict[str, Any]]] = Field(
         None,
-        description="Top-level evaluator block shared by every model's results (all models run the same suite); see `TestRunStatusResponse.evaluators`",
+        description="Top-level evaluator block shared by every model's results (all models run the same suite). See `TestRunStatusResponse.evaluators`",
     )
     model_results: Optional[List[ModelResult]] = Field(
-        None, description="Per-model results; null until available"
+        None, description="Per-model results. Null until available"
     )
     leaderboard_summary: Optional[List[Dict[str, Any]]] = Field(
-        None, description="Leaderboard rows comparing the models; null until done"
+        None, description="Leaderboard rows comparing the models. Null until done"
     )
     results_s3_prefix: Optional[str] = Field(
-        None, description="S3 key prefix for the raw result artifacts; null until uploaded"
+        None, description="S3 key prefix for the raw result artifacts. Null until uploaded"
     )
     error: bool = Field(False, description="True if the run failed")
     is_public: bool = Field(False, description="Whether the run is shared publicly")
     share_token: Optional[str] = Field(
-        None, description="Public share token; null unless the run is public"
+        None, description="Public share token. Null unless the run is public"
     )
 
 
@@ -2491,8 +2491,8 @@ def _update_benchmark_intermediate_results(
     Returns the number of models with completed results.
 
     models: display names (original from frontend, e.g. "openai/gpt-4.1")
-    test_names: ordered suite names; pending rows are ``{name: ...}`` only, like unit tests.
-    cli_models: names passed to CLI (may be stripped, e.g. "gpt-4.1"); defaults to models
+    test_names: ordered suite names. Pending rows are ``{name: ...}`` only, like unit tests.
+    cli_models: names passed to CLI (may be stripped, e.g. "gpt-4.1"). Defaults to models
     """
     if cli_models is None:
         cli_models = models

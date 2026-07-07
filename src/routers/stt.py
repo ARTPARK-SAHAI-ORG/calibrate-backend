@@ -246,15 +246,15 @@ class STTEvaluationRequest(BaseModel):
     )
     audio_paths: Optional[List[str]] = Field(
         None,
-        description="Audio files to transcribe, one `s3://bucket/key` URI per item. **Required when `dataset_id` is omitted**; must align 1:1 with `texts`",
+        description="Audio files to transcribe, one `s3://bucket/key` URI per item. **Required when `dataset_id` is omitted**. Must align 1:1 with `texts`",
     )
     texts: Optional[List[str]] = Field(
         None,
-        description="Ground-truth transcripts to score against, one per audio file. **Required when `dataset_id` is omitted**; must align 1:1 with `audio_paths`",
+        description="Ground-truth transcripts to score against, one per audio file. **Required when `dataset_id` is omitted**. Must align 1:1 with `audio_paths`",
     )
     dataset_name: Optional[str] = Field(
         None,
-        description="Name for a new dataset saved from inline inputs. Ignored when `dataset_id` is set; omit to skip saving",
+        description="Name for a new dataset saved from inline inputs. Ignored when `dataset_id` is set. Omit to skip saving",
     )
     providers: List[str] = Field(
         description='STT providers to compare, e.g. `["deepgram", "openai", "sarvam"]`. At least one required'
@@ -262,7 +262,7 @@ class STTEvaluationRequest(BaseModel):
     language: str = Field(description='Spoken language for the audio, e.g. `"english"` or `"hindi"`')
     evaluator_uuids: Optional[List[str]] = Field(
         None,
-        description="Evaluators to score transcriptions; each must be an `stt` evaluator in your workspace. Omit to use the default STT evaluator",
+        description="Evaluators to score transcriptions. Each must be an `stt` evaluator in your workspace. Omit to use the default STT evaluator",
     )
 
 
@@ -746,7 +746,7 @@ async def evaluate_stt(
 
 class VisibilityRequest(BaseModel):
     is_public: bool = Field(
-        description="`true` to make the job publicly shareable; `false` to make it private"
+        description="`true` to make the job publicly shareable. `false` to make it private"
     )
 
 
@@ -754,7 +754,7 @@ class VisibilityResponse(BaseModel):
     is_public: bool = Field(description="Whether the job is now publicly shareable")
     share_token: str | None = Field(
         None,
-        description="Opaque token for the public share URL when `is_public` is true; null when private",
+        description="Opaque token for the public share URL when `is_public` is true. Null when private",
     )
 
 

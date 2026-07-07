@@ -36,7 +36,7 @@ _EXAMPLE_ITEM_UUID = "6ba7b810-9dad-11d1-80b4-00c04fd430c8"
 class DatasetCreateRequest(BaseModel):
     name: str = Field(description="Human-readable dataset name, unique within the workspace")
     dataset_type: Literal["stt", "tts"] = Field(
-        description="`stt` items carry audio + ground-truth text; `tts` items carry text only"
+        description="`stt` items carry audio + ground-truth text. `tts` items carry text only"
     )
 
 
@@ -47,17 +47,17 @@ class DatasetRenameRequest(BaseModel):
 class DatasetItemIn(BaseModel):
     audio_path: Optional[str] = Field(
         None,
-        description="Audio location as an `s3://bucket/key` URI. **Required for STT datasets; must be omitted for TTS datasets**",
+        description="Audio location as an `s3://bucket/key` URI. **Required for STT datasets. Must be omitted for TTS datasets**",
     )
     text: str = Field(
-        description="For STT, the ground-truth transcript; for TTS, the text to synthesize"
+        description="For STT, the ground-truth transcript. For TTS, the text to synthesize"
     )
 
 
 class DatasetItemUpdate(BaseModel):
     audio_path: Optional[str] = Field(
         None,
-        description="New audio `s3://bucket/key` URI. Omit the field to leave audio unchanged; **STT requires a value, TTS forbids one**",
+        description="New audio `s3://bucket/key` URI. Omit the field to leave audio unchanged. **STT requires a value, TTS forbids one**",
     )
     text: Optional[str] = Field(
         None, description="New item text. Omit to leave text unchanged"

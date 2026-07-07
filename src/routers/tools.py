@@ -13,7 +13,7 @@ _EXAMPLE_ID = "f47ac10b-58cc-4372-a567-0e02b2c3d479"
 
 class ToolCreate(BaseModel):
     name: str = Field(description="Human-readable tool name, unique within the workspace")
-    description: str = Field(description="What the tool does; surfaced to agents and the UI")
+    description: str = Field(description="What the tool does. Surfaced to agents and the UI")
     config: Optional[Dict[str, Any]] = Field(
         None, description="Tool config (e.g. JSON schema, parameters). Omit to leave unset"
     )
@@ -104,7 +104,7 @@ async def update_tool_endpoint(
     ),
     ctx: OrgContext = Depends(get_current_org),
 ):
-    """Update a tool's fields. Only the provided fields change; omitted fields are left as-is."""
+    """Update a tool's fields. Only the provided fields change. Omitted fields are left as-is."""
     existing_tool = get_tool(tool_uuid)
     if not existing_tool or existing_tool.get("org_uuid") != ctx.org_uuid:
         raise HTTPException(status_code=404, detail="Tool not found")

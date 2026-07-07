@@ -464,7 +464,7 @@ class AgentSummaryResponse(BaseModel):
     )
     name: str = Field(description="Agent name")
     type: Literal["agent", "connection"] = Field(
-        description="`agent` applies managed defaults; `connection` stores the config you supply as-is"
+        description="`agent` applies managed defaults. `connection` stores the config you supply as-is"
     )
     config: Optional[Dict[str, Any]] = Field(None, description="Agent config, or null")
     created_at: str = Field(description="Creation timestamp (ISO 8601 UTC)")
@@ -525,7 +525,7 @@ class EvaluationCriterionResult(BaseModel):
         None,
         min_length=36,
         max_length=36,
-        description="Source evaluator ID, echoed from the run; null if unresolved",
+        description="Source evaluator ID, echoed from the run. Null if unresolved",
         examples=[_EXAMPLE_ID],
     )
     description: Optional[str] = Field(None, description="Evaluator's current description, or null")
@@ -555,7 +555,7 @@ class SimulationCaseResult(BaseModel):
         None, description="Full scenario object (name/label and description), or null"
     )
     evaluation_results: Optional[List[EvaluationCriterionResult]] = Field(
-        None, description="Per-evaluator judge results; null while the case is still in progress"
+        None, description="Per-evaluator judge results. Null while the case is still in progress"
     )
     transcript: Optional[List[Dict[str, Any]]] = Field(None, description="Ordered conversation turns, or null")
     audio_urls: Optional[List[str]] = Field(
@@ -579,21 +579,21 @@ class SimulationRunStatusResponse(BaseModel):
     type: SimulationRunType = Field(description="Run mode")
     updated_at: str = Field(description="Last-update timestamp (ISO 8601 UTC)")
     total_simulations: Optional[int] = Field(
-        None, description="Expected number of persona x scenario cases; null before it's known"
+        None, description="Expected number of persona x scenario cases. Null before it's known"
     )
     completed_simulations: Optional[int] = Field(
-        None, description="Number of cases finished so far; null when not tracked"
+        None, description="Number of cases finished so far. Null when not tracked"
     )
-    metrics: Optional[Dict[str, Any]] = Field(None, description="Aggregated metrics; null until the run completes")
+    metrics: Optional[Dict[str, Any]] = Field(None, description="Aggregated metrics. Null until the run completes")
     simulation_results: Optional[List[SimulationCaseResult]] = Field(
         None, description="Per-case results, or null if none yet"
     )
     evaluators: Optional[List[SimulationEvaluatorRef]] = Field(
-        None, description="Evaluators used for this run, in link order; null if none"
+        None, description="Evaluators used for this run, in link order. Null if none"
     )
-    error: Optional[str] = Field(None, description="Failure message; null unless the run failed")
+    error: Optional[str] = Field(None, description="Failure message. Null unless the run failed")
     is_public: bool = Field(False, description="Whether the run is shared via a public link")
-    share_token: Optional[str] = Field(None, description="Share token for the public view; null when private")
+    share_token: Optional[str] = Field(None, description="Share token for the public view. Null when private")
 
 
 class SimulationRunListItem(BaseModel):
@@ -766,12 +766,12 @@ async def list_simulations(ctx: OrgContext = Depends(get_current_org)):
 
 
 class VisibilityRequest(BaseModel):
-    is_public: bool = Field(description="`true` to publish the run via a share link; `false` to make it private")
+    is_public: bool = Field(description="`true` to publish the run via a share link. `false` to make it private")
 
 
 class VisibilityResponse(BaseModel):
     is_public: bool = Field(description="Resulting public/private state of the run")
-    share_token: str | None = Field(None, description="Share token when public; null when private")
+    share_token: str | None = Field(None, description="Share token when public. Null when private")
 
 
 @router.patch("/run/{task_id}/visibility", response_model=VisibilityResponse, summary="Update simulation run visibility")

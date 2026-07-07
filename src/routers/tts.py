@@ -190,7 +190,7 @@ class TTSEvaluationRequest(BaseModel):
     )
     dataset_name: Optional[str] = Field(
         None,
-        description="Name for a new dataset saved from inline inputs. Ignored when `dataset_id` is set; omit to skip saving",
+        description="Name for a new dataset saved from inline inputs. Ignored when `dataset_id` is set. Omit to skip saving",
     )
     providers: List[str] = Field(
         description='TTS providers to compare, e.g. `["smallest", "cartesia", "openai"]`. At least one required'
@@ -198,7 +198,7 @@ class TTSEvaluationRequest(BaseModel):
     language: str = Field(description='Language to synthesize in, e.g. `"english"` or `"hindi"`')
     evaluator_uuids: Optional[List[str]] = Field(
         None,
-        description="Evaluators to score synthesized audio; each must be a `tts` evaluator in your workspace. Omit to use the default TTS evaluator",
+        description="Evaluators to score synthesized audio. Each must be a `tts` evaluator in your workspace. Omit to use the default TTS evaluator",
     )
 
 
@@ -762,7 +762,7 @@ async def evaluate_tts(
 
 class VisibilityRequest(BaseModel):
     is_public: bool = Field(
-        description="`true` to make the job publicly shareable; `false` to make it private"
+        description="`true` to make the job publicly shareable. `false` to make it private"
     )
 
 
@@ -770,7 +770,7 @@ class VisibilityResponse(BaseModel):
     is_public: bool = Field(description="Whether the job is now publicly shareable")
     share_token: str | None = Field(
         None,
-        description="Opaque token for the public share URL when `is_public` is true; null when private",
+        description="Opaque token for the public share URL when `is_public` is true. Null when private",
     )
 
 
