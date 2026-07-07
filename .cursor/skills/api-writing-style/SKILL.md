@@ -263,10 +263,10 @@ in prose. Create-response `status` can only be `queued`/`in_progress`, so it use
 `InitialTaskStatus` (a two-value `Literal` in [utils.py](../../../src/utils.py)),
 not the full `TaskStatus`.
 
-This is mechanically enforced: `check_api_docs_style.py` flags any field/param
-whose annotation is an enum/`Literal` (inline, a shared alias, or an enum class)
-and whose description contains a run of ≥2 of that type's own backticked values
-separated only by connectors.
+This is a house-style convention (not machine-checked): when reviewing or writing
+a route, watch for any enum/`Literal` field or param whose description contains a
+run of ≥2 of that type's own backticked values separated only by connectors, and
+rewrite it to state purpose instead.
 
 ## Terminology (user-facing docs)
 
