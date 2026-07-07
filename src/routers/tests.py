@@ -77,7 +77,7 @@ class TestCreate(BaseModel):
     )
     evaluators: Optional[List[EvaluatorRef]] = Field(
         None,
-        description="Evaluators to link. **Required (>=1) for `type=conversation`** (no fallback judge). Omit for `response`/`tool_call` to link none",
+        description="Evaluators to link. Used by `response` and `conversation` tests",
     )
 
 
@@ -93,7 +93,7 @@ class TestUpdate(BaseModel):
     )
     evaluators: Optional[List[EvaluatorRef]] = Field(
         None,
-        description="Replacement evaluator links (replaces the existing set). Omit to leave links unchanged. An empty list clears them (**rejected for `conversation` tests**)",
+        description="Replacement evaluator links (replaces the existing set). Omit to leave links unchanged. An empty list clears them",
     )
 
 
@@ -161,7 +161,7 @@ class BulkTestItem(BaseModel):
         description="Ordered messages ending at the user turn the agent should answer (must be non-empty)"
     )
     evaluators: Optional[List[EvaluatorRef]] = Field(
-        None, description="Evaluators to link. **Required for `response`/`conversation` batches**"
+        None, description="Evaluators to link. Used by `response` and `conversation` tests"
     )
     tool_calls: Optional[List[ExpectedToolCall]] = Field(
         None, description="Expected tool calls. **Required for `tool_call` batches**"
