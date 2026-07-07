@@ -39,7 +39,7 @@ production GitHub release published
                  → tag v<version> (PUSH_TO_REPO_TOKEN)
                  → calibrate-mcp publish.yml → npm (@dalmia/calibrate-mcp)
        └─ record sdk-v<version> tag on this repo (version history only)
-       └─ sync-docs → repository_dispatch on ARTPARK-SAHAI-ORG/calibrate (DOCS_SYNC_REPO_TOKEN)
+       └─ sync-docs (after publish) → repository_dispatch on ARTPARK-SAHAI-ORG/calibrate (DOCS_SYNC_REPO_TOKEN)
 ```
 
 Workflows: [`.github/workflows/auto-publish-sdk.yml`](.github/workflows/auto-publish-sdk.yml) (auto + manual gate), [`.github/workflows/publish-sdk.yml`](.github/workflows/publish-sdk.yml) (generate + push)  
@@ -81,6 +81,8 @@ Add the token to **this repo** → Settings → Environments → **Production** 
 **Also on the calibrate repo** (not this repo): add `PUBLIC_API_BASE_URL` under Settings → Secrets and variables → Actions so the sync workflow can fetch the live spec.
 
 Requires [calibrate#108](https://github.com/ARTPARK-SAHAI-ORG/calibrate/pull/108) merged (`sync-api-spec.yml` with `repository_dispatch` listener).
+
+The `sync-docs` job runs **after** `publish` completes so the docs workflow sees freshly synced `calibrate-python-sdk` and `calibrate-cli` output (including CLI `docs/`) before generating pages.
 
 ## One-time: Python SDK (`calibrate-python-sdk`)
 

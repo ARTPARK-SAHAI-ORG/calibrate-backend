@@ -150,14 +150,15 @@ jobs:
       version: ${{ needs.detect.outputs.version }}
     secrets: inherit
 
-  # ARTPARK-SAHAI-ORG/calibrate syncs openapi.json from the live public spec.
-  # Fire only when the spec actually changed (same gate as publish).
+  # ARTPARK-SAHAI-ORG/calibrate syncs docs from the live public spec and
+  # client repos (SDK reference, CLI command pages). Wait for publish so
+  # calibrate-cli/docs/ is already pushed before the docs workflow clones it.
   sync-docs:
-    needs: detect
+    needs: [detect, publish]
     if: needs.detect.outputs.should_publish == 'true'
     runs-on: ubuntu-latest
     steps:
-      - name: Trigger docs OpenAPI sync
+      - name: Trigger docs sync
         env:
           GH_TOKEN: ${{ secrets.DOCS_SYNC_REPO_TOKEN }}
         run: |
