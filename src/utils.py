@@ -120,12 +120,13 @@ tasks = {}
 tasks_lock = threading.Lock()
 
 
+# Lifecycle status for the run/job family (STT/TTS eval, agent tests,
+# simulations, and annotation-eval jobs). `cancelled` is retained as a
+# forward-compatible superset value; abort is tracked in `details.aborted`,
+# not here. Kept as a `#` comment (not a docstring) so this internal note does
+# NOT leak into the OpenAPI schema / public SDK — Pydantic promotes an enum's
+# docstring to the schema `description`.
 class TaskStatus(str, Enum):
-    """Lifecycle status for the run/job family (STT/TTS eval, agent tests,
-    simulations, and annotation-eval jobs). `cancelled` is retained as a
-    forward-compatible superset value; abort is tracked in `details.aborted`,
-    not here."""
-
     QUEUED = "queued"
     IN_PROGRESS = "in_progress"
     CANCELLED = "cancelled"
@@ -133,12 +134,12 @@ class TaskStatus(str, Enum):
     FAILED = "failed"
 
 
+# Lifecycle status for the annotation family — labelling jobs
+# (`pending → in_progress → completed`) and the public annotation-eval view
+# (which normalizes the internal `done` to `completed`). `queued`/`failed` are
+# included as a forward-compatible superset for eval jobs surfaced here.
+# `#` comment (not a docstring) on purpose — see TaskStatus note above.
 class AnnotationStatus(str, Enum):
-    """Lifecycle status for the annotation family — labelling jobs
-    (`pending → in_progress → completed`) and the public annotation-eval view
-    (which normalizes the internal `done` to `completed`). `queued`/`failed` are
-    included as a forward-compatible superset for eval jobs surfaced here."""
-
     PENDING = "pending"
     QUEUED = "queued"
     IN_PROGRESS = "in_progress"
