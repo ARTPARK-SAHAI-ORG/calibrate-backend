@@ -104,7 +104,7 @@ async def update_tool_endpoint(
     ),
     ctx: OrgContext = Depends(get_current_org),
 ):
-    """Update a tool's fields. Only the provided fields change. Omitted fields are left as-is."""
+    """Update a tool."""
     existing_tool = get_tool(tool_uuid)
     if not existing_tool or existing_tool.get("org_uuid") != ctx.org_uuid:
         raise HTTPException(status_code=404, detail="Tool not found")

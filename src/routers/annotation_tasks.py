@@ -327,7 +327,7 @@ async def update_annotation_task_endpoint(
     payload: AnnotationTaskUpdate = ...,
     ctx: OrgContext = Depends(get_current_org),
 ):
-    """Update an annotation task's name and description. Task type is immutable."""
+    """Update an annotation task."""
     _ensure_owned_task(task_uuid, ctx.org_uuid)
     with ensure_name_unique(
         "annotation_tasks",

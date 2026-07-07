@@ -551,7 +551,7 @@ async def update_agent_endpoint(
     agent: AgentUpdate = ...,
     ctx: OrgContext = Depends(get_org_jwt_or_api_key),
 ):
-    """Update an agent's name and/or config."""
+    """Update an agent."""
     existing_agent = get_agent(agent_uuid)
     if not existing_agent or existing_agent.get("org_uuid") != ctx.org_uuid:
         raise HTTPException(status_code=404, detail="Agent not found")

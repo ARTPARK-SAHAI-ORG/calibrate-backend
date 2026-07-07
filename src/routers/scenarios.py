@@ -107,7 +107,7 @@ async def update_scenario_endpoint(
     ),
     ctx: OrgContext = Depends(get_current_org),
 ):
-    """Update a scenario's fields. Only the provided fields change. Omitted fields are left as-is."""
+    """Update a scenario."""
     existing_scenario = get_scenario(scenario_uuid)
     if not existing_scenario or existing_scenario.get("org_uuid") != ctx.org_uuid:
         raise HTTPException(status_code=404, detail="Scenario not found")

@@ -63,6 +63,7 @@ One sentence. What the call does — full stop.
 - Response field names (`` `not_found` ``, `` `skipped` ``, `` `task_id` ``)
 - HTTP status codes or error behavior ("404 if…", "400 otherwise")
 - Request-param semantics already on the field ("omit `agent_names` to…")
+- **Which fields the operation touches** ("Update an agent's name and/or config" → just **"Update an agent."**) or PATCH semantics ("only the provided fields change") — what's updatable and the omit behavior live on the body fields
 - Internal preconditions or workflow ("connection must be verified", "call verify-connection")
 - Implementation backstory ("runs the calibrate LLM command", job types, queue behavior)
 - `(non-deleted)` or other DB-filter caveats

@@ -312,7 +312,7 @@ async def update_item(
     ),
     ctx: OrgContext = Depends(get_current_org),
 ):
-    """Update a dataset item's text and/or audio."""
+    """Update a dataset item."""
     row = get_dataset(dataset_id, org_uuid=ctx.org_uuid)
     if not row:
         raise HTTPException(status_code=404, detail="Dataset not found")

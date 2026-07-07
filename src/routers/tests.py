@@ -474,7 +474,7 @@ async def update_test_endpoint(
     ),
     ctx: OrgContext = Depends(get_org_jwt_or_api_key),
 ):
-    """Update a test's name, config, and/or evaluator links."""
+    """Update a test."""
     existing_test = get_test(test_uuid)
     if not existing_test or existing_test.get("org_uuid") != ctx.org_uuid:
         raise HTTPException(status_code=404, detail="Test not found")
