@@ -46,6 +46,7 @@ from utils import (
     InitialTaskStatus,
     TaskCreateResponse,
     TestTypeLiteral,
+    OutputTypeLiteral,
     AgentTestJobType,
     get_s3_client,
     get_s3_output_config,
@@ -375,7 +376,7 @@ class TestCaseResult(BaseModel):
     )
     judge_results: Optional[List[JudgeResult]] = Field(
         None,
-        description="Per-evaluator verdicts for response/conversation tests. Null for tool-call tests or in-progress rows",
+        description="One verdict per evaluator, for response and conversation tests. Null for tool-call tests or rows still running",
     )
     latency_ms: Optional[float] = Field(
         None,
@@ -384,6 +385,30 @@ class TestCaseResult(BaseModel):
     cost: Optional[float] = Field(
         None,
         description="Per-case cost in USD, lifted from calibrate's nested `output.cost`. Null when the provider/agent reports none (e.g. `--provider openai`)",
+    )
+
+
+class RunEvaluator(BaseModel):
+    uuid: Optional[str] = Field(None, description="Evaluator ID")
+    name: Optional[str] = Field(None, description="Evaluator name")
+    description: Optional[str] = Field(
+        None, description="What the evaluator checks"
+    )
+    output_type: Optional[OutputTypeLiteral] = Field(
+        None, description="Verdict shape: pass/fail or a numeric rating"
+    )
+    output_config: Optional[Dict[str, Any]] = Field(
+        None,
+        description="Rubric — the scale values, labels, and colors a verdict maps to",
+    )
+    scale_min: Optional[float] = Field(
+        None, description="Lowest rating value. Set for rating evaluators"
+    )
+    scale_max: Optional[float] = Field(
+        None, description="Highest rating value. Set for rating evaluators"
+    )
+    version_number: Optional[int] = Field(
+        None, description="Evaluator version this run used"
     )
 
 
@@ -418,12 +443,12 @@ class TestRunStatusResponse(BaseModel):
         None,
         description="Aggregated token usage `{mean, min, max, count}`",
     )
-    evaluators: Optional[List[Dict[str, Any]]] = Field(
+    evaluators: Optional[List[RunEvaluator]] = Field(
         None,
-        description="Top-level evaluator block (name/description/output_type/rubric) shared across every `judge_results` row, which references back via `evaluator_uuid` so the rubric isn't duplicated per case",
+        description="The evaluators used in this run. Each verdict in `judge_results` links to one of these by `evaluator_uuid`",
     )
     results: Optional[List[TestCaseResult]] = Field(
-        None, description="Per-test-case results. Null until available"
+        None, description="Results for each test case. Null until available"
     )
     results_s3_prefix: Optional[str] = Field(
         None, description="S3 key prefix for the raw result artifacts. Null until uploaded"
@@ -450,8 +475,8 @@ class AgentTestRunListItem(BaseModel):
     )
     type: AgentTestJobType = Field(description="Job type")
     updated_at: str = Field(description="Last-update timestamp (ISO 8601 UTC)")
-    evaluators: Optional[List[Dict[str, Any]]] = Field(
-        None, description="Top-level evaluator block. See `TestRunStatusResponse.evaluators`"
+    evaluators: Optional[List[RunEvaluator]] = Field(
+        None, description="The evaluators used in this run. See `TestRunStatusResponse.evaluators`"
     )
     total_tests: Optional[int] = Field(
         None, description="Total test cases (unit-test runs). Null for benchmarks or until known"
@@ -2431,10 +2456,10 @@ class ModelResult(BaseModel):
     passed: Optional[int] = Field(None, description="Count of passing cases. Null until done")
     failed: Optional[int] = Field(None, description="Count of failing cases. Null until done")
     evaluator_summary: Optional[List[Dict[str, Any]]] = Field(
-        None, description="Per-evaluator aggregate summary for this model. Null until done"
+        None, description="Aggregate summary per evaluator for this model. Null until done"
     )
     test_results: Optional[List[Dict[str, Any]]] = Field(
-        None, description="Per-test-case results for this model. Null until available"
+        None, description="Results for each test case, for this model. Null until available"
     )
     latency_ms: Optional[Dict[str, Any]] = Field(
         None,
@@ -2459,9 +2484,9 @@ class BenchmarkStatusResponse(BaseModel):
     status: TaskStatus = Field(
         description="Job status"
     )
-    evaluators: Optional[List[Dict[str, Any]]] = Field(
+    evaluators: Optional[List[RunEvaluator]] = Field(
         None,
-        description="Top-level evaluator block shared by every model's results (all models run the same suite). See `TestRunStatusResponse.evaluators`",
+        description="The evaluators used in this run, shared by every model (all models run the same suite). See `TestRunStatusResponse.evaluators`",
     )
     model_results: Optional[List[ModelResult]] = Field(
         None, description="Per-model results. Null until available"
