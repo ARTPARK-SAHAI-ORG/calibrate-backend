@@ -415,19 +415,23 @@ How a field is **typed** drives how Mintlify renders it. This is a docs decision
 not just a code one.
 
 - **A field with a known, stable shape must be a Pydantic model, not
-  `Dict[str, Any]`.** A free-form dict renders as a shapeless `object`/`object[]`
-  chip with **no expandable child attributes** and a **misleading auto-title**:
-  Pydantic title-cases the field name (`config` → `Config`, `evaluators` →
-  `Evaluators`), which Mintlify shows as a fake type chip (`Config · object`) that
-  looks like a named type but expands to nothing. Define a model (e.g.
-  `RunEvaluator`) so the docs show "Show child attributes" with each field
-  documented.
-- **Genuinely free-form blobs** (a passthrough `config` stored as-is, with no
-  fixed keys) are the *only* legitimate `Dict[str, Any]`. Their auto-title is
+  `Dict[str, Any]` / `List[Dict[str, Any]]`.** A free-form dict (or list of them)
+  renders as a shapeless `object`/`object[]` chip with **no expandable child
+  attributes** and a **misleading auto-title**: Pydantic title-cases the field
+  name (`config` → `Config`, `tool_calls` → `Tool Calls`), which Mintlify shows as
+  a fake type chip (`Config · object`, `Tool Calls · object[]`) that looks like a
+  named type but expands to nothing. Define a model (e.g. `TestRunEvaluator`) so
+  the docs show "Show child attributes" with each field documented.
+- **Genuinely free-form blobs** (a passthrough `config` stored as-is; a
+  user-supplied `tool_calls` list; a calibrate-owned metrics dict) are the *only*
+  legitimate `Dict[str, Any]` / `List[Dict[str, Any]]`. Their auto-title is
   stripped from the public spec by `_strip_freeform_titles()` in
-  [main.py](../../../src/main.py) so they render as plain `object`, not a fake
-  type. Don't fight this — if there's no fixed shape, there's nothing to expand,
-  and the description should just say what the blob holds.
+  [main.py](../../../src/main.py) — which covers **both** dicts and lists of dicts
+  — so they render as plain `object`/`object[]`, not a fake type. A test in
+  `tests/test_main_and_routers.py` asserts **no** free-form field in the whole
+  public spec keeps a title, so this can't regress. Don't fight it — if there's no
+  fixed shape, there's nothing to expand; the description just says what the blob
+  holds.
 - **`Name · object[]` on a *modeled* array is Mintlify's normal rendering**, not a
   defect — it prints the model name plus the base JSON type. You cannot suppress
   the `object[]` half from the backend without losing the model name (worse). Do

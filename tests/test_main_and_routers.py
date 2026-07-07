@@ -187,19 +187,35 @@ def test_public_api_docs_are_unauthenticated_and_filtered(client, monkeypatch):
     assert {b.get("type") for b in config_prop["anyOf"]} == {"object", "null"}
     # ...while real model titles (used as the expandable reference name) stay.
     assert pub_schemas["AgentUpdate"]["title"] == "AgentUpdate"
-    # No surviving title anywhere sits on a free-form object schema.
-    for schema in pub_schemas.values():
-        for prop in schema.get("properties", {}).values():
-            branches = prop.get("anyOf", [])
-            freeform = prop if not branches else next(
-                (b for b in branches if b.get("type") == "object"), None
-            )
-            if (
-                freeform
-                and freeform.get("additionalProperties")
-                and not freeform.get("properties")
-            ):
-                assert "title" not in prop, f"stale title on free-form field: {prop}"
+    # No surviving title anywhere sits on a free-form field — neither a
+    # `Dict[str, Any]` (object) NOR a `List[Dict[str, Any]]` (array of objects,
+    # e.g. `tool_calls`). Both render as a shapeless chip; a lingering auto-title
+    # ("Tool Calls · object[]") reads as a fake type. This guards the whole spec
+    # so no new free-form field regresses.
+    def _is_ff_obj(n):
+        return (
+            isinstance(n, dict)
+            and n.get("type") == "object"
+            and n.get("additionalProperties")
+            and not n.get("properties")
+        )
+
+    def _is_freeform(n):
+        return _is_ff_obj(n) or (
+            isinstance(n, dict)
+            and n.get("type") == "array"
+            and _is_ff_obj(n.get("items", {}))
+        )
+
+    for sname, schema in pub_schemas.items():
+        for fname, prop in schema.get("properties", {}).items():
+            branches = [
+                b for b in prop.get("anyOf", []) if b.get("type") != "null"
+            ] or [prop]
+            if any(_is_freeform(b) for b in branches):
+                assert "title" not in prop, (
+                    f"stale auto-title on free-form field {sname}.{fname}: {prop}"
+                )
 
 
 # ---------------------------------------------------------------------------

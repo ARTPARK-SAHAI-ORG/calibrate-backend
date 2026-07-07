@@ -186,14 +186,28 @@ def _is_freeform_object_schema(node: Any) -> bool:
     )
 
 
+def _is_freeform_schema(node: Any) -> bool:
+    """True if ``node`` is a free-form object (`Dict[str, Any]`) OR an array of
+    them (`List[Dict[str, Any]]`). Both render as a shapeless `object`/`object[]`
+    chip with nothing to expand, so both should shed their auto-title."""
+    if _is_freeform_object_schema(node):
+        return True
+    return (
+        isinstance(node, dict)
+        and node.get("type") == "array"
+        and _is_freeform_object_schema(node.get("items", {}))
+    )
+
+
 def _strip_freeform_titles(node: Any) -> None:
     """Recursively delete Pydantic's auto-generated ``title`` from free-form
-    object schemas (`Dict[str, Any]` fields). Pydantic title-cases the field
-    name (``config`` → ``"Config"``), which Mintlify surfaces as a fake type
-    chip (`Config · object | null`) even though no such named type exists and
-    there's nothing to expand. Real component/model titles are untouched — only
-    inline free-form blobs (including the `anyOf: [object, null]` wrapper that
-    `Optional[Dict]` produces) lose their noise title."""
+    fields — `Dict[str, Any]` and `List[Dict[str, Any]]`. Pydantic title-cases
+    the field name (``config`` → ``"Config"``, ``tool_calls`` → ``"Tool Calls"``),
+    which Mintlify surfaces as a fake type chip (`Config · object`,
+    `Tool Calls · object[]`) even though no such named type exists and there's
+    nothing to expand. Real component/model titles are untouched — only inline
+    free-form blobs (including the `anyOf: [<freeform>, null]` wrapper that
+    `Optional[...]` produces) lose their noise title."""
     if isinstance(node, dict):
         if "title" in node:
             branches = node.get("anyOf") or node.get("oneOf") or []
@@ -203,9 +217,9 @@ def _strip_freeform_titles(node: Any) -> None:
                 if not (isinstance(b, dict) and b.get("type") == "null")
             ]
             wraps_freeform = bool(non_null) and all(
-                _is_freeform_object_schema(b) for b in non_null
+                _is_freeform_schema(b) for b in non_null
             )
-            if _is_freeform_object_schema(node) or wraps_freeform:
+            if _is_freeform_schema(node) or wraps_freeform:
                 node.pop("title", None)
         for value in node.values():
             _strip_freeform_titles(value)
