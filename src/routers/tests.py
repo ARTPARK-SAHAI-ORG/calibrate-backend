@@ -18,6 +18,7 @@ from db import (
     set_test_evaluators,
 )
 from auth_utils import get_current_org, get_org_jwt_or_api_key, OrgContext
+from api_errors import PUBLIC_API_ERROR_RESPONSES
 
 import logging
 
@@ -298,6 +299,7 @@ async def bulk_delete_tests_endpoint(
     response_model=BulkTestUploadResponse,
     tags=["Public API"],
     summary="Bulk create tests",
+    responses=PUBLIC_API_ERROR_RESPONSES,
 )
 async def bulk_upload_tests(
     payload: BulkTestUpload, ctx: OrgContext = Depends(get_org_jwt_or_api_key)
@@ -380,6 +382,7 @@ async def bulk_upload_tests(
     response_model=TestCreateResponse,
     tags=["Public API"],
     summary="Create test",
+    responses=PUBLIC_API_ERROR_RESPONSES,
 )
 async def create_test_endpoint(
     test: TestCreate, ctx: OrgContext = Depends(get_org_jwt_or_api_key)
@@ -418,6 +421,7 @@ async def create_test_endpoint(
     response_model=List[TestResponse],
     tags=["Public API"],
     summary="List tests",
+    responses=PUBLIC_API_ERROR_RESPONSES,
 )
 async def list_tests(ctx: OrgContext = Depends(get_org_jwt_or_api_key)):
     """List all tests for your workspace, each with its linked evaluators."""
@@ -430,6 +434,7 @@ async def list_tests(ctx: OrgContext = Depends(get_org_jwt_or_api_key)):
     response_model=TestResponse,
     tags=["Public API"],
     summary="Get test",
+    responses=PUBLIC_API_ERROR_RESPONSES,
 )
 async def get_test_endpoint(
     test_uuid: str = Path(
@@ -450,6 +455,7 @@ async def get_test_endpoint(
     response_model=TestResponse,
     tags=["Public API"],
     summary="Update test",
+    responses=PUBLIC_API_ERROR_RESPONSES,
 )
 async def update_test_endpoint(
     test: TestUpdate,

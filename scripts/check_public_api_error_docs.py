@@ -16,7 +16,7 @@ def find_violations(routers_dir: Path = ROUTERS_DIR) -> list[str]:
     for path in sorted(routers_dir.glob("*.py")):
         tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
         for node in ast.walk(tree):
-            if not isinstance(node, ast.FunctionDef):
+            if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
                 continue
             for dec in node.decorator_list:
                 if not isinstance(dec, ast.Call):
