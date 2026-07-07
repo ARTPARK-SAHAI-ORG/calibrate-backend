@@ -26,8 +26,10 @@ internal implementation).
    fields say what omitting them means. Format/length lives in the schema
    (`min_length`/`max_length`, `examples`) on body/response models — not in prose.
 4. **Be concise. Prefer clarity over completeness.** No filler ("This endpoint
-   allows you to..."). Say the thing. Use markdown (`**bold**`, backticks) only
-   when it earns its place.
+   allows you to..."). Say the thing. Cut what the type chip already conveys
+   (nullability, type) and anything the reader can't act on (internal run modes,
+   provider flags, migration asides). No em-dashes, no semicolons, no unit that
+   just echoes the field name (`latency_ms`). See **Brevity & mechanics**.
 5. **Stay consistent across the whole surface.** Same verbs, same phrasings, same
    param names for the same concepts everywhere (see the vocabulary below).
 
@@ -37,9 +39,11 @@ These routes feed the auto-generated SDK/CLI (`GET /public-api/openapi.json`).
 Hold them to the strictest interpretation of every rule below. Do not add or
 remove the `Public API` tag as part of a docs-only pass.
 
-**Current public routes** (as of this skill): `GET /agents`, `POST /agents/resolve`,
-`POST /agent-tests/agent/{agent_uuid}/run`, `POST /agent-tests/run`,
-`GET /agent-tests/run/{task_id}`.
+**Current public routes** (keep in sync with CLAUDE.md): `GET /agents`, `POST /agents`,
+`GET /agents/{agent_uuid}`, `PUT /agents/{agent_uuid}`, `POST /agents/resolve`,
+`POST /tests`, `GET /tests`, `GET /tests/{test_uuid}`, `PUT /tests/{test_uuid}`,
+`POST /tests/bulk`, `POST /agent-tests/agent/{agent_uuid}/run`,
+`POST /agent-tests/run`, `GET /agent-tests/run/{task_id}`.
 
 ### Endpoint heading (summary + docstring)
 
@@ -126,6 +130,8 @@ models** must match. Never invent `a1b2c3d4`-style placeholders.
 - [ ] Path params — purpose-first `description` + real UUID `examples`; no length constraints
 - [ ] Request fields — what it is + what omitting it does
 - [ ] Response fields — what each value means; error/shape detail here, not in heading
+- [ ] No null caveats / repeated units / em-dashes / internal concepts in any description
+- [ ] Known-shape fields typed as a model (expandable), not `Dict[str, Any]`
 - [ ] Dedicated `response_model` — no cross-domain fields leaking in
 - [ ] Second person ("your workspace"), workspace not org, ID not UUID, API key not sk_/secret
 - [ ] Load-bearing context in `# code comment`, not docstring
@@ -217,12 +223,15 @@ class AgentCreate(BaseModel):
 ```
 
 Field conventions:
-- **Lead with what the thing is and what it's for** — not its format
+- **Lead with what the thing is and what it's for**, not its format
 - Ownership/scoping in a second sentence when relevant (`Must be in your workspace.`)
 - `min_length=36`/`max_length=36` + `examples` on **body/response models only**
 - Mark conditional requirements in **bold**: `**Required for type=connection.**`
-- **Never re-list an enum's own values in its description** (see next section)
-- Response fields (`task_id`, `status`, `uuid`) get purpose-first descriptions — they surface in the SDK
+- **Never re-list an enum's own values in its description** (see enum section)
+- **No null caveats, no repeated units, no em-dashes, no internal concepts** (see
+  Brevity & mechanics) — the type chip already shows nullability and type
+- **Known shape ⇒ a Pydantic model, not `Dict[str, Any]`** (see Model the shape)
+- Response fields (`task_id`, `status`, `uuid`) get purpose-first descriptions; they surface in the SDK
 
 ## Enums / `Literal` — never re-list the values
 
@@ -268,6 +277,111 @@ a route, watch for any enum/`Literal` field or param whose description contains 
 run of ≥2 of that type's own backticked values separated only by connectors, and
 rewrite it to state purpose instead.
 
+## Brevity & mechanics (the docs render in Mintlify)
+
+The public spec is consumed by Mintlify, which renders each field as a **name +
+type chip** (`number | null`, `object`, `object[]`) followed by the description as
+markdown. Write for that surface. Every rule below came from real reader
+complaints — treat them as hard bans, not preferences.
+
+### Say only what the reader needs
+
+Cut anything the type chip, the field name, or the reader's common sense already
+conveys. A description is not a changelog or an implementation note.
+
+- **The `| null` / `| null`-array chip already says the field can be null.** Do
+  **not** append "Null when X", "Null until done", "Null for eval-only runs",
+  "`null` unless…". Drop the null caveat entirely unless the *condition* is both
+  publicly reachable and non-obvious — and even then keep it to a few words. Edge
+  cases the public API can't even trigger (internal run modes, provider-specific
+  flags) must never appear.
+- **A field that's meaningful only for a subset: say what it's *for*, not what
+  happens otherwise.** `match` → "Pass/fail verdict, for binary evaluators".
+  `score` → "Numeric score, for rating evaluators". Not "…else null, `score` is
+  set instead".
+- **No internal/undocumented concepts.** Never reference things that appear
+  nowhere else in the public docs: calibrate internals ("lifted from calibrate's
+  nested `output.cost`"), run modes ("eval-only"), migration asides ("`p50` ≈ the
+  old mean"), provider flags (`--provider openai`), or denormalization rationale
+  ("so the rubric isn't duplicated per case").
+
+```python
+# BAD — caveats the chip implies, internal concepts, migration trivia
+latency_ms: Optional[Dict[str, Any]] = Field(None, description="Aggregated latency `{p50, p95, p99, count}` (ms; `p50` ≈ the old mean). Null for eval-only runs")
+cost: Optional[float] = Field(None, description="Per-case cost in USD, lifted from calibrate's nested `output.cost`. Null when the provider/agent reports none (e.g. `--provider openai`)")
+
+# GOOD — the shape, the unit, done
+latency_ms: Optional[Dict[str, Any]] = Field(None, description="Aggregated response latency in milliseconds: `{p50, p95, p99, count}`")
+cost: Optional[float] = Field(None, description="Cost of this case in USD")
+```
+
+### Don't repeat the unit that's already in the field name
+
+`latency_ms`/`total_tokens`/`cost_usd` already carry the unit. Never write
+"latency in ms" or "(ms)". If a unit genuinely aids reading, spell it **once** in
+words ("in milliseconds", "in USD") — never the abbreviation echoing the suffix.
+
+### No em-dashes. Ever.
+
+Use a period, comma, colon, or parentheses instead. `—` is banned in every
+rendered doc string (field/param `description`, `summary`, endpoint docstrings,
+and markdown-list glosses). Code comments are exempt (they don't render).
+
+```
+BAD:  "Token scheme — always `bearer`"          GOOD: "Always `bearer`"
+BAD:  "**Immutable** — may only echo the value"  GOOD: "**Immutable.** May only echo the value"
+BAD:  "- `response` — judges the reply"          GOOD: "- `response`: judges the reply"
+```
+
+### Prefer semicolon-free, plain phrasing
+
+- **Full stops, not semicolons**, to join two clauses. "X. Null until done", not
+  "X; null until done".
+- **Plain over compressed jargon.** "Results for each test case", not
+  "Per-test-case results". "One verdict per evaluator", not "Per-evaluator
+  verdicts". "Aggregate summary per evaluator", not "Per-evaluator aggregate
+  summary".
+
+### Markdown lists render — use them for per-value glosses
+
+When a field's values each need a gloss, a bullet list reads far better than a
+run-on sentence (and satisfies the "gloss, don't re-list" rule):
+
+```python
+type: TestType = Field(
+    description=(
+        "What the test judges:\n\n"
+        "- `response`: judges the generated reply\n"
+        "- `tool_call`: diffs the generated tool calls\n"
+        "- `conversation`: judges the full conversation"
+    )
+)
+```
+
+## Model the shape — don't ship free-form `Dict[str, Any]`
+
+How a field is **typed** drives how Mintlify renders it. This is a docs decision,
+not just a code one.
+
+- **A field with a known, stable shape must be a Pydantic model, not
+  `Dict[str, Any]`.** A free-form dict renders as a shapeless `object`/`object[]`
+  chip with **no expandable child attributes** and a **misleading auto-title**:
+  Pydantic title-cases the field name (`config` → `Config`, `evaluators` →
+  `Evaluators`), which Mintlify shows as a fake type chip (`Config · object`) that
+  looks like a named type but expands to nothing. Define a model (e.g.
+  `RunEvaluator`) so the docs show "Show child attributes" with each field
+  documented.
+- **Genuinely free-form blobs** (a passthrough `config` stored as-is, with no
+  fixed keys) are the *only* legitimate `Dict[str, Any]`. Their auto-title is
+  stripped from the public spec by `_strip_freeform_titles()` in
+  [main.py](../../../src/main.py) so they render as plain `object`, not a fake
+  type. Don't fight this — if there's no fixed shape, there's nothing to expand,
+  and the description should just say what the blob holds.
+- **`Name · object[]` on a *modeled* array is Mintlify's normal rendering**, not a
+  defect — it prints the model name plus the base JSON type. You cannot suppress
+  the `object[]` half from the backend without losing the model name (worse). Do
+  not try.
+
 ## Terminology (user-facing docs)
 
 | Say | Never (in prose) | Exempt (code identifiers) |
@@ -297,5 +411,8 @@ rewrite it to state purpose instead.
 - [ ] Every request/response model field has `Field(description=...)`
 - [ ] No enum/`Literal` field re-lists its own values in the description (state purpose; narrow the type for lifecycle subsets)
 - [ ] Optional fields explain what omission does
+- [ ] No em-dashes; full stops not semicolons; plain phrasing (not "Per-X …")
+- [ ] No null caveats (chip shows it), no unit repeating the field name, no internal concepts
+- [ ] Known-shape fields modeled (expandable), not free-form `Dict[str, Any]`
 - [ ] No UUID/sk_/org/caller in prose; second person throughout
 - [ ] No path/method/name/tags change (response_model change OK when dedicating a shape)
