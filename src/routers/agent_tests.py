@@ -388,7 +388,7 @@ class TestCaseResult(BaseModel):
     )
 
 
-class RunEvaluator(BaseModel):
+class TestRunEvaluator(BaseModel):
     uuid: Optional[str] = Field(None, description="Evaluator ID")
     name: Optional[str] = Field(None, description="Evaluator name")
     description: Optional[str] = Field(
@@ -443,7 +443,7 @@ class TestRunStatusResponse(BaseModel):
         None,
         description="Aggregated token usage `{mean, min, max, count}`",
     )
-    evaluators: Optional[List[RunEvaluator]] = Field(
+    evaluators: Optional[List[TestRunEvaluator]] = Field(
         None,
         description="The evaluators used in this run. Each verdict in `judge_results` links to one of these by `evaluator_uuid`",
     )
@@ -472,7 +472,7 @@ class AgentTestRunListItem(BaseModel):
     )
     type: AgentTestJobType = Field(description="Job type")
     updated_at: str = Field(description="Last-update timestamp (ISO 8601 UTC)")
-    evaluators: Optional[List[RunEvaluator]] = Field(
+    evaluators: Optional[List[TestRunEvaluator]] = Field(
         None, description="The evaluators used in this run. See `TestRunStatusResponse.evaluators`"
     )
     total_tests: Optional[int] = Field(
@@ -2481,7 +2481,7 @@ class BenchmarkStatusResponse(BaseModel):
     status: TaskStatus = Field(
         description="Job status"
     )
-    evaluators: Optional[List[RunEvaluator]] = Field(
+    evaluators: Optional[List[TestRunEvaluator]] = Field(
         None,
         description="The evaluators used in this run, shared by every model (all models run the same suite). See `TestRunStatusResponse.evaluators`",
     )
