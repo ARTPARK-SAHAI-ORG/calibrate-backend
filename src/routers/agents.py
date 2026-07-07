@@ -9,7 +9,7 @@ from fastapi import APIRouter, HTTPException, Depends, Path
 from pydantic import BaseModel, Field
 from calibrate_agent.connections import TextAgentConnection
 
-from utils import env_bool, env_int, env_str
+from utils import env_bool, env_int, env_str, AGENT_TYPE_DESCRIPTION
 
 from db import (
     create_agent,
@@ -237,11 +237,11 @@ class AgentCreate(BaseModel):
     name: str = Field(description="Agent name, unique within the workspace")
     type: Literal["agent", "connection"] = Field(
         "agent",
-        description="`agent` (built inside Calibrate) applies managed defaults deep-merged under any supplied `config`. `connection` (your existing agent, via its own endpoint) stores the config you supply as-is (must eventually contain `agent_url`)",
+        description=AGENT_TYPE_DESCRIPTION,
     )
     config: Optional[Dict[str, Any]] = Field(
         None,
-        description="Behavioral config (system_prompt, llm, stt, tts, settings, …). Deep-merged over defaults for `type=agent`. Stored as-is for `type=connection`. Omit for `type=agent` to use defaults",
+        description="Behavioral config (system_prompt, llm, stt, tts, settings, …). Deep-merged over defaults for `type=agent`. Stored as-is for `type=connection` (must contain `agent_url`). Omit for `type=agent` to use defaults",
     )
 
 
@@ -251,7 +251,7 @@ class AgentUpdate(BaseModel):
     )
     config: Optional[Dict[str, Any]] = Field(
         None,
-        description="Replacement config, stored as-is (no deep-merge on update). Changing `agent_url` or `agent_headers` resets all connection/benchmark verification flags. Omit to leave config unchanged",
+        description="New config for the agent. Omit to leave unchanged. For `type=connection` agents, changing `agent_url` or `agent_headers` resets the connection and benchmark verification flags",
     )
     connection_verified: Optional[bool] = Field(
         None,
@@ -271,9 +271,7 @@ class AgentResponse(BaseModel):
         examples=["f47ac10b-58cc-4372-a567-0e02b2c3d479"],
     )
     name: str = Field(description="Name of the agent")
-    type: Literal["agent", "connection"] = Field(
-        description="`agent` (built inside Calibrate) or `connection` (your existing agent connected to Calibrate)"
-    )
+    type: Literal["agent", "connection"] = Field(description=AGENT_TYPE_DESCRIPTION)
     config: Optional[Dict[str, Any]] = Field(
         None, description="Agent configuration"
     )
@@ -553,7 +551,7 @@ async def update_agent_endpoint(
     agent: AgentUpdate = ...,
     ctx: OrgContext = Depends(get_org_jwt_or_api_key),
 ):
-    """Update an agent's name and/or config. Changing `agent_url` or `agent_headers` resets connection and benchmark verification flags."""
+    """Update an agent's name and/or config."""
     existing_agent = get_agent(agent_uuid)
     if not existing_agent or existing_agent.get("org_uuid") != ctx.org_uuid:
         raise HTTPException(status_code=404, detail="Agent not found")

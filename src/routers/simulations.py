@@ -44,6 +44,7 @@ from db import (
 )
 from llm_judge import build_evaluator_cli_payload
 from utils import (
+    AGENT_TYPE_DESCRIPTION,
     TaskStatus,
     TaskCreateResponse,
     SimulationRunType,
@@ -464,7 +465,7 @@ class AgentSummaryResponse(BaseModel):
     )
     name: str = Field(description="Agent name")
     type: Literal["agent", "connection"] = Field(
-        description="`agent` (built inside Calibrate) or `connection` (your existing agent connected to Calibrate)"
+        description=AGENT_TYPE_DESCRIPTION
     )
     config: Optional[Dict[str, Any]] = Field(None, description="Agent config, or null")
     created_at: str = Field(description="Creation timestamp (ISO 8601 UTC)")

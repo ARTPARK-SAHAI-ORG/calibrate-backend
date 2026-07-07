@@ -47,6 +47,7 @@ from utils import (
     TaskCreateResponse,
     TestTypeLiteral,
     OutputTypeLiteral,
+    AGENT_TYPE_DESCRIPTION,
     AgentTestJobType,
     get_s3_client,
     get_s3_output_config,
@@ -227,7 +228,7 @@ class AgentResponse(BaseModel):
     )
     name: str = Field(description="Agent name")
     type: Literal["agent", "connection"] = Field(
-        description="`agent` (built inside Calibrate) or `connection` (your existing agent connected to Calibrate)"
+        description=AGENT_TYPE_DESCRIPTION
     )
     config: Dict[str, Any] | None = Field(
         None, description="Behavioral config. Null when the agent has none"

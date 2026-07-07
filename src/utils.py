@@ -160,6 +160,14 @@ EvalJobType = Literal["stt-eval", "tts-eval", "annotation-eval"]
 AnnotationTaskTypeLiteral = Literal["stt", "tts", "llm", "llm-general", "conversation"]
 TestTypeLiteral = Literal["response", "tool_call", "conversation"]
 MemberRoleLiteral = Literal["owner", "admin"]  # mirrors DB CHECK(role IN ('owner','admin'))
+
+# Bulleted gloss of the agent `type` enum, shared across every model that
+# exposes it (agents, agent-tools, agent-tests, simulations) so the two values
+# read identically everywhere.
+AGENT_TYPE_DESCRIPTION = (
+    "- `agent`: built inside Calibrate\n"
+    "- `connection`: your existing agent connected to Calibrate"
+)
 # Status a job can carry at *creation* time: it either starts immediately
 # (`in_progress`) or waits for a concurrency slot (`queued`). Narrower than
 # TaskStatus so create-response docs advertise only the reachable values.

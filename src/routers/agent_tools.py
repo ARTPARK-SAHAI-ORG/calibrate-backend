@@ -4,6 +4,7 @@ from pydantic import BaseModel, Field
 from sqlite3 import IntegrityError
 
 from auth_utils import get_current_org, OrgContext
+from utils import AGENT_TYPE_DESCRIPTION
 from db import (
     add_tool_to_agent,
     remove_tool_from_agent,
@@ -98,7 +99,7 @@ class AgentResponse(BaseModel):
     )
     name: str = Field(description="Agent name")
     type: Literal["agent", "connection"] = Field(
-        description="`agent` (built inside Calibrate) or `connection` (your existing agent connected to Calibrate)"
+        description=AGENT_TYPE_DESCRIPTION
     )
     config: Dict[str, Any] | None = Field(
         None, description="Behavioral config. Null when the agent has none"
