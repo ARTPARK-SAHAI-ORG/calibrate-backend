@@ -136,7 +136,7 @@ class TestCreateResponse(BaseModel):
 
 class ChatMessage(BaseModel):
     role: Literal["user", "assistant", "tool"] = Field(
-        description="Message author role. The agent's system prompt lives in its config, not here"
+        description="Message author role in the conversation history"
     )
     content: Optional[str] = Field(
         None, description="Message text. Omit for assistant messages that only carry `tool_calls`"
