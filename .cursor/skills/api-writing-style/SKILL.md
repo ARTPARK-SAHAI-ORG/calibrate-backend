@@ -13,6 +13,15 @@ public SDK — a short imperative title, one crisp sentence of intent, and every
 variable described by **what it is and what it's for** (not its wire format or
 internal implementation).
 
+## Generalize every fix (do this without being asked)
+
+A flagged bad description is a **class, not an instance**. When you fix one, in the
+same pass: (1) name the abstract rule, (2) `grep` all `src/routers/*.py` for other
+violations, (3) fix them all, (4) encode the rule below — and in
+[check_api_docs_style.py](../../../scripts/check_api_docs_style.py) if it's
+mechanical. Fixing only the screenshotted instance is a failure; the same
+complaint will recur on the next endpoint.
+
 ## The five rules
 
 1. **Give every route an explicit `summary`.** Short, imperative, sentence-case,
