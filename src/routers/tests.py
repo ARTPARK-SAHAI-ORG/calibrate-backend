@@ -47,6 +47,57 @@ _TEST_TYPE_DESCRIPTION = (
 # never drift.
 _TEST_NAME_DESCRIPTION = "Name of the test, unique within the workspace"
 
+# Full test-config schema, shared by create + update so it renders identically.
+# Free-form on purpose (see the type-decision note): `evaluation` is a
+# discriminated union by test type and the whole config is a calibrate
+# passthrough, so it's documented, not enforced.
+_TEST_CONFIG_DESCRIPTION = """The calibrate test config. Three top-level keys.
+
+- `history` (array, required): the conversation up to the agent's turn. Each item is `{role, content}` with `role` one of `user`, `assistant`, `tool`. A `tool` message also carries `tool_call_id` and `name`.
+- `evaluation` (object, required): `{type, ...}`, where `type` matches the test's `type` (below).
+- `settings` (object, optional): e.g. `{"language": "en"}`.
+
+`evaluation` by test type:
+- `response`: judge the agent's reply, graded by the linked evaluators. `{"type": "response"}`
+- `conversation`: append the reply and judge the whole conversation. `{"type": "conversation"}`
+- `tool_call`: diff the agent's tool calls against expected ones. Add `tool_calls`, a list of `{tool, arguments, accept_any_arguments?}`.
+
+For `tool_call`, each expected argument value is one of:
+- `{"match_type": "exact", "value": <any>}`: must equal `value`
+- `{"match_type": "llm_judge", "criteria": "..."}`: judged against the criteria
+- `{"match_type": "any"}`: any value, only checks the argument was passed
+
+`response` / `conversation` example:
+```json
+{
+  "history": [{"role": "user", "content": "What is your return policy?"}],
+  "evaluation": {"type": "response"},
+  "settings": {"language": "en"}
+}
+```
+
+`tool_call` example:
+```json
+{
+  "history": [{"role": "user", "content": "Book room 101 for tomorrow"}],
+  "evaluation": {
+    "type": "tool_call",
+    "tool_calls": [
+      {
+        "tool": "book_room",
+        "arguments": {
+          "room": {"match_type": "exact", "value": "101"},
+          "date": {"match_type": "llm_judge", "criteria": "tomorrow's date"}
+        },
+        "accept_any_arguments": false
+      }
+    ]
+  }
+}
+```
+
+Evaluators are linked via the separate `evaluators` field, not inside `config`."""
+
 # Each test type pins the evaluator_type it accepts. `conversation` tests judge whole
 # simulated conversations, so only `conversation` evaluators apply; `response`/`tool_call`
 # tests judge a single LLM reply, so only `llm` evaluators apply.
@@ -78,7 +129,8 @@ class TestCreate(BaseModel):
     type: TestType = Field(description=_TEST_TYPE_DESCRIPTION)
     config: Optional[Dict[str, Any]] = Field(
         None,
-        description="Config for the test (`history`, `evaluation`, optional `settings`). Omit to create the test with no config and set it later via update",
+        description=_TEST_CONFIG_DESCRIPTION
+        + "\n\nOmit to create the test with no config and fill it in later via update.",
     )
     evaluators: Optional[List[EvaluatorRef]] = Field(
         None,
@@ -94,7 +146,9 @@ class TestUpdate(BaseModel):
         + "\n\nImmutable. Omit, or send the existing value. A different value is rejected (400).",
     )
     config: Optional[Dict[str, Any]] = Field(
-        None, description="New config for the test. Omit to leave unchanged"
+        None,
+        description=_TEST_CONFIG_DESCRIPTION
+        + "\n\nReplaces the stored config. Omit to leave unchanged.",
     )
     evaluators: Optional[List[EvaluatorRef]] = Field(
         None,

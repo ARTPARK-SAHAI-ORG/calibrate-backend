@@ -215,7 +215,7 @@ _VERIFICATION_CONFIG_KEYS = (
 
 
 def _strip_verification_fields(
-    config: Optional[Dict[str, Any]]
+    config: Optional[Dict[str, Any]],
 ) -> Optional[Dict[str, Any]]:
     """Remove server-owned verification flags from a caller-supplied config dict.
 
@@ -233,6 +233,44 @@ def _strip_verification_fields(
     return config
 
 
+# Full agent-config schema, shared by create + update so it renders identically.
+# Free-form on purpose (see the type-decision note): the shape is a discriminated
+# union by `type` plus open extension keys, so it's documented, not enforced.
+_AGENT_CONFIG_DESCRIPTION = """Agent behavioral config. The keys depend on `type`.
+
+**`type=agent`** (built inside Calibrate):
+- `system_prompt` (string): the agent's instructions
+- `llm.model` (string): `provider/model`, e.g. `openai/gpt-4.1` or `google/gemini-2.5-flash`
+- `stt.provider` (string): `deepgram`, `openai`, `cartesia`, `elevenlabs`, `google`, `sarvam`, or `smallest`
+- `tts.provider` (string): `cartesia`, `openai`, `google`, `elevenlabs`, `sarvam`, or `smallest`
+- `settings.agent_speaks_first` (bool), `settings.max_assistant_turns` (int)
+- `system_tools.end_call` (bool, optional): let the agent end the call
+- `data_extraction_fields` (array, optional): `[{name, type, description, required}]`
+
+```json
+{
+  "system_prompt": "You are a helpful support agent.",
+  "llm": {"model": "openai/gpt-4.1"},
+  "stt": {"provider": "deepgram"},
+  "tts": {"provider": "elevenlabs"},
+  "settings": {"agent_speaks_first": true, "max_assistant_turns": 50}
+}
+```
+
+**`type=connection`** (your own HTTP endpoint):
+- `agent_url` (string, required): public HTTPS endpoint the agent is called at
+- `agent_headers` (object, optional): headers sent on each request, e.g. auth
+- `benchmark_provider` (string, optional): `openrouter` (default), `openai`, `google`, `anthropic`, `meta-llama`, `mistralai`, `deepseek`, `x-ai`, `cohere`, `qwen`, or `ai21`
+
+```json
+{
+  "agent_url": "https://api.example.com/agent",
+  "agent_headers": {"Authorization": "Bearer <token>"},
+  "benchmark_provider": "openrouter"
+}
+```"""
+
+
 class AgentCreate(BaseModel):
     name: str = Field(description="Agent name, unique within the workspace")
     type: Literal["agent", "connection"] = Field(
@@ -241,7 +279,8 @@ class AgentCreate(BaseModel):
     )
     config: Optional[Dict[str, Any]] = Field(
         None,
-        description="Behavioral config (system_prompt, llm, stt, tts, settings, …). Deep-merged over defaults for `type=agent`. Stored as-is for `type=connection` (must contain `agent_url`). Omit for `type=agent` to use defaults",
+        description=_AGENT_CONFIG_DESCRIPTION
+        + "\n\nFor `type=agent`, omitted keys inherit managed defaults (omit `config` entirely to use all defaults). For `type=connection`, `config` is stored as-is and must contain `agent_url`.",
     )
 
 
@@ -251,7 +290,8 @@ class AgentUpdate(BaseModel):
     )
     config: Optional[Dict[str, Any]] = Field(
         None,
-        description="New config for the agent. Omit to leave unchanged. For `type=connection` agents, changing `agent_url` or `agent_headers` resets the connection and benchmark verification flags",
+        description=_AGENT_CONFIG_DESCRIPTION
+        + "\n\nReplaces the stored config (no deep-merge). Omit to leave unchanged. For `type=connection`, changing `agent_url` or `agent_headers` resets the connection and benchmark verification flags.",
     )
     connection_verified: Optional[bool] = Field(
         None,
@@ -272,11 +312,11 @@ class AgentResponse(BaseModel):
     )
     name: str = Field(description="Name of the agent")
     type: Literal["agent", "connection"] = Field(description=AGENT_TYPE_DESCRIPTION)
-    config: Optional[Dict[str, Any]] = Field(
-        None, description="Agent configuration"
-    )
+    config: Optional[Dict[str, Any]] = Field(None, description="Agent configuration")
     created_at: str = Field(description="When the agent was created (ISO 8601 UTC)")
-    updated_at: str = Field(description="When the agent was last updated (ISO 8601 UTC)")
+    updated_at: str = Field(
+        description="When the agent was last updated (ISO 8601 UTC)"
+    )
 
 
 class AgentCreateResponse(BaseModel):
@@ -344,9 +384,7 @@ class VerifyConnectionResponse(BaseModel):
     success: bool = Field(
         description="True if the agent responded successfully to the verification probe"
     )
-    error: Optional[str] = Field(
-        None, description="Failure reason. Null on success"
-    )
+    error: Optional[str] = Field(None, description="Failure reason. Null on success")
     sample_response: Optional[Dict[str, Any]] = Field(
         None,
         description="Sample output returned by the agent during verification. Null when unavailable",
@@ -509,7 +547,7 @@ async def create_agent_endpoint(
     summary="List agents",
 )
 async def list_agents(ctx: OrgContext = Depends(get_org_jwt_or_api_key)):
-    """List your agents, each with its type and config."""
+    """Get the list of all your agents."""
     # Public API. Auth via get_org_jwt_or_api_key (JWT for the web app, API key
     # for CI); the run/poll and /resolve endpoints accept the same key, so CI can
     # enumerate agent UUIDs without knowing names up front.
