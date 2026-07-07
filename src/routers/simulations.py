@@ -300,7 +300,7 @@ class EvaluatorRef(BaseModel):
 
 
 class SimulationCreate(BaseModel):
-    """Create body must use `evaluators` with evaluator IDs — not legacy metric IDs or aliases."""
+    """Create body must use `evaluators` with evaluator IDs, not legacy metric IDs or aliases."""
 
     model_config = ConfigDict(extra="forbid")
 
@@ -324,7 +324,7 @@ class SimulationCreate(BaseModel):
 
 
 class SimulationUpdate(BaseModel):
-    """Update body must use `evaluators` with evaluator IDs — not legacy metric IDs or aliases."""
+    """Update body must use `evaluators` with evaluator IDs, not legacy metric IDs or aliases."""
 
     model_config = ConfigDict(extra="forbid")
 

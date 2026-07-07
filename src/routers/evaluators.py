@@ -71,7 +71,7 @@ class VariableSpec(BaseModel):
 
 
 class EvaluatorVersionCreate(BaseModel):
-    """Version-level config — prompt, model, variables, and the rubric (output_config).
+    """Version-level config: prompt, model, variables, and the rubric (output_config).
 
  The rubric is version-owned so links that pin a version (tests, simulations) get
  reproducible judge prompts even if the evaluator's live version is later changed.
@@ -167,7 +167,7 @@ class EvaluatorResponseBase(BaseModel):
  `live_version_id` is the FK pointer to the current live version. List
  views inline the full version on `live_version` because there's no
  `versions[]` to look it up in. Detail views skip the inlined block and
- expose `versions[]` instead — clients resolve the live version by
+ expose `versions[]` instead. Clients resolve the live version by
  matching `live_version_id` to a version entry's `uuid` (avoids
  duplicating the same version payload twice in the same response).
  """
@@ -398,7 +398,7 @@ async def create_evaluator_endpoint(
 class DefaultPromptResponse(BaseModel):
     """Canonical default prompt for a given purpose. Used by the frontend to prefill the
  create-evaluator form. The `name` field is null for `purpose=conversation` because there's
- no seeded conversation evaluator — the prompt is just a template."""
+ no seeded conversation evaluator. The prompt is just a template."""
 
     purpose: Literal["llm", "llm-general", "stt", "tts", "conversation"] = Field(
         description="Evaluation purpose this default prompt targets"

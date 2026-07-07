@@ -1,7 +1,7 @@
 """API keys for programmatic access to your workspace.
 
 Each key is scoped to your active workspace. The raw key is returned exactly
-once at creation; later reads show only a masked display form.
+once at creation. Later reads show only a masked display form.
 """
 
 import re

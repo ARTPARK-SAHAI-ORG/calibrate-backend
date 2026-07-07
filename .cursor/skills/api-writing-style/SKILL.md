@@ -282,7 +282,14 @@ rewrite it to state purpose instead.
 The public spec is consumed by Mintlify, which renders each field as a **name +
 type chip** (`number | null`, `object`, `object[]`) followed by the description as
 markdown. Write for that surface. Every rule below came from real reader
-complaints — treat them as hard bans, not preferences.
+complaints, so treat them as hard bans, not preferences.
+
+**CI-enforced** ([scripts/check_api_docs_style.py](../../../scripts/check_api_docs_style.py)):
+em-dashes, clause-splitting semicolons, and unit abbreviations repeating a
+field-name suffix (`_ms` → bare "ms") all fail the build. The rest below
+(null-caveat trimming, plain phrasing, "say what it's for") are **judgment
+calls** — too context-dependent to machine-check without false positives (many
+`Null until done`-style caveats are legitimate), so they're on you and review.
 
 ### Say only what the reader needs
 

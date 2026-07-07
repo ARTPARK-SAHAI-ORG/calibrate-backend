@@ -1,7 +1,7 @@
 """Public endpoints for shared eval and run results.
 
 View STT/TTS runs, agent tests, benchmarks, simulations, and annotation
-results via share links — no sign-in required. Annotator labelling jobs use
+results via share links, no sign-in required. Annotator labelling jobs use
 a separate token for read-write access.
 """
 
