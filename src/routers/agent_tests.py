@@ -41,6 +41,7 @@ from db import (
 )
 from llm_judge import build_test_evaluators_payload, evaluator_value_name
 from auth_utils import get_current_org, get_org_jwt_or_api_key, OrgContext
+from api_errors import PUBLIC_API_ERROR_RESPONSES, raise_api_error
 from utils import (
     TaskStatus,
     TaskCreateResponse,
@@ -2120,6 +2121,7 @@ def _launch_agent_test_run(
     response_model=AgentTestRunCreateResponse,
     tags=["Public API"],
     summary="Run agent tests",
+    responses=PUBLIC_API_ERROR_RESPONSES,
 )
 async def run_agent_test(
     agent_uuid: str = PathParam(
@@ -2232,6 +2234,7 @@ def _run_tests_for_agents(
     response_model=BatchTestRunResponse,
     tags=["Public API"],
     summary="Run agent tests in batch",
+    responses=PUBLIC_API_ERROR_RESPONSES,
 )
 async def run_tests_batch(
     request: Optional[BatchRunRequest] = None,
@@ -2259,9 +2262,11 @@ async def run_tests_batch(
                 selected.append(agent)
 
         if not_found:
-            raise HTTPException(
-                status_code=404,
-                detail={"message": "Unknown agent name(s)", "not_found": not_found},
+            raise_api_error(
+                404,
+                "Unknown agent name(s)",
+                code="AGENTS_NOT_FOUND",
+                not_found=not_found,
             )
     else:
         selected = org_agents
@@ -2343,6 +2348,7 @@ async def update_test_run_visibility(
     response_model=TestRunStatusResponse,
     tags=["Public API"],
     summary="Get test run status",
+    responses=PUBLIC_API_ERROR_RESPONSES,
 )
 async def get_agent_test_run_status(
     task_id: str = PathParam(

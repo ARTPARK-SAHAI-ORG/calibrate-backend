@@ -549,7 +549,7 @@ def test_unverified_connection_blocks_all_test_types(client, monkeypatch):
             headers=h,
         )
         assert blocked.status_code == 400, blocked.text
-        assert "not verified" in blocked.json()["detail"].lower()
+        assert "not verified" in blocked.json()["error"]["message"].lower()
 
 
 def test_drifted_config_eval_type_follows_immutable_row_type(client, monkeypatch):
@@ -660,7 +660,7 @@ def test_run_agent_benchmark_validation(client):
         headers=h,
     )
     assert bad_subset.status_code == 404
-    assert unlinked["uuid"] in bad_subset.json()["detail"]
+    assert unlinked["uuid"] in bad_subset.json()["error"]["message"]
 
 
 def test_run_agent_benchmark_subset_scoping(client, monkeypatch):
@@ -824,7 +824,7 @@ def test_run_tests_batch_by_names(client, monkeypatch):
             headers=h,
         )
     assert bad.status_code == 404
-    assert "does-not-exist" in bad.json()["detail"]["not_found"]
+    assert "does-not-exist" in bad.json()["error"]["not_found"]
     launch_mock.assert_not_called()  # nothing launched when validation fails
 
     # Valid batch: a1 + a2 launch; a3 (no linked tests) is skipped.

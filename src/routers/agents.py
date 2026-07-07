@@ -10,6 +10,7 @@ from pydantic import BaseModel, Field
 from calibrate_agent.connections import TextAgentConnection
 
 from utils import env_bool, env_int, env_str
+from api_errors import PUBLIC_API_ERROR_RESPONSES
 
 from db import (
     create_agent,
@@ -453,6 +454,7 @@ async def verify_agent_connection(
     response_model=ResolveAgentNamesResponse,
     tags=["Public API"],
     summary="Resolve agent names to IDs",
+    responses=PUBLIC_API_ERROR_RESPONSES,
 )
 async def resolve_agent_names(
     request: ResolveAgentNamesRequest,
@@ -480,6 +482,7 @@ async def resolve_agent_names(
     response_model=AgentCreateResponse,
     tags=["Public API"],
     summary="Create agent",
+    responses=PUBLIC_API_ERROR_RESPONSES,
 )
 async def create_agent_endpoint(
     agent: AgentCreate, ctx: OrgContext = Depends(get_org_jwt_or_api_key)
@@ -509,6 +512,7 @@ async def create_agent_endpoint(
     response_model=List[AgentResponse],
     tags=["Public API"],
     summary="List agents",
+    responses=PUBLIC_API_ERROR_RESPONSES,
 )
 async def list_agents(ctx: OrgContext = Depends(get_org_jwt_or_api_key)):
     """List all agents in your workspace."""
@@ -524,6 +528,7 @@ async def list_agents(ctx: OrgContext = Depends(get_org_jwt_or_api_key)):
     response_model=AgentResponse,
     tags=["Public API"],
     summary="Get agent",
+    responses=PUBLIC_API_ERROR_RESPONSES,
 )
 async def get_agent_endpoint(
     agent_uuid: str = Path(
@@ -544,6 +549,7 @@ async def get_agent_endpoint(
     response_model=AgentResponse,
     tags=["Public API"],
     summary="Update agent",
+    responses=PUBLIC_API_ERROR_RESPONSES,
 )
 async def update_agent_endpoint(
     agent_uuid: str = Path(
