@@ -16,6 +16,10 @@ export MAX_CONCURRENT_JOBS="${MAX_CONCURRENT_JOBS:-1}"
 export MAX_CONCURRENT_JOBS_PER_ORG="${MAX_CONCURRENT_JOBS_PER_ORG:-1}"
 export DEFAULT_MAX_ROWS_PER_EVAL="${DEFAULT_MAX_ROWS_PER_EVAL:-20}"
 export SUPERADMIN_EMAIL="${SUPERADMIN_EMAIL:-admin@example.com}"
+# Empty string counts as set for os.getenv — default so servers.url is never blank.
+if [ -z "${PUBLIC_API_BASE_URL:-}" ]; then
+  export PUBLIC_API_BASE_URL="http://localhost:8000"
+fi
 
 (cd src && uv run uvicorn main:app --port 8000 --log-level warning &)
 for _ in $(seq 1 30); do
