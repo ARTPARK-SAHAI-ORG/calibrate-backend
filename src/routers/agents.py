@@ -255,11 +255,11 @@ class AgentUpdate(BaseModel):
     )
     connection_verified: Optional[bool] = Field(
         None,
-        description="Directly set the `connection_verified` flag inside config. Omit to leave it untouched",
+        description="Set the connection verification flag for a `type=connection` agent. Omit to leave it untouched",
     )
     benchmark_models_verified: Optional[Dict[str, Any]] = Field(
         None,
-        description="Directly set the per-model benchmark verification map inside config. Omit to leave it untouched",
+        description="Set the per-model benchmark verification map for a `type=connection` agent. Omit to leave it untouched",
     )
 
 
