@@ -361,7 +361,7 @@ def _evaluator_response(evaluator: Dict[str, Any]) -> EvaluatorResponse:
 async def create_evaluator_endpoint(
     payload: EvaluatorCreate, ctx: OrgContext = Depends(get_current_org)
 ):
-    """Create a custom evaluator along with its first version, which is set live."""
+    """Create a custom evaluator along with its first version, which is set live"""
     _ensure_unique_evaluator_name(payload.name, ctx.org_uuid)
     with name_uniqueness_guard("Evaluator"):
         evaluator_uuid = create_evaluator(
@@ -423,7 +423,7 @@ async def get_default_prompt(
     ),
     _user_id: str = Depends(get_current_user_id),
 ):
-    """Get the canonical default prompt and suggested config for prefilling the create-evaluator form."""
+    """Get the canonical default prompt and suggested config for prefilling the create-evaluator form"""
     if purpose not in DEFAULT_PROMPTS_BY_PURPOSE:
         raise HTTPException(status_code=404, detail=f"Unknown purpose: {purpose}")
     p = DEFAULT_PROMPTS_BY_PURPOSE[purpose]
@@ -454,7 +454,7 @@ async def list_evaluators(
     ),
     ctx: OrgContext = Depends(get_current_org),
 ):
-    """List evaluators visible, each with its inlined live version."""
+    """List your evaluators"""
     evaluators = get_all_evaluators(
         org_uuid=ctx.org_uuid,
         include_defaults=include_defaults,
@@ -472,7 +472,7 @@ async def get_evaluator_endpoint(
     ),
     ctx: OrgContext = Depends(get_current_org),
 ):
-    """Get one evaluator with its full version history."""
+    """Get one evaluator with its full version history"""
     evaluator = _visible_or_404(get_evaluator(evaluator_uuid), ctx.org_uuid)
     base = _evaluator_response(evaluator)
     output_type = evaluator.get("output_type", "binary")
@@ -499,7 +499,7 @@ async def update_evaluator_endpoint(
     ),
     ctx: OrgContext = Depends(get_current_org),
 ):
-    """Update an evaluator, the judge used to grade outputs."""
+    """Update an evaluator, the judge used to grade outputs"""
     existing = _visible_or_404(get_evaluator(evaluator_uuid), ctx.org_uuid)
     _owner_check(existing, ctx.org_uuid)
     if payload.name is not None:
@@ -532,7 +532,7 @@ async def delete_evaluator_endpoint(
     ),
     ctx: OrgContext = Depends(get_current_org),
 ):
-    """Soft-delete a custom evaluator."""
+    """Soft-delete a custom evaluator"""
     existing = _visible_or_404(get_evaluator(evaluator_uuid), ctx.org_uuid)
     _owner_check(existing, ctx.org_uuid)
     if not delete_evaluator(evaluator_uuid):
@@ -549,7 +549,7 @@ async def duplicate_evaluator_endpoint(
     ),
     ctx: OrgContext = Depends(get_current_org),
 ):
-    """Copy any visible evaluator (including a seeded default) into a new editable custom evaluator that you own."""
+    """Copy any visible evaluator (including a seeded default) into a new editable custom evaluator that you own"""
     _visible_or_404(get_evaluator(evaluator_uuid), ctx.org_uuid)
     _ensure_unique_evaluator_name(payload.name, ctx.org_uuid)
     with name_uniqueness_guard("Evaluator"):
@@ -578,7 +578,7 @@ async def list_versions(
     ),
     ctx: OrgContext = Depends(get_current_org),
 ):
-    """List an evaluator's full version history, oldest first."""
+    """List an evaluator's full version history, oldest first"""
     evaluator = _visible_or_404(get_evaluator(evaluator_uuid), ctx.org_uuid)
     # Pass `output_type` so binary versions stored with a null
     # output_config surface the Correct/Wrong default — consistent with
@@ -599,7 +599,7 @@ async def create_version(
     ),
     ctx: OrgContext = Depends(get_current_org),
 ):
-    """Add a new version to a custom evaluator."""
+    """Add a new version to a custom evaluator"""
     existing = _visible_or_404(get_evaluator(evaluator_uuid), ctx.org_uuid)
     _owner_check(existing, ctx.org_uuid)
     cfg = payload.output_config.model_dump(exclude_none=True) if payload.output_config else None
@@ -631,7 +631,7 @@ async def mark_live(
     ),
     ctx: OrgContext = Depends(get_current_org),
 ):
-    """Set which version is the evaluator's live version."""
+    """Set which version is the evaluator's live version"""
     existing = _visible_or_404(get_evaluator(evaluator_uuid), ctx.org_uuid)
     _owner_check(existing, ctx.org_uuid)
     ok = set_evaluator_live_version(evaluator_uuid, payload.version_uuid)
@@ -665,7 +665,7 @@ async def preview_prompt(
     ),
     ctx: OrgContext = Depends(get_current_org),
 ):
-    """Render a version's system prompt with the supplied variables and return the resolved text."""
+    """Render a version's system prompt with the supplied variables and return the resolved text"""
     evaluator = _visible_or_404(get_evaluator(evaluator_uuid), ctx.org_uuid)
     version_uuid = payload.version_uuid or evaluator.get("live_version_id")
     if not version_uuid:

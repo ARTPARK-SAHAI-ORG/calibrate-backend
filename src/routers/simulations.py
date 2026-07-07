@@ -674,7 +674,7 @@ def apply_simulation_job_evaluator_enrichment(
 async def create_simulation_endpoint(
     simulation: SimulationCreate, ctx: OrgContext = Depends(get_current_org)
 ):
-    """Create a simulation, optionally linking an agent, personas, scenarios, and `conversation` evaluators."""
+    """Create a simulation, optionally linking an agent, personas, scenarios, and `conversation` evaluators"""
     if simulation.agent_uuid:
         agent = get_agent(simulation.agent_uuid)
         if not agent or agent.get("org_uuid") != ctx.org_uuid:
@@ -738,7 +738,7 @@ async def create_simulation_endpoint(
 
 @router.get("", response_model=List[SimulationListResponse], summary="List simulations")
 async def list_simulations(ctx: OrgContext = Depends(get_current_org)):
-    """List all simulations, each with its linked agent summary."""
+    """List all simulations"""
     simulations = get_all_simulations(org_uuid=ctx.org_uuid)
     result = []
     for sim in simulations:
@@ -784,7 +784,7 @@ async def update_simulation_run_visibility(
     ),
     ctx: OrgContext = Depends(get_current_org),
 ):
-    """Update public sharing for a simulation run."""
+    """Update public sharing for a simulation run"""
     job = get_simulation_job(task_id)
     if not job:
         raise HTTPException(status_code=404, detail="Task not found")
@@ -815,7 +815,7 @@ async def get_simulation_run_status(
     ),
     ctx: OrgContext = Depends(get_current_org),
 ):
-    """Get the status and results of a simulation run."""
+    """Get the status and results of a simulation run"""
     job = get_simulation_job(task_id)
     if not job:
         raise HTTPException(status_code=404, detail="Task not found")
@@ -939,7 +939,7 @@ async def get_simulation_runs(
     ),
     ctx: OrgContext = Depends(get_current_org),
 ):
-    """List runs for a simulation, most recently updated first."""
+    """List runs for a simulation, most recently updated first"""
     simulation = get_simulation(simulation_uuid)
     if not simulation or simulation.get("org_uuid") != ctx.org_uuid:
         raise HTTPException(status_code=404, detail="Simulation not found")
@@ -982,7 +982,7 @@ async def get_simulation_endpoint(
     ),
     ctx: OrgContext = Depends(get_current_org),
 ):
-    """Get a simulation with its linked agent, personas, scenarios, and evaluators."""
+    """Get a simulation with its linked agent, personas, scenarios, and evaluators"""
     simulation = get_simulation(simulation_uuid)
     if not simulation or simulation.get("org_uuid") != ctx.org_uuid:
         raise HTTPException(status_code=404, detail="Simulation not found")
@@ -1027,7 +1027,7 @@ async def update_simulation_endpoint(
     ),
     ctx: OrgContext = Depends(get_current_org),
 ):
-    """Update a simulation's name, agent, and linked personas, scenarios, and evaluators."""
+    """Update a simulation's name, agent, and linked personas, scenarios, and evaluators"""
     existing_simulation = get_simulation(simulation_uuid)
     if (
         not existing_simulation
@@ -1159,7 +1159,7 @@ async def delete_simulation_endpoint(
     ),
     ctx: OrgContext = Depends(get_current_org),
 ):
-    """Delete a simulation from your workspace."""
+    """Delete a simulation from your workspace"""
     existing_simulation = get_simulation(simulation_uuid)
     if (
         not existing_simulation
@@ -2422,7 +2422,7 @@ async def run_simulation_endpoint(
     ),
     ctx: OrgContext = Depends(get_current_org),
 ):
-    """Run a simulation as a background job."""
+    """Run a simulation as a background job"""
     simulation = get_simulation(simulation_uuid)
     if not simulation or simulation.get("org_uuid") != ctx.org_uuid:
         raise HTTPException(status_code=404, detail="Simulation not found")
@@ -2518,7 +2518,7 @@ async def abort_simulation_run(
     ),
     ctx: OrgContext = Depends(get_current_org),
 ):
-    """Abort an in-progress simulation run, keeping partial results collected so far."""
+    """Abort an in-progress simulation run, keeping partial results collected so far"""
     simulation_job = get_simulation_job(job_uuid)
     if not simulation_job:
         raise HTTPException(status_code=404, detail="Job not found")
@@ -2607,7 +2607,7 @@ async def delete_simulation_job_endpoint(
     ),
     ctx: OrgContext = Depends(get_current_org),
 ):
-    """Delete a simulation run and its results."""
+    """Delete a simulation run and its results"""
     simulation_job = get_simulation_job(job_uuid)
     if not simulation_job:
         raise HTTPException(status_code=404, detail="Job not found")

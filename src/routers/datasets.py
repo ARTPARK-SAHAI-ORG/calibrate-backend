@@ -155,7 +155,7 @@ async def create_new_dataset(
     request: DatasetCreateRequest,
     ctx: OrgContext = Depends(get_current_org),
 ):
-    """Create a new empty dataset. Add items separately."""
+    """Create a new empty dataset. Add items separately"""
     dataset_uuid = create_dataset(
         name=request.name,
         dataset_type=request.dataset_type,
@@ -173,7 +173,7 @@ async def list_datasets(
     ),
     ctx: OrgContext = Depends(get_current_org),
 ):
-    """List all datasets, optionally filtered by type."""
+    """List all datasets, optionally filtered by type"""
     if dataset_type and dataset_type not in ("stt", "tts"):
         raise HTTPException(
             status_code=400, detail="dataset_type must be 'stt' or 'tts'"
@@ -201,7 +201,7 @@ async def get_dataset_detail(
     ),
     ctx: OrgContext = Depends(get_current_org),
 ):
-    """Get a dataset with all of its items."""
+    """Get a dataset with all of its items"""
     row = get_dataset(dataset_id, org_uuid=ctx.org_uuid)
     if not row:
         raise HTTPException(status_code=404, detail="Dataset not found")
@@ -229,7 +229,7 @@ async def rename_dataset(
     ),
     ctx: OrgContext = Depends(get_current_org),
 ):
-    """Rename a dataset."""
+    """Rename a dataset"""
     row = get_dataset(dataset_id, org_uuid=ctx.org_uuid)
     if not row:
         raise HTTPException(status_code=404, detail="Dataset not found")
@@ -253,7 +253,7 @@ async def remove_dataset(
     ),
     ctx: OrgContext = Depends(get_current_org),
 ):
-    """Delete a dataset and all of its items."""
+    """Delete a dataset and all of its items"""
     row = get_dataset(dataset_id, org_uuid=ctx.org_uuid)
     if not row:
         raise HTTPException(status_code=404, detail="Dataset not found")
@@ -275,7 +275,7 @@ async def add_items(
     ),
     ctx: OrgContext = Depends(get_current_org),
 ):
-    """Append items to a dataset."""
+    """Append items to a dataset"""
     if not items:
         raise HTTPException(status_code=400, detail="items list cannot be empty")
     if len(items) > 1000:
@@ -312,7 +312,7 @@ async def update_item(
     ),
     ctx: OrgContext = Depends(get_current_org),
 ):
-    """Update a dataset item's audio or ground-truth text."""
+    """Update a dataset item's audio or ground-truth text"""
     row = get_dataset(dataset_id, org_uuid=ctx.org_uuid)
     if not row:
         raise HTTPException(status_code=404, detail="Dataset not found")
@@ -363,7 +363,7 @@ async def remove_item(
     ),
     ctx: OrgContext = Depends(get_current_org),
 ):
-    """Delete a dataset item from its dataset."""
+    """Delete a dataset item from its dataset"""
     row = get_dataset(dataset_id, org_uuid=ctx.org_uuid)
     if not row:
         raise HTTPException(status_code=404, detail="Dataset not found")

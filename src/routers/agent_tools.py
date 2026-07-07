@@ -129,7 +129,7 @@ async def create_agent_tool_links(
     agent_tools: AgentToolsCreate,
     ctx: OrgContext = Depends(get_current_org),
 ):
-    """Link one or more tools to an agent. Already-linked tools are skipped."""
+    """Link one or more tools to an agent. Already-linked tools are skipped"""
     _require_owned_agent(agent_tools.agent_uuid, ctx.org_uuid)
     for tool_uuid in agent_tools.tool_uuids:
         _require_owned_tool(tool_uuid, ctx.org_uuid)
@@ -157,7 +157,7 @@ async def create_agent_tool_links(
     "", response_model=List[AgentToolResponse], summary="List agent-tool links"
 )
 async def list_agent_tools(ctx: OrgContext = Depends(get_current_org)):
-    """List which tools are linked to which agents."""
+    """List which tools are linked to which agents"""
     return get_all_agent_tools(org_uuid=ctx.org_uuid)
 
 
@@ -173,7 +173,7 @@ async def get_agent_tools(
     ),
     ctx: OrgContext = Depends(get_current_org),
 ):
-    """List the tools linked to an agent."""
+    """List the tools linked to an agent"""
     _require_owned_agent(agent_uuid, ctx.org_uuid)
     return get_tools_for_agent(agent_uuid)
 
@@ -190,7 +190,7 @@ async def get_tool_agents(
     ),
     ctx: OrgContext = Depends(get_current_org),
 ):
-    """List the agents a tool is linked to."""
+    """List the agents a tool is linked to"""
     _require_owned_tool(tool_uuid, ctx.org_uuid)
     return get_agents_for_tool(tool_uuid)
 
@@ -199,7 +199,7 @@ async def get_tool_agents(
 async def delete_agent_tool_link(
     agent_tool: AgentToolDelete, ctx: OrgContext = Depends(get_current_org)
 ):
-    """Unlink a tool from an agent so the agent can no longer call it."""
+    """Unlink a tool from an agent so the agent can no longer call it"""
     _require_owned_agent(agent_tool.agent_uuid, ctx.org_uuid)
     deleted = remove_tool_from_agent(agent_tool.agent_uuid, agent_tool.tool_uuid)
     if not deleted:

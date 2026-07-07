@@ -75,7 +75,7 @@ class OrgLimitsCreateResponse(BaseModel):
 
 @router.get("/me/max-rows-per-eval", summary="Get own max rows per eval")
 async def get_max_rows_per_eval(ctx: OrgContext = Depends(get_current_org)):
-    """Get the max rows per eval."""
+    """Get the max rows per eval"""
     # Falls back to DEFAULT_MAX_ROWS_PER_EVAL when no workspace-specific limit is set.
     limits = get_org_limits(ctx.org_uuid)
     if limits and "max_rows_per_eval" in limits.get("limits", {}):
@@ -87,7 +87,7 @@ async def get_max_rows_per_eval(ctx: OrgContext = Depends(get_current_org)):
 async def create_org_limits_endpoint(
     data: OrgLimitsCreate, user_id: str = Depends(require_superadmin)
 ):
-    """Create limits for a workspace. Superadmin only."""
+    """Create limits for a workspace. Superadmin only"""
     # 404 if workspace missing; 409 if limits already exist (use PUT to update).
     if not get_organization(data.org_uuid):
         raise HTTPException(status_code=404, detail="Organization not found")
@@ -117,7 +117,7 @@ async def get_org_limits_endpoint(
     ),
     ctx: OrgContext = Depends(get_current_org),
 ):
-    """Get limits for a workspace you belong to."""
+    """Get limits for a workspace you belong to"""
     if get_member_role(target_org_uuid, ctx.user_id) is None and not is_superadmin_user(ctx.user_id):
         raise HTTPException(status_code=404, detail="Organization limits not found")
     limits = get_org_limits(target_org_uuid)
@@ -135,7 +135,7 @@ async def update_org_limits_endpoint(
     data: OrgLimitsUpdate = ...,
     user_id: str = Depends(require_superadmin),
 ):
-    """Update limits for a workspace. Superadmin only."""
+    """Update limits for a workspace. Superadmin only"""
     updated = update_org_limits(org_uuid=target_org_uuid, limits=data.limits)
     if not updated:
         raise HTTPException(status_code=404, detail="Organization limits not found")
@@ -150,7 +150,7 @@ async def delete_org_limits_endpoint(
     ),
     user_id: str = Depends(require_superadmin),
 ):
-    """Delete limits for a workspace, reverting it to the server default. Superadmin only."""
+    """Delete limits for a workspace, reverting it to the server default. Superadmin only"""
     deleted = delete_org_limits(target_org_uuid)
     if not deleted:
         raise HTTPException(status_code=404, detail="Organization limits not found")

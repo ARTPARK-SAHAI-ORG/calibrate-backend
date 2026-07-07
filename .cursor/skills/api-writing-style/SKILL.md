@@ -56,35 +56,39 @@ remove the `Public API` tag as part of a docs-only pass.
 
 ### Endpoint heading (summary + docstring)
 
-One sentence that **adds what the entity is, or what the call returns** — never
-a bare restatement of the summary, never scope/impl filler. The summary is the
-verb + noun ("Create test"); the docstring must earn its place by saying
-something the title doesn't.
+One sentence that **conveys what the entity is or does** — never a bare
+restatement of the summary, never scope/impl filler. **No trailing period**
+(like the summary). The summary is the verb + noun ("Create test"); the docstring
+earns its place by saying something the title doesn't.
 
 - **BAD — bare restatement** (as useless as filler): summary "Create test",
-  docstring `"""Create a test."""`. The reader learned nothing.
-- **GOOD — adds what the entity is**: `"""Create a test that runs your agent
-  against a conversation and grades its reply, tool calls, or the full
-  conversation."""`
-- **For GET/list/poll, add what you get back**: `"""Poll a test run for its
-  status, per-case results, and judge verdicts."""` (cf. Coval: "Retrieve
-  detailed information about a specific simulation run.")
-- **For a lesser-known entity, gloss it in an appositive**: `"""Update a persona,
-  a simulated user profile used in simulations."""`
-- Still **one sentence**, still no scope filler ("in your workspace"), no field
-  enumeration ("name and/or config"), no implementation (deep-merge, job types).
+  docstring `"""Create a test"""`. The reader learned nothing.
+- **GOOD — says what the entity does** (this is where a sentence pays off, most
+  on create): `"""Create a test that runs your agent against a conversation and
+  evaluates its answer quality or the tools it calls"""`
+- **Do NOT append an inventory of what comes back.** A trailing catalog of
+  response fields is padding, not purpose. Keep one clean phrase.
+  - BAD: `"""List your agents, each with its type and config"""`
+  - GOOD: `"""Get the list of all your agents"""`
+  - BAD: `"""Poll a test run for its status, per-case results, and judge
+    verdicts"""`
+  - GOOD: `"""Poll a test run for its status and evaluation results"""`
+- For get/list/simple ops a light natural phrase is enough ("Get one agent by its
+  ID"); don't force a rich sentence where there's nothing to add.
+- Still **one sentence**, no scope filler ("in your workspace"), no field
+  enumeration ("name and/or config"), no implementation (deep-merge, job types),
+  no trailing period.
 
-The model to imitate — Coval's descriptions add purpose, not padding:
-"Launch a new simulation run **to evaluate an agent against test cases using a
-persona**."
+The model — Coval's descriptions add purpose, not padding: "Launch a new
+simulation run **to evaluate an agent against test cases using a persona**."
 
 | Route | Summary | Description |
 |---|---|---|
-| `GET /agents` | List agents | List your agents, each with its type and config. |
-| `POST /agents/resolve` | Resolve agent names to IDs | Look up agent IDs by name, to reference agents in other calls. |
-| `POST /agent-tests/agent/{agent_uuid}/run` | Run agent tests | Run an agent's linked tests as a background job, returning a task ID to poll. |
-| `POST /agent-tests/run` | Run agent tests in batch | Run agent tests for every agent, or for a selected set. |
-| `GET /agent-tests/run/{task_id}` | Get test run status | Poll a test run for its status, per-case results, and judge verdicts. |
+| `GET /agents` | List agents | Get the list of all your agents |
+| `POST /agents/resolve` | Resolve agent names to IDs | Get the IDs for your agents by their names |
+| `PUT /agents/{agent_uuid}` | Update agent | Update an agent's configuration |
+| `POST /tests` | Create test | Create a test that runs your agent against a conversation and evaluates its answer quality or the tools it calls |
+| `GET /agent-tests/run/{task_id}` | Get test run status | Poll a test run for its status and evaluation results |
 
 **Never put in the endpoint heading:**
 
@@ -157,7 +161,7 @@ models** must match. Never invent `a1b2c3d4`-style placeholders.
 ### Public API checklist
 
 - [ ] `summary=` — imperative, no period, says **ID** not UUID
-- [ ] Docstring — **one sentence that adds what the entity is / what it returns** (not a bare restatement of the summary); no fields/errors/auth/impl/scope filler
+- [ ] Docstring — one sentence saying what the entity **is/does** (not a bare restatement, not an inventory of returned fields); **no trailing period**; no fields/errors/auth/impl/scope filler
 - [ ] Path params — purpose-first `description` + real UUID `examples`; no length constraints
 - [ ] Request fields — what it is + what omitting it does
 - [ ] Response fields — what each value means; error/shape detail here, not in heading

@@ -80,7 +80,7 @@ async def create_annotator_endpoint(
     payload: AnnotatorCreate,
     ctx: OrgContext = Depends(get_current_org),
 ):
-    """Create an annotator, a human labeller who can be assigned annotation tasks."""
+    """Create an annotator, a human labeller who can be assigned annotation tasks"""
     try:
         with ensure_name_unique(
             "annotators", payload.name, ctx.org_uuid, entity="Annotator"
@@ -97,7 +97,7 @@ async def create_annotator_endpoint(
 
 @router.get("", response_model=List[AnnotatorResponse], summary="List annotators")
 async def list_annotators(ctx: OrgContext = Depends(get_current_org)):
-    """List annotators with job counts and agreement stats."""
+    """List annotators with job counts and agreement stats"""
     annotators = get_all_annotators(org_uuid=ctx.org_uuid)
     if not annotators:
         return []
@@ -135,7 +135,7 @@ async def get_annotator_endpoint(
     ),
     ctx: OrgContext = Depends(get_current_org),
 ):
-    """Get one annotator with assigned jobs and an agreement trend series."""
+    """Get one annotator with assigned jobs and an agreement trend series"""
     annotator = _ensure_owned_annotator(annotator_uuid, ctx.org_uuid)
 
     jobs = get_jobs_for_annotator_detailed(annotator_uuid)
@@ -180,7 +180,7 @@ async def update_annotator_endpoint(
     payload: AnnotatorUpdate = ...,
     ctx: OrgContext = Depends(get_current_org),
 ):
-    """Update an annotator's name."""
+    """Update an annotator's name"""
     _ensure_owned_annotator(annotator_uuid, ctx.org_uuid)
     try:
         with ensure_name_unique(
@@ -206,7 +206,7 @@ async def delete_annotator_endpoint(
     ),
     ctx: OrgContext = Depends(get_current_org),
 ):
-    """Soft-delete an annotator."""
+    """Soft-delete an annotator"""
     _ensure_owned_annotator(annotator_uuid, ctx.org_uuid)
     deleted = delete_annotator(annotator_uuid)
     if not deleted:

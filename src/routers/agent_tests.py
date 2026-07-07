@@ -523,7 +523,7 @@ class GlobalTestRunsResponse(BaseModel):
 
 @router.post("", response_model=AgentTestsCreateResponse, summary="Link tests to agent")
 async def create_agent_test_links(agent_tests: AgentTestsCreate):
-    """Link one or more tests to an agent. Already-linked tests are skipped."""
+    """Link one or more tests to an agent. Already-linked tests are skipped"""
     # Verify agent exists
     agent = get_agent(agent_tests.agent_uuid)
     if not agent:
@@ -558,7 +558,7 @@ async def create_agent_test_links(agent_tests: AgentTestsCreate):
 
 @router.get("", response_model=List[AgentTestResponse], summary="List agent-test links")
 async def list_agent_tests():
-    """List which tests are linked to which agents."""
+    """List which tests are linked to which agents"""
     links = get_all_agent_tests()
     return links
 
@@ -574,7 +574,7 @@ async def get_agent_tests_endpoint(
         examples=[_EXAMPLE_AGENT_UUID],
     ),
 ):
-    """List the tests linked to an agent."""
+    """List the tests linked to an agent"""
     # Verify agent exists
     agent = get_agent(agent_uuid)
     if not agent:
@@ -650,7 +650,7 @@ async def get_agent_test_runs(
         examples=[_EXAMPLE_AGENT_UUID],
     ),
 ):
-    """List test runs for an agent, including status and results."""
+    """List test runs for an agent, including status and results"""
     # Verify agent exists
     agent = get_agent(agent_uuid)
     if not agent:
@@ -693,7 +693,7 @@ async def get_all_test_runs_for_user(
         description="Filter by job type. Omit to return both",
     ),
 ):
-    """List all test runs, newest first."""
+    """List all test runs, newest first"""
     jobs = get_agent_test_jobs_for_org(ctx.org_uuid, job_type=type)
 
     # Per-agent counters for naming ("Run 1", "Benchmark 2", …).
@@ -741,7 +741,7 @@ async def get_test_agents(
         examples=[_EXAMPLE_TEST_UUID],
     ),
 ):
-    """List the agents linked to a test."""
+    """List the agents linked to a test"""
     # Verify test exists
     test = get_test(test_uuid)
     if not test:
@@ -753,7 +753,7 @@ async def get_test_agents(
 
 @router.delete("", summary="Unlink test from agent")
 async def delete_agent_test_link(agent_test: AgentTestDelete):
-    """Unlink a test from an agent so it no longer runs for that agent."""
+    """Unlink a test from an agent so it no longer runs for that agent"""
     deleted = remove_test_from_agent(agent_test.agent_uuid, agent_test.test_uuid)
     if not deleted:
         raise HTTPException(status_code=404, detail="Agent-test link not found")
@@ -775,7 +775,7 @@ class AgentTestBulkDelete(BaseModel):
 
 @router.post("/bulk-unlink", summary="Bulk unlink tests from agent")
 async def bulk_delete_agent_test_links(payload: AgentTestBulkDelete):
-    """Unlink multiple tests from an agent."""
+    """Unlink multiple tests from an agent"""
     if not payload.test_uuids:
         raise HTTPException(status_code=400, detail="test_uuids must not be empty")
 
@@ -812,7 +812,7 @@ async def bulk_delete_agent_tests(
     payload: AgentTestsBulkDeleteAll,
     ctx: OrgContext = Depends(get_current_org),
 ):
-    """Soft-delete tests linked to an agent, removing their links across every agent."""
+    """Soft-delete tests linked to an agent, removing their links across every agent"""
     # Unlike `/bulk-unlink`, this deletes the test rows (not just links). Only
     # tests in your workspace that are linked to `agent_uuid` are deleted;
     # foreign or unlinked IDs are silently skipped. Deleting a test cascades
@@ -2138,7 +2138,7 @@ async def run_agent_test(
     request: RunTestRequest = ...,
     ctx: OrgContext = Depends(get_org_jwt_or_api_key),
 ):
-    """Run an agent's linked tests as a background job, returning a task ID to poll."""
+    """Run an agent's linked tests as a background job, returning a task ID to poll"""
     # Public API (auth via get_org_jwt_or_api_key). Verify the agent exists and
     # belongs to the caller's workspace (404 otherwise).
     agent = get_agent(agent_uuid)
@@ -2246,7 +2246,7 @@ async def run_tests_batch(
     request: Optional[BatchRunRequest] = None,
     ctx: OrgContext = Depends(get_org_jwt_or_api_key),
 ):
-    """Run agent tests for every agent, or for a selected set."""
+    """Run agent tests for every agent, or for a selected set"""
     # Public API (auth via get_org_jwt_or_api_key).
     agent_names = request.agent_names if request else None
 
@@ -2333,7 +2333,7 @@ async def update_test_run_visibility(
     body: VisibilityRequest = ...,
     ctx: OrgContext = Depends(get_current_org),
 ):
-    """Toggle public sharing for a test run."""
+    """Toggle public sharing for a test run"""
     job = _load_owned_agent_test_job(task_id, ctx)
 
     if body.is_public:
@@ -2360,7 +2360,7 @@ async def get_agent_test_run_status(
     ),
     ctx: OrgContext = Depends(get_org_jwt_or_api_key),
 ):
-    """Poll a test run for its status and evaluation results."""
+    """Poll a test run for its status and evaluation results"""
     # Public API (auth via get_org_jwt_or_api_key); ownership enforced below.
     job = _load_owned_agent_test_job(task_id, ctx)
 
@@ -3011,7 +3011,7 @@ async def run_agent_benchmark(
     request: BenchmarkRequest = ...,
     ctx: OrgContext = Depends(get_current_org),
 ):
-    """Run a multi-model benchmark on an agent's linked tests as a background job."""
+    """Run a multi-model benchmark on an agent's linked tests as a background job"""
     # Verify agent exists and belongs to the caller's org.
     agent = get_agent(agent_uuid)
     if not agent or agent.get("org_uuid") != ctx.org_uuid:
@@ -3136,7 +3136,7 @@ async def update_benchmark_visibility(
     body: VisibilityRequest = ...,
     ctx: OrgContext = Depends(get_current_org),
 ):
-    """Toggle public sharing for a benchmark run."""
+    """Toggle public sharing for a benchmark run"""
     job = _load_owned_agent_test_job(task_id, ctx)
 
     if body.is_public:
@@ -3162,7 +3162,7 @@ async def get_benchmark_status(
     ),
     ctx: OrgContext = Depends(get_current_org),
 ):
-    """Get the status and results of a benchmark run."""
+    """Get the status and results of a benchmark run"""
     job = _load_owned_agent_test_job(task_id, ctx)
 
     status = job["status"]
@@ -3219,7 +3219,7 @@ async def delete_agent_test_job_endpoint(
     ),
     ctx: OrgContext = Depends(get_current_org),
 ):
-    """Delete an agent test or benchmark job."""
+    """Delete an agent test or benchmark job"""
     job = get_agent_test_job(job_uuid)
     if not job:
         raise HTTPException(status_code=404, detail="Job not found")

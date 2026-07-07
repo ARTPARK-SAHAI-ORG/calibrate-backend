@@ -71,7 +71,7 @@ async def list_jobs(
     ),
     ctx: OrgContext = Depends(get_current_org),
 ):
-    """List jobs, newest first."""
+    """List jobs, newest first"""
     db_job_type = JOB_TYPE_MAP.get(job_type) if job_type else None
 
     jobs = get_all_jobs(org_uuid=ctx.org_uuid, job_type=db_job_type)
@@ -114,7 +114,7 @@ async def delete_job_endpoint(
     ),
     ctx: OrgContext = Depends(get_current_org),
 ):
-    """Delete a job, stopping it first if it is still running."""
+    """Delete a job, stopping it first if it is still running"""
     job = get_job(job_uuid, org_uuid=ctx.org_uuid)
     if not job:
         raise HTTPException(status_code=404, detail="Job not found")

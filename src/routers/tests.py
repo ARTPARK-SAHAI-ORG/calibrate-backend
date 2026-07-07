@@ -380,7 +380,7 @@ def _with_evaluators(test_dict: Dict[str, Any]) -> Dict[str, Any]:
 async def bulk_delete_tests_endpoint(
     payload: BulkTestDelete, ctx: OrgContext = Depends(get_current_org)
 ):
-    """Soft-delete multiple tests by ID."""
+    """Soft-delete multiple tests by ID"""
     if not payload.test_uuids:
         raise HTTPException(status_code=400, detail="test_uuids must not be empty")
 
@@ -403,7 +403,7 @@ async def bulk_delete_tests_endpoint(
 async def bulk_upload_tests(
     payload: BulkTestUpload, ctx: OrgContext = Depends(get_org_jwt_or_api_key)
 ):
-    """Create many test cases at once and link them to your agents."""
+    """Create many test cases at once and link them to your agents"""
     if payload.agent_uuids:
         for agent_uuid in payload.agent_uuids:
             agent = get_agent(agent_uuid)
@@ -493,7 +493,7 @@ async def bulk_upload_tests(
 async def create_test_endpoint(
     test: TestCreate, ctx: OrgContext = Depends(get_org_jwt_or_api_key)
 ):
-    """Create a test that runs your agent against a conversation and evaluates its answer quality or the tools it calls."""
+    """Create a test that runs your agent against a conversation and evaluates its answer quality or the tools it calls"""
     # Conversation tests have no evaluator fallback (unlike `response`, which can
     # synthesize the default LLM judge from legacy string criteria) — without a
     # linked simulation evaluator a run produces an empty calibrate config with
@@ -529,7 +529,7 @@ async def create_test_endpoint(
     summary="List tests",
 )
 async def list_tests(ctx: OrgContext = Depends(get_org_jwt_or_api_key)):
-    """List all the test cases for your agents."""
+    """List all the test cases for your agents"""
     tests = get_all_tests(org_uuid=ctx.org_uuid)
     return [_with_evaluators(t) for t in tests]
 
@@ -547,7 +547,7 @@ async def get_test_endpoint(
     ),
     ctx: OrgContext = Depends(get_org_jwt_or_api_key),
 ):
-    """Get an agent test case by its ID."""
+    """Get an agent test case by its ID"""
     test = get_test(test_uuid)
     if not test or test.get("org_uuid") != ctx.org_uuid:
         raise HTTPException(status_code=404, detail="Test not found")
@@ -634,7 +634,7 @@ async def delete_test_endpoint(
     ),
     ctx: OrgContext = Depends(get_current_org),
 ):
-    """Soft-delete a test."""
+    """Soft-delete a test"""
     existing_test = get_test(test_uuid)
     if not existing_test or existing_test.get("org_uuid") != ctx.org_uuid:
         raise HTTPException(status_code=404, detail="Test not found")

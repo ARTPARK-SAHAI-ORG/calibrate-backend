@@ -243,7 +243,7 @@ async def create_annotation_task_endpoint(
     payload: AnnotationTaskCreate,
     ctx: OrgContext = Depends(get_current_org),
 ):
-    """Create an annotation task for annotators to label items against evaluators."""
+    """Create an annotation task for annotators to label items against evaluators"""
     if payload.evaluator_ids:
         for evaluator_id in payload.evaluator_ids:
             _ensure_owned_evaluator(evaluator_id, ctx.org_uuid)
@@ -270,7 +270,7 @@ async def create_annotation_task_endpoint(
 
 @router.get("", response_model=List[AnnotationTaskResponse], summary="List annotation tasks")
 async def list_annotation_tasks(ctx: OrgContext = Depends(get_current_org)):
-    """List annotation tasks with linked evaluators."""
+    """List annotation tasks with linked evaluators"""
     tasks = get_all_annotation_tasks(org_uuid=ctx.org_uuid)
     for task in tasks:
         task["evaluators"] = get_evaluators_for_annotation_task(task["uuid"])
@@ -285,7 +285,7 @@ async def get_annotation_task_endpoint(
     ),
     ctx: OrgContext = Depends(get_current_org),
 ):
-    """Get one annotation task with linked evaluators, items, and labelling jobs."""
+    """Get one annotation task with linked evaluators, items, and labelling jobs"""
     task = _ensure_owned_task(task_uuid, ctx.org_uuid)
     evaluators = _enrich_evaluators_with_live_version(
         get_evaluators_for_annotation_task(task_uuid)
@@ -327,7 +327,7 @@ async def update_annotation_task_endpoint(
     payload: AnnotationTaskUpdate = ...,
     ctx: OrgContext = Depends(get_current_org),
 ):
-    """Update an annotation task, a labelling task for annotators."""
+    """Update an annotation task, a labelling task for annotators"""
     _ensure_owned_task(task_uuid, ctx.org_uuid)
     with ensure_name_unique(
         "annotation_tasks",
@@ -356,7 +356,7 @@ async def delete_annotation_task_endpoint(
     ),
     ctx: OrgContext = Depends(get_current_org),
 ):
-    """Soft-delete an annotation task."""
+    """Soft-delete an annotation task"""
     _ensure_owned_task(task_uuid, ctx.org_uuid)
     deleted = delete_annotation_task(task_uuid)
     if not deleted:
@@ -375,7 +375,7 @@ async def list_task_evaluators(
     ),
     ctx: OrgContext = Depends(get_current_org),
 ):
-    """List evaluators linked to this task in full detail, ordered by display position."""
+    """List evaluators linked to this task in full detail, ordered by display position"""
     # Lazy import to avoid a circular module-load between the two router
     # files (annotation_tasks ↔ evaluators).
     from routers.evaluators import (
@@ -425,7 +425,7 @@ async def link_evaluator_to_task(
     payload: EvaluatorLinkRequest = ...,
     ctx: OrgContext = Depends(get_current_org),
 ):
-    """Link an evaluator to a task, appending it to the display order."""
+    """Link an evaluator to a task, appending it to the display order"""
     _ensure_owned_task(task_uuid, ctx.org_uuid)
     _ensure_owned_evaluator(payload.evaluator_id, ctx.org_uuid)
     add_evaluator_to_annotation_task(task_uuid, payload.evaluator_id)
@@ -443,7 +443,7 @@ async def reorder_task_evaluators(
 ):
     """Reorder evaluators linked to a task.
 
- The request must list every currently linked evaluator ID in the desired order. This endpoint reorders only and does not link or unlink evaluators."""
+ The request must list every currently linked evaluator ID in the desired order. This endpoint reorders only and does not link or unlink evaluators"""
     _ensure_owned_task(task_uuid, ctx.org_uuid)
     try:
         reorder_evaluators_for_annotation_task(task_uuid, payload.evaluator_ids)
@@ -490,7 +490,7 @@ async def list_task_items(
     ),
     ctx: OrgContext = Depends(get_current_org),
 ):
-    """List non-deleted items in a task."""
+    """List non-deleted items in a task"""
     _ensure_owned_task(task_uuid, ctx.org_uuid)
     return get_annotation_items_for_task(task_uuid)
 
@@ -516,7 +516,7 @@ async def check_annotated_items(
     payload: AnnotatedItemsCheckRequest = ...,
     ctx: OrgContext = Depends(get_current_org),
 ):
-    """Check which proposed item names already exist and whether the annotator has labelled them."""
+    """Check which proposed item names already exist and whether the annotator has labelled them"""
     _ensure_owned_task(task_uuid, ctx.org_uuid)
     if not payload.names:
         raise HTTPException(status_code=400, detail="names must be non-empty")
@@ -568,7 +568,7 @@ async def bulk_create_items(
     payload: BulkItemsRequest = ...,
     ctx: OrgContext = Depends(get_current_org),
 ):
-    """Bulk-create annotation items in a task, optionally seeding human annotations."""
+    """Bulk-create annotation items in a task, optionally seeding human annotations"""
     task = _ensure_owned_task(task_uuid, ctx.org_uuid)
     if not payload.items:
         raise HTTPException(status_code=400, detail="items must be non-empty")
@@ -848,7 +848,7 @@ async def bulk_update_items(
     payload: BulkUpdateItemsRequest = ...,
     ctx: OrgContext = Depends(get_current_org),
 ):
-    """Bulk-update item payloads in a task."""
+    """Bulk-update item payloads in a task"""
     task = _ensure_owned_task(task_uuid, ctx.org_uuid)
     if not payload.updates:
         raise HTTPException(status_code=400, detail="updates must be non-empty")
@@ -966,7 +966,7 @@ async def bulk_delete_items(
     payload: BulkDeleteItemsRequest = ...,
     ctx: OrgContext = Depends(get_current_org),
 ):
-    """Soft-delete items in a task, using explicit IDs or a select-all filter."""
+    """Soft-delete items in a task, using explicit IDs or a select-all filter"""
     _ensure_owned_task(task_uuid, ctx.org_uuid)
     target_ids = _resolve_target_item_ids(
         task_uuid,
@@ -998,7 +998,7 @@ async def get_item(
     ),
     ctx: OrgContext = Depends(get_current_org),
 ):
-    """Get one item in a task."""
+    """Get one item in a task"""
     _ensure_owned_task(task_uuid, ctx.org_uuid)
     item = get_annotation_item(item_uuid)
     if not item or item.get("task_id") != task_uuid:
@@ -1018,7 +1018,7 @@ async def list_item_annotations(
     ),
     ctx: OrgContext = Depends(get_current_org),
 ):
-    """List human annotations for one item across every labelling job."""
+    """List human annotations for one item across every labelling job"""
     _ensure_owned_task(task_uuid, ctx.org_uuid)
     item = get_annotation_item(item_uuid)
     if not item or item.get("task_id") != task_uuid:
@@ -1059,7 +1059,7 @@ async def list_task_jobs(
     ),
     ctx: OrgContext = Depends(get_current_org),
 ):
-    """List labelling jobs for a task."""
+    """List labelling jobs for a task"""
     _ensure_owned_task(task_uuid, ctx.org_uuid)
     return get_jobs_for_task(task_uuid)
 
@@ -1073,7 +1073,7 @@ async def create_jobs(
     payload: CreateJobsRequest = ...,
     ctx: OrgContext = Depends(get_current_org),
 ):
-    """Assign items to annotators, creating one labelling job per annotator."""
+    """Assign items to annotators, creating one labelling job per annotator"""
     _ensure_owned_task(task_uuid, ctx.org_uuid)
     if not payload.annotator_ids:
         raise HTTPException(
@@ -1195,7 +1195,7 @@ async def get_annotation_job_endpoint(
     ),
     ctx: OrgContext = Depends(get_current_org),
 ):
-    """Get one labelling job with its frozen item snapshot."""
+    """Get one labelling job with its frozen item snapshot"""
     _ensure_owned_task(task_uuid, ctx.org_uuid)
     job = get_annotation_job(job_uuid)
     if not job or job.get("task_id") != task_uuid:
@@ -1219,7 +1219,7 @@ async def bulk_delete_annotation_jobs_endpoint(
     payload: BulkDeleteJobsRequest = ...,
     ctx: OrgContext = Depends(get_current_org),
 ):
-    """Soft-delete labelling jobs in a task."""
+    """Soft-delete labelling jobs in a task"""
     _ensure_owned_task(task_uuid, ctx.org_uuid)
     if not payload.job_uuids:
         raise HTTPException(status_code=400, detail="job_uuids must be non-empty")
@@ -1239,7 +1239,7 @@ async def delete_annotation_job_endpoint(
     ),
     ctx: OrgContext = Depends(get_current_org),
 ):
-    """Soft-delete one labelling job in a task."""
+    """Soft-delete one labelling job in a task"""
     _ensure_owned_task(task_uuid, ctx.org_uuid)
     job = get_annotation_job(job_uuid)
     if not job or job.get("task_id") != task_uuid:
@@ -1280,7 +1280,7 @@ async def update_annotation_job_visibility_endpoint(
     body: AnnotationJobVisibilityRequest = ...,
     ctx: OrgContext = Depends(get_current_org),
 ):
-    """Toggle a read-only public viewer link for a completed labelling job."""
+    """Toggle a read-only public viewer link for a completed labelling job"""
     _ensure_owned_task(task_uuid, ctx.org_uuid)
     job = get_annotation_job(job_uuid)
     if not job or job.get("task_id") != task_uuid:
@@ -1342,7 +1342,7 @@ async def upsert_annotation_endpoint(
     payload: AnnotationUpsertRequest = ...,
     ctx: OrgContext = Depends(get_current_org),
 ):
-    """Upsert one human annotation on a labelling job."""
+    """Upsert one human annotation on a labelling job"""
     _ensure_owned_task(task_uuid, ctx.org_uuid)
     job = get_annotation_job(payload.job_id)
     if not job or job.get("task_id") != task_uuid:
@@ -1422,7 +1422,7 @@ async def start_evaluator_run(
     payload: EvaluatorRunStartRequest = ...,
     ctx: OrgContext = Depends(get_current_org),
 ):
-    """Run evaluators on task items as a background job."""
+    """Run evaluators on task items as a background job"""
     task = _ensure_owned_task(task_uuid, ctx.org_uuid)
     if task.get("type") not in SUPPORTED_EVAL_TASK_TYPES:
         raise HTTPException(
@@ -1757,7 +1757,7 @@ async def list_evaluator_run_jobs(
     ),
     ctx: OrgContext = Depends(get_current_org),
 ):
-    """List evaluator-run jobs for a task."""
+    """List evaluator-run jobs for a task"""
     _ensure_owned_task(task_uuid, ctx.org_uuid)
     jobs = get_generic_jobs_for_task(task_uuid, ANNOTATION_EVAL_JOB_TYPE)
 
@@ -2016,7 +2016,7 @@ async def get_evaluator_run_job(
     ),
     ctx: OrgContext = Depends(get_current_org),
 ):
-    """Get one evaluator-run job with results and human-agreement summary."""
+    """Get one evaluator-run job with results and human-agreement summary"""
     _ensure_owned_task(task_uuid, ctx.org_uuid)
     job = get_job(job_uuid, org_uuid=ctx.org_uuid)
     if (
@@ -2059,7 +2059,7 @@ async def delete_evaluator_run_job(
     ),
     ctx: OrgContext = Depends(get_current_org),
 ):
-    """Soft-delete an evaluator-run job and its run results."""
+    """Soft-delete an evaluator-run job and its run results"""
     _ensure_owned_task(task_uuid, ctx.org_uuid)
     job = get_job(job_uuid, org_uuid=ctx.org_uuid)
     if (
@@ -2118,7 +2118,7 @@ async def update_evaluator_run_visibility(
     body: EvaluatorRunVisibilityRequest = ...,
     ctx: OrgContext = Depends(get_current_org),
 ):
-    """Toggle public sharing for a completed evaluator-run job."""
+    """Toggle public sharing for a completed evaluator-run job"""
     _ensure_owned_task(task_uuid, ctx.org_uuid)
     job = get_job(job_uuid, org_uuid=ctx.org_uuid)
     if (
@@ -2155,7 +2155,7 @@ async def list_item_evaluator_runs(
     ),
     ctx: OrgContext = Depends(get_current_org),
 ):
-    """List evaluator runs for one item."""
+    """List evaluator runs for one item"""
     _ensure_owned_task(task_uuid, ctx.org_uuid)
     item = get_annotation_item(item_uuid)
     if not item or item.get("task_id") != task_uuid:
@@ -2214,7 +2214,7 @@ async def task_agreement(
     ),
     ctx: OrgContext = Depends(get_current_org),
 ):
-    """Get human-vs-human and human-vs-evaluator agreement metrics for a task."""
+    """Get human-vs-human and human-vs-evaluator agreement metrics for a task"""
     _ensure_owned_task(task_uuid, ctx.org_uuid)
     annotations = get_annotations_for_task(task_uuid)
     linked = get_evaluators_for_annotation_task(task_uuid)
@@ -2261,7 +2261,7 @@ async def task_summary(
     sort: _SummarySort = Depends(),
     pagination: PaginationParams = Depends(),
 ):
-    """Get a paginated summary table of items, evaluator runs, and human annotations for a task."""
+    """Get a paginated summary table of items, evaluator runs, and human annotations for a task"""
     task = _ensure_owned_task(task_uuid, ctx.org_uuid)
     items = get_annotation_items_for_task(task_uuid)
     evaluators = get_evaluators_for_annotation_task(task_uuid)
@@ -2648,7 +2648,7 @@ async def unlink_evaluator_from_task(
     ),
     ctx: OrgContext = Depends(get_current_org),
 ):
-    """Unlink an evaluator from a task without changing existing job snapshots."""
+    """Unlink an evaluator from a task without changing existing job snapshots"""
     _ensure_owned_task(task_uuid, ctx.org_uuid)
     removed = remove_evaluator_from_annotation_task(task_uuid, evaluator_uuid)
     if not removed:

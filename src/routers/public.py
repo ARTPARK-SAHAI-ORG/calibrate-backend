@@ -457,7 +457,7 @@ async def get_public_default_evaluators(
         description="Evaluator types to include, comma-separated (`stt`, `tts`, `llm`, `llm-general`, `conversation`). Omit for all",
     ),
 ):
-    """List default evaluator metadata when you have a valid share token."""
+    """List default evaluator metadata when you have a valid share token"""
     _ensure_valid_public_share_token(share_token)
     requested_types = _parse_evaluator_types(types)
 
@@ -475,7 +475,7 @@ async def get_public_default_evaluators(
 async def get_public_stt(
     share_token: str = Path(description="Share token for the STT run"),
 ):
-    """Get a shared STT evaluation result."""
+    """Get a shared STT evaluation result"""
     job = get_job_by_share_token(share_token, job_type="stt-eval")
     if not job:
         raise HTTPException(status_code=404, detail="Not found")
@@ -547,7 +547,7 @@ async def get_public_stt(
 async def get_public_tts(
     share_token: str = Path(description="Share token for the TTS run"),
 ):
-    """Get a shared TTS evaluation result."""
+    """Get a shared TTS evaluation result"""
     job = get_job_by_share_token(share_token, job_type="tts-eval")
     if not job:
         raise HTTPException(status_code=404, detail="Not found")
@@ -604,7 +604,7 @@ async def get_public_tts(
 async def get_public_test_run(
     share_token: str = Path(description="Share token for the LLM test run"),
 ):
-    """Get a shared LLM test run result."""
+    """Get a shared LLM test run result"""
     job = get_agent_test_job_by_share_token(share_token, job_type="llm-unit-test")
     if not job:
         raise HTTPException(status_code=404, detail="Not found")
@@ -644,7 +644,7 @@ async def get_public_test_run(
 async def get_public_benchmark(
     share_token: str = Path(description="Share token for the LLM benchmark run"),
 ):
-    """Get a shared LLM benchmark result."""
+    """Get a shared LLM benchmark result"""
     job = get_agent_test_job_by_share_token(share_token, job_type="llm-benchmark")
     if not job:
         raise HTTPException(status_code=404, detail="Not found")
@@ -679,7 +679,7 @@ async def get_public_benchmark(
 async def get_public_simulation_run(
     share_token: str = Path(description="Share token for the simulation run"),
 ):
-    """Get a shared simulation run result."""
+    """Get a shared simulation run result"""
     job = get_simulation_job_by_share_token(share_token)
     if not job:
         raise HTTPException(status_code=404, detail="Not found")
@@ -726,7 +726,7 @@ async def get_public_simulation_run(
 async def get_public_annotation_eval(
     share_token: str = Path(description="Share token for the annotation evaluator-run job"),
 ):
-    """Get a shared annotation evaluator-run result."""
+    """Get a shared annotation evaluator-run result"""
     # Only `done` runs are exposed; in-flight or failed runs return 404.
     job = get_job_by_share_token(share_token, job_type=ANNOTATION_EVAL_JOB_TYPE)
     if not job:
@@ -879,7 +879,7 @@ def _build_annotation_job_payload(
 def get_public_annotation_job_view(
     view_token: str = Path(description="Read-only view token for the annotation job"),
 ):
-    """Get a read-only view of an annotator's labelling job."""
+    """Get a read-only view of an annotator's labelling job"""
     job = get_annotation_job_by_view_token(view_token)
     if not job:
         raise HTTPException(status_code=404, detail="Not found")
@@ -890,7 +890,7 @@ def get_public_annotation_job_view(
 def get_public_annotation_job(
     token: str = Path(description="Annotator token for the labelling job"),
 ):
-    """Get everything you need to render an annotator's labelling job page."""
+    """Get everything you need to render an annotator's labelling job page"""
     job = _resolve_public_annotation_job(token)
     return _build_annotation_job_payload(job, read_only=False)
 
@@ -925,7 +925,7 @@ def upsert_public_annotations(
     token: str = Path(description="Annotator token for the labelling job"),
     payload: PublicAnnotationUpsertRequest = ...,
 ):
-    """Save all judgements for one item in a single request."""
+    """Save all judgements for one item in a single request"""
     # First save moves the job from `pending` to `in_progress`; all slots filled moves it to `completed`.
     job = _resolve_public_annotation_job(token)
     if not payload.annotations:

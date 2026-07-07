@@ -291,7 +291,8 @@ class AgentUpdate(BaseModel):
     config: Optional[Dict[str, Any]] = Field(
         None,
         description=_AGENT_CONFIG_DESCRIPTION
-        + "\n\nReplaces the stored config. Omit to leave unchanged. For `type=connection`, changing `agent_url` or `agent_headers` resets the connection and benchmark verification flags.",
+        + "\n\nReplaces the stored config. Omit to leave unchanged."
+        + "\n\nFor `type=connection`, changing `agent_url` or `agent_headers` resets the connection and benchmark verification flags.",
     )
     connection_verified: Optional[bool] = Field(
         None,
@@ -400,7 +401,7 @@ async def verify_agent_connection_presave(
     request: VerifyConnectionRequest,
     ctx: OrgContext = Depends(get_current_org),
 ):
-    """Verify an agent connection before saving an agent. Nothing is persisted."""
+    """Verify an agent connection before saving an agent. Nothing is persisted"""
     if not request.agent_url:
         raise HTTPException(status_code=400, detail="agent_url is required")
 
@@ -426,7 +427,7 @@ async def verify_agent_connection(
     request: VerifyConnectionRequest = ...,
     ctx: OrgContext = Depends(get_current_org),
 ):
-    """Verify a saved agent's connection and persist the result when successful."""
+    """Verify a saved agent's connection and persist the result when successful"""
     agent = get_agent(agent_uuid)
     if not agent or agent.get("org_uuid") != ctx.org_uuid:
         raise HTTPException(status_code=404, detail="Agent not found")
@@ -494,7 +495,7 @@ async def resolve_agent_names(
     request: ResolveAgentNamesRequest,
     ctx: OrgContext = Depends(get_org_jwt_or_api_key),
 ):
-    """Get the IDs for your agents by their names."""
+    """Get the IDs for your agents by their names"""
     # Public API. Auth via get_org_jwt_or_api_key (JWT for the web app, API key
     # for CI). Maps human-friendly names to the UUIDs the run/poll endpoints expect.
     agents = get_all_agents(org_uuid=ctx.org_uuid)
@@ -520,7 +521,7 @@ async def resolve_agent_names(
 async def create_agent_endpoint(
     agent: AgentCreate, ctx: OrgContext = Depends(get_org_jwt_or_api_key)
 ):
-    """Create an agent to test inside Calibrate or connect your existing agent to Calibrate."""
+    """Create an agent to test inside Calibrate or connect your existing agent to Calibrate"""
     if agent.type == "agent":
         merged_config = _deep_merge(_default_agent_config(), agent.config or {})
     else:
@@ -547,7 +548,7 @@ async def create_agent_endpoint(
     summary="List agents",
 )
 async def list_agents(ctx: OrgContext = Depends(get_org_jwt_or_api_key)):
-    """Get the list of all your agents."""
+    """Get the list of all your agents"""
     # Public API. Auth via get_org_jwt_or_api_key (JWT for the web app, API key
     # for CI); the run/poll and /resolve endpoints accept the same key, so CI can
     # enumerate agent UUIDs without knowing names up front.
@@ -645,7 +646,7 @@ async def delete_agent_endpoint(
     ),
     ctx: OrgContext = Depends(get_current_org),
 ):
-    """Soft-delete an agent."""
+    """Soft-delete an agent"""
     existing_agent = get_agent(agent_uuid)
     if not existing_agent or existing_agent.get("org_uuid") != ctx.org_uuid:
         raise HTTPException(status_code=404, detail="Agent not found")
@@ -669,7 +670,7 @@ async def duplicate_agent_endpoint(
     request: AgentDuplicateRequest = ...,
     ctx: OrgContext = Depends(get_current_org),
 ):
-    """Duplicate an agent along with its linked tools and tests. Verification flags are not copied."""
+    """Duplicate an agent along with its linked tools and tests. Verification flags are not copied"""
     original_agent = get_agent(agent_uuid)
     if not original_agent or original_agent.get("org_uuid") != ctx.org_uuid:
         raise HTTPException(status_code=404, detail="Agent not found")

@@ -664,7 +664,7 @@ def run_evaluation_task(
 async def evaluate_stt(
     request: STTEvaluationRequest, ctx: OrgContext = Depends(get_current_org)
 ):
-    """Benchmark STT providers against a dataset as a background job."""
+    """Benchmark STT providers against a dataset as a background job"""
     if not request.providers:
         raise HTTPException(
             status_code=400,
@@ -771,7 +771,7 @@ async def update_stt_visibility(
     ),
     ctx: OrgContext = Depends(get_current_org),
 ):
-    """Update public sharing for an STT evaluation."""
+    """Update public sharing for an STT evaluation"""
     job = get_job(task_id, org_uuid=ctx.org_uuid)
     if not job or job.get("type") != "stt-eval":
         raise HTTPException(status_code=404, detail="Task not found")
@@ -797,7 +797,7 @@ async def get_evaluation_status(
     ),
     ctx: OrgContext = Depends(get_current_org),
 ):
-    """Get the status and results of an STT evaluation."""
+    """Get the status and results of an STT evaluation"""
     job = get_job(task_id, org_uuid=ctx.org_uuid)
     if not job:
         raise HTTPException(status_code=404, detail="Task not found")

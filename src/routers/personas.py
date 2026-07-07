@@ -72,7 +72,7 @@ class PersonaCreateResponse(BaseModel):
 async def create_persona_endpoint(
     persona: PersonaCreate, ctx: OrgContext = Depends(get_current_org)
 ):
-    """Create a new persona."""
+    """Create a new persona"""
     with ensure_name_unique("personas", persona.name, ctx.org_uuid, entity="Persona"):
         persona_uuid = create_persona(
             name=persona.name,
@@ -88,7 +88,7 @@ async def create_persona_endpoint(
 
 @router.get("", response_model=List[PersonaResponse], summary="List personas")
 async def list_personas(ctx: OrgContext = Depends(get_current_org)):
-    """List your personas, each with its config."""
+    """List your personas"""
     personas = get_all_personas(org_uuid=ctx.org_uuid)
     return personas
 
@@ -101,7 +101,7 @@ async def get_persona_endpoint(
     ),
     ctx: OrgContext = Depends(get_current_org),
 ):
-    """Get one persona by ID, including its config."""
+    """Get one persona by ID"""
     persona = get_persona(persona_uuid)
     if not persona or persona.get("org_uuid") != ctx.org_uuid:
         raise HTTPException(status_code=404, detail="Persona not found")
@@ -117,7 +117,7 @@ async def update_persona_endpoint(
     ),
     ctx: OrgContext = Depends(get_current_org),
 ):
-    """Update a persona, a simulated user profile used in simulations."""
+    """Update a persona, a simulated user profile used in simulations"""
     existing_persona = get_persona(persona_uuid)
     if not existing_persona or existing_persona.get("org_uuid") != ctx.org_uuid:
         raise HTTPException(status_code=404, detail="Persona not found")
@@ -151,7 +151,7 @@ async def delete_persona_endpoint(
     ),
     ctx: OrgContext = Depends(get_current_org),
 ):
-    """Soft-delete a persona."""
+    """Soft-delete a persona"""
     existing_persona = get_persona(persona_uuid)
     if not existing_persona or existing_persona.get("org_uuid") != ctx.org_uuid:
         raise HTTPException(status_code=404, detail="Persona not found")

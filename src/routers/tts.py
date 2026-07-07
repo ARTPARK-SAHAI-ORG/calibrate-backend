@@ -684,7 +684,7 @@ def run_tts_evaluation_task(
 async def evaluate_tts(
     request: TTSEvaluationRequest, ctx: OrgContext = Depends(get_current_org)
 ):
-    """Benchmark TTS providers against text inputs as a background job."""
+    """Benchmark TTS providers against text inputs as a background job"""
     if not request.providers:
         raise HTTPException(
             status_code=400,
@@ -787,7 +787,7 @@ async def update_tts_visibility(
     ),
     ctx: OrgContext = Depends(get_current_org),
 ):
-    """Update public sharing for a TTS evaluation."""
+    """Update public sharing for a TTS evaluation"""
     job = get_job(task_id, org_uuid=ctx.org_uuid)
     if not job or job.get("type") != "tts-eval":
         raise HTTPException(status_code=404, detail="Task not found")
@@ -813,7 +813,7 @@ async def get_tts_evaluation_status(
     ),
     ctx: OrgContext = Depends(get_current_org),
 ):
-    """Get the status and results of a TTS evaluation."""
+    """Get the status and results of a TTS evaluation"""
     job = get_job(task_id, org_uuid=ctx.org_uuid)
     if not job:
         raise HTTPException(status_code=404, detail="Task not found")
