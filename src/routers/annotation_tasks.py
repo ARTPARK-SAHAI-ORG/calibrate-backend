@@ -244,7 +244,6 @@ async def create_annotation_task_endpoint(
     ctx: OrgContext = Depends(get_current_org),
 ):
     """Create an annotation task in your workspace."""
-    # `type` is validated at the schema level by AnnotationTaskTypeLiteral (422).
     if payload.evaluator_ids:
         for evaluator_id in payload.evaluator_ids:
             _ensure_owned_evaluator(evaluator_id, ctx.org_uuid)
