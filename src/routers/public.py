@@ -169,11 +169,11 @@ class PublicTestRunResponse(BaseModel):
     )
     cost: Optional[Dict[str, Any]] = Field(
         None,
-        description="Aggregated cost in USD (`{mean, min, max, count}`). `null` when no cost is reported",
+        description="Aggregated cost in USD (`{mean, min, max, count}`)",
     )
     total_tokens: Optional[Dict[str, Any]] = Field(
         None,
-        description="Aggregated token usage (`{mean, min, max, count}`). `null` when not reported",
+        description="Aggregated token usage (`{mean, min, max, count}`)",
     )
     error: bool = Field(False, description="`true` if the run failed")
 

@@ -412,11 +412,11 @@ class TestRunStatusResponse(BaseModel):
     )
     cost: Optional[Dict[str, Any]] = Field(
         None,
-        description="Aggregated cost `{mean, min, max, count}` (USD). Null when no case reported a cost (e.g. openai provider)",
+        description="Aggregated cost `{mean, min, max, count}` (USD)",
     )
     total_tokens: Optional[Dict[str, Any]] = Field(
         None,
-        description="Aggregated token usage `{mean, min, max, count}` (values are `Any` — `mean` may be fractional). Null when no case reported usage",
+        description="Aggregated token usage `{mean, min, max, count}`",
     )
     evaluators: Optional[List[Dict[str, Any]]] = Field(
         None,
@@ -2441,11 +2441,11 @@ class ModelResult(BaseModel):
         description="Aggregated latency in milliseconds: `{p50, p95, p99, count}`. Null before this model's metrics are ready",
     )
     cost: Optional[Dict[str, Any]] = Field(
-        None, description="Aggregated cost `{mean, min, max, count}` (USD). Null when unavailable"
+        None, description="Aggregated cost `{mean, min, max, count}` (USD)"
     )
     total_tokens: Optional[Dict[str, Any]] = Field(
         None,
-        description="Aggregated token usage `{mean, min, max, count}` (values are `Any` — `mean` may be fractional). Null when unavailable",
+        description="Aggregated token usage `{mean, min, max, count}`",
     )
 
 
