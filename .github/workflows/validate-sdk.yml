@@ -40,10 +40,10 @@ jobs:
       - name: Install Speakeasy CLI
         run: curl -fsSL https://go.speakeasy.com/cli-install.sh | sh
 
-      # --skip-upload-spec: compile overlay locally only; no registry auth needed.
-      # Fork PRs do not receive repo secrets (SPEAKEASY_API_KEY), so this must stay offline.
+      # overlay apply: offline merge only. speakeasy run still requires auth in CI
+      # even with --skip-upload-spec; fork PRs also do not receive repo secrets.
       - name: Compile public OpenAPI source (merge spec + overlay)
-        run: speakeasy run -s calibrate-public-api -y --skip-upload-spec
+        run: speakeasy overlay apply -s openapi/openapi.json -o openapi/overlay.yaml --out openapi/compiled.yaml
 
       - name: Lint compiled OpenAPI document
         run: speakeasy lint openapi -s openapi/compiled.yaml
