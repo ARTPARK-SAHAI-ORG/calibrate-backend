@@ -30,6 +30,8 @@ jobs:
       - uses: actions/checkout@v4
 
       - uses: ./.github/actions/fetch-public-spec
+        env:
+          PUBLIC_API_BASE_URL: http://localhost:8000
 
       - name: Install Fern
         run: npm install -g fern-api
