@@ -139,7 +139,9 @@ class TestCreate(BaseModel):
 
 
 class TestUpdate(BaseModel):
-    name: Optional[str] = Field(None, description="New test name. Omit to leave unchanged")
+    name: Optional[str] = Field(
+        None, description="New test name. Omit to leave unchanged"
+    )
     type: Optional[TestType] = Field(
         None,
         description=_TEST_TYPE_DESCRIPTION
@@ -166,10 +168,15 @@ class TestResponse(BaseModel):
     name: str = Field(description="Name of the test")
     type: TestType = Field(description=_TEST_TYPE_DESCRIPTION)
     config: Optional[Dict[str, Any]] = Field(
-        None, description="Config for the test (`history`, `evaluation`, optional `settings`)"
+        None,
+        description="Config for the test (`history`, `evaluation`, optional `settings`)",
     )
-    created_at: str = Field(description="Timestamp when the test was created (ISO 8601 UTC)")
-    updated_at: str = Field(description="Timestamp when the test was last updated (ISO 8601 UTC)")
+    created_at: str = Field(
+        description="Timestamp when the test was created (ISO 8601 UTC)"
+    )
+    updated_at: str = Field(
+        description="Timestamp when the test was last updated (ISO 8601 UTC)"
+    )
     evaluators: List[Dict[str, Any]] = Field(
         default=[],
         description="Linked evaluators, resolved to their current live version at read time",
@@ -188,29 +195,37 @@ class TestCreateResponse(BaseModel):
 
 # --- Bulk upload models ---
 
+
 class ChatMessage(BaseModel):
     role: Literal["user", "assistant", "tool"] = Field(
         description="Message author role in the conversation history"
     )
     content: Optional[str] = Field(
-        None, description="Message text. Omit for assistant messages that only carry `tool_calls`"
+        None,
+        description="Message text. Omit for assistant messages that only carry `tool_calls`",
     )
     tool_calls: Optional[List[Dict[str, Any]]] = Field(
-        None, description="Tool calls issued by the assistant. Omit for plain text turns"
+        None,
+        description="Tool calls issued by the assistant. Omit for plain text turns",
     )
     tool_call_id: Optional[str] = Field(
-        None, description="ID of the tool call this message responds to. **Required for `role=tool`**"
+        None,
+        description="ID of the tool call this message responds to. **Required for `role=tool`**",
     )
-    name: Optional[str] = Field(None, description="Tool name for `role=tool` messages. Omit otherwise")
+    name: Optional[str] = Field(
+        None, description="Tool name for `role=tool` messages. Omit otherwise"
+    )
 
 
 class ExpectedToolCall(BaseModel):
     tool: str = Field(description="Name of the tool the agent is expected to call")
     arguments: Optional[Dict[str, Any]] = Field(
-        None, description="Expected argument values, diffed against the generated call. Omit to expect no arguments"
+        None,
+        description="Expected argument values, diffed against the generated call. Omit to expect no arguments",
     )
     accept_any_arguments: bool = Field(
-        False, description="When `true`, only the tool name must match and `arguments` is ignored"
+        False,
+        description="When `true`, only the tool name must match and `arguments` is ignored",
     )
 
 
@@ -220,7 +235,8 @@ class BulkTestItem(BaseModel):
         description="Ordered messages ending at the user turn the agent should answer (must be non-empty)"
     )
     evaluators: Optional[List[EvaluatorRef]] = Field(
-        None, description="Evaluators to link. Used by `response` and `conversation` tests"
+        None,
+        description="Evaluators to link. Used by `response` and `conversation` tests",
     )
     tool_calls: Optional[List[ExpectedToolCall]] = Field(
         None, description="Expected tool calls. **Required for `tool_call` batches**"
@@ -240,7 +256,8 @@ class BulkTestUpload(BaseModel):
         examples=[[_EXAMPLE_AGENT_UUID]],
     )
     language: Optional[str] = Field(
-        None, description="Language written to each test's `config.settings.language`. Omit to leave unset"
+        None,
+        description="Language written to each test's `config.settings.language`. Omit to leave unset",
     )
 
     MAX_BATCH_SIZE: ClassVar[int] = 500
@@ -251,7 +268,9 @@ class BulkTestUpload(BaseModel):
             raise ValueError("tests list must not be empty")
 
         if len(self.tests) > self.MAX_BATCH_SIZE:
-            raise ValueError(f"Batch size {len(self.tests)} exceeds maximum of {self.MAX_BATCH_SIZE}")
+            raise ValueError(
+                f"Batch size {len(self.tests)} exceeds maximum of {self.MAX_BATCH_SIZE}"
+            )
 
         names = [t.name for t in self.tests]
         if len(names) != len(set(names)):
@@ -261,7 +280,9 @@ class BulkTestUpload(BaseModel):
 
         for t in self.tests:
             if not t.conversation_history:
-                raise ValueError(f"Test '{t.name}' must have at least one message in conversation_history")
+                raise ValueError(
+                    f"Test '{t.name}' must have at least one message in conversation_history"
+                )
             if self.type == "response":
                 if not t.evaluators:
                     raise ValueError(
@@ -269,7 +290,9 @@ class BulkTestUpload(BaseModel):
                     )
             elif self.type == "tool_call":
                 if not t.tool_calls:
-                    raise ValueError(f"Test '{t.name}' must have 'tool_calls' for tool_call type")
+                    raise ValueError(
+                        f"Test '{t.name}' must have 'tool_calls' for tool_call type"
+                    )
             elif self.type == "conversation":
                 if not t.evaluators:
                     raise ValueError(
@@ -287,7 +310,8 @@ class BulkTestUploadResponse(BaseModel):
     count: int = Field(description="Number of tests created")
     message: str = Field(description="Confirmation message")
     warnings: Optional[List[str]] = Field(
-        None, description="Non-fatal issues (e.g. agents some tests couldn't link to). Null when there were none"
+        None,
+        description="Non-fatal issues (e.g. agents some tests couldn't link to). Null when there were none",
     )
 
 
@@ -299,7 +323,9 @@ class BulkTestDelete(BaseModel):
 
 
 class BulkTestDeleteResponse(BaseModel):
-    deleted_count: int = Field(description="Number of tests actually deleted (excludes IDs not in your workspace)")
+    deleted_count: int = Field(
+        description="Number of tests actually deleted (excludes IDs not in your workspace)"
+    )
     message: str = Field(description="Confirmation message")
 
 
@@ -311,16 +337,18 @@ def _validate_evaluators(
     `conversation` ⇒ `simulation`). Returns db-ready refs."""
     required_evaluator_type = REQUIRED_EVALUATOR_TYPE_BY_TEST_TYPE.get(test_type)
     if required_evaluator_type is None:
-        raise HTTPException(
-            status_code=400, detail=f"Unknown test type '{test_type}'"
-        )
+        raise HTTPException(status_code=400, detail=f"Unknown test type '{test_type}'")
     out: List[Dict[str, Any]] = []
     for ref in refs:
         evaluator = get_evaluator(ref.evaluator_uuid)
         if not evaluator:
-            raise HTTPException(status_code=404, detail=f"Evaluator {ref.evaluator_uuid} not found")
+            raise HTTPException(
+                status_code=404, detail=f"Evaluator {ref.evaluator_uuid} not found"
+            )
         if evaluator.get("org_uuid") is not None and evaluator["org_uuid"] != org_uuid:
-            raise HTTPException(status_code=404, detail=f"Evaluator {ref.evaluator_uuid} not found")
+            raise HTTPException(
+                status_code=404, detail=f"Evaluator {ref.evaluator_uuid} not found"
+            )
         if evaluator.get("evaluator_type") != required_evaluator_type:
             raise HTTPException(
                 status_code=400,
@@ -346,7 +374,9 @@ def _with_evaluators(test_dict: Dict[str, Any]) -> Dict[str, Any]:
     return {**test_dict, "evaluators": evaluators}
 
 
-@router.post("/bulk-delete", response_model=BulkTestDeleteResponse, summary="Bulk delete tests")
+@router.post(
+    "/bulk-delete", response_model=BulkTestDeleteResponse, summary="Bulk delete tests"
+)
 async def bulk_delete_tests_endpoint(
     payload: BulkTestDelete, ctx: OrgContext = Depends(get_current_org)
 ):
@@ -354,7 +384,9 @@ async def bulk_delete_tests_endpoint(
     if not payload.test_uuids:
         raise HTTPException(status_code=400, detail="test_uuids must not be empty")
 
-    deleted_count = bulk_delete_tests(test_uuids=payload.test_uuids, org_uuid=ctx.org_uuid)
+    deleted_count = bulk_delete_tests(
+        test_uuids=payload.test_uuids, org_uuid=ctx.org_uuid
+    )
 
     return BulkTestDeleteResponse(
         deleted_count=deleted_count,
@@ -371,12 +403,14 @@ async def bulk_delete_tests_endpoint(
 async def bulk_upload_tests(
     payload: BulkTestUpload, ctx: OrgContext = Depends(get_org_jwt_or_api_key)
 ):
-    """Create many tests of one type in a single call, optionally linking them to agents."""
+    """Create many test cases at once and link them to your agents."""
     if payload.agent_uuids:
         for agent_uuid in payload.agent_uuids:
             agent = get_agent(agent_uuid)
             if not agent or agent.get("org_uuid") != ctx.org_uuid:
-                raise HTTPException(status_code=404, detail=f"Agent {agent_uuid} not found")
+                raise HTTPException(
+                    status_code=404, detail=f"Agent {agent_uuid} not found"
+                )
 
     resolved_evaluator_refs: List[Optional[List[Dict[str, Any]]]] = []
     for t in payload.tests:
@@ -394,17 +428,21 @@ async def bulk_upload_tests(
             evaluation["tool_calls"] = [tc.model_dump() for tc in t.tool_calls]
 
         config: Dict[str, Any] = {
-            "history": [msg.model_dump(exclude_none=True) for msg in t.conversation_history],
+            "history": [
+                msg.model_dump(exclude_none=True) for msg in t.conversation_history
+            ],
             "evaluation": evaluation,
         }
         if payload.language:
             config["settings"] = {"language": payload.language}
 
-        db_tests.append({
-            "name": t.name,
-            "type": payload.type,
-            "config": config,
-        })
+        db_tests.append(
+            {
+                "name": t.name,
+                "type": payload.type,
+                "config": config,
+            }
+        )
 
     try:
         uuids = bulk_create_tests(
@@ -428,7 +466,9 @@ async def bulk_upload_tests(
                     linked_agents.add(agent_uuid)
                 except Exception as e:
                     agent_failed = True
-                    logger.warning(f"Failed to link test {test_uuid} to agent {agent_uuid}: {e}")
+                    logger.warning(
+                        f"Failed to link test {test_uuid} to agent {agent_uuid}: {e}"
+                    )
             if agent_failed:
                 warnings.append(f"Some tests could not be linked to agent {agent_uuid}")
 
@@ -453,7 +493,7 @@ async def bulk_upload_tests(
 async def create_test_endpoint(
     test: TestCreate, ctx: OrgContext = Depends(get_org_jwt_or_api_key)
 ):
-    """Create a test that runs your agent against a conversation and grades its reply, tool calls, or the full conversation."""
+    """Create a test that runs your agent against a conversation and evaluates its answer quality or the tools it calls."""
     # Conversation tests have no evaluator fallback (unlike `response`, which can
     # synthesize the default LLM judge from legacy string criteria) — without a
     # linked simulation evaluator a run produces an empty calibrate config with
@@ -489,7 +529,7 @@ async def create_test_endpoint(
     summary="List tests",
 )
 async def list_tests(ctx: OrgContext = Depends(get_org_jwt_or_api_key)):
-    """List your tests, each with its linked evaluators."""
+    """List all the test cases for your agents."""
     tests = get_all_tests(org_uuid=ctx.org_uuid)
     return [_with_evaluators(t) for t in tests]
 
@@ -507,7 +547,7 @@ async def get_test_endpoint(
     ),
     ctx: OrgContext = Depends(get_org_jwt_or_api_key),
 ):
-    """Get a test by ID, including its linked evaluators."""
+    """Get an agent test case by its ID."""
     test = get_test(test_uuid)
     if not test or test.get("org_uuid") != ctx.org_uuid:
         raise HTTPException(status_code=404, detail="Test not found")
@@ -528,7 +568,7 @@ async def update_test_endpoint(
     ),
     ctx: OrgContext = Depends(get_org_jwt_or_api_key),
 ):
-    """Update a test's config or the evaluators it is graded by."""
+    """Update an agent test case"""
     existing_test = get_test(test_uuid)
     if not existing_test or existing_test.get("org_uuid") != ctx.org_uuid:
         raise HTTPException(status_code=404, detail="Test not found")
@@ -566,9 +606,7 @@ async def update_test_endpoint(
         else None
     )
 
-    has_core_updates = any(
-        v is not None for v in (test.name, test.type, test.config)
-    )
+    has_core_updates = any(v is not None for v in (test.name, test.type, test.config))
     if has_core_updates:
         with ensure_name_unique(
             "tests", test.name, ctx.org_uuid, entity="Test", exclude_uuid=test_uuid

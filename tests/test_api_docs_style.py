@@ -135,6 +135,27 @@ def test_checker_flags_unit_suffix_repeat(tmp_path):
     assert "ok_ms" not in joined
 
 
+def test_checker_resolves_composed_descriptions(tmp_path):
+    """A description built from a module-level constant (`_SHARED + "..."`) is
+    still scanned — bans must reach it, not just plain string literals."""
+    (tmp_path / "composed.py").write_text(
+        "from fastapi import APIRouter\n"
+        "from pydantic import BaseModel, Field\n"
+        "router = APIRouter()\n"
+        "_SHARED = 'Base shape.'\n"
+        "class Thing(BaseModel):\n"
+        "    a: str = Field(description=_SHARED + ' Uses deep-merge on update')\n"
+        "    b: str = Field(description=_SHARED + ' clause; another clause')\n"
+        "@router.get('/things', summary='List things')\n"
+        "async def list_things():\n"
+        "    '''List things.'''\n"
+        "    return []\n"
+    )
+    joined = "\n".join(checker.find_violations(tmp_path))
+    assert "deep-merge" in joined  # jargon ban reached the composed description
+    assert "clause-splitting semicolons" in joined  # mechanics ban reached it too
+
+
 def test_checker_accepts_a_good_module(tmp_path):
     (tmp_path / "good.py").write_text(
         "from fastapi import APIRouter, Path\n"

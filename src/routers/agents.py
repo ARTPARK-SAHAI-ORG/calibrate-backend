@@ -291,7 +291,7 @@ class AgentUpdate(BaseModel):
     config: Optional[Dict[str, Any]] = Field(
         None,
         description=_AGENT_CONFIG_DESCRIPTION
-        + "\n\nReplaces the stored config (no deep-merge). Omit to leave unchanged. For `type=connection`, changing `agent_url` or `agent_headers` resets the connection and benchmark verification flags.",
+        + "\n\nReplaces the stored config. Omit to leave unchanged. For `type=connection`, changing `agent_url` or `agent_headers` resets the connection and benchmark verification flags.",
     )
     connection_verified: Optional[bool] = Field(
         None,
@@ -494,7 +494,7 @@ async def resolve_agent_names(
     request: ResolveAgentNamesRequest,
     ctx: OrgContext = Depends(get_org_jwt_or_api_key),
 ):
-    """Look up agent IDs by name, to reference agents in other calls."""
+    """Get the IDs for your agents by their names."""
     # Public API. Auth via get_org_jwt_or_api_key (JWT for the web app, API key
     # for CI). Maps human-friendly names to the UUIDs the run/poll endpoints expect.
     agents = get_all_agents(org_uuid=ctx.org_uuid)
@@ -520,7 +520,7 @@ async def resolve_agent_names(
 async def create_agent_endpoint(
     agent: AgentCreate, ctx: OrgContext = Depends(get_org_jwt_or_api_key)
 ):
-    """Create an agent to test, either one built inside Calibrate or a connection to your own endpoint."""
+    """Create an agent to test inside Calibrate or connect your existing agent to Calibrate."""
     if agent.type == "agent":
         merged_config = _deep_merge(_default_agent_config(), agent.config or {})
     else:
@@ -568,7 +568,7 @@ async def get_agent_endpoint(
     ),
     ctx: OrgContext = Depends(get_org_jwt_or_api_key),
 ):
-    """Get one agent by ID, including its config and connection status."""
+    """Get one agent by its ID"""
     agent = get_agent(agent_uuid)
     if not agent or agent.get("org_uuid") != ctx.org_uuid:
         raise HTTPException(status_code=404, detail="Agent not found")
@@ -589,7 +589,7 @@ async def update_agent_endpoint(
     agent: AgentUpdate = ...,
     ctx: OrgContext = Depends(get_org_jwt_or_api_key),
 ):
-    """Update an agent's config, e.g. to change its model or repoint a connection to a new endpoint."""
+    """Update an agent's configuration"""
     existing_agent = get_agent(agent_uuid)
     if not existing_agent or existing_agent.get("org_uuid") != ctx.org_uuid:
         raise HTTPException(status_code=404, detail="Agent not found")

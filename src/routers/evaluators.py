@@ -49,7 +49,7 @@ class OutputScaleEntry(BaseModel):
     value: Any = Field(
         description="Scale point value: `bool` for `binary` (2 entries), numeric for `rating` (N>=2 entries)"
     )
-    name: str = Field(description="Short human-readable label for this scale point")
+    name: str = Field(description="Short label for this scale point")
     description: Optional[str] = Field(
         None,
         description="Rubric text for this level, injected into the judge prompt. Omit to leave this level undescribed",
