@@ -178,6 +178,29 @@ def test_public_api_docs_are_unauthenticated_and_filtered(client, monkeypatch):
     }
     assert refs.issubset(set(pub_schemas))
 
+    # Free-form `Dict[str, Any]` fields (e.g. agent `config`) must NOT carry
+    # Pydantic's auto-title, which Mintlify would render as a fake `Config` type
+    # chip. The property drops its title but keeps its type + description...
+    config_prop = pub_schemas["AgentUpdate"]["properties"]["config"]
+    assert "title" not in config_prop
+    assert config_prop["description"]  # description survives
+    assert {b.get("type") for b in config_prop["anyOf"]} == {"object", "null"}
+    # ...while real model titles (used as the expandable reference name) stay.
+    assert pub_schemas["AgentUpdate"]["title"] == "AgentUpdate"
+    # No surviving title anywhere sits on a free-form object schema.
+    for schema in pub_schemas.values():
+        for prop in schema.get("properties", {}).values():
+            branches = prop.get("anyOf", [])
+            freeform = prop if not branches else next(
+                (b for b in branches if b.get("type") == "object"), None
+            )
+            if (
+                freeform
+                and freeform.get("additionalProperties")
+                and not freeform.get("properties")
+            ):
+                assert "title" not in prop, f"stale title on free-form field: {prop}"
+
 
 # ---------------------------------------------------------------------------
 # Presigned URL endpoint
