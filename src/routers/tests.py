@@ -94,11 +94,11 @@ class TestUpdate(BaseModel):
         + "\n\nImmutable. Omit, or send the existing value. A different value is rejected (400).",
     )
     config: Optional[Dict[str, Any]] = Field(
-        None, description="Replacement calibrate config. Omit to leave unchanged"
+        None, description="New config for the test. Omit to leave unchanged"
     )
     evaluators: Optional[List[EvaluatorRef]] = Field(
         None,
-        description="Replacement evaluator links (replaces the existing set). Omit to leave links unchanged. An empty list clears them",
+        description="New evaluator links for the test. Omit to leave unchanged. An empty list clears them",
     )
 
 
@@ -135,8 +135,8 @@ class TestCreateResponse(BaseModel):
 # --- Bulk upload models ---
 
 class ChatMessage(BaseModel):
-    role: Literal["system", "user", "assistant", "tool"] = Field(
-        description="Message author role in the conversation history"
+    role: Literal["user", "assistant", "tool"] = Field(
+        description="Message author role. The agent's system prompt lives in its config, not here"
     )
     content: Optional[str] = Field(
         None, description="Message text. Omit for assistant messages that only carry `tool_calls`"

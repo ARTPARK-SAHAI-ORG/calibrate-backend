@@ -126,6 +126,30 @@ def test_bulk_create_tests_with_api_key(client):
     assert r.json()["count"] == 2
 
 
+def test_bulk_create_rejects_system_role(client):
+    """`system` is not a valid conversation_history role — the agent's system
+    prompt lives in its config, not the history. Only user/assistant/tool."""
+    jwt = _signup(client)
+    r = client.post(
+        "/tests/bulk",
+        json={
+            "type": "response",
+            "tests": [
+                {
+                    "name": f"bulk-{uuid.uuid4().hex[:6]}",
+                    "conversation_history": [
+                        {"role": "system", "content": "you are helpful"},
+                        {"role": "user", "content": "hi"},
+                    ],
+                    "evaluators": [],
+                }
+            ],
+        },
+        headers=jwt,
+    )
+    assert r.status_code == 422, r.text
+
+
 def test_create_test_invalid_api_key(client):
     """POST /tests with a bogus key must 401."""
     r = client.post(
