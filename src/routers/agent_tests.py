@@ -408,7 +408,7 @@ class TestRunStatusResponse(BaseModel):
     )
     latency_ms: Optional[Dict[str, Any]] = Field(
         None,
-        description="Aggregated response latency `{p50, p95, p99, count}` (ms; `p50` ≈ the old mean). Null for eval-only runs",
+        description="Aggregated response latency in milliseconds: `{p50, p95, p99, count}`. Null for eval-only runs",
     )
     cost: Optional[Dict[str, Any]] = Field(
         None,
@@ -2438,7 +2438,7 @@ class ModelResult(BaseModel):
     )
     latency_ms: Optional[Dict[str, Any]] = Field(
         None,
-        description="Aggregated latency `{p50, p95, p99, count}` (ms; `p50` ≈ the old mean). Null when calibrate omits it (eval-only/openai) or before this model's metrics are ready",
+        description="Aggregated latency in milliseconds: `{p50, p95, p99, count}`. Null when calibrate omits it (eval-only/openai) or before this model's metrics are ready",
     )
     cost: Optional[Dict[str, Any]] = Field(
         None, description="Aggregated cost `{mean, min, max, count}` (USD); null when unavailable"
