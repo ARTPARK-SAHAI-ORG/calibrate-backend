@@ -37,17 +37,17 @@ class JobListItem(BaseModel):
         None,
         min_length=36,
         max_length=36,
-        description="Source dataset ID; `null` when the dataset has since been deleted",
+        description="Source dataset ID. `null` when the dataset has since been deleted",
     )
     dataset_name: Optional[str] = Field(
         None,
-        description="Source dataset name; `null` when the dataset has since been deleted",
+        description="Source dataset name. `null` when the dataset has since been deleted",
     )
     details: Optional[Dict[str, Any]] = Field(
-        None, description="Job configuration and runtime metadata; `null` if unset"
+        None, description="Job configuration and runtime metadata. `null` if unset"
     )
     results: Optional[Dict[str, Any]] = Field(
-        None, description="Job output payload; `null` until the job produces results"
+        None, description="Job output payload. `null` until the job produces results"
     )
     created_at: str = Field(description="Creation timestamp (ISO 8601 UTC)")
     updated_at: str = Field(description="Last-update timestamp (ISO 8601 UTC)")
@@ -67,11 +67,11 @@ JOB_TYPE_MAP = {
 @router.get("", response_model=JobsListResponse, summary="List jobs")
 async def list_jobs(
     job_type: Optional[JobType] = Query(
-        None, description="Filter jobs by type; omit for all types"
+        None, description="Filter jobs by type. Omit for all types"
     ),
     ctx: OrgContext = Depends(get_current_org),
 ):
-    """List jobs for your workspace, newest first."""
+    """List jobs, newest first"""
     db_job_type = JOB_TYPE_MAP.get(job_type) if job_type else None
 
     jobs = get_all_jobs(org_uuid=ctx.org_uuid, job_type=db_job_type)
@@ -114,7 +114,7 @@ async def delete_job_endpoint(
     ),
     ctx: OrgContext = Depends(get_current_org),
 ):
-    """Delete a job, stopping it first if it is still running."""
+    """Delete a job, stopping it first if it is still running"""
     job = get_job(job_uuid, org_uuid=ctx.org_uuid)
     if not job:
         raise HTTPException(status_code=404, detail="Job not found")

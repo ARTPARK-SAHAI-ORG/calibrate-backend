@@ -41,7 +41,7 @@ class LoginResponse(BaseModel):
     access_token: str = Field(
         description="JWT to send as `Authorization: Bearer <token>` on later requests"
     )
-    token_type: str = Field("bearer", description="Token scheme — always `bearer`")
+    token_type: str = Field("bearer", description="Always `bearer`")
     user: UserResponse = Field(description="Your profile")
     message: str = Field(description="Status message")
 
@@ -85,7 +85,7 @@ async def verify_google_token(id_token: str) -> dict:
 
 @router.post("/google", response_model=LoginResponse, summary="Log in with Google")
 async def google_login(request: GoogleLoginRequest):
-    """Log in with Google and receive a JWT plus your profile."""
+    """Log in with Google and receive a JWT plus your profile"""
     # Verify the Google token
     token_info = await verify_google_token(request.id_token)
 
@@ -140,7 +140,7 @@ class CredentialLoginRequest(BaseModel):
 
 @router.post("/signup", response_model=LoginResponse, summary="Sign up with email and password")
 async def signup(request: SignupRequest):
-    """Create an account with email and password and receive a JWT plus your profile."""
+    """Create an account with email and password and receive a JWT plus your profile"""
     # 409 if email already has a password; invite stub rows (no password yet) are hydrated in place.
     # A row may already exist as a stub created by an org invite (no
     # password_hash set). `create_user_with_password` hydrates that stub in
@@ -186,7 +186,7 @@ async def signup(request: SignupRequest):
 
 @router.post("/login", response_model=LoginResponse, summary="Log in with email and password")
 async def login(request: CredentialLoginRequest):
-    """Log in with email and password and receive a JWT plus your profile."""
+    """Log in with email and password and receive a JWT plus your profile"""
     user = get_user_by_email(request.email)
     if not user or not user.get("password_hash"):
         raise HTTPException(status_code=401, detail="Invalid email or password")

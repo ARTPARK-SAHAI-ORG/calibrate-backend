@@ -181,7 +181,7 @@ class TTSEvaluationRequest(BaseModel):
         None,
         min_length=36,
         max_length=36,
-        description="Existing TTS dataset to evaluate. Must be in your workspace. **Provide this OR inline `texts`, not both**",
+        description="Existing TTS dataset to evaluate. **Provide this OR inline `texts`, not both**",
         examples=[_EXAMPLE_ID],
     )
     texts: Optional[List[str]] = Field(
@@ -190,7 +190,7 @@ class TTSEvaluationRequest(BaseModel):
     )
     dataset_name: Optional[str] = Field(
         None,
-        description="Name for a new dataset saved from inline inputs. Ignored when `dataset_id` is set; omit to skip saving",
+        description="Name for a new dataset saved from inline inputs. Ignored when `dataset_id` is set. Omit to skip saving",
     )
     providers: List[str] = Field(
         description='TTS providers to compare, e.g. `["smallest", "cartesia", "openai"]`. At least one required'
@@ -198,7 +198,7 @@ class TTSEvaluationRequest(BaseModel):
     language: str = Field(description='Language to synthesize in, e.g. `"english"` or `"hindi"`')
     evaluator_uuids: Optional[List[str]] = Field(
         None,
-        description="Evaluators to score synthesized audio; each must be a `tts` evaluator in your workspace. Omit to use the default TTS evaluator",
+        description="Evaluators to score synthesized audio. Each must be a `tts` evaluator in your workspace. Omit to use the default TTS evaluator",
     )
 
 
@@ -684,7 +684,7 @@ def run_tts_evaluation_task(
 async def evaluate_tts(
     request: TTSEvaluationRequest, ctx: OrgContext = Depends(get_current_org)
 ):
-    """Benchmark TTS providers against text inputs as a background job."""
+    """Benchmark TTS providers against text inputs as a background job"""
     if not request.providers:
         raise HTTPException(
             status_code=400,
@@ -762,7 +762,7 @@ async def evaluate_tts(
 
 class VisibilityRequest(BaseModel):
     is_public: bool = Field(
-        description="`true` to make the job publicly shareable; `false` to make it private"
+        description="`true` to make the job publicly shareable. `false` to make it private"
     )
 
 
@@ -770,7 +770,7 @@ class VisibilityResponse(BaseModel):
     is_public: bool = Field(description="Whether the job is now publicly shareable")
     share_token: str | None = Field(
         None,
-        description="Opaque token for the public share URL when `is_public` is true; null when private",
+        description="Opaque token for the public share URL when `is_public` is true. Null when private",
     )
 
 
@@ -782,12 +782,12 @@ class VisibilityResponse(BaseModel):
 async def update_tts_visibility(
     body: VisibilityRequest,
     task_id: str = PathParam(
-        description="The TTS evaluation to update. Must be in your workspace.",
+        description="The TTS evaluation to update.",
         examples=["f47ac10b-58cc-4372-a567-0e02b2c3d479"],
     ),
     ctx: OrgContext = Depends(get_current_org),
 ):
-    """Update public sharing for a TTS evaluation."""
+    """Update public sharing for a TTS evaluation"""
     job = get_job(task_id, org_uuid=ctx.org_uuid)
     if not job or job.get("type") != "tts-eval":
         raise HTTPException(status_code=404, detail="Task not found")
@@ -808,12 +808,12 @@ async def update_tts_visibility(
 )
 async def get_tts_evaluation_status(
     task_id: str = PathParam(
-        description="The TTS evaluation to poll. Must be in your workspace.",
+        description="The TTS evaluation to poll.",
         examples=["f47ac10b-58cc-4372-a567-0e02b2c3d479"],
     ),
     ctx: OrgContext = Depends(get_current_org),
 ):
-    """Get the status and results of a TTS evaluation."""
+    """Get the status and results of a TTS evaluation"""
     job = get_job(task_id, org_uuid=ctx.org_uuid)
     if not job:
         raise HTTPException(status_code=404, detail="Task not found")

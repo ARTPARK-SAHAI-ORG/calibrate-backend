@@ -40,7 +40,7 @@ class OrganizationResponse(BaseModel):
     )
     member_role: Optional[MemberRoleLiteral] = Field(
         None,
-        description="Your role in this workspace; `null` when not resolved",
+        description="Your role in this workspace. `null` when not resolved",
     )
     created_at: str = Field(description="When the workspace was created (ISO 8601 UTC)")
     updated_at: str = Field(description="When the workspace was last updated (ISO 8601 UTC)")
@@ -58,7 +58,7 @@ class AddMemberRequest(BaseModel):
     email: str = Field(
         ...,
         min_length=3,
-        description="Email of the person to add; a stub account is created if they have not signed up yet",
+        description="Email of the person to add. A stub account is created if they have not signed up yet",
     )
 
 
@@ -92,7 +92,7 @@ def _require_membership(org_uuid: str, user_id: str) -> str:
 
 @router.get("", response_model=List[OrganizationResponse], summary="List workspaces")
 async def list_orgs(user_id: str = Depends(get_current_user_id)):
-    """List every workspace you are an active member of."""
+    """List every workspace you are an active member of"""
     return [OrganizationResponse(**o) for o in list_organizations_for_user(user_id)]
 
 
@@ -101,7 +101,7 @@ async def create_org(
     request: CreateOrganizationRequest,
     user_id: str = Depends(get_current_user_id),
 ):
-    """Create a new (non-personal) workspace with you as owner."""
+    """Create a new (non-personal) workspace with you as owner"""
     org_uuid = create_organization(name=request.name, owner_user_id=user_id)
     org = get_organization(org_uuid)
     return OrganizationResponse(**org, member_role="owner")
@@ -116,7 +116,7 @@ async def rename_org(
     request: UpdateOrganizationRequest = ...,
     user_id: str = Depends(get_current_user_id),
 ):
-    """Rename a workspace you belong to."""
+    """Rename a workspace you belong to"""
     role = _require_membership(org_uuid, user_id)
     update_organization_name(org_uuid, request.name)
     org = get_organization(org_uuid)
@@ -131,7 +131,7 @@ async def list_members(
     ),
     user_id: str = Depends(get_current_user_id),
 ):
-    """List members of a workspace you belong to."""
+    """List members of a workspace you belong to"""
     _require_membership(org_uuid, user_id)
     return [MemberResponse(**m) for m in list_organization_members(org_uuid)]
 
@@ -150,7 +150,7 @@ async def add_member(
     request: AddMemberRequest = ...,
     user_id: str = Depends(get_current_user_id),
 ):
-    """Add a member to a workspace as admin."""
+    """Add a member to a workspace as admin"""
     # Stub accounts are hydrated when the invitee signs up; they then see this workspace immediately.
     _require_membership(org_uuid, user_id)
     try:
@@ -179,7 +179,7 @@ async def remove_member(
     ),
     user_id: str = Depends(get_current_user_id),
 ):
-    """Remove a member from a workspace. Owners cannot be removed."""
+    """Remove a member from a workspace. Owners cannot be removed"""
     _require_membership(org_uuid, user_id)
     try:
         removed = remove_organization_member(org_uuid, target_user_id)

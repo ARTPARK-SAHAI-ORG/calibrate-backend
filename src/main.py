@@ -1,4 +1,5 @@
 import os
+import copy
 import uuid
 import asyncio
 import logging
@@ -174,6 +175,85 @@ def _collect_schema_refs(node: Any, acc: set) -> None:
             _collect_schema_refs(item, acc)
 
 
+def _is_freeform_object_schema(node: Any) -> bool:
+    """True if ``node`` is a free-form object schema — ``type: object`` with
+    ``additionalProperties`` and no declared ``properties`` (i.e. a
+    ``Dict[str, Any]``). These carry no sub-fields to document."""
+    return (
+        isinstance(node, dict)
+        and node.get("type") == "object"
+        and bool(node.get("additionalProperties"))
+        and not node.get("properties")
+    )
+
+
+def _is_freeform_schema(node: Any) -> bool:
+    """True if ``node`` is a free-form object (`Dict[str, Any]`) OR an array of
+    them (`List[Dict[str, Any]]`). Both render as a shapeless `object`/`object[]`
+    chip with nothing to expand, so both should shed their auto-title."""
+    if _is_freeform_object_schema(node):
+        return True
+    return (
+        isinstance(node, dict)
+        and node.get("type") == "array"
+        and _is_freeform_object_schema(node.get("items", {}))
+    )
+
+
+def _strip_freeform_titles(node: Any) -> None:
+    """Recursively delete Pydantic's auto-generated ``title`` from free-form
+    fields — `Dict[str, Any]` and `List[Dict[str, Any]]`. Pydantic title-cases
+    the field name (``config`` → ``"Config"``, ``tool_calls`` → ``"Tool Calls"``),
+    which Mintlify surfaces as a fake type chip (`Config · object`,
+    `Tool Calls · object[]`) even though no such named type exists and there's
+    nothing to expand. Real component/model titles are untouched — only inline
+    free-form blobs (including the `anyOf: [<freeform>, null]` wrapper that
+    `Optional[...]` produces) lose their noise title."""
+    if isinstance(node, dict):
+        if "title" in node:
+            branches = node.get("anyOf") or node.get("oneOf") or []
+            non_null = [
+                b
+                for b in branches
+                if not (isinstance(b, dict) and b.get("type") == "null")
+            ]
+            wraps_freeform = bool(non_null) and all(
+                _is_freeform_schema(b) for b in non_null
+            )
+            if _is_freeform_schema(node) or wraps_freeform:
+                node.pop("title", None)
+        for value in node.values():
+            _strip_freeform_titles(value)
+    elif isinstance(node, list):
+        for item in node:
+            _strip_freeform_titles(item)
+
+
+# Request fields that only JWT (frontend) callers can set — API-key writes have
+# them stripped server-side (see agents._strip_verification_fields), so they're
+# inert and misleading in the API-key-facing public spec and its generated SDK/
+# code samples. Kept on the model (the frontend uses them) but hidden from the
+# public spec only. Keyed by component-schema name.
+_PUBLIC_SPEC_HIDDEN_FIELDS: Dict[str, tuple] = {
+    "AgentUpdate": ("connection_verified", "benchmark_models_verified"),
+}
+
+
+def _strip_hidden_public_fields(schemas: Dict[str, Any]) -> None:
+    """Drop JWT-only request fields from the public component schemas."""
+    for model, fields in _PUBLIC_SPEC_HIDDEN_FIELDS.items():
+        schema = schemas.get(model)
+        if not schema:
+            continue
+        props = schema.get("properties")
+        if props:
+            for f in fields:
+                props.pop(f, None)
+        req = schema.get("required")
+        if req:
+            schema["required"] = [r for r in req if r not in fields]
+
+
 def _build_public_openapi() -> Dict[str, Any]:
     full = app.openapi()
     public_paths: Dict[str, Any] = {}
@@ -221,9 +301,11 @@ def _build_public_openapi() -> Dict[str, Any]:
 
     components: Dict[str, Any] = dict(full.get("components", {}))
     if all_schemas:
-        components["schemas"] = {
-            name: schema for name, schema in all_schemas.items() if name in needed
-        }
+        # Deep-copy: the strip passes below mutate these schemas, and the source
+        # objects are shared with the cached `app.openapi()` (internal /docs).
+        components["schemas"] = copy.deepcopy(
+            {name: schema for name, schema in all_schemas.items() if name in needed}
+        )
     # Expose ONLY the API-key scheme on the public spec — see the per-op
     # `security` override above for why the auto-generated bearer scheme is
     # dropped. `X-API-Key: sk_…` is the SDK's auth path.
@@ -235,6 +317,13 @@ def _build_public_openapi() -> Dict[str, Any]:
             "description": "Workspace API key. Create one under Workspace settings → API keys.",
         }
     }
+
+    # Drop Pydantic's auto-titles on free-form `Dict[str, Any]` fields so
+    # Mintlify renders them as plain `object | null` instead of a misleading
+    # `Config`-style type chip. Real model titles in `components.schemas` stay.
+    _strip_freeform_titles(public_paths)
+    _strip_freeform_titles(components.get("schemas", {}))
+    _strip_hidden_public_fields(components.get("schemas", {}))
 
     return {
         "openapi": full.get("openapi", "3.1.0"),

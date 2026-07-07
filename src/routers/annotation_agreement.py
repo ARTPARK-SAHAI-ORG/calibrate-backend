@@ -44,7 +44,7 @@ async def agreement_trend(
     ),
     ctx: OrgContext = Depends(get_current_org),
 ):
-    """Get human-vs-human agreement trends for your workspace and per-evaluator human alignment."""
+    """Get human-vs-human agreement trends and per-evaluator human alignment"""
     if task_id:
         task = get_annotation_task(task_id)
         if not task or task.get("org_uuid") != ctx.org_uuid:
@@ -128,7 +128,7 @@ async def evaluator_agreement_trend(
     ),
     ctx: OrgContext = Depends(get_current_org),
 ):
-    """Get human-vs-evaluator agreement trends for one evaluator, broken down by version and task."""
+    """Get human-vs-evaluator agreement trends for one evaluator, broken down by version and task"""
     evaluator = get_evaluator(evaluator_uuid)
     if not evaluator:
         raise HTTPException(status_code=404, detail="Evaluator not found")

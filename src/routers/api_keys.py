@@ -1,7 +1,7 @@
 """API keys for programmatic access to your workspace.
 
 Each key is scoped to your active workspace. The raw key is returned exactly
-once at creation; later reads show only a masked display form.
+once at creation. Later reads show only a masked display form.
 """
 
 import re
@@ -32,7 +32,7 @@ class CreateApiKeyRequest(BaseModel):
         ...,
         min_length=1,
         max_length=200,
-        description="Human-readable label shown in your key listings",
+        description="Label shown in your key listings",
     )
 
 
@@ -65,16 +65,16 @@ class ApiKeyResponse(BaseModel):
         max_length=36,
         description="API key ID",
     )
-    name: str = Field(description="Human-readable label for the key")
+    name: str = Field(description="Label for the key")
     last_four: str = Field(
-        description="Last four characters of the key — the only fragment kept after creation"
+        description="Last four characters of the key"
     )
     masked_key: str = Field(
         description="Masked display form of the key for listings"
     )
     last_used_at: Optional[str] = Field(
         None,
-        description="When the key last authenticated a request; `null` if never used",
+        description="When the key last authenticated a request. `null` if never used",
     )
     created_at: str = Field(description="When the key was created (ISO 8601 UTC)")
     updated_at: str = Field(description="When the key was last updated (ISO 8601 UTC)")
@@ -95,7 +95,7 @@ class ApiKeyResponse(BaseModel):
 
 class CreateApiKeyResponse(ApiKeyResponse):
     key: str = Field(
-        description="The API key. **Returned exactly once at creation** — store it now; it cannot be retrieved again"
+        description="The API key. **Returned exactly once at creation.** Store it now. It cannot be retrieved again"
     )
 
 
@@ -106,7 +106,7 @@ async def create_key(
     request: CreateApiKeyRequest,
     ctx: OrgContext = Depends(get_current_org),
 ):
-    """Create an API key for your workspace."""
+    """Create an API key for programmatic access to the API"""
     raw_key, key_prefix = generate_api_key()
     row = create_api_key(
         org_uuid=ctx.org_uuid,
@@ -121,19 +121,19 @@ async def create_key(
 
 @router.get("", response_model=List[ApiKeyResponse], summary="List API keys")
 async def list_keys(ctx: OrgContext = Depends(get_current_org)):
-    """List active API keys in your workspace."""
+    """List active API keys"""
     return [ApiKeyResponse.from_row(k) for k in list_api_keys_for_org(ctx.org_uuid)]
 
 
 @router.delete("/{key_uuid}", status_code=204, summary="Revoke API key")
 async def revoke_key(
     key_uuid: str = Path(
-        description="The API key to revoke. Must be in your workspace.",
+        description="The API key to revoke.",
         examples=["f47ac10b-58cc-4372-a567-0e02b2c3d479"],
     ),
     ctx: OrgContext = Depends(get_current_org),
 ):
-    """Revoke an API key in your workspace."""
+    """Revoke an API key so it can no longer authenticate requests"""
     if get_api_key(key_uuid, ctx.org_uuid) is None:
         raise HTTPException(status_code=404, detail="API key not found")
     soft_delete_api_key(key_uuid, ctx.org_uuid)

@@ -153,6 +153,15 @@ def test_public_api_docs_are_unauthenticated_and_filtered(client, monkeypatch):
     # public override must not have leaked back into the shared cached schema.
     assert "HTTPBearer" in full["components"]["securitySchemes"]
 
+    # JWT-only request fields (verification flags API-key writes have stripped)
+    # are hidden from the public AgentUpdate schema, but stay on the internal one.
+    pub_agent_update = pub_top["components"]["schemas"]["AgentUpdate"]["properties"]
+    assert "connection_verified" not in pub_agent_update
+    assert "benchmark_models_verified" not in pub_agent_update
+    assert {"name", "config"} <= set(pub_agent_update)
+    full_agent_update = full["components"]["schemas"]["AgentUpdate"]["properties"]
+    assert "connection_verified" in full_agent_update  # still there internally
+
     # Components are trimmed to ONLY the schemas the public paths reference
     # (transitively) — internal/JWT-only model shapes must not leak.
     import json
@@ -177,6 +186,45 @@ def test_public_api_docs_are_unauthenticated_and_filtered(client, monkeypatch):
         m for m in re.findall(r'#/components/schemas/([^"]+)', json.dumps(pub_top))
     }
     assert refs.issubset(set(pub_schemas))
+
+    # Free-form `Dict[str, Any]` fields (e.g. agent `config`) must NOT carry
+    # Pydantic's auto-title, which Mintlify would render as a fake `Config` type
+    # chip. The property drops its title but keeps its type + description...
+    config_prop = pub_schemas["AgentUpdate"]["properties"]["config"]
+    assert "title" not in config_prop
+    assert config_prop["description"]  # description survives
+    assert {b.get("type") for b in config_prop["anyOf"]} == {"object", "null"}
+    # ...while real model titles (used as the expandable reference name) stay.
+    assert pub_schemas["AgentUpdate"]["title"] == "AgentUpdate"
+    # No surviving title anywhere sits on a free-form field — neither a
+    # `Dict[str, Any]` (object) NOR a `List[Dict[str, Any]]` (array of objects,
+    # e.g. `tool_calls`). Both render as a shapeless chip; a lingering auto-title
+    # ("Tool Calls · object[]") reads as a fake type. This guards the whole spec
+    # so no new free-form field regresses.
+    def _is_ff_obj(n):
+        return (
+            isinstance(n, dict)
+            and n.get("type") == "object"
+            and n.get("additionalProperties")
+            and not n.get("properties")
+        )
+
+    def _is_freeform(n):
+        return _is_ff_obj(n) or (
+            isinstance(n, dict)
+            and n.get("type") == "array"
+            and _is_ff_obj(n.get("items", {}))
+        )
+
+    for sname, schema in pub_schemas.items():
+        for fname, prop in schema.get("properties", {}).items():
+            branches = [
+                b for b in prop.get("anyOf", []) if b.get("type") != "null"
+            ] or [prop]
+            if any(_is_freeform(b) for b in branches):
+                assert "title" not in prop, (
+                    f"stale auto-title on free-form field {sname}.{fname}: {prop}"
+                )
 
 
 # ---------------------------------------------------------------------------

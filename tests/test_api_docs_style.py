@@ -72,7 +72,7 @@ def test_checker_allows_code_identifiers_in_doc_text(tmp_path):
         "router = APIRouter()\n"
         "@router.get('/x', summary='Get x')\n"
         "async def get_x():\n"
-        "    '''Resolved via `get_current_org` (the `X-Org-UUID` header); see `/org-limits`.'''\n"
+        "    '''Resolved via `get_current_org` (the `X-Org-UUID` header). See `/org-limits`.'''\n"
         "    return {}\n"
     )
     assert checker.find_violations(tmp_path) == []
@@ -94,6 +94,66 @@ def test_checker_flags_uuid_and_caller_in_doc_text(tmp_path):
     joined = "\n".join(checker.find_violations(tmp_path))
     assert "not 'UUID'" in joined
     assert "your workspace" in joined
+
+
+def test_checker_flags_em_dash_and_semicolon(tmp_path):
+    """Rendered doc text must not contain em-dashes or clause-splitting semicolons."""
+    (tmp_path / "mech.py").write_text(
+        "from fastapi import APIRouter\n"
+        "from pydantic import BaseModel, Field\n"
+        "router = APIRouter()\n"
+        "class Thing(BaseModel):\n"
+        "    a: str = Field(description='A value — explained')\n"
+        "    b: str = Field(description='A value; explained further')\n"
+        "@router.get('/things', summary='List things')\n"
+        "async def list_things():\n"
+        "    '''List things.'''\n"
+        "    return []\n"
+    )
+    joined = "\n".join(checker.find_violations(tmp_path))
+    assert "no em-dashes" in joined
+    assert "no clause-splitting semicolons" in joined
+
+
+def test_checker_flags_unit_suffix_repeat(tmp_path):
+    """A `*_ms` field must not repeat the bare 'ms' abbreviation in its description."""
+    (tmp_path / "unit.py").write_text(
+        "from fastapi import APIRouter\n"
+        "from pydantic import BaseModel, Field\n"
+        "router = APIRouter()\n"
+        "class Thing(BaseModel):\n"
+        "    latency_ms: float = Field(description='Response latency in ms')\n"
+        "    ok_ms: float = Field(description='Response latency in milliseconds')\n"
+        "@router.get('/things', summary='List things')\n"
+        "async def list_things():\n"
+        "    '''List things.'''\n"
+        "    return []\n"
+    )
+    joined = "\n".join(checker.find_violations(tmp_path))
+    assert "latency_ms" in joined and "milliseconds" in joined
+    # The spelled-out unit is fine — no violation for ok_ms.
+    assert "ok_ms" not in joined
+
+
+def test_checker_resolves_composed_descriptions(tmp_path):
+    """A description built from a module-level constant (`_SHARED + "..."`) is
+    still scanned — bans must reach it, not just plain string literals."""
+    (tmp_path / "composed.py").write_text(
+        "from fastapi import APIRouter\n"
+        "from pydantic import BaseModel, Field\n"
+        "router = APIRouter()\n"
+        "_SHARED = 'Base shape.'\n"
+        "class Thing(BaseModel):\n"
+        "    a: str = Field(description=_SHARED + ' Uses deep-merge on update')\n"
+        "    b: str = Field(description=_SHARED + ' clause; another clause')\n"
+        "@router.get('/things', summary='List things')\n"
+        "async def list_things():\n"
+        "    '''List things.'''\n"
+        "    return []\n"
+    )
+    joined = "\n".join(checker.find_violations(tmp_path))
+    assert "deep-merge" in joined  # jargon ban reached the composed description
+    assert "clause-splitting semicolons" in joined  # mechanics ban reached it too
 
 
 def test_checker_accepts_a_good_module(tmp_path):

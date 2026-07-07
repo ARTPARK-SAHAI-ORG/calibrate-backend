@@ -126,6 +126,68 @@ def test_bulk_create_tests_with_api_key(client):
     assert r.json()["count"] == 2
 
 
+def test_bulk_create_rejects_system_role(client):
+    """`system` is not a valid conversation_history role — the agent's system
+    prompt lives in its config, not the history. Only user/assistant/tool."""
+    jwt = _signup(client)
+    r = client.post(
+        "/tests/bulk",
+        json={
+            "type": "response",
+            "tests": [
+                {
+                    "name": f"bulk-{uuid.uuid4().hex[:6]}",
+                    "conversation_history": [
+                        {"role": "system", "content": "you are helpful"},
+                        {"role": "user", "content": "hi"},
+                    ],
+                    "evaluators": [],
+                }
+            ],
+        },
+        headers=jwt,
+    )
+    assert r.status_code == 422, r.text
+
+
+def test_update_conversation_test_rejects_clearing_evaluators(client):
+    """A conversation test must keep >=1 evaluator: PUT with an empty
+    `evaluators` list is 400, so the description's 'clears them' promise
+    correctly excludes conversation tests."""
+    jwt = _signup(client)
+    # Create a conversation evaluator (its first version is set live on create),
+    # so the link doesn't depend on seeded-evaluator ordering/state.
+    ev = client.post(
+        "/evaluators",
+        json={
+            "name": f"conv-ev-{uuid.uuid4().hex[:6]}",
+            "evaluator_type": "conversation",
+            "version": {
+                "judge_model": "openai/gpt-4o-mini",
+                "system_prompt": "Judge the conversation.",
+            },
+        },
+        headers=jwt,
+    )
+    assert ev.status_code == 200, ev.text
+    conv_ev_uuid = ev.json()["uuid"]
+    created = client.post(
+        "/tests",
+        json={
+            "name": f"conv-{uuid.uuid4().hex[:6]}",
+            "type": "conversation",
+            "evaluators": [{"evaluator_uuid": conv_ev_uuid}],
+        },
+        headers=jwt,
+    )
+    assert created.status_code == 200, created.text
+    t_uuid = created.json()["uuid"]
+
+    cleared = client.put(f"/tests/{t_uuid}", json={"evaluators": []}, headers=jwt)
+    assert cleared.status_code == 400, cleared.text
+    assert "at least one evaluator" in cleared.text
+
+
 def test_create_test_invalid_api_key(client):
     """POST /tests with a bogus key must 401."""
     r = client.post(

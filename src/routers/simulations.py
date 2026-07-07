@@ -44,6 +44,7 @@ from db import (
 )
 from llm_judge import build_evaluator_cli_payload
 from utils import (
+    AGENT_TYPE_DESCRIPTION,
     TaskStatus,
     TaskCreateResponse,
     SimulationRunType,
@@ -300,23 +301,23 @@ class EvaluatorRef(BaseModel):
 
 
 class SimulationCreate(BaseModel):
-    """Create body must use `evaluators` with evaluator IDs — not legacy metric IDs or aliases."""
+    """Create body must use `evaluators` with evaluator IDs, not legacy metric IDs or aliases."""
 
     model_config = ConfigDict(extra="forbid")
 
-    name: str = Field(description="Human-readable simulation name, unique within the workspace")
+    name: str = Field(description="Simulation name, unique within the workspace")
     agent_uuid: Optional[str] = Field(
         None,
         min_length=36,
         max_length=36,
-        description="Agent under test. Must be in your workspace. Omit to create without an agent",
+        description="Agent under test. Omit to create without an agent",
         examples=[_EXAMPLE_ID],
     )
     persona_uuids: Optional[List[str]] = Field(
-        None, description="Personas to link. Must be in your workspace. Omit to link none"
+        None, description="Personas to link. Omit to link none"
     )
     scenario_uuids: Optional[List[str]] = Field(
-        None, description="Scenarios to link. Must be in your workspace. Omit to link none"
+        None, description="Scenarios to link. Omit to link none"
     )
     evaluators: Optional[List[EvaluatorRef]] = Field(
         None, description="`conversation` evaluators to link. Omit to link none"
@@ -324,13 +325,13 @@ class SimulationCreate(BaseModel):
 
 
 class SimulationUpdate(BaseModel):
-    """Update body must use `evaluators` with evaluator IDs — not legacy metric IDs or aliases."""
+    """Update body must use `evaluators` with evaluator IDs, not legacy metric IDs or aliases."""
 
     model_config = ConfigDict(extra="forbid")
 
     name: Optional[str] = Field(None, description="New name. Omit to leave unchanged")
     agent_uuid: Optional[str] = Field(
-        None, description="Agent to link. Must be in your workspace. Empty string (`\"\"`) clears the agent. Omit to leave unchanged"
+        None, description="Agent to link. Empty string (`\"\"`) clears the agent. Omit to leave unchanged"
     )
     persona_uuids: Optional[List[str]] = Field(
         None, description="Replacement persona set (replaces existing). Omit to leave unchanged"
@@ -464,7 +465,7 @@ class AgentSummaryResponse(BaseModel):
     )
     name: str = Field(description="Agent name")
     type: Literal["agent", "connection"] = Field(
-        description="`agent` applies managed defaults; `connection` stores the config you supply as-is"
+        description=AGENT_TYPE_DESCRIPTION
     )
     config: Optional[Dict[str, Any]] = Field(None, description="Agent config, or null")
     created_at: str = Field(description="Creation timestamp (ISO 8601 UTC)")
@@ -507,7 +508,7 @@ class SimulationCreateResponse(BaseModel):
         description="ID of the newly created simulation",
         examples=[_EXAMPLE_ID],
     )
-    message: str = Field(description="Human-readable confirmation message")
+    message: str = Field(description="Confirmation message")
 
 
 class RunSimulationRequest(BaseModel):
@@ -525,7 +526,7 @@ class EvaluationCriterionResult(BaseModel):
         None,
         min_length=36,
         max_length=36,
-        description="Source evaluator ID, echoed from the run; null if unresolved",
+        description="Source evaluator ID, echoed from the run. Null if unresolved",
         examples=[_EXAMPLE_ID],
     )
     description: Optional[str] = Field(None, description="Evaluator's current description, or null")
@@ -555,7 +556,7 @@ class SimulationCaseResult(BaseModel):
         None, description="Full scenario object (name/label and description), or null"
     )
     evaluation_results: Optional[List[EvaluationCriterionResult]] = Field(
-        None, description="Per-evaluator judge results; null while the case is still in progress"
+        None, description="Per-evaluator judge results. Null while the case is still in progress"
     )
     transcript: Optional[List[Dict[str, Any]]] = Field(None, description="Ordered conversation turns, or null")
     audio_urls: Optional[List[str]] = Field(
@@ -579,21 +580,21 @@ class SimulationRunStatusResponse(BaseModel):
     type: SimulationRunType = Field(description="Run mode")
     updated_at: str = Field(description="Last-update timestamp (ISO 8601 UTC)")
     total_simulations: Optional[int] = Field(
-        None, description="Expected number of persona x scenario cases; null before it's known"
+        None, description="Expected number of persona x scenario cases. Null before it's known"
     )
     completed_simulations: Optional[int] = Field(
-        None, description="Number of cases finished so far; null when not tracked"
+        None, description="Number of cases finished so far. Null when not tracked"
     )
-    metrics: Optional[Dict[str, Any]] = Field(None, description="Aggregated metrics; null until the run completes")
+    metrics: Optional[Dict[str, Any]] = Field(None, description="Aggregated metrics. Null until the run completes")
     simulation_results: Optional[List[SimulationCaseResult]] = Field(
         None, description="Per-case results, or null if none yet"
     )
     evaluators: Optional[List[SimulationEvaluatorRef]] = Field(
-        None, description="Evaluators used for this run, in link order; null if none"
+        None, description="Evaluators used for this run, in link order. Null if none"
     )
-    error: Optional[str] = Field(None, description="Failure message; null unless the run failed")
+    error: Optional[str] = Field(None, description="Failure message. Null unless the run failed")
     is_public: bool = Field(False, description="Whether the run is shared via a public link")
-    share_token: Optional[str] = Field(None, description="Share token for the public view; null when private")
+    share_token: Optional[str] = Field(None, description="Share token for the public view. Null when private")
 
 
 class SimulationRunListItem(BaseModel):
@@ -673,7 +674,7 @@ def apply_simulation_job_evaluator_enrichment(
 async def create_simulation_endpoint(
     simulation: SimulationCreate, ctx: OrgContext = Depends(get_current_org)
 ):
-    """Create a simulation in your workspace, optionally linking an agent, personas, scenarios, and `conversation` evaluators."""
+    """Create a simulation, optionally linking an agent, personas, scenarios, and `conversation` evaluators"""
     if simulation.agent_uuid:
         agent = get_agent(simulation.agent_uuid)
         if not agent or agent.get("org_uuid") != ctx.org_uuid:
@@ -737,7 +738,7 @@ async def create_simulation_endpoint(
 
 @router.get("", response_model=List[SimulationListResponse], summary="List simulations")
 async def list_simulations(ctx: OrgContext = Depends(get_current_org)):
-    """List all simulations for your workspace, each with its linked agent summary."""
+    """List all simulations"""
     simulations = get_all_simulations(org_uuid=ctx.org_uuid)
     result = []
     for sim in simulations:
@@ -766,24 +767,24 @@ async def list_simulations(ctx: OrgContext = Depends(get_current_org)):
 
 
 class VisibilityRequest(BaseModel):
-    is_public: bool = Field(description="`true` to publish the run via a share link; `false` to make it private")
+    is_public: bool = Field(description="`true` to publish the run via a share link. `false` to make it private")
 
 
 class VisibilityResponse(BaseModel):
     is_public: bool = Field(description="Resulting public/private state of the run")
-    share_token: str | None = Field(None, description="Share token when public; null when private")
+    share_token: str | None = Field(None, description="Share token when public. Null when private")
 
 
 @router.patch("/run/{task_id}/visibility", response_model=VisibilityResponse, summary="Update simulation run visibility")
 async def update_simulation_run_visibility(
     body: VisibilityRequest,
     task_id: str = PathParam(
-        description="The simulation run to update. Must be in your workspace.",
+        description="The simulation run to update.",
         examples=["f47ac10b-58cc-4372-a567-0e02b2c3d479"],
     ),
     ctx: OrgContext = Depends(get_current_org),
 ):
-    """Update public sharing for a simulation run."""
+    """Update public sharing for a simulation run"""
     job = get_simulation_job(task_id)
     if not job:
         raise HTTPException(status_code=404, detail="Task not found")
@@ -809,12 +810,12 @@ async def update_simulation_run_visibility(
 @router.get("/run/{task_id}", response_model=SimulationRunStatusResponse, summary="Get simulation run status")
 async def get_simulation_run_status(
     task_id: str = PathParam(
-        description="The simulation run to poll. Must be in your workspace.",
+        description="The simulation run to poll.",
         examples=["f47ac10b-58cc-4372-a567-0e02b2c3d479"],
     ),
     ctx: OrgContext = Depends(get_current_org),
 ):
-    """Get the status and results of a simulation run."""
+    """Get the status and results of a simulation run"""
     job = get_simulation_job(task_id)
     if not job:
         raise HTTPException(status_code=404, detail="Task not found")
@@ -933,12 +934,12 @@ async def get_simulation_run_status(
 @router.get("/{simulation_uuid}/runs", response_model=SimulationRunsResponse, summary="List simulation runs")
 async def get_simulation_runs(
     simulation_uuid: str = PathParam(
-        description="The simulation whose runs to list. Must be in your workspace.",
+        description="The simulation whose runs to list.",
         examples=["f47ac10b-58cc-4372-a567-0e02b2c3d479"],
     ),
     ctx: OrgContext = Depends(get_current_org),
 ):
-    """List runs for a simulation, most recently updated first."""
+    """List runs for a simulation, most recently updated first"""
     simulation = get_simulation(simulation_uuid)
     if not simulation or simulation.get("org_uuid") != ctx.org_uuid:
         raise HTTPException(status_code=404, detail="Simulation not found")
@@ -976,12 +977,12 @@ async def get_simulation_runs(
 @router.get("/{simulation_uuid}", response_model=SimulationDetailResponse, summary="Get simulation")
 async def get_simulation_endpoint(
     simulation_uuid: str = PathParam(
-        description="The simulation to retrieve. Must be in your workspace.",
+        description="The simulation to retrieve.",
         examples=["f47ac10b-58cc-4372-a567-0e02b2c3d479"],
     ),
     ctx: OrgContext = Depends(get_current_org),
 ):
-    """Get a simulation with its linked agent, personas, scenarios, and evaluators."""
+    """Get a simulation with its linked agent, personas, scenarios, and evaluators"""
     simulation = get_simulation(simulation_uuid)
     if not simulation or simulation.get("org_uuid") != ctx.org_uuid:
         raise HTTPException(status_code=404, detail="Simulation not found")
@@ -1021,12 +1022,12 @@ async def get_simulation_endpoint(
 async def update_simulation_endpoint(
     simulation: SimulationUpdate,
     simulation_uuid: str = PathParam(
-        description="The simulation to update. Must be in your workspace.",
+        description="The simulation to update.",
         examples=["f47ac10b-58cc-4372-a567-0e02b2c3d479"],
     ),
     ctx: OrgContext = Depends(get_current_org),
 ):
-    """Update a simulation's name, agent, and linked personas, scenarios, and evaluators."""
+    """Update a simulation's name, agent, and linked personas, scenarios, and evaluators"""
     existing_simulation = get_simulation(simulation_uuid)
     if (
         not existing_simulation
@@ -1153,12 +1154,12 @@ async def update_simulation_endpoint(
 @router.delete("/{simulation_uuid}", summary="Delete simulation")
 async def delete_simulation_endpoint(
     simulation_uuid: str = PathParam(
-        description="The simulation to delete. Must be in your workspace.",
+        description="The simulation to delete.",
         examples=["f47ac10b-58cc-4372-a567-0e02b2c3d479"],
     ),
     ctx: OrgContext = Depends(get_current_org),
 ):
-    """Delete a simulation from your workspace."""
+    """Delete a simulation from your workspace"""
     existing_simulation = get_simulation(simulation_uuid)
     if (
         not existing_simulation
@@ -2416,12 +2417,12 @@ def run_simulation_task(
 async def run_simulation_endpoint(
     request: RunSimulationRequest,
     simulation_uuid: str = PathParam(
-        description="The simulation to run. Must be in your workspace.",
+        description="The simulation to run.",
         examples=["f47ac10b-58cc-4372-a567-0e02b2c3d479"],
     ),
     ctx: OrgContext = Depends(get_current_org),
 ):
-    """Run a simulation as a background job."""
+    """Run a simulation as a background job"""
     simulation = get_simulation(simulation_uuid)
     if not simulation or simulation.get("org_uuid") != ctx.org_uuid:
         raise HTTPException(status_code=404, detail="Simulation not found")
@@ -2512,12 +2513,12 @@ async def run_simulation_endpoint(
 @router.post("/run/{job_uuid}/abort", response_model=SimulationRunStatusResponse, summary="Abort simulation run")
 async def abort_simulation_run(
     job_uuid: str = PathParam(
-        description="The in-progress simulation run to abort. Must be in your workspace.",
+        description="The in-progress simulation run to abort.",
         examples=["f47ac10b-58cc-4372-a567-0e02b2c3d479"],
     ),
     ctx: OrgContext = Depends(get_current_org),
 ):
-    """Abort an in-progress simulation run, keeping partial results collected so far."""
+    """Abort an in-progress simulation run, keeping partial results collected so far"""
     simulation_job = get_simulation_job(job_uuid)
     if not simulation_job:
         raise HTTPException(status_code=404, detail="Job not found")
@@ -2601,12 +2602,12 @@ async def abort_simulation_run(
 @router.delete("/run/{job_uuid}", summary="Delete simulation run")
 async def delete_simulation_job_endpoint(
     job_uuid: str = PathParam(
-        description="The simulation run to delete. Must be in your workspace.",
+        description="The simulation run to delete.",
         examples=["f47ac10b-58cc-4372-a567-0e02b2c3d479"],
     ),
     ctx: OrgContext = Depends(get_current_org),
 ):
-    """Delete a simulation run."""
+    """Delete a simulation run and its results"""
     simulation_job = get_simulation_job(job_uuid)
     if not simulation_job:
         raise HTTPException(status_code=404, detail="Job not found")

@@ -27,7 +27,7 @@ _EXAMPLE_ID = "f47ac10b-58cc-4372-a567-0e02b2c3d479"
 
 
 class AnnotatorCreate(BaseModel):
-    name: str = Field(description="Human-readable annotator name, unique within your workspace")
+    name: str = Field(description="Annotator name, unique within your workspace")
 
 
 class AnnotatorUpdate(BaseModel):
@@ -43,7 +43,7 @@ class AnnotatorResponse(BaseModel):
         description="Annotator ID",
         examples=[_EXAMPLE_ID],
     )
-    name: str = Field(description="Human-readable annotator name")
+    name: str = Field(description="Annotator name")
     created_at: str = Field(description="Creation timestamp (ISO 8601 UTC)")
     updated_at: str = Field(description="Last-update timestamp (ISO 8601 UTC)")
     jobs_count: Optional[int] = Field(
@@ -65,7 +65,7 @@ class AnnotatorCreateResponse(BaseModel):
         description="ID of the newly created annotator",
         examples=[_EXAMPLE_ID],
     )
-    message: str = Field(description="Human-readable success message")
+    message: str = Field(description="Success message")
 
 
 def _ensure_owned_annotator(annotator_uuid: str, org_uuid: str):
@@ -80,7 +80,7 @@ async def create_annotator_endpoint(
     payload: AnnotatorCreate,
     ctx: OrgContext = Depends(get_current_org),
 ):
-    """Create an annotator in your workspace."""
+    """Create an annotator, a human labeller who can be assigned annotation tasks"""
     try:
         with ensure_name_unique(
             "annotators", payload.name, ctx.org_uuid, entity="Annotator"
@@ -97,7 +97,7 @@ async def create_annotator_endpoint(
 
 @router.get("", response_model=List[AnnotatorResponse], summary="List annotators")
 async def list_annotators(ctx: OrgContext = Depends(get_current_org)):
-    """List annotators in your workspace with job counts and agreement stats."""
+    """List annotators with job counts and agreement stats"""
     annotators = get_all_annotators(org_uuid=ctx.org_uuid)
     if not annotators:
         return []
@@ -122,7 +122,7 @@ async def list_annotators(ctx: OrgContext = Depends(get_current_org)):
 @router.get("/{annotator_uuid}", summary="Get annotator")
 async def get_annotator_endpoint(
     annotator_uuid: str = Path(
-        description="Annotator to retrieve. Must be in your workspace.",
+        description="Annotator to retrieve.",
         examples=["f47ac10b-58cc-4372-a567-0e02b2c3d479"],
     ),
     bucket: str = Query(
@@ -135,7 +135,7 @@ async def get_annotator_endpoint(
     ),
     ctx: OrgContext = Depends(get_current_org),
 ):
-    """Get one annotator with assigned jobs and an agreement trend series."""
+    """Get one annotator with assigned jobs and an agreement trend series"""
     annotator = _ensure_owned_annotator(annotator_uuid, ctx.org_uuid)
 
     jobs = get_jobs_for_annotator_detailed(annotator_uuid)
@@ -174,13 +174,13 @@ async def get_annotator_endpoint(
 @router.put("/{annotator_uuid}", response_model=AnnotatorResponse, summary="Update annotator")
 async def update_annotator_endpoint(
     annotator_uuid: str = Path(
-        description="Annotator to update. Must be in your workspace.",
+        description="Annotator to update.",
         examples=["f47ac10b-58cc-4372-a567-0e02b2c3d479"],
     ),
     payload: AnnotatorUpdate = ...,
     ctx: OrgContext = Depends(get_current_org),
 ):
-    """Update an annotator's name."""
+    """Update an annotator's name"""
     _ensure_owned_annotator(annotator_uuid, ctx.org_uuid)
     try:
         with ensure_name_unique(
@@ -201,12 +201,12 @@ async def update_annotator_endpoint(
 @router.delete("/{annotator_uuid}", summary="Delete annotator")
 async def delete_annotator_endpoint(
     annotator_uuid: str = Path(
-        description="Annotator to delete. Must be in your workspace.",
+        description="Annotator to delete.",
         examples=["f47ac10b-58cc-4372-a567-0e02b2c3d479"],
     ),
     ctx: OrgContext = Depends(get_current_org),
 ):
-    """Soft-delete an annotator in your workspace."""
+    """Soft-delete an annotator"""
     _ensure_owned_annotator(annotator_uuid, ctx.org_uuid)
     deleted = delete_annotator(annotator_uuid)
     if not deleted:

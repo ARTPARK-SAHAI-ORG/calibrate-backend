@@ -241,20 +241,20 @@ class STTEvaluationRequest(BaseModel):
         None,
         min_length=36,
         max_length=36,
-        description="Existing STT dataset to evaluate. Must be in your workspace. **Provide this OR inline `audio_paths` + `texts`, not both**",
+        description="Existing STT dataset to evaluate. **Provide this OR inline `audio_paths` + `texts`, not both**",
         examples=[_EXAMPLE_ID],
     )
     audio_paths: Optional[List[str]] = Field(
         None,
-        description="Audio files to transcribe, one `s3://bucket/key` URI per item. **Required when `dataset_id` is omitted**; must align 1:1 with `texts`",
+        description="Audio files to transcribe, one `s3://bucket/key` URI per item. **Required when `dataset_id` is omitted**. Must align 1:1 with `texts`",
     )
     texts: Optional[List[str]] = Field(
         None,
-        description="Ground-truth transcripts to score against, one per audio file. **Required when `dataset_id` is omitted**; must align 1:1 with `audio_paths`",
+        description="Ground-truth transcripts to score against, one per audio file. **Required when `dataset_id` is omitted**. Must align 1:1 with `audio_paths`",
     )
     dataset_name: Optional[str] = Field(
         None,
-        description="Name for a new dataset saved from inline inputs. Ignored when `dataset_id` is set; omit to skip saving",
+        description="Name for a new dataset saved from inline inputs. Ignored when `dataset_id` is set. Omit to skip saving",
     )
     providers: List[str] = Field(
         description='STT providers to compare, e.g. `["deepgram", "openai", "sarvam"]`. At least one required'
@@ -262,7 +262,7 @@ class STTEvaluationRequest(BaseModel):
     language: str = Field(description='Spoken language for the audio, e.g. `"english"` or `"hindi"`')
     evaluator_uuids: Optional[List[str]] = Field(
         None,
-        description="Evaluators to score transcriptions; each must be an `stt` evaluator in your workspace. Omit to use the default STT evaluator",
+        description="Evaluators to score transcriptions. Each must be an `stt` evaluator in your workspace. Omit to use the default STT evaluator",
     )
 
 
@@ -664,7 +664,7 @@ def run_evaluation_task(
 async def evaluate_stt(
     request: STTEvaluationRequest, ctx: OrgContext = Depends(get_current_org)
 ):
-    """Benchmark STT providers against a dataset as a background job."""
+    """Benchmark STT providers against a dataset as a background job"""
     if not request.providers:
         raise HTTPException(
             status_code=400,
@@ -746,7 +746,7 @@ async def evaluate_stt(
 
 class VisibilityRequest(BaseModel):
     is_public: bool = Field(
-        description="`true` to make the job publicly shareable; `false` to make it private"
+        description="`true` to make the job publicly shareable. `false` to make it private"
     )
 
 
@@ -754,7 +754,7 @@ class VisibilityResponse(BaseModel):
     is_public: bool = Field(description="Whether the job is now publicly shareable")
     share_token: str | None = Field(
         None,
-        description="Opaque token for the public share URL when `is_public` is true; null when private",
+        description="Opaque token for the public share URL when `is_public` is true. Null when private",
     )
 
 
@@ -766,12 +766,12 @@ class VisibilityResponse(BaseModel):
 async def update_stt_visibility(
     body: VisibilityRequest,
     task_id: str = PathParam(
-        description="The STT evaluation to update. Must be in your workspace.",
+        description="The STT evaluation to update.",
         examples=["f47ac10b-58cc-4372-a567-0e02b2c3d479"],
     ),
     ctx: OrgContext = Depends(get_current_org),
 ):
-    """Update public sharing for an STT evaluation."""
+    """Update public sharing for an STT evaluation"""
     job = get_job(task_id, org_uuid=ctx.org_uuid)
     if not job or job.get("type") != "stt-eval":
         raise HTTPException(status_code=404, detail="Task not found")
@@ -792,12 +792,12 @@ async def update_stt_visibility(
 )
 async def get_evaluation_status(
     task_id: str = PathParam(
-        description="The STT evaluation to poll. Must be in your workspace.",
+        description="The STT evaluation to poll.",
         examples=["f47ac10b-58cc-4372-a567-0e02b2c3d479"],
     ),
     ctx: OrgContext = Depends(get_current_org),
 ):
-    """Get the status and results of an STT evaluation."""
+    """Get the status and results of an STT evaluation"""
     job = get_job(task_id, org_uuid=ctx.org_uuid)
     if not job:
         raise HTTPException(status_code=404, detail="Task not found")

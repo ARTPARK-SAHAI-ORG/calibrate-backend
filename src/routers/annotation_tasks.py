@@ -139,9 +139,9 @@ _EXAMPLE_ID = "f47ac10b-58cc-4372-a567-0e02b2c3d479"
 
 
 class AnnotationTaskCreate(BaseModel):
-    name: str = Field(description="Human-readable task name, unique within your workspace")
+    name: str = Field(description="Task name, unique within your workspace")
     type: AnnotationTaskTypeLiteral = Field(
-        description="Task type; governs item payload shape and applicable evaluators"
+        description="Task type. Governs item payload shape and applicable evaluators"
     )
     description: Optional[str] = Field(
         None, description="Free-text task description. Omit for none"
@@ -168,9 +168,9 @@ class AnnotationTaskResponse(BaseModel):
         description="Task ID",
         examples=[_EXAMPLE_ID],
     )
-    name: str = Field(description="Human-readable task name")
+    name: str = Field(description="Task name")
     type: AnnotationTaskTypeLiteral = Field(
-        description="Task type (`stt | tts | llm | llm-general | conversation`)"
+        description="Task type. Governs item payload shape and applicable evaluators"
     )
     description: Optional[str] = Field(None, description="Free-text task description, if any")
     created_at: str = Field(description="Creation timestamp (ISO 8601 UTC)")
@@ -186,11 +186,11 @@ class AnnotationTaskResponse(BaseModel):
     # empty (use the dedicated /items and /jobs endpoints for those views).
     items: List[Dict[str, Any]] = Field(
         default=[],
-        description="Task items with per-item agreement stats. Populated on the single-task fetch only; empty on the list endpoint",
+        description="Task items with per-item agreement stats. Populated on the single-task fetch only. Empty on the list endpoint",
     )
     jobs: List[Dict[str, Any]] = Field(
         default=[],
-        description="Labelling jobs for the task. Populated on the single-task fetch only; empty on the list endpoint",
+        description="Labelling jobs for the task. Populated on the single-task fetch only. Empty on the list endpoint",
     )
 
 
@@ -201,7 +201,7 @@ class AnnotationTaskCreateResponse(BaseModel):
         description="ID of the newly created task",
         examples=[_EXAMPLE_ID],
     )
-    message: str = Field(description="Human-readable success message")
+    message: str = Field(description="Success message")
 
 
 class EvaluatorLinkRequest(BaseModel):
@@ -215,7 +215,7 @@ class EvaluatorLinkRequest(BaseModel):
 
 class EvaluatorOrderRequest(BaseModel):
     evaluator_ids: List[str] = Field(
-        description="Full ordered list of currently-linked evaluator IDs. **Must match the active linked set exactly** — this endpoint reorders, it does not link/unlink. Send `[]` only when the task has no linked evaluators"
+        description="Full ordered list of currently-linked evaluator IDs. **Must match the active linked set exactly.** This endpoint reorders, it does not link/unlink. Send `[]` only when the task has no linked evaluators"
     )
 
 
@@ -243,7 +243,7 @@ async def create_annotation_task_endpoint(
     payload: AnnotationTaskCreate,
     ctx: OrgContext = Depends(get_current_org),
 ):
-    """Create an annotation task in your workspace."""
+    """Create an annotation task for annotators to label items against evaluators"""
     if payload.evaluator_ids:
         for evaluator_id in payload.evaluator_ids:
             _ensure_owned_evaluator(evaluator_id, ctx.org_uuid)
@@ -270,7 +270,7 @@ async def create_annotation_task_endpoint(
 
 @router.get("", response_model=List[AnnotationTaskResponse], summary="List annotation tasks")
 async def list_annotation_tasks(ctx: OrgContext = Depends(get_current_org)):
-    """List annotation tasks in your workspace with linked evaluators."""
+    """List annotation tasks with linked evaluators"""
     tasks = get_all_annotation_tasks(org_uuid=ctx.org_uuid)
     for task in tasks:
         task["evaluators"] = get_evaluators_for_annotation_task(task["uuid"])
@@ -280,12 +280,12 @@ async def list_annotation_tasks(ctx: OrgContext = Depends(get_current_org)):
 @router.get("/{task_uuid}", response_model=AnnotationTaskResponse, summary="Get annotation task")
 async def get_annotation_task_endpoint(
     task_uuid: str = Path(
-        description="Task to retrieve. Must be in your workspace.",
+        description="Task to retrieve.",
         examples=["f47ac10b-58cc-4372-a567-0e02b2c3d479"],
     ),
     ctx: OrgContext = Depends(get_current_org),
 ):
-    """Get one annotation task with linked evaluators, items, and labelling jobs."""
+    """Get one annotation task with linked evaluators, items, and labelling jobs"""
     task = _ensure_owned_task(task_uuid, ctx.org_uuid)
     evaluators = _enrich_evaluators_with_live_version(
         get_evaluators_for_annotation_task(task_uuid)
@@ -321,13 +321,13 @@ async def get_annotation_task_endpoint(
 @router.put("/{task_uuid}", response_model=AnnotationTaskResponse, summary="Update annotation task")
 async def update_annotation_task_endpoint(
     task_uuid: str = Path(
-        description="Annotation task to act on. Must be in your workspace.",
+        description="Annotation task to act on.",
         examples=["f47ac10b-58cc-4372-a567-0e02b2c3d479"],
     ),
     payload: AnnotationTaskUpdate = ...,
     ctx: OrgContext = Depends(get_current_org),
 ):
-    """Update an annotation task's name and description. Task type is immutable."""
+    """Update an annotation task, a labelling task for annotators"""
     _ensure_owned_task(task_uuid, ctx.org_uuid)
     with ensure_name_unique(
         "annotation_tasks",
@@ -351,12 +351,12 @@ async def update_annotation_task_endpoint(
 @router.delete("/{task_uuid}", summary="Delete annotation task")
 async def delete_annotation_task_endpoint(
     task_uuid: str = Path(
-        description="Annotation task to act on. Must be in your workspace.",
+        description="Annotation task to act on.",
         examples=["f47ac10b-58cc-4372-a567-0e02b2c3d479"],
     ),
     ctx: OrgContext = Depends(get_current_org),
 ):
-    """Soft-delete an annotation task in your workspace."""
+    """Soft-delete an annotation task"""
     _ensure_owned_task(task_uuid, ctx.org_uuid)
     deleted = delete_annotation_task(task_uuid)
     if not deleted:
@@ -370,12 +370,12 @@ async def delete_annotation_task_endpoint(
 @router.get("/{task_uuid}/evaluators", summary="List task evaluators")
 async def list_task_evaluators(
     task_uuid: str = Path(
-        description="Annotation task to act on. Must be in your workspace.",
+        description="Annotation task to act on.",
         examples=["f47ac10b-58cc-4372-a567-0e02b2c3d479"],
     ),
     ctx: OrgContext = Depends(get_current_org),
 ):
-    """List evaluators linked to this task in full detail, ordered by display position."""
+    """List evaluators linked to this task in full detail, ordered by display position"""
     # Lazy import to avoid a circular module-load between the two router
     # files (annotation_tasks ↔ evaluators).
     from routers.evaluators import (
@@ -419,13 +419,13 @@ async def list_task_evaluators(
 @router.post("/{task_uuid}/evaluators", summary="Link evaluator to task")
 async def link_evaluator_to_task(
     task_uuid: str = Path(
-        description="Annotation task to act on. Must be in your workspace.",
+        description="Annotation task to act on.",
         examples=["f47ac10b-58cc-4372-a567-0e02b2c3d479"],
     ),
     payload: EvaluatorLinkRequest = ...,
     ctx: OrgContext = Depends(get_current_org),
 ):
-    """Link an evaluator to a task, appending it to the display order."""
+    """Link an evaluator to a task, appending it to the display order"""
     _ensure_owned_task(task_uuid, ctx.org_uuid)
     _ensure_owned_evaluator(payload.evaluator_id, ctx.org_uuid)
     add_evaluator_to_annotation_task(task_uuid, payload.evaluator_id)
@@ -435,7 +435,7 @@ async def link_evaluator_to_task(
 @router.put("/{task_uuid}/evaluators/order", summary="Reorder task evaluators")
 async def reorder_task_evaluators(
     task_uuid: str = Path(
-        description="Annotation task to act on. Must be in your workspace.",
+        description="Annotation task to act on.",
         examples=["f47ac10b-58cc-4372-a567-0e02b2c3d479"],
     ),
     payload: EvaluatorOrderRequest = ...,
@@ -443,7 +443,7 @@ async def reorder_task_evaluators(
 ):
     """Reorder evaluators linked to a task.
 
- The request must list every currently linked evaluator ID in the desired order; this endpoint reorders only and does not link or unlink evaluators."""
+ The request must list every currently linked evaluator ID in the desired order. This endpoint reorders only and does not link or unlink evaluators"""
     _ensure_owned_task(task_uuid, ctx.org_uuid)
     try:
         reorder_evaluators_for_annotation_task(task_uuid, payload.evaluator_ids)
@@ -465,7 +465,7 @@ class AnnotationItemPayload(BaseModel):
     )
     annotations: Optional[Dict[str, Any]] = Field(
         None,
-        description="Optional human annotations to seed with the item, keyed by evaluator ID (each must be currently linked to the task). Each value is `{'value': <bool|number|string>, 'reasoning'?: str}` for every output_type — binary uses a bool in `value`, rating a number. Only the keys `value`/`score`/`rating`/`label`/`binary` count toward agreement aggregates. **When any item carries this, `BulkItemsRequest.annotator_id` is required.**",
+        description="Optional human annotations to seed with the item, keyed by evaluator ID (each must be currently linked to the task). Each value is `{'value': <bool|number|string>, 'reasoning'?: str}` for every output_type. Binary uses a bool in `value`, rating a number. Only the keys `value`/`score`/`rating`/`label`/`binary` count toward agreement aggregates. **When any item carries this, `BulkItemsRequest.annotator_id` is required.**",
     )
 
 
@@ -477,7 +477,7 @@ class BulkItemsRequest(BaseModel):
         None,
         min_length=36,
         max_length=36,
-        description="Annotator to attribute seeded annotations to. **Required when any item carries annotations.** Must be in your workspace",
+        description="Annotator to attribute seeded annotations to. **Required when any item carries annotations.**",
         examples=[_EXAMPLE_ID],
     )
 
@@ -485,12 +485,12 @@ class BulkItemsRequest(BaseModel):
 @router.get("/{task_uuid}/items", summary="List task items")
 async def list_task_items(
     task_uuid: str = Path(
-        description="Annotation task to act on. Must be in your workspace.",
+        description="Annotation task to act on.",
         examples=["f47ac10b-58cc-4372-a567-0e02b2c3d479"],
     ),
     ctx: OrgContext = Depends(get_current_org),
 ):
-    """List non-deleted items in a task."""
+    """List non-deleted items in a task"""
     _ensure_owned_task(task_uuid, ctx.org_uuid)
     return get_annotation_items_for_task(task_uuid)
 
@@ -503,20 +503,20 @@ class AnnotatedItemsCheckRequest(BaseModel):
         examples=[_EXAMPLE_ID],
     )
     names: List[str] = Field(
-        description="Item names in upload row order (`payload.name`); the response reports back by row index"
+        description="Item names in upload row order (`payload.name`). The response reports back by row index"
     )
 
 
 @router.post("/{task_uuid}/items/annotated-check", summary="Check annotated items")
 async def check_annotated_items(
     task_uuid: str = Path(
-        description="Annotation task to act on. Must be in your workspace.",
+        description="Annotation task to act on.",
         examples=["f47ac10b-58cc-4372-a567-0e02b2c3d479"],
     ),
     payload: AnnotatedItemsCheckRequest = ...,
     ctx: OrgContext = Depends(get_current_org),
 ):
-    """Check which proposed item names already exist and whether the annotator has labelled them."""
+    """Check which proposed item names already exist and whether the annotator has labelled them"""
     _ensure_owned_task(task_uuid, ctx.org_uuid)
     if not payload.names:
         raise HTTPException(status_code=400, detail="names must be non-empty")
@@ -562,13 +562,13 @@ async def check_annotated_items(
 @router.post("/{task_uuid}/items", summary="Bulk create items")
 async def bulk_create_items(
     task_uuid: str = Path(
-        description="Annotation task to act on. Must be in your workspace.",
+        description="Annotation task to act on.",
         examples=["f47ac10b-58cc-4372-a567-0e02b2c3d479"],
     ),
     payload: BulkItemsRequest = ...,
     ctx: OrgContext = Depends(get_current_org),
 ):
-    """Bulk-create annotation items in a task, optionally seeding human annotations."""
+    """Bulk-create annotation items in a task, optionally seeding human annotations"""
     task = _ensure_owned_task(task_uuid, ctx.org_uuid)
     if not payload.items:
         raise HTTPException(status_code=400, detail="items must be non-empty")
@@ -842,13 +842,13 @@ class BulkUpdateItemsRequest(BaseModel):
 @router.put("/{task_uuid}/items", summary="Bulk update items")
 async def bulk_update_items(
     task_uuid: str = Path(
-        description="Annotation task to act on. Must be in your workspace.",
+        description="Annotation task to act on.",
         examples=["f47ac10b-58cc-4372-a567-0e02b2c3d479"],
     ),
     payload: BulkUpdateItemsRequest = ...,
     ctx: OrgContext = Depends(get_current_org),
 ):
-    """Bulk-update item payloads in a task."""
+    """Bulk-update item payloads in a task"""
     task = _ensure_owned_task(task_uuid, ctx.org_uuid)
     if not payload.updates:
         raise HTTPException(status_code=400, detail="updates must be non-empty")
@@ -918,10 +918,10 @@ def _resolve_target_item_ids(
       (same field/match rule as the summary endpoint's `?q=`). The explicit
       `item_ids` list is ignored — `select_all` is the source of truth so
       stale checkboxes can't sneak through.
-    - `select_all=False`: returns `item_ids` verbatim; `q` is ignored.
+    - `select_all=False`: returns `item_ids` verbatim. `q` is ignored.
 
     Pass `items` to reuse an already-loaded task item list (avoids a second
-    `get_annotation_items_for_task` round-trip); omitted ⇒ fetched lazily and
+    `get_annotation_items_for_task` round-trip). Omitted ⇒ fetched lazily and
     only when `select_all=True`.
 
     Returns the raw resolved list (may be empty). Callers decide whether
@@ -945,7 +945,7 @@ def _resolve_target_item_ids(
 class BulkDeleteItemsRequest(BaseModel):
     item_ids: List[str] = Field(
         default=[],
-        description="Item IDs to delete. **Required (non-empty) when `select_all=false`**; ignored when `select_all=true`",
+        description="Item IDs to delete. **Required (non-empty) when `select_all=false`**. Ignored when `select_all=true`",
     )
     select_all: bool = Field(
         False,
@@ -960,13 +960,13 @@ class BulkDeleteItemsRequest(BaseModel):
 @router.delete("/{task_uuid}/items", summary="Bulk delete items")
 async def bulk_delete_items(
     task_uuid: str = Path(
-        description="Annotation task to act on. Must be in your workspace.",
+        description="Annotation task to act on.",
         examples=["f47ac10b-58cc-4372-a567-0e02b2c3d479"],
     ),
     payload: BulkDeleteItemsRequest = ...,
     ctx: OrgContext = Depends(get_current_org),
 ):
-    """Soft-delete items in a task, using explicit IDs or a select-all filter."""
+    """Soft-delete items in a task, using explicit IDs or a select-all filter"""
     _ensure_owned_task(task_uuid, ctx.org_uuid)
     target_ids = _resolve_target_item_ids(
         task_uuid,
@@ -989,7 +989,7 @@ async def bulk_delete_items(
 @router.get("/{task_uuid}/items/{item_uuid}", summary="Get item")
 async def get_item(
     task_uuid: str = Path(
-        description="Annotation task to act on. Must be in your workspace.",
+        description="Annotation task to act on.",
         examples=["f47ac10b-58cc-4372-a567-0e02b2c3d479"],
     ),
     item_uuid: str = Path(
@@ -998,7 +998,7 @@ async def get_item(
     ),
     ctx: OrgContext = Depends(get_current_org),
 ):
-    """Get one item in a task."""
+    """Get one item in a task"""
     _ensure_owned_task(task_uuid, ctx.org_uuid)
     item = get_annotation_item(item_uuid)
     if not item or item.get("task_id") != task_uuid:
@@ -1009,7 +1009,7 @@ async def get_item(
 @router.get("/{task_uuid}/items/{item_uuid}/annotations", summary="List item annotations")
 async def list_item_annotations(
     task_uuid: str = Path(
-        description="Annotation task to act on. Must be in your workspace.",
+        description="Annotation task to act on.",
         examples=["f47ac10b-58cc-4372-a567-0e02b2c3d479"],
     ),
     item_uuid: str = Path(
@@ -1018,7 +1018,7 @@ async def list_item_annotations(
     ),
     ctx: OrgContext = Depends(get_current_org),
 ):
-    """List human annotations for one item across every labelling job."""
+    """List human annotations for one item across every labelling job"""
     _ensure_owned_task(task_uuid, ctx.org_uuid)
     item = get_annotation_item(item_uuid)
     if not item or item.get("task_id") != task_uuid:
@@ -1031,11 +1031,11 @@ async def list_item_annotations(
 
 class CreateJobsRequest(BaseModel):
     annotator_ids: List[str] = Field(
-        description="Annotator IDs to assign — one labelling job per annotator. Must be non-empty and in your workspace"
+        description="Annotator IDs to assign, one labelling job per annotator. Must be non-empty and in your workspace"
     )
     item_ids: List[str] = Field(
         default=[],
-        description="Item IDs to assign. **Required (non-empty) when `select_all=false`**; ignored when `select_all=true`",
+        description="Item IDs to assign. **Required (non-empty) when `select_all=false`**. Ignored when `select_all=true`",
     )
     select_all: bool = Field(
         False,
@@ -1047,19 +1047,19 @@ class CreateJobsRequest(BaseModel):
     )
     evaluator_ids: Optional[List[str]] = Field(
         None,
-        description="Optional subset of the task's linked evaluators to show in these jobs (must be a subset of the live links; empty list ⇒ 400). Applies to every annotator's job. Omit (`None`) to snapshot every linked evaluator",
+        description="Optional subset of the task's linked evaluators to show in these jobs (must be a subset of the live links. Empty list ⇒ 400). Applies to every annotator's job. Omit (`None`) to snapshot every linked evaluator",
     )
 
 
 @router.get("/{task_uuid}/jobs", summary="List labelling jobs")
 async def list_task_jobs(
     task_uuid: str = Path(
-        description="Annotation task to act on. Must be in your workspace.",
+        description="Annotation task to act on.",
         examples=["f47ac10b-58cc-4372-a567-0e02b2c3d479"],
     ),
     ctx: OrgContext = Depends(get_current_org),
 ):
-    """List labelling jobs for a task."""
+    """List labelling jobs for a task"""
     _ensure_owned_task(task_uuid, ctx.org_uuid)
     return get_jobs_for_task(task_uuid)
 
@@ -1067,13 +1067,13 @@ async def list_task_jobs(
 @router.post("/{task_uuid}/jobs", summary="Create labelling jobs")
 async def create_jobs(
     task_uuid: str = Path(
-        description="Annotation task to act on. Must be in your workspace.",
+        description="Annotation task to act on.",
         examples=["f47ac10b-58cc-4372-a567-0e02b2c3d479"],
     ),
     payload: CreateJobsRequest = ...,
     ctx: OrgContext = Depends(get_current_org),
 ):
-    """Assign items to annotators, creating one labelling job per annotator."""
+    """Assign items to annotators, creating one labelling job per annotator"""
     _ensure_owned_task(task_uuid, ctx.org_uuid)
     if not payload.annotator_ids:
         raise HTTPException(
@@ -1186,7 +1186,7 @@ async def create_jobs(
 @router.get("/{task_uuid}/jobs/{job_uuid}", summary="Get labelling job")
 async def get_annotation_job_endpoint(
     task_uuid: str = Path(
-        description="Annotation task to act on. Must be in your workspace.",
+        description="Annotation task to act on.",
         examples=["f47ac10b-58cc-4372-a567-0e02b2c3d479"],
     ),
     job_uuid: str = Path(
@@ -1195,7 +1195,7 @@ async def get_annotation_job_endpoint(
     ),
     ctx: OrgContext = Depends(get_current_org),
 ):
-    """Get one labelling job with its frozen item snapshot."""
+    """Get one labelling job with its frozen item snapshot"""
     _ensure_owned_task(task_uuid, ctx.org_uuid)
     job = get_annotation_job(job_uuid)
     if not job or job.get("task_id") != task_uuid:
@@ -1213,13 +1213,13 @@ class BulkDeleteJobsRequest(BaseModel):
 @router.delete("/{task_uuid}/jobs", summary="Bulk delete labelling jobs")
 async def bulk_delete_annotation_jobs_endpoint(
     task_uuid: str = Path(
-        description="Annotation task to act on. Must be in your workspace.",
+        description="Annotation task to act on.",
         examples=["f47ac10b-58cc-4372-a567-0e02b2c3d479"],
     ),
     payload: BulkDeleteJobsRequest = ...,
     ctx: OrgContext = Depends(get_current_org),
 ):
-    """Soft-delete labelling jobs in a task."""
+    """Soft-delete labelling jobs in a task"""
     _ensure_owned_task(task_uuid, ctx.org_uuid)
     if not payload.job_uuids:
         raise HTTPException(status_code=400, detail="job_uuids must be non-empty")
@@ -1230,7 +1230,7 @@ async def bulk_delete_annotation_jobs_endpoint(
 @router.delete("/{task_uuid}/jobs/{job_uuid}", summary="Delete labelling job")
 async def delete_annotation_job_endpoint(
     task_uuid: str = Path(
-        description="Annotation task to act on. Must be in your workspace.",
+        description="Annotation task to act on.",
         examples=["f47ac10b-58cc-4372-a567-0e02b2c3d479"],
     ),
     job_uuid: str = Path(
@@ -1239,7 +1239,7 @@ async def delete_annotation_job_endpoint(
     ),
     ctx: OrgContext = Depends(get_current_org),
 ):
-    """Soft-delete one labelling job in a task."""
+    """Soft-delete one labelling job in a task"""
     _ensure_owned_task(task_uuid, ctx.org_uuid)
     job = get_annotation_job(job_uuid)
     if not job or job.get("task_id") != task_uuid:
@@ -1251,7 +1251,7 @@ async def delete_annotation_job_endpoint(
 
 class AnnotationJobVisibilityRequest(BaseModel):
     is_public: bool = Field(
-        description="`true` opts the job into a read-only public viewer link; `false` disables it"
+        description="`true` opts the job into a read-only public viewer link. `false` disables it"
     )
 
 
@@ -1259,7 +1259,7 @@ class AnnotationJobVisibilityResponse(BaseModel):
     is_public: bool = Field(description="Current public-viewer state after the toggle")
     view_token: Optional[str] = Field(
         None,
-        description="Read-only viewer token for the public labelling job viewer. Present when public; null when disabled",
+        description="Read-only viewer token for the public labelling job viewer. Present when public. Null when disabled",
     )
 
 
@@ -1270,7 +1270,7 @@ class AnnotationJobVisibilityResponse(BaseModel):
 )
 async def update_annotation_job_visibility_endpoint(
     task_uuid: str = Path(
-        description="Annotation task to act on. Must be in your workspace.",
+        description="Annotation task to act on.",
         examples=["f47ac10b-58cc-4372-a567-0e02b2c3d479"],
     ),
     job_uuid: str = Path(
@@ -1280,7 +1280,7 @@ async def update_annotation_job_visibility_endpoint(
     body: AnnotationJobVisibilityRequest = ...,
     ctx: OrgContext = Depends(get_current_org),
 ):
-    """Toggle a read-only public viewer link for a completed labelling job."""
+    """Toggle a read-only public viewer link for a completed labelling job"""
     _ensure_owned_task(task_uuid, ctx.org_uuid)
     job = get_annotation_job(job_uuid)
     if not job or job.get("task_id") != task_uuid:
@@ -1336,13 +1336,13 @@ class AnnotationUpsertRequest(BaseModel):
 @router.post("/{task_uuid}/annotations", summary="Upsert annotation")
 async def upsert_annotation_endpoint(
     task_uuid: str = Path(
-        description="Annotation task to act on. Must be in your workspace.",
+        description="Annotation task to act on.",
         examples=["f47ac10b-58cc-4372-a567-0e02b2c3d479"],
     ),
     payload: AnnotationUpsertRequest = ...,
     ctx: OrgContext = Depends(get_current_org),
 ):
-    """Upsert one human annotation on a labelling job."""
+    """Upsert one human annotation on a labelling job"""
     _ensure_owned_task(task_uuid, ctx.org_uuid)
     job = get_annotation_job(payload.job_id)
     if not job or job.get("task_id") != task_uuid:
@@ -1401,11 +1401,11 @@ class EvaluatorRunStartRequest(BaseModel):
     )
     item_ids: List[str] = Field(
         default=[],
-        description="Item IDs to run on. **Required (non-empty) when `select_all=false`**; ignored when `select_all=true`",
+        description="Item IDs to run on. **Required (non-empty) when `select_all=false`**. Ignored when `select_all=true`",
     )
     select_all: bool = Field(
         False,
-        description="When `true`, run on every item in the task (optionally filtered by `q`); the live set is snapshotted at submission time",
+        description="When `true`, run on every item in the task (optionally filtered by `q`). The live set is snapshotted at submission time",
     )
     q: Optional[str] = Field(
         None,
@@ -1416,13 +1416,13 @@ class EvaluatorRunStartRequest(BaseModel):
 @router.post("/{task_uuid}/evaluator-runs", summary="Run evaluators on items")
 async def start_evaluator_run(
     task_uuid: str = Path(
-        description="Annotation task to act on. Must be in your workspace.",
+        description="Annotation task to act on.",
         examples=["f47ac10b-58cc-4372-a567-0e02b2c3d479"],
     ),
     payload: EvaluatorRunStartRequest = ...,
     ctx: OrgContext = Depends(get_current_org),
 ):
-    """Run evaluators on task items as a background job."""
+    """Run evaluators on task items as a background job"""
     task = _ensure_owned_task(task_uuid, ctx.org_uuid)
     if task.get("type") not in SUPPORTED_EVAL_TASK_TYPES:
         raise HTTPException(
@@ -1752,12 +1752,12 @@ def _shape_eval_job_for_response(job: Dict[str, Any]) -> Dict[str, Any]:
 @router.get("/{task_uuid}/evaluator-runs", summary="List evaluator runs")
 async def list_evaluator_run_jobs(
     task_uuid: str = Path(
-        description="Annotation task to act on. Must be in your workspace.",
+        description="Annotation task to act on.",
         examples=["f47ac10b-58cc-4372-a567-0e02b2c3d479"],
     ),
     ctx: OrgContext = Depends(get_current_org),
 ):
-    """List evaluator-run jobs for a task."""
+    """List evaluator-run jobs for a task"""
     _ensure_owned_task(task_uuid, ctx.org_uuid)
     jobs = get_generic_jobs_for_task(task_uuid, ANNOTATION_EVAL_JOB_TYPE)
 
@@ -2007,7 +2007,7 @@ def _human_agreement_for_run(
 @router.get("/{task_uuid}/evaluator-runs/{job_uuid}", summary="Get evaluator run")
 async def get_evaluator_run_job(
     task_uuid: str = Path(
-        description="Annotation task to act on. Must be in your workspace.",
+        description="Annotation task to act on.",
         examples=["f47ac10b-58cc-4372-a567-0e02b2c3d479"],
     ),
     job_uuid: str = Path(
@@ -2016,7 +2016,7 @@ async def get_evaluator_run_job(
     ),
     ctx: OrgContext = Depends(get_current_org),
 ):
-    """Get one evaluator-run job with results and human-agreement summary."""
+    """Get one evaluator-run job with results and human-agreement summary"""
     _ensure_owned_task(task_uuid, ctx.org_uuid)
     job = get_job(job_uuid, org_uuid=ctx.org_uuid)
     if (
@@ -2050,7 +2050,7 @@ async def get_evaluator_run_job(
 @router.delete("/{task_uuid}/evaluator-runs/{job_uuid}", summary="Delete evaluator run")
 async def delete_evaluator_run_job(
     task_uuid: str = Path(
-        description="Annotation task to act on. Must be in your workspace.",
+        description="Annotation task to act on.",
         examples=["f47ac10b-58cc-4372-a567-0e02b2c3d479"],
     ),
     job_uuid: str = Path(
@@ -2059,7 +2059,7 @@ async def delete_evaluator_run_job(
     ),
     ctx: OrgContext = Depends(get_current_org),
 ):
-    """Soft-delete an evaluator-run job and its run results."""
+    """Soft-delete an evaluator-run job and its run results"""
     _ensure_owned_task(task_uuid, ctx.org_uuid)
     job = get_job(job_uuid, org_uuid=ctx.org_uuid)
     if (
@@ -2089,7 +2089,7 @@ async def delete_evaluator_run_job(
 
 class EvaluatorRunVisibilityRequest(BaseModel):
     is_public: bool = Field(
-        description="`true` enables a public share link for the completed run; `false` disables it"
+        description="`true` enables a public share link for the completed run. `false` disables it"
     )
 
 
@@ -2097,7 +2097,7 @@ class EvaluatorRunVisibilityResponse(BaseModel):
     is_public: bool = Field(description="Current public-sharing state after the toggle")
     share_token: Optional[str] = Field(
         None,
-        description="Public share token for the run. Present when public; `null` when disabled. Reused across off→on cycles",
+        description="Public share token for the run. Present when public. `null` when disabled. Reused across off→on cycles",
     )
 
 
@@ -2108,7 +2108,7 @@ class EvaluatorRunVisibilityResponse(BaseModel):
 )
 async def update_evaluator_run_visibility(
     task_uuid: str = Path(
-        description="Annotation task to act on. Must be in your workspace.",
+        description="Annotation task to act on.",
         examples=["f47ac10b-58cc-4372-a567-0e02b2c3d479"],
     ),
     job_uuid: str = Path(
@@ -2118,7 +2118,7 @@ async def update_evaluator_run_visibility(
     body: EvaluatorRunVisibilityRequest = ...,
     ctx: OrgContext = Depends(get_current_org),
 ):
-    """Toggle public sharing for a completed evaluator-run job."""
+    """Toggle public sharing for a completed evaluator-run job"""
     _ensure_owned_task(task_uuid, ctx.org_uuid)
     job = get_job(job_uuid, org_uuid=ctx.org_uuid)
     if (
@@ -2146,7 +2146,7 @@ async def update_evaluator_run_visibility(
 @router.get("/{task_uuid}/items/{item_uuid}/evaluator-runs", summary="List item evaluator runs")
 async def list_item_evaluator_runs(
     task_uuid: str = Path(
-        description="Annotation task to act on. Must be in your workspace.",
+        description="Annotation task to act on.",
         examples=["f47ac10b-58cc-4372-a567-0e02b2c3d479"],
     ),
     item_uuid: str = Path(
@@ -2155,7 +2155,7 @@ async def list_item_evaluator_runs(
     ),
     ctx: OrgContext = Depends(get_current_org),
 ):
-    """List evaluator runs for one item."""
+    """List evaluator runs for one item"""
     _ensure_owned_task(task_uuid, ctx.org_uuid)
     item = get_annotation_item(item_uuid)
     if not item or item.get("task_id") != task_uuid:
@@ -2201,7 +2201,7 @@ def _evaluator_alignment_block(
 @router.get("/{task_uuid}/agreement", summary="Get task agreement")
 async def task_agreement(
     task_uuid: str = Path(
-        description="Annotation task to act on. Must be in your workspace.",
+        description="Annotation task to act on.",
         examples=["f47ac10b-58cc-4372-a567-0e02b2c3d479"],
     ),
     bucket: str = Query(
@@ -2214,7 +2214,7 @@ async def task_agreement(
     ),
     ctx: OrgContext = Depends(get_current_org),
 ):
-    """Get human-vs-human and human-vs-evaluator agreement metrics for a task."""
+    """Get human-vs-human and human-vs-evaluator agreement metrics for a task"""
     _ensure_owned_task(task_uuid, ctx.org_uuid)
     annotations = get_annotations_for_task(task_uuid)
     linked = get_evaluators_for_annotation_task(task_uuid)
@@ -2245,7 +2245,7 @@ async def task_agreement(
 @router.get("/{task_uuid}/summary", summary="Get task summary")
 async def task_summary(
     task_uuid: str = Path(
-        description="Annotation task to act on. Must be in your workspace.",
+        description="Annotation task to act on.",
         examples=["f47ac10b-58cc-4372-a567-0e02b2c3d479"],
     ),
     item_id: Optional[str] = Query(
@@ -2261,7 +2261,7 @@ async def task_summary(
     sort: _SummarySort = Depends(),
     pagination: PaginationParams = Depends(),
 ):
-    """Get a paginated summary table of items, evaluator runs, and human annotations for a task."""
+    """Get a paginated summary table of items, evaluator runs, and human annotations for a task"""
     task = _ensure_owned_task(task_uuid, ctx.org_uuid)
     items = get_annotation_items_for_task(task_uuid)
     evaluators = get_evaluators_for_annotation_task(task_uuid)
@@ -2639,7 +2639,7 @@ async def task_summary(
 @router.delete("/{task_uuid}/evaluators/{evaluator_uuid}", summary="Unlink evaluator from task")
 async def unlink_evaluator_from_task(
     task_uuid: str = Path(
-        description="Annotation task to act on. Must be in your workspace.",
+        description="Annotation task to act on.",
         examples=["f47ac10b-58cc-4372-a567-0e02b2c3d479"],
     ),
     evaluator_uuid: str = Path(
@@ -2648,7 +2648,7 @@ async def unlink_evaluator_from_task(
     ),
     ctx: OrgContext = Depends(get_current_org),
 ):
-    """Unlink an evaluator from a task without changing existing job snapshots."""
+    """Unlink an evaluator from a task without changing existing job snapshots"""
     _ensure_owned_task(task_uuid, ctx.org_uuid)
     removed = remove_evaluator_from_annotation_task(task_uuid, evaluator_uuid)
     if not removed:

@@ -9,7 +9,7 @@ from fastapi import APIRouter, HTTPException, Depends, Path
 from pydantic import BaseModel, Field
 from calibrate_agent.connections import TextAgentConnection
 
-from utils import env_bool, env_int, env_str
+from utils import env_bool, env_int, env_str, AGENT_TYPE_DESCRIPTION
 
 from db import (
     create_agent,
@@ -193,7 +193,7 @@ def _default_agent_config() -> Dict[str, Any]:
 def _deep_merge(base: Dict[str, Any], override: Dict[str, Any]) -> Dict[str, Any]:
     """Recursively merge `override` into a copy of `base`. Caller wins per key.
 
-    Dict-vs-dict at the same key recurses; anything else (scalar, list, None)
+    Dict-vs-dict at the same key recurses. Anything else (scalar, list, None)
     in `override` replaces the corresponding `base` value entirely.
     """
     result = copy.deepcopy(base)
@@ -215,7 +215,7 @@ _VERIFICATION_CONFIG_KEYS = (
 
 
 def _strip_verification_fields(
-    config: Optional[Dict[str, Any]]
+    config: Optional[Dict[str, Any]],
 ) -> Optional[Dict[str, Any]]:
     """Remove server-owned verification flags from a caller-supplied config dict.
 
@@ -233,15 +233,54 @@ def _strip_verification_fields(
     return config
 
 
+# Full agent-config schema, shared by create + update so it renders identically.
+# Free-form on purpose (see the type-decision note): the shape is a discriminated
+# union by `type` plus open extension keys, so it's documented, not enforced.
+_AGENT_CONFIG_DESCRIPTION = """Agent behavioral config. The keys depend on `type`.
+
+**`type=agent`** (built inside Calibrate):
+- `system_prompt` (string): the agent's instructions
+- `llm.model` (string): `provider/model`, e.g. `openai/gpt-4.1` or `google/gemini-2.5-flash`
+- `stt.provider` (string): `deepgram`, `openai`, `cartesia`, `elevenlabs`, `google`, `sarvam`, or `smallest`
+- `tts.provider` (string): `cartesia`, `openai`, `google`, `elevenlabs`, `sarvam`, or `smallest`
+- `settings.agent_speaks_first` (bool), `settings.max_assistant_turns` (int)
+- `system_tools.end_call` (bool, optional): let the agent end the call
+- `data_extraction_fields` (array, optional): `[{name, type, description, required}]`
+
+```json
+{
+  "system_prompt": "You are a helpful support agent.",
+  "llm": {"model": "openai/gpt-4.1"},
+  "stt": {"provider": "deepgram"},
+  "tts": {"provider": "elevenlabs"},
+  "settings": {"agent_speaks_first": true, "max_assistant_turns": 50}
+}
+```
+
+**`type=connection`** (your own HTTP endpoint):
+- `agent_url` (string, required): public HTTPS endpoint the agent is called at
+- `agent_headers` (object, optional): headers sent on each request, e.g. auth
+- `benchmark_provider` (string, optional): `openrouter` (default), `openai`, `google`, `anthropic`, `meta-llama`, `mistralai`, `deepseek`, `x-ai`, `cohere`, `qwen`, or `ai21`
+
+```json
+{
+  "agent_url": "https://api.example.com/agent",
+  "agent_headers": {"Authorization": "Bearer <token>"},
+  "benchmark_provider": "openrouter"
+}
+```"""
+
+
 class AgentCreate(BaseModel):
-    name: str = Field(description="Human-readable agent name, unique within the workspace")
+    name: str = Field(description="Agent name, unique within the workspace")
     type: Literal["agent", "connection"] = Field(
         "agent",
-        description="`agent` applies managed defaults deep-merged under any supplied `config`; `connection` stores the config you supply as-is (must eventually contain `agent_url`)",
+        description=AGENT_TYPE_DESCRIPTION,
     )
     config: Optional[Dict[str, Any]] = Field(
         None,
-        description="Behavioral config (system_prompt, llm, stt, tts, settings, …). Deep-merged over defaults for `type=agent`; stored as-is for `type=connection`. Omit for `type=agent` to use defaults",
+        description=_AGENT_CONFIG_DESCRIPTION
+        + "\n\nFor `type=agent`, omitted keys inherit managed defaults (omit `config` entirely to use all defaults). For `type=connection`, `config` is stored as-is and must contain `agent_url`.",
     )
 
 
@@ -251,15 +290,17 @@ class AgentUpdate(BaseModel):
     )
     config: Optional[Dict[str, Any]] = Field(
         None,
-        description="Replacement config, stored as-is (no deep-merge on update). Changing `agent_url` or `agent_headers` resets all connection/benchmark verification flags. Omit to leave config unchanged",
+        description=_AGENT_CONFIG_DESCRIPTION
+        + "\n\nReplaces the stored config. Omit to leave unchanged."
+        + "\n\nFor `type=connection`, changing `agent_url` or `agent_headers` resets the connection and benchmark verification flags.",
     )
     connection_verified: Optional[bool] = Field(
         None,
-        description="Directly set the `connection_verified` flag inside config. Omit to leave it untouched",
+        description="Set the connection verification flag for a `type=connection` agent. Omit to leave it untouched",
     )
     benchmark_models_verified: Optional[Dict[str, Any]] = Field(
         None,
-        description="Directly set the per-model benchmark verification map inside config. Omit to leave it untouched",
+        description="Set the per-model benchmark verification map for a `type=connection` agent. Omit to leave it untouched",
     )
 
 
@@ -270,15 +311,13 @@ class AgentResponse(BaseModel):
         description="ID of the agent",
         examples=["f47ac10b-58cc-4372-a567-0e02b2c3d479"],
     )
-    name: str = Field(description="Human-readable name of the agent")
-    type: Literal["agent", "connection"] = Field(
-        description="`agent` (managed defaults) or `connection` (your own endpoint)"
-    )
-    config: Optional[Dict[str, Any]] = Field(
-        None, description="Agent configuration"
-    )
+    name: str = Field(description="Name of the agent")
+    type: Literal["agent", "connection"] = Field(description=AGENT_TYPE_DESCRIPTION)
+    config: Optional[Dict[str, Any]] = Field(None, description="Agent configuration")
     created_at: str = Field(description="When the agent was created (ISO 8601 UTC)")
-    updated_at: str = Field(description="When the agent was last updated (ISO 8601 UTC)")
+    updated_at: str = Field(
+        description="When the agent was last updated (ISO 8601 UTC)"
+    )
 
 
 class AgentCreateResponse(BaseModel):
@@ -288,7 +327,7 @@ class AgentCreateResponse(BaseModel):
         description="ID of the newly created agent",
         examples=["f47ac10b-58cc-4372-a567-0e02b2c3d479"],
     )
-    message: str = Field(description="Human-readable confirmation message")
+    message: str = Field(description="Confirmation message")
 
 
 class AgentDuplicateRequest(BaseModel):
@@ -304,7 +343,7 @@ class AgentDuplicateResponse(BaseModel):
         description="ID of the newly created duplicate agent",
         examples=["f47ac10b-58cc-4372-a567-0e02b2c3d479"],
     )
-    message: str = Field(description="Human-readable confirmation message")
+    message: str = Field(description="Confirmation message")
 
 
 class ResolveAgentNamesRequest(BaseModel):
@@ -326,7 +365,7 @@ class ResolveAgentNamesResponse(BaseModel):
 class VerifyConnectionRequest(BaseModel):
     agent_url: Optional[str] = Field(
         None,
-        description="Public HTTP(S) agent endpoint to verify. **Required for the pre-save endpoint** (no agent ID); ignored by the saved-agent endpoint, which reads `agent_url` from the stored config",
+        description="Public HTTP(S) agent endpoint to verify. **Required for the pre-save endpoint** (no agent ID). Ignored by the saved-agent endpoint, which reads `agent_url` from the stored config",
     )
     agent_headers: Optional[Dict[str, str]] = Field(
         None,
@@ -334,7 +373,7 @@ class VerifyConnectionRequest(BaseModel):
     )
     model: Optional[str] = Field(
         None,
-        description="Model to verify. Omit for a basic connection check; provide it for a model-specific check required before benchmarking that model",
+        description="Model to verify. Omit for a basic connection check. Provide it for a model-specific check required before benchmarking that model",
     )
     messages: Optional[List[Dict[str, str]]] = Field(
         None,
@@ -346,12 +385,10 @@ class VerifyConnectionResponse(BaseModel):
     success: bool = Field(
         description="True if the agent responded successfully to the verification probe"
     )
-    error: Optional[str] = Field(
-        None, description="Failure reason; null on success"
-    )
+    error: Optional[str] = Field(None, description="Failure reason. Null on success")
     sample_response: Optional[Dict[str, Any]] = Field(
         None,
-        description="Sample output returned by the agent during verification; null when unavailable",
+        description="Sample output returned by the agent during verification. Null when unavailable",
     )
 
 
@@ -364,7 +401,7 @@ async def verify_agent_connection_presave(
     request: VerifyConnectionRequest,
     ctx: OrgContext = Depends(get_current_org),
 ):
-    """Verify an agent connection before saving an agent. Nothing is persisted."""
+    """Verify an agent connection before saving an agent. Nothing is persisted"""
     if not request.agent_url:
         raise HTTPException(status_code=400, detail="agent_url is required")
 
@@ -384,13 +421,13 @@ async def verify_agent_connection_presave(
 )
 async def verify_agent_connection(
     agent_uuid: str = Path(
-        description="The agent whose connection to verify. Must be in your workspace.",
+        description="The agent whose connection to verify.",
         examples=["f47ac10b-58cc-4372-a567-0e02b2c3d479"],
     ),
     request: VerifyConnectionRequest = ...,
     ctx: OrgContext = Depends(get_current_org),
 ):
-    """Verify a saved agent's connection and persist the result when successful."""
+    """Verify a saved agent's connection and persist the result when successful"""
     agent = get_agent(agent_uuid)
     if not agent or agent.get("org_uuid") != ctx.org_uuid:
         raise HTTPException(status_code=404, detail="Agent not found")
@@ -458,7 +495,7 @@ async def resolve_agent_names(
     request: ResolveAgentNamesRequest,
     ctx: OrgContext = Depends(get_org_jwt_or_api_key),
 ):
-    """Resolve agent names to their IDs."""
+    """Get the IDs for your agents by their names"""
     # Public API. Auth via get_org_jwt_or_api_key (JWT for the web app, API key
     # for CI). Maps human-friendly names to the UUIDs the run/poll endpoints expect.
     agents = get_all_agents(org_uuid=ctx.org_uuid)
@@ -484,7 +521,7 @@ async def resolve_agent_names(
 async def create_agent_endpoint(
     agent: AgentCreate, ctx: OrgContext = Depends(get_org_jwt_or_api_key)
 ):
-    """Create a new agent in your workspace. For `type=agent`, defaults are deep-merged with any config you supply."""
+    """Create an agent to test inside Calibrate or connect your existing agent to Calibrate"""
     if agent.type == "agent":
         merged_config = _deep_merge(_default_agent_config(), agent.config or {})
     else:
@@ -511,7 +548,7 @@ async def create_agent_endpoint(
     summary="List agents",
 )
 async def list_agents(ctx: OrgContext = Depends(get_org_jwt_or_api_key)):
-    """List all agents in your workspace."""
+    """Get the list of all your agents"""
     # Public API. Auth via get_org_jwt_or_api_key (JWT for the web app, API key
     # for CI); the run/poll and /resolve endpoints accept the same key, so CI can
     # enumerate agent UUIDs without knowing names up front.
@@ -527,12 +564,12 @@ async def list_agents(ctx: OrgContext = Depends(get_org_jwt_or_api_key)):
 )
 async def get_agent_endpoint(
     agent_uuid: str = Path(
-        description="The agent to retrieve. Must be in your workspace.",
+        description="The agent to retrieve.",
         examples=["f47ac10b-58cc-4372-a567-0e02b2c3d479"],
     ),
     ctx: OrgContext = Depends(get_org_jwt_or_api_key),
 ):
-    """Get an agent in your workspace."""
+    """Get one agent by its ID"""
     agent = get_agent(agent_uuid)
     if not agent or agent.get("org_uuid") != ctx.org_uuid:
         raise HTTPException(status_code=404, detail="Agent not found")
@@ -547,13 +584,13 @@ async def get_agent_endpoint(
 )
 async def update_agent_endpoint(
     agent_uuid: str = Path(
-        description="The agent to update. Must be in your workspace.",
+        description="The agent to update.",
         examples=["f47ac10b-58cc-4372-a567-0e02b2c3d479"],
     ),
     agent: AgentUpdate = ...,
     ctx: OrgContext = Depends(get_org_jwt_or_api_key),
 ):
-    """Update an agent's name and/or config. Changing `agent_url` or `agent_headers` resets connection and benchmark verification flags."""
+    """Update an agent's configuration"""
     existing_agent = get_agent(agent_uuid)
     if not existing_agent or existing_agent.get("org_uuid") != ctx.org_uuid:
         raise HTTPException(status_code=404, detail="Agent not found")
@@ -604,12 +641,12 @@ async def update_agent_endpoint(
 @router.delete("/{agent_uuid}", summary="Delete agent")
 async def delete_agent_endpoint(
     agent_uuid: str = Path(
-        description="The agent to delete. Must be in your workspace.",
+        description="The agent to delete.",
         examples=["f47ac10b-58cc-4372-a567-0e02b2c3d479"],
     ),
     ctx: OrgContext = Depends(get_current_org),
 ):
-    """Soft-delete an agent in your workspace."""
+    """Soft-delete an agent"""
     existing_agent = get_agent(agent_uuid)
     if not existing_agent or existing_agent.get("org_uuid") != ctx.org_uuid:
         raise HTTPException(status_code=404, detail="Agent not found")
@@ -627,13 +664,13 @@ async def delete_agent_endpoint(
 )
 async def duplicate_agent_endpoint(
     agent_uuid: str = Path(
-        description="The agent to duplicate. Must be in your workspace.",
+        description="The agent to duplicate.",
         examples=["f47ac10b-58cc-4372-a567-0e02b2c3d479"],
     ),
     request: AgentDuplicateRequest = ...,
     ctx: OrgContext = Depends(get_current_org),
 ):
-    """Duplicate an agent along with its linked tools and tests. Verification flags are not copied."""
+    """Duplicate an agent along with its linked tools and tests. Verification flags are not copied"""
     original_agent = get_agent(agent_uuid)
     if not original_agent or original_agent.get("org_uuid") != ctx.org_uuid:
         raise HTTPException(status_code=404, detail="Agent not found")

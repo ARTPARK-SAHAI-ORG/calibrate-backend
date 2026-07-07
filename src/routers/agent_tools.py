@@ -4,6 +4,7 @@ from pydantic import BaseModel, Field
 from sqlite3 import IntegrityError
 
 from auth_utils import get_current_org, OrgContext
+from utils import AGENT_TYPE_DESCRIPTION
 from db import (
     add_tool_to_agent,
     remove_tool_from_agent,
@@ -25,7 +26,7 @@ class AgentToolsCreate(BaseModel):
     agent_uuid: str = Field(
         min_length=36,
         max_length=36,
-        description="The agent to link tools to. Must be in your workspace.",
+        description="The agent to link tools to.",
         examples=[_EXAMPLE_ID],
     )
     tool_uuids: List[str] = Field(
@@ -38,7 +39,7 @@ class AgentToolDelete(BaseModel):
     agent_uuid: str = Field(
         min_length=36,
         max_length=36,
-        description="The agent to unlink a tool from. Must be in your workspace.",
+        description="The agent to unlink a tool from.",
         examples=[_EXAMPLE_ID],
     )
     tool_uuid: str = Field(
@@ -70,7 +71,7 @@ class AgentToolsCreateResponse(BaseModel):
     ids: List[int] = Field(
         description="Link row IDs created this call (excludes tools that were already linked)"
     )
-    message: str = Field(description="Human-readable confirmation message")
+    message: str = Field(description="Confirmation message")
 
 
 class ToolResponse(BaseModel):
@@ -80,10 +81,10 @@ class ToolResponse(BaseModel):
         description="ID of the tool",
         examples=[_EXAMPLE_ID],
     )
-    name: str = Field(description="Human-readable tool name")
+    name: str = Field(description="Tool name")
     description: str = Field(description="What the tool does")
     config: Dict[str, Any] | None = Field(
-        None, description="Tool configuration; null when the tool has none"
+        None, description="Tool configuration. Null when the tool has none"
     )
     created_at: str = Field(description="When the tool was created (ISO 8601 UTC)")
     updated_at: str = Field(description="When the tool was last updated (ISO 8601 UTC)")
@@ -96,12 +97,12 @@ class AgentResponse(BaseModel):
         description="ID of the agent",
         examples=[_EXAMPLE_ID],
     )
-    name: str = Field(description="Human-readable agent name")
+    name: str = Field(description="Agent name")
     type: Literal["agent", "connection"] = Field(
-        description="`agent` applies managed defaults; `connection` stores the config you supply as-is"
+        description=AGENT_TYPE_DESCRIPTION
     )
     config: Dict[str, Any] | None = Field(
-        None, description="Behavioral config; null when the agent has none"
+        None, description="Behavioral config. Null when the agent has none"
     )
     created_at: str = Field(description="When the agent was created (ISO 8601 UTC)")
     updated_at: str = Field(description="When the agent was last updated (ISO 8601 UTC)")
@@ -128,7 +129,7 @@ async def create_agent_tool_links(
     agent_tools: AgentToolsCreate,
     ctx: OrgContext = Depends(get_current_org),
 ):
-    """Link one or more tools to an agent. Already-linked tools are skipped."""
+    """Link one or more tools to an agent. Already-linked tools are skipped"""
     _require_owned_agent(agent_tools.agent_uuid, ctx.org_uuid)
     for tool_uuid in agent_tools.tool_uuids:
         _require_owned_tool(tool_uuid, ctx.org_uuid)
@@ -156,7 +157,7 @@ async def create_agent_tool_links(
     "", response_model=List[AgentToolResponse], summary="List agent-tool links"
 )
 async def list_agent_tools(ctx: OrgContext = Depends(get_current_org)):
-    """List all agent-tool links in your workspace."""
+    """List which tools are linked to which agents"""
     return get_all_agent_tools(org_uuid=ctx.org_uuid)
 
 
@@ -167,12 +168,12 @@ async def list_agent_tools(ctx: OrgContext = Depends(get_current_org)):
 )
 async def get_agent_tools(
     agent_uuid: str = Path(
-        description="The agent whose linked tools to list. Must be in your workspace.",
+        description="The agent whose linked tools to list.",
         examples=[_EXAMPLE_ID],
     ),
     ctx: OrgContext = Depends(get_current_org),
 ):
-    """List the tools linked to an agent."""
+    """List the tools linked to an agent"""
     _require_owned_agent(agent_uuid, ctx.org_uuid)
     return get_tools_for_agent(agent_uuid)
 
@@ -184,12 +185,12 @@ async def get_agent_tools(
 )
 async def get_tool_agents(
     tool_uuid: str = Path(
-        description="The tool whose linked agents to list. Must be in your workspace.",
+        description="The tool whose linked agents to list.",
         examples=[_EXAMPLE_ID],
     ),
     ctx: OrgContext = Depends(get_current_org),
 ):
-    """List the agents a tool is linked to."""
+    """List the agents a tool is linked to"""
     _require_owned_tool(tool_uuid, ctx.org_uuid)
     return get_agents_for_tool(tool_uuid)
 
@@ -198,7 +199,7 @@ async def get_tool_agents(
 async def delete_agent_tool_link(
     agent_tool: AgentToolDelete, ctx: OrgContext = Depends(get_current_org)
 ):
-    """Unlink a tool from an agent."""
+    """Unlink a tool from an agent so the agent can no longer call it"""
     _require_owned_agent(agent_tool.agent_uuid, ctx.org_uuid)
     deleted = remove_tool_from_agent(agent_tool.agent_uuid, agent_tool.tool_uuid)
     if not deleted:

@@ -11,6 +11,10 @@ boot) and flags routes/models that violate the house style:
      `description`.
   4. Every field on a Pydantic model (a `BaseModel` subclass, transitively) has a
      `Field(..., description=...)` with a non-empty description.
+  5. Rendered doc text (descriptions, summaries, route/model/module docstrings)
+     contains no banned terms, no em-dashes, and no clause-splitting semicolons.
+  6. A field whose name ends in a unit suffix (e.g. `_ms`) doesn't repeat that
+     unit abbreviation in its description.
 
 Run directly (`uv run python scripts/check_api_docs_style.py`) — exits non-zero
 and prints one line per violation. `tests/test_api_docs_style.py` reuses
@@ -47,6 +51,28 @@ _BANNED_TERMS = [
     (re.compile(r"\b8-char\b"), "IDs are UUID v4 (36 chars) — don't say '8-char'"),
 ]
 
+# Mechanical bans on rendered doc text (see "Brevity & mechanics" in the skill).
+# Applied to the same doc-text set as _BANNED_TERMS (descriptions, summaries,
+# route/model/module docstrings). Code comments are exempt — they don't render.
+_MECHANICS = [
+    (
+        re.compile("—"),  # em-dash
+        "no em-dashes in rendered docs: use a period, comma, colon, or parentheses",
+    ),
+    (
+        re.compile(r";\s"),  # clause-splitting semicolon
+        "no clause-splitting semicolons in docs: use a full stop",
+    ),
+    (
+        re.compile(r"(?i)deep[- ]merge"),  # implementation jargon
+        "don't say 'deep-merge' in docs (implementation jargon); describe the effect",
+    ),
+    (
+        re.compile(r"(?i)human-readable"),  # filler
+        "'Human-readable' is filler; drop it",
+    ),
+]
+
 REPO_ROOT = Path(__file__).resolve().parent.parent
 ROUTERS_DIR = REPO_ROOT / "src" / "routers"
 
@@ -60,6 +86,21 @@ def _has_description_kw(call: ast.Call) -> bool:
             # Non-literal (f-string, variable) — accept; can't statically judge.
             return True
     return False
+
+
+# Field-name suffix → the unit abbreviation that must NOT be repeated in prose
+# (the field name already carries it; spell the word out or drop it). See
+# "Don't repeat the unit that's already in the field name" in the skill.
+_UNIT_SUFFIXES = [("_ms", re.compile(r"\bms\b"), "milliseconds")]
+
+
+def _field_description_text(call: ast.Call) -> Optional[str]:
+    """The literal `description=` string on a Field call, or None if absent /
+    non-literal (f-string, variable — can't statically inspect)."""
+    for kw in call.keywords:
+        if kw.arg == "description" and isinstance(kw.value, ast.Constant) and isinstance(kw.value.value, str):
+            return kw.value.value
+    return None
 
 
 def _is_field_call(node: Optional[ast.expr]) -> bool:
@@ -112,6 +153,15 @@ def _check_model_fields(cls: ast.ClassDef, rel: str) -> list[str]:
             out.append(f"{loc}: field is not documented with Field(description=...)")
         elif not _has_description_kw(stmt.value):
             out.append(f"{loc}: Field(...) is missing a non-empty description=")
+        else:
+            desc = _field_description_text(stmt.value)
+            if desc:
+                for suffix, pat, word in _UNIT_SUFFIXES:
+                    if field.endswith(suffix) and pat.search(desc):
+                        out.append(
+                            f"{loc}: unit abbreviation repeats the '{suffix}' "
+                            f"field-name suffix — say '{word}' or drop it"
+                        )
     return out
 
 
@@ -186,51 +236,81 @@ def _is_route_function(func) -> bool:
     return _route_decorator(func) is not None
 
 
+def _resolve_str(node: ast.expr, consts: dict) -> Optional[str]:
+    """Statically resolve a node to a string: a literal, a module-level string
+    constant by name, or an `+`-concatenation of those. Returns None if it
+    can't be resolved (f-strings, calls, unknown names). This lets the checker
+    see `description=_SHARED + "…"` composed descriptions, not just literals."""
+    if isinstance(node, ast.Constant) and isinstance(node.value, str):
+        return node.value
+    if isinstance(node, ast.Name) and node.id in consts:
+        return consts[node.id]
+    if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Add):
+        left = _resolve_str(node.left, consts)
+        right = _resolve_str(node.right, consts)
+        if left is not None and right is not None:
+            return left + right
+    return None
+
+
+def _module_str_consts(tree: ast.Module) -> dict:
+    """Map module-level `NAME = <string>` assignments (resolving concatenation
+    and references to earlier constants), in source order."""
+    consts: dict = {}
+    for stmt in tree.body:
+        if (
+            isinstance(stmt, ast.Assign)
+            and len(stmt.targets) == 1
+            and isinstance(stmt.targets[0], ast.Name)
+        ):
+            val = _resolve_str(stmt.value, consts)
+            if val is not None:
+                consts[stmt.targets[0].id] = val
+    return consts
+
+
 def _doc_string_nodes(tree: ast.Module):
-    """User-facing doc text: module, route, model class docstrings, summary=/description=."""
+    """User-facing doc text as (lineno, text) pairs: module/route/model-class
+    docstrings and summary=/description= kwargs — including descriptions composed
+    from module-level string constants (`_SHARED + "…"`)."""
+    consts = _module_str_consts(tree)
     out = []
     models = _model_class_names(tree)
-    body = tree.body
-    if (
-        body
-        and isinstance(body[0], ast.Expr)
-        and isinstance(body[0].value, ast.Constant)
-        and isinstance(body[0].value.value, str)
-    ):
-        out.append(body[0].value)
+
+    def _docstring(node):
+        b = getattr(node, "body", None)
+        if (
+            b
+            and isinstance(b[0], ast.Expr)
+            and isinstance(b[0].value, ast.Constant)
+            and isinstance(b[0].value.value, str)
+        ):
+            out.append((b[0].value.lineno, b[0].value.value))
+
+    _docstring(tree)  # module docstring
     for node in ast.walk(tree):
         if isinstance(node, ast.ClassDef) and node.name in models:
-            b = node.body
-            if (
-                b
-                and isinstance(b[0], ast.Expr)
-                and isinstance(b[0].value, ast.Constant)
-                and isinstance(b[0].value.value, str)
-            ):
-                out.append(b[0].value)
+            _docstring(node)
         if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and _is_route_function(node):
-            b = node.body
-            if (
-                b
-                and isinstance(b[0], ast.Expr)
-                and isinstance(b[0].value, ast.Constant)
-                and isinstance(b[0].value.value, str)
-            ):
-                out.append(b[0].value)
+            _docstring(node)
         if isinstance(node, ast.Call):
             for kw in node.keywords:
-                if kw.arg in ("summary", "description") and isinstance(kw.value, ast.Constant) and isinstance(kw.value.value, str):
-                    out.append(kw.value)
+                if kw.arg in ("summary", "description"):
+                    text = _resolve_str(kw.value, consts)
+                    if text is not None:
+                        out.append((kw.value.lineno, text))
     return out
 
 
 def _check_terminology(tree: ast.Module, rel: str) -> list[str]:
     out = []
-    for node in _doc_string_nodes(tree):
-        text = node.value
+    for lineno, text in _doc_string_nodes(tree):
         for pat, msg in _BANNED_TERMS:
             if pat.search(text):
-                out.append(f"{rel}:{node.lineno}: banned term in doc text — {msg}")
+                out.append(f"{rel}:{lineno}: banned term in doc text — {msg}")
+        for pat, msg in _MECHANICS:
+            if pat.search(text):
+                out.append(f"{rel}:{lineno}: {msg}")
     return out
 
 

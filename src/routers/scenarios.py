@@ -19,7 +19,7 @@ _EXAMPLE_ID = "f47ac10b-58cc-4372-a567-0e02b2c3d479"
 
 
 class ScenarioCreate(BaseModel):
-    name: str = Field(description="Human-readable scenario name, unique within the workspace")
+    name: str = Field(description="Scenario name, unique within the workspace")
     description: Optional[str] = Field(
         None, description="Free-text description of the scenario. Omit to leave unset"
     )
@@ -41,7 +41,7 @@ class ScenarioResponse(BaseModel):
         description="ID of the scenario",
         examples=[_EXAMPLE_ID],
     )
-    name: str = Field(description="Human-readable scenario name")
+    name: str = Field(description="Scenario name")
     description: Optional[str] = Field(
         None, description="Free-text description, or null if unset"
     )
@@ -56,14 +56,14 @@ class ScenarioCreateResponse(BaseModel):
         description="ID of the newly created scenario",
         examples=[_EXAMPLE_ID],
     )
-    message: str = Field(description="Human-readable success message")
+    message: str = Field(description="Success message")
 
 
 @router.post("", response_model=ScenarioCreateResponse, summary="Create scenario")
 async def create_scenario_endpoint(
     scenario: ScenarioCreate, ctx: OrgContext = Depends(get_current_org)
 ):
-    """Create a new scenario in your workspace."""
+    """Create a new scenario"""
     with ensure_name_unique("scenarios", scenario.name, ctx.org_uuid, entity="Scenario"):
         scenario_uuid = create_scenario(
             name=scenario.name,
@@ -78,7 +78,7 @@ async def create_scenario_endpoint(
 
 @router.get("", response_model=List[ScenarioResponse], summary="List scenarios")
 async def list_scenarios(ctx: OrgContext = Depends(get_current_org)):
-    """List all scenarios in your workspace."""
+    """List your scenarios"""
     scenarios = get_all_scenarios(org_uuid=ctx.org_uuid)
     return scenarios
 
@@ -86,12 +86,12 @@ async def list_scenarios(ctx: OrgContext = Depends(get_current_org)):
 @router.get("/{scenario_uuid}", response_model=ScenarioResponse, summary="Get scenario")
 async def get_scenario_endpoint(
     scenario_uuid: str = Path(
-        description="The scenario to retrieve. Must be in your workspace.",
+        description="The scenario to retrieve.",
         examples=[_EXAMPLE_ID],
     ),
     ctx: OrgContext = Depends(get_current_org),
 ):
-    """Get a scenario in your workspace."""
+    """Get one scenario by ID"""
     scenario = get_scenario(scenario_uuid)
     if not scenario or scenario.get("org_uuid") != ctx.org_uuid:
         raise HTTPException(status_code=404, detail="Scenario not found")
@@ -102,12 +102,12 @@ async def get_scenario_endpoint(
 async def update_scenario_endpoint(
     scenario: ScenarioUpdate,
     scenario_uuid: str = Path(
-        description="The scenario to update. Must be in your workspace.",
+        description="The scenario to update.",
         examples=[_EXAMPLE_ID],
     ),
     ctx: OrgContext = Depends(get_current_org),
 ):
-    """Update a scenario's fields. Only the provided fields change; omitted fields are left as-is."""
+    """Update a scenario, the situation and goal a simulation plays out"""
     existing_scenario = get_scenario(scenario_uuid)
     if not existing_scenario or existing_scenario.get("org_uuid") != ctx.org_uuid:
         raise HTTPException(status_code=404, detail="Scenario not found")
@@ -135,12 +135,12 @@ async def update_scenario_endpoint(
 @router.delete("/{scenario_uuid}", summary="Delete scenario")
 async def delete_scenario_endpoint(
     scenario_uuid: str = Path(
-        description="The scenario to delete. Must be in your workspace.",
+        description="The scenario to delete.",
         examples=[_EXAMPLE_ID],
     ),
     ctx: OrgContext = Depends(get_current_org),
 ):
-    """Soft-delete a scenario in your workspace."""
+    """Soft-delete a scenario"""
     existing_scenario = get_scenario(scenario_uuid)
     if not existing_scenario or existing_scenario.get("org_uuid") != ctx.org_uuid:
         raise HTTPException(status_code=404, detail="Scenario not found")
