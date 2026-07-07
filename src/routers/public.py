@@ -210,7 +210,7 @@ class PublicSimulationRunResponse(BaseModel):
     )
     name: str = Field(description="Display name for the run, e.g. `Run 1`")
     status: TaskStatus = Field(description="Run status")
-    type: SimulationRunType = Field(description="Simulation type")
+    type: SimulationRunType = Field(description="Run mode")
     updated_at: str = Field(description="When the run was last updated (ISO 8601 UTC)")
     total_simulations: Optional[int] = Field(None, description="Number of simulations in the run. `null` until known")
     metrics: Optional[Dict[str, Any]] = Field(None, description="Aggregated run metrics. `null` until computed")

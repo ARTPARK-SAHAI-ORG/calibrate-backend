@@ -170,7 +170,7 @@ class AnnotationTaskResponse(BaseModel):
     )
     name: str = Field(description="Task name")
     type: AnnotationTaskTypeLiteral = Field(
-        description="Task type (`stt | tts | llm | llm-general | conversation`)"
+        description="Task type. Governs item payload shape and applicable evaluators"
     )
     description: Optional[str] = Field(None, description="Free-text task description, if any")
     created_at: str = Field(description="Creation timestamp (ISO 8601 UTC)")

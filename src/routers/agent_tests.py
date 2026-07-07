@@ -227,7 +227,7 @@ class AgentResponse(BaseModel):
     )
     name: str = Field(description="Agent name")
     type: Literal["agent", "connection"] = Field(
-        description="`agent` (managed defaults) or `connection` (config you supply)"
+        description="`agent` (built inside Calibrate) or `connection` (your existing agent connected to Calibrate)"
     )
     config: Dict[str, Any] | None = Field(
         None, description="Behavioral config. Null when the agent has none"

@@ -464,7 +464,7 @@ class AgentSummaryResponse(BaseModel):
     )
     name: str = Field(description="Agent name")
     type: Literal["agent", "connection"] = Field(
-        description="`agent` applies managed defaults. `connection` stores the config you supply as-is"
+        description="`agent` (built inside Calibrate) or `connection` (your existing agent connected to Calibrate)"
     )
     config: Optional[Dict[str, Any]] = Field(None, description="Agent config, or null")
     created_at: str = Field(description="Creation timestamp (ISO 8601 UTC)")
