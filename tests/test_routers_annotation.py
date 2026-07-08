@@ -1886,33 +1886,17 @@ def test_annotation_eval_llm_general_payload_validation(client):
     assert "input" in resp.json()["detail"]
 
 
-def test_annotation_eval_unsupported_task_type(client):
-    auth = _signup(client)
-    h = auth["headers"]
-    # Try with a tts annotation task type if supported, else use a known unsupported
-    # Use 'tts' which is in ANNOTATION_TASK_TYPES but not SUPPORTED_EVAL_TASK_TYPES
-    # First, what types exist?
+def test_annotation_eval_supported_task_types_cover_all_creatable_types():
+    """Every creatable annotation task type must be eval-run supported, so the
+    unsupported-type 400 guard in the evaluator-runs endpoint is defensive-only
+    and can't be hit through a real task. (tts was the last creatable-but-
+    unsupported type and is no longer a valid annotation task type.)"""
     import db as db_mod
+    from annotation_eval_runner import SUPPORTED_EVAL_TASK_TYPES
 
-    task_types = set(db_mod.ANNOTATION_TASK_TYPES)
-    # SUPPORTED_EVAL_TASK_TYPES is {stt, llm, conversation}; tts is excluded
-    if "tts" in task_types:
-        llm_ev = _llm_evaluator(client, h)
-        task_uuid = client.post(
-            "/annotation-tasks",
-            json={
-                "name": f"t-{uuid.uuid4().hex[:6]}",
-                "type": "tts",
-                "evaluator_ids": [llm_ev["uuid"]],
-            },
-            headers=h,
-        ).json()["uuid"]
-        resp = client.post(
-            f"/annotation-tasks/{task_uuid}/evaluator-runs",
-            json={"evaluators": [{"evaluator_id": llm_ev["uuid"]}]},
-            headers=h,
-        )
-        assert resp.status_code == 400
+    assert "tts" not in db_mod.ANNOTATION_TASK_TYPES
+    unsupported = set(db_mod.ANNOTATION_TASK_TYPES) - set(SUPPORTED_EVAL_TASK_TYPES)
+    assert unsupported == set(), f"creatable task types with no eval support: {unsupported}"
 
 
 def test_annotation_task_summary_pagination(client):

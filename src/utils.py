@@ -179,7 +179,7 @@ AgentTestJobType = Literal["llm-unit-test", "llm-benchmark"]
 EvalJobType = Literal["stt-eval", "tts-eval", "annotation-eval"]
 # Keep in sync with db.ANNOTATION_TASK_TYPES and db.VALID_EVALUATOR_TYPES
 # (Literal requires literal members, so the vocabulary is mirrored here).
-AnnotationTaskTypeLiteral = Literal["stt", "tts", "llm", "llm-general", "conversation"]
+AnnotationTaskTypeLiteral = Literal["stt", "llm", "llm-general", "conversation"]
 TestTypeLiteral = Literal["response", "tool_call", "conversation"]
 MemberRoleLiteral = Literal["owner", "admin"]  # mirrors DB CHECK(role IN ('owner','admin'))
 

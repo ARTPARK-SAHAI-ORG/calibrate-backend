@@ -82,6 +82,15 @@ AnnotationEvalStatus = Literal["queued", "in_progress", "completed", "failed"]
 
 _EXAMPLE_ID = "f47ac10b-58cc-4372-a567-0e02b2c3d479"
 
+# Task type gloss, shared by the create and response models so both render identically.
+_TASK_TYPE_DESCRIPTION = (
+    "Task type. Determines the shape of each item's payload.\n"
+    "- `stt`: judge a transcript on its own\n"
+    "- `llm`: judge one response with its conversation history\n"
+    "- `llm-general`: judge a standalone `input -> output` pair\n"
+    "- `conversation`: judge a full conversation"
+)
+
 # Per-type item payload shape, rendered on the `payload` field of AnnotationItemPayload.
 # `name` is required and unique within the task for every type; the rest depends on the
 # task `type` (see AnnotationTaskCreate.type). `evaluator_variables` maps an evaluator ID
@@ -90,7 +99,6 @@ _ITEM_PAYLOAD_DESCRIPTION = (
     "The item's payload. `name` is required and unique within the task for every type. "
     "The other fields depend on the task `type`:\n\n"
     "- `stt`: `name`, `reference_transcript`, `predicted_transcript`\n"
-    "- `tts`: `name` plus the synthesized-speech fields your task provides\n"
     "- `llm`: `name`, `chat_history` (list of `{role, content}` turns ending at the user turn), "
     "`agent_response` (the reply to judge), optional `evaluator_variables`\n"
     "- `llm-general`: `name`, `input`, `output`, optional `evaluator_variables`\n"
@@ -314,16 +322,7 @@ router = APIRouter(prefix="/annotation-tasks", tags=["annotation-tasks"])
 
 class AnnotationTaskCreate(BaseModel):
     name: str = Field(description="Task name, unique within your workspace")
-    type: AnnotationTaskTypeLiteral = Field(
-        description=(
-            "Task type. Determines the shape of each item's payload.\n"
-            "- `stt`: judge a transcript on its own\n"
-            "- `tts`: judge synthesized speech output\n"
-            "- `llm`: judge one response with its conversation history\n"
-            "- `llm-general`: judge a standalone `input -> output` pair\n"
-            "- `conversation`: judge a full conversation"
-        )
-    )
+    type: AnnotationTaskTypeLiteral = Field(description=_TASK_TYPE_DESCRIPTION)
     description: Optional[str] = Field(
         None, description="A description for the task. Omit for none"
     )
@@ -351,16 +350,7 @@ class AnnotationTaskResponse(BaseModel):
         examples=[_EXAMPLE_ID],
     )
     name: str = Field(description="Name of the task")
-    type: AnnotationTaskTypeLiteral = Field(
-        description=(
-            "Task type. Determines the shape of each item's payload.\n"
-            "- `stt`: judge a transcript on its own\n"
-            "- `tts`: judge synthesized speech output\n"
-            "- `llm`: judge one response with its conversation history\n"
-            "- `llm-general`: judge a standalone `input -> output` pair\n"
-            "- `conversation`: judge a full conversation"
-        )
-    )
+    type: AnnotationTaskTypeLiteral = Field(description=_TASK_TYPE_DESCRIPTION)
     description: Optional[str] = Field(None, description="The task's description")
     created_at: str = Field(description="When the task was created (ISO 8601 UTC)")
     updated_at: str = Field(description="When the task was last updated (ISO 8601 UTC)")
