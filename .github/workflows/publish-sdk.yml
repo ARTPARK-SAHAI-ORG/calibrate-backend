@@ -114,12 +114,7 @@ jobs:
       - name: Tag SDK repo to trigger its PyPI publish
         env:
           GH_TOKEN: ${{ secrets.PUSH_TO_REPO_TOKEN }}
-        run: |
-          SDK_REPO="dalmia/calibrate-python-sdk"
-          TAG="v${{ needs.prepare.outputs.version }}"
-          SHA=$(gh api "repos/$SDK_REPO/git/ref/heads/main" --jq .object.sha)
-          gh api "repos/$SDK_REPO/git/refs" -f ref="refs/tags/$TAG" -f sha="$SHA"
-          echo "Tagged $SDK_REPO @ $SHA as $TAG — its ci.yml will publish to PyPI."
+        run: ./.github/scripts/tag-client-repo.sh dalmia/calibrate-python-sdk "${{ needs.prepare.outputs.version }}"
 
   publish-cli:
     needs: prepare
@@ -131,14 +126,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Download public OpenAPI spec
-        uses: actions/download-artifact@v4
-        with:
-          name: public-openapi
-          path: openapi
-
-      - name: Install Speakeasy CLI
-        run: curl -fsSL https://go.speakeasy.com/cli-install.sh | sh
+      - uses: ./.github/actions/setup-speakeasy-gen
 
       - name: Generate Calibrate CLI + sync to repo
         env:
@@ -160,12 +148,7 @@ jobs:
       - name: Tag CLI repo to trigger its release publish
         env:
           GH_TOKEN: ${{ secrets.PUSH_TO_REPO_TOKEN }}
-        run: |
-          CLI_REPO="dalmia/calibrate-cli"
-          TAG="v${{ needs.prepare.outputs.version }}"
-          SHA=$(gh api "repos/$CLI_REPO/git/ref/heads/main" --jq .object.sha)
-          gh api "repos/$CLI_REPO/git/refs" -f ref="refs/tags/$TAG" -f sha="$SHA"
-          echo "Tagged $CLI_REPO @ $SHA as $TAG — its ci.yml will publish the CLI."
+        run: ./.github/scripts/tag-client-repo.sh dalmia/calibrate-cli "${{ needs.prepare.outputs.version }}"
 
   publish-mcp:
     needs: prepare
@@ -179,14 +162,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Download public OpenAPI spec
-        uses: actions/download-artifact@v4
-        with:
-          name: public-openapi
-          path: openapi
-
-      - name: Install Speakeasy CLI
-        run: curl -fsSL https://go.speakeasy.com/cli-install.sh | sh
+      - uses: ./.github/actions/setup-speakeasy-gen
 
       - name: Generate Calibrate MCP + sync to repo
         env:
@@ -216,8 +192,4 @@ jobs:
             echo "SPEAKEASY_API_KEY_MCP is not set; skipping MCP tag."
             exit 0
           fi
-          MCP_REPO="dalmia/calibrate-mcp"
-          TAG="v${{ needs.prepare.outputs.version }}"
-          SHA=$(gh api "repos/$MCP_REPO/git/ref/heads/main" --jq .object.sha)
-          gh api "repos/$MCP_REPO/git/refs" -f ref="refs/tags/$TAG" -f sha="$SHA"
-          echo "Tagged $MCP_REPO @ $SHA as $TAG — its ci.yml will publish the MCP server."
+          ./.github/scripts/tag-client-repo.sh dalmia/calibrate-mcp "${{ needs.prepare.outputs.version }}"

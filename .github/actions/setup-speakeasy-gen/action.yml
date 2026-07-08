@@ -1,0 +1,19 @@
+name: Setup Speakeasy generation
+description: >-
+  Download the public OpenAPI spec artifact (uploaded by the prepare job) into
+  openapi/ and install the Speakeasy CLI. Shared preamble for the Speakeasy CLI
+  and MCP generation jobs in publish-sdk.yml. The caller must run
+  actions/checkout first so this local action can be resolved.
+
+runs:
+  using: composite
+  steps:
+    - name: Download public OpenAPI spec
+      uses: actions/download-artifact@v4
+      with:
+        name: public-openapi
+        path: openapi
+
+    - name: Install Speakeasy CLI
+      shell: bash
+      run: curl -fsSL https://go.speakeasy.com/cli-install.sh | sh
