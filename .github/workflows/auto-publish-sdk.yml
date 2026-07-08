@@ -169,9 +169,9 @@ jobs:
 
   # dalmia/calibrate-skills drift-checks its agent skills against the live public
   # spec (the skills hardcode CLI flags + payload shapes). Same dispatch as
-  # sync-docs. Reuses PUSH_TO_REPO_TOKEN: it is a classic PAT (not repo-scoped),
-  # and calibrate-skills is under the same dalmia/ owner as the client repos, so
-  # the token already has dispatch access — no separate secret needed.
+  # sync-docs. Reuses PUSH_TO_REPO_TOKEN: the fine-grained PAT (owner dalmia)
+  # already lists calibrate-skills with Contents: write, which is what
+  # repository_dispatch needs — so no separate secret.
   sync-skills:
     needs: [detect, publish]
     if: needs.detect.outputs.should_publish == 'true'

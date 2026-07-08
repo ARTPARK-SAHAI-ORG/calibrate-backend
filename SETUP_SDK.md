@@ -56,16 +56,18 @@ Add these to **this repo** → Settings → Environments → **Production**:
 | `FERN_TOKEN` | Fern Python SDK generate | From [buildwithfern.com](https://buildwithfern.com); Fern GitHub App must be authorized on `dalmia` |
 | `PYPI_TOKEN` | Fern generate (metadata) | Passed to `fern generate`; actual PyPI upload is in `calibrate-python-sdk` CI |
 | `SPEAKEASY_API_KEY` | Speakeasy CLI generate + validate | From [speakeasy.com](https://www.speakeasy.com) |
-| `PUSH_TO_REPO_TOKEN` | CLI/MCP sync + tagging all client repos; skills drift-sync dispatch (`sync-skills` job) | Classic PAT with **`contents:write`** and **`workflow`** on `dalmia/calibrate-python-sdk`, `dalmia/calibrate-cli`, and `dalmia/calibrate-mcp`. **Required for publish workflows to start** (gate check) as well as client-repo pushes. Being a classic PAT it also reaches `dalmia/calibrate-skills` (same owner), so `sync-skills` reuses it — no separate secret. |
-| `DOCS_SYNC_REPO_TOKEN` | Docs OpenAPI sync dispatch (`sync-docs` job) | Fine-grained PAT on [`ARTPARK-SAHAI-ORG/calibrate`](https://github.com/ARTPARK-SAHAI-ORG/calibrate) with **Actions: Read and write** (see below). Separate because the docs repo is a different owner (org), out of the classic PAT's reach. |
+| `PUSH_TO_REPO_TOKEN` | CLI/MCP sync + tagging all client repos; skills drift-sync dispatch (`sync-skills` job) | Fine-grained PAT (resource owner `dalmia`) with **Contents: write** and **Workflows: write** on `dalmia/calibrate-python-sdk`, `dalmia/calibrate-cli`, `dalmia/calibrate-mcp`, and `dalmia/calibrate-skills`. **Required for publish workflows to start** (gate check) and client-repo pushes. `calibrate-skills` is in the repo list so `sync-skills` reuses it — `repository_dispatch` needs Contents: write, already granted. |
+| `DOCS_SYNC_REPO_TOKEN` | Docs OpenAPI sync dispatch (`sync-docs` job) | Fine-grained PAT on [`ARTPARK-SAHAI-ORG/calibrate`](https://github.com/ARTPARK-SAHAI-ORG/calibrate) with **Actions: Read and write** (see below). Separate because a fine-grained PAT is scoped to one resource owner, and this repo is under `ARTPARK-SAHAI-ORG`, not `dalmia`. |
 | `PUBLIC_API_BASE_URL` | Fetch public OpenAPI spec | Production API URL injected into `servers` (e.g. `https://pense-backend.artpark.ai`) |
 
-### PAT scopes (`PUSH_TO_REPO_TOKEN`)
+### PAT permissions (`PUSH_TO_REPO_TOKEN`)
 
-| Scope | Why |
-|-------|-----|
-| `contents:write` | Push CLI/MCP output via `sync-client-repo.sh`; create tags on all client repos |
-| `workflow` | Push Speakeasy-generated `.github/workflows/release.yaml` into `calibrate-cli` on each sync |
+Fine-grained, resource owner `dalmia`, repositories: `calibrate-python-sdk`, `calibrate-cli`, `calibrate-mcp`, `calibrate-skills`.
+
+| Permission | Why |
+|------------|-----|
+| Contents: write | Push CLI/MCP output via `sync-client-repo.sh`; create tags on the client repos; dispatch `sync-api-spec` to `calibrate-skills` |
+| Workflows: write | Push Speakeasy-generated `.github/workflows/release.yaml` into `calibrate-cli` on each sync |
 
 ### Docs sync token (`DOCS_SYNC_REPO_TOKEN`)
 
@@ -87,7 +89,10 @@ The `sync-docs` job runs **after** `publish` completes so the docs workflow sees
 
 ### Skills sync token (reuses `PUSH_TO_REPO_TOKEN`)
 
-`sync-skills` does **not** need its own secret. `PUSH_TO_REPO_TOKEN` is a classic PAT, and classic PATs are not repo-restricted — they can write to any repo their owner can access. Since `dalmia/calibrate-skills` shares the `dalmia/` owner with the client repos the token already pushes to, it can dispatch `repository_dispatch` there too. (Contrast `DOCS_SYNC_REPO_TOKEN`, which must be separate because the docs repo is under a different owner.)
+`sync-skills` does **not** need its own secret. `PUSH_TO_REPO_TOKEN` is a fine-grained PAT owned by `dalmia`, and `dalmia/calibrate-skills` has been **added to its repository list** with **Contents: write** — the permission `repository_dispatch` requires (the token already grants it for pushing to the client repos). So the same token dispatches to the skills repo. (Contrast `DOCS_SYNC_REPO_TOKEN`, which must be separate: a fine-grained PAT is scoped to a single resource owner, and the docs repo is under `ARTPARK-SAHAI-ORG`, not `dalmia`.)
+
+When rotating or regenerating `PUSH_TO_REPO_TOKEN`, keep all three repos —
+`calibrate-python-sdk`, `calibrate-cli`, `calibrate-skills` — in its repository list.
 
 **Nothing to configure on the skills side.** The published spec URL is a public constant baked into [`sync-from-spec.yml`](https://github.com/dalmia/calibrate-skills/blob/main/.github/workflows/sync-from-spec.yml) as its default, so there is no env var to keep in sync between the two repos. The dispatch may pass `client_payload.spec_url` to override it if the host ever moves, but is not required to.
 
@@ -258,11 +263,16 @@ uv run --group dev pytest tests/test_sdk_overrides.py -q
 |---------|--------------|-----|
 | `gh: set the GH_TOKEN environment variable` | `PUSH_TO_REPO_TOKEN` missing/empty in Production | Add PAT to backend Production secrets |
 | `sync-docs` fails with 401/403 | `DOCS_SYNC_REPO_TOKEN` missing, expired, or lacks Actions write on `ARTPARK-SAHAI-ORG/calibrate` | Regenerate fine-grained PAT; update Production secret |
-| `sync-skills` fails with 401/403 | `PUSH_TO_REPO_TOKEN` expired, or is a fine-grained PAT not scoped to `dalmia/calibrate-skills` | Ensure it is a classic PAT (reaches all `dalmia/` repos); if fine-grained, add `calibrate-skills` to its repos |
+| `sync-skills` fails with 401/403 | `PUSH_TO_REPO_TOKEN` expired, or `calibrate-skills` dropped from its repository list | Re-add `calibrate-skills` to the fine-grained PAT with **Contents: write**; refresh the Production secret |
 | `sync-api-spec` never runs on calibrate | calibrate#108 not merged, or `repository_dispatch` not wired | Merge docs PR; confirm `sync-api-spec.yml` listens for `sync-api-spec` |
+<<<<<<< HEAD
 | `sync-from-spec` never runs on calibrate-skills | Dispatch not reaching the repo (token/owner), or the listener not wired | Confirm `PUSH_TO_REPO_TOKEN` is a classic PAT; confirm `sync-from-spec.yml` listens for `sync-api-spec` (spec URL needs no config — it defaults to the public constant) |
 | PAT rejected pushing `release.yaml` | Missing `workflow` scope on `PUSH_TO_REPO_TOKEN` | Add `workflow` scope to the backend PAT |
 | PAT rejected pushing to `calibrate-mcp` | PAT not authorized on `dalmia/calibrate-mcp` | Grant `contents:write` on that repo |
+=======
+| `sync-from-spec` never runs on calibrate-skills | Dispatch not reaching the repo, or the listener not wired | Confirm `calibrate-skills` is in `PUSH_TO_REPO_TOKEN`'s repo list; confirm `sync-from-spec.yml` listens for `sync-api-spec` (spec URL needs no config — it defaults to the public constant) |
+| PAT rejected pushing `release.yaml` | Missing **Workflows: write** on `PUSH_TO_REPO_TOKEN` | Add Workflows: write to the fine-grained PAT |
+>>>>>>> 4a7fee4 (Correct PUSH_TO_REPO_TOKEN as fine-grained with calibrate-skills in its repo list)
 | Release fails: `gpg_private_key` not supplied | GPG secrets missing in **calibrate-cli** | Add `CLI_GPG_SECRET_KEY` + `CLI_GPG_PASSPHRASE` |
 | Release fails: `field token not found in type config.Homebrew` | Speakeasy `.goreleaser.yaml` incompatible with GoReleaser >=2.17 | Merge backend patch (`patch-goreleaser-config.sh`) or move `token` under `repository` in `calibrate-cli`; re-run Release |
 | Homebrew formula never appears | `HOMEBREW_TAP_GITHUB_TOKEN` missing or tap repo missing | Add secret; create `dalmia/homebrew-tap` |
