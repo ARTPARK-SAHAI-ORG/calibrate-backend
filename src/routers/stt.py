@@ -254,7 +254,7 @@ class STTEvaluationRequest(BaseModel):
     )
     dataset_name: Optional[str] = Field(
         None,
-        description="Name for a new dataset saved from inline inputs. Ignored when `dataset_id` is set. Omit to skip saving",
+        description="Name for a new dataset created from the inline inputs. Ignored when `dataset_id` is set. Omit to not create one",
     )
     providers: List[str] = Field(
         description='STT providers to compare, e.g. `["deepgram", "openai", "sarvam"]`. At least one required'
@@ -754,7 +754,7 @@ class VisibilityResponse(BaseModel):
     is_public: bool = Field(description="Whether the job is now publicly shareable")
     share_token: str | None = Field(
         None,
-        description="Opaque token for the public share URL when `is_public` is true. Null when private",
+        description="Opaque token for the public share URL when `is_public` is true",
     )
 
 
@@ -766,7 +766,7 @@ class VisibilityResponse(BaseModel):
 async def update_stt_visibility(
     body: VisibilityRequest,
     task_id: str = PathParam(
-        description="The STT evaluation to update.",
+        description="The STT evaluation to update",
         examples=["f47ac10b-58cc-4372-a567-0e02b2c3d479"],
     ),
     ctx: OrgContext = Depends(get_current_org),
@@ -792,7 +792,7 @@ async def update_stt_visibility(
 )
 async def get_evaluation_status(
     task_id: str = PathParam(
-        description="The STT evaluation to poll.",
+        description="The STT evaluation to poll",
         examples=["f47ac10b-58cc-4372-a567-0e02b2c3d479"],
     ),
     ctx: OrgContext = Depends(get_current_org),

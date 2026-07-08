@@ -16,6 +16,10 @@ paths:
     post:
       x-fern-sdk-group-name: agents
       x-fern-sdk-method-name: create
+  /agents/resolve:
+    post:
+      x-fern-sdk-group-name: agents
+      x-fern-sdk-method-name: resolve
   /agents/{agent_uuid}:
     get:
       x-fern-sdk-group-name: agents
@@ -23,6 +27,10 @@ paths:
     put:
       x-fern-sdk-group-name: agents
       x-fern-sdk-method-name: update
+  /agents/{agent_uuid}/verify-connection:
+    post:
+      x-fern-sdk-group-name: agents
+      x-fern-sdk-method-name: verify_connection
   /tests:
     post:
       x-fern-sdk-group-name: tests
@@ -41,10 +49,18 @@ paths:
     put:
       x-fern-sdk-group-name: tests
       x-fern-sdk-method-name: update
-  /agents/resolve:
+  /agent-tests:
     post:
-      x-fern-sdk-group-name: agents
-      x-fern-sdk-method-name: resolve
+      x-fern-sdk-group-name: agent_tests
+      x-fern-sdk-method-name: link
+  /agent-tests/agent/{agent_uuid}/tests:
+    get:
+      x-fern-sdk-group-name: agent_tests
+      x-fern-sdk-method-name: list_for_agent
+  /agent-tests/agent/{agent_uuid}/runs:
+    get:
+      x-fern-sdk-group-name: agent_tests
+      x-fern-sdk-method-name: list_runs_for_agent
   /agent-tests/agent/{agent_uuid}/run:
     post:
       x-fern-sdk-group-name: agent_tests
@@ -57,3 +73,64 @@ paths:
     get:
       x-fern-sdk-group-name: agent_tests
       x-fern-sdk-method-name: get_run
+  /agent-tests/agent/{agent_uuid}/benchmark:
+    post:
+      x-fern-sdk-group-name: agent_tests
+      x-fern-sdk-method-name: benchmark
+  /agent-tests/benchmark/{task_id}:
+    get:
+      x-fern-sdk-group-name: agent_tests
+      x-fern-sdk-method-name: get_benchmark
+  /evaluators:
+    post:
+      x-fern-sdk-group-name: evaluators
+      x-fern-sdk-method-name: create
+    get:
+      x-fern-sdk-group-name: evaluators
+      x-fern-sdk-method-name: list
+  /evaluators/{evaluator_uuid}:
+    get:
+      x-fern-sdk-group-name: evaluators
+      x-fern-sdk-method-name: get
+  /evaluators/{evaluator_uuid}/versions:
+    post:
+      x-fern-sdk-group-name: evaluators
+      x-fern-sdk-method-name: create_version
+  /annotation-tasks:
+    post:
+      x-fern-sdk-group-name: annotation_tasks
+      x-fern-sdk-method-name: create
+    get:
+      x-fern-sdk-group-name: annotation_tasks
+      x-fern-sdk-method-name: list
+  /annotation-tasks/{task_uuid}:
+    get:
+      x-fern-sdk-group-name: annotation_tasks
+      x-fern-sdk-method-name: get
+  /annotation-tasks/{task_uuid}/evaluators:
+    post:
+      x-fern-sdk-group-name: annotation_tasks
+      x-fern-sdk-method-name: link_evaluator
+  /annotation-tasks/{task_uuid}/items:
+    post:
+      x-fern-sdk-group-name: annotation_tasks
+      x-fern-sdk-method-name: add_items
+    put:
+      x-fern-sdk-group-name: annotation_tasks
+      x-fern-sdk-method-name: update_items
+  /annotation-tasks/{task_uuid}/evaluator-runs:
+    post:
+      x-fern-sdk-group-name: annotation_tasks
+      x-fern-sdk-method-name: create_evaluator_run
+  /annotation-tasks/{task_uuid}/evaluator-runs/{job_uuid}:
+    get:
+      x-fern-sdk-group-name: annotation_tasks
+      x-fern-sdk-method-name: get_evaluator_run
+  /annotation-tasks/{task_uuid}/agreement:
+    get:
+      x-fern-sdk-group-name: annotation_tasks
+      x-fern-sdk-method-name: get_agreement
+  /annotation-tasks/{task_uuid}/summary:
+    get:
+      x-fern-sdk-group-name: annotation_tasks
+      x-fern-sdk-method-name: get_summary

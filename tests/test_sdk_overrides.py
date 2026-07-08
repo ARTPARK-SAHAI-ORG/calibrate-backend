@@ -89,3 +89,39 @@ def test_every_speakeasy_overlay_has_mcp_metadata():
         assert mcp.get("name") or mcp.get("scopes"), (
             f"{method.upper()} {path}: x-speakeasy-mcp needs name or scopes"
         )
+
+
+def test_no_destructive_or_visibility_route_is_public():
+    """Guard the public-surface design decision (see CLAUDE.md): the API-key
+    surface exposes create/read/update/launch only. No DELETE reaches the
+    anonymous SDK page, and no `/visibility` share-toggle (UI-only) leaks into
+    it. Publishing one is almost always an accident — fail loudly here so it
+    can't ship silently just because someone also added an overlay entry.
+    """
+    offenders = [
+        (path, method)
+        for (path, method) in _public_ops()
+        if method == "delete" or path.endswith("/visibility")
+    ]
+    assert not offenders, (
+        "Destructive/visibility routes must not be tagged Public API: "
+        f"{sorted(offenders)}"
+    )
+
+
+def test_public_surface_has_only_api_key_security():
+    """Every public op must advertise the single apiKey scheme as its sole auth
+    (see `_build_public_openapi`), so Fern/Speakeasy emit `api_key` as the one
+    required constructor arg. A public route wired to a JWT-only dependency
+    (e.g. `get_current_user_id`) would still render but 401 for real API-key
+    clients — this catches that class of mistake.
+    """
+    spec = _build_public_openapi()
+    schemes = set(spec.get("components", {}).get("securitySchemes", {}))
+    assert schemes == {"ApiKeyAuth"}, f"unexpected public security schemes: {schemes}"
+    for path, ops in spec["paths"].items():
+        for method, op in ops.items():
+            sec = op.get("security")
+            assert sec == [{"ApiKeyAuth": []}], (
+                f"{method.upper()} {path}: public op must require only ApiKeyAuth, got {sec}"
+            )

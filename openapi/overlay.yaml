@@ -213,3 +213,264 @@ actions:
           Update an existing test by UUID within the caller's org. Supply the
           fields to change (name, config). Returns the updated test. Fails with
           404 if the test does not exist or belongs to another org.
+
+  - target: $.paths['/agents/{agent_uuid}/verify-connection'].post
+    update:
+      x-speakeasy-group: agents
+      x-speakeasy-name-override: verify_connection
+      x-speakeasy-mcp:
+        name: verify-agent-connection
+        title: Verify agent connection
+        scopes: [write]
+        readOnlyHint: false
+        destructiveHint: false
+        openWorldHint: true
+        idempotentHint: false
+        description: |
+          Verify that a connection-type agent responds. Optionally pass a model to verify it before benchmarking. The endpoint and headers come from the agent's stored config; a successful check is recorded on the agent.
+  - target: $.paths['/agent-tests'].post
+    update:
+      x-speakeasy-group: agent_tests
+      x-speakeasy-name-override: link
+      x-speakeasy-mcp:
+        name: link-tests-to-agent
+        title: Link tests to agent
+        scopes: [write]
+        readOnlyHint: false
+        destructiveHint: false
+        openWorldHint: true
+        idempotentHint: true
+        description: |
+          Link one or more existing tests to an agent so they run together. Tests already linked are skipped. The agent and every test must be in your workspace.
+  - target: $.paths['/agent-tests/agent/{agent_uuid}/tests'].get
+    update:
+      x-speakeasy-group: agent_tests
+      x-speakeasy-name-override: list_for_agent
+      x-speakeasy-mcp:
+        name: list-agent-tests
+        title: List tests for an agent
+        scopes: [read]
+        readOnlyHint: true
+        openWorldHint: true
+        description: |
+          List the tests linked to an agent.
+  - target: $.paths['/agent-tests/agent/{agent_uuid}/runs'].get
+    update:
+      x-speakeasy-group: agent_tests
+      x-speakeasy-name-override: list_runs_for_agent
+      x-speakeasy-mcp:
+        name: list-agent-test-runs
+        title: List test runs for an agent
+        scopes: [read]
+        readOnlyHint: true
+        openWorldHint: true
+        description: |
+          List an agent's test and benchmark runs, most recently created first, with their status and results.
+  - target: $.paths['/agent-tests/agent/{agent_uuid}/benchmark'].post
+    update:
+      x-speakeasy-group: agent_tests
+      x-speakeasy-name-override: benchmark
+      x-speakeasy-mcp:
+        name: run-agent-benchmark
+        title: Run agent benchmark
+        scopes: [write]
+        readOnlyHint: false
+        destructiveHint: false
+        openWorldHint: true
+        idempotentHint: false
+        description: |
+          Start a multi-model benchmark over an agent's linked tests as a background job. Optionally restrict to a subset of linked tests. Returns a task_id to poll with get-agent-benchmark.
+  - target: $.paths['/agent-tests/benchmark/{task_id}'].get
+    update:
+      x-speakeasy-group: agent_tests
+      x-speakeasy-name-override: get_benchmark
+      x-speakeasy-mcp:
+        name: get-agent-benchmark
+        title: Get benchmark status
+        scopes: [read]
+        readOnlyHint: true
+        openWorldHint: true
+        description: |
+          Get the results of a benchmark run, including per-model scores and the leaderboard.
+  - target: $.paths['/evaluators'].post
+    update:
+      x-speakeasy-group: evaluators
+      x-speakeasy-name-override: create
+      x-speakeasy-mcp:
+        name: create-evaluator
+        title: Create evaluator
+        scopes: [write]
+        readOnlyHint: false
+        destructiveHint: false
+        openWorldHint: true
+        idempotentHint: false
+        description: |
+          Create an evaluator and its first version, which is set live. An evaluator judges an output against a prompt and rubric.
+  - target: $.paths['/evaluators'].get
+    update:
+      x-speakeasy-group: evaluators
+      x-speakeasy-name-override: list
+      x-speakeasy-mcp:
+        name: list-evaluators
+        title: List evaluators
+        scopes: [read]
+        readOnlyHint: true
+        openWorldHint: true
+        description: |
+          List your evaluators. Optionally filter by what they judge or their modality, and include the built-in defaults.
+  - target: $.paths['/evaluators/{evaluator_uuid}'].get
+    update:
+      x-speakeasy-group: evaluators
+      x-speakeasy-name-override: get
+      x-speakeasy-mcp:
+        name: get-evaluator
+        title: Get evaluator
+        scopes: [read]
+        readOnlyHint: true
+        openWorldHint: true
+        description: |
+          Get one evaluator with its full version history.
+  - target: $.paths['/evaluators/{evaluator_uuid}/versions'].post
+    update:
+      x-speakeasy-group: evaluators
+      x-speakeasy-name-override: create_version
+      x-speakeasy-mcp:
+        name: create-evaluator-version
+        title: Create evaluator version
+        scopes: [write]
+        readOnlyHint: false
+        destructiveHint: false
+        openWorldHint: true
+        idempotentHint: false
+        description: |
+          Add a new version to an evaluator you created, optionally making it live. The variable names must match the previous version.
+  - target: $.paths['/annotation-tasks'].post
+    update:
+      x-speakeasy-group: annotation_tasks
+      x-speakeasy-name-override: create
+      x-speakeasy-mcp:
+        name: create-annotation-task
+        title: Create annotation task
+        scopes: [write]
+        readOnlyHint: false
+        destructiveHint: false
+        openWorldHint: true
+        idempotentHint: false
+        description: |
+          Create an annotation task for labelling items against evaluators. Optionally link evaluators in order.
+  - target: $.paths['/annotation-tasks'].get
+    update:
+      x-speakeasy-group: annotation_tasks
+      x-speakeasy-name-override: list
+      x-speakeasy-mcp:
+        name: list-annotation-tasks
+        title: List annotation tasks
+        scopes: [read]
+        readOnlyHint: true
+        openWorldHint: true
+        description: |
+          List your annotation tasks with their linked evaluators.
+  - target: $.paths['/annotation-tasks/{task_uuid}'].get
+    update:
+      x-speakeasy-group: annotation_tasks
+      x-speakeasy-name-override: get
+      x-speakeasy-mcp:
+        name: get-annotation-task
+        title: Get annotation task
+        scopes: [read]
+        readOnlyHint: true
+        openWorldHint: true
+        description: |
+          Get one annotation task with its evaluators, items, and labelling jobs.
+  - target: $.paths['/annotation-tasks/{task_uuid}/evaluators'].post
+    update:
+      x-speakeasy-group: annotation_tasks
+      x-speakeasy-name-override: link_evaluator
+      x-speakeasy-mcp:
+        name: link-evaluator-to-task
+        title: Link evaluator to task
+        scopes: [write]
+        readOnlyHint: false
+        destructiveHint: false
+        openWorldHint: true
+        idempotentHint: true
+        description: |
+          Link an evaluator to an annotation task, appending it to the display order.
+  - target: $.paths['/annotation-tasks/{task_uuid}/items'].post
+    update:
+      x-speakeasy-group: annotation_tasks
+      x-speakeasy-name-override: add_items
+      x-speakeasy-mcp:
+        name: add-annotation-items
+        title: Bulk create items
+        scopes: [write]
+        readOnlyHint: false
+        destructiveHint: false
+        openWorldHint: true
+        idempotentHint: false
+        description: |
+          Bulk-create items in an annotation task, optionally seeding human annotations.
+  - target: $.paths['/annotation-tasks/{task_uuid}/items'].put
+    update:
+      x-speakeasy-group: annotation_tasks
+      x-speakeasy-name-override: update_items
+      x-speakeasy-mcp:
+        name: update-annotation-items
+        title: Bulk update items
+        scopes: [write]
+        readOnlyHint: false
+        destructiveHint: false
+        openWorldHint: true
+        idempotentHint: true
+        description: |
+          Bulk-update item payloads in an annotation task.
+  - target: $.paths['/annotation-tasks/{task_uuid}/evaluator-runs'].post
+    update:
+      x-speakeasy-group: annotation_tasks
+      x-speakeasy-name-override: create_evaluator_run
+      x-speakeasy-mcp:
+        name: run-annotation-evaluators
+        title: Run evaluators on items
+        scopes: [write]
+        readOnlyHint: false
+        destructiveHint: false
+        openWorldHint: true
+        idempotentHint: false
+        description: |
+          Run one or more of a task's evaluators over its items as a background job. Returns a job_uuid to poll with get-annotation-evaluator-run.
+  - target: $.paths['/annotation-tasks/{task_uuid}/evaluator-runs/{job_uuid}'].get
+    update:
+      x-speakeasy-group: annotation_tasks
+      x-speakeasy-name-override: get_evaluator_run
+      x-speakeasy-mcp:
+        name: get-annotation-evaluator-run
+        title: Get evaluator run
+        scopes: [read]
+        readOnlyHint: true
+        openWorldHint: true
+        description: |
+          Get one evaluator-run job with its results and human-agreement summary.
+  - target: $.paths['/annotation-tasks/{task_uuid}/agreement'].get
+    update:
+      x-speakeasy-group: annotation_tasks
+      x-speakeasy-name-override: get_agreement
+      x-speakeasy-mcp:
+        name: get-annotation-agreement
+        title: Get task agreement
+        scopes: [read]
+        readOnlyHint: true
+        openWorldHint: true
+        description: |
+          Get human-vs-human and human-vs-evaluator agreement metrics for a task, with a trend series.
+  - target: $.paths['/annotation-tasks/{task_uuid}/summary'].get
+    update:
+      x-speakeasy-group: annotation_tasks
+      x-speakeasy-name-override: get_summary
+      x-speakeasy-mcp:
+        name: get-annotation-summary
+        title: Get task summary
+        scopes: [read]
+        readOnlyHint: true
+        openWorldHint: true
+        description: |
+          Get a paginated summary table for a task, with each item's evaluator values and human labels.

@@ -399,6 +399,16 @@ def test_annotation_items_crud(client):
     )
     assert bu.status_code == 200
 
+    # Bulk-update — a replacement payload without a name is rejected (an update
+    # replaces the whole payload, so a missing name would leave the item nameless).
+    bu_noname = client.put(
+        f"/annotation-tasks/{task_uuid}/items",
+        json={"updates": [{"uuid": item_ids[1], "payload": {"notes": "no name here"}}]},
+        headers=h,
+    )
+    assert bu_noname.status_code == 400
+    assert "payload.name" in bu_noname.json()["detail"]
+
     # Bulk-delete — empty
     bd_empty = client.request(
         "DELETE",
@@ -1240,10 +1250,12 @@ def test_list_versions_applies_binary_default_output_config(client):
     )
     versions = client.get(f"/evaluators/{ev_uuid}/versions", headers=h).json()
     legacy = next(v for v in versions if v["system_prompt"] == "legacy")
+    # output_config is typed as OutputConfig now, so each scale entry carries the
+    # optional description/color keys (null when unset) rather than being omitted.
     assert legacy["output_config"] == {
         "scale": [
-            {"value": True, "name": "Correct"},
-            {"value": False, "name": "Wrong"},
+            {"value": True, "name": "Correct", "description": None, "color": None},
+            {"value": False, "name": "Wrong", "description": None, "color": None},
         ]
     }
 

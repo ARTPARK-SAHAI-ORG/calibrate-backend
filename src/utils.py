@@ -152,6 +152,28 @@ EvaluatorTypeLiteral = Literal["tts", "stt", "llm", "llm-general", "conversation
 DataTypeLiteral = Literal["text", "audio"]
 OutputTypeLiteral = Literal["binary", "rating"]
 EvaluatorKindLiteral = Literal["single", "side_by_side"]
+
+# Shared field docs so evaluator_type / data_type / output_type read identically
+# everywhere they appear (evaluators, public, simulations). Enum meanings render
+# as a markdown bullet list.
+EVALUATOR_TYPE_DESCRIPTION = (
+    "What the evaluator judges:\n\n"
+    "- `tts`: TTS audio\n"
+    "- `stt`: one transcript\n"
+    "- `llm`: a reply with its conversation history\n"
+    "- `llm-general`: a standalone input and output pair\n"
+    "- `conversation`: a full conversation\n"
+)
+DATA_TYPE_DESCRIPTION = (
+    "The modality the judge reads:\n\n"
+    "- `text`\n"
+    "- `audio`\n"
+)
+OUTPUT_TYPE_DESCRIPTION = (
+    "How the evaluator scores:\n\n"
+    "- `binary`: pass or fail\n"
+    "- `rating`: a numeric score, using the scale in `output_config`\n"
+)
 SimulationRunType = Literal["text", "voice"]
 AgentTestJobType = Literal["llm-unit-test", "llm-benchmark"]
 EvalJobType = Literal["stt-eval", "tts-eval", "annotation-eval"]

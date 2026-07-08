@@ -26,11 +26,11 @@ class AgentToolsCreate(BaseModel):
     agent_uuid: str = Field(
         min_length=36,
         max_length=36,
-        description="The agent to link tools to.",
+        description="The agent to link tools to",
         examples=[_EXAMPLE_ID],
     )
     tool_uuids: List[str] = Field(
-        description="Tools to link. Already-linked tools are skipped",
+        description="Tools to link. Any that are already linked are skipped",
         examples=[[_EXAMPLE_ID, "6ba7b810-9dad-11d1-80b4-00c04fd430c8"]],
     )
 
@@ -39,7 +39,7 @@ class AgentToolDelete(BaseModel):
     agent_uuid: str = Field(
         min_length=36,
         max_length=36,
-        description="The agent to unlink a tool from.",
+        description="The agent to unlink a tool from",
         examples=[_EXAMPLE_ID],
     )
     tool_uuid: str = Field(
@@ -51,7 +51,7 @@ class AgentToolDelete(BaseModel):
 
 
 class AgentToolResponse(BaseModel):
-    id: int = Field(description="Auto-increment link row ID")
+    id: int = Field(description="ID of the link")
     agent_id: str = Field(
         min_length=36,
         max_length=36,
@@ -69,7 +69,7 @@ class AgentToolResponse(BaseModel):
 
 class AgentToolsCreateResponse(BaseModel):
     ids: List[int] = Field(
-        description="Link row IDs created this call (excludes tools that were already linked)"
+        description="IDs of the links created by this call. Tools that were already linked are excluded"
     )
     message: str = Field(description="Confirmation message")
 
@@ -84,7 +84,7 @@ class ToolResponse(BaseModel):
     name: str = Field(description="Tool name")
     description: str = Field(description="What the tool does")
     config: Dict[str, Any] | None = Field(
-        None, description="Tool configuration. Null when the tool has none"
+        None, description="Tool configuration"
     )
     created_at: str = Field(description="When the tool was created (ISO 8601 UTC)")
     updated_at: str = Field(description="When the tool was last updated (ISO 8601 UTC)")
@@ -102,7 +102,7 @@ class AgentResponse(BaseModel):
         description=AGENT_TYPE_DESCRIPTION
     )
     config: Dict[str, Any] | None = Field(
-        None, description="Behavioral config. Null when the agent has none"
+        None, description="Behavioral config"
     )
     created_at: str = Field(description="When the agent was created (ISO 8601 UTC)")
     updated_at: str = Field(description="When the agent was last updated (ISO 8601 UTC)")
@@ -129,7 +129,7 @@ async def create_agent_tool_links(
     agent_tools: AgentToolsCreate,
     ctx: OrgContext = Depends(get_current_org),
 ):
-    """Link one or more tools to an agent. Already-linked tools are skipped"""
+    """Link one or more tools to an agent. Tools that are already linked are skipped"""
     _require_owned_agent(agent_tools.agent_uuid, ctx.org_uuid)
     for tool_uuid in agent_tools.tool_uuids:
         _require_owned_tool(tool_uuid, ctx.org_uuid)
@@ -168,7 +168,7 @@ async def list_agent_tools(ctx: OrgContext = Depends(get_current_org)):
 )
 async def get_agent_tools(
     agent_uuid: str = Path(
-        description="The agent whose linked tools to list.",
+        description="The agent whose linked tools to list",
         examples=[_EXAMPLE_ID],
     ),
     ctx: OrgContext = Depends(get_current_org),
@@ -185,7 +185,7 @@ async def get_agent_tools(
 )
 async def get_tool_agents(
     tool_uuid: str = Path(
-        description="The tool whose linked agents to list.",
+        description="The tool whose linked agents to list",
         examples=[_EXAMPLE_ID],
     ),
     ctx: OrgContext = Depends(get_current_org),

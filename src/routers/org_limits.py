@@ -1,6 +1,6 @@
 """Workspace eval limits (superadmin configuration).
 
-Set per-workspace caps on dataset rows per eval run. Members can read their
+Set caps for each workspace on dataset rows per eval run. Members can read their
 workspace's effective limit via `/me/max-rows-per-eval`.
 """
 
@@ -112,7 +112,7 @@ async def create_org_limits_endpoint(
 @router.get("/{target_org_uuid}", response_model=OrgLimitsResponse, summary="Get workspace limits")
 async def get_org_limits_endpoint(
     target_org_uuid: str = Path(
-        description="The workspace whose limits to read. You must be a member.",
+        description="The workspace whose limits to read. You must be a member",
         examples=["f47ac10b-58cc-4372-a567-0e02b2c3d479"],
     ),
     ctx: OrgContext = Depends(get_current_org),

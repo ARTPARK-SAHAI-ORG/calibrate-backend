@@ -21,7 +21,7 @@ _EXAMPLE_ID = "f47ac10b-58cc-4372-a567-0e02b2c3d479"
 class PersonaCreate(BaseModel):
     name: str = Field(description="Persona name, unique within the workspace")
     description: Optional[str] = Field(
-        None, description="Free-text description of the persona. Omit to leave unset"
+        None, description="A description of the persona. Omit to leave unset"
     )
     config: Optional[Dict[str, Any]] = Field(
         None, description="Behavioral config. Omit to leave unset"
@@ -49,10 +49,10 @@ class PersonaResponse(BaseModel):
     )
     name: str = Field(description="Persona name")
     description: Optional[str] = Field(
-        None, description="Free-text description, or null if unset"
+        None, description="Description of the persona"
     )
     config: Optional[Dict[str, Any]] = Field(
-        None, description="Behavioral config, or null if unset"
+        None, description="Behavioral config"
     )
     created_at: str = Field(description="When the persona was created (ISO 8601 UTC)")
     updated_at: str = Field(description="When the persona was last updated (ISO 8601 UTC)")
@@ -96,7 +96,7 @@ async def list_personas(ctx: OrgContext = Depends(get_current_org)):
 @router.get("/{persona_uuid}", response_model=PersonaResponse, summary="Get persona")
 async def get_persona_endpoint(
     persona_uuid: str = Path(
-        description="The persona to retrieve.",
+        description="The persona to retrieve",
         examples=[_EXAMPLE_ID],
     ),
     ctx: OrgContext = Depends(get_current_org),
@@ -112,7 +112,7 @@ async def get_persona_endpoint(
 async def update_persona_endpoint(
     persona: PersonaUpdate,
     persona_uuid: str = Path(
-        description="The persona to update.",
+        description="The persona to update",
         examples=[_EXAMPLE_ID],
     ),
     ctx: OrgContext = Depends(get_current_org),
@@ -146,7 +146,7 @@ async def update_persona_endpoint(
 @router.delete("/{persona_uuid}", summary="Delete persona")
 async def delete_persona_endpoint(
     persona_uuid: str = Path(
-        description="The persona to delete.",
+        description="The persona to delete",
         examples=[_EXAMPLE_ID],
     ),
     ctx: OrgContext = Depends(get_current_org),

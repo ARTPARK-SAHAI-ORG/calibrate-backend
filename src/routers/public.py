@@ -39,6 +39,8 @@ from utils import (
     AnnotationTaskTypeLiteral,
     EvaluatorTypeLiteral,
     OutputTypeLiteral,
+    EVALUATOR_TYPE_DESCRIPTION,
+    OUTPUT_TYPE_DESCRIPTION,
     ProviderResult,
     enrich_evaluator_runs_with_current_names,
     generate_presigned_download_url,
@@ -59,6 +61,8 @@ from routers.agent_tests import (
     _enrich_test_results_with_evaluators,
     _enrich_model_results_with_evaluators,
     _build_evaluators_block_for_test_run,
+    LEADERBOARD_SUMMARY_DESCRIPTION,
+    LEADERBOARD_SUMMARY_EXAMPLE,
 )
 from routers.annotation_tasks import (
     _build_evaluators_block_for_eval_job,
@@ -94,22 +98,22 @@ class PublicSTTResponse(BaseModel):
         examples=[_EXAMPLE_TASK_UUID],
     )
     status: TaskStatus = Field(description="Job status")
-    language: Optional[str] = Field(None, description="Evaluated language code. `null` if unset")
+    language: Optional[str] = Field(None, description="Evaluated language code")
     dataset_id: Optional[str] = Field(
         None,
         min_length=36,
         max_length=36,
-        description="Source dataset ID. `null` if unavailable",
+        description="Source dataset ID",
         examples=[_EXAMPLE_DATASET_UUID],
     )
-    dataset_name: Optional[str] = Field(None, description="Source dataset name. `null` if unavailable")
+    dataset_name: Optional[str] = Field(None, description="Source dataset name")
     provider_results: Optional[List[ProviderResult]] = Field(
-        None, description="Per-provider transcription results and metrics. `null` until available"
+        None, description="Transcription results and metrics for each provider"
     )
     leaderboard_summary: Optional[List[Dict[str, Any]]] = Field(
-        None, description="Ranked provider comparison. `null` if not yet computed"
+        None, description="Ranked provider comparison"
     )
-    error: Optional[str] = Field(None, description="Failure message. `null` on success")
+    error: Optional[str] = Field(None, description="Failure message")
 
 
 class PublicTTSResponse(BaseModel):
@@ -120,22 +124,22 @@ class PublicTTSResponse(BaseModel):
         examples=[_EXAMPLE_TASK_UUID],
     )
     status: TaskStatus = Field(description="Job status")
-    language: Optional[str] = Field(None, description="Evaluated language code. `null` if unset")
+    language: Optional[str] = Field(None, description="Evaluated language code")
     dataset_id: Optional[str] = Field(
         None,
         min_length=36,
         max_length=36,
-        description="Source dataset ID. `null` if unavailable",
+        description="Source dataset ID",
         examples=[_EXAMPLE_DATASET_UUID],
     )
-    dataset_name: Optional[str] = Field(None, description="Source dataset name. `null` if unavailable")
+    dataset_name: Optional[str] = Field(None, description="Source dataset name")
     provider_results: Optional[List[ProviderResult]] = Field(
-        None, description="Per-provider synthesis results and metrics. `null` until available"
+        None, description="Synthesis results and metrics for each provider"
     )
     leaderboard_summary: Optional[List[Dict[str, Any]]] = Field(
-        None, description="Ranked provider comparison. `null` if not yet computed"
+        None, description="Ranked provider comparison"
     )
-    error: Optional[str] = Field(None, description="Failure message. `null` on success")
+    error: Optional[str] = Field(None, description="Failure message")
 
 
 class PublicTestRunResponse(BaseModel):
@@ -146,18 +150,18 @@ class PublicTestRunResponse(BaseModel):
         examples=[_EXAMPLE_TASK_UUID],
     )
     status: TaskStatus = Field(description="Run status")
-    total_tests: Optional[int] = Field(None, description="Total test cases in the run. `null` until known")
-    passed: Optional[int] = Field(None, description="Test cases that passed. `null` until computed")
-    failed: Optional[int] = Field(None, description="Test cases that failed. `null` until computed")
+    total_tests: Optional[int] = Field(None, description="Total test cases in the run")
+    passed: Optional[int] = Field(None, description="Test cases that passed")
+    failed: Optional[int] = Field(None, description="Test cases that failed")
     # Top-level evaluator block — name/description/output_type/rubric
     # shared across every judge_results row. Rows reference back via
     # `evaluator_uuid` so the rubric isn't duplicated per test case.
     evaluators: Optional[List[Dict[str, Any]]] = Field(
         None,
-        description="Shared evaluator definitions (name, description, output type, rubric). Rows reference these by evaluator ID",
+        description="Shared evaluator definitions, each with its name, description, output type, and rubric. Rows reference these by evaluator ID",
     )
     results: Optional[List[Dict[str, Any]]] = Field(
-        None, description="Per-test-case results. `null` until the run produces them"
+        None, description="Results for each test case"
     )
     # Aggregated latency/cost/total_tokens: {mean, min, max, count}. Values are
     # `Any` — don't assume int: total_tokens is per-run an int but its aggregate
@@ -165,7 +169,7 @@ class PublicTestRunResponse(BaseModel):
     # or token usage reported).
     latency_ms: Optional[Dict[str, Any]] = Field(
         None,
-        description="Aggregated latency (`{p50, p95, p99, count}`). `null` when not reported",
+        description="Aggregated latency (`{p50, p95, p99, count}`)",
     )
     cost: Optional[Dict[str, Any]] = Field(
         None,
@@ -190,13 +194,15 @@ class PublicBenchmarkResponse(BaseModel):
     # test_results inside model_results[] (all models run the same suite).
     evaluators: Optional[List[Dict[str, Any]]] = Field(
         None,
-        description="Shared evaluator definitions referenced by every model's results. `null` until available",
+        description="Shared evaluator definitions referenced by every model's results",
     )
     model_results: Optional[List[Dict[str, Any]]] = Field(
-        None, description="Per-model test results (all models run the same suite). `null` until available"
+        None, description="Test results for each model"
     )
     leaderboard_summary: Optional[List[Dict[str, Any]]] = Field(
-        None, description="Ranked model comparison. `null` if not yet computed"
+        None,
+        description=LEADERBOARD_SUMMARY_DESCRIPTION,
+        examples=[LEADERBOARD_SUMMARY_EXAMPLE],
     )
     error: bool = Field(False, description="`true` if the run failed")
 
@@ -212,16 +218,16 @@ class PublicSimulationRunResponse(BaseModel):
     status: TaskStatus = Field(description="Run status")
     type: SimulationRunType = Field(description="Run mode")
     updated_at: str = Field(description="When the run was last updated (ISO 8601 UTC)")
-    total_simulations: Optional[int] = Field(None, description="Number of simulations in the run. `null` until known")
-    metrics: Optional[Dict[str, Any]] = Field(None, description="Aggregated run metrics. `null` until computed")
+    total_simulations: Optional[int] = Field(None, description="Number of simulations in the run")
+    metrics: Optional[Dict[str, Any]] = Field(None, description="Aggregated run metrics")
     simulation_results: Optional[List[Dict[str, Any]]] = Field(
         None,
-        description="Per-simulation results. Voice runs include freshly presigned audio URLs. `null` until available",
+        description="Results for each simulation. Voice runs include freshly presigned audio URLs",
     )
     evaluators: Optional[List[SimulationEvaluatorRef]] = Field(
-        None, description="Evaluators applied to the run. `null` if none"
+        None, description="Evaluators applied to the run"
     )
-    error: Optional[str] = Field(None, description="Failure message. `null` on success")
+    error: Optional[str] = Field(None, description="Failure message")
 
 
 class PublicAnnotationEvalTaskRef(BaseModel):
@@ -235,7 +241,7 @@ class PublicAnnotationEvalTaskRef(BaseModel):
     type: AnnotationTaskTypeLiteral = Field(
         description="Annotation task type"
     )
-    description: Optional[str] = Field(None, description="Task description. `null` if unset")
+    description: Optional[str] = Field(None, description="Task description")
 
 
 class PublicAnnotationEvalResponse(BaseModel):
@@ -248,13 +254,13 @@ class PublicAnnotationEvalResponse(BaseModel):
     job_uuid: str = Field(
         min_length=36,
         max_length=36,
-        description="Annotation evaluator-run job ID",
+        description="ID of the annotation evaluator run",
         examples=[_EXAMPLE_JOB_UUID],
     )
     status: AnnotationStatus = Field(description="Run status. Share links only expose completed runs")
-    created_at: Optional[str] = Field(None, description="When the run was created (ISO 8601 UTC). `null` if unset")
-    completed_at: Optional[str] = Field(None, description="When the run finished (ISO 8601 UTC). `null` if unset")
-    updated_at: Optional[str] = Field(None, description="When the run was last updated (ISO 8601 UTC). `null` if unset")
+    created_at: Optional[str] = Field(None, description="When the run was created (ISO 8601 UTC)")
+    completed_at: Optional[str] = Field(None, description="When the run finished (ISO 8601 UTC)")
+    updated_at: Optional[str] = Field(None, description="When the run was last updated (ISO 8601 UTC)")
     task: PublicAnnotationEvalTaskRef = Field(description="Parent annotation task summary")
     # `details` mirrors the authenticated GET shape so a shared FE component
     # can read `job.details?.evaluators` against either endpoint without
@@ -267,23 +273,23 @@ class PublicAnnotationEvalResponse(BaseModel):
     # Top-level mirrors retained for the existing public consumers that
     # were already reading them. Both shapes carry the same data.
     evaluators: Optional[List[Dict[str, Any]]] = Field(
-        None, description="Evaluator definitions applied in the run. `null` if none"
+        None, description="Evaluator definitions applied in the run"
     )
-    item_count: Optional[int] = Field(None, description="Number of items evaluated. `null` if unknown")
-    items: Optional[List[Dict[str, Any]]] = Field(None, description="Evaluated items. `null` if none")
+    item_count: Optional[int] = Field(None, description="Number of items evaluated")
+    items: Optional[List[Dict[str, Any]]] = Field(None, description="Evaluated items")
     runs: Optional[List[Dict[str, Any]]] = Field(
         None,
-        description="Per-item evaluator run rows. Each keys back into `evaluators[]` by evaluator and version ID",
+        description="Evaluator run rows for each item. Each keys back into `evaluators[]` by evaluator and version ID",
     )
     human_agreement: Optional[Dict[str, Any]] = Field(
-        None, description="Human-vs-evaluator agreement metrics. `null` if unavailable"
+        None, description="Human-vs-evaluator agreement metrics"
     )
-    error: Optional[str] = Field(None, description="Failure message. `null` on success")
+    error: Optional[str] = Field(None, description="Failure message")
 
 
 class PublicDefaultEvaluatorVersionResponse(BaseModel):
     output_config: Optional[Dict[str, Any]] = Field(
-        None, description="Rubric config (scale values/labels/descriptions/colors). `null` if unset"
+        None, description="The rubric: the scale points and their labels"
     )
 
 
@@ -295,13 +301,13 @@ class PublicDefaultEvaluatorResponse(BaseModel):
         examples=[_EXAMPLE_EVALUATOR_UUID],
     )
     name: str = Field(description="Evaluator display name")
-    description: Optional[str] = Field(None, description="Evaluator description. `null` if unset")
+    description: Optional[str] = Field(None, description="Evaluator description")
     evaluator_type: EvaluatorTypeLiteral = Field(
-        description="Semantic category"
+        description=EVALUATOR_TYPE_DESCRIPTION
     )
-    output_type: OutputTypeLiteral = Field(description="Output shape")
+    output_type: OutputTypeLiteral = Field(description=OUTPUT_TYPE_DESCRIPTION)
     live_version: Optional[PublicDefaultEvaluatorVersionResponse] = Field(
-        None, description="Public-safe fields of the live version. `null` if none is set"
+        None, description="The version that is currently live"
     )
 
 
@@ -454,7 +460,7 @@ async def get_public_default_evaluators(
     share_token: str = Query(..., min_length=1, description="Share token that grants access to the linked run"),
     types: Optional[str] = Query(
         None,
-        description="Evaluator types to include, comma-separated (`stt`, `tts`, `llm`, `llm-general`, `conversation`). Omit for all",
+        description="Evaluator types to include as a comma-separated list, any of `stt`, `tts`, `llm`, `llm-general`, `conversation`. Omit for all",
     ),
 ):
     """List default evaluator metadata when you have a valid share token"""
@@ -724,7 +730,7 @@ async def get_public_simulation_run(
     summary="Get shared annotation eval run",
 )
 async def get_public_annotation_eval(
-    share_token: str = Path(description="Share token for the annotation evaluator-run job"),
+    share_token: str = Path(description="Share token for the annotation evaluator run"),
 ):
     """Get a shared annotation evaluator-run result"""
     # Only `done` runs are exposed; in-flight or failed runs return 404.
@@ -904,7 +910,7 @@ class PublicAnnotationEntry(BaseModel):
         examples=[_EXAMPLE_EVALUATOR_UUID],
     )
     value: Optional[Dict[str, Any]] = Field(
-        None, description="Judgement payload (shape depends on the evaluator's output type). `null` to clear"
+        None, description="Judgement payload. Its shape depends on the evaluator's output type. `null` to clear"
     )
 
 
@@ -916,7 +922,7 @@ class PublicAnnotationUpsertRequest(BaseModel):
         examples=[_EXAMPLE_ITEM_UUID],
     )
     annotations: List[PublicAnnotationEntry] = Field(
-        description="Judgements to save, one entry per evaluator, plus optionally one row-level entry"
+        description="Judgements to record, one entry per evaluator, plus optionally one row-level entry"
     )
 
 
@@ -925,7 +931,7 @@ def upsert_public_annotations(
     token: str = Path(description="Annotator token for the labelling job"),
     payload: PublicAnnotationUpsertRequest = ...,
 ):
-    """Save all judgements for one item in a single request"""
+    """Record all judgements for one item in a single request"""
     # First save moves the job from `pending` to `in_progress`; all slots filled moves it to `completed`.
     job = _resolve_public_annotation_job(token)
     if not payload.annotations:

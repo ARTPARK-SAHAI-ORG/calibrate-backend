@@ -51,8 +51,17 @@ class PaginationParams:
 
     def __init__(
         self,
-        limit: int = Query(DEFAULT_LIMIT, ge=1, le=MAX_LIMIT),
-        offset: int = Query(0, ge=0),
+        limit: int = Query(
+            DEFAULT_LIMIT,
+            ge=1,
+            le=MAX_LIMIT,
+            description="Maximum number of items to return",
+        ),
+        offset: int = Query(
+            0,
+            ge=0,
+            description="Number of items to skip before returning results",
+        ),
     ):
         self.limit = limit
         self.offset = offset
@@ -81,14 +90,14 @@ def make_sort_params(
             f"default sort_by={default!r} must be one of sortable={sortable!r}"
         )
     allowed = list(sortable)  # frozen copy
-    description = f"Sort key. One of: {', '.join(allowed)}."
+    description = "Sort key for the results"
 
     class SortParams:
         def __init__(
             self,
             sort_by: str = Query(default, description=description),
             order: Literal["asc", "desc"] = Query(
-                default_order, description="Sort direction."
+                default_order, description="Sort direction"
             ),
         ):
             if sort_by not in allowed:
@@ -140,8 +149,8 @@ def make_search_params(*, searchable: List[str]) -> Type:
         raise ValueError("searchable must be non-empty")
     paths = [p.split(".") for p in searchable]
     description = (
-        f"Case-insensitive substring search over: {', '.join(searchable)}. "
-        "Empty/blank value is a no-op."
+        f"Case-insensitive substring search on {', '.join(f'`{s}`' for s in searchable)}. "
+        "Blank is a no-op"
     )
 
     class SearchParams:

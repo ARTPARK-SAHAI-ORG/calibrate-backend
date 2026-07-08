@@ -229,29 +229,56 @@ def _strip_freeform_titles(node: Any) -> None:
             _strip_freeform_titles(item)
 
 
-# Request fields that only JWT (frontend) callers can set — API-key writes have
-# them stripped server-side (see agents._strip_verification_fields), so they're
-# inert and misleading in the API-key-facing public spec and its generated SDK/
-# code samples. Kept on the model (the frontend uses them) but hidden from the
-# public spec only. Keyed by component-schema name.
+# Fields kept on the model (the frontend uses them) but hidden from the public
+# spec and its generated SDK/code samples. Two kinds:
+#   1. JWT-only request fields — API-key writes strip them server-side (see
+#      agents._strip_verification_fields), so they're inert and misleading.
+#   2. Backend-internal response fields — auto-increment link/pivot IDs and other
+#      storage/tenant plumbing that a public API consumer (who works in UUIDs)
+#      has no use for. Not part of the public contract.
+# Keyed by component-schema name.
 _PUBLIC_SPEC_HIDDEN_FIELDS: Dict[str, tuple] = {
     "AgentUpdate": ("connection_verified", "benchmark_models_verified"),
+    # Auto-increment pivot-row IDs from the link endpoints — internal DB keys a
+    # UUID-based public client has no use for. `ids` is too generic to strip
+    # globally, so it's pinned to the link responses that return it.
+    "AgentTestsCreateResponse": ("ids",),
+    "AgentToolsCreateResponse": ("ids",),
 }
+
+# Distinctive internal field names stripped from EVERY public component schema
+# (no public response should expose them, and the concrete schema name is
+# sometimes module-namespaced, e.g. `routers__evaluators__EvaluatorResponse`, so
+# matching by field name is more robust than by schema name). `owner_user_id` is
+# a raw tenant user ID; `live_version_index` is a UI-only array position (the
+# live version is already identified by the `live_version_id` UUID).
+_PUBLIC_SPEC_HIDDEN_FIELD_NAMES: frozenset = frozenset(
+    # `kind` (single vs side_by_side) is a niche scoring mode not exposed on the
+    # public evaluator surface.
+    {"owner_user_id", "live_version_index", "kind"}
+)
+
+
+def _drop_fields(schema: Dict[str, Any], fields) -> None:
+    props = schema.get("properties")
+    if props:
+        for f in fields:
+            props.pop(f, None)
+    req = schema.get("required")
+    if req:
+        schema["required"] = [r for r in req if r not in fields]
 
 
 def _strip_hidden_public_fields(schemas: Dict[str, Any]) -> None:
-    """Drop JWT-only request fields from the public component schemas."""
+    """Hide backend-internal / JWT-only fields from the public component schemas."""
     for model, fields in _PUBLIC_SPEC_HIDDEN_FIELDS.items():
         schema = schemas.get(model)
-        if not schema:
-            continue
-        props = schema.get("properties")
-        if props:
-            for f in fields:
-                props.pop(f, None)
-        req = schema.get("required")
-        if req:
-            schema["required"] = [r for r in req if r not in fields]
+        if schema:
+            _drop_fields(schema, fields)
+    if _PUBLIC_SPEC_HIDDEN_FIELD_NAMES:
+        for schema in schemas.values():
+            if isinstance(schema, dict):
+                _drop_fields(schema, _PUBLIC_SPEC_HIDDEN_FIELD_NAMES)
 
 
 def _build_public_openapi() -> Dict[str, Any]:
@@ -324,6 +351,18 @@ def _build_public_openapi() -> Dict[str, Any]:
     _strip_freeform_titles(public_paths)
     _strip_freeform_titles(components.get("schemas", {}))
     _strip_hidden_public_fields(components.get("schemas", {}))
+
+    # Drop the optional `X-Org-UUID` header the shared `get_org_jwt_or_api_key`
+    # dep adds. An API-key client is already scoped to one workspace by the key
+    # itself, so the header is redundant and confusing on the anonymous public
+    # page. `X-API-Key` (and every other param) stays.
+    for ops in public_paths.values():
+        for op in ops.values():
+            params = op.get("parameters")
+            if params:
+                op["parameters"] = [
+                    p for p in params if p.get("name") != "X-Org-UUID"
+                ]
 
     return {
         "openapi": full.get("openapi", "3.1.0"),

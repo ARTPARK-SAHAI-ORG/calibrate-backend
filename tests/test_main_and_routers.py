@@ -96,25 +96,75 @@ def test_public_api_docs_are_unauthenticated_and_filtered(client, monkeypatch):
     assert pub_top["servers"] == [{"url": "http://testserver", "description": "API"}]
 
     paths = pub_top["paths"]
-    # Only the API-key-accessible endpoints are exposed.
-    assert ("get" in paths.get("/agents", {}))
-    assert ("post" in paths.get("/agents", {}))
-    assert ("get" in paths.get("/agents/{agent_uuid}", {}))
-    assert ("put" in paths.get("/agents/{agent_uuid}", {}))
-    assert ("post" in paths.get("/agents/resolve", {}))
-    assert ("post" in paths.get("/agent-tests/agent/{agent_uuid}/run", {}))
-    assert ("get" in paths.get("/agent-tests/run/{task_id}", {}))
-    assert ("post" in paths.get("/tests", {}))
-    assert ("get" in paths.get("/tests", {}))
-    assert ("get" in paths.get("/tests/{test_uuid}", {}))
-    assert ("put" in paths.get("/tests/{test_uuid}", {}))
-    assert ("post" in paths.get("/tests/bulk", {}))
-    # JWT-only endpoints must NOT leak into the public schema.
-    assert "/personas" not in paths
+    # The public surface spans the full create/read/update/launch eval loop.
+    # Spot-check a representative op from each published router.
+    assert "get" in paths.get("/agents", {})
+    assert "post" in paths.get("/agents", {})
+    assert "put" in paths.get("/agents/{agent_uuid}", {})
+    assert "post" in paths.get("/agents/resolve", {})
+    assert "post" in paths.get("/agent-tests", {})  # link tests to agent
+    assert "post" in paths.get("/agent-tests/agent/{agent_uuid}/run", {})
+    assert "get" in paths.get("/agent-tests/run/{task_id}", {})
+    assert "post" in paths.get("/agent-tests/agent/{agent_uuid}/benchmark", {})
+    assert "post" in paths.get("/tests", {})
+    assert "post" in paths.get("/tests/bulk", {})
+    assert "post" in paths.get("/evaluators", {})
+    assert "post" in paths.get("/evaluators/{evaluator_uuid}/versions", {})
+    # Annotation is trimmed to the automated evaluator-run loop (10 routes).
+    assert "post" in paths.get("/annotation-tasks", {})
+    assert "post" in paths.get("/annotation-tasks/{task_uuid}/evaluator-runs", {})
+    assert "get" in paths.get("/annotation-tasks/{task_uuid}/summary", {})
+    assert "get" in paths.get("/annotation-tasks/{task_uuid}/agreement", {})
+
+    # The public verify-connection endpoint only accepts the probe inputs
+    # (model + messages). agent_url / agent_headers come from the agent's
+    # stored config and must NOT be on the public request body (the by-id route
+    # ignores them; exposing them misleads API-key clients).
+    verify_op = paths["/agents/{agent_uuid}/verify-connection"]["post"]
+    verify_ref = verify_op["requestBody"]["content"]["application/json"]["schema"]["$ref"]
+    verify_schema = pub_top["components"]["schemas"][verify_ref.split("/")[-1]]
+    assert set(verify_schema.get("properties", {})) == {"model", "messages"}, (
+        "public verify-connection body must expose only model + messages"
+    )
+
+    # JWT-only / deliberately-excluded endpoints must NOT leak into the public
+    # schema: account/tenant bootstrapping, the UI-only share pages, tools
+    # (deferred), and every destructive or visibility-toggle route.
     assert "/presigned-url" not in paths
-    assert "delete" not in paths.get("/agents/{agent_uuid}", {})  # delete stays JWT-only
-    assert "delete" not in paths.get("/tests/{test_uuid}", {})  # delete stays JWT-only
+    assert "/api-keys" not in paths
+    assert "/organizations" not in paths
+    assert "/tools" not in paths  # tools/agent-tools deferred, stay JWT-only
+    assert not any(p.startswith("/auth") for p in paths)
+    # STT/TTS eval, simulations, and the jobs list are deferred from the public
+    # API for now (keeps the SDK endpoint count down) — must stay JWT-only.
+    assert "/stt/evaluate" not in paths
+    assert "/tts/evaluate" not in paths
+    assert not any(p.startswith("/simulations") for p in paths)
+    assert "/jobs" not in paths
+    assert not any(p.startswith("/datasets") for p in paths)  # STT/TTS-only; deferred with them
+    # personas + scenarios are simulation-only; deferred with simulations.
+    assert not any(p.startswith("/personas") for p in paths)
+    assert not any(p.startswith("/scenarios") for p in paths)
+    # evaluators are trimmed to the minimum write+read set; helpers stay JWT-only.
+    assert "/evaluators/default-prompt" not in paths
+    assert "/evaluators/{evaluator_uuid}/preview-prompt" not in paths
+    assert "/evaluators/{evaluator_uuid}/versions/live" not in paths
+    assert "put" not in paths.get("/evaluators/{evaluator_uuid}", {})  # update stays JWT-only
+    assert "get" not in paths.get("/evaluators/{evaluator_uuid}/versions", {})  # list-versions redundant with detail
+    # Annotation long tail (human-labelling workflow, housekeeping reads,
+    # annotators, agreement trends) stays JWT-only.
+    assert "/annotators" not in paths
+    assert not any(p.startswith("/annotation-agreement") for p in paths)
+    assert "put" not in paths.get("/annotation-tasks/{task_uuid}", {})  # task update stays JWT-only
+    assert "/annotation-tasks/{task_uuid}/jobs" not in paths  # human labelling jobs
+    assert "/annotation-tasks/{task_uuid}/annotations" not in paths
+    assert "/annotation-tasks/{task_uuid}/items/{item_uuid}" not in paths
+    assert "get" not in paths.get("/agent-tests", {})  # plain link-list stays JWT-only
+    assert "delete" not in paths.get("/agents/{agent_uuid}", {})  # no deletes are public
+    assert "delete" not in paths.get("/tests/{test_uuid}", {})
     assert "/tests/bulk-delete" not in paths  # bulk-delete stays JWT-only
+    # Visibility share-toggles are UI-only, never public.
+    assert "/agent-tests/run/{task_id}/visibility" not in paths
 
     # Ops keep their router-level tag (e.g. "agents") for grouping, but the
     # "Public API" filter marker is stripped so it never shows as its own group
@@ -145,6 +195,18 @@ def test_public_api_docs_are_unauthenticated_and_filtered(client, monkeypatch):
         for op in ops.values():
             assert op["security"] == [{"ApiKeyAuth": []}]
 
+    # The optional `X-Org-UUID` header (added by the shared auth dep) is
+    # redundant for API-key clients — the key already scopes to one workspace —
+    # so it must be stripped from every public operation.
+    for path, methods in pub_top["paths"].items():
+        for method, op in methods.items():
+            if method not in ("get", "post", "put", "delete", "patch"):
+                continue
+            names = {p.get("name") for p in op.get("parameters", [])}
+            assert "X-Org-UUID" not in names, (
+                f"X-Org-UUID leaked into public op {method.upper()} {path}"
+            )
+
     # The private (Basic-Auth'd) full schema keeps the router tags intact —
     # the public filter must not have mutated the shared cached schema.
     full = client.get("/openapi.json", auth=("admin", "changeme")).json()
@@ -162,6 +224,23 @@ def test_public_api_docs_are_unauthenticated_and_filtered(client, monkeypatch):
     full_agent_update = full["components"]["schemas"]["AgentUpdate"]["properties"]
     assert "connection_verified" in full_agent_update  # still there internally
 
+    # Backend-internal response fields are hidden from the public spec but stay
+    # on the internal model: auto-increment pivot-row `ids` from the link
+    # response, and the raw `owner_user_id` / UI-only `live_version_index` on
+    # evaluators (which are stripped from EVERY public schema by field name).
+    import json as _json
+
+    pub_link = pub_top["components"]["schemas"]["AgentTestsCreateResponse"]["properties"]
+    assert "ids" not in pub_link and "message" in pub_link
+    assert "ids" in full["components"]["schemas"]["AgentTestsCreateResponse"]["properties"]
+    pub_schemas_dump = _json.dumps(
+        {k: v.get("properties", {}) for k, v in pub_top["components"]["schemas"].items()}
+    )
+    assert '"owner_user_id"' not in pub_schemas_dump
+    assert '"live_version_index"' not in pub_schemas_dump
+    # still present internally (the frontend uses owner_user_id for default-vs-custom)
+    assert "owner_user_id" in _json.dumps(full["components"]["schemas"])
+
     # Components are trimmed to ONLY the schemas the public paths reference
     # (transitively) — internal/JWT-only model shapes must not leak.
     import json
@@ -171,16 +250,23 @@ def test_public_api_docs_are_unauthenticated_and_filtered(client, monkeypatch):
     full_schemas = full.get("components", {}).get("schemas", {})
     # Public response models are present...
     assert "ResolveAgentNamesResponse" in pub_schemas  # POST /agents/resolve
-    assert "AgentTestRunCreateResponse" in pub_schemas  # POST /agent-tests/agent/{uuid}/run
+    assert "AgentTestRunCreateResponse" in pub_schemas  # run + benchmark launch shape
     assert "BatchTestRunResponse" in pub_schemas  # POST /agent-tests/run
-    assert "TaskCreateResponse" not in pub_schemas  # STT/TTS eval shape — not public API
+    # Agent-test launches use the dataset-free AgentTestRunCreateResponse; the
+    # shared TaskCreateResponse (with STT/TTS dataset fields) is deferred with
+    # STT/TTS, so it must NOT leak into the public spec.
+    assert "TaskCreateResponse" not in pub_schemas
     # ...nested refs are pulled in transitively...
     assert "BatchTestSkip" in pub_schemas  # referenced by BatchTestRunResponse
+    assert "ModelResult" in pub_schemas  # AgentTestRunListItem.model_results is now typed
     # ...but it's a strict subset of the full set, and internal-only models are gone.
     assert set(pub_schemas).issubset(set(full_schemas))
-    assert "PersonaCreate" not in pub_schemas
+    assert "PersonaCreate" not in pub_schemas  # personas deferred (simulation-only)
     assert "AgentCreate" in pub_schemas  # POST /agents is now public
     assert "BulkTestDelete" not in pub_schemas  # bulk-delete stays JWT-only
+    # Internal-only models from excluded routers stay out of the public schema.
+    assert "LoginResponse" not in pub_schemas  # /auth is not public
+    assert "ToolCreate" not in pub_schemas  # tools/agent-tools deferred
     # Every $ref in the public doc resolves within the trimmed schema set.
     refs = {
         m for m in re.findall(r'#/components/schemas/([^"]+)', json.dumps(pub_top))
@@ -622,6 +708,27 @@ def test_evaluators_list_and_default_prompt(client):
     listing = client.get("/evaluators", headers=h)
     assert listing.status_code == 200
     assert any(e.get("slug") == "default-safety" for e in listing.json())
+
+    # Seeded defaults are read-only ⇒ is_default True; the raw owner_user_id is
+    # never exposed on the public API surface (only is_default is).
+    seeded = next(e for e in listing.json() if e.get("slug") == "default-safety")
+    assert seeded["is_default"] is True
+
+    # A custom evaluator is editable ⇒ is_default False.
+    created = client.post(
+        "/evaluators",
+        json={
+            "name": f"custom-{uuid.uuid4().hex[:6]}",
+            "evaluator_type": "llm",
+            "output_type": "binary",
+            "version": {"judge_model": "openai/gpt-4.1", "system_prompt": "Judge it."},
+        },
+        headers=h,
+    )
+    assert created.status_code == 200
+    detail = client.get(f"/evaluators/{created.json()['uuid']}", headers=h)
+    assert detail.status_code == 200
+    assert detail.json()["is_default"] is False
 
     prompt = client.get(
         "/evaluators/default-prompt", params={"purpose": "llm"}, headers=h

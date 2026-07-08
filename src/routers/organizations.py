@@ -40,7 +40,7 @@ class OrganizationResponse(BaseModel):
     )
     member_role: Optional[MemberRoleLiteral] = Field(
         None,
-        description="Your role in this workspace. `null` when not resolved",
+        description="Your role in this workspace",
     )
     created_at: str = Field(description="When the workspace was created (ISO 8601 UTC)")
     updated_at: str = Field(description="When the workspace was last updated (ISO 8601 UTC)")
@@ -110,7 +110,7 @@ async def create_org(
 @router.patch("/{org_uuid}", response_model=OrganizationResponse, summary="Update workspace")
 async def rename_org(
     org_uuid: str = Path(
-        description="The workspace to rename. You must be a member.",
+        description="The workspace to rename. You must be a member",
         examples=["f47ac10b-58cc-4372-a567-0e02b2c3d479"],
     ),
     request: UpdateOrganizationRequest = ...,
@@ -126,7 +126,7 @@ async def rename_org(
 @router.get("/{org_uuid}/members", response_model=List[MemberResponse], summary="List members")
 async def list_members(
     org_uuid: str = Path(
-        description="The workspace whose members to list. You must be a member.",
+        description="The workspace whose members to list. You must be a member",
         examples=["f47ac10b-58cc-4372-a567-0e02b2c3d479"],
     ),
     user_id: str = Depends(get_current_user_id),
@@ -144,7 +144,7 @@ async def list_members(
 )
 async def add_member(
     org_uuid: str = Path(
-        description="The workspace to add a member to. You must be a member.",
+        description="The workspace to add a member to. You must be a member",
         examples=["f47ac10b-58cc-4372-a567-0e02b2c3d479"],
     ),
     request: AddMemberRequest = ...,
@@ -170,7 +170,7 @@ async def add_member(
 @router.delete("/{org_uuid}/members/{target_user_id}", status_code=204, summary="Remove member")
 async def remove_member(
     org_uuid: str = Path(
-        description="The workspace to remove the member from. You must be a member.",
+        description="The workspace to remove the member from. You must be a member",
         examples=["f47ac10b-58cc-4372-a567-0e02b2c3d479"],
     ),
     target_user_id: str = Path(

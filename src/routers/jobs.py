@@ -37,20 +37,20 @@ class JobListItem(BaseModel):
         None,
         min_length=36,
         max_length=36,
-        description="Source dataset ID. `null` when the dataset has since been deleted",
+        description="Source dataset ID",
     )
     dataset_name: Optional[str] = Field(
         None,
-        description="Source dataset name. `null` when the dataset has since been deleted",
+        description="Source dataset name",
     )
     details: Optional[Dict[str, Any]] = Field(
-        None, description="Job configuration and runtime metadata. `null` if unset"
+        None, description="Job configuration and runtime metadata"
     )
     results: Optional[Dict[str, Any]] = Field(
-        None, description="Job output payload. `null` until the job produces results"
+        None, description="Job output payload"
     )
-    created_at: str = Field(description="Creation timestamp (ISO 8601 UTC)")
-    updated_at: str = Field(description="Last-update timestamp (ISO 8601 UTC)")
+    created_at: str = Field(description="When the job was created (ISO 8601 UTC)")
+    updated_at: str = Field(description="When the job was last updated (ISO 8601 UTC)")
 
 
 class JobsListResponse(BaseModel):
