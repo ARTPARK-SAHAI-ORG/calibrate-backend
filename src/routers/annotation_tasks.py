@@ -82,6 +82,51 @@ AnnotationEvalStatus = Literal["queued", "in_progress", "completed", "failed"]
 
 _EXAMPLE_ID = "f47ac10b-58cc-4372-a567-0e02b2c3d479"
 
+# Per-type item payload shape, rendered on the `payload` field of AnnotationItemPayload.
+# `name` is required and unique within the task for every type; the rest depends on the
+# task `type` (see AnnotationTaskCreate.type). `evaluator_variables` maps an evaluator ID
+# to that evaluator's `{{variable}}` values for the item (used by `llm` and `llm-general`).
+_ITEM_PAYLOAD_DESCRIPTION = (
+    "The item's payload. `name` is required and unique within the task for every type. "
+    "The other fields depend on the task `type`:\n\n"
+    "- `stt`: `name`, `reference_transcript`, `predicted_transcript`\n"
+    "- `tts`: `name` plus the synthesized-speech fields your task provides\n"
+    "- `llm`: `name`, `chat_history` (list of `{role, content}` turns ending at the user turn), "
+    "`agent_response` (the reply to judge), optional `evaluator_variables`\n"
+    "- `llm-general`: `name`, `input`, `output`, optional `evaluator_variables`\n"
+    "- `conversation`: `name`, `transcript` (list of `{role, content}` turns), optional `evaluator_variables`\n\n"
+    "`evaluator_variables` maps an evaluator ID to that evaluator's `{{variable}}` values for this item"
+)
+
+# Representative payloads, one per task type, surfaced as request examples in the docs.
+_ITEM_PAYLOAD_EXAMPLES = [
+    {
+        "name": "clip-001",
+        "reference_transcript": "the quick brown fox",
+        "predicted_transcript": "the quick brown fax",
+    },
+    {
+        "name": "case-001",
+        "chat_history": [
+            {"role": "user", "content": "What is my account balance?"},
+        ],
+        "agent_response": "Your balance is $42.00.",
+    },
+    {
+        "name": "pair-001",
+        "input": "Summarize: the meeting is moved to 3pm.",
+        "output": "The meeting is now at 3pm.",
+    },
+    {
+        "name": "convo-001",
+        "transcript": [
+            {"role": "assistant", "content": "Hi, how can I help?"},
+            {"role": "user", "content": "I lost my card."},
+            {"role": "assistant", "content": "I can block it now. Can you confirm the last 4 digits?"},
+        ],
+    },
+]
+
 
 class EvaluatorLinkResponse(BaseModel):
     message: str = Field(
@@ -605,7 +650,8 @@ async def reorder_task_evaluators(
 
 class AnnotationItemPayload(BaseModel):
     payload: Any = Field(
-        description="The item's payload. Its shape depends on the task `type`. `payload['name']` is **required** for every type and must be unique within the task"
+        description=_ITEM_PAYLOAD_DESCRIPTION,
+        examples=_ITEM_PAYLOAD_EXAMPLES,
     )
     annotations: Optional[Dict[str, Any]] = Field(
         None,
