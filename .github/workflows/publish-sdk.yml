@@ -178,6 +178,13 @@ jobs:
             --skip-testing \
             --skip-upload-spec \
             -y
+          # mcp-typescript emits no release workflow (unlike the CLI's
+          # generateRelease), so inject our npm-publish workflow into the
+          # generated tree before sync. It ships in the output and survives the
+          # rsync --delete, so the client repo publishes itself on the v* tag.
+          mkdir -p .speakeasy/out/mcp/.github/workflows
+          cp .github/client-templates/calibrate-mcp-publish.yml \
+            .speakeasy/out/mcp/.github/workflows/publish.yml
           ./.github/scripts/sync-client-repo.sh \
             dalmia/calibrate-mcp \
             .speakeasy/out/mcp \

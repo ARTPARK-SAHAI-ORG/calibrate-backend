@@ -34,9 +34,10 @@ production GitHub release published
             │    → calibrate-cli release.yaml → GoReleaser → GitHub Release + homebrew-tap
             └─ publish-mcp (parallel)
                  speakeasy run -t calibrate-mcp
+                 → inject .github/workflows/publish.yml (backend template)
                  → sync-client-repo.sh → dalmia/calibrate-mcp
                  → tag v<version> (PUSH_TO_REPO_TOKEN)
-                 → calibrate-mcp ci.yml → npm (@dalmia/calibrate-mcp)
+                 → calibrate-mcp publish.yml → npm (@dalmia/calibrate-mcp)
 ```
 
 Workflows: [`.github/workflows/auto-publish-sdk.yml`](.github/workflows/auto-publish-sdk.yml) (auto + manual gate), [`.github/workflows/publish-sdk.yml`](.github/workflows/publish-sdk.yml) (generate + push)  
@@ -117,18 +118,22 @@ On each publish, generated output overwrites `calibrate-cli` except:
 
 Speakeasy **`mcp-typescript`** generates a standalone MCP server from the same public OpenAPI spec + overlay as the CLI. Generate + sync run in `publish-sdk.yml` (`publish-mcp` job).
 
+**Publish workflow is injected, not Speakeasy-generated.** Unlike the CLI (`generateRelease: true` → `release.yaml`), the `mcp-typescript` target emits **no** release workflow. So `publish-mcp` copies [`.github/client-templates/calibrate-mcp-publish.yml`](.github/client-templates/calibrate-mcp-publish.yml) into the generated tree as `.github/workflows/publish.yml` before sync. It ships in the output (survives the `rsync --delete`), so the client repo publishes itself to npm on the `v*` tag — same "client repo self-publishes" pattern as the SDK/CLI. Edit the template in **this** repo; never hand-edit it in `calibrate-mcp` (overwritten every release). Pushing it requires the `workflow` scope on `PUSH_TO_REPO_TOKEN` (already needed for the CLI's `release.yaml`).
+
 ### Client repo secrets
 
 Add to **`dalmia/calibrate-mcp`** → Settings → Secrets and variables → Actions:
 
 | Secret | Purpose |
 |--------|---------|
-| `NPM_TOKEN` | Publish `@dalmia/calibrate-mcp` to npm on `v*` tags |
+| `NPM_TOKEN` | Publish `@dalmia/calibrate-mcp` to npm on `v*` tags (used by the injected `publish.yml`) |
 
 ### Repos
 
 - [ ] **`dalmia/calibrate-mcp`** exists (can start empty; first sync populates generated tree)
 - [ ] **`README.md`** in `calibrate-mcp` — hand-written; excluded from sync (same pattern as CLI)
+- [ ] **`.github/workflows/publish.yml`** in `calibrate-mcp` — injected from the backend template on each sync; do not hand-edit
+- [ ] First publish is a scoped-package `--access public` (handled by the injected workflow); the npm org/user must allow the `@dalmia` scope
 
 ### Cursor local config (example)
 

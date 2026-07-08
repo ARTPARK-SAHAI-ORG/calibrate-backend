@@ -1,0 +1,37 @@
+# Injected into dalmia/calibrate-mcp as .github/workflows/publish.yml by the
+# publish-mcp job in publish-sdk.yml (Speakeasy's mcp-typescript target does NOT
+# generate a release workflow, unlike the CLI's generateRelease: true). Publishes
+# @dalmia/calibrate-mcp to npm when a v* tag is pushed. Requires NPM_TOKEN in the
+# calibrate-mcp repo secrets. This file lives in the backend repo as the single
+# source of truth; do not hand-edit it in the client repo (it is overwritten on
+# every release sync).
+name: Publish to npm
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: oven-sh/setup-bun@v2
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          registry-url: https://registry.npmjs.org
+
+      # prepublishOnly runs the bun + tsc build; --access public is required for
+      # the scoped package's first publish.
+      - name: Publish to npm
+        run: npm publish --access public
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
