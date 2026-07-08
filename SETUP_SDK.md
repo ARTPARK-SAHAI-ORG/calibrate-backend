@@ -89,7 +89,7 @@ The `sync-docs` job runs **after** `publish` completes so the docs workflow sees
 
 `sync-skills` does **not** need its own secret. `PUSH_TO_REPO_TOKEN` is a classic PAT, and classic PATs are not repo-restricted — they can write to any repo their owner can access. Since `dalmia/calibrate-skills` shares the `dalmia/` owner with the client repos the token already pushes to, it can dispatch `repository_dispatch` there too. (Contrast `DOCS_SYNC_REPO_TOKEN`, which must be separate because the docs repo is under a different owner.)
 
-**Only step on the skills side** (not this repo): add the `OPENAPI_SPEC_URL` variable under `dalmia/calibrate-skills` → Settings → Secrets and variables → Actions → Variables, so its drift check can fetch the live spec. Its [`sync-from-spec.yml`](https://github.com/dalmia/calibrate-skills/blob/main/.github/workflows/sync-from-spec.yml) listener is already merged.
+**Nothing to configure on the skills side.** The published spec URL is a public constant baked into [`sync-from-spec.yml`](https://github.com/dalmia/calibrate-skills/blob/main/.github/workflows/sync-from-spec.yml) as its default, so there is no env var to keep in sync between the two repos. The dispatch may pass `client_payload.spec_url` to override it if the host ever moves, but is not required to.
 
 `sync-skills` drift-checks the skills against the published spec (it does not regenerate them — the skills are prose). It runs after `publish` for parity with `sync-docs`, though it only depends on the spec being live.
 
@@ -260,7 +260,7 @@ uv run --group dev pytest tests/test_sdk_overrides.py -q
 | `sync-docs` fails with 401/403 | `DOCS_SYNC_REPO_TOKEN` missing, expired, or lacks Actions write on `ARTPARK-SAHAI-ORG/calibrate` | Regenerate fine-grained PAT; update Production secret |
 | `sync-skills` fails with 401/403 | `PUSH_TO_REPO_TOKEN` expired, or is a fine-grained PAT not scoped to `dalmia/calibrate-skills` | Ensure it is a classic PAT (reaches all `dalmia/` repos); if fine-grained, add `calibrate-skills` to its repos |
 | `sync-api-spec` never runs on calibrate | calibrate#108 not merged, or `repository_dispatch` not wired | Merge docs PR; confirm `sync-api-spec.yml` listens for `sync-api-spec` |
-| `sync-from-spec` never runs on calibrate-skills | `OPENAPI_SPEC_URL` variable unset, or dispatch not reaching the repo | Set the variable on calibrate-skills; confirm `sync-from-spec.yml` listens for `sync-api-spec` |
+| `sync-from-spec` never runs on calibrate-skills | Dispatch not reaching the repo (token/owner), or the listener not wired | Confirm `PUSH_TO_REPO_TOKEN` is a classic PAT; confirm `sync-from-spec.yml` listens for `sync-api-spec` (spec URL needs no config — it defaults to the public constant) |
 | PAT rejected pushing `release.yaml` | Missing `workflow` scope on `PUSH_TO_REPO_TOKEN` | Add `workflow` scope to the backend PAT |
 | PAT rejected pushing to `calibrate-mcp` | PAT not authorized on `dalmia/calibrate-mcp` | Grant `contents:write` on that repo |
 | Release fails: `gpg_private_key` not supplied | GPG secrets missing in **calibrate-cli** | Add `CLI_GPG_SECRET_KEY` + `CLI_GPG_PASSPHRASE` |
