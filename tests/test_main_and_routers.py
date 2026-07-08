@@ -241,6 +241,27 @@ def test_public_api_docs_are_unauthenticated_and_filtered(client, monkeypatch):
     # still present internally (the frontend uses owner_user_id for default-vs-custom)
     assert "owner_user_id" in _json.dumps(full["components"]["schemas"])
 
+    # The by-name strip is scoped to evaluator schemas only — a non-evaluator
+    # schema that happened to carry one of these field names would keep it.
+    import main as _main
+
+    strip = _main._PUBLIC_SPEC_EVALUATOR_HIDDEN_FIELD_NAMES
+    schemas = {
+        "routers__evaluators__EvaluatorResponse": {"properties": dict.fromkeys(strip)},
+        "DefaultPromptResponse": {"properties": {"kind": {}}},
+        "SomeOtherThing": {
+            "properties": {"kind": {}, "keep": {}},
+            "required": ["kind"],
+        },
+    }
+    _main._strip_hidden_public_fields(schemas)
+    # evaluator schemas lose the internal names...
+    assert schemas["routers__evaluators__EvaluatorResponse"]["properties"] == {}
+    assert "kind" not in schemas["DefaultPromptResponse"]["properties"]
+    # ...but an unrelated schema's identically-named field survives.
+    assert "kind" in schemas["SomeOtherThing"]["properties"]
+    assert schemas["SomeOtherThing"]["required"] == ["kind"]
+
     # Components are trimmed to ONLY the schemas the public paths reference
     # (transitively) — internal/JWT-only model shapes must not leak.
     import json

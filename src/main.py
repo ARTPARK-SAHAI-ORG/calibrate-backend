@@ -246,17 +246,27 @@ _PUBLIC_SPEC_HIDDEN_FIELDS: Dict[str, tuple] = {
     "AgentToolsCreateResponse": ("ids",),
 }
 
-# Distinctive internal field names stripped from EVERY public component schema
-# (no public response should expose them, and the concrete schema name is
-# sometimes module-namespaced, e.g. `routers__evaluators__EvaluatorResponse`, so
-# matching by field name is more robust than by schema name). `owner_user_id` is
-# a raw tenant user ID; `live_version_index` is a UI-only array position (the
-# live version is already identified by the `live_version_id` UUID).
-_PUBLIC_SPEC_HIDDEN_FIELD_NAMES: frozenset = frozenset(
-    # `kind` (single vs side_by_side) is a niche scoring mode not exposed on the
-    # public evaluator surface.
+# Distinctive internal field names stripped from every *evaluator* public
+# component schema. These names only appear on evaluator-shaped models today, but
+# matching them globally by name would silently drop any unrelated future field
+# that happened to reuse one (e.g. a `kind` on some other resource). So the strip
+# is scoped to evaluator schemas via `_is_evaluator_schema` — the concrete schema
+# name is sometimes module-namespaced (e.g. `routers__evaluators__EvaluatorResponse`),
+# which is why we match by schema name rather than pinning an exact list.
+# `owner_user_id` is a raw tenant user ID; `live_version_index` is a UI-only array
+# position (the live version is already identified by the `live_version_id` UUID);
+# `kind` (single vs side_by_side) is a niche scoring mode not on the public surface.
+_PUBLIC_SPEC_EVALUATOR_HIDDEN_FIELD_NAMES: frozenset = frozenset(
     {"owner_user_id", "live_version_index", "kind"}
 )
+
+
+def _is_evaluator_schema(name: str) -> bool:
+    """True for evaluator-shaped component schemas, incl. module-namespaced ones
+    (`routers__evaluators__EvaluatorResponse`) and the evaluator default-prompt
+    response (`DefaultPromptResponse`)."""
+    lowered = name.lower()
+    return "evaluator" in lowered or lowered == "defaultpromptresponse"
 
 
 def _drop_fields(schema: Dict[str, Any], fields) -> None:
@@ -275,10 +285,10 @@ def _strip_hidden_public_fields(schemas: Dict[str, Any]) -> None:
         schema = schemas.get(model)
         if schema:
             _drop_fields(schema, fields)
-    if _PUBLIC_SPEC_HIDDEN_FIELD_NAMES:
-        for schema in schemas.values():
-            if isinstance(schema, dict):
-                _drop_fields(schema, _PUBLIC_SPEC_HIDDEN_FIELD_NAMES)
+    if _PUBLIC_SPEC_EVALUATOR_HIDDEN_FIELD_NAMES:
+        for name, schema in schemas.items():
+            if isinstance(schema, dict) and _is_evaluator_schema(name):
+                _drop_fields(schema, _PUBLIC_SPEC_EVALUATOR_HIDDEN_FIELD_NAMES)
 
 
 def _build_public_openapi() -> Dict[str, Any]:
