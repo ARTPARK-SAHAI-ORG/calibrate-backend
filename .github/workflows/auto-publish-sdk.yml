@@ -169,8 +169,9 @@ jobs:
 
   # dalmia/calibrate-skills drift-checks its agent skills against the live public
   # spec (the skills hardcode CLI flags + payload shapes). Same dispatch as
-  # sync-docs; separate token because the repo is under dalmia/ (personal), not
-  # the org. Independent of sync-docs, so it needs only detect + publish.
+  # sync-docs. Reuses PUSH_TO_REPO_TOKEN: it is a classic PAT (not repo-scoped),
+  # and calibrate-skills is under the same dalmia/ owner as the client repos, so
+  # the token already has dispatch access — no separate secret needed.
   sync-skills:
     needs: [detect, publish]
     if: needs.detect.outputs.should_publish == 'true'
@@ -178,7 +179,7 @@ jobs:
     steps:
       - name: Trigger skills sync
         env:
-          GH_TOKEN: ${{ secrets.SKILLS_SYNC_REPO_TOKEN }}
+          GH_TOKEN: ${{ secrets.PUSH_TO_REPO_TOKEN }}
         run: |
           gh api repos/dalmia/calibrate-skills/dispatches \
             -f event_type=sync-api-spec \
