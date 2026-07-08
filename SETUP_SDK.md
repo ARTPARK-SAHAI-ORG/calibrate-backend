@@ -120,20 +120,24 @@ Speakeasy **`mcp-typescript`** generates a standalone MCP server from the same p
 
 **Publish workflow is injected, not Speakeasy-generated.** Unlike the CLI (`generateRelease: true` → `release.yaml`), the `mcp-typescript` target emits **no** release workflow. So `publish-mcp` copies [`.github/client-templates/calibrate-mcp-publish.yml`](.github/client-templates/calibrate-mcp-publish.yml) into the generated tree as `.github/workflows/publish.yml` before sync. It ships in the output (survives the `rsync --delete`), so the client repo publishes itself to npm on the `v*` tag — same "client repo self-publishes" pattern as the SDK/CLI. Edit the template in **this** repo; never hand-edit it in `calibrate-mcp` (overwritten every release). Pushing it requires the `workflow` scope on `PUSH_TO_REPO_TOKEN` (already needed for the CLI's `release.yaml`).
 
-### Client repo secrets
+**Auth is npm Trusted Publishing (OIDC) — no `NPM_TOKEN` secret.** The injected `publish.yml` authenticates via GitHub's short-lived OIDC identity (`id-token: write`), which npm verifies against a trusted publisher configured on the package. Nothing to store or rotate; provenance attestation is automatic. Trusted publishing needs npm ≥ 11.5.1, so the workflow runs `npm install -g npm@latest` before publishing.
 
-Add to **`dalmia/calibrate-mcp`** → Settings → Secrets and variables → Actions:
+### One-time npm setup
 
-| Secret | Purpose |
-|--------|---------|
-| `NPM_TOKEN` | Publish `@dalmia/calibrate-mcp` to npm on `v*` tags (used by the injected `publish.yml`) |
+1. **Bootstrap the package** — trusted publishing can only be configured on a package that already exists. Do the first publish manually from a local clone of `calibrate-mcp`: `npm publish --access public` (needs `bun` for the build; will prompt for 2FA). Confirm with `npm view @dalmia/calibrate-mcp version`.
+2. **Configure the trusted publisher** — npmjs.com → the `@dalmia/calibrate-mcp` package → **Settings → Trusted Publisher** → add **GitHub Actions**:
+   - Organization/owner: `dalmia`
+   - Repository: `calibrate-mcp`
+   - Workflow filename: `publish.yml`
+   - Environment: *(leave blank)*
+3. **Keep the package public** — `npm access get status @dalmia/calibrate-mcp` should say `public`; the `dalmia` org must allow the `@dalmia` scope. No repo secret is needed.
 
 ### Repos
 
 - [ ] **`dalmia/calibrate-mcp`** exists (can start empty; first sync populates generated tree)
 - [ ] **`README.md`** in `calibrate-mcp` — hand-written; excluded from sync (same pattern as CLI)
 - [ ] **`.github/workflows/publish.yml`** in `calibrate-mcp` — injected from the backend template on each sync; do not hand-edit
-- [ ] First publish is a scoped-package `--access public` (handled by the injected workflow); the npm org/user must allow the `@dalmia` scope
+- [ ] **Trusted publisher** configured on the npm package (GitHub `dalmia/calibrate-mcp`, workflow `publish.yml`) — no `NPM_TOKEN` secret required
 
 ### Cursor local config (example)
 
@@ -217,7 +221,8 @@ uv run --group dev pytest tests/test_sdk_overrides.py -q
 | Release fails: `gpg_private_key` not supplied | GPG secrets missing in **calibrate-cli** | Add `CLI_GPG_SECRET_KEY` + `CLI_GPG_PASSPHRASE` |
 | Release fails: `field token not found in type config.Homebrew` | Speakeasy `.goreleaser.yaml` incompatible with GoReleaser >=2.17 | Merge backend patch (`patch-goreleaser-config.sh`) or move `token` under `repository` in `calibrate-cli`; re-run Release |
 | Homebrew formula never appears | `HOMEBREW_TAP_GITHUB_TOKEN` missing or tap repo missing | Add secret; create `dalmia/homebrew-tap` |
-| MCP npm publish fails | `NPM_TOKEN` missing in **calibrate-mcp** | Add npm automation token to client repo |
+| MCP npm publish fails: OIDC / `id-token` error | Trusted publisher not configured, or repo/workflow/env mismatch | On npmjs.com set the trusted publisher to GitHub `dalmia/calibrate-mcp`, workflow `publish.yml`, blank environment; ensure the workflow has `id-token: write` |
+| MCP npm publish fails: `npm ERR! Trusted publishing requires npm >= 11.5.1` | Runner's bundled npm too old for OIDC | The workflow runs `npm install -g npm@latest`; confirm that step is present |
 | Ugly SDK method names | Overlay out of sync with Public API routes | Update both overlay files; run `test_sdk_overrides.py` |
 | MCP tools missing or misnamed | `x-speakeasy-mcp` missing in `openapi/overlay.yaml` | Add `name` or `scopes` per route; run `test_sdk_overrides.py` |
 
