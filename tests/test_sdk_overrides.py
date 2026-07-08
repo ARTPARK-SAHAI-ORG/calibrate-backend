@@ -80,3 +80,12 @@ def test_every_speakeasy_overlay_has_group_and_method_names():
         assert op.get("x-speakeasy-name-override"), (
             f"{method.upper()} {path}: no x-speakeasy-name-override"
         )
+
+
+def test_every_speakeasy_overlay_has_mcp_metadata():
+    for (path, method), op in _speakeasy_overlay_ops().items():
+        mcp = op.get("x-speakeasy-mcp")
+        assert mcp, f"{method.upper()} {path}: no x-speakeasy-mcp"
+        assert mcp.get("name") or mcp.get("scopes"), (
+            f"{method.upper()} {path}: x-speakeasy-mcp needs name or scopes"
+        )

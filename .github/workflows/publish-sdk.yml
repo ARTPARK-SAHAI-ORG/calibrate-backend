@@ -1,8 +1,9 @@
-name: Publish SDK and CLI
+name: Publish SDK, CLI, and MCP
 
 # Fetches the app's public OpenAPI spec once, then generates in parallel:
 #   - calibrate-sdk (Python) via Fern → dalmia/calibrate-python-sdk
 #   - calibrate CLI via Speakeasy → dalmia/calibrate-cli
+#   - calibrate MCP via Speakeasy → dalmia/calibrate-mcp
 # Setup: SETUP_SDK.md
 #
 # Trigger: workflow_call (from auto-publish-sdk.yml), or workflow_dispatch.
@@ -74,7 +75,7 @@ jobs:
             exit 1
           fi
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
-          echo "Publishing calibrate-sdk (Fern) + Calibrate CLI (Speakeasy) version $VERSION"
+          echo "Publishing calibrate-sdk (Fern) + Calibrate CLI + MCP (Speakeasy) version $VERSION"
 
       - name: Upload public OpenAPI spec
         uses: actions/upload-artifact@v4
@@ -113,12 +114,7 @@ jobs:
       - name: Tag SDK repo to trigger its PyPI publish
         env:
           GH_TOKEN: ${{ secrets.PUSH_TO_REPO_TOKEN }}
-        run: |
-          SDK_REPO="dalmia/calibrate-python-sdk"
-          TAG="v${{ needs.prepare.outputs.version }}"
-          SHA=$(gh api "repos/$SDK_REPO/git/ref/heads/main" --jq .object.sha)
-          gh api "repos/$SDK_REPO/git/refs" -f ref="refs/tags/$TAG" -f sha="$SHA"
-          echo "Tagged $SDK_REPO @ $SHA as $TAG — its ci.yml will publish to PyPI."
+        run: ./.github/scripts/tag-client-repo.sh dalmia/calibrate-python-sdk "${{ needs.prepare.outputs.version }}"
 
   publish-cli:
     needs: prepare
@@ -130,14 +126,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Download public OpenAPI spec
-        uses: actions/download-artifact@v4
-        with:
-          name: public-openapi
-          path: openapi
-
-      - name: Install Speakeasy CLI
-        run: curl -fsSL https://go.speakeasy.com/cli-install.sh | sh
+      - uses: ./.github/actions/setup-speakeasy-gen
 
       - name: Generate Calibrate CLI + sync to repo
         env:
@@ -159,9 +148,55 @@ jobs:
       - name: Tag CLI repo to trigger its release publish
         env:
           GH_TOKEN: ${{ secrets.PUSH_TO_REPO_TOKEN }}
+        run: ./.github/scripts/tag-client-repo.sh dalmia/calibrate-cli "${{ needs.prepare.outputs.version }}"
+
+  publish-mcp:
+    needs: prepare
+    # Gate is skipped on workflow_call; GitHub propagates that skip through
+    # the needs chain unless downstream jobs override with always().
+    if: >-
+      always() &&
+      needs.prepare.result == 'success'
+    runs-on: ubuntu-latest
+    environment: Production
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: ./.github/actions/setup-speakeasy-gen
+
+      - name: Generate Calibrate MCP + sync to repo
+        env:
+          SPEAKEASY_API_KEY: ${{ secrets.SPEAKEASY_API_KEY_MCP }}
+          PUSH_TO_REPO_TOKEN: ${{ secrets.PUSH_TO_REPO_TOKEN }}
         run: |
-          CLI_REPO="dalmia/calibrate-cli"
-          TAG="v${{ needs.prepare.outputs.version }}"
-          SHA=$(gh api "repos/$CLI_REPO/git/ref/heads/main" --jq .object.sha)
-          gh api "repos/$CLI_REPO/git/refs" -f ref="refs/tags/$TAG" -f sha="$SHA"
-          echo "Tagged $CLI_REPO @ $SHA as $TAG — its ci.yml will publish the CLI."
+          if [ -z "$SPEAKEASY_API_KEY" ]; then
+            echo "::warning::SPEAKEASY_API_KEY_MCP is not set; skipping MCP publish."
+            exit 0
+          fi
+          speakeasy run -t calibrate-mcp \
+            --set-version "${{ needs.prepare.outputs.version }}" \
+            --skip-testing \
+            --skip-upload-spec \
+            -y
+          # mcp-typescript emits no release workflow (unlike the CLI's
+          # generateRelease), so inject our npm-publish workflow into the
+          # generated tree before sync. It ships in the output and survives the
+          # rsync --delete, so the client repo publishes itself on the v* tag.
+          mkdir -p .speakeasy/out/mcp/.github/workflows
+          cp .github/client-templates/calibrate-mcp-publish.yml \
+            .speakeasy/out/mcp/.github/workflows/publish.yml
+          ./.github/scripts/sync-client-repo.sh \
+            dalmia/calibrate-mcp \
+            .speakeasy/out/mcp \
+            "chore(mcp): release ${{ needs.prepare.outputs.version }}"
+
+      - name: Tag MCP repo to trigger its release publish
+        env:
+          GH_TOKEN: ${{ secrets.PUSH_TO_REPO_TOKEN }}
+          SPEAKEASY_API_KEY_MCP: ${{ secrets.SPEAKEASY_API_KEY_MCP }}
+        run: |
+          if [ -z "$SPEAKEASY_API_KEY_MCP" ]; then
+            echo "SPEAKEASY_API_KEY_MCP is not set; skipping MCP tag."
+            exit 0
+          fi
+          ./.github/scripts/tag-client-repo.sh dalmia/calibrate-mcp "${{ needs.prepare.outputs.version }}"

@@ -14,3 +14,7 @@ targets:
         target: cli
         source: calibrate-public-api
         output: .speakeasy/out/cli
+    calibrate-mcp:
+        target: mcp-typescript
+        source: calibrate-public-api
+        output: .speakeasy/out/mcp

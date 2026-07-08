@@ -11,6 +11,7 @@ from typing import Iterable
 CLIENT_REPOS = (
     "dalmia/calibrate-python-sdk",
     "dalmia/calibrate-cli",
+    "dalmia/calibrate-mcp",
 )
 TAG_RE = re.compile(r"^v(\d+\.\d+\.\d+)$")
 

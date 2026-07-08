@@ -1,6 +1,6 @@
 name: Validate SDK config
 
-# Validates Fern (Python SDK) + Speakeasy (CLI) client-generation config on PRs
+# Validates Fern (Python SDK) + Speakeasy (CLI + MCP) client-generation config on PRs
 # that touch those files. Fetches the public spec via fetch-public-spec (same as
 # publish-sdk.yml).
 on:
@@ -52,3 +52,13 @@ jobs:
 
       - name: Validate Speakeasy config
         run: speakeasy lint config -d .
+
+      - name: Validate calibrate-mcp target
+        env:
+          SPEAKEASY_API_KEY: ${{ secrets.SPEAKEASY_API_KEY_MCP }}
+        run: |
+          if [ -z "$SPEAKEASY_API_KEY" ]; then
+            echo "SPEAKEASY_API_KEY_MCP is not set; skipping MCP target validation."
+            exit 0
+          fi
+          speakeasy run -t calibrate-mcp --skip-testing --skip-upload-spec -y
