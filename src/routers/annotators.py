@@ -44,17 +44,17 @@ class AnnotatorResponse(BaseModel):
         examples=[_EXAMPLE_ID],
     )
     name: str = Field(description="Annotator name")
-    created_at: str = Field(description="Creation timestamp (ISO 8601 UTC)")
-    updated_at: str = Field(description="Last-update timestamp (ISO 8601 UTC)")
+    created_at: str = Field(description="When the annotator was created (ISO 8601 UTC)")
+    updated_at: str = Field(description="When the annotator was last updated (ISO 8601 UTC)")
     jobs_count: Optional[int] = Field(
-        None, description="Number of labelling jobs assigned to this annotator. Null when not computed"
+        None, description="Number of labelling jobs assigned to this annotator"
     )
     current_agreement: Optional[float] = Field(
         None,
-        description="Latest pairwise mean agreement with other annotators, from 0 to 1. Null when there is no overlap to compute",
+        description="Latest pairwise mean agreement with other annotators, from 0 to 1",
     )
     pair_count: Optional[int] = Field(
-        None, description="Number of comparable annotation pairs behind the current agreement score. Null when none exist"
+        None, description="Number of comparable annotation pairs behind the current agreement score"
     )
 
 
@@ -122,7 +122,7 @@ async def list_annotators(ctx: OrgContext = Depends(get_current_org)):
 @router.get("/{annotator_uuid}", summary="Get annotator")
 async def get_annotator_endpoint(
     annotator_uuid: str = Path(
-        description="Annotator to retrieve.",
+        description="Annotator to retrieve",
         examples=["f47ac10b-58cc-4372-a567-0e02b2c3d479"],
     ),
     bucket: str = Query(
@@ -174,7 +174,7 @@ async def get_annotator_endpoint(
 @router.put("/{annotator_uuid}", response_model=AnnotatorResponse, summary="Update annotator")
 async def update_annotator_endpoint(
     annotator_uuid: str = Path(
-        description="Annotator to update.",
+        description="Annotator to update",
         examples=["f47ac10b-58cc-4372-a567-0e02b2c3d479"],
     ),
     payload: AnnotatorUpdate = ...,
@@ -201,7 +201,7 @@ async def update_annotator_endpoint(
 @router.delete("/{annotator_uuid}", summary="Delete annotator")
 async def delete_annotator_endpoint(
     annotator_uuid: str = Path(
-        description="Annotator to delete.",
+        description="Annotator to delete",
         examples=["f47ac10b-58cc-4372-a567-0e02b2c3d479"],
     ),
     ctx: OrgContext = Depends(get_current_org),

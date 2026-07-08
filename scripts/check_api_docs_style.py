@@ -49,6 +49,47 @@ _BANNED_TERMS = [
     (re.compile(r"\bthe caller(?:'s)?\b"), "address the reader directly ('you' / 'your workspace')"),
     (re.compile(r"\bcaller's workspace\b"), "say 'your workspace'"),
     (re.compile(r"\b8-char\b"), "IDs are UUID v4 (36 chars) — don't say '8-char'"),
+    (
+        re.compile(r"(?i)semantic categor(?:y|ies)"),
+        "don't say 'semantic category' — describe it plainly (e.g. 'what the evaluator judges')",
+    ),
+    (
+        re.compile(r"(?i)\bseeded\b"),
+        "don't say 'seeded' — the reader-facing term for a shipped evaluator is "
+        "'built-in default'",
+    ),
+    (
+        re.compile(r"(?i)\bfree-?(?:text|form)\b"),
+        "drop 'free-text' / 'free-form' — just describe the field (e.g. 'A description of the persona')",
+    ),
+    (
+        # "Replacement X" as a noun-adjective prefix on an update field ("Replacement
+        # persona set", "Replacement free-form payload"). The value IS the new value;
+        # the word is filler. Describe it directly ("The item's new payload"). The
+        # verb form ("Replaces the stored config") is a different word and stays fine.
+        re.compile(r"(?i)\bReplacement\b"),
+        "drop the filler 'Replacement' prefix — describe the value directly "
+        "(e.g. 'The item's new payload'); the verb 'Replaces …' is fine",
+    ),
+    (
+        re.compile(r"(?i)\b(?:creation|last[- ]update) timestamp\b|\btimestamp when\b"),
+        "use the standard timestamp wording: 'When the <thing> was created / was "
+        "last updated (ISO 8601 UTC)'",
+    ),
+    (
+        re.compile(r"(?i)\bmedium\b"),
+        "say 'modality' (text/audio), not 'medium'",
+    ),
+    (
+        re.compile(r"(?i)\binlined\b|\bfor list views\b|\blist shape\b|\bdetail shape\b"),
+        "don't describe the internal response shape ('inlined', 'for list views'); "
+        "say what the value is to the reader",
+    ),
+    (
+        re.compile(r"(?i)\b(?:\d+|zero|one)-(?:based|indexed)\b"),
+        "don't say '1-based' / '0-indexed' (developer jargon); say it plainly, "
+        "e.g. 'the first version is 1'",
+    ),
 ]
 
 # Mechanical bans on rendered doc text (see "Brevity & mechanics" in the skill).
@@ -68,8 +109,82 @@ _MECHANICS = [
         "don't say 'deep-merge' in docs (implementation jargon); describe the effect",
     ),
     (
+        # Type+caveat parenthetical, e.g. "(object, optional)", "(array, required)",
+        # "(string, optional)". This is the "(detail)" template the house style
+        # bans: parentheses are for a bare unit/format/example only, never a
+        # type-plus-required/optional gloss. Move required/optional into prose.
+        re.compile(
+            r"(?i)\((?:object|array|string|bool|boolean|int|integer|number"
+            r"|dict|list|float)(?:\[[^\]]*\])?,\s*(?:required|optional)\)"
+        ),
+        "don't use a '(type, required/optional)' parenthetical (the '(detail)' "
+        "template): say it in prose, e.g. 'the required conversation history'",
+    ),
+    (
         re.compile(r"(?i)human-readable"),  # filler
         "'Human-readable' is filler; drop it",
+    ),
+    (
+        re.compile(r"(?i)hop-by-hop"),  # HTTP-plumbing jargon
+        "don't say 'hop-by-hop' (HTTP-plumbing jargon); describe the effect for "
+        "the reader, or drop it if it doesn't affect how they call the API",
+    ),
+    (
+        # UI verb for API persistence. An API doesn't "save" — it creates, stores,
+        # or persists. "before saving an agent", "a saved agent", "skip saving"
+        # read like a form's Save button. Say "create" / "an existing agent" /
+        # "stored". "stored config" already uses the allowed adjective.
+        re.compile(r"(?i)\bsav(?:e|es|ed|ing)\b"),
+        "don't use the UI verb 'save/saving/saved' for API persistence; say "
+        "'create', 'store', 'persist', or 'an existing <thing>'",
+    ),
+    (
+        # Adverb+participle compound modifier before a noun, e.g. "already-linked
+        # tests", "newly-created rows". Rewrite as a relative clause: "tests that
+        # are already linked". Domain terms like "soft-deleted" are intentionally
+        # not matched (the adverb list is temporal-state only).
+        re.compile(r"(?i)\b(?:already|newly|previously|recently|currently|freshly|just)-\w+"),
+        "don't hyphenate an adverb onto a participle (e.g. 'already-linked'): "
+        "rephrase as a relative clause, 'tests that are already linked'",
+    ),
+    (
+        # Storage/DB implementation jargon leaking into user-facing text, e.g.
+        # "link row IDs", "pinned on the pivot", "auto-increment link row ID".
+        # Describe what the value means to the reader, not how it's stored. Bare
+        # "row(s)" is fine ("max rows per eval"); only the storage-noun forms below.
+        re.compile(r"(?i)\b(?:pivot|auto-increment|(?:link|join|db|table)[ -]rows?|row ids?)\b"),
+        "don't expose storage jargon (pivot, link row, row id, auto-increment) in "
+        "docs; describe the value's meaning (e.g. 'IDs of the links created')",
+    ),
+    (
+        # Nullability caveats: the `| null` type is already shown, so ". null until
+        # done", ". null if unset", ", or null" etc. are redundant. Matches only
+        # caveat keywords after null, so INPUT-EFFECT phrasings survive ("null
+        # clears the cell", "null to clear", "null marks a row-level overall").
+        re.compile(
+            r"(?i)(?:,\s*or\s+null\b"
+            r"|[.]\s*`?null`?\s+(?:until|if|when|unless|for|on|before|while|unavailable)\b)"
+        ),
+        "drop the nullability caveat (the `| null` type already shows it); keep "
+        "null only when it describes an input effect ('`null` clears the cell')",
+    ),
+    (
+        # "per-X" compound modifier. Say "for each X". The lookbehind keeps this
+        # from firing mid-token inside hyphenated code identifiers/paths like
+        # `max-rows-per-eval` (there "per" is preceded by a hyphen, not prose).
+        re.compile(r"(?i)(?<![\w-])per-[a-z]+"),
+        "say 'for each X', not 'per-X' (e.g. 'results for each model', not "
+        "'per-model results')",
+    ),
+    (
+        # Validation caveats the API already enforces + returns a clear 400 for.
+        # Describe what the field IS, not the empty-input rule ("Must be
+        # non-empty", "(non-empty)"). This targets rendered field docs only —
+        # runtime HTTPException error messages ("... must be non-empty") are not
+        # scanned and stay, since they're the actual error feedback.
+        re.compile(r"(?i)non-empty"),
+        "drop 'non-empty' — the API rejects empty input with a 400 already; "
+        "describe what the field holds",
     ),
 ]
 
@@ -162,6 +277,50 @@ def _check_model_fields(cls: ast.ClassDef, rel: str) -> list[str]:
                             f"{loc}: unit abbreviation repeats the '{suffix}' "
                             f"field-name suffix — say '{word}' or drop it"
                         )
+    return out
+
+
+def _trailing_literal(node: ast.expr) -> Optional[str]:
+    """The statically-known trailing string of a description/summary value, or
+    None when the tail can't be judged (ends in an f-string `{expr}`, a variable,
+    etc.). Handles plain literals, f-strings (JoinedStr), and `+` concatenations —
+    so `f"...{n}..batch."` and `CONST + "...tail."` are both inspected, not just
+    bare `"..."` literals.
+    """
+    if isinstance(node, ast.Constant):
+        return node.value if isinstance(node.value, str) else None
+    if isinstance(node, ast.JoinedStr):
+        last = node.values[-1] if node.values else None
+        return last.value if isinstance(last, ast.Constant) and isinstance(last.value, str) else None
+    if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Add):
+        return _trailing_literal(node.right)
+    return None
+
+
+def _check_trailing_periods(tree: ast.Module, rel: str) -> list[str]:
+    """Flag `description=` / `summary=` values whose text ends in a single period.
+    Param/field descriptions and summaries are terse labels in the house style,
+    not sentences, so they carry no trailing period (internal sentence periods and
+    `...` ellipses are fine). Docstrings are NOT checked here — they are prose and
+    keep their terminal period. F-strings and concatenations are inspected via
+    their trailing literal.
+    """
+    out = []
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
+            continue
+        for kw in node.keywords:
+            if kw.arg not in ("description", "summary"):
+                continue
+            tail = _trailing_literal(kw.value)
+            if tail is None:
+                continue
+            text = tail.rstrip()
+            if text.endswith(".") and not text.endswith(".."):
+                out.append(
+                    f"{rel}:{node.lineno}: {kw.arg}= must not end with a period "
+                    "(terse label, not a sentence); drop the trailing '.'"
+                )
     return out
 
 
@@ -334,6 +493,19 @@ def find_violations(routers_dir: Path = ROUTERS_DIR) -> list[str]:
                 if dec is not None:
                     violations.extend(_check_route(node, dec, rel))
         violations.extend(_check_terminology(tree, rel))
+        violations.extend(_check_trailing_periods(tree, rel))
+
+    # Shared non-router modules that still produce rendered API doc text (e.g.
+    # pagination.py builds Query() descriptions injected into list endpoints).
+    # Only the `description=`/`summary=`-scoped check applies — their own module
+    # and function docstrings are internal code prose that never renders as API
+    # docs, so the docstring-based terminology pass is deliberately NOT run here.
+    for extra in (REPO_ROOT / "src" / "pagination.py",):
+        if not extra.exists():
+            continue
+        rel = str(extra.relative_to(REPO_ROOT))
+        tree = ast.parse(extra.read_text(), filename=str(extra))
+        violations.extend(_check_trailing_periods(tree, rel))
     return violations
 
 

@@ -39,7 +39,7 @@ _TEST_TYPE_DESCRIPTION = (
     "What the test judges:\n\n"
     "- `response`: judges the generated reply\n"
     "- `tool_call`: diffs the generated tool calls\n"
-    "- `conversation`: judges the full conversation"
+    "- `conversation`: judges the full conversation\n"
 )
 
 # Test name uniqueness is workspace-scoped on single create; bulk create adds
@@ -53,9 +53,9 @@ _TEST_NAME_DESCRIPTION = "Name of the test, unique within the workspace"
 # passthrough, so it's documented, not enforced.
 _TEST_CONFIG_DESCRIPTION = """The calibrate test config. Three top-level keys.
 
-- `history` (array, required): the conversation up to the agent's turn. Each item is `{role, content}` with `role` one of `user`, `assistant`, `tool`. A `tool` message also carries `tool_call_id` and `name`.
-- `evaluation` (object, required): `{type, ...}`, where `type` matches the test's `type` (below).
-- `settings` (object, optional): e.g. `{"language": "en"}`.
+- `history`: the required conversation up to the agent's turn. Each item is `{role, content}` with `role` one of `user`, `assistant`, `tool`. A `tool` message also carries `tool_call_id` and `name`.
+- `evaluation`: the required `{type, ...}`, where `type` matches the test's `type` below.
+- `settings`: an optional object, e.g. `{"language": "en"}`.
 
 `evaluation` by test type:
 - `response`: judge the agent's reply, graded by the linked evaluators. `{"type": "response"}`
@@ -120,7 +120,8 @@ class EvaluatorRef(BaseModel):
     )
     variable_values: Optional[Dict[str, Any]] = Field(
         None,
-        description="Values for the evaluator's `{{placeholder}}` variables, pinned per test. Omit to inherit the evaluator version's defaults",
+        description="Values for the evaluator's `{{placeholder}}` variables, pinned on this test. Omit to inherit the evaluator version's defaults",
+        examples=[{"criteria": "The reply must cite the refund window"}],
     )
 
 
@@ -130,7 +131,16 @@ class TestCreate(BaseModel):
     config: Optional[Dict[str, Any]] = Field(
         None,
         description=_TEST_CONFIG_DESCRIPTION
-        + "\n\nOmit to create the test with no config and fill it in later via update.",
+        + "\n\nOmit to create the test with no config and fill it in later via update",
+        examples=[
+            {
+                "history": [
+                    {"role": "user", "content": "What is your return policy?"}
+                ],
+                "evaluation": {"type": "response"},
+                "settings": {"language": "en"},
+            }
+        ],
     )
     evaluators: Optional[List[EvaluatorRef]] = Field(
         None,
@@ -145,12 +155,21 @@ class TestUpdate(BaseModel):
     type: Optional[TestType] = Field(
         None,
         description=_TEST_TYPE_DESCRIPTION
-        + "\n\nImmutable. Omit, or send the existing value. A different value is rejected (400).",
+        + "\n\nImmutable. Omit it, or send the current value",
     )
     config: Optional[Dict[str, Any]] = Field(
         None,
         description=_TEST_CONFIG_DESCRIPTION
-        + "\n\nReplaces the stored config. Omit to leave unchanged.",
+        + "\n\nReplaces the stored config. Omit to leave unchanged",
+        examples=[
+            {
+                "history": [
+                    {"role": "user", "content": "What is your return policy?"}
+                ],
+                "evaluation": {"type": "response"},
+                "settings": {"language": "en"},
+            }
+        ],
     )
     evaluators: Optional[List[EvaluatorRef]] = Field(
         None,
@@ -169,13 +188,13 @@ class TestResponse(BaseModel):
     type: TestType = Field(description=_TEST_TYPE_DESCRIPTION)
     config: Optional[Dict[str, Any]] = Field(
         None,
-        description="Config for the test (`history`, `evaluation`, optional `settings`)",
+        description="The stored config: `history`, `evaluation`, and an optional `settings`",
     )
     created_at: str = Field(
-        description="Timestamp when the test was created (ISO 8601 UTC)"
+        description="When the test was created (ISO 8601 UTC)"
     )
     updated_at: str = Field(
-        description="Timestamp when the test was last updated (ISO 8601 UTC)"
+        description="When the test was last updated (ISO 8601 UTC)"
     )
     evaluators: List[Dict[str, Any]] = Field(
         default=[],
@@ -232,7 +251,7 @@ class ExpectedToolCall(BaseModel):
 class BulkTestItem(BaseModel):
     name: str = Field(description=_TEST_NAME_DESCRIPTION + " and within the batch")
     conversation_history: List[ChatMessage] = Field(
-        description="Ordered messages ending at the user turn the agent should answer (must be non-empty)"
+        description="Ordered messages ending at the user turn the agent should answer"
     )
     evaluators: Optional[List[EvaluatorRef]] = Field(
         None,
@@ -245,14 +264,14 @@ class BulkTestItem(BaseModel):
 
 class BulkTestUpload(BaseModel):
     type: TestType = Field(
-        description=_TEST_TYPE_DESCRIPTION + "\n\nApplied to every test in the batch."
+        description=_TEST_TYPE_DESCRIPTION + "\n\nApplied to every test in the batch"
     )
     tests: List[BulkTestItem] = Field(
-        description=f"Test items to create (non-empty, max {500} per request, names unique within the batch)"
+        description=f"Test items to create, at most {500} per request, with names unique within the batch"
     )
     agent_uuids: Optional[List[str]] = Field(
         None,
-        description="Agents (IDs) to link every created test to. Omit to link none",
+        description="IDs of agents to link every created test to. Omit to link none",
         examples=[[_EXAMPLE_AGENT_UUID]],
     )
     language: Optional[str] = Field(
@@ -311,20 +330,20 @@ class BulkTestUploadResponse(BaseModel):
     message: str = Field(description="Confirmation message")
     warnings: Optional[List[str]] = Field(
         None,
-        description="Non-fatal issues (e.g. agents some tests couldn't link to). Null when there were none",
+        description="Non-fatal issues, such as agents some tests could not be linked to",
     )
 
 
 class BulkTestDelete(BaseModel):
     test_uuids: List[str] = Field(
-        description="IDs of the tests to delete (non-empty)",
+        description="IDs of the tests to delete",
         examples=[[_EXAMPLE_TEST_UUID]],
     )
 
 
 class BulkTestDeleteResponse(BaseModel):
     deleted_count: int = Field(
-        description="Number of tests actually deleted (excludes IDs not in your workspace)"
+        description="Number of tests actually deleted, excluding IDs not in your workspace"
     )
     message: str = Field(description="Confirmation message")
 
@@ -334,7 +353,7 @@ def _validate_evaluators(
 ) -> List[Dict[str, Any]]:
     """Validate that each referenced evaluator is visible to the workspace and that its
     `evaluator_type` matches the test's type (`response`/`tool_call` ⇒ `llm`,
-    `conversation` ⇒ `simulation`). Returns db-ready refs."""
+    `conversation` ⇒ `conversation`). Returns validated refs."""
     required_evaluator_type = REQUIRED_EVALUATOR_TYPE_BY_TEST_TYPE.get(test_type)
     if required_evaluator_type is None:
         raise HTTPException(status_code=400, detail=f"Unknown test type '{test_type}'")

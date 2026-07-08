@@ -21,7 +21,7 @@ _EXAMPLE_ID = "f47ac10b-58cc-4372-a567-0e02b2c3d479"
 class ScenarioCreate(BaseModel):
     name: str = Field(description="Scenario name, unique within the workspace")
     description: Optional[str] = Field(
-        None, description="Free-text description of the scenario. Omit to leave unset"
+        None, description="A description of the scenario. Omit to leave unset"
     )
 
 
@@ -43,7 +43,7 @@ class ScenarioResponse(BaseModel):
     )
     name: str = Field(description="Scenario name")
     description: Optional[str] = Field(
-        None, description="Free-text description, or null if unset"
+        None, description="Description of the scenario"
     )
     created_at: str = Field(description="When the scenario was created (ISO 8601 UTC)")
     updated_at: str = Field(description="When the scenario was last updated (ISO 8601 UTC)")
@@ -86,7 +86,7 @@ async def list_scenarios(ctx: OrgContext = Depends(get_current_org)):
 @router.get("/{scenario_uuid}", response_model=ScenarioResponse, summary="Get scenario")
 async def get_scenario_endpoint(
     scenario_uuid: str = Path(
-        description="The scenario to retrieve.",
+        description="The scenario to retrieve",
         examples=[_EXAMPLE_ID],
     ),
     ctx: OrgContext = Depends(get_current_org),
@@ -102,7 +102,7 @@ async def get_scenario_endpoint(
 async def update_scenario_endpoint(
     scenario: ScenarioUpdate,
     scenario_uuid: str = Path(
-        description="The scenario to update.",
+        description="The scenario to update",
         examples=[_EXAMPLE_ID],
     ),
     ctx: OrgContext = Depends(get_current_org),
@@ -135,7 +135,7 @@ async def update_scenario_endpoint(
 @router.delete("/{scenario_uuid}", summary="Delete scenario")
 async def delete_scenario_endpoint(
     scenario_uuid: str = Path(
-        description="The scenario to delete.",
+        description="The scenario to delete",
         examples=[_EXAMPLE_ID],
     ),
     ctx: OrgContext = Depends(get_current_org),

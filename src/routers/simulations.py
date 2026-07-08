@@ -52,6 +52,8 @@ from utils import (
     DataTypeLiteral,
     OutputTypeLiteral,
     EvaluatorKindLiteral,
+    DATA_TYPE_DESCRIPTION,
+    OUTPUT_TYPE_DESCRIPTION,
     get_s3_client,
     get_s3_output_config,
     list_object_keys,
@@ -296,7 +298,7 @@ class EvaluatorRef(BaseModel):
     )
     variable_values: Optional[Dict[str, Any]] = Field(
         None,
-        description="Values for the evaluator's `{{placeholder}}` variables, pinned on the pivot at link time. Omit to use version defaults",
+        description="Values for the evaluator's `{{placeholder}}` variables, pinned at link time. Omit to use version defaults",
     )
 
 
@@ -334,13 +336,13 @@ class SimulationUpdate(BaseModel):
         None, description="Agent to link. Empty string (`\"\"`) clears the agent. Omit to leave unchanged"
     )
     persona_uuids: Optional[List[str]] = Field(
-        None, description="Replacement persona set (replaces existing). Omit to leave unchanged"
+        None, description="The personas to use, replacing the current set. Omit to leave unchanged"
     )
     scenario_uuids: Optional[List[str]] = Field(
-        None, description="Replacement scenario set (replaces existing). Omit to leave unchanged"
+        None, description="The scenarios to use, replacing the current set. Omit to leave unchanged"
     )
     evaluators: Optional[List[EvaluatorRef]] = Field(
-        None, description="Replacement evaluator set (replaces existing). Omit to leave unchanged"
+        None, description="The evaluators to use, replacing the current set. Omit to leave unchanged"
     )
 
 
@@ -407,12 +409,12 @@ class PersonaResponse(BaseModel):
         examples=[_EXAMPLE_ID],
     )
     name: str = Field(description="Persona name")
-    description: Optional[str] = Field(None, description="Persona description, or null")
+    description: Optional[str] = Field(None, description="Persona description")
     config: Optional[Dict[str, Any]] = Field(
-        None, description="Persona config (e.g. gender, language, interruption sensitivity), or null"
+        None, description="Persona config (e.g. gender, language, interruption sensitivity)"
     )
-    created_at: str = Field(description="Creation timestamp (ISO 8601 UTC)")
-    updated_at: str = Field(description="Last-update timestamp (ISO 8601 UTC)")
+    created_at: str = Field(description="When the persona was created (ISO 8601 UTC)")
+    updated_at: str = Field(description="When the persona was last updated (ISO 8601 UTC)")
 
 
 class ScenarioResponse(BaseModel):
@@ -423,9 +425,9 @@ class ScenarioResponse(BaseModel):
         examples=[_EXAMPLE_ID],
     )
     name: str = Field(description="Scenario name")
-    description: Optional[str] = Field(None, description="Scenario description, or null")
-    created_at: str = Field(description="Creation timestamp (ISO 8601 UTC)")
-    updated_at: str = Field(description="Last-update timestamp (ISO 8601 UTC)")
+    description: Optional[str] = Field(None, description="Scenario description")
+    created_at: str = Field(description="When the scenario was created (ISO 8601 UTC)")
+    updated_at: str = Field(description="When the scenario was last updated (ISO 8601 UTC)")
 
 
 class EvaluatorResponse(BaseModel):
@@ -436,24 +438,31 @@ class EvaluatorResponse(BaseModel):
         examples=[_EXAMPLE_ID],
     )
     name: str = Field(description="Evaluator name")
-    description: Optional[str] = Field(None, description="Evaluator description, or null")
+    description: Optional[str] = Field(None, description="Evaluator description")
     evaluator_type: EvaluatorTypeLiteral = Field(
-        "conversation", description="Semantic category (always `conversation` for simulations)"
+        "conversation", description="What the evaluator judges (always `conversation` for simulations)"
     )
-    data_type: DataTypeLiteral = Field("text", description="Medium the judge consumes")
-    kind: EvaluatorKindLiteral = Field("single", description="Scoring mode: single output vs. side-by-side comparison")
-    output_type: OutputTypeLiteral = Field("binary", description="Output shape: pass/fail or numeric score")
-    output_config: Optional[Dict[str, Any]] = Field(None, description="Rubric pinned at link time, or null")
+    data_type: DataTypeLiteral = Field("text", description=DATA_TYPE_DESCRIPTION)
+    kind: EvaluatorKindLiteral = Field(
+        "single",
+        description=(
+            "How the evaluator scores:\n\n"
+            "- `single`: judges one output\n"
+            "- `side_by_side`: compares two outputs and picks a winner\n"
+        ),
+    )
+    output_type: OutputTypeLiteral = Field("binary", description=OUTPUT_TYPE_DESCRIPTION)
+    output_config: Optional[Dict[str, Any]] = Field(None, description="The rubric, pinned at link time")
     evaluator_version_id: str = Field(
         min_length=36,
         max_length=36,
-        description="Version ID pinned on the pivot at link time",
+        description="Version ID pinned at link time",
         examples=[_EXAMPLE_ID],
     )
-    version_number: int = Field(description="1-based number of the pinned version")
+    version_number: int = Field(description="Number of the pinned version. The first version is 1")
     judge_model: str = Field(description="Judge model for the pinned version")
-    variables: Optional[List[Dict[str, Any]]] = Field(None, description="Declared prompt variables, or null")
-    variable_values: Optional[Dict[str, Any]] = Field(None, description="Values pinned for this link, or null")
+    variables: Optional[List[Dict[str, Any]]] = Field(None, description="Declared prompt variables")
+    variable_values: Optional[Dict[str, Any]] = Field(None, description="Values pinned for this link")
 
 
 class AgentSummaryResponse(BaseModel):
@@ -467,9 +476,9 @@ class AgentSummaryResponse(BaseModel):
     type: Literal["agent", "connection"] = Field(
         description=AGENT_TYPE_DESCRIPTION
     )
-    config: Optional[Dict[str, Any]] = Field(None, description="Agent config, or null")
-    created_at: str = Field(description="Creation timestamp (ISO 8601 UTC)")
-    updated_at: str = Field(description="Last-update timestamp (ISO 8601 UTC)")
+    config: Optional[Dict[str, Any]] = Field(None, description="Agent config")
+    created_at: str = Field(description="When the agent was created (ISO 8601 UTC)")
+    updated_at: str = Field(description="When the agent was last updated (ISO 8601 UTC)")
 
 
 class SimulationListResponse(BaseModel):
@@ -480,9 +489,9 @@ class SimulationListResponse(BaseModel):
         examples=[_EXAMPLE_ID],
     )
     name: str = Field(description="Simulation name")
-    agent: Optional[AgentSummaryResponse] = Field(None, description="Linked agent summary, or null if none linked")
-    created_at: str = Field(description="Creation timestamp (ISO 8601 UTC)")
-    updated_at: str = Field(description="Last-update timestamp (ISO 8601 UTC)")
+    agent: Optional[AgentSummaryResponse] = Field(None, description="Linked agent summary")
+    created_at: str = Field(description="When the simulation was created (ISO 8601 UTC)")
+    updated_at: str = Field(description="When the simulation was last updated (ISO 8601 UTC)")
 
 
 class SimulationDetailResponse(BaseModel):
@@ -493,9 +502,9 @@ class SimulationDetailResponse(BaseModel):
         examples=[_EXAMPLE_ID],
     )
     name: str = Field(description="Simulation name")
-    agent: Optional[AgentSummaryResponse] = Field(None, description="Linked agent summary, or null if none linked")
-    created_at: str = Field(description="Creation timestamp (ISO 8601 UTC)")
-    updated_at: str = Field(description="Last-update timestamp (ISO 8601 UTC)")
+    agent: Optional[AgentSummaryResponse] = Field(None, description="Linked agent summary")
+    created_at: str = Field(description="When the simulation was created (ISO 8601 UTC)")
+    updated_at: str = Field(description="When the simulation was last updated (ISO 8601 UTC)")
     personas: List[PersonaResponse] = Field(description="Linked personas")
     scenarios: List[ScenarioResponse] = Field(description="Linked scenarios")
     evaluators: List[EvaluatorResponse] = Field(description="Linked evaluators with their pinned versions")
@@ -526,10 +535,10 @@ class EvaluationCriterionResult(BaseModel):
         None,
         min_length=36,
         max_length=36,
-        description="Source evaluator ID, echoed from the run. Null if unresolved",
+        description="Source evaluator ID, echoed from the run",
         examples=[_EXAMPLE_ID],
     )
-    description: Optional[str] = Field(None, description="Evaluator's current description, or null")
+    description: Optional[str] = Field(None, description="Evaluator's current description")
 
 
 class SimulationEvaluatorRef(BaseModel):
@@ -542,7 +551,7 @@ class SimulationEvaluatorRef(BaseModel):
         examples=[_EXAMPLE_ID],
     )
     name: str = Field(description="Evaluator's current DB name at response time")
-    description: Optional[str] = Field(None, description="Evaluator's current DB description at response time, or null")
+    description: Optional[str] = Field(None, description="Evaluator's current DB description at response time")
 
 
 class SimulationCaseResult(BaseModel):
@@ -550,17 +559,17 @@ class SimulationCaseResult(BaseModel):
 
     simulation_name: str = Field(description="Case identifier within the run, e.g. `simulation_persona_1_scenario_1`")
     persona: Optional[Dict[str, Any]] = Field(
-        None, description="Full persona object (label, characteristics, gender, language), or null"
+        None, description="Full persona object (label, characteristics, gender, language)"
     )
     scenario: Optional[Dict[str, Any]] = Field(
-        None, description="Full scenario object (name/label and description), or null"
+        None, description="Full scenario object (name/label and description)"
     )
     evaluation_results: Optional[List[EvaluationCriterionResult]] = Field(
-        None, description="Per-evaluator judge results. Null while the case is still in progress"
+        None, description="Judge results for each evaluator"
     )
-    transcript: Optional[List[Dict[str, Any]]] = Field(None, description="Ordered conversation turns, or null")
+    transcript: Optional[List[Dict[str, Any]]] = Field(None, description="Ordered conversation turns")
     audio_urls: Optional[List[str]] = Field(
-        None, description="Presigned URLs for per-turn audio, in conversation order (voice runs only)"
+        None, description="Presigned URLs for audio of each turn, in conversation order (voice runs only)"
     )
     conversation_wav_url: Optional[str] = Field(
         None, description="Presigned URL for the combined conversation.wav (voice runs only)"
@@ -578,23 +587,23 @@ class SimulationRunStatusResponse(BaseModel):
     name: str = Field(description='Display name in `Run {index}` form (creation order)')
     status: TaskStatus = Field(description="Run status")
     type: SimulationRunType = Field(description="Run mode")
-    updated_at: str = Field(description="Last-update timestamp (ISO 8601 UTC)")
+    updated_at: str = Field(description="When the run was last updated (ISO 8601 UTC)")
     total_simulations: Optional[int] = Field(
-        None, description="Expected number of persona x scenario cases. Null before it's known"
+        None, description="Expected number of persona x scenario cases"
     )
     completed_simulations: Optional[int] = Field(
-        None, description="Number of cases finished so far. Null when not tracked"
+        None, description="Number of cases finished so far"
     )
-    metrics: Optional[Dict[str, Any]] = Field(None, description="Aggregated metrics. Null until the run completes")
+    metrics: Optional[Dict[str, Any]] = Field(None, description="Aggregated metrics")
     simulation_results: Optional[List[SimulationCaseResult]] = Field(
-        None, description="Per-case results, or null if none yet"
+        None, description="Results for each case"
     )
     evaluators: Optional[List[SimulationEvaluatorRef]] = Field(
-        None, description="Evaluators used for this run, in link order. Null if none"
+        None, description="Evaluators used for this run, in link order"
     )
-    error: Optional[str] = Field(None, description="Failure message. Null unless the run failed")
+    error: Optional[str] = Field(None, description="Failure message")
     is_public: bool = Field(False, description="Whether the run is shared via a public link")
-    share_token: Optional[str] = Field(None, description="Share token for the public view. Null when private")
+    share_token: Optional[str] = Field(None, description="Share token for the public view")
 
 
 class SimulationRunListItem(BaseModel):
@@ -607,7 +616,7 @@ class SimulationRunListItem(BaseModel):
     name: str = Field(description='Display name in `Run {index}` form (creation order)')
     status: TaskStatus = Field(description="Run status")
     type: SimulationRunType = Field(description="Run mode")
-    updated_at: str = Field(description="Last-update timestamp (ISO 8601 UTC)")
+    updated_at: str = Field(description="When the run was last updated (ISO 8601 UTC)")
 
 
 class SimulationRunsResponse(BaseModel):
@@ -772,14 +781,14 @@ class VisibilityRequest(BaseModel):
 
 class VisibilityResponse(BaseModel):
     is_public: bool = Field(description="Resulting public/private state of the run")
-    share_token: str | None = Field(None, description="Share token when public. Null when private")
+    share_token: str | None = Field(None, description="Share token when public")
 
 
 @router.patch("/run/{task_id}/visibility", response_model=VisibilityResponse, summary="Update simulation run visibility")
 async def update_simulation_run_visibility(
     body: VisibilityRequest,
     task_id: str = PathParam(
-        description="The simulation run to update.",
+        description="The simulation run to update",
         examples=["f47ac10b-58cc-4372-a567-0e02b2c3d479"],
     ),
     ctx: OrgContext = Depends(get_current_org),
@@ -810,7 +819,7 @@ async def update_simulation_run_visibility(
 @router.get("/run/{task_id}", response_model=SimulationRunStatusResponse, summary="Get simulation run status")
 async def get_simulation_run_status(
     task_id: str = PathParam(
-        description="The simulation run to poll.",
+        description="The simulation run to poll",
         examples=["f47ac10b-58cc-4372-a567-0e02b2c3d479"],
     ),
     ctx: OrgContext = Depends(get_current_org),
@@ -934,7 +943,7 @@ async def get_simulation_run_status(
 @router.get("/{simulation_uuid}/runs", response_model=SimulationRunsResponse, summary="List simulation runs")
 async def get_simulation_runs(
     simulation_uuid: str = PathParam(
-        description="The simulation whose runs to list.",
+        description="The simulation whose runs to list",
         examples=["f47ac10b-58cc-4372-a567-0e02b2c3d479"],
     ),
     ctx: OrgContext = Depends(get_current_org),
@@ -977,7 +986,7 @@ async def get_simulation_runs(
 @router.get("/{simulation_uuid}", response_model=SimulationDetailResponse, summary="Get simulation")
 async def get_simulation_endpoint(
     simulation_uuid: str = PathParam(
-        description="The simulation to retrieve.",
+        description="The simulation to retrieve",
         examples=["f47ac10b-58cc-4372-a567-0e02b2c3d479"],
     ),
     ctx: OrgContext = Depends(get_current_org),
@@ -1022,7 +1031,7 @@ async def get_simulation_endpoint(
 async def update_simulation_endpoint(
     simulation: SimulationUpdate,
     simulation_uuid: str = PathParam(
-        description="The simulation to update.",
+        description="The simulation to update",
         examples=["f47ac10b-58cc-4372-a567-0e02b2c3d479"],
     ),
     ctx: OrgContext = Depends(get_current_org),
@@ -1154,7 +1163,7 @@ async def update_simulation_endpoint(
 @router.delete("/{simulation_uuid}", summary="Delete simulation")
 async def delete_simulation_endpoint(
     simulation_uuid: str = PathParam(
-        description="The simulation to delete.",
+        description="The simulation to delete",
         examples=["f47ac10b-58cc-4372-a567-0e02b2c3d479"],
     ),
     ctx: OrgContext = Depends(get_current_org),
@@ -2417,7 +2426,7 @@ def run_simulation_task(
 async def run_simulation_endpoint(
     request: RunSimulationRequest,
     simulation_uuid: str = PathParam(
-        description="The simulation to run.",
+        description="The simulation to run",
         examples=["f47ac10b-58cc-4372-a567-0e02b2c3d479"],
     ),
     ctx: OrgContext = Depends(get_current_org),
@@ -2513,7 +2522,7 @@ async def run_simulation_endpoint(
 @router.post("/run/{job_uuid}/abort", response_model=SimulationRunStatusResponse, summary="Abort simulation run")
 async def abort_simulation_run(
     job_uuid: str = PathParam(
-        description="The in-progress simulation run to abort.",
+        description="The in-progress simulation run to abort",
         examples=["f47ac10b-58cc-4372-a567-0e02b2c3d479"],
     ),
     ctx: OrgContext = Depends(get_current_org),
@@ -2602,7 +2611,7 @@ async def abort_simulation_run(
 @router.delete("/run/{job_uuid}", summary="Delete simulation run")
 async def delete_simulation_job_endpoint(
     job_uuid: str = PathParam(
-        description="The simulation run to delete.",
+        description="The simulation run to delete",
         examples=["f47ac10b-58cc-4372-a567-0e02b2c3d479"],
     ),
     ctx: OrgContext = Depends(get_current_org),

@@ -41,7 +41,7 @@ class ToolResponse(BaseModel):
     name: str = Field(description="Tool name")
     description: str = Field(description="What the tool does")
     config: Optional[Dict[str, Any]] = Field(
-        None, description="Tool config, or null if unset"
+        None, description="Tool config"
     )
     created_at: str = Field(description="When the tool was created (ISO 8601 UTC)")
     updated_at: str = Field(description="When the tool was last updated (ISO 8601 UTC)")
@@ -83,7 +83,7 @@ async def list_tools(ctx: OrgContext = Depends(get_current_org)):
 @router.get("/{tool_uuid}", response_model=ToolResponse, summary="Get tool")
 async def get_tool_endpoint(
     tool_uuid: str = Path(
-        description="The tool to retrieve.",
+        description="The tool to retrieve",
         examples=[_EXAMPLE_ID],
     ),
     ctx: OrgContext = Depends(get_current_org),
@@ -99,7 +99,7 @@ async def get_tool_endpoint(
 async def update_tool_endpoint(
     tool: ToolUpdate,
     tool_uuid: str = Path(
-        description="The tool to update.",
+        description="The tool to update",
         examples=[_EXAMPLE_ID],
     ),
     ctx: OrgContext = Depends(get_current_org),
@@ -129,7 +129,7 @@ async def update_tool_endpoint(
 @router.delete("/{tool_uuid}", summary="Delete tool")
 async def delete_tool_endpoint(
     tool_uuid: str = Path(
-        description="The tool to delete.",
+        description="The tool to delete",
         examples=[_EXAMPLE_ID],
     ),
     ctx: OrgContext = Depends(get_current_org),

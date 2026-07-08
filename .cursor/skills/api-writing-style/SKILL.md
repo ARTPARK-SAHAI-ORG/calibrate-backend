@@ -210,6 +210,44 @@ delete vs hard delete). Still follow the bans below.
 - HTTP error narration in the endpoint blurb
 - Internal preconditions ("connection must be verified", verify-connection workflow)
 - Third-person indirection ("the caller's workspace" → "your workspace")
+- Hyphenated adverb+participle modifiers ("already-linked tests", "newly-created rows", "currently-linked evaluators") — rephrase as a relative clause: "tests that are already linked", "the evaluators currently linked". Domain terms like "soft-deleted" are fine. Enforced mechanically in `check_api_docs_style.py`.
+- Storage/DB implementation jargon ("link row IDs", "pinned on the pivot", "auto-increment link row ID", "join row") — describe what the value means to the reader, not how it's stored ("IDs of the links created", "pinned at link time"). Bare "rows" for user data ("max rows per eval") is fine. Enforced mechanically in `check_api_docs_style.py`.
+- Nullability caveats ("Null until done", "`null` if unset", ", or null") — the `| null` type chip already shows the value can be null, so the caveat is noise. Drop it. The ONE exception: when null is a meaningful input value, describe the effect ("`null` clears the cell", "`null` marks a row-level overall annotation"). Enforced mechanically.
+- "per-X" compound modifiers ("per-model results", "per-test-case", "per-turn audio") — say "for each X" ("results for each model", "results for each test case", "audio for each turn"). Enforced mechanically.
+- Run-type clarifications and behavioral claims in parentheses ("(unit-test runs)", "(benchmark runs)", "(all models run the same suite)") — fold the meaning into the sentence ("Results for each model in a benchmark run") or drop the claim. Parentheses are still fine for format/unit/enum/example specs ("(ISO 8601 UTC)", "(USD)", "(`week`, `month`, or `year`)", "(e.g. an OpenRouter model slug)"). Do NOT invent behavioral claims: only state what the code actually does.
+- Unrequested scope/behavior asides appended to a field ("Model names to benchmark **on the same tests**") — describe the field ("Model names to benchmark"); the reader doesn't need the surrounding mechanics restated on every field.
+- Validation caveats the API already enforces ("Must be non-empty", "(non-empty)") — drop them; empty input gets a clear 400. Keep constraints that tell the reader which *values* are valid ("Must be in your workspace", "Must be a `conversation`-type evaluator"). "non-empty" in doc text is enforced mechanically; runtime `HTTPException` error messages keep it (that's the actual error feedback).
+- "medium" for text/audio — say "modality". Enforced mechanically.
+- "semantic category" — describe it plainly ("what the evaluator judges"). Enforced mechanically.
+- Internal response-shape phrasing ("inlined", "for list views", "list shape", "detail shape", "Public-safe fields of ...") — say what the value IS to the reader ("The version that is currently live"). "inlined"/"for list views" enforced mechanically.
+- "custom" for things the reader created — address them: "an evaluator you created", "the ones you created" (not "custom evaluator"). Built-in ones are "default" / "built-in default".
+- "1-based" / "0-indexed" and similar indexing jargon — say it plainly ("the first version is 1", "the first item is 0"). Enforced mechanically.
+- "seeded" for a shipped evaluator — say "built-in default". Enforced mechanically.
+- "Free-text" / "free-form" — drop it; just describe the field ("A description of the persona", "The item's payload"). Enforced mechanically.
+- "Replacement <thing>" as a noun prefix on an update field — drop the filler; describe the value ("The item's new payload"). The verb "Replaces the stored config" is fine. Enforced mechanically.
+- "save" / "saving" / "saved" — UI verb. An API creates, stores, or persists; it doesn't "save". "before saving an agent" → "before you create an agent" (or drop it), "a saved agent" → "an existing agent", "Omit to skip saving" → "Omit to not create one". "stored config" is the allowed adjective. Enforced mechanically.
+- "hop-by-hop" and similar HTTP-plumbing jargon — describe the effect on how the reader calls the API, or drop it. Don't claim behaviour you haven't verified (e.g. "sensitive headers are stripped" was false — `Authorization` is kept). Enforced mechanically.
+- **No trailing period on `description=` / `summary=`.** These are terse labels, not sentences, so they end without a period: "Agent to benchmark", "When the task was created (ISO 8601 UTC)". A multi-sentence description keeps its internal periods but still drops the final one ("First sentence. Second with no end period"). `...` ellipses are fine. Docstrings are prose and keep their terminal period. Enforced mechanically.
+- **No explanatory parentheticals — the "(detail)" template.** Parentheses may hold ONLY a bare unit, format, enum value, or example: `(ISO 8601 UTC)`, `(USD)`, `(400)`, `` (`openai/gpt-4.1`) ``. Anything that adds an explanation, behaviour, claim, or a type+caveat gloss is banned — `(built inside Calibrate)`, `(your own HTTP endpoint)`, `(object, optional)`, `(array, required)`, `(omit config entirely to use all defaults)`, `(e.g. agents some tests couldn't link to)`, `(name, description, output type, rubric)`. Rewrite into prose with a colon or a following sentence: "the required conversation history", "Its shape depends on the task type." The `(type, required/optional)` sub-pattern is enforced mechanically; the broader rule is house style you must apply by hand — never reach for a parenthetical to explain something.
+- Timestamps use ONE standard wording, enforced mechanically: `created_at` → "When the <thing> was created (ISO 8601 UTC)", `updated_at` → "When the <thing> was last updated (ISO 8601 UTC)". Never "Creation timestamp" / "Last-update timestamp" / "Timestamp when".
+- Response-shape / when-you-get-it phrasing must be reader-facing, not internal ("Carries the live version's rubric on the single-task fetch", "Filled on the single-task fetch, empty on the list endpoint") → "When you fetch one task by ID, each includes its live version's rubric" / "You get these when you fetch one task by ID, not when you list tasks".
+
+**Enum / Literal fields → markdown bullet list of value meanings.** Never inline comma prose. Put the gloss for each value on its own `- \`value\`: meaning` line (Mintlify renders it):
+```python
+description=(
+    "What the evaluator judges:\n\n"
+    "- `tts`: TTS audio\n"
+    "- `stt`: one transcript\n"
+    "- `llm`: a reply with its conversation history\n"
+)
+```
+Define the gloss once as a shared module/`utils` constant when the same enum appears in more than one model (create/update/response/filter), so every rendering is identical (see `EVALUATOR_TYPE_DESCRIPTION`, `DATA_TYPE_DESCRIPTION`, `OUTPUT_TYPE_DESCRIPTION`, `_TEST_TYPE_DESCRIPTION`).
+
+**Don't explain a typed field's contents in parentheses.** If a field's type is a model (`EvaluatorVersionCreate`, `OutputConfig`), the type documents its own fields — drop asides like "(prompt, model, rubric, variables)". Parentheses are for format/unit specs only.
+
+**Type consistency.** The same concept must use the same type in request and response, and the same field name must carry the same type + description across models. Never leave a raw `Dict[str, Any]`/`object` where a typed model already exists (e.g. `output_config` → `OutputConfig`, per-test-case rows → `TestCaseResult`). Exceptions: genuinely free-form passthroughs (calibrate `config`, dynamic-column leaderboards, opaque metric aggregates) stay `Dict[str, Any]` on purpose.
+
+**Backend-internal / niche fields → hide from the public spec** via `_PUBLIC_SPEC_HIDDEN_FIELDS` / `_PUBLIC_SPEC_HIDDEN_FIELD_NAMES` in [main.py](../../../src/main.py) rather than exposing plumbing to API-key clients (pivot `ids`, `owner_user_id`, `live_version_index`, `kind`). Surface a clean derived signal instead when the reader needs it (e.g. `is_default` instead of raw `owner_user_id`).
 
 ```python
 @router.delete("/{api_key_id}", summary="Delete API key")
@@ -412,6 +450,8 @@ differently when the context differs — that is NOT an inconsistency to "fix":
   (response) is correct and intended.
 - **Update fields** say `"New <thing>. Omit to leave unchanged"` (not
   "Replacement" — plainer, and matches the codebase's own update wording).
+  The filler noun-prefix `"Replacement <thing>"` is banned mechanically; the
+  verb `"Replaces the stored config"` (real replace-vs-merge semantics) stays fine.
 - **Create fields** may carry extra input-only behavior (deep-merge rules,
   `agent_url` requirement) that the response gloss omits.
 

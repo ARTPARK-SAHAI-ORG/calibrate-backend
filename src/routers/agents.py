@@ -238,14 +238,14 @@ def _strip_verification_fields(
 # union by `type` plus open extension keys, so it's documented, not enforced.
 _AGENT_CONFIG_DESCRIPTION = """Agent behavioral config. The keys depend on `type`.
 
-**`type=agent`** (built inside Calibrate):
-- `system_prompt` (string): the agent's instructions
-- `llm.model` (string): `provider/model`, e.g. `openai/gpt-4.1` or `google/gemini-2.5-flash`
-- `stt.provider` (string): `deepgram`, `openai`, `cartesia`, `elevenlabs`, `google`, `sarvam`, or `smallest`
-- `tts.provider` (string): `cartesia`, `openai`, `google`, `elevenlabs`, `sarvam`, or `smallest`
-- `settings.agent_speaks_first` (bool), `settings.max_assistant_turns` (int)
-- `system_tools.end_call` (bool, optional): let the agent end the call
-- `data_extraction_fields` (array, optional): `[{name, type, description, required}]`
+**`type=agent`**, built inside Calibrate:
+- `system_prompt`: the agent's instructions
+- `llm.model`: `provider/model`, e.g. `openai/gpt-4.1` or `google/gemini-2.5-flash`
+- `stt.provider`: `deepgram`, `openai`, `cartesia`, `elevenlabs`, `google`, `sarvam`, or `smallest`
+- `tts.provider`: `cartesia`, `openai`, `google`, `elevenlabs`, `sarvam`, or `smallest`
+- `settings.agent_speaks_first`, `settings.max_assistant_turns`
+- `system_tools.end_call`: let the agent end the call
+- `data_extraction_fields`: `[{name, type, description, required}]`
 
 ```json
 {
@@ -257,10 +257,10 @@ _AGENT_CONFIG_DESCRIPTION = """Agent behavioral config. The keys depend on `type
 }
 ```
 
-**`type=connection`** (your own HTTP endpoint):
-- `agent_url` (string, required): public HTTPS endpoint the agent is called at
-- `agent_headers` (object, optional): headers sent on each request, e.g. auth
-- `benchmark_provider` (string, optional): `openrouter` (default), `openai`, `google`, `anthropic`, `meta-llama`, `mistralai`, `deepseek`, `x-ai`, `cohere`, `qwen`, or `ai21`
+**`type=connection`**, your own HTTP endpoint:
+- `agent_url`: public HTTP(S) endpoint your agent is called at
+- `agent_headers`: headers sent on each request, e.g. auth
+- `benchmark_provider`: `openrouter` by default. Other values: `openai`, `google`, `anthropic`, `meta-llama`, `mistralai`, `deepseek`, `x-ai`, `cohere`, `qwen`, or `ai21`
 
 ```json
 {
@@ -280,7 +280,7 @@ class AgentCreate(BaseModel):
     config: Optional[Dict[str, Any]] = Field(
         None,
         description=_AGENT_CONFIG_DESCRIPTION
-        + "\n\nFor `type=agent`, omitted keys inherit managed defaults (omit `config` entirely to use all defaults). For `type=connection`, `config` is stored as-is and must contain `agent_url`.",
+        + "\n\nFor `type=agent`, omitted keys inherit managed defaults. Omit `config` entirely to use all defaults. For `type=connection`, `config` is stored as-is and must contain `agent_url`",
     )
 
 
@@ -291,8 +291,8 @@ class AgentUpdate(BaseModel):
     config: Optional[Dict[str, Any]] = Field(
         None,
         description=_AGENT_CONFIG_DESCRIPTION
-        + "\n\nReplaces the stored config. Omit to leave unchanged."
-        + "\n\nFor `type=connection`, changing `agent_url` or `agent_headers` resets the connection and benchmark verification flags.",
+        + "\n\nReplaces the stored config. Omit to leave unchanged"
+        + "\n\nFor `type=connection`, changing `agent_url` or `agent_headers` resets the connection and benchmark verification flags",
     )
     connection_verified: Optional[bool] = Field(
         None,
@@ -300,7 +300,8 @@ class AgentUpdate(BaseModel):
     )
     benchmark_models_verified: Optional[Dict[str, Any]] = Field(
         None,
-        description="Set the per-model benchmark verification map for a `type=connection` agent. Omit to leave it untouched",
+        description="Set the benchmark verification map, keyed by model, for a `type=connection` agent. Omit to leave it untouched",
+        examples=[{"openai/gpt-4.1": {"verified": True, "verified_at": "2026-01-01T00:00:00Z", "error": None}}],
     )
 
 
@@ -362,22 +363,33 @@ class ResolveAgentNamesResponse(BaseModel):
     )
 
 
-class VerifyConnectionRequest(BaseModel):
-    agent_url: Optional[str] = Field(
-        None,
-        description="Public HTTP(S) agent endpoint to verify. **Required for the pre-save endpoint** (no agent ID). Ignored by the saved-agent endpoint, which reads `agent_url` from the stored config",
-    )
-    agent_headers: Optional[Dict[str, str]] = Field(
-        None,
-        description="Extra request headers to send to the agent (hop-by-hop and sensitive headers are stripped). Omit if none are needed",
-    )
+class AgentVerifyRequest(BaseModel):
+    """Body for verifying an existing agent by ID. The endpoint (`agent_url`,
+    `agent_headers`) comes from the agent's stored config, so only the probe
+    inputs are accepted here."""
+
     model: Optional[str] = Field(
         None,
-        description="Model to verify. Omit for a basic connection check. Provide it for a model-specific check required before benchmarking that model",
+        description="Model to verify. Omit for a basic connection check. Provide it for a model-specific check before benchmarking that model",
+        examples=["openai/gpt-4.1"],
     )
     messages: Optional[List[Dict[str, str]]] = Field(
         None,
-        description="Optional sample chat messages to send during verification. Omit to use the default probe",
+        description="Sample chat messages to send during verification. Omit to use the default probe",
+        examples=[[{"role": "user", "content": "Hello"}]],
+    )
+
+
+class VerifyConnectionRequest(AgentVerifyRequest):
+    agent_url: Optional[str] = Field(
+        None,
+        description="Public HTTP(S) agent endpoint to verify",
+        examples=["https://api.example.com/agent"],
+    )
+    agent_headers: Optional[Dict[str, str]] = Field(
+        None,
+        description="Extra request headers to send to your agent, e.g. an auth token. Omit if none are needed",
+        examples=[{"Authorization": "Bearer <token>"}],
     )
 
 
@@ -385,23 +397,23 @@ class VerifyConnectionResponse(BaseModel):
     success: bool = Field(
         description="True if the agent responded successfully to the verification probe"
     )
-    error: Optional[str] = Field(None, description="Failure reason. Null on success")
+    error: Optional[str] = Field(None, description="Reason the verification failed")
     sample_response: Optional[Dict[str, Any]] = Field(
         None,
-        description="Sample output returned by the agent during verification. Null when unavailable",
+        description="Sample output returned by the agent during verification",
     )
 
 
 @router.post(
     "/verify-connection",
     response_model=VerifyConnectionResponse,
-    summary="Verify agent connection before saving",
+    summary="Verify an agent connection",
 )
 async def verify_agent_connection_presave(
     request: VerifyConnectionRequest,
     ctx: OrgContext = Depends(get_current_org),
 ):
-    """Verify an agent connection before saving an agent. Nothing is persisted"""
+    """Verify an agent connection without creating an agent. Nothing is persisted"""
     if not request.agent_url:
         raise HTTPException(status_code=400, detail="agent_url is required")
 
@@ -417,17 +429,18 @@ async def verify_agent_connection_presave(
 @router.post(
     "/{agent_uuid}/verify-connection",
     response_model=VerifyConnectionResponse,
-    summary="Verify saved agent connection",
+    summary="Verify agent connection",
+    tags=["Public API"],
 )
 async def verify_agent_connection(
     agent_uuid: str = Path(
-        description="The agent whose connection to verify.",
+        description="The agent whose connection to verify",
         examples=["f47ac10b-58cc-4372-a567-0e02b2c3d479"],
     ),
-    request: VerifyConnectionRequest = ...,
-    ctx: OrgContext = Depends(get_current_org),
+    request: AgentVerifyRequest = ...,
+    ctx: OrgContext = Depends(get_org_jwt_or_api_key),
 ):
-    """Verify a saved agent's connection and persist the result when successful"""
+    """Verify an agent's connection and persist the result when successful"""
     agent = get_agent(agent_uuid)
     if not agent or agent.get("org_uuid") != ctx.org_uuid:
         raise HTTPException(status_code=404, detail="Agent not found")
@@ -564,7 +577,7 @@ async def list_agents(ctx: OrgContext = Depends(get_org_jwt_or_api_key)):
 )
 async def get_agent_endpoint(
     agent_uuid: str = Path(
-        description="The agent to retrieve.",
+        description="The agent to retrieve",
         examples=["f47ac10b-58cc-4372-a567-0e02b2c3d479"],
     ),
     ctx: OrgContext = Depends(get_org_jwt_or_api_key),
@@ -584,7 +597,7 @@ async def get_agent_endpoint(
 )
 async def update_agent_endpoint(
     agent_uuid: str = Path(
-        description="The agent to update.",
+        description="The agent to update",
         examples=["f47ac10b-58cc-4372-a567-0e02b2c3d479"],
     ),
     agent: AgentUpdate = ...,
@@ -641,7 +654,7 @@ async def update_agent_endpoint(
 @router.delete("/{agent_uuid}", summary="Delete agent")
 async def delete_agent_endpoint(
     agent_uuid: str = Path(
-        description="The agent to delete.",
+        description="The agent to delete",
         examples=["f47ac10b-58cc-4372-a567-0e02b2c3d479"],
     ),
     ctx: OrgContext = Depends(get_current_org),
@@ -664,7 +677,7 @@ async def delete_agent_endpoint(
 )
 async def duplicate_agent_endpoint(
     agent_uuid: str = Path(
-        description="The agent to duplicate.",
+        description="The agent to duplicate",
         examples=["f47ac10b-58cc-4372-a567-0e02b2c3d479"],
     ),
     request: AgentDuplicateRequest = ...,

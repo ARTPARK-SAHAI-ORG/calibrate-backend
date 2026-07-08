@@ -44,7 +44,7 @@ async def agreement_trend(
     ),
     ctx: OrgContext = Depends(get_current_org),
 ):
-    """Get human-vs-human agreement trends and per-evaluator human alignment"""
+    """Get human-vs-human agreement trends and human alignment for each evaluator"""
     if task_id:
         task = get_annotation_task(task_id)
         if not task or task.get("org_uuid") != ctx.org_uuid:

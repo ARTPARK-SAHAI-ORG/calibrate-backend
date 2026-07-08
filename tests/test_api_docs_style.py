@@ -65,6 +65,299 @@ def test_checker_flags_banned_terminology(tmp_path):
     assert "not 'secret'" in joined
 
 
+def test_checker_flags_free_form_and_replacement(tmp_path):
+    """'free-form' / 'free-text' and the filler 'Replacement <thing>' prefix are
+    banned; the verb 'Replaces …' (real replace-vs-merge semantics) is allowed.
+    """
+    (tmp_path / "bad.py").write_text(
+        "from fastapi import APIRouter\n"
+        "from pydantic import BaseModel, Field\n"
+        "router = APIRouter()\n"
+        "class Thing(BaseModel):\n"
+        "    payload: dict = Field(description='Replacement free-form payload for the item')\n"
+        "    other: dict = Field(description='Free-text notes')\n"
+        "@router.put('/things', summary='Update thing')\n"
+        "async def update_thing():\n"
+        "    '''Update a thing'''\n"
+        "    return []\n"
+    )
+    (tmp_path / "ok.py").write_text(
+        "from fastapi import APIRouter\n"
+        "from pydantic import BaseModel, Field\n"
+        "router = APIRouter()\n"
+        "class Thing(BaseModel):\n"
+        "    config: dict = Field(description='New config. Replaces the stored config. Omit to leave unchanged')\n"
+        "@router.put('/x', summary='Update x')\n"
+        "async def update_x():\n"
+        "    '''Update x'''\n"
+        "    return []\n"
+    )
+    joined = "\n".join(checker.find_violations(tmp_path))
+    assert "bad.py" in joined
+    assert "free-form" in joined
+    assert "Replacement" in joined
+    # The verb 'Replaces the stored config' is a legitimate replace-vs-merge note.
+    assert not any(
+        "ok.py" in v for v in checker.find_violations(tmp_path)
+    )
+
+
+def test_checker_flags_ui_save_verb_and_http_plumbing_jargon(tmp_path):
+    """The UI verb 'save/saving/saved' and HTTP-plumbing jargon ('hop-by-hop')
+    are banned; 'stored'/'create' and plain header wording are fine.
+    """
+    (tmp_path / "bad.py").write_text(
+        "from fastapi import APIRouter\n"
+        "from pydantic import BaseModel, Field\n"
+        "router = APIRouter()\n"
+        "class Thing(BaseModel):\n"
+        "    url: str = Field(description='Endpoint. Required when verifying before saving an agent')\n"
+        "    headers: dict = Field(description='Headers (hop-by-hop headers are stripped)')\n"
+        "@router.post('/things', summary='Verify agent connection before saving')\n"
+        "async def verify_thing():\n"
+        "    '''Verify a connection before saving an agent'''\n"
+        "    return []\n"
+    )
+    (tmp_path / "ok.py").write_text(
+        "from fastapi import APIRouter\n"
+        "from pydantic import BaseModel, Field\n"
+        "router = APIRouter()\n"
+        "class Thing(BaseModel):\n"
+        "    url: str = Field(description='Endpoint. Read from the stored config for an existing agent')\n"
+        "@router.post('/x', summary='Verify an agent connection')\n"
+        "async def verify_x():\n"
+        "    '''Verify a connection without creating an agent'''\n"
+        "    return []\n"
+    )
+    violations = checker.find_violations(tmp_path)
+    joined = "\n".join(violations)
+    assert "bad.py" in joined
+    assert "save" in joined  # the UI-verb message
+    assert "hop-by-hop" in joined
+    assert not any("ok.py" in v for v in violations)
+
+
+def test_checker_flags_trailing_period_in_description(tmp_path):
+    """description= / summary= are terse labels and must not end in a period;
+    docstrings (prose) keep theirs, and `...` ellipses are allowed.
+    """
+    (tmp_path / "bad.py").write_text(
+        "from fastapi import APIRouter, Path\n"
+        "from pydantic import BaseModel, Field\n"
+        "router = APIRouter()\n"
+        "class Thing(BaseModel):\n"
+        "    name: str = Field(description='Name of the thing.')\n"
+        "@router.get('/x/{tid}', summary='Get the thing.')\n"
+        "async def get_x(tid: str = Path(description='Thing to get.')):\n"
+        "    '''Get a thing. This docstring sentence keeps its period.'''\n"
+        "    return []\n"
+    )
+    # An f-string description and a concatenated one, both ending in a period,
+    # must also be caught (regression: only bare literals were checked before).
+    (tmp_path / "fstr.py").write_text(
+        "from fastapi import APIRouter\n"
+        "from pydantic import BaseModel, Field\n"
+        "router = APIRouter()\n"
+        "N = 500\n"
+        "PART = 'Items to create'\n"
+        "class Thing(BaseModel):\n"
+        "    a: str = Field(description=f'Create at most {N} items.')\n"
+        "    b: str = Field(description=PART + ', at most 500.')\n"
+        "@router.get('/x', summary='Get thing')\n"
+        "async def get_x():\n"
+        "    '''Get a thing'''\n"
+        "    return []\n"
+    )
+    (tmp_path / "ok.py").write_text(
+        "from fastapi import APIRouter\n"
+        "from pydantic import BaseModel, Field\n"
+        "router = APIRouter()\n"
+        "class Thing(BaseModel):\n"
+        "    a: str = Field(description='Name of the thing')\n"
+        "    b: str = Field(description='First sentence. Second with no end period')\n"
+        "    c: str = Field(description='Ends in an ellipsis ...')\n"
+        "    d: str = Field(description=f'At most {500} items, no end period')\n"
+        "@router.get('/x', summary='Get thing')\n"
+        "async def get_x():\n"
+        "    '''Get a thing. Prose keeps its period.'''\n"
+        "    return []\n"
+    )
+    violations = checker.find_violations(tmp_path)
+    joined = "\n".join(violations)
+    # bad.py: Field description + summary + Path description = 3; fstr.py: 2.
+    assert joined.count("must not end with a period") == 5
+    # The docstring period is NOT flagged, and ok.py (incl. its f-string) is clean.
+    assert not any("ok.py" in v for v in violations)
+
+
+def test_checker_flags_type_caveat_parenthetical(tmp_path):
+    """The '(type, required/optional)' parenthetical (the '(detail)' template) is
+    banned; a bare unit/format parenthetical like '(ISO 8601 UTC)' is fine.
+    """
+    (tmp_path / "bad.py").write_text(
+        "from fastapi import APIRouter\n"
+        "from pydantic import BaseModel, Field\n"
+        "router = APIRouter()\n"
+        "class Thing(BaseModel):\n"
+        "    history: list = Field(description='`history` (array, required): the turns')\n"
+        "    settings: dict = Field(description='`settings` (object, optional): extras')\n"
+        "@router.post('/things', summary='Create thing')\n"
+        "async def make_thing():\n"
+        "    '''Create a thing'''\n"
+        "    return []\n"
+    )
+    (tmp_path / "ok.py").write_text(
+        "from fastapi import APIRouter\n"
+        "from pydantic import BaseModel, Field\n"
+        "router = APIRouter()\n"
+        "class Thing(BaseModel):\n"
+        "    created_at: str = Field(description='When it was created (ISO 8601 UTC)')\n"
+        "@router.get('/x', summary='Get thing')\n"
+        "async def get_thing():\n"
+        "    '''Get a thing'''\n"
+        "    return []\n"
+    )
+    violations = checker.find_violations(tmp_path)
+    joined = "\n".join(violations)
+    assert "bad.py" in joined and "detail" in joined
+    assert not any("ok.py" in v for v in violations)
+
+
+def test_checker_flags_hyphenated_adverb_participle(tmp_path):
+    """Doc text must not hyphenate an adverb onto a participle ('already-linked
+    tests'); rephrase as a relative clause. Domain terms ('soft-deleted') are fine.
+    """
+    (tmp_path / "bad.py").write_text(
+        "from fastapi import APIRouter\n"
+        "from pydantic import BaseModel, Field\n"
+        "router = APIRouter()\n"
+        "class Thing(BaseModel):\n"
+        "    ids: list = Field(description='The currently-linked evaluators')\n"
+        "@router.post('/things', summary='Link things')\n"
+        "async def link_things():\n"
+        "    '''Link things. Already-linked ones are skipped'''\n"
+        "    return []\n"
+    )
+    (tmp_path / "ok.py").write_text(
+        "from fastapi import APIRouter\n"
+        "router = APIRouter()\n"
+        "@router.get('/x', summary='List things')\n"
+        "async def list_x():\n"
+        "    '''List things, skipping soft-deleted rows'''\n"
+        "    return []\n"
+    )
+    violations = checker.find_violations(tmp_path)
+    joined = "\n".join(violations)
+    # Both the Field description and the docstring compound are flagged.
+    assert "bad.py" in joined and "already-linked" in joined
+    # The domain term "soft-deleted" is not caught by the adverb rule.
+    assert not any("ok.py" in v and "adverb" in v for v in violations)
+
+
+def test_checker_flags_storage_jargon(tmp_path):
+    """Doc text must describe a value's meaning, not its DB storage ('link row
+    ID', 'pinned on the pivot'). Bare 'rows' for user data stays allowed.
+    """
+    (tmp_path / "bad.py").write_text(
+        "from fastapi import APIRouter\n"
+        "from pydantic import BaseModel, Field\n"
+        "router = APIRouter()\n"
+        "class Thing(BaseModel):\n"
+        "    id: int = Field(description='Auto-increment link row ID')\n"
+        "    ver: str = Field(description='Version ID pinned on the pivot at link time')\n"
+        "@router.get('/things', summary='List things')\n"
+        "async def list_things():\n"
+        "    '''List things'''\n"
+        "    return []\n"
+    )
+    (tmp_path / "ok.py").write_text(
+        "from fastapi import APIRouter\n"
+        "from pydantic import BaseModel, Field\n"
+        "router = APIRouter()\n"
+        "class Cap(BaseModel):\n"
+        "    n: int = Field(description='Max rows per eval')\n"
+        "@router.get('/cap', summary='Get cap')\n"
+        "async def get_cap():\n"
+        "    '''Get the cap'''\n"
+        "    return {}\n"
+    )
+    violations = checker.find_violations(tmp_path)
+    joined = "\n".join(violations)
+    assert "bad.py" in joined and "storage jargon" in joined
+    # "Max rows per eval" is legitimate user data, not storage jargon.
+    assert not any("ok.py" in v for v in violations)
+
+
+def test_checker_flags_null_caveats_but_keeps_input_effects(tmp_path):
+    """Nullability caveats are noise (the `| null` type shows it). But null as an
+    input effect ("clears the cell") carries meaning and must survive.
+    """
+    (tmp_path / "bad.py").write_text(
+        "from fastapi import APIRouter\n"
+        "from pydantic import BaseModel, Field\n"
+        "router = APIRouter()\n"
+        "class Thing(BaseModel):\n"
+        "    a: int = Field(None, description='Total test cases. Null until done')\n"
+        "    b: str = Field(None, description='Agent config, or null if unset')\n"
+        "    c: dict = Field(None, description='Aggregated cost. `null` when not reported')\n"
+        "@router.get('/things', summary='List things')\n"
+        "async def list_things():\n"
+        "    '''List things'''\n"
+        "    return []\n"
+    )
+    (tmp_path / "ok.py").write_text(
+        "from fastapi import APIRouter\n"
+        "from pydantic import BaseModel, Field\n"
+        "router = APIRouter()\n"
+        "class Ann(BaseModel):\n"
+        "    v: dict = Field(None, description='Annotation value. `null` clears the cell')\n"
+        "    e: str = Field(None, description='Evaluator ID. `null` marks a row-level overall annotation')\n"
+        "@router.get('/ann', summary='Get annotation')\n"
+        "async def get_ann():\n"
+        "    '''Get the annotation'''\n"
+        "    return {}\n"
+    )
+    violations = checker.find_violations(tmp_path)
+    joined = "\n".join(violations)
+    assert "bad.py" in joined and "nullability caveat" in joined
+    # Input-effect null phrasings must not be flagged.
+    assert not any("ok.py" in v and "nullability" in v for v in violations)
+
+
+def test_checker_flags_non_empty_validation_caveat(tmp_path):
+    """'non-empty' in field docs is a validation caveat the API already enforces."""
+    (tmp_path / "d.py").write_text(
+        "from fastapi import APIRouter\n"
+        "from pydantic import BaseModel, Field\n"
+        "router = APIRouter()\n"
+        "class Thing(BaseModel):\n"
+        "    ids: list = Field(description='Model names to benchmark. Must be non-empty')\n"
+        "@router.get('/things', summary='List things')\n"
+        "async def list_things():\n"
+        "    '''List things'''\n"
+        "    return []\n"
+    )
+    joined = "\n".join(checker.find_violations(tmp_path))
+    assert "non-empty" in joined
+
+
+def test_checker_flags_per_x(tmp_path):
+    """'per-X' compound modifiers must be rewritten as 'for each X'."""
+    (tmp_path / "p.py").write_text(
+        "from fastapi import APIRouter\n"
+        "from pydantic import BaseModel, Field\n"
+        "router = APIRouter()\n"
+        "class Thing(BaseModel):\n"
+        "    r: list = Field(None, description='Per-model results')\n"
+        "@router.get('/things', summary='List things')\n"
+        "async def list_things():\n"
+        "    '''List things'''\n"
+        "    return []\n"
+    )
+    joined = "\n".join(checker.find_violations(tmp_path))
+    assert "for each X" in joined
+
+
 def test_checker_allows_code_identifiers_in_doc_text(tmp_path):
     """Code refs that merely contain 'org' must not trip the terminology gate."""
     (tmp_path / "ok.py").write_text(

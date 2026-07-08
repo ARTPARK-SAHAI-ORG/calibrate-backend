@@ -73,13 +73,13 @@ class DatasetItemResponse(BaseModel):
     )
     audio_path: Optional[str] = Field(
         None,
-        description="Presigned download URL for the item's audio, or null for TTS items",
+        description="Presigned download URL for the item's audio",
     )
     text: str = Field(description="Ground-truth transcript (STT) or synthesis text (TTS)")
-    order_index: int = Field(description="Zero-based position of the item within the dataset")
-    created_at: str = Field(description="Creation timestamp (ISO 8601 UTC)")
+    order_index: int = Field(description="Position of the item within the dataset. The first item is 0")
+    created_at: str = Field(description="When the dataset item was created (ISO 8601 UTC)")
     updated_at: Optional[str] = Field(
-        None, description="Last-update timestamp (ISO 8601 UTC), or null if never updated"
+        None, description="When the dataset item was last updated (ISO 8601 UTC)"
     )
 
 
@@ -94,8 +94,8 @@ class DatasetResponse(BaseModel):
     dataset_type: str = Field(description="Dataset type (`stt` or `tts`)")
     item_count: int = Field(description="Number of items in the dataset")
     eval_count: int = Field(description="Number of evaluation jobs that used this dataset")
-    created_at: str = Field(description="Creation timestamp (ISO 8601 UTC)")
-    updated_at: str = Field(description="Last-update timestamp (ISO 8601 UTC)")
+    created_at: str = Field(description="When the dataset was created (ISO 8601 UTC)")
+    updated_at: str = Field(description="When the dataset was last updated (ISO 8601 UTC)")
 
 
 class DatasetDetailResponse(DatasetResponse):
@@ -196,7 +196,7 @@ async def list_datasets(
 @router.get("/{dataset_id}", response_model=DatasetDetailResponse, summary="Get dataset")
 async def get_dataset_detail(
     dataset_id: str = Path(
-        description="The dataset to retrieve.",
+        description="The dataset to retrieve",
         examples=["f47ac10b-58cc-4372-a567-0e02b2c3d479"],
     ),
     ctx: OrgContext = Depends(get_current_org),
@@ -224,7 +224,7 @@ async def get_dataset_detail(
 async def rename_dataset(
     request: DatasetRenameRequest,
     dataset_id: str = Path(
-        description="The dataset to rename.",
+        description="The dataset to rename",
         examples=["f47ac10b-58cc-4372-a567-0e02b2c3d479"],
     ),
     ctx: OrgContext = Depends(get_current_org),
@@ -248,7 +248,7 @@ async def rename_dataset(
 @router.delete("/{dataset_id}", status_code=204, summary="Delete dataset")
 async def remove_dataset(
     dataset_id: str = Path(
-        description="The dataset to delete.",
+        description="The dataset to delete",
         examples=["f47ac10b-58cc-4372-a567-0e02b2c3d479"],
     ),
     ctx: OrgContext = Depends(get_current_org),
@@ -270,7 +270,7 @@ async def remove_dataset(
 async def add_items(
     items: List[DatasetItemIn],
     dataset_id: str = Path(
-        description="The dataset to add items to.",
+        description="The dataset to add items to",
         examples=["f47ac10b-58cc-4372-a567-0e02b2c3d479"],
     ),
     ctx: OrgContext = Depends(get_current_org),
@@ -303,11 +303,11 @@ async def add_items(
 async def update_item(
     request: DatasetItemUpdate,
     dataset_id: str = Path(
-        description="The dataset containing the item.",
+        description="The dataset containing the item",
         examples=["f47ac10b-58cc-4372-a567-0e02b2c3d479"],
     ),
     item_uuid: str = Path(
-        description="The dataset item to update.",
+        description="The dataset item to update",
         examples=["a3b2c1d0-e5f4-3210-abcd-ef1234567890"],
     ),
     ctx: OrgContext = Depends(get_current_org),
@@ -354,11 +354,11 @@ async def update_item(
 )
 async def remove_item(
     dataset_id: str = Path(
-        description="The dataset containing the item.",
+        description="The dataset containing the item",
         examples=["f47ac10b-58cc-4372-a567-0e02b2c3d479"],
     ),
     item_uuid: str = Path(
-        description="The dataset item to delete.",
+        description="The dataset item to delete",
         examples=["a3b2c1d0-e5f4-3210-abcd-ef1234567890"],
     ),
     ctx: OrgContext = Depends(get_current_org),

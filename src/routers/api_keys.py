@@ -74,7 +74,7 @@ class ApiKeyResponse(BaseModel):
     )
     last_used_at: Optional[str] = Field(
         None,
-        description="When the key last authenticated a request. `null` if never used",
+        description="When the key last authenticated a request",
     )
     created_at: str = Field(description="When the key was created (ISO 8601 UTC)")
     updated_at: str = Field(description="When the key was last updated (ISO 8601 UTC)")
@@ -128,7 +128,7 @@ async def list_keys(ctx: OrgContext = Depends(get_current_org)):
 @router.delete("/{key_uuid}", status_code=204, summary="Revoke API key")
 async def revoke_key(
     key_uuid: str = Path(
-        description="The API key to revoke.",
+        description="The API key to revoke",
         examples=["f47ac10b-58cc-4372-a567-0e02b2c3d479"],
     ),
     ctx: OrgContext = Depends(get_current_org),
