@@ -169,6 +169,11 @@ jobs:
 
   publish-mcp:
     needs: prepare
+    # Gate is skipped on workflow_call; GitHub propagates that skip through
+    # the needs chain unless downstream jobs override with always().
+    if: >-
+      always() &&
+      needs.prepare.result == 'success'
     runs-on: ubuntu-latest
     environment: Production
     steps:
