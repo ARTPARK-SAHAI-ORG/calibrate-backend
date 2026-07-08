@@ -29,7 +29,7 @@ actions:
       x-speakeasy-mcp:
         name: resolve-agent-names
         title: Resolve agent names to UUIDs
-        scopes: [write]
+        scopes: [read]
         readOnlyHint: true
         destructiveHint: false
         idempotentHint: true
