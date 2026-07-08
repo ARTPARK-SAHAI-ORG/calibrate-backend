@@ -40,6 +40,7 @@ production GitHub release published
                  → calibrate-mcp publish.yml → npm (@dalmia/calibrate-mcp)
        └─ record sdk-v<version> tag on this repo (version history only)
        └─ sync-docs (after publish) → repository_dispatch on ARTPARK-SAHAI-ORG/calibrate (DOCS_SYNC_REPO_TOKEN)
+       └─ sync-skills (after publish) → repository_dispatch on dalmia/calibrate-skills (SKILLS_SYNC_REPO_TOKEN)
 ```
 
 Workflows: [`.github/workflows/auto-publish-sdk.yml`](.github/workflows/auto-publish-sdk.yml) (auto + manual gate), [`.github/workflows/publish-sdk.yml`](.github/workflows/publish-sdk.yml) (generate + push)  
@@ -57,6 +58,7 @@ Add these to **this repo** → Settings → Environments → **Production**:
 | `SPEAKEASY_API_KEY` | Speakeasy CLI generate + validate | From [speakeasy.com](https://www.speakeasy.com) |
 | `PUSH_TO_REPO_TOKEN` | CLI/MCP sync + tagging all client repos | Classic PAT with **`contents:write`** and **`workflow`** on `dalmia/calibrate-python-sdk`, `dalmia/calibrate-cli`, and `dalmia/calibrate-mcp`. **Required for publish workflows to start** (gate check) as well as client-repo pushes. |
 | `DOCS_SYNC_REPO_TOKEN` | Docs OpenAPI sync dispatch (`sync-docs` job) | Fine-grained PAT on [`ARTPARK-SAHAI-ORG/calibrate`](https://github.com/ARTPARK-SAHAI-ORG/calibrate) with **Actions: Read and write** (see below) |
+| `SKILLS_SYNC_REPO_TOKEN` | Agent-skills drift-sync dispatch (`sync-skills` job) | Fine-grained PAT on [`dalmia/calibrate-skills`](https://github.com/dalmia/calibrate-skills) with **Actions: Read and write** (see below) |
 | `PUBLIC_API_BASE_URL` | Fetch public OpenAPI spec | Production API URL injected into `servers` (e.g. `https://pense-backend.artpark.ai`) |
 
 ### PAT scopes (`PUSH_TO_REPO_TOKEN`)
@@ -83,6 +85,22 @@ Add the token to **this repo** → Settings → Environments → **Production** 
 Requires [calibrate#108](https://github.com/ARTPARK-SAHAI-ORG/calibrate/pull/108) merged (`sync-api-spec.yml` with `repository_dispatch` listener).
 
 The `sync-docs` job runs **after** `publish` completes so the docs workflow sees freshly synced `calibrate-python-sdk` and `calibrate-cli` output (including CLI `docs/`) before generating pages.
+
+### Skills sync token (`SKILLS_SYNC_REPO_TOKEN`)
+
+Separate from `DOCS_SYNC_REPO_TOKEN` because the skills repo is **`dalmia/calibrate-skills`** (personal), a different owner than the org docs repo. (One PAT could cover both repos if you prefer; keeping them separate scopes each token to a single repo.)
+
+1. GitHub → **Settings → Developer settings → Fine-grained personal access tokens → Generate**
+2. **Resource owner:** `dalmia`
+3. **Repository access:** Only `calibrate-skills`
+4. **Permissions:** **Actions: Read and write** (triggers `repository_dispatch` → `sync-from-spec.yml`)
+5. **Expiration:** rotate annually and update the Production secret
+
+Add the token to **this repo** → Settings → Environments → **Production** as `SKILLS_SYNC_REPO_TOKEN`.
+
+**Also on the calibrate-skills repo** (not this repo): add the `OPENAPI_SPEC_URL` variable under Settings → Secrets and variables → Actions → Variables so its drift check can fetch the live spec. Its [`sync-from-spec.yml`](https://github.com/dalmia/calibrate-skills/blob/main/.github/workflows/sync-from-spec.yml) listener is already merged.
+
+`sync-skills` drift-checks the skills against the published spec (it does not regenerate them — the skills are prose). It runs after `publish` for parity with `sync-docs`, though it only depends on the spec being live.
 
 ## One-time: Python SDK (`calibrate-python-sdk`)
 
@@ -249,7 +267,9 @@ uv run --group dev pytest tests/test_sdk_overrides.py -q
 |---------|--------------|-----|
 | `gh: set the GH_TOKEN environment variable` | `PUSH_TO_REPO_TOKEN` missing/empty in Production | Add PAT to backend Production secrets |
 | `sync-docs` fails with 401/403 | `DOCS_SYNC_REPO_TOKEN` missing, expired, or lacks Actions write on `ARTPARK-SAHAI-ORG/calibrate` | Regenerate fine-grained PAT; update Production secret |
+| `sync-skills` fails with 401/403 | `SKILLS_SYNC_REPO_TOKEN` missing, expired, or lacks Actions write on `dalmia/calibrate-skills` | Regenerate fine-grained PAT; update Production secret |
 | `sync-api-spec` never runs on calibrate | calibrate#108 not merged, or `repository_dispatch` not wired | Merge docs PR; confirm `sync-api-spec.yml` listens for `sync-api-spec` |
+| `sync-from-spec` never runs on calibrate-skills | `OPENAPI_SPEC_URL` variable unset, or dispatch not reaching the repo | Set the variable on calibrate-skills; confirm `sync-from-spec.yml` listens for `sync-api-spec` |
 | PAT rejected pushing `release.yaml` | Missing `workflow` scope on `PUSH_TO_REPO_TOKEN` | Add `workflow` scope to the backend PAT |
 | PAT rejected pushing to `calibrate-mcp` | PAT not authorized on `dalmia/calibrate-mcp` | Grant `contents:write` on that repo |
 | Release fails: `gpg_private_key` not supplied | GPG secrets missing in **calibrate-cli** | Add `CLI_GPG_SECRET_KEY` + `CLI_GPG_PASSPHRASE` |

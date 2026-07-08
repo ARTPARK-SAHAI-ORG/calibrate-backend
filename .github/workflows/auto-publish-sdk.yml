@@ -166,3 +166,21 @@ jobs:
             -f event_type=sync-api-spec \
             -f "client_payload[version]=${{ needs.detect.outputs.version }}"
           echo "Triggered sync-api-spec on ARTPARK-SAHAI-ORG/calibrate"
+
+  # dalmia/calibrate-skills drift-checks its agent skills against the live public
+  # spec (the skills hardcode CLI flags + payload shapes). Same dispatch as
+  # sync-docs; separate token because the repo is under dalmia/ (personal), not
+  # the org. Independent of sync-docs, so it needs only detect + publish.
+  sync-skills:
+    needs: [detect, publish]
+    if: needs.detect.outputs.should_publish == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Trigger skills sync
+        env:
+          GH_TOKEN: ${{ secrets.SKILLS_SYNC_REPO_TOKEN }}
+        run: |
+          gh api repos/dalmia/calibrate-skills/dispatches \
+            -f event_type=sync-api-spec \
+            -f "client_payload[version]=${{ needs.detect.outputs.version }}"
+          echo "Triggered sync-api-spec on dalmia/calibrate-skills"
