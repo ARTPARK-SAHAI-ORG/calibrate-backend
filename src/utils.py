@@ -195,7 +195,7 @@ AGENT_TYPE_DESCRIPTION = (
 # TaskStatus so create-response docs advertise only the reachable values.
 InitialTaskStatus = Literal["queued", "in_progress"]
 
-_EXAMPLE_TEST_UUID = "b1c2d3e4-f5a6-7890-bcde-f12345678901"
+EXAMPLE_TEST_UUID = "b1c2d3e4-f5a6-7890-bcde-f12345678901"
 # Bulleted gloss of the test `type` enum, shared by every model that exposes it
 # (full test responses and the trimmed list shape) so the values read the same
 # everywhere.
@@ -223,7 +223,7 @@ class TestListResponse(BaseModel):
         min_length=36,
         max_length=36,
         description="Unique ID for the test",
-        examples=[_EXAMPLE_TEST_UUID],
+        examples=[EXAMPLE_TEST_UUID],
     )
     name: str = Field(description="Name of the test")
     type: TestTypeLiteral = Field(description=TEST_TYPE_DESCRIPTION)
