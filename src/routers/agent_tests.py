@@ -40,12 +40,13 @@ from db import (
     delete_agent_test_job,
 )
 from llm_judge import build_test_evaluators_payload, evaluator_value_name
-from routers.tests import TestListResponse, to_test_list_response
 from auth_utils import get_current_org, get_org_jwt_or_api_key, OrgContext
 from utils import (
     TaskStatus,
     InitialTaskStatus,
     TaskCreateResponse,
+    TestListResponse,
+    to_test_list_response,
     OutputTypeLiteral,
     AGENT_TYPE_DESCRIPTION,
     AgentTestJobType,

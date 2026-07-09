@@ -195,6 +195,72 @@ AGENT_TYPE_DESCRIPTION = (
 # TaskStatus so create-response docs advertise only the reachable values.
 InitialTaskStatus = Literal["queued", "in_progress"]
 
+_EXAMPLE_TEST_UUID = "b1c2d3e4-f5a6-7890-bcde-f12345678901"
+# Bulleted gloss of the test `type` enum, shared by every model that exposes it
+# (full test responses and the trimmed list shape) so the values read the same
+# everywhere.
+TEST_TYPE_DESCRIPTION = (
+    "What the test judges:\n\n"
+    "- `response`: judges the generated reply\n"
+    "- `tool_call`: diffs the generated tool calls\n"
+    "- `conversation`: judges the full conversation\n"
+)
+
+
+class TestListConfig(BaseModel):
+    description: Optional[str] = Field(
+        None,
+        description="Short description of the test, shown in list views and searched on",
+    )
+
+
+class TestListResponse(BaseModel):
+    """Trimmed test shape for list/index endpoints. The full config and hydrated
+    evaluators live on the detail endpoint (`GET /tests/{uuid}`); the list keeps
+    only what list and attach-dropdown views render."""
+
+    uuid: str = Field(
+        min_length=36,
+        max_length=36,
+        description="Unique ID for the test",
+        examples=[_EXAMPLE_TEST_UUID],
+    )
+    name: str = Field(description="Name of the test")
+    type: TestTypeLiteral = Field(description=TEST_TYPE_DESCRIPTION)
+    config: Optional[TestListConfig] = Field(
+        None,
+        description="Trimmed config carrying only the test's description. Fetch the test by ID for the full config and evaluators",
+    )
+    created_at: str = Field(
+        description="When the test was created (ISO 8601 UTC)"
+    )
+    updated_at: str = Field(
+        description="When the test was last updated (ISO 8601 UTC)"
+    )
+
+
+def to_test_list_response(test_dict: Dict[str, Any]) -> "TestListResponse":
+    """Project a test row down to the trimmed list shape.
+
+    Keeps only `config.description` and drops the heavy `config.history` /
+    `evaluation` / `settings` blocks and evaluator hydration (an N+1). List and
+    attach-dropdown views read only uuid/name/type/description; the edit and
+    duplicate dialogs refetch the full test by ID."""
+    config = test_dict.get("config")
+    list_config = (
+        TestListConfig(description=config.get("description"))
+        if isinstance(config, dict)
+        else None
+    )
+    return TestListResponse(
+        uuid=test_dict["uuid"],
+        name=test_dict["name"],
+        type=test_dict["type"],
+        config=list_config,
+        created_at=test_dict["created_at"],
+        updated_at=test_dict["updated_at"],
+    )
+
 
 class EvaluatorRunEntry(BaseModel):
     """One evaluator's aggregate metrics for an STT/TTS provider, paired with evaluator UUID.

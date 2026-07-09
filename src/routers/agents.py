@@ -339,6 +339,19 @@ class AgentSummary(BaseModel):
     )
 
 
+def _to_agent_summary(agent: Dict[str, Any]) -> AgentSummary:
+    """Project an agent row to the trimmed list shape, lifting
+    `config.connection_verified` to a top-level flag (None when absent)."""
+    verified = (agent.get("config") or {}).get("connection_verified")
+    return AgentSummary(
+        uuid=agent["uuid"],
+        name=agent["name"],
+        type=agent["type"],
+        updated_at=agent["updated_at"],
+        connection_verified=None if verified is None else bool(verified),
+    )
+
+
 class AgentCreateResponse(BaseModel):
     uuid: str = Field(
         min_length=36,
@@ -587,20 +600,7 @@ async def list_agents(ctx: OrgContext = Depends(get_org_jwt_or_api_key)):
     # never ships agent auth credentials (`config.agent_headers`); the detail
     # endpoint (`GET /agents/{uuid}`) refetches the full config when needed.
     agents = get_all_agents(org_uuid=ctx.org_uuid)
-    return [
-        AgentSummary(
-            uuid=agent["uuid"],
-            name=agent["name"],
-            type=agent["type"],
-            updated_at=agent["updated_at"],
-            connection_verified=(
-                bool((agent.get("config") or {}).get("connection_verified"))
-                if (agent.get("config") or {}).get("connection_verified") is not None
-                else None
-            ),
-        )
-        for agent in agents
-    ]
+    return [_to_agent_summary(agent) for agent in agents]
 
 
 @router.get(

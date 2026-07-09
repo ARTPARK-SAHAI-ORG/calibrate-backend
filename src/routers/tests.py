@@ -18,6 +18,11 @@ from db import (
     set_test_evaluators,
 )
 from auth_utils import get_current_org, get_org_jwt_or_api_key, OrgContext
+from utils import (
+    TEST_TYPE_DESCRIPTION,
+    TestListResponse,
+    to_test_list_response,
+)
 
 import logging
 
@@ -35,12 +40,8 @@ TestType = Literal["response", "tool_call", "conversation"]
 
 # Shared across every `type` field (create/update/response/bulk) so the gloss
 # stays identical everywhere it renders.
-_TEST_TYPE_DESCRIPTION = (
-    "What the test judges:\n\n"
-    "- `response`: judges the generated reply\n"
-    "- `tool_call`: diffs the generated tool calls\n"
-    "- `conversation`: judges the full conversation\n"
-)
+# Single source of truth lives in utils (shared with the trimmed list shape).
+_TEST_TYPE_DESCRIPTION = TEST_TYPE_DESCRIPTION
 
 # Test name uniqueness is workspace-scoped on single create; bulk create adds
 # batch-level uniqueness on top (both are enforced). Share the base so the two
@@ -199,34 +200,6 @@ class TestResponse(BaseModel):
     evaluators: List[Dict[str, Any]] = Field(
         default=[],
         description="Linked evaluators, resolved to their current live version at read time",
-    )
-
-
-class TestListConfig(BaseModel):
-    description: Optional[str] = Field(
-        None,
-        description="Short description of the test, shown in list views and searched on",
-    )
-
-
-class TestListResponse(BaseModel):
-    uuid: str = Field(
-        min_length=36,
-        max_length=36,
-        description="Unique ID for the test",
-        examples=[_EXAMPLE_TEST_UUID],
-    )
-    name: str = Field(description="Name of the test")
-    type: TestType = Field(description=_TEST_TYPE_DESCRIPTION)
-    config: Optional[TestListConfig] = Field(
-        None,
-        description="Trimmed config carrying only the test's description. Fetch the test by ID for the full config and evaluators",
-    )
-    created_at: str = Field(
-        description="When the test was created (ISO 8601 UTC)"
-    )
-    updated_at: str = Field(
-        description="When the test was last updated (ISO 8601 UTC)"
     )
 
 
@@ -419,29 +392,6 @@ def _with_evaluators(test_dict: Dict[str, Any]) -> Dict[str, Any]:
     """Attach linked evaluators to a test dict."""
     evaluators = get_evaluators_for_test(test_dict["uuid"])
     return {**test_dict, "evaluators": evaluators}
-
-
-def to_test_list_response(test_dict: Dict[str, Any]) -> "TestListResponse":
-    """Project a test row down to the trimmed list shape.
-
-    Keeps only `config.description` and drops the heavy `config.history` /
-    `evaluation` / `settings` blocks and evaluator hydration (an N+1). List and
-    attach-dropdown views read only uuid/name/type/description; the edit and
-    duplicate dialogs refetch the full test by ID."""
-    config = test_dict.get("config")
-    list_config = (
-        TestListConfig(description=config.get("description"))
-        if isinstance(config, dict)
-        else None
-    )
-    return TestListResponse(
-        uuid=test_dict["uuid"],
-        name=test_dict["name"],
-        type=test_dict["type"],
-        config=list_config,
-        created_at=test_dict["created_at"],
-        updated_at=test_dict["updated_at"],
-    )
 
 
 @router.post(
