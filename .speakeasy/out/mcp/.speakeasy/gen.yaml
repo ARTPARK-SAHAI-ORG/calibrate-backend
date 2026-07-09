@@ -53,7 +53,8 @@ mcp-typescript:
   responseFormat: flat
   validateResponse: false
   mcpbManifestOverlay:
-    displayName: Calibrate
+    # snake_case: camelCase displayName fails the mcpb>=1.2.0 pack.
+    display_name: Calibrate
     description: >-
       Run and monitor Calibrate agent tests from AI assistants. List agents,
       resolve names to UUIDs, launch test runs, and poll results via the
