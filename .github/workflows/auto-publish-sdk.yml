@@ -157,6 +157,7 @@ jobs:
     needs: [detect, publish]
     if: needs.detect.outputs.should_publish == 'true'
     runs-on: ubuntu-latest
+    environment: Production
     steps:
       - name: Trigger docs sync
         env:
@@ -176,6 +177,7 @@ jobs:
     needs: [detect, publish]
     if: needs.detect.outputs.should_publish == 'true'
     runs-on: ubuntu-latest
+    environment: Production
     steps:
       - name: Trigger skills sync
         env:
