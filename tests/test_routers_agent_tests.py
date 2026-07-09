@@ -269,6 +269,84 @@ def test_agent_runs_list_surfaces_perf_aggregates(client):
     assert gruns[0]["results"] == [{"name": "tc1", "passed": True}]
 
 
+def test_agent_runs_list_slims_benchmark_model_results(client):
+    """A benchmark run in the runs-list drops each model's heavy nested
+    `test_results`/`evaluator_summary`, keeping only flat scalar summaries. Also
+    exercises the empty/non-dict guards in `_slim_test_results`."""
+    from db import create_agent_test_job, update_agent_test_job
+
+    h = _signup(client)["headers"]
+    agent = _create_agent(client, h)
+
+    job_id = create_agent_test_job(agent_id=agent["uuid"], job_type="llm-benchmark")
+    update_agent_test_job(
+        job_id,
+        status="done",
+        results={
+            # Junk non-dict rows must be skipped, not crash.
+            "test_results": ["not-a-dict", None],
+            "leaderboard_summary": [{"model": "openai/gpt-4.1", "rank": 1}],
+            "model_results": [
+                "not-a-dict",  # non-dict guard
+                {
+                    "model": "openai/gpt-4.1",
+                    "success": True,
+                    "message": "ok",
+                    "total_tests": 2,
+                    "passed": 2,
+                    "failed": 0,
+                    # Heavy nested detail that must be dropped from the list.
+                    "test_results": [
+                        {"name": "tc1", "passed": True, "output": {"response": "hi"}}
+                    ],
+                    "evaluator_summary": [{"name": "correctness", "pass_rate": 1.0}],
+                    "latency_ms": {"p50": 10.0},
+                },
+            ],
+        },
+    )
+
+    resp = client.get(f"/agent-tests/agent/{agent['uuid']}/runs", headers=h)
+    assert resp.status_code == 200
+    run = resp.json()["runs"][0]
+    # Non-dict test_results rows are skipped → empty list collapses to None.
+    assert run["results"] is None
+    # Model row is slimmed to flat scalars; heavy nested fields are gone.
+    assert run["model_results"] == [
+        {
+            "model": "openai/gpt-4.1",
+            "success": True,
+            "message": "ok",
+            "total_tests": 2,
+            "passed": 2,
+            "failed": 0,
+        }
+    ]
+    # Leaderboard + top-level evaluators are not part of the list item at all.
+    assert "leaderboard_summary" not in run
+    assert "evaluators" not in run
+
+
+def test_slim_run_list_helpers_guard_edge_cases():
+    """The run-list slimming helpers tolerate empty/missing input and skip
+    non-dict rows, and lift `test_case.name` up onto a case's flat `name`."""
+    from routers.agent_tests import _slim_test_results, _slim_model_results
+
+    # Falsy input → None
+    assert _slim_test_results(None) is None
+    assert _slim_test_results([]) is None
+    assert _slim_model_results(None) is None
+
+    # Non-dict rows are skipped; an all-junk list collapses to None
+    assert _slim_test_results(["x", None]) is None
+    assert _slim_model_results([42]) is None
+
+    # `test_case.name` is lifted onto `name` when the row has no own name
+    assert _slim_test_results([{"test_case": {"name": "tc"}, "passed": False}]) == [
+        {"name": "tc", "passed": False}
+    ]
+
+
 def test_agent_tests_link_with_missing(client):
     auth = _signup(client)
     h = auth["headers"]
