@@ -1,13 +1,19 @@
 # Injected into dalmia/calibrate-mcp as .github/workflows/publish.yml by the
 # publish-mcp job in publish-sdk.yml (Speakeasy's mcp-typescript target does NOT
 # generate a release workflow, unlike the CLI's generateRelease: true). Publishes
-# @dalmia/calibrate-mcp to npm when a v* tag is pushed.
+# @dalmia/calibrate-mcp to npm when a v* tag is pushed, then attaches the packed
+# .mcpb bundle to a matching GitHub release.
 #
 # Auth is npm Trusted Publishing (OIDC) — NO NPM_TOKEN secret. npm verifies the
 # workflow's short-lived GitHub identity against the trusted publisher configured
 # on the package (npmjs.com → package → Settings → Trusted Publisher: GitHub
 # Actions, org dalmia, repo calibrate-mcp, workflow publish.yml). id-token: write
 # is what lets GitHub mint that identity; provenance attestation is automatic.
+#
+# The GitHub release exists so the Speakeasy-generated landing page's Claude
+# Desktop tab ("Download MCP Bundle") resolves: it links a fixed asset at
+# <repoUrl>/releases/download/<tag>/mcp-server.mcpb, which nothing else creates.
+# contents: write is what lets gh create that release and upload the asset.
 #
 # This file lives in the backend repo as the single source of truth; do not
 # hand-edit it in the client repo (it is overwritten on every release sync).
@@ -20,7 +26,7 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: read
+  contents: write # gh release create + asset upload (Claude Desktop .mcpb bundle)
   id-token: write # required for npm Trusted Publishing (OIDC)
 
 jobs:
@@ -44,3 +50,65 @@ jobs:
       # package public. No token: OIDC handles auth, provenance is automatic.
       - name: Publish to npm
         run: npm publish --access public
+
+      # --- Claude Desktop .mcpb bundle release (tag pushes only) --------------
+      # The landing page links a fixed asset name, so the release must carry the
+      # bundle as mcp-server.mcpb regardless of what `mcpb pack` names it.
+      # mcpb:build needs @anthropic-ai/mcpb from node_modules; npm publish's
+      # prepublishOnly build doesn't guarantee a persisted install. No
+      # --frozen-lockfile: the generated tree may ship without a bun lockfile,
+      # and a bundle build shouldn't fail the release on lockfile drift.
+      - name: Install dependencies (for the mcpb build)
+        if: startsWith(github.ref, 'refs/tags/')
+        run: bun install
+
+      - name: Build MCP bundle (.mcpb)
+        if: startsWith(github.ref, 'refs/tags/')
+        run: npm run mcpb:build
+
+      - name: Normalize bundle filename to mcp-server.mcpb
+        if: startsWith(github.ref, 'refs/tags/')
+        run: |
+          if [ ! -f mcp-server.mcpb ]; then
+            bundle="$(find . -maxdepth 3 -name '*.mcpb' -not -path './node_modules/*' | head -n1)"
+            if [ -z "$bundle" ]; then
+              echo "::error::mcpb:build produced no .mcpb file." >&2
+              exit 1
+            fi
+            mv "$bundle" mcp-server.mcpb
+          fi
+
+      # Create the release if missing, otherwise re-upload the asset (so re-runs
+      # of the same tag are idempotent). The landing page links this exact name.
+      - name: Publish GitHub release with the bundle
+        if: startsWith(github.ref, 'refs/tags/')
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
+            gh release upload "$GITHUB_REF_NAME" ./mcp-server.mcpb --clobber
+          else
+            gh release create "$GITHUB_REF_NAME" ./mcp-server.mcpb \
+              --title "$GITHUB_REF_NAME" \
+              --generate-notes
+          fi
+
+      # Redeploy the remote GCP Cloud Run MCP server so it and its landing page
+      # track this just-published version. Runs after npm publish above, so the
+      # deploy repo (which builds its image FROM the npm package) can install
+      # this version right away. DEPLOY_DISPATCH_TOKEN is a PAT with actions:write
+      # on dalmia/calibrate-mcp-deploy; unset ⇒ the step no-ops.
+      - name: Trigger GCP MCP server redeploy
+        if: startsWith(github.ref, 'refs/tags/')
+        env:
+          GH_TOKEN: ${{ secrets.DEPLOY_DISPATCH_TOKEN }}
+        run: |
+          if [ -z "$GH_TOKEN" ]; then
+            echo "DEPLOY_DISPATCH_TOKEN not set; skipping GCP redeploy trigger."
+            exit 0
+          fi
+          VERSION="${GITHUB_REF_NAME#v}"
+          gh workflow run deploy.yml \
+            --repo dalmia/calibrate-mcp-deploy \
+            -f version="$VERSION"
+          echo "Dispatched calibrate-mcp-deploy for version $VERSION."
