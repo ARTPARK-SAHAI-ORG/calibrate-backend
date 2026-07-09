@@ -216,9 +216,12 @@ def test_agent_tests_link_crud(client):
 
 
 def test_agent_runs_list_surfaces_perf_aggregates(client):
-    """A completed unit-test run must surface latency/cost/total_tokens aggregates
-    and per-case latency/cost through the agent runs-list endpoint. Covers the
-    shared `_build_agent_test_run_item_fields` mapping used by both list endpoints."""
+    """A completed unit-test run surfaces run-level latency/cost/total_tokens
+    aggregates through the agent runs-list endpoint. The list is a lightweight
+    index: per-case rows are slimmed to flat `{name, passed}` (no per-case
+    output/latency/cost/test_case) — those live on the run-detail endpoint.
+    Covers the shared `_build_agent_test_run_item_fields` mapping used by both
+    list endpoints."""
     from db import create_agent_test_job, update_agent_test_job
 
     h = _signup(client)["headers"]
@@ -251,17 +254,19 @@ def test_agent_runs_list_surfaces_perf_aggregates(client):
     resp = client.get(f"/agent-tests/agent/{agent['uuid']}/runs", headers=h)
     assert resp.status_code == 200
     run = resp.json()["runs"][0]
+    # Run-level aggregates flow through.
     assert run["latency_ms"] == {"p50": 1851.0, "p95": 1851.0, "p99": 1851.0, "count": 1}
     assert run["cost"]["mean"] == 0.0248
     assert run["total_tokens"] == {"mean": 4378.0, "min": 4369, "max": 4387, "count": 2}
-    assert run["results"][0]["latency_ms"] == 1851.0
-    assert run["results"][0]["cost"] == 0.0248
+    # Per-case rows are slim: name + passed only, nothing else.
+    assert run["results"] == [{"name": "tc1", "passed": True}]
 
-    # Same fields flow through the global runs-list endpoint.
+    # Same aggregates flow through the global runs-list endpoint.
     global_resp = client.get("/agent-tests/runs", headers=h)
     assert global_resp.status_code == 200
     gruns = [r for r in global_resp.json()["runs"] if r["uuid"] == job_id]
     assert gruns and gruns[0]["total_tokens"]["count"] == 2
+    assert gruns[0]["results"] == [{"name": "tc1", "passed": True}]
 
 
 def test_agent_tests_link_with_missing(client):
