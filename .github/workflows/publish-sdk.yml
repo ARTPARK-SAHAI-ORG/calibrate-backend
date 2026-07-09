@@ -200,3 +200,51 @@ jobs:
             exit 0
           fi
           ./.github/scripts/tag-client-repo.sh dalmia/calibrate-mcp "${{ needs.prepare.outputs.version }}"
+
+  # Redeploy the remote GCP Cloud Run MCP server (mcp.calibrate.artpark.ai) once
+  # the new npm package is live, so it and its landing page track the just-
+  # published version instead of needing a manual redeploy. Lives here (not in
+  # auto-publish-sdk.yml) so ANY publish — auto or manual workflow_dispatch —
+  # also refreshes the deploy. The container is built FROM the npm package, so we
+  # must wait for the registry to serve the new version (npm publish runs
+  # asynchronously in calibrate-mcp's own publish.yml, triggered by the tag
+  # above) before dispatching the deploy repo's workflow.
+  deploy-mcp:
+    needs: [prepare, publish-mcp]
+    if: >-
+      always() &&
+      needs.prepare.result == 'success' &&
+      needs.publish-mcp.result == 'success'
+    runs-on: ubuntu-latest
+    environment: Production
+    steps:
+      - name: Trigger calibrate-mcp-deploy once npm has the new version
+        env:
+          # PUSH_TO_REPO_TOKEN must also have actions:write on
+          # dalmia/calibrate-mcp-deploy (it already spans the dalmia client repos).
+          GH_TOKEN: ${{ secrets.PUSH_TO_REPO_TOKEN }}
+          SPEAKEASY_API_KEY_MCP: ${{ secrets.SPEAKEASY_API_KEY_MCP }}
+          VERSION: ${{ needs.prepare.outputs.version }}
+        run: |
+          if [ -z "$SPEAKEASY_API_KEY_MCP" ]; then
+            echo "SPEAKEASY_API_KEY_MCP is not set; MCP was not published, skipping deploy."
+            exit 0
+          fi
+
+          echo "Waiting for @dalmia/calibrate-mcp@$VERSION to appear on npm..."
+          for i in $(seq 1 40); do
+            if npm view "@dalmia/calibrate-mcp@$VERSION" version >/dev/null 2>&1; then
+              echo "npm is serving @dalmia/calibrate-mcp@$VERSION."
+              break
+            fi
+            if [ "$i" -eq 40 ]; then
+              echo "::warning::@dalmia/calibrate-mcp@$VERSION not on npm after ~10m; skipping deploy trigger (dispatch calibrate-mcp-deploy manually once it publishes)."
+              exit 0
+            fi
+            sleep 15
+          done
+
+          gh workflow run deploy.yml \
+            --repo dalmia/calibrate-mcp-deploy \
+            -f version="$VERSION"
+          echo "Dispatched calibrate-mcp-deploy for version $VERSION."
