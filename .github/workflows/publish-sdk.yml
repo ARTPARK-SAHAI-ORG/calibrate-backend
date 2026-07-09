@@ -201,8 +201,8 @@ jobs:
           fi
           ./.github/scripts/tag-client-repo.sh dalmia/calibrate-mcp "${{ needs.prepare.outputs.version }}"
 
-  # Redeploy the remote GCP Cloud Run MCP server (mcp.calibrate.artpark.ai) once
-  # the new npm package is live, so it and its landing page track the just-
+  # Redeploy the remote GCP Cloud Run MCP server once the new npm package is
+  # live, so it and its landing page track the just-
   # published version instead of needing a manual redeploy. Lives here (not in
   # auto-publish-sdk.yml) so ANY publish — auto or manual workflow_dispatch —
   # also refreshes the deploy. The container is built FROM the npm package, so we
