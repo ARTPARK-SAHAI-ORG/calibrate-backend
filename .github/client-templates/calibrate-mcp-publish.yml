@@ -43,8 +43,12 @@ jobs:
           registry-url: https://registry.npmjs.org
 
       # Trusted Publishing (OIDC) needs npm >= 11.5.1; Node 22 ships an older npm.
+      # Pin to the 11 line, NOT @latest: npm 12.0.0 ships a broken bundle where
+      # libnpmpublish can't resolve `sigstore` (it's buried under pacote), so a
+      # provenance publish crashes with "Cannot find module 'sigstore'". 11.x
+      # keeps sigstore at top-level node_modules where it resolves.
       - name: Update npm for OIDC support
-        run: npm install -g npm@latest
+        run: npm install -g npm@11
 
       # prepublishOnly runs the bun + tsc build. --access public keeps the scoped
       # package public. No token: OIDC handles auth, provenance is automatic.
