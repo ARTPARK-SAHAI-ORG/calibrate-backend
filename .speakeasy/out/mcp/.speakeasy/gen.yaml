@@ -53,7 +53,10 @@ mcp-typescript:
   responseFormat: flat
   validateResponse: false
   mcpbManifestOverlay:
-    displayName: Calibrate
+    # mcpb manifest key is snake_case display_name; the camelCase displayName
+    # is rejected by @anthropic-ai/mcpb >=1.2.0 ("Unrecognized key displayName"),
+    # which fails the .mcpb pack. This overlay merges verbatim into manifest.json.
+    display_name: Calibrate
     description: >-
       Run and monitor Calibrate agent tests from AI assistants. List agents,
       resolve names to UUIDs, launch test runs, and poll results via the
