@@ -215,6 +215,34 @@ def test_agent_tests_link_crud(client):
     assert foreign.status_code == 404
 
 
+def test_agent_tests_list_returns_trimmed_shape(client):
+    """GET /agent-tests/agent/{uuid}/tests returns the trimmed list shape:
+    uuid/name/type only, with `config.history`/`evaluation` and the hydrated
+    `evaluators` list dropped from each item."""
+    auth = _signup(client)
+    h = auth["headers"]
+    agent = _create_agent(client, h)
+    # _create_test links an llm evaluator and sets config.history + evaluation,
+    # so a full shape would carry both — proving the list drops them.
+    name = f"t-trim-{uuid.uuid4().hex[:6]}"
+    test = _create_test(client, h, name=name)
+    client.post(
+        "/agent-tests",
+        json={"agent_uuid": agent["uuid"], "test_uuids": [test["uuid"]]},
+        headers=h,
+    )
+
+    r = client.get(f"/agent-tests/agent/{agent['uuid']}/tests", headers=h)
+    assert r.status_code == 200, r.text
+    item = next(t for t in r.json() if t["uuid"] == test["uuid"])
+    assert item["name"] == name
+    assert item["type"] == "response"
+    assert "evaluators" not in item
+    # config carries description only (None here), never history/evaluation.
+    assert "history" not in (item.get("config") or {})
+    assert "evaluation" not in (item.get("config") or {})
+
+
 def test_agent_runs_list_surfaces_perf_aggregates(client):
     """A completed unit-test run surfaces run-level latency/cost/total_tokens
     aggregates through the agent runs-list endpoint. The list is a lightweight

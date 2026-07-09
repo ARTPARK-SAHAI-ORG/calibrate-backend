@@ -321,6 +321,24 @@ class AgentResponse(BaseModel):
     )
 
 
+class AgentSummary(BaseModel):
+    uuid: str = Field(
+        min_length=36,
+        max_length=36,
+        description="ID of the agent",
+        examples=["f47ac10b-58cc-4372-a567-0e02b2c3d479"],
+    )
+    name: str = Field(description="Name of the agent")
+    type: Literal["agent", "connection"] = Field(description=AGENT_TYPE_DESCRIPTION)
+    updated_at: str = Field(
+        description="When the agent was last updated (ISO 8601 UTC)"
+    )
+    connection_verified: Optional[bool] = Field(
+        None,
+        description="Whether the agent's connection has been verified, for a `type=connection` agent",
+    )
+
+
 class AgentCreateResponse(BaseModel):
     uuid: str = Field(
         min_length=36,
@@ -556,7 +574,7 @@ async def create_agent_endpoint(
 
 @router.get(
     "",
-    response_model=List[AgentResponse],
+    response_model=List[AgentSummary],
     tags=["Public API"],
     summary="List agents",
 )
@@ -565,8 +583,24 @@ async def list_agents(ctx: OrgContext = Depends(get_org_jwt_or_api_key)):
     # Public API. Auth via get_org_jwt_or_api_key (JWT for the web app, API key
     # for CI); the run/poll and /resolve endpoints accept the same key, so CI can
     # enumerate agent UUIDs without knowing names up front.
+    # Returns a trimmed summary per agent (no full `config`) so the bulk list
+    # never ships agent auth credentials (`config.agent_headers`); the detail
+    # endpoint (`GET /agents/{uuid}`) refetches the full config when needed.
     agents = get_all_agents(org_uuid=ctx.org_uuid)
-    return agents
+    return [
+        AgentSummary(
+            uuid=agent["uuid"],
+            name=agent["name"],
+            type=agent["type"],
+            updated_at=agent["updated_at"],
+            connection_verified=(
+                bool((agent.get("config") or {}).get("connection_verified"))
+                if (agent.get("config") or {}).get("connection_verified") is not None
+                else None
+            ),
+        )
+        for agent in agents
+    ]
 
 
 @router.get(

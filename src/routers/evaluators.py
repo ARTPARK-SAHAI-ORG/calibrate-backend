@@ -192,6 +192,20 @@ class EvaluatorVersionResponse(BaseModel):
     created_at: str = Field(description="When the version was created (ISO 8601 UTC)")
 
 
+class EvaluatorLiveVersionSummary(BaseModel):
+    """Slim view of the live version for list results, carrying only what the list needs."""
+
+    uuid: str = Field(
+        min_length=36,
+        max_length=36,
+        description="Version ID",
+        examples=[_EXAMPLE_VERSION_UUID],
+    )
+    version_number: int = Field(description=_VERSION_NUMBER_DESCRIPTION)
+    judge_model: str = Field(description=_JUDGE_MODEL_DESCRIPTION)
+    variables: Optional[List[VariableSpec]] = Field(None, description="Declared prompt variables")
+
+
 class EvaluatorResponseBase(BaseModel):
     """Identity and classification fields shared by every evaluator response."""
 
@@ -238,7 +252,7 @@ class EvaluatorResponseBase(BaseModel):
 
 
 class EvaluatorResponse(EvaluatorResponseBase):
-    live_version: Optional[EvaluatorVersionResponse] = Field(
+    live_version: Optional[EvaluatorLiveVersionSummary] = Field(
         None, description="The version that is currently live"
     )
 
@@ -360,12 +374,14 @@ def _live_version_index(
 
 def _evaluator_response(evaluator: Dict[str, Any]) -> EvaluatorResponse:
     live_version = None
-    output_type = evaluator.get("output_type", "binary")
     if evaluator.get("live_version_id"):
         v = get_evaluator_version(evaluator["live_version_id"])
         if v:
-            live_version = EvaluatorVersionResponse(
-                **_version_dict(v, output_type)
+            live_version = EvaluatorLiveVersionSummary(
+                uuid=v["uuid"],
+                version_number=v["version_number"],
+                judge_model=v["judge_model"],
+                variables=v.get("variables"),
             )
     return EvaluatorResponse(
         uuid=evaluator["uuid"],

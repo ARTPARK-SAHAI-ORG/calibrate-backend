@@ -40,12 +40,12 @@ from db import (
     delete_agent_test_job,
 )
 from llm_judge import build_test_evaluators_payload, evaluator_value_name
+from routers.tests import TestListResponse, to_test_list_response
 from auth_utils import get_current_org, get_org_jwt_or_api_key, OrgContext
 from utils import (
     TaskStatus,
     InitialTaskStatus,
     TaskCreateResponse,
-    TestTypeLiteral,
     OutputTypeLiteral,
     AGENT_TYPE_DESCRIPTION,
     AgentTestJobType,
@@ -228,29 +228,6 @@ class AgentTestsCreateResponse(BaseModel):
         description="Identifiers for the links created by this call. Tests that were already linked are excluded"
     )
     message: str = Field(description="Confirmation message")
-
-
-class TestResponse(BaseModel):
-    uuid: str = Field(
-        min_length=36,
-        max_length=36,
-        description="Test ID",
-        examples=[_EXAMPLE_TEST_UUID],
-    )
-    name: str = Field(description="Name of the test")
-    type: TestTypeLiteral = Field(
-        description=(
-            "What the test checks:\n"
-            "- `response`: judges the reply the agent generates\n"
-            "- `tool_call`: checks the tool calls the agent makes\n"
-            "- `conversation`: judges the full conversation after the agent replies"
-        )
-    )
-    config: Dict[str, Any] | None = Field(
-        None, description="Test configuration"
-    )
-    created_at: str = Field(description="When the test was created (ISO 8601 UTC)")
-    updated_at: str = Field(description="When the test was last updated (ISO 8601 UTC)")
 
 
 class AgentResponse(BaseModel):
@@ -666,7 +643,7 @@ async def list_agent_tests():
 
 @router.get(
     "/agent/{agent_uuid}/tests",
-    response_model=List[TestResponse],
+    response_model=List[TestListResponse],
     summary="List tests for agent",
     tags=["Public API"],
 )
@@ -684,8 +661,10 @@ async def get_agent_tests_endpoint(
     if not agent or agent.get("org_uuid") != ctx.org_uuid:
         raise HTTPException(status_code=404, detail="Agent not found")
 
+    # Trimmed list shape: uuid/name/type + config.description only, no evaluator
+    # hydration. Callers refetch a full test by ID when they need config/evaluators.
     tests = get_tests_for_agent(agent_uuid)
-    return tests
+    return [to_test_list_response(t) for t in tests]
 
 
 def _slim_test_results(test_results: Any) -> Optional[List[Dict[str, Any]]]:

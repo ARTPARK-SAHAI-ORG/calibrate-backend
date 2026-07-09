@@ -146,6 +146,67 @@ def test_list_agents_with_api_key(client):
     assert {a1["uuid"], a2["uuid"]} <= {a["uuid"] for a in r2.json()}
 
 
+def test_list_agents_returns_trimmed_summary(client):
+    """GET /agents returns a trimmed summary per agent, never the full config
+    (which carries agent auth credentials in `agent_headers`)."""
+    h = _signup(client)
+    name = f"summary-{uuid.uuid4().hex[:6]}"
+    agent = _create_agent(client, h, name)
+
+    r = client.get("/agents", headers=h)
+    assert r.status_code == 200, r.text
+    item = next(a for a in r.json() if a["uuid"] == agent["uuid"])
+
+    # Summary fields present.
+    assert set(item.keys()) == {"uuid", "name", "type", "updated_at", "connection_verified"}
+    assert item["name"] == name
+    assert item["type"] == "agent"
+    assert item["updated_at"]
+
+    # Full config / credentials / created_at are NOT shipped in the list.
+    assert "config" not in item
+    assert "system_prompt" not in item
+    assert "agent_headers" not in item
+    assert "created_at" not in item
+
+
+def test_list_agents_derives_connection_verified(client):
+    """connection_verified in the summary is derived from config.connection_verified:
+    None when absent, and the stored bool once set."""
+    h = _signup(client)
+
+    # Agent with no verification flag → connection_verified is None.
+    plain = _create_agent(client, h, f"cv-none-{uuid.uuid4().hex[:6]}")
+
+    # Connection agent, then flip verification true / false via JWT PUT.
+    conn = client.post(
+        "/agents",
+        json={
+            "name": f"cv-conn-{uuid.uuid4().hex[:6]}",
+            "type": "connection",
+            "config": {"agent_url": "https://example.com/agent"},
+        },
+        headers=h,
+    ).json()
+
+    def _cv(agent_uuid):
+        r = client.get("/agents", headers=h)
+        assert r.status_code == 200, r.text
+        return next(a for a in r.json() if a["uuid"] == agent_uuid)["connection_verified"]
+
+    assert _cv(plain["uuid"]) is None
+
+    client.put(
+        f"/agents/{conn['uuid']}", json={"connection_verified": True}, headers=h
+    )
+    assert _cv(conn["uuid"]) is True
+
+    client.put(
+        f"/agents/{conn['uuid']}", json={"connection_verified": False}, headers=h
+    )
+    assert _cv(conn["uuid"]) is False
+
+
 def test_list_agents_is_org_scoped(client):
     """An API key for org A must not list agents from org B."""
     ha = _signup(client)

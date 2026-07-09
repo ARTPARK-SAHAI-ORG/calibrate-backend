@@ -356,7 +356,7 @@ class AnnotationTaskResponse(BaseModel):
     updated_at: str = Field(description="When the task was last updated (ISO 8601 UTC)")
     evaluators: List[Dict[str, Any]] = Field(
         default=[],
-        description="The evaluators linked to this task, in display order, each with its live version's rubric",
+        description="The evaluators linked to this task, in display order. Fetching one task by ID enriches each with its live version's rubric. Listing tasks returns lightweight metadata (uuid, name, type, position) only",
     )
     item_count: Optional[int] = Field(
         None, description="Number of items in the task"

@@ -202,6 +202,34 @@ class TestResponse(BaseModel):
     )
 
 
+class TestListConfig(BaseModel):
+    description: Optional[str] = Field(
+        None,
+        description="Short description of the test, shown in list views and searched on",
+    )
+
+
+class TestListResponse(BaseModel):
+    uuid: str = Field(
+        min_length=36,
+        max_length=36,
+        description="Unique ID for the test",
+        examples=[_EXAMPLE_TEST_UUID],
+    )
+    name: str = Field(description="Name of the test")
+    type: TestType = Field(description=_TEST_TYPE_DESCRIPTION)
+    config: Optional[TestListConfig] = Field(
+        None,
+        description="Trimmed config carrying only the test's description. Fetch the test by ID for the full config and evaluators",
+    )
+    created_at: str = Field(
+        description="When the test was created (ISO 8601 UTC)"
+    )
+    updated_at: str = Field(
+        description="When the test was last updated (ISO 8601 UTC)"
+    )
+
+
 class TestCreateResponse(BaseModel):
     uuid: str = Field(
         min_length=36,
@@ -393,6 +421,29 @@ def _with_evaluators(test_dict: Dict[str, Any]) -> Dict[str, Any]:
     return {**test_dict, "evaluators": evaluators}
 
 
+def to_test_list_response(test_dict: Dict[str, Any]) -> "TestListResponse":
+    """Project a test row down to the trimmed list shape.
+
+    Keeps only `config.description` and drops the heavy `config.history` /
+    `evaluation` / `settings` blocks and evaluator hydration (an N+1). List and
+    attach-dropdown views read only uuid/name/type/description; the edit and
+    duplicate dialogs refetch the full test by ID."""
+    config = test_dict.get("config")
+    list_config = (
+        TestListConfig(description=config.get("description"))
+        if isinstance(config, dict)
+        else None
+    )
+    return TestListResponse(
+        uuid=test_dict["uuid"],
+        name=test_dict["name"],
+        type=test_dict["type"],
+        config=list_config,
+        created_at=test_dict["created_at"],
+        updated_at=test_dict["updated_at"],
+    )
+
+
 @router.post(
     "/bulk-delete", response_model=BulkTestDeleteResponse, summary="Bulk delete tests"
 )
@@ -543,14 +594,14 @@ async def create_test_endpoint(
 
 @router.get(
     "",
-    response_model=List[TestResponse],
+    response_model=List[TestListResponse],
     tags=["Public API"],
     summary="List tests",
 )
 async def list_tests(ctx: OrgContext = Depends(get_org_jwt_or_api_key)):
     """List all the test cases for your agents"""
     tests = get_all_tests(org_uuid=ctx.org_uuid)
-    return [_with_evaluators(t) for t in tests]
+    return [to_test_list_response(t) for t in tests]
 
 
 @router.get(

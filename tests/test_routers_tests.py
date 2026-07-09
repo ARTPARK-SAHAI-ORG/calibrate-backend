@@ -73,14 +73,76 @@ def test_list_tests_with_api_key(client):
     assert t_uuid in {t["uuid"] for t in r.json()}
 
 
-def test_get_test_with_api_key(client):
-    """GET /tests/{uuid} accepts an X-API-Key."""
+def test_list_tests_returns_trimmed_shape(client):
+    """GET /tests returns the trimmed list shape: uuid/name/type + only
+    config.description survives, while the heavy `evaluators` list and the
+    `config.history`/`config.evaluation` blocks are dropped from list items."""
     jwt = _signup(client)
     key = _raw_key(client, jwt)
-    t_uuid = _create_test(client, {"X-API-Key": key})
+    # An `llm` evaluator to link, so a full test would carry a non-empty
+    # `evaluators[]` — proving the list shape drops it.
+    evaluators = client.get("/evaluators", headers=jwt).json()
+    llm_ev = next(e for e in evaluators if e.get("evaluator_type") == "llm")
+    name = f"t-trim-{uuid.uuid4().hex[:6]}"
+    created = client.post(
+        "/tests",
+        json={
+            "name": name,
+            "type": "response",
+            "config": {
+                "description": "search me",
+                "history": [{"role": "user", "content": "hi"}],
+                "evaluation": {"type": "response"},
+                "settings": {"language": "en"},
+            },
+            "evaluators": [{"evaluator_uuid": llm_ev["uuid"]}],
+        },
+        headers={"X-API-Key": key},
+    )
+    assert created.status_code == 200, created.text
+    t_uuid = created.json()["uuid"]
+
+    items = client.get("/tests", headers={"X-API-Key": key}).json()
+    item = next(t for t in items if t["uuid"] == t_uuid)
+    # Trimmed shape: no evaluator hydration, no heavy config blocks.
+    assert "evaluators" not in item
+    assert item["config"] == {"description": "search me"}
+    assert "history" not in item["config"]
+    assert "evaluation" not in item["config"]
+    assert item["name"] == name
+    assert item["type"] == "response"
+
+
+def test_get_test_with_api_key(client):
+    """GET /tests/{uuid} accepts an X-API-Key and returns the full test shape."""
+    jwt = _signup(client)
+    key = _raw_key(client, jwt)
+    evaluators = client.get("/evaluators", headers=jwt).json()
+    llm_ev = next(e for e in evaluators if e.get("evaluator_type") == "llm")
+    created = client.post(
+        "/tests",
+        json={
+            "name": f"t-{uuid.uuid4().hex[:6]}",
+            "type": "response",
+            "config": {
+                "description": "d",
+                "history": [{"role": "user", "content": "hi"}],
+                "evaluation": {"type": "response"},
+            },
+            "evaluators": [{"evaluator_uuid": llm_ev["uuid"]}],
+        },
+        headers={"X-API-Key": key},
+    )
+    assert created.status_code == 200, created.text
+    t_uuid = created.json()["uuid"]
     r = client.get(f"/tests/{t_uuid}", headers={"X-API-Key": key})
     assert r.status_code == 200, r.text
-    assert r.json()["uuid"] == t_uuid
+    body = r.json()
+    assert body["uuid"] == t_uuid
+    # Full detail shape keeps evaluators + the whole config.
+    assert len(body["evaluators"]) == 1
+    assert body["config"]["history"] == [{"role": "user", "content": "hi"}]
+    assert body["config"]["evaluation"] == {"type": "response"}
 
 
 def test_update_test_with_api_key(client):
