@@ -58,13 +58,19 @@ jobs:
           # corruption risk of interpolating raw secret text into a script body
           # — system prompts can contain $, backticks, quotes, markdown, etc.
           DEFAULT_AGENT_SYSTEM_PROMPT: ${{ secrets.DEFAULT_AGENT_SYSTEM_PROMPT }}
+          # Short-lived registry credential so the VM can pull the private image
+          # without a stored personal PAT. GITHUB_TOKEN is minted per-run and
+          # expires when the job ends; the job's `packages: write` permission
+          # (set above) lets it pull this repo-linked GHCR image.
+          GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GHCR_ACTOR: ${{ github.actor }}
         with:
           host: ${{ secrets.VM_HOST }}
           username: ${{ secrets.VM_USER }}
           key: ${{ secrets.VM_SSH_KEY }}
-          envs: DEFAULT_AGENT_SYSTEM_PROMPT
+          envs: DEFAULT_AGENT_SYSTEM_PROMPT,GHCR_TOKEN,GHCR_ACTOR
           script: |
-            set -e  # Exit immediately if any command fails
+            set -eo pipefail  # Exit on any failure; fail a pipeline if any stage fails
 
             # Set environment variables
             export IMAGE_NAME="${{ env.IMAGE_NAME }}"
@@ -134,14 +140,30 @@ jobs:
             export CALIBRATE_SIMULATION_PARALLEL="${{ secrets.CALIBRATE_SIMULATION_PARALLEL }}"
             export SUPERADMIN_EMAIL="${{ secrets.SUPERADMIN_EMAIL }}"
 
+            # Authenticate to GHCR with the short-lived token injected by the
+            # Actions job (valid only for this run) — no personal PAT stored on
+            # the VM, and not subject to the org's classic-PAT policy.
+            echo "$GHCR_TOKEN" | docker login ghcr.io -u "$GHCR_ACTOR" --password-stdin
+
             # Navigate to directory with docker-compose.yml
             cd /tmp/pense-staging
 
-            # Run new container with docker compose (pull always to ensure latest image)
-            docker compose -p pense-staging pull && docker compose -p pense-staging up -d
+            # Pull the new image explicitly and abort on failure. `docker pull`
+            # returns a non-zero exit code on registry/auth errors (e.g. 403
+            # Forbidden), whereas `docker compose pull` can exit 0 after logging
+            # the error and silently reuse a stale same-tag image already cached
+            # on the VM — which previously let a failed pull report success while
+            # the old container (old code + old env) kept running.
+            docker pull "${IMAGE_NAME}:${IMAGE_TAG}"
+
+            # --force-recreate so both code and env-var changes always take effect.
+            docker compose -p pense-staging up -d --force-recreate
 
             # Clean up old images
             docker image prune -f
+
+            # Drop the ephemeral registry credential from the VM.
+            docker logout ghcr.io
 
             echo "🎉 Staging deployment completed successfully!"
 
