@@ -35,7 +35,6 @@ from db import (
     get_tests_for_agent_summary,
     get_agents_for_test,
     get_agent_test_link,
-    get_all_agent_tests,
     get_agent,
     get_all_agents,
     get_test,
@@ -217,23 +216,6 @@ class AgentTestDelete(BaseModel):
         description="Test to unlink from the agent",
         examples=[EXAMPLE_TEST_UUID],
     )
-
-
-class AgentTestResponse(BaseModel):
-    id: int = Field(description="Identifier for the agent-test link")
-    agent_id: str = Field(
-        min_length=36,
-        max_length=36,
-        description="The linked agent",
-        examples=[_EXAMPLE_AGENT_UUID],
-    )
-    test_id: str = Field(
-        min_length=36,
-        max_length=36,
-        description="The linked test",
-        examples=[EXAMPLE_TEST_UUID],
-    )
-    created_at: str = Field(description="When the link was created (ISO 8601 UTC)")
 
 
 class AgentTestsCreateResponse(BaseModel):
@@ -639,13 +621,6 @@ async def create_agent_test_links(
     )
 
 
-@router.get("", response_model=List[AgentTestResponse], summary="List agent-test links")
-async def list_agent_tests():
-    """List which tests are linked to which agents."""
-    links = get_all_agent_tests()
-    return links
-
-
 @router.get(
     "/agent/{agent_uuid}/tests",
     response_model=PaginatedResponse[TestListResponse],
@@ -938,11 +913,14 @@ async def get_test_agents(
         description="Test whose linked agents to list",
         examples=[EXAMPLE_TEST_UUID],
     ),
+    ctx: OrgContext = Depends(get_current_org),
 ):
     """List the agents linked to a test."""
-    # Verify test exists
+    # Verify the test exists and belongs to the caller's workspace (404
+    # otherwise). The response includes each agent's full config (which can
+    # carry connection headers), so cross-org reads must not leak it.
     test = get_test(test_uuid)
-    if not test:
+    if not test or test.get("org_uuid") != ctx.org_uuid:
         raise HTTPException(status_code=404, detail="Test not found")
 
     agents = get_agents_for_test(test_uuid)
@@ -950,8 +928,17 @@ async def get_test_agents(
 
 
 @router.delete("", summary="Unlink test from agent")
-async def delete_agent_test_link(agent_test: AgentTestDelete):
+async def delete_agent_test_link(
+    agent_test: AgentTestDelete,
+    ctx: OrgContext = Depends(get_current_org),
+):
     """Unlink a test from an agent so it no longer runs for that agent."""
+    # Verify the agent exists and belongs to the caller's workspace (404
+    # otherwise) before touching the link.
+    agent = get_agent(agent_test.agent_uuid)
+    if not agent or agent.get("org_uuid") != ctx.org_uuid:
+        raise HTTPException(status_code=404, detail="Agent not found")
+
     deleted = remove_test_from_agent(agent_test.agent_uuid, agent_test.test_uuid)
     if not deleted:
         raise HTTPException(status_code=404, detail="Agent-test link not found")
@@ -972,13 +959,18 @@ class AgentTestBulkDelete(BaseModel):
 
 
 @router.post("/bulk-unlink", summary="Bulk unlink tests from agent")
-async def bulk_delete_agent_test_links(payload: AgentTestBulkDelete):
+async def bulk_delete_agent_test_links(
+    payload: AgentTestBulkDelete,
+    ctx: OrgContext = Depends(get_current_org),
+):
     """Unlink multiple tests from an agent."""
     if not payload.test_uuids:
         raise HTTPException(status_code=400, detail="test_uuids must not be empty")
 
+    # Verify the agent exists and belongs to the caller's workspace (404
+    # otherwise).
     agent = get_agent(payload.agent_uuid)
-    if not agent:
+    if not agent or agent.get("org_uuid") != ctx.org_uuid:
         raise HTTPException(status_code=404, detail="Agent not found")
 
     deleted_count = bulk_remove_tests_from_agent(
