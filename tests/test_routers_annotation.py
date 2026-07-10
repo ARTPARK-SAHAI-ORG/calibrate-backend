@@ -43,7 +43,7 @@ def _signup(client):
 
 
 def _llm_evaluator(client, h):
-    evaluators = client.get("/evaluators", headers=h).json()
+    evaluators = client.get("/evaluators", headers=h).json()["items"]
     return next(e for e in evaluators if e.get("evaluator_type") == "llm")
 
 
@@ -91,7 +91,7 @@ def test_annotation_task_crud(client):
     # list
     listing = client.get("/annotation-tasks", headers=h)
     assert listing.status_code == 200
-    assert any(t["uuid"] == task_uuid for t in listing.json())
+    assert any(t["uuid"] == task_uuid for t in listing.json()["items"])
 
     # detail
     detail = client.get(f"/annotation-tasks/{task_uuid}", headers=h)
@@ -197,7 +197,7 @@ def test_list_annotation_tasks_batched_evaluators_match_per_task(client):
 
     auth = _signup(client)
     h = auth["headers"]
-    evaluators = client.get("/evaluators", headers=h).json()
+    evaluators = client.get("/evaluators", headers=h).json()["items"]
     llm_evs = [e for e in evaluators if e.get("evaluator_type") == "llm"][:2]
     assert len(llm_evs) == 2
 
@@ -224,7 +224,7 @@ def test_list_annotation_tasks_batched_evaluators_match_per_task(client):
 
     # And the list endpoint (which uses the batched helper) must return the same
     # evaluators for each of our tasks as the per-task helper produced.
-    listing = client.get("/annotation-tasks", headers=h).json()
+    listing = client.get("/annotation-tasks", headers=h).json()["items"]
     by_uuid = {t["uuid"]: t for t in listing}
     for tu in task_uuids:
         assert tu in by_uuid
@@ -236,7 +236,7 @@ def test_annotation_task_evaluator_ordering(client):
     order, and every surface that lists task evaluators honors it."""
     auth = _signup(client)
     h = auth["headers"]
-    evaluators = client.get("/evaluators", headers=h).json()
+    evaluators = client.get("/evaluators", headers=h).json()["items"]
     llm_evs = [e for e in evaluators if e.get("evaluator_type") == "llm"]
     # Need at least two evaluators to assert ordering meaningfully.
     assert len(llm_evs) >= 2, "expected ≥2 seeded LLM evaluators"
@@ -773,7 +773,7 @@ def test_create_jobs_evaluator_subset(client):
     omitting it snapshots all of them."""
     auth = _signup(client)
     h = auth["headers"]
-    evaluators = client.get("/evaluators", headers=h).json()
+    evaluators = client.get("/evaluators", headers=h).json()["items"]
     llm_evs = [e for e in evaluators if e.get("evaluator_type") == "llm"]
     assert len(llm_evs) >= 2, "expected ≥2 seeded LLM evaluators"
     ev_a, ev_b = llm_evs[0], llm_evs[1]

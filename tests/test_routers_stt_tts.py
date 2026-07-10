@@ -195,7 +195,7 @@ def test_stt_evaluate_wrong_evaluator_type(client, monkeypatch):
     auth = _signup(client)
     monkeypatch.setenv("S3_OUTPUT_BUCKET", "test-bucket")
     # Use the LLM default evaluator; that should be rejected for STT
-    evaluators = client.get("/evaluators", headers=auth["headers"]).json()
+    evaluators = client.get("/evaluators", headers=auth["headers"]).json()["items"]
     llm_ev = next(e for e in evaluators if e.get("evaluator_type") == "llm")
     resp = client.post(
         "/stt/evaluate",

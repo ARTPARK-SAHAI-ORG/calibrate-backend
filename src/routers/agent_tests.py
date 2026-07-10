@@ -12,6 +12,16 @@ from pathlib import Path
 from typing import List, Dict, Any, Literal, Optional
 
 from fastapi import APIRouter, HTTPException, Depends, Path as PathParam, Query
+from pagination import (
+    OptionalPaginationParams,
+    PaginatedResponse,
+    count_and_page,
+    make_search_params,
+    page_envelope,
+    paginate,
+)
+
+_AgentTestSearch = make_search_params(searchable=["name"])
 from pydantic import BaseModel, Field
 from sqlite3 import IntegrityError
 
@@ -569,12 +579,6 @@ class AgentTestRunListItem(BaseModel):
     )
 
 
-class AgentTestRunsResponse(BaseModel):
-    runs: List[AgentTestRunListItem] = Field(
-        description="Test runs for the agent, most recently created first"
-    )
-
-
 class GlobalTestRunListItem(AgentTestRunListItem):
     agent_id: str = Field(
         min_length=36,
@@ -583,12 +587,6 @@ class GlobalTestRunListItem(AgentTestRunListItem):
         examples=[_EXAMPLE_AGENT_UUID],
     )
     agent_name: str = Field(description="Name of the agent this run belongs to")
-
-
-class GlobalTestRunsResponse(BaseModel):
-    runs: List[GlobalTestRunListItem] = Field(
-        description="Test runs across every agent in your workspace, most recently updated first"
-    )
 
 
 @router.post(
@@ -644,7 +642,7 @@ async def list_agent_tests():
 
 @router.get(
     "/agent/{agent_uuid}/tests",
-    response_model=List[TestListResponse],
+    response_model=PaginatedResponse[TestListResponse],
     summary="List tests for agent",
     tags=["Public API"],
 )
@@ -654,6 +652,8 @@ async def get_agent_tests_endpoint(
         examples=[_EXAMPLE_AGENT_UUID],
     ),
     ctx: OrgContext = Depends(get_org_jwt_or_api_key),
+    search: _AgentTestSearch = Depends(),
+    pagination: OptionalPaginationParams = Depends(),
 ):
     """List the tests linked to an agent."""
     # Public API (auth via get_org_jwt_or_api_key). Verify the agent exists and
@@ -662,10 +662,14 @@ async def get_agent_tests_endpoint(
     if not agent or agent.get("org_uuid") != ctx.org_uuid:
         raise HTTPException(status_code=404, detail="Agent not found")
 
-    # Trimmed list shape: uuid/name/type + config.description only, no evaluator
-    # hydration. Callers refetch a full test by ID when they need config/evaluators.
+    # Optional `?q=` name search + `?limit=&offset=` paging. Returns the
+    # `{items, total, limit, offset}` envelope. Each item is the trimmed list
+    # shape (uuid/name/type + config.description, no evaluator hydration);
+    # the transform runs only on the returned page.
     tests = get_tests_for_agent(agent_uuid)
-    return [to_test_list_response(t) for t in tests]
+    tests = search.apply(tests)
+    page, total = count_and_page(tests, pagination)
+    return page_envelope([to_test_list_response(t) for t in page], total, pagination)
 
 
 def _slim_test_results(test_results: Any) -> Optional[List[Dict[str, Any]]]:
@@ -748,9 +752,23 @@ def _build_agent_test_run_item_fields(job: Dict[str, Any], name: str) -> Dict[st
     }
 
 
+def _run_item_has_failures(item: AgentTestRunListItem) -> bool:
+    """True if a run has any failing test case or model. Covers both shapes:
+    a unit-test run's aggregate `failed`/`error`, and a benchmark run where any
+    single model failed (`failed > 0`) or its run didn't succeed."""
+    if item.error:
+        return True
+    if item.failed and item.failed > 0:
+        return True
+    for m in item.model_results or []:
+        if (m.failed and m.failed > 0) or m.success is False:
+            return True
+    return False
+
+
 @router.get(
     "/agent/{agent_uuid}/runs",
-    response_model=AgentTestRunsResponse,
+    response_model=PaginatedResponse[AgentTestRunListItem],
     summary="List test runs for agent",
     tags=["Public API"],
 )
@@ -760,6 +778,27 @@ async def get_agent_test_runs(
         examples=[_EXAMPLE_AGENT_UUID],
     ),
     ctx: OrgContext = Depends(get_org_jwt_or_api_key),
+    type: Optional[AgentTestJobType] = Query(
+        None,
+        description=(
+            "Filter by run type. Omit to return both:\n"
+            "- `llm-unit-test`: single runs of an agent's tests\n"
+            "- `llm-benchmark`: multi-model comparisons"
+        ),
+    ),
+    status: Optional[TaskStatus] = Query(
+        None,
+        description="Filter by run status. Omit for all statuses",
+    ),
+    has_failures: Optional[bool] = Query(
+        None,
+        description=(
+            "Filter by whether the run has any failing test case or model. "
+            "`true` returns only runs with failures (or errors), `false` only "
+            "clean runs. Omit for both"
+        ),
+    ),
+    pagination: OptionalPaginationParams = Depends(),
 ):
     """List an agent's test runs with their results"""
     # Public API (auth via get_org_jwt_or_api_key). Verify the agent exists and
@@ -771,7 +810,8 @@ async def get_agent_test_runs(
     # Get all jobs for this agent
     jobs = get_agent_test_jobs_for_agent(agent_uuid)
 
-    # Group jobs by type to generate run names
+    # Build every run item FIRST (before filtering) so the "Run N"/"Benchmark N"
+    # display names stay stable regardless of which filters are applied.
     unit_test_count = 0
     benchmark_count = 0
 
@@ -790,12 +830,23 @@ async def get_agent_test_runs(
         run_item = AgentTestRunListItem(**_build_agent_test_run_item_fields(job, name))
         runs.append(run_item)
 
-    return AgentTestRunsResponse(runs=runs)
+    # Optional filters — each narrows the set an MCP/agent client pages through,
+    # so it can ask "the failing benchmark runs" in one small call instead of
+    # pulling every run and filtering client-side.
+    if type is not None:
+        runs = [r for r in runs if r.type == type]
+    if status is not None:
+        runs = [r for r in runs if r.status == status]
+    if has_failures is not None:
+        runs = [r for r in runs if _run_item_has_failures(r) == has_failures]
+
+    # `total` = matches after filtering, before the page slice.
+    return paginate(runs, pagination)
 
 
 @router.get(
     "/runs",
-    response_model=GlobalTestRunsResponse,
+    response_model=PaginatedResponse[GlobalTestRunListItem],
     summary="List test runs for workspace",
 )
 async def get_all_test_runs_for_user(
@@ -808,6 +859,19 @@ async def get_all_test_runs_for_user(
             "- `llm-benchmark`: multi-model comparisons"
         ),
     ),
+    status: Optional[TaskStatus] = Query(
+        None,
+        description="Filter by run status. Omit for all statuses",
+    ),
+    has_failures: Optional[bool] = Query(
+        None,
+        description=(
+            "Filter by whether the run has any failing test case or model. "
+            "`true` returns only runs with failures (or errors), `false` only "
+            "clean runs. Omit for both"
+        ),
+    ),
+    pagination: OptionalPaginationParams = Depends(),
 ):
     """List all test runs, most recent first."""
     jobs = get_agent_test_jobs_for_org(ctx.org_uuid, job_type=type)
@@ -833,6 +897,8 @@ async def get_all_test_runs_for_user(
         else:
             name_map[job["uuid"]] = "Job"
 
+    # Build every run item FIRST (before status/has_failures filtering) so the
+    # "Run N"/"Benchmark N" names stay stable regardless of which filters apply.
     runs = []
     for job in jobs:  # already newest-first
         run_item = GlobalTestRunListItem(
@@ -843,7 +909,13 @@ async def get_all_test_runs_for_user(
         )
         runs.append(run_item)
 
-    return GlobalTestRunsResponse(runs=runs)
+    if status is not None:
+        runs = [r for r in runs if r.status == status]
+    if has_failures is not None:
+        runs = [r for r in runs if _run_item_has_failures(r) == has_failures]
+
+    # `total` = matches after filtering, before the page slice.
+    return paginate(runs, pagination)
 
 
 @router.get(

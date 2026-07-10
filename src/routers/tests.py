@@ -1,5 +1,14 @@
 from typing import ClassVar, Optional, List, Dict, Any, Literal
 from fastapi import APIRouter, HTTPException, Depends, Path
+from pagination import (
+    OptionalPaginationParams,
+    PaginatedResponse,
+    count_and_page,
+    make_search_params,
+    page_envelope,
+)
+
+_TestSearch = make_search_params(searchable=["name"])
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from db import (
@@ -544,14 +553,23 @@ async def create_test_endpoint(
 
 @router.get(
     "",
-    response_model=List[TestListResponse],
+    response_model=PaginatedResponse[TestListResponse],
     tags=["Public API"],
     summary="List tests",
 )
-async def list_tests(ctx: OrgContext = Depends(get_org_jwt_or_api_key)):
+async def list_tests(
+    ctx: OrgContext = Depends(get_org_jwt_or_api_key),
+    search: _TestSearch = Depends(),
+    pagination: OptionalPaginationParams = Depends(),
+):
     """List all the test cases for your agents"""
+    # Optional `?q=` name search + `?limit=&offset=` paging. Returns the
+    # `{items, total, limit, offset}` envelope; the slim list transform runs
+    # only on the returned page.
     tests = get_all_tests(org_uuid=ctx.org_uuid)
-    return [to_test_list_response(t) for t in tests]
+    tests = search.apply(tests)
+    page, total = count_and_page(tests, pagination)
+    return page_envelope([to_test_list_response(t) for t in page], total, pagination)
 
 
 @router.get(

@@ -78,7 +78,7 @@ def test_list_evaluators_live_version_is_slim(client):
 
     resp = client.get("/evaluators?include_defaults=false", headers=h)
     assert resp.status_code == 200
-    items = resp.json()
+    items = resp.json()["items"]
     mine = [e for e in items if e["uuid"] == ev_uuid]
     assert len(mine) == 1
     item = mine[0]
@@ -127,7 +127,7 @@ def test_list_evaluators_batched_live_version_matches_detail(client):
         _, ev_uuid, v_uuid = _create_rating_evaluator(client, h)
         created[ev_uuid] = v_uuid
 
-    items = client.get("/evaluators?include_defaults=false", headers=h).json()
+    items = client.get("/evaluators?include_defaults=false", headers=h).json()["items"]
     by_uuid = {e["uuid"]: e for e in items}
     for ev_uuid, v_uuid in created.items():
         assert ev_uuid in by_uuid

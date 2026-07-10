@@ -6,6 +6,15 @@ from datetime import datetime, timezone
 from typing import Optional, List, Dict, Any, Literal
 from urllib.parse import urlparse
 from fastapi import APIRouter, HTTPException, Depends, Path
+from pagination import (
+    OptionalPaginationParams,
+    PaginatedResponse,
+    count_and_page,
+    make_search_params,
+    page_envelope,
+)
+
+_AgentSearch = make_search_params(searchable=["name"])
 from pydantic import BaseModel, Field
 from calibrate_agent.connections import TextAgentConnection
 
@@ -587,20 +596,28 @@ async def create_agent_endpoint(
 
 @router.get(
     "",
-    response_model=List[AgentSummary],
+    response_model=PaginatedResponse[AgentSummary],
     tags=["Public API"],
     summary="List agents",
 )
-async def list_agents(ctx: OrgContext = Depends(get_org_jwt_or_api_key)):
+async def list_agents(
+    ctx: OrgContext = Depends(get_org_jwt_or_api_key),
+    search: _AgentSearch = Depends(),
+    pagination: OptionalPaginationParams = Depends(),
+):
     """Get the list of all your agents"""
     # Public API. Auth via get_org_jwt_or_api_key (JWT for the web app, API key
     # for CI); the run/poll and /resolve endpoints accept the same key, so CI can
     # enumerate agent UUIDs without knowing names up front.
-    # Returns a trimmed summary per agent (no full `config`) so the bulk list
-    # never ships agent auth credentials (`config.agent_headers`); the detail
-    # endpoint (`GET /agents/{uuid}`) refetches the full config when needed.
+    # Optional `?q=` name search + `?limit=&offset=` paging. Returns the
+    # `{items, total, limit, offset}` envelope. Each item is a trimmed summary
+    # (no full `config`) so the bulk list never ships agent auth credentials
+    # (`config.agent_headers`) — the detail endpoint (`GET /agents/{uuid}`)
+    # refetches the full config; the summary transform runs only on the page.
     agents = get_all_agents(org_uuid=ctx.org_uuid)
-    return [_to_agent_summary(agent) for agent in agents]
+    agents = search.apply(agents)
+    page, total = count_and_page(agents, pagination)
+    return page_envelope([_to_agent_summary(a) for a in page], total, pagination)
 
 
 @router.get(

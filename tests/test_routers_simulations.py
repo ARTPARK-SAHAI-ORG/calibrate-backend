@@ -199,7 +199,7 @@ def test_create_simulation_rejects_non_conversation_evaluator(client):
     # Simulations only accept `conversation` evaluators; linking an `llm` one → 400.
     auth = _signup(client)
     h = auth["headers"]
-    evaluators = client.get("/evaluators", headers=h).json()
+    evaluators = client.get("/evaluators", headers=h).json()["items"]
     llm_ev = next(e for e in evaluators if e.get("evaluator_type") == "llm")
     resp = client.post(
         "/simulations",

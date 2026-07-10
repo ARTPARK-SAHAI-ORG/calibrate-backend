@@ -134,16 +134,49 @@ def test_list_agents_with_api_key(client):
     a2 = _create_agent(client, h, n2)
     raw = _raw_key(client, h)
 
-    # X-API-Key header
+    # X-API-Key header. Response is the paginated envelope: {items, total, ...}.
     r1 = client.get("/agents", headers={"X-API-Key": raw})
     assert r1.status_code == 200, r1.text
-    uuids = {a["uuid"] for a in r1.json()}
+    uuids = {a["uuid"] for a in r1.json()["items"]}
     assert {a1["uuid"], a2["uuid"]} <= uuids
 
     # Authorization: Bearer sk_…
     r2 = client.get("/agents", headers={"Authorization": f"Bearer {raw}"})
     assert r2.status_code == 200, r2.text
-    assert {a1["uuid"], a2["uuid"]} <= {a["uuid"] for a in r2.json()}
+    assert {a1["uuid"], a2["uuid"]} <= {a["uuid"] for a in r2.json()["items"]}
+
+
+def test_list_agents_search_and_pagination(client):
+    """GET /agents supports optional `?q=` name search and `?limit=&offset=`
+    paging, returning the `{items, total, limit, offset}` envelope; `total` is
+    the pre-slice count of the filtered set."""
+    h = _signup(client)
+    tag = uuid.uuid4().hex[:6]
+    names = [f"zeta-{tag}", f"zebra-{tag}", f"other-{tag}"]
+    created = {n: _create_agent(client, h, n)["uuid"] for n in names}
+
+    # No params → all three present, echoed window is unbounded.
+    r = client.get("/agents", headers=h)
+    assert r.status_code == 200
+    body = r.json()
+    assert set(created.values()) <= {a["uuid"] for a in body["items"]}
+    assert body["limit"] is None and body["offset"] == 0
+
+    # q= narrows by case-insensitive substring; only the two "ze…" names match.
+    r = client.get("/agents", params={"q": "ZE"}, headers=h)
+    assert r.status_code == 200
+    body = r.json()
+    assert {a["name"] for a in body["items"]} == {f"zeta-{tag}", f"zebra-{tag}"}
+    assert body["total"] == 2
+
+    # limit slices the (searched) set; total is the pre-slice count.
+    r = client.get("/agents", params={"q": "ze", "limit": 1, "offset": 0}, headers=h)
+    b1 = r.json()
+    assert len(b1["items"]) == 1 and b1["total"] == 2
+    r2 = client.get("/agents", params={"q": "ze", "limit": 1, "offset": 1}, headers=h)
+    b2 = r2.json()
+    assert len(b2["items"]) == 1
+    assert b1["items"][0]["uuid"] != b2["items"][0]["uuid"]
 
 
 def test_list_agents_returns_trimmed_summary(client):
@@ -155,7 +188,7 @@ def test_list_agents_returns_trimmed_summary(client):
 
     r = client.get("/agents", headers=h)
     assert r.status_code == 200, r.text
-    item = next(a for a in r.json() if a["uuid"] == agent["uuid"])
+    item = next(a for a in r.json()["items"] if a["uuid"] == agent["uuid"])
 
     # Summary fields present.
     assert set(item.keys()) == {"uuid", "name", "type", "updated_at", "connection_verified"}
@@ -192,7 +225,7 @@ def test_list_agents_derives_connection_verified(client):
     def _cv(agent_uuid):
         r = client.get("/agents", headers=h)
         assert r.status_code == 200, r.text
-        return next(a for a in r.json() if a["uuid"] == agent_uuid)["connection_verified"]
+        return next(a for a in r.json()["items"] if a["uuid"] == agent_uuid)["connection_verified"]
 
     assert _cv(plain["uuid"]) is None
 
@@ -217,7 +250,7 @@ def test_list_agents_is_org_scoped(client):
     raw_b = _raw_key(client, hb)
     r = client.get("/agents", headers={"X-API-Key": raw_b})
     assert r.status_code == 200, r.text
-    assert a["uuid"] not in {x["uuid"] for x in r.json()}
+    assert a["uuid"] not in {x["uuid"] for x in r.json()["items"]}
 
 
 def test_list_agents_requires_auth(client):

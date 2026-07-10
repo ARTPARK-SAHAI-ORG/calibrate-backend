@@ -11,9 +11,13 @@ import pytest
 from fastapi import HTTPException
 
 from pagination import (
+    OptionalPaginationParams,
     PaginationParams,
+    count_and_page,
     make_search_params,
     make_sort_params,
+    page_envelope,
+    paginate,
 )
 
 
@@ -40,6 +44,60 @@ def test_pagination_max_limit_is_export_friendly():
     from pagination import MAX_LIMIT
 
     assert MAX_LIMIT >= 1_000_000
+
+
+# ---------------------------------------------------------------------------
+# OptionalPaginationParams + paginate
+# ---------------------------------------------------------------------------
+
+
+def test_optional_pagination_defaults_to_no_limit():
+    # Omitting the params (limit=None) means "return everything" — the slice is
+    # a no-op so adding the dep to an endpoint keeps every item.
+    p = OptionalPaginationParams(limit=None, offset=0)
+    items = list(range(10))
+    env = paginate(items, p)
+    assert env == {"items": items, "total": 10, "limit": None, "offset": 0}
+
+
+def test_optional_pagination_slices_and_reports_total():
+    items = list(range(10))
+    env = paginate(items, OptionalPaginationParams(limit=3, offset=2))
+    assert env["items"] == [2, 3, 4]
+    # Total is the PRE-slice length, so a client knows more pages exist.
+    assert env["total"] == 10
+    assert env["limit"] == 3 and env["offset"] == 2
+
+
+def test_optional_pagination_offset_only_returns_tail():
+    items = list(range(5))
+    env = paginate(items, OptionalPaginationParams(limit=None, offset=3))
+    assert env["items"] == [3, 4]
+    assert env["total"] == 5
+
+
+def test_optional_pagination_offset_past_end_is_empty():
+    items = list(range(3))
+    env = paginate(items, OptionalPaginationParams(limit=10, offset=100))
+    assert env["items"] == []
+    # Total still reflects the full set even when the page is empty.
+    assert env["total"] == 3
+
+
+def test_count_and_page_and_envelope_compose():
+    # count_and_page returns (page, total) for endpoints that transform the
+    # page before wrapping; page_envelope builds the same dict paginate does.
+    items = list(range(10))
+    p = OptionalPaginationParams(limit=2, offset=0)
+    page, total = count_and_page(items, p)
+    assert page == [0, 1] and total == 10
+    transformed = [x * 10 for x in page]
+    assert page_envelope(transformed, total, p) == {
+        "items": [0, 10],
+        "total": 10,
+        "limit": 2,
+        "offset": 0,
+    }
 
 
 # ---------------------------------------------------------------------------

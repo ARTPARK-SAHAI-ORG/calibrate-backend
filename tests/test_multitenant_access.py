@@ -92,7 +92,7 @@ def test_cross_org_cannot_see_agents(client):
     assert client.delete(f"/agents/{a_uuid}", headers=b["headers"]).status_code == 404
 
     # B's list doesn't contain A's agent
-    b_list = client.get("/agents", headers=b["headers"]).json()
+    b_list = client.get("/agents", headers=b["headers"]).json()["items"]
     assert all(item["uuid"] != a_uuid for item in b_list)
 
 
@@ -333,7 +333,7 @@ def test_same_org_members_see_each_others_agents(client):
     member_headers = {**member["headers"], **_org_header(org_uuid)}
     listing = client.get("/agents", headers=member_headers)
     assert listing.status_code == 200
-    assert any(item["uuid"] == a_uuid for item in listing.json())
+    assert any(item["uuid"] == a_uuid for item in listing.json()["items"])
 
     # And can fetch it by UUID.
     got = client.get(f"/agents/{a_uuid}", headers=member_headers)
@@ -342,4 +342,4 @@ def test_same_org_members_see_each_others_agents(client):
     # Member sees nothing without the header (their own personal org is empty).
     own_listing = client.get("/agents", headers=member["headers"])
     assert own_listing.status_code == 200
-    assert all(item["uuid"] != a_uuid for item in own_listing.json())
+    assert all(item["uuid"] != a_uuid for item in own_listing.json()["items"])
