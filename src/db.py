@@ -7992,3 +7992,56 @@ def get_evaluators_for_annotation_task(task_id: str) -> List[Dict[str, Any]]:
             (task_id,),
         )
         return [dict(r) for r in cursor.fetchall()]
+
+
+def get_evaluators_for_annotation_tasks(
+    task_ids: List[str],
+) -> Dict[str, List[Dict[str, Any]]]:
+    """Batched version of ``get_evaluators_for_annotation_task`` for a whole page.
+
+    Returns a dict mapping each task uuid to its linked evaluators in ONE query,
+    letting list endpoints avoid the per-task N+1. The per-task order matches the
+    single-task helper: ``ORDER BY position ASC, id ASC``. Ordering globally by
+    ``(position, id)`` is sufficient because we bucket in insertion order, so
+    within each task_id bucket the rows still land position-ascending. Task ids
+    with no linked evaluators are present with an empty list, so callers can
+    assign unconditionally.
+    """
+    result: Dict[str, List[Dict[str, Any]]] = {tid: [] for tid in task_ids}
+    if not task_ids:
+        return result
+    placeholders = ",".join("?" for _ in task_ids)
+    with get_db_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            f"""
+            SELECT
+                ate.task_id AS task_id,
+                e.uuid AS uuid,
+                e.name AS name,
+                e.description AS description,
+                e.evaluator_type AS evaluator_type,
+                e.data_type AS data_type,
+                e.kind AS kind,
+                e.output_type AS output_type,
+                e.owner_user_id AS owner_user_id,
+                e.slug AS slug,
+                e.live_version_id AS live_version_id,
+                ate.created_at AS linked_at,
+                ate.position AS position
+              FROM annotation_task_evaluators ate
+              JOIN evaluators e ON e.uuid = ate.evaluator_id
+             WHERE ate.task_id IN ({placeholders})
+               AND ate.deleted_at IS NULL
+               AND e.deleted_at IS NULL
+             ORDER BY ate.position ASC, ate.id ASC
+            """,
+            tuple(task_ids),
+        )
+        for r in cursor.fetchall():
+            d = dict(r)
+            # `task_id` is only the bucketing key; drop it so each evaluator dict
+            # is byte-for-byte identical to the single-task helper's rows.
+            tid = d.pop("task_id")
+            result.setdefault(tid, []).append(d)
+    return result

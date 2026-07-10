@@ -189,6 +189,48 @@ def test_annotation_task_crud(client):
     assert client.delete(f"/annotation-tasks/{task_uuid}", headers=h).status_code == 404
 
 
+def test_list_annotation_tasks_batched_evaluators_match_per_task(client):
+    """GET /annotation-tasks batches evaluator enrichment into one query; the
+    per-task evaluator data on a multi-item page must be byte-for-byte identical
+    to fetching each task's evaluators individually (the old N+1 path)."""
+    import db
+
+    auth = _signup(client)
+    h = auth["headers"]
+    evaluators = client.get("/evaluators", headers=h).json()
+    llm_evs = [e for e in evaluators if e.get("evaluator_type") == "llm"][:2]
+    assert len(llm_evs) == 2
+
+    # Three tasks with different evaluator sets (incl. one with none) so the
+    # bucketing has to key correctly and preserve per-task ordering.
+    task_uuids = []
+    for ev_ids in ([llm_evs[0]["uuid"], llm_evs[1]["uuid"]], [llm_evs[1]["uuid"]], []):
+        created = client.post(
+            "/annotation-tasks",
+            json={
+                "name": f"task-{uuid.uuid4().hex[:6]}",
+                "type": "llm",
+                "evaluator_ids": ev_ids,
+            },
+            headers=h,
+        )
+        assert created.status_code == 200
+        task_uuids.append(created.json()["uuid"])
+
+    # The batched DB helper must equal the single-task helper for every task.
+    batched = db.get_evaluators_for_annotation_tasks(task_uuids)
+    for tu in task_uuids:
+        assert batched.get(tu) == db.get_evaluators_for_annotation_task(tu)
+
+    # And the list endpoint (which uses the batched helper) must return the same
+    # evaluators for each of our tasks as the per-task helper produced.
+    listing = client.get("/annotation-tasks", headers=h).json()
+    by_uuid = {t["uuid"]: t for t in listing}
+    for tu in task_uuids:
+        assert tu in by_uuid
+        assert by_uuid[tu]["evaluators"] == db.get_evaluators_for_annotation_task(tu)
+
+
 def test_annotation_task_evaluator_ordering(client):
     """PUT /annotation-tasks/{uuid}/evaluators/order re-numbers the display
     order, and every surface that lists task evaluators honors it."""

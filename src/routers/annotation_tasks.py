@@ -19,6 +19,7 @@ from db import (
     remove_evaluator_from_annotation_task,
     reorder_evaluators_for_annotation_task,
     get_evaluators_for_annotation_task,
+    get_evaluators_for_annotation_tasks,
     get_evaluator,
     get_evaluator_version,
     get_annotations_for_task,
@@ -451,8 +452,14 @@ async def create_annotation_task_endpoint(
 async def list_annotation_tasks(ctx: OrgContext = Depends(get_org_jwt_or_api_key)):
     """List annotation tasks with linked evaluators"""
     tasks = get_all_annotation_tasks(org_uuid=ctx.org_uuid)
+    # Fetch all linked evaluators for the page in ONE query, then bucket by task
+    # uuid — avoids a per-task N+1 (mirrors the pre-fetch/bucket pattern used in
+    # `get_annotation_task_endpoint`).
+    evaluators_by_task = get_evaluators_for_annotation_tasks(
+        [task["uuid"] for task in tasks]
+    )
     for task in tasks:
-        task["evaluators"] = get_evaluators_for_annotation_task(task["uuid"])
+        task["evaluators"] = evaluators_by_task.get(task["uuid"], [])
     return tasks
 
 
