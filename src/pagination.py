@@ -271,6 +271,97 @@ def make_search_params(*, searchable: List[str]) -> Type:
     return SearchParams
 
 
+def make_projection_params(*, heavy_fields: List[str]) -> Type:
+    """Build a FastAPI `Depends`-compatible `?compact=` class for one endpoint.
+
+    `heavy_fields` is the endpoint's list of payload-dominating fields to drop
+    when the caller passes `?compact=true`. Each entry is a dotted path with an
+    optional `[]` (iterate a list) or `*` (iterate a dict's values) at any
+    segment, e.g.:
+
+        "config"                         # top-level key
+        "results[].output"              # `output` on every element of `results`
+        "rows[].annotations.*.reasoning" # `reasoning` on every value of each
+                                         # row's `annotations` dict
+        "evaluators[].versions[].system_prompt"
+
+    Projection **nulls the value in place, keeping the key** — the response
+    stays shape-compatible with the endpoint's `response_model` (so the
+    generated SDK/MCP types are unchanged and the heavy fields must already be
+    `Optional`). The weight being shed is the values (transcripts, rubrics,
+    prompts), not the ~10-char key names. Full detail is fetched by omitting
+    the flag.
+
+    The returned class exposes `apply(data: dict) -> dict`, meant to run on a
+    handler's `model_dump()` output (a fresh dict, safe to mutate) right before
+    returning. A no-op when `compact` is false.
+    """
+    if not heavy_fields:
+        raise ValueError("heavy_fields must be non-empty")
+    tokenized = [_tokenize_projection(p) for p in heavy_fields]
+    description = (
+        "Return a compact response that drops (nulls) heavy detail fields — "
+        + ", ".join(f"`{f}`" for f in heavy_fields)
+        + " — keeping only the lightweight decision fields. Omit for full detail"
+    )
+
+    class ProjectionParams:
+        def __init__(
+            self,
+            compact: bool = Query(False, description=description),
+        ):
+            self.compact = compact
+
+        def apply(self, data: Dict[str, Any]) -> Dict[str, Any]:
+            if self.compact and isinstance(data, dict):
+                for tokens in tokenized:
+                    _null_at(data, tokens)
+            return data
+
+    ProjectionParams.__name__ = "ProjectionParams"
+    return ProjectionParams
+
+
+def _tokenize_projection(path: str) -> List[str]:
+    """Split a projection path into walk tokens, exploding a trailing `[]` on a
+    segment into its own token so the walker can iterate that list."""
+    tokens: List[str] = []
+    for seg in path.split("."):
+        if seg.endswith("[]"):
+            tokens.append(seg[:-2])
+            tokens.append("[]")
+        else:
+            tokens.append(seg)
+    return tokens
+
+
+def _null_at(obj: Any, tokens: List[str]) -> None:
+    """Walk `tokens` into `obj`, nulling the leaf. `[]` iterates a list; `*`
+    iterates a dict's values; any other token is a dict key. Missing keys /
+    type mismatches are silently skipped so a projection path that doesn't
+    apply to a given payload is a no-op rather than an error."""
+    if not tokens:
+        return
+    tok, rest = tokens[0], tokens[1:]
+    if tok == "[]":
+        if isinstance(obj, list):
+            for el in obj:
+                _null_at(el, rest)
+        return
+    if tok == "*":
+        if isinstance(obj, dict):
+            for val in obj.values():
+                _null_at(val, rest)
+        return
+    if not isinstance(obj, dict):
+        return
+    if not rest:
+        if tok in obj:
+            obj[tok] = None
+    else:
+        _null_at(obj.get(tok), rest)
+
+
 def _matches(item: Dict[str, Any], paths: List[List[str]], needle: str) -> bool:
     for path in paths:
         value = _get_path(item, path)
@@ -299,4 +390,5 @@ __all__ = [
     "paginate",
     "make_sort_params",
     "make_search_params",
+    "make_projection_params",
 ]

@@ -15,11 +15,19 @@ from pagination import (
     OptionalPaginationParams,
     PaginatedResponse,
     count_and_page,
+    make_projection_params,
     make_search_params,
     page_envelope,
 )
 
 _EvaluatorSearch = make_search_params(searchable=["name"])
+_EvaluatorDetailProjection = make_projection_params(
+    heavy_fields=[
+        "versions[].system_prompt",
+        "versions[].output_config",
+        "versions[].variables",
+    ]
+)
 from pydantic import BaseModel, Field, model_validator
 
 from auth_utils import get_current_org, get_current_user_id, get_org_jwt_or_api_key, OrgContext
@@ -194,7 +202,12 @@ class EvaluatorVersionResponse(BaseModel):
     )
     version_number: int = Field(description=_VERSION_NUMBER_DESCRIPTION)
     judge_model: str = Field(description=_JUDGE_MODEL_DESCRIPTION)
-    system_prompt: str = Field(description="Judge system prompt, with `{{variable}}` placeholders unrendered")
+    # Optional only to support the detail endpoint's `?compact=true` mode, which
+    # nulls this heavy field in place. Full (non-compact) responses always
+    # populate it.
+    system_prompt: Optional[str] = Field(
+        None, description="Judge system prompt, with `{{variable}}` placeholders unrendered"
+    )
     output_config: Optional[OutputConfig] = Field(
         None, description=_RUBRIC_DESCRIPTION
     )
@@ -559,6 +572,7 @@ async def get_evaluator_endpoint(
         examples=["f47ac10b-58cc-4372-a567-0e02b2c3d479"],
     ),
     ctx: OrgContext = Depends(get_org_jwt_or_api_key),
+    projection: _EvaluatorDetailProjection = Depends(),
 ):
     """Get one evaluator with its full version history"""
     evaluator = _visible_or_404(get_evaluator(evaluator_uuid), ctx.org_uuid)
@@ -571,11 +585,13 @@ async def get_evaluator_endpoint(
     # base carries `live_version` (list shape); drop it here — detail uses
     # `versions[]` + `live_version_id`/`live_version_index` so we don't
     # duplicate the version.
-    return EvaluatorDetailResponse(
+    response = EvaluatorDetailResponse(
         **base.model_dump(exclude={"live_version"}),
         versions=versions,
         live_version_index=_live_version_index(versions, base.live_version_id),
     )
+    # `?compact=true` nulls heavy per-version fields in place; a no-op otherwise.
+    return projection.apply(response.model_dump())
 
 
 @router.put("/{evaluator_uuid}", response_model=EvaluatorResponse, summary="Update evaluator")

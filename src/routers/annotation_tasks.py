@@ -224,8 +224,9 @@ class TaskSummaryResponse(BaseModel):
     rows: List[Dict[str, Any]] = Field(
         description="One row per item, evaluator, and version on this page, with the evaluator's value and each annotator's label"
     )
-    item_comments: Dict[str, Any] = Field(
-        description="Annotator comments, keyed by item ID"
+    item_comments: Optional[Dict[str, Any]] = Field(
+        default=None,
+        description="Annotator comments, keyed by item ID",
     )
     pagination: PaginationMeta = Field(
         description="Where this page sits in the full item list"
@@ -263,6 +264,7 @@ from pagination import (
     PaginatedResponse,
     PaginationParams,
     count_and_page,
+    make_projection_params,
     make_search_params,
     make_sort_params,
     page_envelope,
@@ -278,6 +280,22 @@ _SummarySort = make_sort_params(
     default_order="desc",
 )
 _SummarySearch = make_search_params(searchable=["payload.name"])
+
+# Compact projection for the summary response. Nulls the payload-dominating
+# fields (item payloads, evaluator/annotator reasoning, and the per-version
+# rubric bodies) while keeping the lightweight decision fields (values,
+# agreement, ids) so a caller can page the table cheaply.
+_SummaryProjection = make_projection_params(
+    heavy_fields=[
+        "rows[].payload",
+        "rows[].evaluator_reasoning",
+        "rows[].annotations.*.reasoning",
+        "evaluators[].versions[].system_prompt",
+        "evaluators[].versions[].output_config",
+        "evaluators[].versions[].variables",
+        "item_comments",
+    ]
+)
 from annotation_metrics import (
     aggregate_agreement,
     aggregate_human_evaluator_agreement,
@@ -2503,10 +2521,15 @@ async def task_summary(
         False,
         description="When true, emit only one row for each (item, evaluator) pair using the evaluator's live version. Versions other than the live one that have runs are excluded",
     ),
+    disagreement_only: bool = Query(
+        False,
+        description="When true, keep only rows where the evaluator disagreed with at least one annotator",
+    ),
     ctx: OrgContext = Depends(get_org_jwt_or_api_key),
     search: _SummarySearch = Depends(),
     sort: _SummarySort = Depends(),
     pagination: PaginationParams = Depends(),
+    projection: _SummaryProjection = Depends(),
 ):
     """Get a paginated summary table of items, evaluator runs, and human annotations for a task"""
     task = _ensure_owned_task(task_uuid, ctx.org_uuid)
@@ -2784,6 +2807,26 @@ async def task_summary(
                     }
                 )
 
+    # Optional disagreement filter: keep only rows where the evaluator
+    # produced a value AND it disagreed with at least one annotator
+    # (`evaluator_agreement` present and below 1.0). This is a ROW-level
+    # concern, but `pagination` here is ITEM-level — `pagination.total`
+    # counts in-scope items, not rows, and already never equals `len(rows)`
+    # (each item fans out into evaluator×version rows). Rows are only built
+    # for the current page's items, so we filter the built rows in place and
+    # deliberately leave `pagination.total` as the item count. The two live
+    # on different axes; conflating them would mean rebuilding every page's
+    # rows to re-page at row granularity, which would change the endpoint's
+    # item-level paging contract. Callers wanting the full disagreeing set
+    # page items with `?limit=<total>` (same guidance as `item_comments`).
+    if disagreement_only:
+        rows = [
+            r
+            for r in rows
+            if r.get("evaluator_agreement") is not None
+            and r["evaluator_agreement"] < 1.0
+        ]
+
     # Build the enriched top-level `evaluators[]` block — one entry per
     # linked evaluator with the per-version rubric inlined so the FE has
     # everything to render row labels without joining per-row metadata.
@@ -2868,7 +2911,7 @@ async def task_summary(
         if surviving_cells:
             item_comments[cmt_item_id] = surviving_cells
 
-    return {
+    response: Dict[str, Any] = {
         "task_id": task_uuid,
         "task_type": task["type"],
         "evaluators": evaluators_block,
@@ -2881,6 +2924,11 @@ async def task_summary(
             "offset": pagination.offset,
         },
     }
+
+    # `?compact=true` nulls the payload-dominating fields in place (keeping
+    # keys) so the shape still validates against TaskSummaryResponse. No-op
+    # by default.
+    return projection.apply(response)
 
 
 @router.delete("/{task_uuid}/evaluators/{evaluator_uuid}", summary="Unlink evaluator from task")
