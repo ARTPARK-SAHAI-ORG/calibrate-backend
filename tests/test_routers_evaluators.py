@@ -113,6 +113,34 @@ def test_list_evaluators_live_version_is_slim(client):
     assert "output_config" not in lv
 
 
+def test_list_evaluators_batched_live_version_matches_detail(client):
+    """GET /evaluators resolves every row's live version from one batched query;
+    across a multi-evaluator list, each row's live_version must match the id it
+    was created with and the value the single-evaluator path resolves — no
+    cross-contamination between evaluators."""
+    from routers.evaluators import _evaluator_response
+    from db import get_all_evaluators
+
+    h = _signup(client)
+    created = {}  # ev_uuid -> version_uuid
+    for _ in range(3):
+        _, ev_uuid, v_uuid = _create_rating_evaluator(client, h)
+        created[ev_uuid] = v_uuid
+
+    items = client.get("/evaluators?include_defaults=false", headers=h).json()
+    by_uuid = {e["uuid"]: e for e in items}
+    for ev_uuid, v_uuid in created.items():
+        assert ev_uuid in by_uuid
+        # The batched map picked the right live version for THIS evaluator.
+        assert by_uuid[ev_uuid]["live_version"]["uuid"] == v_uuid
+        # ...and it equals the un-batched single-evaluator shaping (no map).
+        row = next(e for e in get_all_evaluators() if e["uuid"] == ev_uuid)
+        assert (
+            by_uuid[ev_uuid]["live_version"]
+            == _evaluator_response(row).model_dump()["live_version"]
+        )
+
+
 def test_get_evaluator_detail_returns_full_versions(client):
     h = _signup(client)
     name, ev_uuid, v_uuid = _create_rating_evaluator(client, h)

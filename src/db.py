@@ -3069,6 +3069,24 @@ def get_all_agents(org_uuid: Optional[str] = None) -> List[Dict[str, Any]]:
         return [_parse_agent_row(row) for row in rows]
 
 
+def get_agents_by_uuids(agent_uuids: List[str]) -> Dict[str, Dict[str, Any]]:
+    """Bulk variant of `get_agent` — single query for many UUIDs.
+    Returns `{uuid: agent_row}`; missing or soft-deleted UUIDs are omitted.
+    Use this when a caller would otherwise loop `get_agent(...)` per id (N+1)."""
+    unique_uuids = list({u for u in agent_uuids if u})
+    if not unique_uuids:
+        return {}
+    placeholders = ",".join("?" for _ in unique_uuids)
+    with get_db_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            f"SELECT * FROM agents "
+            f"WHERE uuid IN ({placeholders}) AND deleted_at IS NULL",
+            unique_uuids,
+        )
+        return {row["uuid"]: _parse_agent_row(row) for row in cursor.fetchall()}
+
+
 def update_agent(
     agent_uuid: str,
     name: Optional[str] = None,
@@ -4327,6 +4345,58 @@ def get_evaluator_versions(evaluator_uuid: str) -> List[Dict[str, Any]]:
             (evaluator_uuid,),
         )
         return [_parse_evaluator_version_row(r) for r in cursor.fetchall()]
+
+
+def get_evaluator_versions_by_uuids(
+    version_uuids: List[str],
+) -> Dict[str, Dict[str, Any]]:
+    """Bulk variant of `get_evaluator_version` — single query for many version
+    UUIDs. Returns `{uuid: version_row}`; missing UUIDs are omitted. Use when a
+    caller would otherwise loop `get_evaluator_version(...)` per id (N+1), e.g.
+    resolving each evaluator's live version across a whole list."""
+    unique_uuids = list({u for u in version_uuids if u})
+    if not unique_uuids:
+        return {}
+    placeholders = ",".join("?" for _ in unique_uuids)
+    with get_db_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            f"SELECT * FROM evaluator_versions WHERE uuid IN ({placeholders})",
+            unique_uuids,
+        )
+        return {
+            row["uuid"]: _parse_evaluator_version_row(row)
+            for row in cursor.fetchall()
+        }
+
+
+def get_evaluator_versions_for_evaluators(
+    evaluator_uuids: List[str],
+) -> Dict[str, List[Dict[str, Any]]]:
+    """Bulk variant of `get_evaluator_versions` — single query returning every
+    evaluator's full version history bucketed by evaluator uuid. Each bucket is
+    newest-first (`version_number DESC`), matching the single-evaluator helper;
+    ordering globally by `version_number DESC` is fine because bucketing in
+    iteration order preserves per-evaluator descending order. Evaluators with no
+    versions are present with an empty list. Use to avoid a per-evaluator N+1."""
+    result: Dict[str, List[Dict[str, Any]]] = {u: [] for u in evaluator_uuids}
+    unique_uuids = list({u for u in evaluator_uuids if u})
+    if not unique_uuids:
+        return result
+    placeholders = ",".join("?" for _ in unique_uuids)
+    with get_db_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            f"SELECT * FROM evaluator_versions "
+            f"WHERE evaluator_id IN ({placeholders}) "
+            f"ORDER BY version_number DESC",
+            unique_uuids,
+        )
+        for row in cursor.fetchall():
+            result.setdefault(row["evaluator_id"], []).append(
+                _parse_evaluator_version_row(row)
+            )
+    return result
 
 
 def set_evaluator_live_version(evaluator_uuid: str, version_uuid: str) -> bool:

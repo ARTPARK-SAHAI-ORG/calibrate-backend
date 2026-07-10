@@ -114,6 +114,38 @@ def test_create_simulation_with_all_links(client):
     )
 
 
+def test_list_simulations_batched_agent_hydration(client):
+    """GET /simulations hydrates each row's agent from one batched query; a
+    multi-item list must carry the same per-row agent summary as the detail
+    endpoint, and distinct agents must not cross-contaminate."""
+    auth = _signup(client)
+    h = auth["headers"]
+    agent_a = _create_agent(client, h, name=f"agent-a-{uuid.uuid4().hex[:6]}")
+    agent_b = _create_agent(client, h, name=f"agent-b-{uuid.uuid4().hex[:6]}")
+
+    sims = {}
+    for agent in (agent_a, agent_b, agent_a):
+        created = client.post(
+            "/simulations",
+            json={"name": f"sim-{uuid.uuid4().hex[:6]}", "agent_uuid": agent["uuid"]},
+            headers=h,
+        )
+        assert created.status_code == 200
+        sims[created.json()["uuid"]] = agent["uuid"]
+
+    listing = client.get("/simulations", headers=h).json()
+    by_uuid = {s["uuid"]: s for s in listing}
+    for sim_uuid, agent_uuid in sims.items():
+        assert sim_uuid in by_uuid
+        # Each row's agent matches the one it was created with (correct bucketing)
+        # and matches the detail endpoint's agent block (identical hydration).
+        assert by_uuid[sim_uuid]["agent"]["uuid"] == agent_uuid
+        detail = client.get(f"/simulations/{sim_uuid}", headers=h).json()
+        assert by_uuid[sim_uuid]["agent"] == {
+            k: detail["agent"][k] for k in by_uuid[sim_uuid]["agent"]
+        }
+
+
 def test_create_simulation_unknown_agent_404(client):
     auth = _signup(client)
     resp = client.post(

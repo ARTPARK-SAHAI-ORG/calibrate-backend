@@ -34,6 +34,7 @@ from db import (
     get_scenarios_for_simulation,
     get_evaluators_for_simulation,
     get_agent,
+    get_agents_by_uuids,
     get_tools_for_agent,
     create_simulation_job,
     get_simulation_job,
@@ -749,11 +750,16 @@ async def create_simulation_endpoint(
 async def list_simulations(ctx: OrgContext = Depends(get_current_org)):
     """List all simulations"""
     simulations = get_all_simulations(org_uuid=ctx.org_uuid)
+    # Hydrate each simulation's agent summary from ONE batched query instead of
+    # a per-simulation `get_agent` (N+1).
+    agents_by_id = get_agents_by_uuids(
+        [sim["agent_id"] for sim in simulations if sim.get("agent_id")]
+    )
     result = []
     for sim in simulations:
         agent = None
         if sim.get("agent_id"):
-            agent_data = get_agent(sim["agent_id"])
+            agent_data = agents_by_id.get(sim["agent_id"])
             if agent_data:
                 agent = AgentSummaryResponse(
                     uuid=agent_data["uuid"],

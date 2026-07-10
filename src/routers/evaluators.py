@@ -26,6 +26,7 @@ from db import (
     get_evaluator,
     get_evaluator_version,
     get_evaluator_versions,
+    get_evaluator_versions_by_uuids,
     set_evaluator_live_version,
     update_evaluator,
 )
@@ -372,10 +373,24 @@ def _live_version_index(
     return None
 
 
-def _evaluator_response(evaluator: Dict[str, Any]) -> EvaluatorResponse:
+def _evaluator_response(
+    evaluator: Dict[str, Any],
+    version_by_id: Optional[Dict[str, Dict[str, Any]]] = None,
+) -> EvaluatorResponse:
+    """Shape one evaluator row into the list/summary response.
+
+    `version_by_id` is an optional preloaded `{version_uuid: version_row}` map so
+    a list caller can resolve every evaluator's live version from ONE batched
+    query instead of a per-evaluator `get_evaluator_version` (N+1). When omitted,
+    the single live version is fetched inline (the single-detail path)."""
     live_version = None
-    if evaluator.get("live_version_id"):
-        v = get_evaluator_version(evaluator["live_version_id"])
+    live_version_id = evaluator.get("live_version_id")
+    if live_version_id:
+        v = (
+            version_by_id.get(live_version_id)
+            if version_by_id is not None
+            else get_evaluator_version(live_version_id)
+        )
         if v:
             live_version = EvaluatorLiveVersionSummary(
                 uuid=v["uuid"],
@@ -508,7 +523,12 @@ async def list_evaluators(
         evaluator_type=evaluator_type,
         data_type=data_type,
     )
-    return [_evaluator_response(e) for e in evaluators]
+    # Resolve every evaluator's live version from ONE batched query, then shape
+    # against that map — avoids a per-evaluator `get_evaluator_version` (N+1).
+    version_by_id = get_evaluator_versions_by_uuids(
+        [e["live_version_id"] for e in evaluators if e.get("live_version_id")]
+    )
+    return [_evaluator_response(e, version_by_id=version_by_id) for e in evaluators]
 
 
 @router.get("/{evaluator_uuid}", response_model=EvaluatorDetailResponse, summary="Get evaluator", tags=["Public API"])
