@@ -258,7 +258,17 @@ class EvaluatorRunResponse(BaseModel):
         description="Token for building the public share URL"
     )
 from auth_utils import get_current_org, get_org_jwt_or_api_key, OrgContext
-from pagination import PaginationParams, make_search_params, make_sort_params
+from pagination import (
+    OptionalPaginationParams,
+    PaginatedResponse,
+    PaginationParams,
+    count_and_page,
+    make_search_params,
+    make_sort_params,
+    page_envelope,
+)
+
+_AnnotationTaskSearch = make_search_params(searchable=["name"])
 
 # Per-endpoint sort/search allowlists for the summary view. Built at module
 # load time so FastAPI's dependency-graph introspection sees stable types.
@@ -448,19 +458,27 @@ async def create_annotation_task_endpoint(
     )
 
 
-@router.get("", response_model=List[AnnotationTaskResponse], summary="List annotation tasks", tags=["Public API"])
-async def list_annotation_tasks(ctx: OrgContext = Depends(get_org_jwt_or_api_key)):
+@router.get("", response_model=PaginatedResponse[AnnotationTaskResponse], summary="List annotation tasks", tags=["Public API"])
+async def list_annotation_tasks(
+    ctx: OrgContext = Depends(get_org_jwt_or_api_key),
+    search: _AnnotationTaskSearch = Depends(),
+    pagination: OptionalPaginationParams = Depends(),
+):
     """List annotation tasks with linked evaluators"""
+    # Optional `?q=` name search + `?limit=&offset=` paging. Returns the
+    # `{items, total, limit, offset}` envelope.
     tasks = get_all_annotation_tasks(org_uuid=ctx.org_uuid)
-    # Fetch all linked evaluators for the page in ONE query, then bucket by task
+    tasks = search.apply(tasks)
+    page, total = count_and_page(tasks, pagination)
+    # Fetch all linked evaluators for the PAGE in ONE query, then bucket by task
     # uuid — avoids a per-task N+1 (mirrors the pre-fetch/bucket pattern used in
-    # `get_annotation_task_endpoint`).
+    # `get_annotation_task_endpoint`), and only over the rows actually returned.
     evaluators_by_task = get_evaluators_for_annotation_tasks(
-        [task["uuid"] for task in tasks]
+        [task["uuid"] for task in page]
     )
-    for task in tasks:
+    for task in page:
         task["evaluators"] = evaluators_by_task.get(task["uuid"], [])
-    return tasks
+    return page_envelope(page, total, pagination)
 
 
 @router.get("/{task_uuid}", response_model=AnnotationTaskResponse, summary="Get annotation task", tags=["Public API"])

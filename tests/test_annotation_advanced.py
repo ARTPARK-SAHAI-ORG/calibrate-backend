@@ -44,7 +44,7 @@ def _signup(client):
 
 
 def _llm_ev(client, h):
-    evs = client.get("/evaluators", headers=h).json()
+    evs = client.get("/evaluators", headers=h).json()["items"]
     return next(e for e in evs if e.get("evaluator_type") == "llm")
 
 

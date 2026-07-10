@@ -728,11 +728,11 @@ def test_evaluators_list_and_default_prompt(client):
     h = auth["headers"]
     listing = client.get("/evaluators", headers=h)
     assert listing.status_code == 200
-    assert any(e.get("slug") == "default-safety" for e in listing.json())
+    assert any(e.get("slug") == "default-safety" for e in listing.json()["items"])
 
     # Seeded defaults are read-only ⇒ is_default True; the raw owner_user_id is
     # never exposed on the public API surface (only is_default is).
-    seeded = next(e for e in listing.json() if e.get("slug") == "default-safety")
+    seeded = next(e for e in listing.json()["items"] if e.get("slug") == "default-safety")
     assert seeded["is_default"] is True
 
     # A custom evaluator is editable ⇒ is_default False.
@@ -766,7 +766,7 @@ def test_evaluators_list_and_default_prompt(client):
     assert general.json()["data_type"] == "text"
 
     # The seeded default-llm-general evaluator should be visible in the list.
-    assert any(e.get("slug") == "default-llm-general" for e in listing.json())
+    assert any(e.get("slug") == "default-llm-general" for e in listing.json()["items"])
 
     bad = client.get(
         "/evaluators/default-prompt", params={"purpose": "bogus"}, headers=h
@@ -815,7 +815,7 @@ def test_tests_router_crud(client):
     auth = _auth(client)
     h = auth["headers"]
     # Get an evaluator we can attach
-    evaluators = client.get("/evaluators", headers=h).json()
+    evaluators = client.get("/evaluators", headers=h).json()["items"]
     llm_ev = next(e for e in evaluators if e.get("evaluator_type") == "llm")
 
     name = f"t-{uuid.uuid4().hex[:6]}"
@@ -848,7 +848,7 @@ def test_tests_router_crud(client):
     # List + GET
     listing = client.get("/tests", headers=h)
     assert listing.status_code == 200
-    assert any(t["uuid"] == t_uuid for t in listing.json())
+    assert any(t["uuid"] == t_uuid for t in listing.json()["items"])
     assert client.get(f"/tests/{t_uuid}", headers=h).status_code == 200
     assert client.get("/tests/missing", headers=h).status_code == 404
 
@@ -897,7 +897,7 @@ def test_tests_router_type_validation(client):
     auth = _auth(client)
     h = auth["headers"]
 
-    evaluators = client.get("/evaluators", headers=h).json()
+    evaluators = client.get("/evaluators", headers=h).json()["items"]
     llm_ev = next(e for e in evaluators if e.get("evaluator_type") == "llm")
 
     # Unknown `type` rejected by Pydantic Literal — 422.

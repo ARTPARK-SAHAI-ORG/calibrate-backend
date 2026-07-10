@@ -175,7 +175,7 @@ def test_evaluators_full_lifecycle(client):
     assert no_op.status_code == 400
 
     # Default evaluator cannot be modified
-    seeds = client.get("/evaluators", headers=h).json()
+    seeds = client.get("/evaluators", headers=h).json()["items"]
     default = next(e for e in seeds if e.get("owner_user_id") is None)
     forbidden = client.put(
         f"/evaluators/{default['uuid']}",
@@ -228,6 +228,44 @@ def test_evaluators_full_lifecycle(client):
     assert deleted.status_code == 200
 
 
+def test_list_evaluators_search_and_pagination(client):
+    """GET /evaluators keeps its type filters and adds optional `?q=` name
+    search + `?limit=&offset=` paging, returning the `{items, total, ...}`
+    envelope. Scoped to the caller's own evaluators (`include_defaults=false`)
+    so the seeded defaults don't perturb the counts."""
+    h = _signup(client)["headers"]
+    tag = uuid.uuid4().hex[:6]
+    names = [f"alpha-{tag}", f"alpine-{tag}", f"beta-{tag}"]
+    for n in names:
+        r = client.post(
+            "/evaluators",
+            json={
+                "name": n,
+                "evaluator_type": "llm",
+                "output_type": "binary",
+                "version": {"judge_model": "openai/gpt-4", "system_prompt": "p"},
+            },
+            headers=h,
+        )
+        assert r.status_code == 200
+
+    base = {"include_defaults": "false"}
+
+    # q= narrows to the two "alp…" names; `total` is the pre-slice count.
+    r = client.get("/evaluators", params={**base, "q": "ALP"}, headers=h)
+    assert r.status_code == 200
+    body = r.json()
+    assert {e["name"] for e in body["items"]} == {f"alpha-{tag}", f"alpine-{tag}"}
+    assert body["total"] == 2
+
+    # limit slices; total stays the filtered pre-slice count.
+    r = client.get(
+        "/evaluators", params={**base, "q": "alp", "limit": 1}, headers=h
+    )
+    body = r.json()
+    assert len(body["items"]) == 1 and body["total"] == 2
+
+
 # ---------------------------------------------------------------------------
 # Tests router — bulk upload
 # ---------------------------------------------------------------------------
@@ -236,7 +274,7 @@ def test_evaluators_full_lifecycle(client):
 def test_bulk_test_upload(client):
     auth = _signup(client)
     h = auth["headers"]
-    evaluators = client.get("/evaluators", headers=h).json()
+    evaluators = client.get("/evaluators", headers=h).json()["items"]
     llm_ev = next(e for e in evaluators if e.get("evaluator_type") == "llm")
 
     # Empty tests → 422 (pydantic validator)
@@ -390,7 +428,7 @@ def test_create_test_wrong_evaluator_type(client):
     """Tests with evaluator_type != 'llm' should be rejected."""
     auth = _signup(client)
     h = auth["headers"]
-    evaluators = client.get("/evaluators", headers=h).json()
+    evaluators = client.get("/evaluators", headers=h).json()["items"]
     # default-stt-transcription has evaluator_type=stt
     stt_ev = next(e for e in evaluators if e.get("evaluator_type") == "stt")
     bad = client.post(
@@ -409,7 +447,7 @@ def test_create_test_wrong_evaluator_type(client):
 def test_update_test_with_evaluators(client):
     auth = _signup(client)
     h = auth["headers"]
-    evaluators = client.get("/evaluators", headers=h).json()
+    evaluators = client.get("/evaluators", headers=h).json()["items"]
     llm_ev = next(e for e in evaluators if e.get("evaluator_type") == "llm")
     create = client.post(
         "/tests",

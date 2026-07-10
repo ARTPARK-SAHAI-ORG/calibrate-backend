@@ -33,9 +33,10 @@ as a strict allowlist — anything else gets a 422 from FastAPI (no
 SQL-injection surface even though sort runs post-fetch in Python).
 """
 
-from typing import Any, Dict, List, Literal, Optional, Type
+from typing import Any, Dict, Generic, List, Literal, Optional, Tuple, Type, TypeVar
 
 from fastapi import HTTPException, Query
+from pydantic import BaseModel, Field
 
 DEFAULT_LIMIT = 50
 # Cap is intentionally very high (1M) so "give me everything" use cases like
@@ -65,6 +66,102 @@ class PaginationParams:
     ):
         self.limit = limit
         self.offset = offset
+
+
+class OptionalPaginationParams:
+    """FastAPI dependency for OPTIONAL `?limit=&offset=` on list endpoints.
+
+    Unlike `PaginationParams` (whose `limit` defaults to 50), here `limit`
+    defaults to `None` meaning "no limit" — omitting the params returns the full
+    list unchanged, so adding this dep to an existing endpoint is
+    backwards-compatible. `offset` alone (with no `limit`) skips a prefix and
+    returns the rest.
+
+    Pair with `paginate(items, pagination)` (or `count_and_page` + `page_envelope`
+    when the page needs a per-item transform), which returns a
+    `PaginatedResponse`-shaped `{items, total, limit, offset}` body. `total` is
+    the pre-slice count so a client can tell whether more pages exist.
+    """
+
+    def __init__(
+        self,
+        limit: Optional[int] = Query(
+            None,
+            ge=1,
+            le=MAX_LIMIT,
+            description="Maximum number of items to return. Omit for no limit (all items)",
+        ),
+        offset: int = Query(
+            0,
+            ge=0,
+            description="Number of items to skip before returning results",
+        ),
+    ):
+        self.limit = limit
+        self.offset = offset
+
+
+T = TypeVar("T")
+
+
+class PaginatedResponse(BaseModel, Generic[T]):
+    """Uniform envelope for paginated list endpoints. `items` is the page;
+    `total` is the count BEFORE slicing so a client knows whether more pages
+    exist. `limit`/`offset` echo the applied window (`limit=null` = unbounded).
+
+    Every paginated list returns this same shape, so a client reads the array
+    via `.items` and the count via `.total` the same way on every endpoint."""
+
+    items: List[T] = Field(description="The page of results")
+    total: int = Field(
+        description="Total number of items matching the query, before pagination"
+    )
+    limit: Optional[int] = Field(
+        None, description="The applied `limit` (null when unbounded)"
+    )
+    offset: int = Field(0, description="The applied `offset`")
+
+
+def count_and_page(
+    items: List[Any], pagination: "OptionalPaginationParams"
+) -> Tuple[List[Any], int]:
+    """Return `(page, total)`: the sliced page plus the pre-slice length. Use
+    this when the page needs a per-item transform before going into the
+    envelope; wrap the transformed page with `page_envelope`.
+
+    With `pagination.limit is None` the slice keeps everything from `offset` on.
+    """
+    total = len(items)
+    start = pagination.offset
+    if pagination.limit is None:
+        page = items[start:]
+    else:
+        page = items[start : start + pagination.limit]
+    return page, total
+
+
+def page_envelope(
+    items: List[Any], total: int, pagination: "OptionalPaginationParams"
+) -> Dict[str, Any]:
+    """Build the `PaginatedResponse` body dict from an already-sliced page and
+    its pre-slice total. FastAPI coerces the dict to the endpoint's
+    `PaginatedResponse[T]` response_model."""
+    return {
+        "items": items,
+        "total": total,
+        "limit": pagination.limit,
+        "offset": pagination.offset,
+    }
+
+
+def paginate(
+    items: List[Any], pagination: "OptionalPaginationParams"
+) -> Dict[str, Any]:
+    """Slice `items` and return the `PaginatedResponse` envelope in one call.
+    For endpoints that transform each item first, use `count_and_page` +
+    `page_envelope` instead."""
+    page, total = count_and_page(items, pagination)
+    return page_envelope(page, total, pagination)
 
 
 def make_sort_params(
@@ -195,6 +292,11 @@ __all__ = [
     "DEFAULT_LIMIT",
     "MAX_LIMIT",
     "PaginationParams",
+    "OptionalPaginationParams",
+    "PaginatedResponse",
+    "count_and_page",
+    "page_envelope",
+    "paginate",
     "make_sort_params",
     "make_search_params",
 ]

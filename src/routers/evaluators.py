@@ -11,6 +11,15 @@ Replaces the legacy `metrics` router. Adds:
 from typing import Any, Dict, List, Literal, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Path, Query
+from pagination import (
+    OptionalPaginationParams,
+    PaginatedResponse,
+    count_and_page,
+    make_search_params,
+    page_envelope,
+)
+
+_EvaluatorSearch = make_search_params(searchable=["name"])
 from pydantic import BaseModel, Field, model_validator
 
 from auth_utils import get_current_org, get_current_user_id, get_org_jwt_or_api_key, OrgContext
@@ -503,7 +512,7 @@ async def get_default_prompt(
     )
 
 
-@router.get("", response_model=List[EvaluatorResponse], summary="List evaluators", tags=["Public API"])
+@router.get("", response_model=PaginatedResponse[EvaluatorResponse], summary="List evaluators", tags=["Public API"])
 async def list_evaluators(
     evaluator_type: Optional[EvaluatorTypeLiteral] = Query(
         None, description="Filter by what the evaluator judges. Omit for all types"
@@ -515,20 +524,32 @@ async def list_evaluators(
         True, description="When `true`, include the built-in default evaluators alongside the ones you created"
     ),
     ctx: OrgContext = Depends(get_org_jwt_or_api_key),
+    search: _EvaluatorSearch = Depends(),
+    pagination: OptionalPaginationParams = Depends(),
 ):
     """List your evaluators"""
+    # `evaluator_type`/`data_type`/`include_defaults` filter server-side; then
+    # optional `?q=` name search + `?limit=&offset=` paging. Returns the
+    # `{items, total, limit, offset}` envelope.
     evaluators = get_all_evaluators(
         org_uuid=ctx.org_uuid,
         include_defaults=include_defaults,
         evaluator_type=evaluator_type,
         data_type=data_type,
     )
-    # Resolve every evaluator's live version from ONE batched query, then shape
-    # against that map — avoids a per-evaluator `get_evaluator_version` (N+1).
+    evaluators = search.apply(evaluators)
+    page, total = count_and_page(evaluators, pagination)
+    # Resolve the PAGE's evaluators' live versions in ONE batched query, then
+    # shape against that map — avoids a per-evaluator `get_evaluator_version`
+    # (N+1), and only over the rows actually returned.
     version_by_id = get_evaluator_versions_by_uuids(
-        [e["live_version_id"] for e in evaluators if e.get("live_version_id")]
+        [e["live_version_id"] for e in page if e.get("live_version_id")]
     )
-    return [_evaluator_response(e, version_by_id=version_by_id) for e in evaluators]
+    return page_envelope(
+        [_evaluator_response(e, version_by_id=version_by_id) for e in page],
+        total,
+        pagination,
+    )
 
 
 @router.get("/{evaluator_uuid}", response_model=EvaluatorDetailResponse, summary="Get evaluator", tags=["Public API"])

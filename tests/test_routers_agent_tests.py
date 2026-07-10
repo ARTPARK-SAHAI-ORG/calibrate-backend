@@ -50,7 +50,7 @@ def _create_agent(client, h, name=None):
 
 
 def _create_test(client, h, name=None):
-    evaluators = client.get("/evaluators", headers=h).json()
+    evaluators = client.get("/evaluators", headers=h).json()["items"]
     llm_ev = next(e for e in evaluators if e.get("evaluator_type") == "llm")
     return client.post(
         "/tests",
@@ -147,10 +147,10 @@ def test_agent_tests_link_crud(client):
         client.get("/agent-tests/agent/missing/runs", headers=h).status_code == 404
     )
 
-    # Runs list (no runs yet)
+    # Runs list (no runs yet) — paginated envelope.
     runs = client.get(f"/agent-tests/agent/{agent['uuid']}/runs", headers=h)
     assert runs.status_code == 200
-    assert runs.json()["runs"] == []
+    assert runs.json()["items"] == []
 
     # Global runs list (auth required)
     global_runs = client.get("/agent-tests/runs", headers=h)
@@ -234,7 +234,7 @@ def test_agent_tests_list_returns_trimmed_shape(client):
 
     r = client.get(f"/agent-tests/agent/{agent['uuid']}/tests", headers=h)
     assert r.status_code == 200, r.text
-    item = next(t for t in r.json() if t["uuid"] == test["uuid"])
+    item = next(t for t in r.json()["items"] if t["uuid"] == test["uuid"])
     assert item["name"] == name
     assert item["type"] == "response"
     assert "evaluators" not in item
@@ -281,7 +281,7 @@ def test_agent_runs_list_surfaces_perf_aggregates(client):
 
     resp = client.get(f"/agent-tests/agent/{agent['uuid']}/runs", headers=h)
     assert resp.status_code == 200
-    run = resp.json()["runs"][0]
+    run = resp.json()["items"][0]
     # Run-level aggregates flow through.
     assert run["latency_ms"] == {"p50": 1851.0, "p95": 1851.0, "p99": 1851.0, "count": 1}
     assert run["cost"]["mean"] == 0.0248
@@ -289,10 +289,11 @@ def test_agent_runs_list_surfaces_perf_aggregates(client):
     # Per-case rows are slim: name + passed only, nothing else.
     assert run["results"] == [{"name": "tc1", "passed": True}]
 
-    # Same aggregates flow through the global runs-list endpoint.
+    # Same aggregates flow through the global runs-list endpoint (paginated
+    # envelope, same as the per-agent one).
     global_resp = client.get("/agent-tests/runs", headers=h)
     assert global_resp.status_code == 200
-    gruns = [r for r in global_resp.json()["runs"] if r["uuid"] == job_id]
+    gruns = [r for r in global_resp.json()["items"] if r["uuid"] == job_id]
     assert gruns and gruns[0]["total_tokens"]["count"] == 2
     assert gruns[0]["results"] == [{"name": "tc1", "passed": True}]
 
@@ -336,7 +337,7 @@ def test_agent_runs_list_slims_benchmark_model_results(client):
 
     resp = client.get(f"/agent-tests/agent/{agent['uuid']}/runs", headers=h)
     assert resp.status_code == 200
-    run = resp.json()["runs"][0]
+    run = resp.json()["items"][0]
     # Non-dict test_results rows are skipped → empty list collapses to None.
     assert run["results"] is None
     # Model row is slimmed to flat scalars; heavy nested fields are gone.
@@ -353,6 +354,135 @@ def test_agent_runs_list_slims_benchmark_model_results(client):
     # Leaderboard + top-level evaluators are not part of the list item at all.
     assert "leaderboard_summary" not in run
     assert "evaluators" not in run
+
+
+def test_agent_runs_list_filters_and_pagination(client):
+    """The agent runs-list accepts optional `type`/`status`/`has_failures`
+    filters + `limit`/`offset` paging, returning the `{items, total, ...}`
+    envelope where `total` is the pre-slice count of the filtered set. Names
+    ("Run N"/"Benchmark N") stay stable regardless of filters."""
+    from db import create_agent_test_job, update_agent_test_job
+
+    h = _signup(client)["headers"]
+    agent = _create_agent(client, h)
+    au = agent["uuid"]
+
+    # Run 1: unit test, done, clean (no failures).
+    clean = create_agent_test_job(agent_id=au, job_type="llm-unit-test")
+    update_agent_test_job(
+        clean, status="done", results={"total_tests": 2, "passed": 2, "failed": 0}
+    )
+    # Run 2: unit test, done, with failures.
+    failing = create_agent_test_job(agent_id=au, job_type="llm-unit-test")
+    update_agent_test_job(
+        failing, status="done", results={"total_tests": 2, "passed": 1, "failed": 1}
+    )
+    # Benchmark 1: in_progress, one model failed.
+    bench = create_agent_test_job(agent_id=au, job_type="llm-benchmark")
+    update_agent_test_job(
+        bench,
+        status="in_progress",
+        results={
+            "model_results": [
+                {"model": "openai/gpt-4.1", "success": True, "passed": 2, "failed": 0},
+                {"model": "openai/gpt-4o", "success": True, "passed": 1, "failed": 1},
+            ]
+        },
+    )
+
+    def _get(**params):
+        r = client.get(f"/agent-tests/agent/{au}/runs", params=params, headers=h)
+        assert r.status_code == 200
+        return r
+
+    # No params → every run, `total` = all runs.
+    body = _get().json()
+    all_runs = body["items"]
+    assert len(all_runs) == 3
+    assert body["total"] == 3
+    uuid_to_name = {x["uuid"]: x["name"] for x in all_runs}
+    assert uuid_to_name[clean] == "Run 1"
+    assert uuid_to_name[failing] == "Run 2"
+    assert uuid_to_name[bench] == "Benchmark 1"
+
+    # type filter.
+    body = _get(type="llm-benchmark").json()
+    assert {x["uuid"] for x in body["items"]} == {bench}
+    assert body["total"] == 1
+
+    # status filter.
+    assert {x["uuid"] for x in _get(status="in_progress").json()["items"]} == {bench}
+    assert {x["uuid"] for x in _get(status="done").json()["items"]} == {clean, failing}
+
+    # has_failures — covers both unit (aggregate `failed`) and benchmark (a
+    # model's `failed`) shapes.
+    assert {x["uuid"] for x in _get(has_failures=True).json()["items"]} == {
+        failing,
+        bench,
+    }
+    assert {x["uuid"] for x in _get(has_failures=False).json()["items"]} == {clean}
+
+    # Filters compose; names remain stable (still "Run 2", not renumbered).
+    only = _get(type="llm-unit-test", has_failures=True).json()["items"]
+    assert [x["uuid"] for x in only] == [failing]
+    assert only[0]["name"] == "Run 2"
+
+    # Pagination: total reflects the filtered set (pre-slice), page is sliced.
+    b1 = _get(status="done", limit=1, offset=0).json()
+    assert len(b1["items"]) == 1 and b1["total"] == 2
+    b2 = _get(status="done", limit=1, offset=1).json()
+    assert len(b2["items"]) == 1
+    assert b1["items"][0]["uuid"] != b2["items"][0]["uuid"]
+
+
+def test_global_runs_list_filters_and_pagination(client):
+    """The workspace-wide GET /agent-tests/runs (JWT-only) uses the same
+    `{items, total, ...}` envelope as the per-agent endpoint and accepts
+    `type`/`status`/`has_failures` filters + paging across every agent."""
+    from db import create_agent_test_job, update_agent_test_job
+
+    h = _signup(client)["headers"]
+    a1 = _create_agent(client, h)
+    a2 = _create_agent(client, h)
+
+    # a1: one clean unit run. a2: one failing unit run + one benchmark.
+    clean = create_agent_test_job(agent_id=a1["uuid"], job_type="llm-unit-test")
+    update_agent_test_job(
+        clean, status="done", results={"total_tests": 1, "passed": 1, "failed": 0}
+    )
+    failing = create_agent_test_job(agent_id=a2["uuid"], job_type="llm-unit-test")
+    update_agent_test_job(
+        failing, status="done", results={"total_tests": 1, "passed": 0, "failed": 1}
+    )
+    bench = create_agent_test_job(agent_id=a2["uuid"], job_type="llm-benchmark")
+    update_agent_test_job(
+        bench, status="in_progress", results={"model_results": []}
+    )
+    mine = {clean, failing, bench}
+
+    def _get(**params):
+        r = client.get("/agent-tests/runs", params=params, headers=h)
+        assert r.status_code == 200
+        return r.json()
+
+    # Envelope shape + spans both agents.
+    body = _get()
+    got = {x["uuid"] for x in body["items"]} & mine
+    assert got == mine
+    assert body["total"] >= 3
+
+    # Filters narrow the set (scoped to this workspace's three runs).
+    def _mine(**params):
+        return {x["uuid"] for x in _get(**params)["items"]} & mine
+
+    assert _mine(type="llm-benchmark") == {bench}
+    assert _mine(status="done") == {clean, failing}
+    assert _mine(has_failures=True) == {failing}
+    assert _mine(has_failures=False, type="llm-unit-test") == {clean}
+
+    # Pagination slices; total reflects the filtered set.
+    page = _get(status="done", limit=1)
+    assert len(page["items"]) == 1 and page["total"] == 2
 
 
 def test_slim_run_list_helpers_guard_edge_cases():

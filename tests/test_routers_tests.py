@@ -70,7 +70,7 @@ def test_list_tests_with_api_key(client):
     t_uuid = _create_test(client, {"X-API-Key": key})
     r = client.get("/tests", headers={"X-API-Key": key})
     assert r.status_code == 200, r.text
-    assert t_uuid in {t["uuid"] for t in r.json()}
+    assert t_uuid in {t["uuid"] for t in r.json()["items"]}
 
 
 def test_list_tests_returns_trimmed_shape(client):
@@ -81,7 +81,7 @@ def test_list_tests_returns_trimmed_shape(client):
     key = _raw_key(client, jwt)
     # An `llm` evaluator to link, so a full test would carry a non-empty
     # `evaluators[]` — proving the list shape drops it.
-    evaluators = client.get("/evaluators", headers=jwt).json()
+    evaluators = client.get("/evaluators", headers=jwt).json()["items"]
     llm_ev = next(e for e in evaluators if e.get("evaluator_type") == "llm")
     name = f"t-trim-{uuid.uuid4().hex[:6]}"
     created = client.post(
@@ -102,7 +102,7 @@ def test_list_tests_returns_trimmed_shape(client):
     assert created.status_code == 200, created.text
     t_uuid = created.json()["uuid"]
 
-    items = client.get("/tests", headers={"X-API-Key": key}).json()
+    items = client.get("/tests", headers={"X-API-Key": key}).json()["items"]
     item = next(t for t in items if t["uuid"] == t_uuid)
     # Trimmed shape: no evaluator hydration, no heavy config blocks.
     assert "evaluators" not in item
@@ -117,7 +117,7 @@ def test_get_test_with_api_key(client):
     """GET /tests/{uuid} accepts an X-API-Key and returns the full test shape."""
     jwt = _signup(client)
     key = _raw_key(client, jwt)
-    evaluators = client.get("/evaluators", headers=jwt).json()
+    evaluators = client.get("/evaluators", headers=jwt).json()["items"]
     llm_ev = next(e for e in evaluators if e.get("evaluator_type") == "llm")
     created = client.post(
         "/tests",
@@ -162,7 +162,7 @@ def test_bulk_create_tests_with_api_key(client):
     """POST /tests/bulk accepts an X-API-Key."""
     jwt = _signup(client)
     key = _raw_key(client, jwt)
-    evaluators = client.get("/evaluators", headers=jwt).json()
+    evaluators = client.get("/evaluators", headers=jwt).json()["items"]
     llm_ev = next(e for e in evaluators if e.get("evaluator_type") == "llm")
     ev_ref = [{"evaluator_uuid": llm_ev["uuid"]}]
     r = client.post(
