@@ -382,20 +382,24 @@ actions:
         openWorldHint: true
         description: |
           Get one annotation task with its evaluators, items, and labelling jobs.
-  - target: $.paths['/annotation-tasks/{task_uuid}/evaluators'].post
+  - target: $.paths['/annotation-tasks/{task_uuid}/evaluators'].put
     update:
       x-speakeasy-group: annotation_tasks
-      x-speakeasy-name-override: link_evaluator
+      x-speakeasy-name-override: set_evaluators
       x-speakeasy-mcp:
-        name: link-evaluator-to-task
-        title: Link evaluator to task
+        name: set-task-evaluators
+        title: Set an annotation task's evaluators
         scopes: [write]
         readOnlyHint: false
         destructiveHint: false
         openWorldHint: true
         idempotentHint: true
         description: |
-          Link an evaluator to an annotation task, appending it to the display order.
+          Replace the task's linked evaluators with exactly the given ordered
+          set: new ids are linked, omitted ids are unlinked, and the list order
+          sets their display position. Send an empty list to unlink all. Each
+          evaluator must be one you created or a built-in default, and the task
+          must be in your workspace.
   - target: $.paths['/annotation-tasks/{task_uuid}/items'].post
     update:
       x-speakeasy-group: annotation_tasks

@@ -108,9 +108,9 @@ paths:
       x-fern-sdk-group-name: annotation_tasks
       x-fern-sdk-method-name: get
   /annotation-tasks/{task_uuid}/evaluators:
-    post:
+    put:
       x-fern-sdk-group-name: annotation_tasks
-      x-fern-sdk-method-name: link_evaluator
+      x-fern-sdk-method-name: set_evaluators
   /annotation-tasks/{task_uuid}/items:
     post:
       x-fern-sdk-group-name: annotation_tasks
