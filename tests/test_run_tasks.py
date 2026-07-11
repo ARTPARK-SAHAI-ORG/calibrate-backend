@@ -135,6 +135,104 @@ def test_stt_run_evaluation_task_success(tmp_path):
     assert job["status"] == "done"
 
 
+def _seed_job_with_pinned_evaluator(job_type, evaluator_type, data_type):
+    """Create a job whose ``details.evaluators`` snapshot is pinned to an OLD
+    evaluator version, then bump the evaluator to a NEW live version. The runner
+    should re-hydrate the snapshot to the live version at run time and persist it.
+
+    Returns (job_uuid, ev_uuid, v1_id, v2_id).
+    """
+    user_uuid = db.create_user("R", "T", f"rl-{os.urandom(4).hex()}@x.com")
+    org_uuid = db.get_personal_org_for_user(user_uuid)["uuid"]
+    ev_uuid = db.create_evaluator(
+        name="ev",
+        evaluator_type=evaluator_type,
+        data_type=data_type,
+        owner_user_id=user_uuid,
+        org_uuid=org_uuid,
+    )
+    v1 = db.create_evaluator_version(ev_uuid, judge_model="m", system_prompt="V1")
+    db.set_evaluator_live_version(ev_uuid, v1["uuid"])
+    snapshot = {
+        "uuid": ev_uuid,
+        "name": "old-name",
+        "evaluator_type": evaluator_type,
+        "data_type": data_type,
+        "kind": "single",
+        "output_type": "binary",
+        "evaluator_version_id": v1["uuid"],
+        "judge_model": "m",
+        "system_prompt": "V1",
+        "output_config": None,
+        "variables": None,
+        "variable_values": {"foo": "bar"},
+    }
+    # New live version — the run must pick this up, NOT the pinned v1 snapshot.
+    v2 = db.create_evaluator_version(ev_uuid, judge_model="m", system_prompt="V2")
+    db.set_evaluator_live_version(ev_uuid, v2["uuid"])
+
+    details = {
+        "texts": ["hi"],
+        "providers": ["openai"],
+        "language": "en",
+        "s3_bucket": "bucket",
+        "evaluators": [snapshot],
+    }
+    if job_type == "stt-eval":
+        details["audio_paths"] = ["s3://bucket/key.wav"]
+    job_uuid = db.create_job(
+        job_type=job_type,
+        org_uuid=org_uuid,
+        user_id=user_uuid,
+        status="in_progress",
+        details=details,
+    )
+    return job_uuid, ev_uuid, v1["uuid"], v2["uuid"]
+
+
+def test_stt_run_evaluation_task_refreshes_evaluators_to_live():
+    """The runner re-hydrates the pinned evaluator snapshot to the live version
+    at run time and persists the refreshed snapshot back into job details."""
+    from routers.stt import run_evaluation_task, STTEvaluationRequest
+
+    job_uuid, _ev, _v1, v2 = _seed_job_with_pinned_evaluator(
+        "stt-eval", "stt", "text"
+    )
+    process = _FakeProcess(returncode=0, poll_results=[None, 0])
+
+    def fake_popen(*args, **kwargs):
+        output_dir = Path(kwargs["cwd"]) / "output"
+        if output_dir.exists():
+            _make_stt_output_dir(output_dir, ["openai"], total=1)
+        return process
+
+    s3_mock = MagicMock()
+    with patch("routers.stt.subprocess.Popen", side_effect=fake_popen), patch(
+        "routers.stt.get_s3_client", return_value=s3_mock
+    ), patch("routers.stt.upload_file_to_s3"), patch(
+        "routers.stt.upload_top_level_files_to_s3"
+    ), patch(
+        "routers.stt.upload_directory_tree_to_s3"
+    ), patch(
+        "routers.stt.try_start_queued_job"
+    ), patch(
+        "routers.stt.time.sleep"
+    ):
+        request = STTEvaluationRequest(
+            audio_paths=["s3://bucket/key.wav"],
+            texts=["hi"],
+            providers=["openai"],
+            language="en",
+        )
+        run_evaluation_task(job_uuid, request, "bucket")
+
+    stored = db.get_job(job_uuid)["details"]["evaluators"][0]
+    assert stored["evaluator_version_id"] == v2
+    assert stored["system_prompt"] == "V2"
+    # Pinned per-job variable_values survive the refresh.
+    assert stored["variable_values"] == {"foo": "bar"}
+
+
 def test_stt_run_evaluation_task_subprocess_failure(tmp_path):
     from routers.stt import run_evaluation_task, STTEvaluationRequest
 
@@ -248,6 +346,45 @@ def test_tts_run_evaluation_task_with_outputs():
     # The post-processing path ran; final status depends on path-mapping
     # heuristics — either is acceptable.
     assert job["status"] in ("done", "failed")
+
+
+def test_tts_run_evaluation_task_refreshes_evaluators_to_live():
+    """TTS runner re-hydrates the pinned evaluator snapshot to the live version
+    at run time and persists it back into job details."""
+    from routers.tts import run_tts_evaluation_task, TTSEvaluationRequest
+
+    job_uuid, _ev, _v1, v2 = _seed_job_with_pinned_evaluator(
+        "tts-eval", "tts", "audio"
+    )
+    process = _FakeProcess(returncode=0, poll_results=[None, 0])
+
+    def fake_popen(*args, **kwargs):
+        output_dir = Path(kwargs["cwd"]) / "output"
+        if output_dir.exists():
+            _make_tts_output_dir(output_dir, ["openai"], total=1)
+        return process
+
+    s3_mock = MagicMock()
+    with patch("routers.tts.subprocess.Popen", side_effect=fake_popen), patch(
+        "routers.tts.get_s3_client", return_value=s3_mock
+    ), patch("routers.tts.upload_file_to_s3"), patch(
+        "routers.tts.upload_top_level_files_to_s3"
+    ), patch(
+        "routers.tts.upload_directory_tree_to_s3"
+    ), patch(
+        "routers.tts.try_start_queued_job"
+    ), patch(
+        "routers.tts.time.sleep"
+    ):
+        request = TTSEvaluationRequest(
+            texts=["hi"], providers=["openai"], language="en"
+        )
+        run_tts_evaluation_task(job_uuid, request, "bucket")
+
+    stored = db.get_job(job_uuid)["details"]["evaluators"][0]
+    assert stored["evaluator_version_id"] == v2
+    assert stored["system_prompt"] == "V2"
+    assert stored["variable_values"] == {"foo": "bar"}
 
 
 def test_tts_run_evaluation_task_failure():
