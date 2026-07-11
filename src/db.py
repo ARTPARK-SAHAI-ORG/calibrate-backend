@@ -6846,6 +6846,87 @@ def reorder_evaluators_for_annotation_task(
         conn.commit()
 
 
+def set_evaluators_for_annotation_task(
+    task_id: str, ordered_evaluator_ids: List[str]
+) -> Dict[str, List[str]]:
+    """Reconcile a task's linked evaluators to exactly `ordered_evaluator_ids`,
+    in that display order — one atomic call that links, unlinks, and reorders.
+
+    Links ids not currently linked (restoring a soft-deleted row if present),
+    unlinks currently-linked ids absent from the target, then renumbers
+    `position` to 1..N in the given order across the whole surviving set (so a
+    later flow like the labelling job snapshots them in this order). Unlike
+    `reorder_evaluators_for_annotation_task`, the target need NOT match the
+    current membership — that is the point. The caller validates ownership and
+    de-dupes; `ordered_evaluator_ids` must contain no duplicates.
+
+    Job snapshots (`annotation_job_evaluators.position`) are frozen at
+    job-creation time and intentionally NOT touched here. Returns
+    `{"linked": [...], "unlinked": [...]}` of the ids actually changed.
+    """
+    if len(set(ordered_evaluator_ids)) != len(ordered_evaluator_ids):
+        raise ValueError("ordered_evaluator_ids contains duplicates")
+    with get_db_connection() as conn:
+        cursor = conn.cursor()
+        # Current set the caller can see: active pivot rows whose evaluator is
+        # itself active (evaluator soft-delete doesn't cascade to the pivot).
+        cursor.execute(
+            """
+            SELECT ate.evaluator_id
+              FROM annotation_task_evaluators ate
+              JOIN evaluators e ON e.uuid = ate.evaluator_id
+             WHERE ate.task_id = ?
+               AND ate.deleted_at IS NULL
+               AND e.deleted_at IS NULL
+            """,
+            (task_id,),
+        )
+        current = {r["evaluator_id"] for r in cursor.fetchall()}
+        target = set(ordered_evaluator_ids)
+        to_add = [e for e in ordered_evaluator_ids if e not in current]
+        to_remove = [e for e in current if e not in target]
+
+        for ev in to_remove:
+            cursor.execute(
+                "UPDATE annotation_task_evaluators SET deleted_at = CURRENT_TIMESTAMP "
+                "WHERE task_id = ? AND evaluator_id = ? AND deleted_at IS NULL",
+                (task_id, ev),
+            )
+        for ev in to_add:
+            cursor.execute(
+                "SELECT id FROM annotation_task_evaluators "
+                "WHERE task_id = ? AND evaluator_id = ? AND deleted_at IS NOT NULL",
+                (task_id, ev),
+            )
+            existing = cursor.fetchone()
+            if existing:
+                cursor.execute(
+                    "UPDATE annotation_task_evaluators SET deleted_at = NULL, "
+                    "created_at = CURRENT_TIMESTAMP WHERE id = ?",
+                    (existing["id"],),
+                )
+            else:
+                cursor.execute(
+                    "INSERT INTO annotation_task_evaluators (task_id, evaluator_id, position) "
+                    "VALUES (?, ?, ?)",
+                    (task_id, ev, None),
+                )
+        # Renumber the whole surviving set to the requested order.
+        for idx, evaluator_id in enumerate(ordered_evaluator_ids, start=1):
+            cursor.execute(
+                "UPDATE annotation_task_evaluators SET position = ? "
+                "WHERE task_id = ? AND evaluator_id = ? AND deleted_at IS NULL",
+                (idx, task_id, evaluator_id),
+            )
+        conn.commit()
+        if to_add or to_remove:
+            logger.info(
+                f"Set evaluators for annotation task {task_id}: "
+                f"+{len(to_add)} / -{len(to_remove)}"
+            )
+        return {"linked": to_add, "unlinked": to_remove}
+
+
 def create_annotator(name: str, org_uuid: str, user_id: Optional[str] = None) -> str:
     """Create a new annotator. Name must be unique per org (active rows)."""
     if not org_uuid:

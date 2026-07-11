@@ -2491,3 +2491,120 @@ def test_summary_disagreement_only_survives_pagination(client):
         headers=h,
     ).json()
     assert page2["rows"] == []
+
+
+def test_annotation_task_set_evaluators(client):
+    """PUT /annotation-tasks/{uuid}/evaluators reconciles membership AND order
+    in one call — linking, unlinking, and reordering."""
+    auth = _signup(client)
+    h = auth["headers"]
+    llm_evs = [
+        e
+        for e in client.get("/evaluators", headers=h).json()["items"]
+        if e.get("evaluator_type") == "llm"
+    ]
+    assert len(llm_evs) >= 3, "expected ≥3 seeded LLM evaluators"
+    a, b, c = (llm_evs[0]["uuid"], llm_evs[1]["uuid"], llm_evs[2]["uuid"])
+
+    task_uuid = client.post(
+        "/annotation-tasks",
+        json={"name": f"set-{uuid.uuid4().hex[:6]}", "type": "llm", "evaluator_ids": [a, b]},
+        headers=h,
+    ).json()["uuid"]
+
+    # Reconcile to [c, b]: adds c, removes a, and c sorts first (order = list).
+    r = client.put(
+        f"/annotation-tasks/{task_uuid}/evaluators",
+        json={"evaluator_ids": [c, b]},
+        headers=h,
+    )
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["evaluator_ids"] == [c, b]
+    assert body["linked"] == [c]
+    assert body["unlinked"] == [a]
+    listed = client.get(f"/annotation-tasks/{task_uuid}/evaluators", headers=h).json()
+    assert [e["uuid"] for e in listed] == [c, b]
+
+    # Idempotent: same set again changes nothing.
+    r2 = client.put(
+        f"/annotation-tasks/{task_uuid}/evaluators",
+        json={"evaluator_ids": [c, b]},
+        headers=h,
+    ).json()
+    assert r2["linked"] == [] and r2["unlinked"] == []
+
+    # Empty list unlinks all.
+    r3 = client.put(
+        f"/annotation-tasks/{task_uuid}/evaluators",
+        json={"evaluator_ids": []},
+        headers=h,
+    ).json()
+    assert sorted(r3["unlinked"]) == sorted([c, b])
+    assert client.get(f"/annotation-tasks/{task_uuid}/evaluators", headers=h).json() == []
+
+    # Duplicates → 400.
+    assert (
+        client.put(
+            f"/annotation-tasks/{task_uuid}/evaluators",
+            json={"evaluator_ids": [a, a]},
+            headers=h,
+        ).status_code
+        == 400
+    )
+
+    # Unknown evaluator id → 404, and nothing changes.
+    assert (
+        client.put(
+            f"/annotation-tasks/{task_uuid}/evaluators",
+            json={"evaluator_ids": [str(uuid.uuid4())]},
+            headers=h,
+        ).status_code
+        == 404
+    )
+
+    # Other org → 404.
+    other = _signup(client)
+    assert (
+        client.put(
+            f"/annotation-tasks/{task_uuid}/evaluators",
+            json={"evaluator_ids": [a]},
+            headers=other["headers"],
+        ).status_code
+        == 404
+    )
+
+
+def test_annotation_task_set_evaluators_public_surface(client):
+    """PUT (set) is Public API (accepts an API key); the single-item link POST
+    is now JWT-only, so an API key alone is rejected there."""
+    auth = _signup(client)
+    h = auth["headers"]
+    raw = client.post("/api-keys", json={"name": "ci"}, headers=h).json()["key"]
+    ev = next(
+        e
+        for e in client.get("/evaluators", headers=h).json()["items"]
+        if e.get("evaluator_type") == "llm"
+    )["uuid"]
+    task_uuid = client.post(
+        "/annotation-tasks",
+        json={"name": f"key-{uuid.uuid4().hex[:6]}", "type": "llm"},
+        headers=h,
+    ).json()["uuid"]
+
+    # PUT (set) accepts an API key.
+    r = client.put(
+        f"/annotation-tasks/{task_uuid}/evaluators",
+        json={"evaluator_ids": [ev]},
+        headers={"X-API-Key": raw},
+    )
+    assert r.status_code == 200, r.text
+    assert r.json()["evaluator_ids"] == [ev]
+
+    # POST (link one) is JWT-only — an API key alone is rejected.
+    r = client.post(
+        f"/annotation-tasks/{task_uuid}/evaluators",
+        json={"evaluator_id": ev},
+        headers={"X-API-Key": raw},
+    )
+    assert r.status_code == 403, r.text

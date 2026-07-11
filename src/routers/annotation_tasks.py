@@ -18,6 +18,7 @@ from db import (
     add_evaluator_to_annotation_task,
     remove_evaluator_from_annotation_task,
     reorder_evaluators_for_annotation_task,
+    set_evaluators_for_annotation_task,
     get_evaluators_for_annotation_task,
     get_evaluators_for_annotation_tasks,
     get_evaluator,
@@ -425,6 +426,29 @@ class EvaluatorOrderRequest(BaseModel):
     )
 
 
+class EvaluatorSetRequest(BaseModel):
+    evaluator_ids: List[str] = Field(
+        description="The full ordered set of evaluators the task should end up linked to, in display order. Missing ones are unlinked, new ones are linked, and the order sets their position. Send an empty list to unlink all. Each must be one you created or a built-in default",
+        examples=[["f47ac10b-58cc-4372-a567-0e02b2c3d479"]],
+    )
+
+
+class EvaluatorSetResponse(BaseModel):
+    message: str = Field(
+        description="Confirmation that the task's evaluators were updated",
+        examples=["Task evaluators updated"],
+    )
+    evaluator_ids: List[str] = Field(
+        description="The task's evaluator IDs after the update, in display order"
+    )
+    linked: List[str] = Field(
+        description="Evaluator IDs newly linked by this request"
+    )
+    unlinked: List[str] = Field(
+        description="Evaluator IDs unlinked by this request"
+    )
+
+
 def _ensure_owned_task(task_uuid: str, org_uuid: str) -> Dict[str, Any]:
     task = get_annotation_task(task_uuid)
     if not task or task.get("org_uuid") != org_uuid:
@@ -653,14 +677,14 @@ async def list_task_evaluators(
     return out
 
 
-@router.post("/{task_uuid}/evaluators", response_model=EvaluatorLinkResponse, summary="Link evaluator to task", tags=["Public API"])
+@router.post("/{task_uuid}/evaluators", response_model=EvaluatorLinkResponse, summary="Link evaluator to task")
 async def link_evaluator_to_task(
     task_uuid: str = Path(
         description="Annotation task to act on",
         examples=["f47ac10b-58cc-4372-a567-0e02b2c3d479"],
     ),
     payload: EvaluatorLinkRequest = ...,
-    ctx: OrgContext = Depends(get_org_jwt_or_api_key),
+    ctx: OrgContext = Depends(get_current_org),
 ):
     """Link an evaluator to a task, appending it to the display order"""
     _ensure_owned_task(task_uuid, ctx.org_uuid)
@@ -690,6 +714,39 @@ async def reorder_task_evaluators(
         "message": "Evaluator order updated",
         "evaluators": get_evaluators_for_annotation_task(task_uuid),
     }
+
+
+@router.put(
+    "/{task_uuid}/evaluators",
+    response_model=EvaluatorSetResponse,
+    summary="Update task evaluators",
+    tags=["Public API"],
+)
+async def set_task_evaluators(
+    task_uuid: str = Path(
+        description="Annotation task to act on",
+        examples=["f47ac10b-58cc-4372-a567-0e02b2c3d479"],
+    ),
+    payload: EvaluatorSetRequest = ...,
+    ctx: OrgContext = Depends(get_org_jwt_or_api_key),
+):
+    """Replace a task's linked evaluators with the given ordered set, linking, unlinking, and reordering as needed"""
+    _ensure_owned_task(task_uuid, ctx.org_uuid)
+    if len(set(payload.evaluator_ids)) != len(payload.evaluator_ids):
+        raise HTTPException(
+            status_code=400, detail="evaluator_ids contains duplicates"
+        )
+    # Validate the whole set up front so a bad id links/unlinks nothing.
+    for evaluator_id in payload.evaluator_ids:
+        _ensure_owned_evaluator(evaluator_id, ctx.org_uuid)
+    changed = set_evaluators_for_annotation_task(task_uuid, payload.evaluator_ids)
+    current_ids = [e["uuid"] for e in get_evaluators_for_annotation_task(task_uuid)]
+    return EvaluatorSetResponse(
+        message="Task evaluators updated",
+        evaluator_ids=current_ids,
+        linked=changed["linked"],
+        unlinked=changed["unlinked"],
+    )
 
 
 # ============ Items ============
