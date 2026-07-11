@@ -299,10 +299,8 @@ def make_projection_params(*, heavy_fields: List[str]) -> Type:
     if not heavy_fields:
         raise ValueError("heavy_fields must be non-empty")
     tokenized = [_tokenize_projection(p) for p in heavy_fields]
-    # Present readable dotted field names in the public docs, not the internal
-    # walk syntax (`[]` list / `*` dict-value markers). Also avoid em-dashes so
-    # the rendered text matches the api-writing-style house rules the static
-    # checker can't see through this runtime-built string.
+    # Docs-facing: readable dotted names, no walk markers or em-dashes. This
+    # runtime-built string bypasses the static api-writing-style checker.
     display = ", ".join(f"`{_display_projection_path(p)}`" for p in heavy_fields)
     description = (
         f"Return a compact response that omits heavy detail fields ({display}), "

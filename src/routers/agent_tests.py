@@ -2619,10 +2619,8 @@ async def get_agent_test_run_status(
     )
     data = response.model_dump()
     if only_failed and isinstance(data.get("results"), list):
-        # Keep only failing cases (`passed is False`). A case that errored
-        # comes back `False` too, so it's included. `passed is None` means the
-        # case hasn't finished yet (pending placeholder) — NOT a failure — so a
-        # client polling mid-run doesn't see unfinished cases as problems.
+        # `passed is None` is a pending case, not a failure — exclude it so a
+        # mid-run poll doesn't report unfinished cases. Errored cases are False.
         data["results"] = [
             r for r in data["results"] if r.get("passed") is False
         ]
@@ -3453,9 +3451,7 @@ async def get_benchmark_status(
             if isinstance(model, dict) and isinstance(
                 model.get("test_results"), list
             ):
-                # Keep only failing cases (`passed is False`); errored cases
-                # come back `False`, pending cases (`passed is None`) are
-                # excluded. See the run endpoint for rationale.
+                # `passed is None` is pending, not a failure; errored is False.
                 model["test_results"] = [
                     r for r in model["test_results"] if r.get("passed") is False
                 ]

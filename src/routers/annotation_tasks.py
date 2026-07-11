@@ -281,10 +281,8 @@ _SummarySort = make_sort_params(
 )
 _SummarySearch = make_search_params(searchable=["payload.name"])
 
-# Compact projection for the summary response. Nulls the payload-dominating
-# fields (item payloads, evaluator/annotator reasoning, and the per-version
-# rubric bodies) while keeping the lightweight decision fields (values,
-# agreement, ids) so a caller can page the table cheaply.
+# `?compact` drops the heavy fields, keeping values/agreement/ids so the table
+# pages cheaply.
 _SummaryProjection = make_projection_params(
     heavy_fields=[
         "rows[].payload",
@@ -2558,13 +2556,11 @@ async def task_summary(
     # Mechanics live in `pagination.make_search_params`.
     items = search.apply(items)
 
-    # `items` is now the full scope (task-wide or filtered by item_id/q).
-    # Keep it untouched for scoped_item_ids / annotator union / run_count
-    # so the top-level evaluators[] and annotators[] blocks stay stable
-    # across pages (consistent column headers in the FE table). Pagination
-    # only slices which items get expanded into `rows`. `total_items` and the
-    # `paged_items` slice are computed LOWER DOWN — after the optional
-    # `disagreement_only` item filter — so paging covers the disagreeing set.
+    # `items` is the full in-scope set (task-wide or filtered by item_id/q).
+    # scoped_item_ids / the annotator union / run_count read from it so the
+    # top-level evaluators[] and annotators[] column headers stay stable across
+    # pages. `total_items` and the slice are taken after the disagreement filter
+    # below, so paging covers only the matching items.
 
     # Sort the in-scope items before pagination so paging is stable across
     # requests. Mechanics live in `pagination.make_sort_params`.
@@ -2732,11 +2728,8 @@ async def task_summary(
             return (0 if v_id == live_v else 1, num if num is not None else 1 << 30)
         return sorted(versions, key=_sort_key)
 
-    # --- Single source of the evaluator-vs-human agreement math ---------------
-    # The row builder below AND the `disagreement_only` item pre-filter both
-    # need "did the evaluator agree with the humans on this slot?". Keep that in
-    # ONE place so the pre-filter (which decides `total`/paging) and the visible
-    # rows can never drift apart.
+    # Shared agreement math for the row builder and the `disagreement_only`
+    # pre-filter, so the paging count and the visible rows can't diverge.
 
     def _slot_human_scalars(item_uuid: str, ev_id: str) -> List[Any]:
         """Non-null human annotation scalars for one (item, evaluator) slot."""
@@ -2786,11 +2779,9 @@ async def task_summary(
                     return True
         return False
 
-    # `disagreement_only` filters at the ITEM level BEFORE pagination so paging
-    # covers the full disagreeing set (`total` reflects it) instead of only the
-    # disagreements that happen to fall on the current page. The row-level
-    # filter below then drops the agreeing rows within each surviving item, so
-    # the caller sees only the disagreements. Both use the same predicate.
+    # Filter items before slicing so `total` and paging cover the whole
+    # disagreeing set, not just matches on the current page. The row-level
+    # filter below then drops the agreeing rows within each surviving item.
     if disagreement_only:
         items = [it for it in items if _item_disagrees(it)]
     total_items = len(items)
@@ -2816,8 +2807,6 @@ async def task_summary(
                     "value": val,
                     "reasoning": reasoning,
                 }
-            # Human scalars for this slot come from the shared helper — the same
-            # one the disagreement pre-filter uses (single source of truth).
             slot_human_scalars = _slot_human_scalars(item["uuid"], ev_id)
 
             hh_mean, hh_pairs = _pairwise_agreement(slot_human_scalars)
@@ -2831,9 +2820,6 @@ async def task_summary(
                 ev_value, ev_reasoning = _scalar_and_reasoning(run_value)
                 version_meta = _version_meta(version_id)
 
-                # Per-row evaluator agreement via the shared helper, so the
-                # disagreement pre-filter (which drives `total`/paging) and this
-                # visible value can never disagree.
                 evaluator_agreement = _evaluator_agreement(
                     run_value, slot_human_scalars
                 )
@@ -2861,13 +2847,8 @@ async def task_summary(
                     }
                 )
 
-    # Row-level half of the disagreement filter: the paged items are already
-    # narrowed to those that disagree somewhere (item-level filter above), so
-    # here we drop the agreeing rows within them, leaving only the rows where
-    # the evaluator produced a value AND disagreed with at least one annotator
-    # (`evaluator_agreement` present and below 1.0). `pagination.total` counts
-    # the disagreeing ITEMS (paging axis), which each still fan out into ≥1
-    # surviving row.
+    # Drop the agreeing rows within the (already item-filtered) page.
+    # `pagination.total` stays the item count; each item keeps ≥1 row.
     if disagreement_only:
         rows = [r for r in rows if _is_disagreement(r.get("evaluator_agreement"))]
 
@@ -2969,9 +2950,7 @@ async def task_summary(
         },
     }
 
-    # `?compact=true` nulls the payload-dominating fields in place (keeping
-    # keys) so the shape still validates against TaskSummaryResponse. No-op
-    # by default.
+    # `?compact` nulls the heavy fields in place; no-op otherwise.
     return projection.apply(response)
 
 

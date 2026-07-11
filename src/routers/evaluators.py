@@ -210,13 +210,9 @@ class EvaluatorVersionResponse(BaseModel):
     created_at: str = Field(description="When the version was created (ISO 8601 UTC)")
 
 
-# Version model for the evaluator-detail endpoint's `versions[]`, where
-# `?compact=true` may null `system_prompt`. Kept a subclass (not a change to the
-# base) so only that endpoint's contract advertises `system_prompt` as nullable,
-# while the always-full `GET /evaluators/{uuid}/versions` and `live_version`
-# responses keep it required. `output_config`/`variables` are already optional on
-# the base. Deliberately no docstring — it would become the public schema
-# description.
+# Compact-mode shape for GET /evaluators/{uuid}: `system_prompt` is nullable
+# only here so the always-full endpoints reusing the base keep it required.
+# No docstring: Pydantic would publish it as the schema description.
 class EvaluatorVersionCompact(EvaluatorVersionResponse):
     system_prompt: Optional[str] = Field(
         None, description="Judge system prompt, with `{{variable}}` placeholders unrendered"
@@ -300,12 +296,9 @@ class EvaluatorDetailResponse(EvaluatorResponseBase):
     )
 
 
-# Detail model for `GET /evaluators/{uuid}` only, whose `?compact=true` mode may
-# null each version's `system_prompt`. Overriding `versions` to the compact
-# version model confines that nullable contract to this one endpoint; the base
-# `EvaluatorDetailResponse` stays tight for the annotation-task detail endpoints
-# that reuse it and always populate every version field. No docstring on purpose
-# (it would become the public schema description).
+# Response for GET /evaluators/{uuid}: uses the compact version model so
+# `?compact` can null version fields. The base stays tight for the
+# annotation-task endpoints that reuse it. No docstring: it would be published.
 class EvaluatorDetailResponseCompact(EvaluatorDetailResponse):
     versions: List[EvaluatorVersionCompact] = Field(description="Full version history, oldest first")
 
