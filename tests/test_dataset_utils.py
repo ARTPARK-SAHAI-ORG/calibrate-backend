@@ -198,3 +198,21 @@ def test_resolve_eval_rerun_inputs_keeps_inline_snapshot(user):
     assert resolved.audio_paths == ["s3://b/inline.wav"]
     assert resolved.texts == ["hello"]
     assert resolved.dataset_id is None
+
+
+def test_resolve_eval_rerun_inputs_tts_dataset(user):
+    ds_uuid = db.create_dataset(
+        name=f"ds-{uuid.uuid4().hex[:6]}",
+        dataset_type="tts",
+        org_uuid=user["org_uuid"],
+        user_id=user["user_id"],
+    )
+    item_ids = db.add_dataset_items(ds_uuid, [{"text": "old"}])
+    db.update_dataset_item(item_ids[0], ds_uuid, text="new")
+
+    resolved = resolve_eval_rerun_inputs_from_job_details(
+        {"dataset_id": ds_uuid, "texts": ["old"], "dataset_item_ids": item_ids},
+        org_uuid=user["org_uuid"],
+        expected_type="tts",
+    )
+    assert resolved.texts == ["new"]

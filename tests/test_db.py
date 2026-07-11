@@ -746,6 +746,16 @@ def test_generic_jobs_and_queue(user):
     ) is True
     replaced = db.get_job(j_uuid)
     assert replaced["details"] == {"provider": "deepgram"}
+    # merge when stored details are NULL
+    null_details_uuid = db.create_job(
+        job_type="stt-eval",
+        user_id=user["uuid"],
+        org_uuid=user["org_uuid"],
+        status="queued",
+        details=None,
+    )
+    assert db.update_job(null_details_uuid, details={"provider": "openai"}) is True
+    assert db.get_job(null_details_uuid)["details"] == {"provider": "openai"}
     assert db.update_job(j_uuid) is False
 
     # visibility / share token
