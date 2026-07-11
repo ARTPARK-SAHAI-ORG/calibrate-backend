@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import uuid
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import pytest
 from fastapi.testclient import TestClient
@@ -780,6 +780,114 @@ def test_benchmark_allows_conversation_tests(client, monkeypatch):
     assert resp.status_code == 200, resp.text
     task_id = resp.json()["task_id"]
     assert client.delete(f"/agent-tests/job/{task_id}", headers=h).status_code == 200
+
+
+def test_benchmark_response_test_judge_results_completes(client, monkeypatch):
+    """Regression: a benchmark that includes a graded (``response``) test must
+    complete and expose ``judge_results`` as a LIST.
+
+    calibrate emits ``judge_results`` as a dict keyed by evaluator name. The
+    benchmark runner used to wrap each model's parsed rows in a Pydantic
+    ``ModelResult`` at WRITE time, whose ``TestCaseResult.judge_results`` is
+    typed ``List[JudgeResult]`` — so the raw dict raised a ``ValidationError``
+    and the job crashed to ``failed``. The runner now stores raw dicts (like
+    ``run_llm_test_task``) and the read endpoint converts dict→list. Only
+    ``response``/``conversation`` tests trip it — ``tool_call`` has
+    ``judge_results=None`` — which is why it slipped past earlier tests that
+    only forced the failure path or stubbed the worker thread.
+    """
+    import json
+    from pathlib import Path
+
+    import db
+    from routers.agent_tests import run_benchmark_task
+
+    auth = _signup(client)
+    h = auth["headers"]
+    agent = _create_agent(client, h)
+    test_name = f"t-{uuid.uuid4().hex[:6]}"
+    test = _create_test(client, h, name=test_name)  # response-type, seeded llm evaluator
+    client.post(
+        "/agent-tests",
+        json={"agent_uuid": agent["uuid"], "test_uuids": [test["uuid"]]},
+        headers=h,
+    )
+
+    # Name calibrate keys judge_results by = the linked evaluator's name.
+    evaluators = client.get("/evaluators", headers=h).json()["items"]
+    llm_ev = next(e for e in evaluators if e.get("evaluator_type") == "llm")
+    ev_name = llm_ev["name"]
+
+    agent_row = db.get_agent(agent["uuid"])
+    test_row = db.get_test(test["uuid"])
+    job_uuid = db.create_agent_test_job(
+        agent_id=agent["uuid"], job_type="llm-benchmark", status="in_progress"
+    )
+
+    class _P:
+        def __init__(self):
+            self.returncode = 0
+            self.pid = 4242
+            self._poll = [None, 0]
+
+        def poll(self):
+            return self._poll.pop(0) if self._poll else 0
+
+        def wait(self, *a, **k):
+            return 0
+
+    def fake_popen(*args, **kwargs):
+        model_dir = Path(kwargs["cwd"]) / "output" / "gpt-4.1"
+        model_dir.mkdir(parents=True, exist_ok=True)
+        with open(model_dir / "results.json", "w") as f:
+            json.dump(
+                [
+                    {
+                        "output": {"response": "Yes.", "tool_calls": []},
+                        "metrics": {
+                            "passed": True,
+                            "reasoning": "ok",
+                            # dict keyed by evaluator name — the shape that used
+                            # to crash the benchmark write path.
+                            "judge_results": {
+                                ev_name: {"reasoning": "good", "match": True}
+                            },
+                        },
+                        "test_case": {"id": test["uuid"], "name": test_name},
+                        "test_case_id": test["uuid"],
+                    }
+                ],
+                f,
+            )
+        with open(model_dir / "metrics.json", "w") as f:
+            json.dump({"total": 1, "passed": 1, "criteria": {}}, f)
+        return _P()
+
+    with patch(
+        "routers.agent_tests.subprocess.Popen", side_effect=fake_popen
+    ), patch(
+        "routers.agent_tests.get_s3_client", return_value=MagicMock()
+    ), patch("routers.agent_tests.upload_directory_tree_to_s3"), patch(
+        "routers.agent_tests.upload_file_to_s3"
+    ), patch(
+        "routers.agent_tests.try_start_queued_agent_test_job"
+    ), patch(
+        "routers.agent_tests.time.sleep"
+    ):
+        run_benchmark_task(job_uuid, agent_row, [test_row], ["gpt-4.1"], "bucket")
+
+    # Write path no longer crashes: job reaches ``done``.
+    job = db.get_agent_test_job(job_uuid)
+    assert job["status"] == "done", job.get("results")
+
+    # Read path returns 200 and reshapes judge_results into a list.
+    resp = client.get(f"/agent-tests/benchmark/{job_uuid}", headers=h)
+    assert resp.status_code == 200, resp.text
+    data = resp.json()
+    assert data["status"] == "done"
+    judge_results = data["model_results"][0]["test_results"][0]["judge_results"]
+    assert isinstance(judge_results, list), judge_results
+    assert judge_results[0]["match"] is True
 
 
 def test_unverified_connection_blocks_all_test_types(client, monkeypatch):

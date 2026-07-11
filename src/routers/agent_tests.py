@@ -3004,20 +3004,26 @@ def run_benchmark_task(
                             total = metrics_data.get("total", 0)
                             passed = metrics_data.get("passed", 0)
                             evaluator_summary = _build_evaluator_summary(metrics_data)
+                            # Store raw parsed dicts (not a validated ``ModelResult``):
+                            # calibrate emits ``judge_results`` as a dict keyed by
+                            # evaluator name, but ``TestCaseResult.judge_results`` is
+                            # typed ``List[JudgeResult]``. Validating at write time
+                            # would raise; the dict→list conversion happens at read
+                            # time in ``_enrich_model_results_with_evaluators``.
                             model_results.append(
-                                ModelResult(
-                                    model=model,
-                                    success=True,
-                                    message=f"Benchmark completed successfully for {model}",
-                                    total_tests=total,
-                                    passed=passed,
-                                    failed=total - passed,
-                                    evaluator_summary=evaluator_summary,
-                                    latency_ms=metrics_data.get("latency_ms"),
-                                    cost=metrics_data.get("cost"),
-                                    total_tokens=metrics_data.get("total_tokens"),
-                                    test_results=test_results,
-                                )
+                                {
+                                    "model": model,
+                                    "success": True,
+                                    "message": f"Benchmark completed successfully for {model}",
+                                    "total_tests": total,
+                                    "passed": passed,
+                                    "failed": total - passed,
+                                    "evaluator_summary": evaluator_summary,
+                                    "latency_ms": metrics_data.get("latency_ms"),
+                                    "cost": metrics_data.get("cost"),
+                                    "total_tokens": metrics_data.get("total_tokens"),
+                                    "test_results": test_results,
+                                }
                             )
                         else:
                             # No metrics but has results - compute from results
@@ -3026,30 +3032,30 @@ def run_benchmark_task(
                                 1 for r in test_results if r.get("passed", False)
                             )
                             model_results.append(
-                                ModelResult(
-                                    model=model,
-                                    success=True,
-                                    message=f"Benchmark completed for {model}",
-                                    total_tests=total,
-                                    passed=passed,
-                                    failed=total - passed,
-                                    evaluator_summary=None,
-                                    test_results=test_results,
-                                )
+                                {
+                                    "model": model,
+                                    "success": True,
+                                    "message": f"Benchmark completed for {model}",
+                                    "total_tests": total,
+                                    "passed": passed,
+                                    "failed": total - passed,
+                                    "evaluator_summary": None,
+                                    "test_results": test_results,
+                                }
                             )
                     else:
                         logger.warning(f"No output found for model {model}")
                         model_results.append(
-                            ModelResult(
-                                model=model,
-                                success=False,
-                                message=f"No output found for model {model}",
-                                test_results=(
+                            {
+                                "model": model,
+                                "success": False,
+                                "message": f"No output found for model {model}",
+                                "test_results": (
                                     _merge_test_results_by_test_names(test_names, [])
                                     if test_names
                                     else None
                                 ),
-                            )
+                            }
                         )
 
                 # Read leaderboard from output directory
@@ -3100,14 +3106,14 @@ def run_benchmark_task(
                 logger.info(f"Uploaded benchmark config file to S3: {config_s3_key}")
 
                 # Check if all models succeeded
-                all_succeeded = all(r.success for r in model_results)
+                all_succeeded = all(r["success"] for r in model_results)
                 final_status = (
                     TaskStatus.DONE.value if all_succeeded else TaskStatus.FAILED.value
                 )
 
                 error_msg = None
                 if not all_succeeded:
-                    failed = [r.model for r in model_results if not r.success]
+                    failed = [r["model"] for r in model_results if not r["success"]]
                     error_msg = f"Some models failed: {', '.join(failed)}"
 
                 # Update job with results
@@ -3115,7 +3121,7 @@ def run_benchmark_task(
                     task_id,
                     status=final_status,
                     results={
-                        "model_results": [r.model_dump() for r in model_results],
+                        "model_results": model_results,
                         "leaderboard_summary": leaderboard_summary,
                         "results_s3_prefix": results_prefix,
                         "error": error_msg,
