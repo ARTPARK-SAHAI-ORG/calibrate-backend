@@ -358,6 +358,65 @@ def test_run_benchmark_task_failure_path():
     assert job["status"] == "failed"
 
 
+def test_run_benchmark_task_missing_model_output_marks_failed():
+    """One model produces output, another's folder never appears. The missing
+    model yields a ``success=False`` result → job FAILED with that model listed
+    in the error. Exercises the no-output branch and the failure aggregation,
+    which reads the raw stored dicts (not ``ModelResult`` objects)."""
+    from routers.agent_tests import run_benchmark_task
+
+    _, agent_uuid, job_uuid = _make_agent_test_job(job_type="llm-benchmark")
+
+    process = _FakeProcess(returncode=0, poll_results=[None, 0])
+
+    def fake_popen(*args, **kwargs):
+        out = Path(kwargs["cwd"]) / "output"
+        # gpt-4.1: full results + metrics.
+        full = out / "gpt-4.1"
+        full.mkdir(parents=True, exist_ok=True)
+        with open(full / "results.json", "w") as f:
+            json.dump(
+                [{"output": {"response": "hi"}, "metrics": {"passed": True}}], f
+            )
+        with open(full / "metrics.json", "w") as f:
+            json.dump({"total": 1, "passed": 1, "criteria": {}}, f)
+        # gpt-4o-mini: results but NO metrics.json (partial-output branch).
+        partial = out / "gpt-4o-mini"
+        partial.mkdir(parents=True, exist_ok=True)
+        with open(partial / "results.json", "w") as f:
+            json.dump(
+                [{"output": {"response": "hi"}, "metrics": {"passed": True}}], f
+            )
+        # gpt-4o: no folder at all → _match_model_to_folder returns None.
+        return process
+
+    with patch(
+        "routers.agent_tests.subprocess.Popen", side_effect=fake_popen
+    ), patch(
+        "routers.agent_tests.get_s3_client", return_value=MagicMock()
+    ), patch("routers.agent_tests.upload_directory_tree_to_s3"), patch(
+        "routers.agent_tests.upload_file_to_s3"
+    ), patch(
+        "routers.agent_tests.try_start_queued_agent_test_job"
+    ), patch(
+        "routers.agent_tests.time.sleep"
+    ):
+        agent = {"uuid": agent_uuid, "name": "a", "config": {}}
+        tests = [{"uuid": "t", "name": "T", "config": {}}]
+        run_benchmark_task(
+            job_uuid, agent, tests, ["gpt-4.1", "gpt-4o-mini", "gpt-4o"], "bucket"
+        )
+
+    job = db.get_agent_test_job(job_uuid)
+    assert job["status"] == "failed"
+    results = job["results"]
+    assert "gpt-4o" in (results.get("error") or "")
+    by_model = {m["model"]: m for m in results["model_results"]}
+    assert by_model["gpt-4.1"]["success"] is True
+    assert by_model["gpt-4o-mini"]["success"] is True  # results, computed w/o metrics
+    assert by_model["gpt-4o"]["success"] is False
+
+
 # ---------------------------------------------------------------------------
 # Conversation tests — run through the same `calibrate llm` path as response
 # tests (run_llm_test_task); calibrate dispatches per row on evaluation.type.
