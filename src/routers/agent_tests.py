@@ -2561,7 +2561,7 @@ async def get_agent_test_run_status(
     ctx: OrgContext = Depends(get_org_jwt_or_api_key),
     only_failed: bool = Query(
         False,
-        description="Return only failing test cases. Omit to return every case",
+        description="Return only test cases that did not pass, including failures and errored cases. Omit to return every case",
     ),
     projection: _RunProjection = Depends(),
 ):
@@ -2619,8 +2619,11 @@ async def get_agent_test_run_status(
     )
     data = response.model_dump()
     if only_failed and isinstance(data.get("results"), list):
+        # Keep anything that isn't a clean pass — explicit failures AND
+        # errored cases (`passed is None`), which a caller filtering for
+        # problems expects to see rather than have silently dropped.
         data["results"] = [
-            r for r in data["results"] if r.get("passed") is False
+            r for r in data["results"] if r.get("passed") is not True
         ]
     return projection.apply(data)
 
@@ -3393,7 +3396,7 @@ async def get_benchmark_status(
     ctx: OrgContext = Depends(get_org_jwt_or_api_key),
     only_failed: bool = Query(
         False,
-        description="Return only failing test cases within each model. Omit to return every case",
+        description="Return only test cases that did not pass, including failures and errored cases, within each model. Omit to return every case",
     ),
     projection: _BenchmarkProjection = Depends(),
 ):
@@ -3449,8 +3452,10 @@ async def get_benchmark_status(
             if isinstance(model, dict) and isinstance(
                 model.get("test_results"), list
             ):
+                # Keep anything that isn't a clean pass — failures AND errored
+                # cases (`passed is None`); see the run endpoint for rationale.
                 model["test_results"] = [
-                    r for r in model["test_results"] if r.get("passed") is False
+                    r for r in model["test_results"] if r.get("passed") is not True
                 ]
     return projection.apply(data)
 

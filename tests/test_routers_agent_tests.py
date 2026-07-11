@@ -506,8 +506,9 @@ def test_slim_run_list_helpers_guard_edge_cases():
 
 
 def _seed_run_job(client, h, agent):
-    """Seed a completed unit-test run with two cases (one pass, one fail) and an
-    evaluator carrying a rubric, for the run-detail compact/only_failed tests."""
+    """Seed a completed unit-test run with three cases (one pass, one fail, one
+    errored/`passed=None`) and an evaluator carrying a rubric, for the
+    run-detail compact/only_failed tests."""
     from db import create_agent_test_job, update_agent_test_job
 
     job_id = create_agent_test_job(
@@ -535,7 +536,7 @@ def _seed_run_job(client, h, agent):
         job_id,
         status="done",
         results={
-            "total_tests": 2,
+            "total_tests": 3,
             "passed": 1,
             "failed": 1,
             "test_results": [
@@ -561,6 +562,16 @@ def _seed_run_job(client, h, agent):
                         {"evaluator_uuid": NONEXISTENT_UUID, "match": False}
                     ],
                 },
+                {
+                    # Errored case — no pass/fail recorded (`passed is None`).
+                    "name": "tc_error",
+                    "test_case_id": "tc_error",
+                    "passed": None,
+                    "output": {"response": "", "tool_calls": None},
+                    "test_case": {"name": "tc_error", "history": []},
+                    "reasoning": "judge errored",
+                    "judge_results": None,
+                },
             ],
         },
     )
@@ -576,7 +587,7 @@ def test_run_detail_default_is_full(client):
     resp = client.get(f"/agent-tests/run/{job_id}", headers=h)
     assert resp.status_code == 200
     body = resp.json()
-    assert len(body["results"]) == 2
+    assert len(body["results"]) == 3
     case = body["results"][0]
     assert case["output"] is not None
     assert case["test_case"] is not None
@@ -598,22 +609,23 @@ def test_run_detail_compact_nulls_heavy_fields(client):
     assert resp.status_code == 200
     body = resp.json()
     assert body["status"] == "done"
-    assert len(body["results"]) == 2
+    assert len(body["results"]) == 3
     for case in body["results"]:
         assert case["output"] is None
         assert case["test_case"] is None
         assert case["judge_results"] is None
         assert case["reasoning"] is None
         # Slim fields survive.
-        assert case["name"] in {"tc_pass", "tc_fail"}
-        assert case["passed"] in {True, False}
+        assert case["name"] in {"tc_pass", "tc_fail", "tc_error"}
+        assert case["passed"] in {True, False, None}
     assert body["evaluators"][0]["output_config"] is None
     # Non-heavy evaluator fields survive.
     assert body["evaluators"][0]["name"] == "correctness"
 
 
 def test_run_detail_only_failed_narrows_results(client):
-    """`?only_failed=true` keeps only cases where `passed is False`."""
+    """`?only_failed=true` keeps cases that did not cleanly pass — the explicit
+    failure AND the errored (`passed is None`) case — dropping only the pass."""
     h = _signup(client)["headers"]
     agent = _create_agent(client, h)
     job_id = _seed_run_job(client, h, agent)
@@ -623,7 +635,7 @@ def test_run_detail_only_failed_narrows_results(client):
     )
     assert resp.status_code == 200
     body = resp.json()
-    assert [c["name"] for c in body["results"]] == ["tc_fail"]
+    assert [c["name"] for c in body["results"]] == ["tc_fail", "tc_error"]
     # Heavy fields still present (compact not requested).
     assert body["results"][0]["output"] is not None
 
@@ -662,7 +674,7 @@ def _seed_benchmark_job(client, h, agent):
                     "model": "openai/gpt-4.1",
                     "success": True,
                     "message": "ok",
-                    "total_tests": 2,
+                    "total_tests": 3,
                     "passed": 1,
                     "failed": 1,
                     "test_results": [
@@ -675,6 +687,12 @@ def _seed_benchmark_job(client, h, agent):
                             "name": "tc_fail",
                             "passed": False,
                             "output": {"response": "no"},
+                        },
+                        {
+                            # Errored case — `passed is None`.
+                            "name": "tc_error",
+                            "passed": None,
+                            "output": {"response": ""},
                         },
                     ],
                 }
@@ -695,7 +713,7 @@ def test_benchmark_detail_default_is_full(client):
     assert resp.status_code == 200
     body = resp.json()
     model = body["model_results"][0]
-    assert len(model["test_results"]) == 2
+    assert len(model["test_results"]) == 3
     assert body["evaluators"][0]["output_config"] is not None
 
 
@@ -722,8 +740,9 @@ def test_benchmark_detail_compact_nulls_heavy_fields(client):
 
 
 def test_benchmark_detail_only_failed_narrows_each_model(client):
-    """`?only_failed=true` narrows each model's test_results to failing cases,
-    leaving model-level fields intact."""
+    """`?only_failed=true` narrows each model's test_results to cases that did
+    not pass — the failure AND the errored case — leaving model-level fields
+    intact."""
     h = _signup(client)["headers"]
     agent = _create_agent(client, h)
     job_id = _seed_benchmark_job(client, h, agent)
@@ -734,10 +753,10 @@ def test_benchmark_detail_only_failed_narrows_each_model(client):
     assert resp.status_code == 200
     body = resp.json()
     model = body["model_results"][0]
-    assert [c["name"] for c in model["test_results"]] == ["tc_fail"]
+    assert [c["name"] for c in model["test_results"]] == ["tc_fail", "tc_error"]
     # Model-level fields untouched.
     assert model["passed"] == 1
-    assert model["total_tests"] == 2
+    assert model["total_tests"] == 3
 
 
 def test_agent_tests_link_with_missing(client):
