@@ -202,17 +202,25 @@ class EvaluatorVersionResponse(BaseModel):
     )
     version_number: int = Field(description=_VERSION_NUMBER_DESCRIPTION)
     judge_model: str = Field(description=_JUDGE_MODEL_DESCRIPTION)
-    # Optional only to support the detail endpoint's `?compact=true` mode, which
-    # nulls this heavy field in place. Full (non-compact) responses always
-    # populate it.
-    system_prompt: Optional[str] = Field(
-        None, description="Judge system prompt, with `{{variable}}` placeholders unrendered"
-    )
+    system_prompt: str = Field(description="Judge system prompt, with `{{variable}}` placeholders unrendered")
     output_config: Optional[OutputConfig] = Field(
         None, description=_RUBRIC_DESCRIPTION
     )
     variables: Optional[List[VariableSpec]] = Field(None, description="Declared prompt variables")
     created_at: str = Field(description="When the version was created (ISO 8601 UTC)")
+
+
+# Version model for the evaluator-detail endpoint's `versions[]`, where
+# `?compact=true` may null `system_prompt`. Kept a subclass (not a change to the
+# base) so only that endpoint's contract advertises `system_prompt` as nullable,
+# while the always-full `GET /evaluators/{uuid}/versions` and `live_version`
+# responses keep it required. `output_config`/`variables` are already optional on
+# the base. Deliberately no docstring — it would become the public schema
+# description.
+class EvaluatorVersionCompact(EvaluatorVersionResponse):
+    system_prompt: Optional[str] = Field(
+        None, description="Judge system prompt, with `{{variable}}` placeholders unrendered"
+    )
 
 
 class EvaluatorLiveVersionSummary(BaseModel):
@@ -290,6 +298,16 @@ class EvaluatorDetailResponse(EvaluatorResponseBase):
     live_version_index: Optional[int] = Field(
         None, description="Array position of the live version within `versions[]`"
     )
+
+
+# Detail model for `GET /evaluators/{uuid}` only, whose `?compact=true` mode may
+# null each version's `system_prompt`. Overriding `versions` to the compact
+# version model confines that nullable contract to this one endpoint; the base
+# `EvaluatorDetailResponse` stays tight for the annotation-task detail endpoints
+# that reuse it and always populate every version field. No docstring on purpose
+# (it would become the public schema description).
+class EvaluatorDetailResponseCompact(EvaluatorDetailResponse):
+    versions: List[EvaluatorVersionCompact] = Field(description="Full version history, oldest first")
 
 
 class EvaluatorCreateResponse(BaseModel):
@@ -565,7 +583,7 @@ async def list_evaluators(
     )
 
 
-@router.get("/{evaluator_uuid}", response_model=EvaluatorDetailResponse, summary="Get evaluator", tags=["Public API"])
+@router.get("/{evaluator_uuid}", response_model=EvaluatorDetailResponseCompact, summary="Get evaluator", tags=["Public API"])
 async def get_evaluator_endpoint(
     evaluator_uuid: str = Path(
         description="Evaluator to retrieve",
@@ -579,13 +597,13 @@ async def get_evaluator_endpoint(
     base = _evaluator_response(evaluator)
     output_type = evaluator.get("output_type", "binary")
     versions = [
-        EvaluatorVersionResponse(**_version_dict(v, output_type))
+        EvaluatorVersionCompact(**_version_dict(v, output_type))
         for v in get_evaluator_versions(evaluator_uuid)
     ]
     # base carries `live_version` (list shape); drop it here — detail uses
     # `versions[]` + `live_version_id`/`live_version_index` so we don't
     # duplicate the version.
-    response = EvaluatorDetailResponse(
+    response = EvaluatorDetailResponseCompact(
         **base.model_dump(exclude={"live_version"}),
         versions=versions,
         live_version_index=_live_version_index(versions, base.live_version_id),
