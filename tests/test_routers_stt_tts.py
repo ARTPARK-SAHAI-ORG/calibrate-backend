@@ -262,6 +262,94 @@ def test_stt_get_status_unknown(client):
     assert resp.status_code == 404
 
 
+def test_stt_retry_creates_new_job(client, monkeypatch):
+    auth = _signup(client)
+    monkeypatch.setenv("S3_OUTPUT_BUCKET", "test-bucket")
+    with patch("routers.stt.can_start_job", return_value=False), patch(
+        "threading.Thread"
+    ):
+        original = client.post(
+            "/stt/evaluate",
+            json={
+                "providers": ["openai"],
+                "language": "en",
+                "audio_paths": ["s3://b/k.wav"],
+                "texts": ["hello"],
+            },
+            headers=auth["headers"],
+        )
+        assert original.status_code == 200
+        original_id = original.json()["task_id"]
+
+        retry = client.post(
+            f"/stt/evaluate/{original_id}/retry",
+            headers=auth["headers"],
+        )
+        assert retry.status_code == 200
+        body = retry.json()
+        assert body["task_id"] != original_id
+        assert body["status"] == "queued"
+
+
+def test_stt_retry_rejects_in_progress(client, monkeypatch):
+    auth = _signup(client)
+    monkeypatch.setenv("S3_OUTPUT_BUCKET", "test-bucket")
+    with patch("routers.stt.can_start_job", return_value=True), patch(
+        "routers.stt.threading.Thread"
+    ):
+        original = client.post(
+            "/stt/evaluate",
+            json={
+                "providers": ["openai"],
+                "language": "en",
+                "audio_paths": ["s3://b/k.wav"],
+                "texts": ["hello"],
+            },
+            headers=auth["headers"],
+        )
+        original_id = original.json()["task_id"]
+        assert original.json()["status"] == "in_progress"
+
+    resp = client.post(
+        f"/stt/evaluate/{original_id}/retry",
+        headers=auth["headers"],
+    )
+    assert resp.status_code == 400
+
+
+def test_stt_retry_not_found(client):
+    auth = _signup(client)
+    resp = client.post(
+        "/stt/evaluate/missing/retry",
+        headers=auth["headers"],
+    )
+    assert resp.status_code == 404
+
+
+def test_stt_retry_wrong_job_type(client, monkeypatch):
+    auth = _signup(client)
+    monkeypatch.setenv("S3_OUTPUT_BUCKET", "test-bucket")
+    with patch("routers.tts.can_start_job", return_value=False), patch(
+        "threading.Thread"
+    ):
+        tts = client.post(
+            "/tts/evaluate",
+            json={
+                "providers": ["openai"],
+                "language": "en",
+                "texts": ["hello"],
+            },
+            headers=auth["headers"],
+        )
+        tts_id = tts.json()["task_id"]
+
+    resp = client.post(
+        f"/stt/evaluate/{tts_id}/retry",
+        headers=auth["headers"],
+    )
+    assert resp.status_code == 404
+
+
 # ---------------------------------------------------------------------------
 # TTS /evaluate (parallel set)
 # ---------------------------------------------------------------------------
@@ -388,3 +476,56 @@ def test_tts_get_status_unknown(client):
     auth = _signup(client)
     resp = client.get("/tts/evaluate/missing", headers=auth["headers"])
     assert resp.status_code == 404
+
+
+def test_tts_retry_creates_new_job(client, monkeypatch):
+    auth = _signup(client)
+    monkeypatch.setenv("S3_OUTPUT_BUCKET", "test-bucket")
+    with patch("routers.tts.can_start_job", return_value=False), patch(
+        "threading.Thread"
+    ):
+        original = client.post(
+            "/tts/evaluate",
+            json={
+                "providers": ["openai"],
+                "language": "en",
+                "texts": ["hello"],
+            },
+            headers=auth["headers"],
+        )
+        assert original.status_code == 200
+        original_id = original.json()["task_id"]
+
+        retry = client.post(
+            f"/tts/evaluate/{original_id}/retry",
+            headers=auth["headers"],
+        )
+        assert retry.status_code == 200
+        body = retry.json()
+        assert body["task_id"] != original_id
+        assert body["status"] == "queued"
+
+
+def test_tts_retry_rejects_in_progress(client, monkeypatch):
+    auth = _signup(client)
+    monkeypatch.setenv("S3_OUTPUT_BUCKET", "test-bucket")
+    with patch("routers.tts.can_start_job", return_value=True), patch(
+        "routers.tts.threading.Thread"
+    ):
+        original = client.post(
+            "/tts/evaluate",
+            json={
+                "providers": ["openai"],
+                "language": "en",
+                "texts": ["hello"],
+            },
+            headers=auth["headers"],
+        )
+        original_id = original.json()["task_id"]
+        assert original.json()["status"] == "in_progress"
+
+    resp = client.post(
+        f"/tts/evaluate/{original_id}/retry",
+        headers=auth["headers"],
+    )
+    assert resp.status_code == 400

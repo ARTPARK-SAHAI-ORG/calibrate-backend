@@ -152,13 +152,7 @@ def _start_stt_job_from_queue(job: dict) -> bool:
     job_id = job["uuid"]
     details = job.get("details", {})
 
-    # Reconstruct request from job details
-    request = STTEvaluationRequest(
-        audio_paths=details.get("audio_paths", []),
-        texts=details.get("texts", []),
-        providers=details.get("providers", []),
-        language=details.get("language", ""),
-    )
+    request = _stt_request_from_job_details(details)
     s3_bucket = details.get("s3_bucket", "")
 
     # Start background task in a separate thread
@@ -263,6 +257,15 @@ class STTEvaluationRequest(BaseModel):
     evaluator_uuids: Optional[List[str]] = Field(
         None,
         description="Evaluators to score transcriptions. Each must be an `stt` evaluator in your workspace. Omit to use the default STT evaluator",
+    )
+
+
+def _stt_request_from_job_details(details: dict) -> STTEvaluationRequest:
+    return STTEvaluationRequest(
+        audio_paths=details.get("audio_paths", []),
+        texts=details.get("texts", []),
+        providers=details.get("providers", []),
+        language=details.get("language", ""),
     )
 
 
@@ -741,6 +744,87 @@ async def evaluate_stt(
         status=initial_status,
         dataset_id=resolved_dataset_id,
         dataset_name=resolved_dataset_name,
+    )
+
+
+@router.post(
+    "/evaluate/{task_id}/retry",
+    response_model=TaskCreateResponse,
+    summary="Retry STT evaluation",
+)
+async def retry_stt_evaluation(
+    task_id: str = PathParam(
+        description="The STT evaluation to re-run",
+        examples=["f47ac10b-58cc-4372-a567-0e02b2c3d479"],
+    ),
+    ctx: OrgContext = Depends(get_current_org),
+):
+    """Re-run an STT evaluation with the same providers, inputs, and evaluators as the original job"""
+    original = get_job(task_id, org_uuid=ctx.org_uuid)
+    if not original or original.get("type") != "stt-eval":
+        raise HTTPException(status_code=404, detail="Task not found")
+    if original["status"] == TaskStatus.IN_PROGRESS.value:
+        raise HTTPException(
+            status_code=400,
+            detail="Cannot retry a job that is still in progress",
+        )
+
+    details = original.get("details") or {}
+    providers = details.get("providers") or []
+    if not providers:
+        raise HTTPException(
+            status_code=400,
+            detail="Original job is missing provider configuration",
+        )
+
+    try:
+        s3_bucket = get_s3_output_config()
+    except ValueError as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+    retry_details = {
+        "audio_paths": details.get("audio_paths", []),
+        "texts": details.get("texts", []),
+        "providers": providers,
+        "language": details.get("language", ""),
+        "s3_bucket": s3_bucket,
+        "dataset_id": details.get("dataset_id"),
+        "dataset_name": details.get("dataset_name"),
+        "dataset_item_ids": details.get("dataset_item_ids"),
+        "evaluators": details.get("evaluators", []),
+    }
+
+    can_start = can_start_job(EVAL_JOB_TYPES, ctx.org_uuid)
+    initial_status = (
+        TaskStatus.IN_PROGRESS.value if can_start else TaskStatus.QUEUED.value
+    )
+
+    job_id = create_job(
+        job_type="stt-eval",
+        org_uuid=ctx.org_uuid,
+        user_id=ctx.user_id,
+        status=initial_status,
+        details=retry_details,
+        results=None,
+    )
+
+    request = _stt_request_from_job_details(retry_details)
+    if can_start:
+        thread = threading.Thread(
+            target=run_evaluation_task,
+            args=(job_id, request, s3_bucket),
+            daemon=True,
+        )
+        thread.start()
+        logger.info(f"Started STT evaluation retry {job_id} (from {task_id}) immediately")
+    else:
+        logger.info(f"Queued STT evaluation retry {job_id} (from {task_id})")
+
+    return TaskCreateResponse(
+        task_id=job_id,
+        status=initial_status,
+        dataset_id=retry_details.get("dataset_id"),
+        dataset_name=retry_details.get("dataset_name"),
     )
 
 
