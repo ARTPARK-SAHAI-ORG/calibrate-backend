@@ -6736,6 +6736,72 @@ def _next_evaluator_position(cursor: sqlite3.Cursor, task_id: str) -> int:
     return int(row["next_pos"]) if row else 1
 
 
+def _visible_evaluator_ids_for_task(cursor: sqlite3.Cursor, task_id: str) -> set:
+    """Return the evaluator ids linked to a task that are visible to clients.
+
+    Only active pivot rows whose evaluator is itself still active count —
+    evaluator soft-delete does NOT cascade to `annotation_task_evaluators`, so
+    a pivot row can outlive its evaluator. `get_evaluators_for_annotation_task`
+    JOINs and filters `e.deleted_at IS NULL`, hiding those rows from clients;
+    this mirrors that filter so membership checks reference only ids a client
+    could actually know about.
+    """
+    cursor.execute(
+        """
+        SELECT ate.evaluator_id
+          FROM annotation_task_evaluators ate
+          JOIN evaluators e ON e.uuid = ate.evaluator_id
+         WHERE ate.task_id = ?
+           AND ate.deleted_at IS NULL
+           AND e.deleted_at IS NULL
+        """,
+        (task_id,),
+    )
+    return {r["evaluator_id"] for r in cursor.fetchall()}
+
+
+def _relink_or_insert_evaluator(
+    cursor: sqlite3.Cursor, task_id: str, evaluator_id: str, position: Optional[int]
+) -> int:
+    """Restore a soft-deleted (task, evaluator) pivot row or insert a fresh one.
+
+    Sets the row's `position` to the given value (pass `None` when the caller
+    renumbers the whole set afterward). Returns the pivot row id.
+    """
+    cursor.execute(
+        "SELECT id FROM annotation_task_evaluators "
+        "WHERE task_id = ? AND evaluator_id = ? AND deleted_at IS NOT NULL",
+        (task_id, evaluator_id),
+    )
+    existing = cursor.fetchone()
+    if existing:
+        cursor.execute(
+            "UPDATE annotation_task_evaluators "
+            "SET deleted_at = NULL, created_at = CURRENT_TIMESTAMP, position = ? "
+            "WHERE id = ?",
+            (position, existing["id"]),
+        )
+        return existing["id"]
+    cursor.execute(
+        "INSERT INTO annotation_task_evaluators (task_id, evaluator_id, position) "
+        "VALUES (?, ?, ?)",
+        (task_id, evaluator_id, position),
+    )
+    return cursor.lastrowid
+
+
+def _renumber_evaluator_positions(
+    cursor: sqlite3.Cursor, task_id: str, ordered_evaluator_ids: List[str]
+) -> None:
+    """Assign `position` 1..N to the task's active links in the given order."""
+    for idx, evaluator_id in enumerate(ordered_evaluator_ids, start=1):
+        cursor.execute(
+            "UPDATE annotation_task_evaluators SET position = ? "
+            "WHERE task_id = ? AND evaluator_id = ? AND deleted_at IS NULL",
+            (idx, task_id, evaluator_id),
+        )
+
+
 def add_evaluator_to_annotation_task(task_id: str, evaluator_id: str) -> int:
     """Link an evaluator to an annotation task. Restores soft-deleted links if present.
 
@@ -6744,34 +6810,10 @@ def add_evaluator_to_annotation_task(task_id: str, evaluator_id: str) -> int:
     """
     with get_db_connection() as conn:
         cursor = conn.cursor()
-        cursor.execute(
-            """
-            SELECT id FROM annotation_task_evaluators
-             WHERE task_id = ? AND evaluator_id = ? AND deleted_at IS NOT NULL
-            """,
-            (task_id, evaluator_id),
-        )
-        existing = cursor.fetchone()
-        if existing:
-            next_pos = _next_evaluator_position(cursor, task_id)
-            cursor.execute(
-                "UPDATE annotation_task_evaluators "
-                "SET deleted_at = NULL, created_at = CURRENT_TIMESTAMP, position = ? "
-                "WHERE id = ?",
-                (next_pos, existing["id"]),
-            )
-            conn.commit()
-            return existing["id"]
         next_pos = _next_evaluator_position(cursor, task_id)
-        cursor.execute(
-            """
-            INSERT INTO annotation_task_evaluators (task_id, evaluator_id, position)
-            VALUES (?, ?, ?)
-            """,
-            (task_id, evaluator_id, next_pos),
-        )
+        link_id = _relink_or_insert_evaluator(cursor, task_id, evaluator_id, next_pos)
         conn.commit()
-        return cursor.lastrowid
+        return link_id
 
 
 def remove_evaluator_from_annotation_task(task_id: str, evaluator_id: str) -> bool:
@@ -6807,25 +6849,10 @@ def reorder_evaluators_for_annotation_task(
         raise ValueError("ordered_evaluator_ids contains duplicates")
     with get_db_connection() as conn:
         cursor = conn.cursor()
-        # Validate against the set the caller can actually see: pivot links
-        # whose evaluator row is itself still active. Evaluator soft-delete
-        # does NOT cascade to `annotation_task_evaluators.deleted_at`, so a
-        # pivot row can outlive its evaluator — `get_evaluators_for_annotation_task`
-        # JOINs and filters `e.deleted_at IS NULL`, hiding those rows from
-        # clients. If we validated against the raw pivot instead, clients
-        # would get 400s referencing UUIDs they were never told about.
-        cursor.execute(
-            """
-            SELECT ate.evaluator_id
-              FROM annotation_task_evaluators ate
-              JOIN evaluators e ON e.uuid = ate.evaluator_id
-             WHERE ate.task_id = ?
-               AND ate.deleted_at IS NULL
-               AND e.deleted_at IS NULL
-            """,
-            (task_id,),
-        )
-        current = {r["evaluator_id"] for r in cursor.fetchall()}
+        # Validate against the set the caller can actually see (see
+        # `_visible_evaluator_ids_for_task`): validating against the raw pivot
+        # would 400 referencing UUIDs the client was never told about.
+        current = _visible_evaluator_ids_for_task(cursor, task_id)
         provided = set(ordered_evaluator_ids)
         if current != provided:
             missing = current - provided
@@ -6834,15 +6861,7 @@ def reorder_evaluators_for_annotation_task(
                 "ordered_evaluator_ids must match the currently-linked set "
                 f"(missing={sorted(missing)}, extra={sorted(extra)})"
             )
-        for idx, evaluator_id in enumerate(ordered_evaluator_ids, start=1):
-            cursor.execute(
-                """
-                UPDATE annotation_task_evaluators
-                   SET position = ?
-                 WHERE task_id = ? AND evaluator_id = ? AND deleted_at IS NULL
-                """,
-                (idx, task_id, evaluator_id),
-            )
+        _renumber_evaluator_positions(cursor, task_id, ordered_evaluator_ids)
         conn.commit()
 
 
@@ -6868,20 +6887,7 @@ def set_evaluators_for_annotation_task(
         raise ValueError("ordered_evaluator_ids contains duplicates")
     with get_db_connection() as conn:
         cursor = conn.cursor()
-        # Current set the caller can see: active pivot rows whose evaluator is
-        # itself active (evaluator soft-delete doesn't cascade to the pivot).
-        cursor.execute(
-            """
-            SELECT ate.evaluator_id
-              FROM annotation_task_evaluators ate
-              JOIN evaluators e ON e.uuid = ate.evaluator_id
-             WHERE ate.task_id = ?
-               AND ate.deleted_at IS NULL
-               AND e.deleted_at IS NULL
-            """,
-            (task_id,),
-        )
-        current = {r["evaluator_id"] for r in cursor.fetchall()}
+        current = _visible_evaluator_ids_for_task(cursor, task_id)
         target = set(ordered_evaluator_ids)
         to_add = [e for e in ordered_evaluator_ids if e not in current]
         to_remove = [e for e in current if e not in target]
@@ -6893,31 +6899,9 @@ def set_evaluators_for_annotation_task(
                 (task_id, ev),
             )
         for ev in to_add:
-            cursor.execute(
-                "SELECT id FROM annotation_task_evaluators "
-                "WHERE task_id = ? AND evaluator_id = ? AND deleted_at IS NOT NULL",
-                (task_id, ev),
-            )
-            existing = cursor.fetchone()
-            if existing:
-                cursor.execute(
-                    "UPDATE annotation_task_evaluators SET deleted_at = NULL, "
-                    "created_at = CURRENT_TIMESTAMP WHERE id = ?",
-                    (existing["id"],),
-                )
-            else:
-                cursor.execute(
-                    "INSERT INTO annotation_task_evaluators (task_id, evaluator_id, position) "
-                    "VALUES (?, ?, ?)",
-                    (task_id, ev, None),
-                )
-        # Renumber the whole surviving set to the requested order.
-        for idx, evaluator_id in enumerate(ordered_evaluator_ids, start=1):
-            cursor.execute(
-                "UPDATE annotation_task_evaluators SET position = ? "
-                "WHERE task_id = ? AND evaluator_id = ? AND deleted_at IS NULL",
-                (idx, task_id, evaluator_id),
-            )
+            # Position is left NULL here; the renumber below assigns final order.
+            _relink_or_insert_evaluator(cursor, task_id, ev, None)
+        _renumber_evaluator_positions(cursor, task_id, ordered_evaluator_ids)
         conn.commit()
         if to_add or to_remove:
             logger.info(
