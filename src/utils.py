@@ -200,9 +200,14 @@ OUTPUT_TYPE_DESCRIPTION = (
 SimulationRunType = Literal["text", "voice"]
 AgentTestJobType = Literal["llm-unit-test", "llm-benchmark"]
 EvalJobType = Literal["stt-eval", "tts-eval", "annotation-eval"]
-# Keep in sync with db.ANNOTATION_TASK_TYPES and db.VALID_EVALUATOR_TYPES
-# (Literal requires literal members, so the vocabulary is mirrored here).
-AnnotationTaskTypeLiteral = Literal["stt", "llm", "llm-general", "conversation", "tts"]
+# Keep in sync with db.ANNOTATION_TASK_TYPES (Literal requires literal members,
+# so the vocabulary is mirrored here). This axis does NOT equal
+# db.VALID_EVALUATOR_TYPES: `llm-tool-call` is an annotation-task type only — a
+# human-labelling-only task type with no evaluator_type and no automated
+# evaluator-run support.
+AnnotationTaskTypeLiteral = Literal[
+    "stt", "llm", "llm-general", "llm-tool-call", "conversation", "tts"
+]
 TestTypeLiteral = Literal["response", "tool_call", "conversation", "general"]
 MemberRoleLiteral = Literal["owner", "admin"]  # mirrors DB CHECK(role IN ('owner','admin'))
 EvaluatorUuid = Annotated[str, StringConstraints(min_length=36, max_length=36)]

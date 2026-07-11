@@ -216,6 +216,44 @@ def test_evaluator_run_bad_evaluator_resolution(client):
     assert resp.status_code == 400
 
 
+def test_llm_tool_call_task_is_human_labelling_only(client):
+    """`llm-tool-call` tasks can be created and seeded with items, but they are
+    not in SUPPORTED_EVAL_TASK_TYPES — an evaluator-run launch 400s."""
+    auth = _signup(client)
+    h = auth["headers"]
+    task_uuid = client.post(
+        "/annotation-tasks",
+        json={"name": f"t-{uuid.uuid4().hex[:6]}", "type": "llm-tool-call"},
+        headers=h,
+    ).json()["uuid"]
+    added = client.post(
+        f"/annotation-tasks/{task_uuid}/items",
+        json={
+            "items": [
+                {
+                    "payload": {
+                        "name": "call-1",
+                        "chat_history": [{"role": "user", "content": "weather?"}],
+                        "tool_calls": [
+                            {"tool": "get_weather", "arguments": {"city": "Paris"}}
+                        ],
+                    }
+                }
+            ]
+        },
+        headers=h,
+    )
+    assert added.status_code == 200
+
+    resp = client.post(
+        f"/annotation-tasks/{task_uuid}/evaluator-runs",
+        json={"evaluators": [{"evaluator_id": str(uuid.uuid4())}], "select_all": True},
+        headers=h,
+    )
+    assert resp.status_code == 400
+    assert "not supported" in resp.json()["detail"]
+
+
 def test_evaluator_run_detail_shape(client):
     """GET /annotation-tasks/{uuid}/evaluator-runs/{job_uuid} exposes the
     rubric via top-level `evaluators[].output_config.scale` (mirrors the
