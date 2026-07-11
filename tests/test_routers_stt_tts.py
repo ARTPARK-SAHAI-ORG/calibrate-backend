@@ -487,6 +487,111 @@ def test_stt_retry_missing_bucket(client, monkeypatch):
 
 
 # ---------------------------------------------------------------------------
+# _refresh_evaluators_to_live (re-hydrate snapshot to live version at run time)
+# ---------------------------------------------------------------------------
+
+
+def _make_snapshot(ev_uuid: str, version_uuid: str, *, evaluator_type: str,
+                   data_type: str, system_prompt: str) -> dict:
+    """Mimic `_resolve_evaluators_for_job` submit-time snapshot output."""
+    return {
+        "uuid": ev_uuid,
+        "name": "ev",
+        "evaluator_type": evaluator_type,
+        "data_type": data_type,
+        "kind": "single",
+        "output_type": "binary",
+        "evaluator_version_id": version_uuid,
+        "judge_model": "m",
+        "system_prompt": system_prompt,
+        "output_config": None,
+        "variables": None,
+        "variable_values": {"foo": "bar"},
+    }
+
+
+def test_stt_refresh_evaluators_picks_up_live_version(client):
+    import db
+    from llm_judge import refresh_evaluators_to_live as stt_refresh
+
+    ev_uuid = db.create_evaluator(
+        name=f"stt-ev-{uuid.uuid4().hex[:8]}",
+        evaluator_type="stt",
+        data_type="text",
+        output_type="binary",
+    )
+    v1 = db.create_evaluator_version(
+        evaluator_uuid=ev_uuid, judge_model="m", system_prompt="STT V1"
+    )
+    db.set_evaluator_live_version(ev_uuid, v1["uuid"])
+
+    snapshot = _make_snapshot(
+        ev_uuid, v1["uuid"], evaluator_type="stt", data_type="text",
+        system_prompt="STT V1",
+    )
+
+    # Create v2 and make it live; no re-link, no new snapshot.
+    v2 = db.create_evaluator_version(
+        evaluator_uuid=ev_uuid, judge_model="m", system_prompt="STT V2"
+    )
+    db.set_evaluator_live_version(ev_uuid, v2["uuid"])
+
+    refreshed = stt_refresh([snapshot])
+    assert len(refreshed) == 1
+    entry = refreshed[0]
+    assert entry["system_prompt"] == "STT V2"
+    assert entry["evaluator_version_id"] == v2["uuid"]
+    # Pinned per-job config preserved.
+    assert entry["variable_values"] == {"foo": "bar"}
+
+
+def test_stt_refresh_keeps_snapshot_when_no_live_version(client):
+    from llm_judge import refresh_evaluators_to_live as stt_refresh
+
+    snap = _make_snapshot(
+        str(uuid.uuid4()), str(uuid.uuid4()), evaluator_type="stt",
+        data_type="text", system_prompt="STT V1",
+    )
+    refreshed = stt_refresh([snap])
+    assert len(refreshed) == 1
+    # Unknown evaluator → snapshot returned unchanged.
+    assert refreshed[0] == snap
+
+
+def test_tts_refresh_evaluators_picks_up_live_version(client):
+    import db
+    from llm_judge import refresh_evaluators_to_live as tts_refresh
+
+    ev_uuid = db.create_evaluator(
+        name=f"tts-ev-{uuid.uuid4().hex[:8]}",
+        evaluator_type="tts",
+        data_type="audio",
+        output_type="binary",
+    )
+    v1 = db.create_evaluator_version(
+        evaluator_uuid=ev_uuid, judge_model="m", system_prompt="TTS V1"
+    )
+    db.set_evaluator_live_version(ev_uuid, v1["uuid"])
+
+    snapshot = _make_snapshot(
+        ev_uuid, v1["uuid"], evaluator_type="tts", data_type="audio",
+        system_prompt="TTS V1",
+    )
+
+    v2 = db.create_evaluator_version(
+        evaluator_uuid=ev_uuid, judge_model="m", system_prompt="TTS V2"
+    )
+    db.set_evaluator_live_version(ev_uuid, v2["uuid"])
+
+    refreshed = tts_refresh([snapshot])
+    assert len(refreshed) == 1
+    entry = refreshed[0]
+    assert entry["system_prompt"] == "TTS V2"
+    assert entry["evaluator_version_id"] == v2["uuid"]
+    assert entry["variable_values"] == {"foo": "bar"}
+
+
+# ---------------------------------------------------------------------------
 # TTS /evaluate (parallel set)
 # ---------------------------------------------------------------------------
 

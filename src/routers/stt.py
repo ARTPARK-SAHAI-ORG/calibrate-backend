@@ -23,7 +23,7 @@ from db import (
 )
 from dataset_utils import resolve_dataset_inputs, resolve_eval_rerun_inputs_from_job_details
 from auth_utils import get_current_org, OrgContext
-from llm_judge import build_evaluator_cli_payload
+from llm_judge import build_evaluator_cli_payload, refresh_evaluators_to_live
 from utils import (
     TaskStatus,
     ProviderResult,
@@ -404,6 +404,13 @@ def run_evaluation_task(
                 job_details = (get_job(task_id) or {}).get("details", {}) or {}
                 raw_evaluators = job_details.get("evaluators") or []
                 if raw_evaluators:
+                    # Re-hydrate to each evaluator's CURRENT live version at run
+                    # time (consistent with LLM tests / simulations), so editing
+                    # an evaluator while the job is queued takes effect. Persist
+                    # the live-at-run-time snapshot back into details so
+                    # finished-run reads render the exact version that ran.
+                    raw_evaluators = refresh_evaluators_to_live(raw_evaluators)
+                    update_job(task_id, details={"evaluators": raw_evaluators})
                     evaluator_payload = build_evaluator_cli_payload(raw_evaluators)
                     config_path = input_dir / "config.json"
                     with open(config_path, "w", encoding="utf-8") as f:

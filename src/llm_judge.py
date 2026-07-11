@@ -180,6 +180,59 @@ def build_evaluator_cli_payload(
     return payload
 
 
+def refresh_evaluators_to_live(
+    snapshot_evaluators: List[Dict[str, Any]],
+) -> List[Dict[str, Any]]:
+    """Re-hydrate submit-time evaluator snapshots to each evaluator's CURRENT
+    live version at run time.
+
+    STT/TTS jobs snapshot a fully-hydrated evaluator into ``details.evaluators``
+    at submit time. To make runs use the LIVE version (consistent with LLM tests
+    and simulations, which resolve live), we re-read each evaluator's current
+    ``live_version_id`` when the job actually executes and rebuild the snapshot
+    from it — preserving the job's pinned ``variable_values``. If the evaluator
+    was deleted, or has no live version, or the live version row is missing, we
+    keep the original submit-time snapshot unchanged (a queued job must not break
+    because someone edited/deleted the evaluator). The caller writes the refreshed
+    list back into the job details so finished-run reads render against the
+    live-at-run-time version reproducibly.
+
+    Shared by the STT and TTS runners (`routers/stt.py`, `routers/tts.py`).
+    """
+    from db import get_evaluator, get_evaluator_version  # local: avoid circular import
+
+    refreshed: List[Dict[str, Any]] = []
+    for snap in snapshot_evaluators or []:
+        uid = snap.get("uuid")
+        evaluator = get_evaluator(uid) if uid else None
+        live_id = evaluator.get("live_version_id") if evaluator else None
+        version = get_evaluator_version(live_id) if live_id else None
+        if not evaluator or not version or version.get("evaluator_id") != uid:
+            refreshed.append(snap)
+            continue
+        refreshed.append(
+            {
+                "uuid": evaluator["uuid"],
+                "name": evaluator["name"],
+                "evaluator_type": evaluator.get(
+                    "evaluator_type", snap.get("evaluator_type")
+                ),
+                "data_type": evaluator.get("data_type", snap.get("data_type", "text")),
+                "kind": evaluator.get("kind", snap.get("kind", "single")),
+                "output_type": evaluator.get(
+                    "output_type", snap.get("output_type", "binary")
+                ),
+                "evaluator_version_id": version["uuid"],
+                "judge_model": version["judge_model"],
+                "system_prompt": version["system_prompt"],
+                "output_config": version.get("output_config"),
+                "variables": version.get("variables"),
+                "variable_values": snap.get("variable_values") or {},
+            }
+        )
+    return refreshed
+
+
 def build_evaluator_cli_payload_unrendered(
     evaluators: List[Dict[str, Any]],
 ) -> List[Dict[str, Any]]:
