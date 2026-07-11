@@ -2562,8 +2562,9 @@ async def task_summary(
     # Keep it untouched for scoped_item_ids / annotator union / run_count
     # so the top-level evaluators[] and annotators[] blocks stay stable
     # across pages (consistent column headers in the FE table). Pagination
-    # only slices which items get expanded into `rows`.
-    total_items = len(items)
+    # only slices which items get expanded into `rows`. `total_items` and the
+    # `paged_items` slice are computed LOWER DOWN — after the optional
+    # `disagreement_only` item filter — so paging covers the disagreeing set.
 
     # Sort the in-scope items before pagination so paging is stable across
     # requests. Mechanics live in `pagination.make_sort_params`.
@@ -2576,7 +2577,6 @@ async def task_summary(
     # which matches `get_annotation_items_for_task`'s historical
     # `ORDER BY id DESC` and is what users actually expect after a bulk add.
     items = sort.apply(items, secondary_key="id")
-    paged_items = items[pagination.offset : pagination.offset + pagination.limit]
 
     # Latest evaluator_run per (item, evaluator, version). One row in the
     # response per distinct version that has run, so re-running on a new
@@ -2732,6 +2732,47 @@ async def task_summary(
             return (0 if v_id == live_v else 1, num if num is not None else 1 << 30)
         return sorted(versions, key=_sort_key)
 
+    def _item_disagrees(item: Dict[str, Any]) -> bool:
+        """True if any (evaluator, version) slot on this item has the evaluator
+        disagreeing with at least one annotator (`evaluator_agreement < 1.0`).
+        Mirrors the per-row `evaluator_agreement` computation below exactly so
+        the item-level pre-filter and the row-level filter agree on what counts
+        as a disagreement."""
+        item_uuid = item["uuid"]
+        for ev in evaluators:
+            ev_id = ev["uuid"]
+            live_v = ev.get("live_version_id")
+            slot_human_scalars = [
+                s
+                for annotator in annotators
+                if (a := latest_ann.get((item_uuid, ev_id, annotator["uuid"]))) is not None
+                and (s := _scalar(a.get("value"))) is not None
+            ]
+            if not slot_human_scalars:
+                continue
+            for version_id in _version_row_keys(ev_id, live_v):
+                run = latest_run.get((item_uuid, ev_id, version_id))
+                run_value = run.get("value") if run else None
+                eval_scalar = _scalar(run_value) if run_value is not None else None
+                if eval_scalar is None:
+                    continue
+                total, pairs = evaluator_human_pair_agreement(
+                    eval_scalar, slot_human_scalars
+                )
+                if pairs > 0 and (_round_agreement(total / pairs) or 0) < 1.0:
+                    return True
+        return False
+
+    # `disagreement_only` filters at the ITEM level BEFORE pagination so paging
+    # covers the full disagreeing set (`total` reflects it) instead of only the
+    # disagreements that happen to fall on the current page. The row-level
+    # filter below then drops the agreeing rows within each surviving item, so
+    # the caller sees only the disagreements. Both use the same predicate.
+    if disagreement_only:
+        items = [it for it in items if _item_disagrees(it)]
+    total_items = len(items)
+    paged_items = items[pagination.offset : pagination.offset + pagination.limit]
+
     rows: List[Dict[str, Any]] = []
     for item in paged_items:
         # Annotations are not version-scoped (the table has no
@@ -2807,18 +2848,13 @@ async def task_summary(
                     }
                 )
 
-    # Optional disagreement filter: keep only rows where the evaluator
-    # produced a value AND it disagreed with at least one annotator
-    # (`evaluator_agreement` present and below 1.0). This is a ROW-level
-    # concern, but `pagination` here is ITEM-level — `pagination.total`
-    # counts in-scope items, not rows, and already never equals `len(rows)`
-    # (each item fans out into evaluator×version rows). Rows are only built
-    # for the current page's items, so we filter the built rows in place and
-    # deliberately leave `pagination.total` as the item count. The two live
-    # on different axes; conflating them would mean rebuilding every page's
-    # rows to re-page at row granularity, which would change the endpoint's
-    # item-level paging contract. Callers wanting the full disagreeing set
-    # page items with `?limit=<total>` (same guidance as `item_comments`).
+    # Row-level half of the disagreement filter: the paged items are already
+    # narrowed to those that disagree somewhere (item-level filter above), so
+    # here we drop the agreeing rows within them, leaving only the rows where
+    # the evaluator produced a value AND disagreed with at least one annotator
+    # (`evaluator_agreement` present and below 1.0). `pagination.total` counts
+    # the disagreeing ITEMS (paging axis), which each still fan out into ≥1
+    # surviving row.
     if disagreement_only:
         rows = [
             r
