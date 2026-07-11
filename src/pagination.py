@@ -299,10 +299,14 @@ def make_projection_params(*, heavy_fields: List[str]) -> Type:
     if not heavy_fields:
         raise ValueError("heavy_fields must be non-empty")
     tokenized = [_tokenize_projection(p) for p in heavy_fields]
+    # Present readable dotted field names in the public docs, not the internal
+    # walk syntax (`[]` list / `*` dict-value markers). Also avoid em-dashes so
+    # the rendered text matches the api-writing-style house rules the static
+    # checker can't see through this runtime-built string.
+    display = ", ".join(f"`{_display_projection_path(p)}`" for p in heavy_fields)
     description = (
-        "Return a compact response that drops (nulls) heavy detail fields — "
-        + ", ".join(f"`{f}`" for f in heavy_fields)
-        + " — keeping only the lightweight decision fields. Omit for full detail"
+        f"Return a compact response that omits heavy detail fields ({display}), "
+        "keeping only the lightweight decision fields. Omit for full detail"
     )
 
     class ProjectionParams:
@@ -320,6 +324,13 @@ def make_projection_params(*, heavy_fields: List[str]) -> Type:
 
     ProjectionParams.__name__ = "ProjectionParams"
     return ProjectionParams
+
+
+def _display_projection_path(path: str) -> str:
+    """Human-readable form of a projection path for docs: drop the internal
+    `[]` (iterate list) and `*` (iterate dict values) markers so a reader sees
+    plain dotted field names (`rows[].annotations.*.reasoning` → `rows.annotations.reasoning`)."""
+    return path.replace("[]", "").replace(".*", "")
 
 
 def _tokenize_projection(path: str) -> List[str]:

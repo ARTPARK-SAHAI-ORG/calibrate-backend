@@ -228,6 +228,27 @@ def test_projection_requires_non_empty_heavy_fields():
         make_projection_params(heavy_fields=[])
 
 
+def test_projection_compact_description_is_docs_clean():
+    """The generated `?compact` help text must read cleanly in the public docs:
+    no internal walk markers (`[]`/`*`) and no em-dashes (which the static
+    api-writing-style checker can't see through this runtime string)."""
+    from fastapi import params
+
+    Proj = make_projection_params(
+        heavy_fields=["config", "rows[].annotations.*.reasoning"]
+    )
+    # The Query default lives on the constructor signature's `compact` param.
+    import inspect
+
+    default = inspect.signature(Proj.__init__).parameters["compact"].default
+    desc = default.description if isinstance(default, params.Query) else ""
+    assert "—" not in desc  # no em-dash
+    assert "[]" not in desc and ".*" not in desc  # no internal markers
+    # Readable dotted names survive.
+    assert "`config`" in desc
+    assert "`rows.annotations.reasoning`" in desc
+
+
 def test_projection_noop_when_not_compact():
     Proj = make_projection_params(heavy_fields=["config"])
     data = {"uuid": "u1", "config": {"big": "blob"}}
