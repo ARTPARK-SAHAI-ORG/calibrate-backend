@@ -3458,6 +3458,17 @@ def get_tools_for_agent(agent_id: str) -> List[Dict[str, Any]]:
 # ============ Agent Evaluators Functions ============
 
 
+def _restore_agent_evaluator_link(cursor: sqlite3.Cursor, link_id: int) -> None:
+    """Un-soft-delete an `agent_evaluators` row, refreshing `created_at` so the
+    re-link sorts as recently-added rather than inheriting its first-add time.
+    Caller commits."""
+    cursor.execute(
+        "UPDATE agent_evaluators SET deleted_at = NULL, "
+        "created_at = CURRENT_TIMESTAMP WHERE id = ?",
+        (link_id,),
+    )
+
+
 def add_evaluator_to_agent(agent_id: str, evaluator_id: str) -> int:
     """Link an evaluator to an agent. Returns the id of the created/restored link.
     If a soft-deleted link exists, it is restored by unsetting deleted_at and
@@ -3477,12 +3488,7 @@ def add_evaluator_to_agent(agent_id: str, evaluator_id: str) -> int:
         if existing:
             if existing["deleted_at"] is None:
                 return existing["id"]
-            # Restore the soft-deleted link, refreshing created_at so the re-link
-            # registers as a recent action rather than the original link time.
-            cursor.execute(
-                "UPDATE agent_evaluators SET deleted_at = NULL, created_at = CURRENT_TIMESTAMP WHERE id = ?",
-                (existing["id"],),
-            )
+            _restore_agent_evaluator_link(cursor, existing["id"])
             conn.commit()
             logger.info(f"Restored evaluator {evaluator_id} to agent {agent_id}")
             return existing["id"]
@@ -3514,11 +3520,7 @@ def add_evaluator_to_agent(agent_id: str, evaluator_id: str) -> int:
             if row is None:
                 raise
             if row["deleted_at"] is not None:
-                cursor.execute(
-                    "UPDATE agent_evaluators SET deleted_at = NULL, "
-                    "created_at = CURRENT_TIMESTAMP WHERE id = ?",
-                    (row["id"],),
-                )
+                _restore_agent_evaluator_link(cursor, row["id"])
                 conn.commit()
             return row["id"]
 
