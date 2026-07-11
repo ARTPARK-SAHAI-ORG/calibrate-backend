@@ -296,31 +296,21 @@ class AgentCreate(BaseModel):
 # Named request-body examples for `POST /agents`. Rendered as a switchable
 # dropdown in the API reference (and as per-variant snippets in the generated
 # SDK/CLI docs) so a reader can toggle between building an agent inside Calibrate
-# and connecting their own HTTP endpoint. The Calibrate example spells out the
-# managed defaults `_default_agent_config()` applies so the created config isn't
-# a mystery. Keep these values in sync with `_default_agent_config()` and
-# `_AGENT_CONFIG_DESCRIPTION`.
+# and connecting their own HTTP endpoint. The Calibrate example's config is built
+# from `_default_agent_config()` itself, so it always shows the exact managed
+# defaults a caller gets — it can't drift out of sync.
 _CREATE_AGENT_EXAMPLES = {
     "agent_within_calibrate": {
         "summary": "Agent within Calibrate",
         "description": (
-            "Build a voice/chat agent inside Calibrate. These are the managed "
+            "Build a voice/chat agent inside Calibrate. This config is the managed "
             "defaults spelled out. Override only the keys you want to change; "
             "omitted keys still inherit the defaults."
         ),
         "value": {
             "name": "Support Agent",
             "type": "agent",
-            "config": {
-                "system_prompt": "You are a helpful support agent.",
-                "llm": {"model": "google/gemini-2.5-flash"},
-                "stt": {"provider": "google"},
-                "tts": {"provider": "google"},
-                "settings": {
-                    "agent_speaks_first": True,
-                    "max_assistant_turns": 50,
-                },
-            },
+            "config": _default_agent_config(),
         },
     },
     "openai_compatible_connection": {
