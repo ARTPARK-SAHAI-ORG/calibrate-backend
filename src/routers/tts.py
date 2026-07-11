@@ -775,17 +775,17 @@ async def retry_tts_evaluation(
     ),
     ctx: OrgContext = Depends(get_current_org),
 ):
-    """Re-run a TTS evaluation with the same providers, inputs, and evaluators as the original job"""
-    original = get_job(task_id, org_uuid=ctx.org_uuid)
-    if not original or original.get("type") != "tts-eval":
+    """Re-run the same TTS evaluation job with its stored providers, inputs, and evaluators"""
+    job = get_job(task_id, org_uuid=ctx.org_uuid)
+    if not job or job.get("type") != "tts-eval":
         raise HTTPException(status_code=404, detail="Task not found")
-    if original["status"] == TaskStatus.IN_PROGRESS.value:
+    if job["status"] == TaskStatus.IN_PROGRESS.value:
         raise HTTPException(
             status_code=400,
             detail="Cannot retry a job that is still in progress",
         )
 
-    details = original.get("details") or {}
+    details = job.get("details") or {}
     providers = details.get("providers") or []
     if not providers:
         raise HTTPException(
@@ -798,7 +798,7 @@ async def retry_tts_evaluation(
     except ValueError as e:
         raise HTTPException(status_code=500, detail=str(e))
 
-    retry_details = {
+    rerun_details = {
         "texts": details.get("texts", []),
         "providers": providers,
         "language": details.get("language", ""),
@@ -814,32 +814,31 @@ async def retry_tts_evaluation(
         TaskStatus.IN_PROGRESS.value if can_start else TaskStatus.QUEUED.value
     )
 
-    job_id = create_job(
-        job_type="tts-eval",
-        org_uuid=ctx.org_uuid,
-        user_id=ctx.user_id,
+    update_job(
+        task_id,
         status=initial_status,
-        details=retry_details,
-        results=None,
+        results={},
+        details=rerun_details,
+        replace_details=True,
     )
 
-    request = _tts_request_from_job_details(retry_details)
+    request = _tts_request_from_job_details(rerun_details)
     if can_start:
         thread = threading.Thread(
             target=run_tts_evaluation_task,
-            args=(job_id, request, s3_bucket),
+            args=(task_id, request, s3_bucket),
             daemon=True,
         )
         thread.start()
-        logger.info(f"Started TTS evaluation retry {job_id} (from {task_id}) immediately")
+        logger.info(f"Re-started TTS evaluation job {task_id}")
     else:
-        logger.info(f"Queued TTS evaluation retry {job_id} (from {task_id})")
+        logger.info(f"Re-queued TTS evaluation job {task_id}")
 
     return TaskCreateResponse(
-        task_id=job_id,
+        task_id=task_id,
         status=initial_status,
-        dataset_id=retry_details.get("dataset_id"),
-        dataset_name=retry_details.get("dataset_name"),
+        dataset_id=rerun_details.get("dataset_id"),
+        dataset_name=rerun_details.get("dataset_name"),
     )
 
 

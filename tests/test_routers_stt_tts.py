@@ -262,7 +262,7 @@ def test_stt_get_status_unknown(client):
     assert resp.status_code == 404
 
 
-def test_stt_retry_creates_new_job(client, monkeypatch):
+def test_stt_retry_reruns_same_job(client, monkeypatch):
     auth = _signup(client)
     monkeypatch.setenv("S3_OUTPUT_BUCKET", "test-bucket")
     with patch("routers.stt.can_start_job", return_value=False), patch(
@@ -287,7 +287,7 @@ def test_stt_retry_creates_new_job(client, monkeypatch):
         )
         assert retry.status_code == 200
         body = retry.json()
-        assert body["task_id"] != original_id
+        assert body["task_id"] == original_id
         assert body["status"] == "queued"
 
 
@@ -478,7 +478,7 @@ def test_tts_get_status_unknown(client):
     assert resp.status_code == 404
 
 
-def test_tts_retry_creates_new_job(client, monkeypatch):
+def test_tts_retry_reruns_same_job(client, monkeypatch):
     auth = _signup(client)
     monkeypatch.setenv("S3_OUTPUT_BUCKET", "test-bucket")
     with patch("routers.tts.can_start_job", return_value=False), patch(
@@ -502,7 +502,7 @@ def test_tts_retry_creates_new_job(client, monkeypatch):
         )
         assert retry.status_code == 200
         body = retry.json()
-        assert body["task_id"] != original_id
+        assert body["task_id"] == original_id
         assert body["status"] == "queued"
 
 
