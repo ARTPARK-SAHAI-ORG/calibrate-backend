@@ -11,8 +11,10 @@ freshly minted name/uuid so tests are order-independent.
 
 from __future__ import annotations
 
+import sqlite3
 import time
 import uuid as _uuid
+from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -1449,3 +1451,61 @@ def test_name_uniqueness_helpers(user):
             "personas", name, user["org_uuid"], entity="Persona"
         ):
             pass  # would do an insert
+
+
+def test_add_evaluator_to_agent_recovers_from_concurrent_insert():
+    """If a racing insert trips the UNIQUE(agent_id, evaluator_id) constraint
+    between the existence check and our INSERT, add_evaluator_to_agent recovers
+    to the winning row and returns its id instead of raising a 500."""
+    cursor = MagicMock()
+    # SELECT (miss) -> INSERT (UNIQUE conflict) -> re-SELECT (winning row).
+    cursor.execute.side_effect = [
+        None,
+        sqlite3.IntegrityError(
+            "UNIQUE constraint failed: agent_evaluators.agent_id, "
+            "agent_evaluators.evaluator_id"
+        ),
+        None,
+    ]
+    cursor.fetchone.side_effect = [
+        None,  # initial existence check: nothing yet
+        {"id": 4242, "deleted_at": None},  # the racer's committed row
+    ]
+    conn = MagicMock()
+    conn.cursor.return_value = cursor
+    cm = MagicMock()
+    cm.__enter__.return_value = conn
+    cm.__exit__.return_value = False
+
+    with patch("db.get_db_connection", return_value=cm):
+        link_id = db.add_evaluator_to_agent("agent-x", "eval-y")
+
+    assert link_id == 4242
+    conn.rollback.assert_called_once()
+
+
+def test_add_evaluator_to_agent_race_restores_soft_deleted_winner():
+    """If the racing row landed soft-deleted, the recovery path restores it."""
+    cursor = MagicMock()
+    cursor.execute.side_effect = [
+        None,  # initial SELECT
+        sqlite3.IntegrityError("UNIQUE constraint failed"),  # INSERT
+        None,  # re-SELECT
+        None,  # UPDATE restore
+    ]
+    cursor.fetchone.side_effect = [
+        None,
+        {"id": 77, "deleted_at": "2026-07-11 00:00:00"},
+    ]
+    conn = MagicMock()
+    conn.cursor.return_value = cursor
+    cm = MagicMock()
+    cm.__enter__.return_value = conn
+    cm.__exit__.return_value = False
+
+    with patch("db.get_db_connection", return_value=cm):
+        link_id = db.add_evaluator_to_agent("agent-x", "eval-y")
+
+    assert link_id == 77
+    # The restore UPDATE ran (4 execute calls total incl. the restore).
+    assert cursor.execute.call_count == 4

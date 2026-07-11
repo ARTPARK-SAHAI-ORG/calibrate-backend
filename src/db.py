@@ -3486,17 +3486,41 @@ def add_evaluator_to_agent(agent_id: str, evaluator_id: str) -> int:
             conn.commit()
             logger.info(f"Restored evaluator {evaluator_id} to agent {agent_id}")
             return existing["id"]
-        cursor.execute(
-            """
-            INSERT INTO agent_evaluators (agent_id, evaluator_id)
-            VALUES (?, ?)
-            """,
-            (agent_id, evaluator_id),
-        )
-        conn.commit()
-        link_id = cursor.lastrowid
-        logger.info(f"Added evaluator {evaluator_id} to agent {agent_id}")
-        return link_id
+        try:
+            cursor.execute(
+                """
+                INSERT INTO agent_evaluators (agent_id, evaluator_id)
+                VALUES (?, ?)
+                """,
+                (agent_id, evaluator_id),
+            )
+            conn.commit()
+            link_id = cursor.lastrowid
+            logger.info(f"Added evaluator {evaluator_id} to agent {agent_id}")
+            return link_id
+        except sqlite3.IntegrityError:
+            # A concurrent request inserted the same (agent_id, evaluator_id)
+            # between the SELECT above and this INSERT, tripping the UNIQUE
+            # constraint. Treat it as an already-satisfied link: roll back, then
+            # re-read the winning row (restoring it if that racer left it
+            # soft-deleted) and return its id instead of surfacing a 500.
+            conn.rollback()
+            cursor.execute(
+                "SELECT id, deleted_at FROM agent_evaluators "
+                "WHERE agent_id = ? AND evaluator_id = ?",
+                (agent_id, evaluator_id),
+            )
+            row = cursor.fetchone()
+            if row is None:
+                raise
+            if row["deleted_at"] is not None:
+                cursor.execute(
+                    "UPDATE agent_evaluators SET deleted_at = NULL, "
+                    "created_at = CURRENT_TIMESTAMP WHERE id = ?",
+                    (row["id"],),
+                )
+                conn.commit()
+            return row["id"]
 
 
 def remove_evaluator_from_agent(agent_id: str, evaluator_id: str) -> bool:
