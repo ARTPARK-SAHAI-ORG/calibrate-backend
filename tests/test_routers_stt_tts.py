@@ -350,6 +350,53 @@ def test_stt_retry_wrong_job_type(client, monkeypatch):
     assert resp.status_code == 404
 
 
+def test_stt_retry_rereads_linked_dataset(client, monkeypatch):
+    import db as db_mod
+
+    auth = _signup(client)
+    monkeypatch.setenv("S3_OUTPUT_BUCKET", "test-bucket")
+    org_uuid = db_mod.get_personal_org_for_user(auth["user_uuid"])["uuid"]
+    ds_uuid = db_mod.create_dataset(
+        name="retry-ds",
+        dataset_type="stt",
+        org_uuid=org_uuid,
+        user_id=auth["user_uuid"],
+    )
+    item_ids = db_mod.add_dataset_items(
+        ds_uuid,
+        [{"text": "hi", "audio_path": "s3://b/broken.wav"}],
+    )
+    task_id = db_mod.create_job(
+        job_type="stt-eval",
+        org_uuid=org_uuid,
+        user_id=auth["user_uuid"],
+        status="failed",
+        details={
+            "audio_paths": ["s3://b/broken.wav"],
+            "texts": ["hi"],
+            "providers": ["openai"],
+            "language": "en",
+            "dataset_id": ds_uuid,
+            "dataset_name": "retry-ds",
+            "dataset_item_ids": item_ids,
+            "evaluators": [],
+        },
+        results={"error": "failed"},
+    )
+    db_mod.update_dataset_item(item_ids[0], ds_uuid, audio_path="s3://b/fixed.wav")
+
+    with patch("routers.stt.can_start_job", return_value=False), patch(
+        "threading.Thread"
+    ):
+        resp = client.post(
+            f"/stt/evaluate/{task_id}/retry",
+            headers=auth["headers"],
+        )
+    assert resp.status_code == 200
+    job = db_mod.get_job(task_id, org_uuid=org_uuid)
+    assert job["details"]["audio_paths"] == ["s3://b/fixed.wav"]
+
+
 # ---------------------------------------------------------------------------
 # TTS /evaluate (parallel set)
 # ---------------------------------------------------------------------------

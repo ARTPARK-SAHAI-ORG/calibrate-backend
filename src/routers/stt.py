@@ -21,7 +21,7 @@ from db import (
     update_job,
     update_job_visibility,
 )
-from dataset_utils import resolve_dataset_inputs
+from dataset_utils import resolve_dataset_inputs, resolve_eval_rerun_inputs_from_job_details
 from auth_utils import get_current_org, OrgContext
 from llm_judge import build_evaluator_cli_payload
 from utils import (
@@ -759,7 +759,7 @@ async def retry_stt_evaluation(
     ),
     ctx: OrgContext = Depends(get_current_org),
 ):
-    """Re-run the same STT evaluation job with its stored providers, inputs, and evaluators"""
+    """Re-run the same STT evaluation job with its stored providers and evaluators, re-reading the dataset when one is linked"""
     job = get_job(task_id, org_uuid=ctx.org_uuid)
     if not job or job.get("type") != "stt-eval":
         raise HTTPException(status_code=404, detail="Task not found")
@@ -782,15 +782,21 @@ async def retry_stt_evaluation(
     except ValueError as e:
         raise HTTPException(status_code=500, detail=str(e))
 
+    resolved = resolve_eval_rerun_inputs_from_job_details(
+        details,
+        org_uuid=ctx.org_uuid,
+        expected_type="stt",
+    )
+
     rerun_details = {
-        "audio_paths": details.get("audio_paths", []),
-        "texts": details.get("texts", []),
+        "audio_paths": resolved.audio_paths or [],
+        "texts": resolved.texts,
         "providers": providers,
         "language": details.get("language", ""),
         "s3_bucket": s3_bucket,
-        "dataset_id": details.get("dataset_id"),
-        "dataset_name": details.get("dataset_name"),
-        "dataset_item_ids": details.get("dataset_item_ids"),
+        "dataset_id": resolved.dataset_id,
+        "dataset_name": resolved.dataset_name,
+        "dataset_item_ids": resolved.item_ids,
         "evaluators": details.get("evaluators", []),
     }
 
