@@ -2561,7 +2561,7 @@ async def get_agent_test_run_status(
     ctx: OrgContext = Depends(get_org_jwt_or_api_key),
     only_failed: bool = Query(
         False,
-        description="Return only failing test cases (a case that errored counts as failing). Omit to return every case",
+        description="Return only failing test cases. Omit to return every case",
     ),
     projection: _RunProjection = Depends(),
 ):
@@ -3397,7 +3397,7 @@ async def get_benchmark_status(
     ctx: OrgContext = Depends(get_org_jwt_or_api_key),
     only_failed: bool = Query(
         False,
-        description="Return only failing test cases within each model (a case that errored counts as failing). Omit to return every case",
+        description="Return only failing test cases for each model. Omit to return every case",
     ),
     projection: _BenchmarkProjection = Depends(),
 ):
