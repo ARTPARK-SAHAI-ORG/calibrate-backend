@@ -1041,6 +1041,17 @@ def test_annotation_pipeline(user):
     assert db.update_annotation_task(task_uuid, name=_u("t2"), description="d2")
     assert db.update_annotation_task(task_uuid) is False
 
+    # `llm-tool-call` is a valid annotation-task type (human-labelling only —
+    # it has no evaluator_type and no automated evaluator-run support).
+    assert "llm-tool-call" in db.ANNOTATION_TASK_TYPES
+    assert "llm-tool-call" not in db.VALID_EVALUATOR_TYPES
+    tc_task = db.create_annotation_task(
+        name=_u("tool-call-task"),
+        user_id=user["uuid"], org_uuid=user["org_uuid"],
+        type="llm-tool-call",
+    )
+    assert db.get_annotation_task(tc_task)["type"] == "llm-tool-call"
+
     # items
     item_ids = db.create_annotation_items(
         task_uuid,

@@ -1928,17 +1928,20 @@ def test_annotation_eval_llm_general_payload_validation(client):
     assert "input" in resp.json()["detail"]
 
 
-def test_annotation_eval_supported_task_types_cover_all_creatable_types():
-    """Every creatable annotation task type must be eval-run supported, so the
-    unsupported-type 400 guard in the evaluator-runs endpoint is defensive-only
-    and can't be hit through a real task. (tts was the last creatable-but-
-    unsupported type and is no longer a valid annotation task type.)"""
+def test_annotation_eval_supported_task_types_vs_creatable_types():
+    """`llm-tool-call` is a human-labelling-only annotation task type — creatable
+    but deliberately NOT eval-run supported, so the unsupported-type 400 guard in
+    the evaluator-runs endpoint IS reachable through a real task. It is the only
+    such type; every other creatable type has eval support. (`tts` is not a valid
+    annotation task type at all.)"""
     import db as db_mod
     from annotation_eval_runner import SUPPORTED_EVAL_TASK_TYPES
 
     assert "tts" not in db_mod.ANNOTATION_TASK_TYPES
     unsupported = set(db_mod.ANNOTATION_TASK_TYPES) - set(SUPPORTED_EVAL_TASK_TYPES)
-    assert unsupported == set(), f"creatable task types with no eval support: {unsupported}"
+    assert unsupported == {"llm-tool-call"}, (
+        f"unexpected creatable task types with no eval support: {unsupported}"
+    )
 
 
 def test_annotation_task_summary_pagination(client):
