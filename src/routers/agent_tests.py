@@ -2561,7 +2561,7 @@ async def get_agent_test_run_status(
     ctx: OrgContext = Depends(get_org_jwt_or_api_key),
     only_failed: bool = Query(
         False,
-        description="Return only test cases that did not pass, including failures and errored cases. Omit to return every case",
+        description="Return only failing test cases (a case that errored counts as failing). Omit to return every case",
     ),
     projection: _RunProjection = Depends(),
 ):
@@ -2619,11 +2619,12 @@ async def get_agent_test_run_status(
     )
     data = response.model_dump()
     if only_failed and isinstance(data.get("results"), list):
-        # Keep anything that isn't a clean pass — explicit failures AND
-        # errored cases (`passed is None`), which a caller filtering for
-        # problems expects to see rather than have silently dropped.
+        # Keep only failing cases (`passed is False`). A case that errored
+        # comes back `False` too, so it's included. `passed is None` means the
+        # case hasn't finished yet (pending placeholder) — NOT a failure — so a
+        # client polling mid-run doesn't see unfinished cases as problems.
         data["results"] = [
-            r for r in data["results"] if r.get("passed") is not True
+            r for r in data["results"] if r.get("passed") is False
         ]
     return projection.apply(data)
 
@@ -3396,7 +3397,7 @@ async def get_benchmark_status(
     ctx: OrgContext = Depends(get_org_jwt_or_api_key),
     only_failed: bool = Query(
         False,
-        description="Return only test cases that did not pass, including failures and errored cases, within each model. Omit to return every case",
+        description="Return only failing test cases within each model (a case that errored counts as failing). Omit to return every case",
     ),
     projection: _BenchmarkProjection = Depends(),
 ):
@@ -3452,10 +3453,11 @@ async def get_benchmark_status(
             if isinstance(model, dict) and isinstance(
                 model.get("test_results"), list
             ):
-                # Keep anything that isn't a clean pass — failures AND errored
-                # cases (`passed is None`); see the run endpoint for rationale.
+                # Keep only failing cases (`passed is False`); errored cases
+                # come back `False`, pending cases (`passed is None`) are
+                # excluded. See the run endpoint for rationale.
                 model["test_results"] = [
-                    r for r in model["test_results"] if r.get("passed") is not True
+                    r for r in model["test_results"] if r.get("passed") is False
                 ]
     return projection.apply(data)
 

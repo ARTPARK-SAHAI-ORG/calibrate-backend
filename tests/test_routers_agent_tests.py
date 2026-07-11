@@ -506,8 +506,8 @@ def test_slim_run_list_helpers_guard_edge_cases():
 
 
 def _seed_run_job(client, h, agent):
-    """Seed a completed unit-test run with three cases (one pass, one fail, one
-    errored/`passed=None`) and an evaluator carrying a rubric, for the
+    """Seed a unit-test run with three cases (one pass, one fail, one still
+    pending/`passed=None`) and an evaluator carrying a rubric, for the
     run-detail compact/only_failed tests."""
     from db import create_agent_test_job, update_agent_test_job
 
@@ -563,13 +563,14 @@ def _seed_run_job(client, h, agent):
                     ],
                 },
                 {
-                    # Errored case — no pass/fail recorded (`passed is None`).
-                    "name": "tc_error",
-                    "test_case_id": "tc_error",
+                    # Pending case — not finished yet (`passed is None`),
+                    # matching the pending placeholder shape.
+                    "name": "tc_pending",
+                    "test_case_id": None,
                     "passed": None,
-                    "output": {"response": "", "tool_calls": None},
-                    "test_case": {"name": "tc_error", "history": []},
-                    "reasoning": "judge errored",
+                    "output": None,
+                    "test_case": None,
+                    "reasoning": None,
                     "judge_results": None,
                 },
             ],
@@ -616,7 +617,7 @@ def test_run_detail_compact_nulls_heavy_fields(client):
         assert case["judge_results"] is None
         assert case["reasoning"] is None
         # Slim fields survive.
-        assert case["name"] in {"tc_pass", "tc_fail", "tc_error"}
+        assert case["name"] in {"tc_pass", "tc_fail", "tc_pending"}
         assert case["passed"] in {True, False, None}
     assert body["evaluators"][0]["output_config"] is None
     # Non-heavy evaluator fields survive.
@@ -624,8 +625,9 @@ def test_run_detail_compact_nulls_heavy_fields(client):
 
 
 def test_run_detail_only_failed_narrows_results(client):
-    """`?only_failed=true` keeps cases that did not cleanly pass — the explicit
-    failure AND the errored (`passed is None`) case — dropping only the pass."""
+    """`?only_failed=true` keeps only failing cases (`passed is False`). The
+    pass is dropped, and the still-pending case (`passed is None`) is dropped
+    too — a mid-run poll must not surface unfinished cases as failures."""
     h = _signup(client)["headers"]
     agent = _create_agent(client, h)
     job_id = _seed_run_job(client, h, agent)
@@ -635,7 +637,7 @@ def test_run_detail_only_failed_narrows_results(client):
     )
     assert resp.status_code == 200
     body = resp.json()
-    assert [c["name"] for c in body["results"]] == ["tc_fail", "tc_error"]
+    assert [c["name"] for c in body["results"]] == ["tc_fail"]
     # Heavy fields still present (compact not requested).
     assert body["results"][0]["output"] is not None
 
@@ -689,10 +691,10 @@ def _seed_benchmark_job(client, h, agent):
                             "output": {"response": "no"},
                         },
                         {
-                            # Errored case — `passed is None`.
-                            "name": "tc_error",
+                            # Pending case — not finished yet (`passed is None`).
+                            "name": "tc_pending",
                             "passed": None,
-                            "output": {"response": ""},
+                            "output": None,
                         },
                     ],
                 }
@@ -740,9 +742,9 @@ def test_benchmark_detail_compact_nulls_heavy_fields(client):
 
 
 def test_benchmark_detail_only_failed_narrows_each_model(client):
-    """`?only_failed=true` narrows each model's test_results to cases that did
-    not pass — the failure AND the errored case — leaving model-level fields
-    intact."""
+    """`?only_failed=true` narrows each model's test_results to failing cases
+    (`passed is False`), dropping the pass and the still-pending case
+    (`passed is None`), and leaving model-level fields intact."""
     h = _signup(client)["headers"]
     agent = _create_agent(client, h)
     job_id = _seed_benchmark_job(client, h, agent)
@@ -753,7 +755,7 @@ def test_benchmark_detail_only_failed_narrows_each_model(client):
     assert resp.status_code == 200
     body = resp.json()
     model = body["model_results"][0]
-    assert [c["name"] for c in model["test_results"]] == ["tc_fail", "tc_error"]
+    assert [c["name"] for c in model["test_results"]] == ["tc_fail"]
     # Model-level fields untouched.
     assert model["passed"] == 1
     assert model["total_tests"] == 3
