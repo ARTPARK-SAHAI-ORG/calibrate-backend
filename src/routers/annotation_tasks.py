@@ -2732,34 +2732,57 @@ async def task_summary(
             return (0 if v_id == live_v else 1, num if num is not None else 1 << 30)
         return sorted(versions, key=_sort_key)
 
+    # --- Single source of the evaluator-vs-human agreement math ---------------
+    # The row builder below AND the `disagreement_only` item pre-filter both
+    # need "did the evaluator agree with the humans on this slot?". Keep that in
+    # ONE place so the pre-filter (which decides `total`/paging) and the visible
+    # rows can never drift apart.
+
+    def _slot_human_scalars(item_uuid: str, ev_id: str) -> List[Any]:
+        """Non-null human annotation scalars for one (item, evaluator) slot."""
+        out: List[Any] = []
+        for annotator in annotators:
+            a = latest_ann.get((item_uuid, ev_id, annotator["uuid"]))
+            if a is None:
+                continue
+            scalar = _scalar(a.get("value"))
+            if scalar is not None:
+                out.append(scalar)
+        return out
+
+    def _evaluator_agreement(
+        run_value: Any, slot_human_scalars: List[Any]
+    ) -> Optional[float]:
+        """Evaluator-vs-human agreement for one (item, evaluator, version) slot,
+        or None when the evaluator produced no value or there are no human
+        labels. Shares `evaluator_human_pair_agreement` with the task-level
+        rollup so the two endpoints stay consistent."""
+        eval_scalar = _scalar(run_value) if run_value is not None else None
+        if eval_scalar is None or not slot_human_scalars:
+            return None
+        total, pairs = evaluator_human_pair_agreement(eval_scalar, slot_human_scalars)
+        return _round_agreement(total / pairs) if pairs > 0 else None
+
+    def _is_disagreement(agreement: Optional[float]) -> bool:
+        """A slot disagrees when the evaluator scored below perfect agreement.
+        None (no evaluator value / no human labels) is NOT a disagreement."""
+        return agreement is not None and agreement < 1.0
+
     def _item_disagrees(item: Dict[str, Any]) -> bool:
-        """True if any (evaluator, version) slot on this item has the evaluator
-        disagreeing with at least one annotator (`evaluator_agreement < 1.0`).
-        Mirrors the per-row `evaluator_agreement` computation below exactly so
-        the item-level pre-filter and the row-level filter agree on what counts
-        as a disagreement."""
+        """True if any (evaluator, version) slot on this item disagrees."""
         item_uuid = item["uuid"]
         for ev in evaluators:
             ev_id = ev["uuid"]
             live_v = ev.get("live_version_id")
-            slot_human_scalars = [
-                s
-                for annotator in annotators
-                if (a := latest_ann.get((item_uuid, ev_id, annotator["uuid"]))) is not None
-                and (s := _scalar(a.get("value"))) is not None
-            ]
+            slot_human_scalars = _slot_human_scalars(item_uuid, ev_id)
             if not slot_human_scalars:
                 continue
             for version_id in _version_row_keys(ev_id, live_v):
                 run = latest_run.get((item_uuid, ev_id, version_id))
                 run_value = run.get("value") if run else None
-                eval_scalar = _scalar(run_value) if run_value is not None else None
-                if eval_scalar is None:
-                    continue
-                total, pairs = evaluator_human_pair_agreement(
-                    eval_scalar, slot_human_scalars
-                )
-                if pairs > 0 and (_round_agreement(total / pairs) or 0) < 1.0:
+                if _is_disagreement(
+                    _evaluator_agreement(run_value, slot_human_scalars)
+                ):
                     return True
         return False
 
@@ -2783,7 +2806,6 @@ async def task_summary(
             live_v = ev.get("live_version_id")
 
             ann_cells: Dict[str, Optional[Dict[str, Any]]] = {}
-            slot_human_scalars: List[Any] = []
             for annotator in annotators:
                 a = latest_ann.get((item["uuid"], ev_id, annotator["uuid"]))
                 if a is None:
@@ -2794,9 +2816,9 @@ async def task_summary(
                     "value": val,
                     "reasoning": reasoning,
                 }
-                scalar = _scalar(a.get("value"))
-                if scalar is not None:
-                    slot_human_scalars.append(scalar)
+            # Human scalars for this slot come from the shared helper — the same
+            # one the disagreement pre-filter uses (single source of truth).
+            slot_human_scalars = _slot_human_scalars(item["uuid"], ev_id)
 
             hh_mean, hh_pairs = _pairwise_agreement(slot_human_scalars)
             human_agreement = (
@@ -2809,21 +2831,12 @@ async def task_summary(
                 ev_value, ev_reasoning = _scalar_and_reasoning(run_value)
                 version_meta = _version_meta(version_id)
 
-                # Per-row evaluator agreement: pairs THIS version's run value
-                # with every human annotation on the (item, evaluator) slot.
-                # Per-version, so each version row gets its own number. Shares
-                # `evaluator_human_pair_agreement` with the task-level rollup
-                # so the two endpoints stay consistent.
-                eval_scalar = (
-                    _scalar(run_value) if run_value is not None else None
+                # Per-row evaluator agreement via the shared helper, so the
+                # disagreement pre-filter (which drives `total`/paging) and this
+                # visible value can never disagree.
+                evaluator_agreement = _evaluator_agreement(
+                    run_value, slot_human_scalars
                 )
-                evaluator_agreement: Optional[float] = None
-                if eval_scalar is not None and slot_human_scalars:
-                    total, pairs = evaluator_human_pair_agreement(
-                        eval_scalar, slot_human_scalars
-                    )
-                    if pairs > 0:
-                        evaluator_agreement = _round_agreement(total / pairs)
 
                 rows.append(
                     {
@@ -2856,12 +2869,7 @@ async def task_summary(
     # the disagreeing ITEMS (paging axis), which each still fan out into ≥1
     # surviving row.
     if disagreement_only:
-        rows = [
-            r
-            for r in rows
-            if r.get("evaluator_agreement") is not None
-            and r["evaluator_agreement"] < 1.0
-        ]
+        rows = [r for r in rows if _is_disagreement(r.get("evaluator_agreement"))]
 
     # Build the enriched top-level `evaluators[]` block — one entry per
     # linked evaluator with the per-version rubric inlined so the FE has
