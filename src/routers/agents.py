@@ -296,24 +296,17 @@ class AgentCreate(BaseModel):
 # Named request-body examples for `POST /agents`. Rendered as a switchable
 # dropdown in the API reference (and as per-variant snippets in the generated
 # SDK/CLI docs) so a reader can toggle between building an agent inside Calibrate
-# and connecting their own HTTP endpoint. The internal-agent examples spell out
-# the managed defaults `_default_agent_config()` applies so the created config
-# isn't a mystery. Keep these values in sync with `_default_agent_config()` and
+# and connecting their own HTTP endpoint. The Calibrate example spells out the
+# managed defaults `_default_agent_config()` applies so the created config isn't
+# a mystery. Keep these values in sync with `_default_agent_config()` and
 # `_AGENT_CONFIG_DESCRIPTION`.
 _CREATE_AGENT_EXAMPLES = {
-    "internal_agent": {
-        "summary": "Internal agent (defaults)",
+    "agent_within_calibrate": {
+        "summary": "Agent within Calibrate",
         "description": (
-            "Build a voice/chat agent inside Calibrate. Omit `config` to accept "
-            "every managed default."
-        ),
-        "value": {"name": "Support Agent", "type": "agent"},
-    },
-    "internal_agent_full": {
-        "summary": "Internal agent (full config)",
-        "description": (
-            "The same managed defaults spelled out. Override only the keys you "
-            "want to change; omitted keys still inherit the defaults."
+            "Build a voice/chat agent inside Calibrate. These are the managed "
+            "defaults spelled out. Override only the keys you want to change; "
+            "omitted keys still inherit the defaults."
         ),
         "value": {
             "name": "Support Agent",
@@ -330,30 +323,18 @@ _CREATE_AGENT_EXAMPLES = {
             },
         },
     },
-    "connection": {
-        "summary": "Agent connection",
+    "openai_compatible_connection": {
+        "summary": "Connect OpenAI-compatible agent",
         "description": (
-            "Connect your own agent over HTTP. `config.agent_url` is required."
+            "Connect your own agent over an OpenAI-compatible HTTP endpoint. "
+            "`config.agent_url` is required; `agent_headers` carries the auth "
+            "token the endpoint expects."
         ),
         "value": {
             "name": "My Hosted Agent",
             "type": "connection",
             "config": {
-                "agent_url": "https://api.example.com/agent",
-                "benchmark_provider": "openrouter",
-            },
-        },
-    },
-    "connection_with_auth": {
-        "summary": "Agent connection (with auth)",
-        "description": (
-            "An agent connection that sends an auth header on every request."
-        ),
-        "value": {
-            "name": "My Hosted Agent",
-            "type": "connection",
-            "config": {
-                "agent_url": "https://api.example.com/agent",
+                "agent_url": "https://api.example.com/v1/chat/completions",
                 "agent_headers": {"Authorization": "Bearer <token>"},
                 "benchmark_provider": "openrouter",
             },
