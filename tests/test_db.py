@@ -595,6 +595,78 @@ def test_agent_tests_pivot_and_test_evaluators(user):
         db.set_test_evaluators(test_uuid, [{"evaluator_id": no_live}])
 
 
+def test_backfill_agent_evaluator_links_from_test_evaluators(user):
+    """On first deploy the agent_evaluators pivot is backfilled once from
+    test_evaluators; later init_db() runs skip it."""
+    agent_uuid = db.create_agent(
+        name=_u("a-backfill-ev"), user_id=user["uuid"], org_uuid=user["org_uuid"]
+    )
+    test_uuid = db.create_test(
+        name=_u("t-backfill-ev"), type="llm", user_id=user["uuid"], org_uuid=user["org_uuid"]
+    )
+    other_test = db.create_test(
+        name=_u("t-backfill-ev2"), type="llm", user_id=user["uuid"], org_uuid=user["org_uuid"]
+    )
+    db.add_test_to_agent(agent_uuid, test_uuid)
+    db.add_test_to_agent(agent_uuid, other_test)
+
+    seeded_a = db.get_evaluator_by_slug("default-safety")
+    seeded_b = db.get_evaluator_by_slug("default-helpfulness")
+    v_a = db.get_evaluator_versions(seeded_a["uuid"])[0]
+    v_b = db.get_evaluator_versions(seeded_b["uuid"])[0]
+    db.add_evaluator_to_test(test_uuid, seeded_a["uuid"], v_a["uuid"])
+    db.add_evaluator_to_test(other_test, seeded_b["uuid"], v_b["uuid"])
+
+    # Simulate a pre-feature DB: pivots exist, but agent_evaluators and its
+    # migration flag have not been applied yet.
+    with db.get_db_connection() as conn:
+        conn.execute("DROP TABLE IF EXISTS agent_evaluators")
+        conn.execute(
+            "DELETE FROM _schema_migrations WHERE name = ?",
+            (db.AGENT_EVALUATORS_BACKFILL_MIGRATION,),
+        )
+        conn.commit()
+
+    db.init_db()
+    linked = {e["uuid"] for e in db.get_evaluators_for_agent(agent_uuid)}
+    assert linked == {seeded_a["uuid"], seeded_b["uuid"]}
+
+    # Migration flag is set — a later init_db() does not re-run the backfill.
+    assert db.remove_evaluator_from_agent(agent_uuid, seeded_a["uuid"]) is True
+    db.init_db()
+    assert seeded_a["uuid"] not in {e["uuid"] for e in db.get_evaluators_for_agent(agent_uuid)}
+    assert seeded_b["uuid"] in {e["uuid"] for e in db.get_evaluators_for_agent(agent_uuid)}
+
+
+def test_backfill_agent_evaluator_links_retries_after_crash_mid_migration(user):
+    """If deploy creates agent_evaluators but crashes before the backfill
+    commits, the next init_db() still runs the migration."""
+    agent_uuid = db.create_agent(
+        name=_u("a-crash-ev"), user_id=user["uuid"], org_uuid=user["org_uuid"]
+    )
+    test_uuid = db.create_test(
+        name=_u("t-crash-ev"), type="llm", user_id=user["uuid"], org_uuid=user["org_uuid"]
+    )
+    db.add_test_to_agent(agent_uuid, test_uuid)
+    seeded = db.get_evaluator_by_slug("default-safety")
+    v = db.get_evaluator_versions(seeded["uuid"])[0]
+    db.add_evaluator_to_test(test_uuid, seeded["uuid"], v["uuid"])
+
+    with db.get_db_connection() as conn:
+        conn.execute("DELETE FROM agent_evaluators")
+        conn.execute(
+            "DELETE FROM _schema_migrations WHERE name = ?",
+            (db.AGENT_EVALUATORS_BACKFILL_MIGRATION,),
+        )
+        conn.commit()
+
+    assert db.get_evaluators_for_agent(agent_uuid) == []
+
+    db.init_db()
+    linked = {e["uuid"] for e in db.get_evaluators_for_agent(agent_uuid)}
+    assert linked == {seeded["uuid"]}
+
+
 def test_get_evaluators_for_test_resolves_live_version(user):
     """A test run must always use the evaluator's CURRENT live version, not the
     version pinned on the pivot at link time. Editing the evaluator (new live
