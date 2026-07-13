@@ -651,8 +651,9 @@ def test_create_agent_code_samples_match_examples(app):
     for ex in _CREATE_AGENT_EXAMPLES.values():
         sample = by_label[ex["summary"]]
         assert sample["lang"] == "curl"
-        # Full example body is embedded verbatim, not a required-fields subset.
-        assert json.dumps(ex["value"]) in sample["source"]
+        # Full example body is embedded verbatim (pretty-printed for readability),
+        # not a required-fields subset.
+        assert json.dumps(ex["value"], indent=2) in sample["source"]
 
 
 def test_public_spec_preserves_create_agent_code_samples(app):

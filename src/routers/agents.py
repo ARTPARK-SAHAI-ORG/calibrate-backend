@@ -365,7 +365,7 @@ def _curl_code_samples(examples: Dict[str, Any], path: str) -> List[Dict[str, st
                 f"  --url {base_url}{path} \\\n"
                 "  --header 'Content-Type: application/json' \\\n"
                 "  --header 'X-API-Key: <api-key>' \\\n"
-                f"  --data '{json.dumps(ex['value'])}'"
+                f"  --data '{json.dumps(ex['value'], indent=2)}'"
             ),
         }
         for ex in examples.values()
