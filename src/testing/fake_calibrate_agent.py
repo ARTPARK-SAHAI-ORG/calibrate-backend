@@ -235,9 +235,24 @@ def _write_llm_model_dir(
             {
                 "total": n,
                 "passed": n,
-                "latency_ms": FAKE_LATENCY_MS,
-                "cost": FAKE_COST,
-                "total_tokens": FAKE_TOKENS,
+                # Aggregate perf blocks are dicts, not scalars: latency is
+                # percentiles {p50,p95,p99,count}; cost/tokens are
+                # {mean,min,max,count}. The run-status/benchmark readers pass
+                # these straight into Optional[Dict] response fields, so a
+                # scalar 500s response validation.
+                "latency_ms": {
+                    "p50": FAKE_LATENCY_MS,
+                    "p95": FAKE_LATENCY_MS,
+                    "p99": FAKE_LATENCY_MS,
+                    "count": n,
+                },
+                "cost": {"mean": FAKE_COST, "min": FAKE_COST, "max": FAKE_COST, "count": n},
+                "total_tokens": {
+                    "mean": FAKE_TOKENS,
+                    "min": FAKE_TOKENS,
+                    "max": FAKE_TOKENS,
+                    "count": n,
+                },
                 "criteria": criteria_agg,
             },
             f,
