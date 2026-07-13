@@ -280,13 +280,13 @@ _AGENT_CONFIG_DESCRIPTION = """Agent behavioral config. The keys depend on `type
 **`type=connection`**, your own HTTP endpoint:
 - `agent_url`: public HTTP(S) endpoint your agent is called at
 - `agent_headers`: headers sent on each request, e.g. auth
-- `benchmark_provider`: `openrouter` by default. Other values: `openai`, `google`, `anthropic`, `meta-llama`, `mistralai`, `deepseek`, `x-ai`, `cohere`, `qwen`, or `ai21`
+- `model_provider`: `openrouter` by default. Other values: `openai`, `google`, `anthropic`, `meta-llama`, `mistralai`, `deepseek`, `x-ai`, `cohere`, `qwen`, or `ai21`
 
 ```json
 {
   "agent_url": "https://api.example.com/agent",
   "agent_headers": {"Authorization": "Bearer <token>"},
-  "benchmark_provider": "openrouter"
+  "model_provider": "openrouter"
 }
 ```"""
 
@@ -337,7 +337,7 @@ _CREATE_AGENT_EXAMPLES = {
             "config": {
                 "agent_url": "https://api.example.com/v1/chat/completions",
                 "agent_headers": {"Authorization": "Bearer <token>"},
-                "benchmark_provider": "openrouter",
+                "model_provider": "openrouter",
             },
         },
     },
@@ -571,8 +571,8 @@ async def verify_agent_connection(
     # receives just the model name (e.g. "gpt-4.1" not "openai/gpt-4.1").
     verify_model = model
     if model and "/" in model:
-        benchmark_provider = agent_config.get("benchmark_provider", "openrouter")
-        if benchmark_provider != "openrouter":
+        model_provider = agent_config.get("model_provider", "openrouter")
+        if model_provider != "openrouter":
             verify_model = model.split("/", 1)[-1]
 
     result = await _verify_agent_connection(
