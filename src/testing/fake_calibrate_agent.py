@@ -388,13 +388,19 @@ def _cmd_tts(opts: Dict[str, List[str]]) -> None:
     ev_cols, ev_values = _evaluator_row_cols(evaluators)
     for provider in providers:
         sub = output_dir / f"{provider}_results"
-        sub.mkdir(parents=True, exist_ok=True)
+        audios = sub / "audios"
+        audios.mkdir(parents=True, exist_ok=True)
         with open(sub / "results.csv", "w", newline="", encoding="utf-8") as f:
             writer = csv.writer(f)
             writer.writerow(["id", "text", "audio_path"] + ev_cols)
-            for row in rows:
+            for idx, row in enumerate(rows):
+                # Write a real (empty) .wav and reference its ABSOLUTE path — the
+                # TTS worker keys audio files by exact local path and marks a
+                # provider failed if no row's audio_path matches a walked file.
+                wav = audios / f"row_{idx + 1}.wav"
+                wav.write_bytes(b"")
                 writer.writerow(
-                    [row.get("id"), row.get("text", ""), "/tmp/fake_audio.wav"]
+                    [row.get("id"), row.get("text", ""), str(wav)]
                     + [ev_values[c] for c in ev_cols]
                 )
         with open(sub / "metrics.json", "w", encoding="utf-8") as f:
