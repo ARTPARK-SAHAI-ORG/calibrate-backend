@@ -2898,10 +2898,10 @@ def run_benchmark_task(
                     # Frontend always sends models in openrouter format (provider/model).
                     # Strip the provider prefix for non-openrouter providers so the
                     # agent receives just the model name (e.g. "gpt-4.1" not "openai/gpt-4.1").
-                    model_provider = agent_config.get(
-                        "model_provider", "openrouter"
+                    benchmark_provider = agent_config.get(
+                        "benchmark_provider", "openrouter"
                     )
-                    if model_provider != "openrouter":
+                    if benchmark_provider != "openrouter":
                         cli_models = [
                             m.split("/", 1)[-1] if "/" in m else m for m in models
                         ]
