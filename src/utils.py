@@ -59,7 +59,7 @@ def _fake_calibrate_agent_path() -> str:
     script = Path(__file__).resolve().parent / "testing" / "fake_calibrate_agent.py"
     try:
         os.chmod(script, 0o755)
-    except OSError:
+    except OSError:  # pragma: no cover - defensive (e.g. read-only filesystem)
         pass
     return str(script)
 
