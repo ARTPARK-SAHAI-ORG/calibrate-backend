@@ -8,10 +8,26 @@ from typing import Any, Dict, Optional
 from fastapi import HTTPException
 from fastapi.responses import JSONResponse
 
-from utils import get_calibrate_agent_cli
+from utils import env_bool, get_calibrate_agent_cli
 
 
 logger = logging.getLogger(__name__)
+
+# Providers surfaced as healthy in test mode (union of the STT/TTS provider
+# vocabularies the UI knows about). Only used when FAKE_AI_PROVIDERS is set.
+_FAKE_PROVIDER_NAMES = (
+    "openai",
+    "deepgram",
+    "cartesia",
+    "elevenlabs",
+    "google",
+    "sarvam",
+    "smallest",
+)
+
+
+def _fake_healthy_providers() -> Dict[str, Any]:
+    return {name: {"status": "pass"} for name in _FAKE_PROVIDER_NAMES}
 
 
 def _without_groq(providers: Dict[str, Any]) -> Dict[str, Any]:
@@ -153,6 +169,11 @@ class ProviderStatusMonitor:
         return stdout_bytes, stderr_bytes
 
     async def run_check(self) -> Dict[str, Any]:
+        # Test mode: skip the CLI health probe entirely and report every
+        # provider healthy, so status pills don't depend on the fake CLI
+        # implementing a `status` path (see FAKE_AI_PROVIDERS in utils.py).
+        if env_bool("FAKE_AI_PROVIDERS", False):
+            return _fake_healthy_providers()
         try:
             process = await asyncio.create_subprocess_exec(
                 "uv",
