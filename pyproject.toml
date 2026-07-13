@@ -33,6 +33,10 @@ addopts = "--cov=src --cov-report=term-missing"
 [tool.coverage.run]
 source = ["src"]
 branch = true
+# src/testing holds the integration-testing fake CLI. It only runs under
+# FAKE_AI_PROVIDERS and then as a subprocess, so in-process coverage can't see
+# it — it's exercised end-to-end by tests/test_fake_calibrate_agent.py instead.
+omit = ["*/tests/*", "src/testing/*"]
 
 [tool.coverage.report]
-omit = ["*/tests/*"]
+omit = ["*/tests/*", "src/testing/*"]

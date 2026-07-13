@@ -50,8 +50,29 @@ def env_int(var: str, fallback: int) -> int:
         return fallback
 
 
+def _fake_calibrate_agent_path() -> str:
+    """Absolute path to the in-repo fake eval CLI, chmod +x'd on demand.
+
+    Callers spawn ``Popen([cli, ...])``, so this must be a directly-executable
+    ``argv[0]``; the chmod (idempotent) re-arms the exec bit if a checkout drops it.
+    """
+    script = Path(__file__).resolve().parent / "testing" / "fake_calibrate_agent.py"
+    try:
+        os.chmod(script, 0o755)
+    except OSError:  # pragma: no cover - defensive (e.g. read-only filesystem)
+        pass
+    return str(script)
+
+
 def get_calibrate_agent_cli() -> str:
-    """Executable for the eval engine (PyPI package ``calibrate-agent``)."""
+    """Executable for the eval engine (PyPI package ``calibrate-agent``).
+
+    For integration testing (``FAKE_AI_PROVIDERS=1``) return the in-repo fake so
+    the run → results pipeline runs with no real provider call, key, or cost.
+    Production (flag unset) is untouched.
+    """
+    if env_bool("FAKE_AI_PROVIDERS", False):
+        return _fake_calibrate_agent_path()
     return "calibrate-agent"
 
 
