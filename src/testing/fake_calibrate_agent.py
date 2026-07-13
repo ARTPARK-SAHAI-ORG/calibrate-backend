@@ -561,9 +561,22 @@ def _cmd_status() -> None:
     sys.stdout.write(json.dumps(providers))
 
 
+# Every `calibrate-agent <subcommand>` the backend workers spawn. The guard test
+# `tests/test_fake_matches_real_usage.py` statically scans the real call sites and
+# fails if any spawns a subcommand missing from this set — so a new real usage
+# can't ship without the fake growing a handler for it.
+SUPPORTED_SUBCOMMANDS = frozenset(
+    {"status", "general", "llm", "stt", "tts", "simulations"}
+)
+
+
 def main(argv: List[str]) -> int:
     sub, opts = _parse_args(argv)
     eval_only = "--eval-only" in opts
+
+    if sub not in SUPPORTED_SUBCOMMANDS:
+        sys.stderr.write(f"fake_calibrate_agent: unknown subcommand {sub!r}\n")
+        return 1
 
     if sub == "status":
         _cmd_status()
@@ -577,9 +590,6 @@ def main(argv: List[str]) -> int:
         _cmd_tts(opts)
     elif sub == "simulations":
         _cmd_annotation_simulation(opts) if eval_only else _cmd_simulations(opts)
-    else:
-        sys.stderr.write(f"fake_calibrate_agent: unknown subcommand {sub!r}\n")
-        return 1
     return 0
 
 

@@ -58,16 +58,27 @@ Every evaluator verdict is a PASS; every rating is scale-max.
 
 ## Maintaining the fake
 
-The fake's per-subcommand output mirrors the readers in
-`routers/agent_tests.py`, `stt.py`, `tts.py`, `simulations.py`, and
-`annotation_eval_runner.py`. **When you change a reader's expected shape, update the
-fake in the same change.** [tests/test_fake_calibrate_agent.py](tests/test_fake_calibrate_agent.py)
-drives every call site end-to-end with the real fake (no `subprocess` patch), so a
-drift fails there:
+Any `calibrate-agent` change is a **three-file change** — do all three in one commit:
+
+1. the real worker/reader in `routers/agent_tests.py`, `stt.py`, `tts.py`,
+   `simulations.py`, or `annotation_eval_runner.py`;
+2. [src/testing/fake_calibrate_agent.py](src/testing/fake_calibrate_agent.py) so its
+   canned output still matches (and `SUPPORTED_SUBCOMMANDS` if the subcommand set
+   changed);
+3. [tests/test_fake_calibrate_agent.py](tests/test_fake_calibrate_agent.py) — drives
+   every call site end-to-end with the real fake (no `subprocess` patch), so drift
+   fails here.
+
+Two tests keep this honest, both run by CI's full `pytest`:
 
 ```
-uv run --group dev pytest tests/test_fake_calibrate_agent.py -q
+uv run --group dev pytest tests/test_fake_calibrate_agent.py tests/test_fake_matches_real_usage.py -q
 ```
+
+- `test_fake_calibrate_agent.py` — end-to-end coverage of every worker path.
+- `test_fake_matches_real_usage.py` — AST-scans every `get_calibrate_agent_cli()`
+  call site under `src/`, auto-discovers each spawned subcommand, and fails if the
+  fake doesn't handle one. A new real usage can't ship without the fake covering it.
 
 ## Known gap
 
