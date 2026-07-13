@@ -77,6 +77,22 @@ def test_run_llm_test_task_end_to_end_with_fake_cli():
     assert results["passed"] == results["total_tests"]
     assert results["failed"] == 0
     assert results["test_results"][0]["passed"] is True
+    # Aggregate perf blocks must be dicts, not scalars — the run-status reader
+    # feeds them into Optional[Dict] response fields, so a scalar 500s the
+    # endpoint. Latency is percentiles; cost/tokens are mean/min/max.
+    assert set(results["latency_ms"]) == {"p50", "p95", "p99", "count"}
+    assert set(results["cost"]) == {"mean", "min", "max", "count"}
+    assert set(results["total_tokens"]) == {"mean", "min", "max", "count"}
+    from routers.agent_tests import TestRunStatusResponse
+
+    TestRunStatusResponse(
+        task_id="t" * 36,
+        status="done",
+        test_name="x",
+        latency_ms=results["latency_ms"],
+        cost=results["cost"],
+        total_tokens=results["total_tokens"],
+    )
 
 
 def test_run_llm_test_task_agent_connection_mode_with_fake_cli():
@@ -128,6 +144,10 @@ def test_run_benchmark_task_multi_model_end_to_end_with_fake_cli():
     for m in models:
         assert by_model[m]["success"] is True
         assert by_model[m]["passed"] == by_model[m]["total_tests"] == 1
+        # Per-model aggregate perf blocks are dicts (see unit-test rationale).
+        assert set(by_model[m]["latency_ms"]) == {"p50", "p95", "p99", "count"}
+        assert set(by_model[m]["cost"]) == {"mean", "min", "max", "count"}
+        assert set(by_model[m]["total_tokens"]) == {"mean", "min", "max", "count"}
     assert job["results"]["leaderboard_summary"], "leaderboard should be populated"
 
 
