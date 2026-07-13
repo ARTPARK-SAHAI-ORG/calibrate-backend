@@ -13,14 +13,17 @@ from utils import env_bool, get_calibrate_agent_cli
 
 logger = logging.getLogger(__name__)
 
-# Providers surfaced as healthy in test mode (union of the STT/TTS provider
-# vocabularies the UI knows about). Only used when FAKE_AI_PROVIDERS is set.
+# Providers surfaced as healthy in test mode: the union of the STT + TTS
+# integrations (see calibrate.artpark.ai/docs/integrations), minus groq — which
+# `_without_groq` strips from the real status anyway. Only used when
+# FAKE_AI_PROVIDERS is set.
 _FAKE_PROVIDER_NAMES = (
     "openai",
     "deepgram",
     "cartesia",
     "elevenlabs",
     "google",
+    "gemini",
     "sarvam",
     "smallest",
 )
