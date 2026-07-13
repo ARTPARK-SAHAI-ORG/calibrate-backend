@@ -551,14 +551,16 @@ def _cmd_annotation_simulation(opts: Dict[str, List[str]]) -> None:
 
 # --- status (provider health) -----------------------------------------------
 def _cmd_status() -> None:
-    """Report every known provider healthy. The backend short-circuits this in
-    ``provider_status.run_check`` under the flag, so this is a fallback for any
-    other caller."""
-    providers = {
-        name: {"status": "pass"}
-        for name in ("openai", "deepgram", "cartesia", "elevenlabs", "google", "sarvam", "smallest")
-    }
-    sys.stdout.write(json.dumps(providers))
+    """Emit a healthy provider-status payload.
+
+    Unreachable in the real flow: ``provider_status.run_check`` short-circuits
+    ``status`` under FAKE_AI_PROVIDERS and returns its own canonical healthy set,
+    so the fake is never spawned for it. Kept only so ``status`` stays a handled
+    subcommand (the guard test scans it as a real call site) and for manual runs
+    — hence a single placeholder here rather than a second copy of the canonical
+    provider list, which lives in ``provider_status._FAKE_PROVIDER_NAMES``.
+    """
+    sys.stdout.write(json.dumps({"openai": {"status": "pass"}}))
 
 
 # Every `calibrate-agent <subcommand>` the backend workers spawn. The guard test
