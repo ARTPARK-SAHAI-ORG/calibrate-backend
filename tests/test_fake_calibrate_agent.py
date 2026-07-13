@@ -1,11 +1,9 @@
-"""End-to-end proof that FAKE_AI_PROVIDERS wires the in-repo fake eval CLI into
-the run → results pipeline.
+"""Integration tests: every worker drives the real fake CLI end-to-end.
 
-Unlike the rest of the agent-test suite, this test does NOT patch
-``subprocess.Popen``: it sets ``FAKE_AI_PROVIDERS=1`` and lets ``run_llm_test_task``
-actually launch ``src/testing/fake_calibrate_agent.py`` and read its canned
-output. Only the S3/queue side effects are stubbed. If the seam or the fake's
-output contract regresses, the job won't reach ``done`` with ``passed == total``.
+Sets ``FAKE_AI_PROVIDERS=1`` and does NOT patch ``subprocess.Popen`` — the
+workers actually spawn ``src/testing/fake_calibrate_agent.py`` and read its
+output (only S3/queue side effects are stubbed). Catches any regression in the
+seam or the fake's per-subcommand output contract.
 """
 
 import asyncio

@@ -51,12 +51,10 @@ def env_int(var: str, fallback: int) -> int:
 
 
 def _fake_calibrate_agent_path() -> str:
-    """Absolute path to the in-repo fake eval CLI, made executable on demand.
+    """Absolute path to the in-repo fake eval CLI, chmod +x'd on demand.
 
-    Call sites launch the CLI in list form (``Popen([cli, subcommand, ...])``),
-    so the returned value has to be a single directly-executable ``argv[0]``.
-    The script carries a ``#!/usr/bin/env python3`` shebang; we ``chmod +x`` here
-    (idempotent) because the executable bit doesn't survive every checkout.
+    Callers spawn ``Popen([cli, ...])``, so this must be a directly-executable
+    ``argv[0]``; the chmod (idempotent) re-arms the exec bit if a checkout drops it.
     """
     script = Path(__file__).resolve().parent / "testing" / "fake_calibrate_agent.py"
     try:
@@ -69,10 +67,9 @@ def _fake_calibrate_agent_path() -> str:
 def get_calibrate_agent_cli() -> str:
     """Executable for the eval engine (PyPI package ``calibrate-agent``).
 
-    In test mode (``FAKE_AI_PROVIDERS=1``) return a deterministic in-repo fake
-    that writes canned output files instead of calling real AI providers, so CI
-    and local E2E can exercise the run → results pipeline without provider keys
-    or cost. Production (flag unset) is untouched.
+    For integration testing (``FAKE_AI_PROVIDERS=1``) return the in-repo fake so
+    the run → results pipeline runs with no real provider call, key, or cost.
+    Production (flag unset) is untouched.
     """
     if env_bool("FAKE_AI_PROVIDERS", False):
         return _fake_calibrate_agent_path()

@@ -1,25 +1,15 @@
 #!/usr/bin/env python3
-"""Deterministic stand-in for the ``calibrate-agent`` eval CLI.
+"""Integration-testing stand-in for the ``calibrate-agent`` eval CLI.
 
 Enabled by ``FAKE_AI_PROVIDERS=1`` (see ``get_calibrate_agent_cli`` in
-``src/utils.py``): every AI operation in the backend funnels through that one
-seam, so swapping the executable for this script lets CI and local E2E drive the
-full run → results pipeline without any real LLM/STT/TTS provider call, key, or
-cost.
+``src/utils.py``) so integration tests can drive the full run → results pipeline
+with no real LLM/STT/TTS call, key, or cost. Standalone — imports nothing from
+the backend. For each ``[cli, <subcommand>, ...flags]`` a worker spawns, it
+writes the output files that worker's reader expects, then exits 0.
 
-This is a STANDALONE script — it imports nothing from the backend. Each backend
-worker builds ``[cli, <subcommand>, ...flags]``, launches it with
-``subprocess.Popen``, polls until it exits, then reads the output files out of
-the ``-o <output_dir>`` directory. So all this script has to do is parse the
-subcommand + a handful of flags, write the exact files each worker's reader
-expects, and ``exit(0)`` — writing everything BEFORE exiting, since workers only
-read after the process is gone.
-
-The output shapes mirror the backend's own test doubles (``tests/test_run_tasks``,
-``tests/test_routers_agent_tests``) and the readers in ``routers/agent_tests.py``,
-``routers/stt.py``, ``routers/tts.py``, ``routers/simulations.py``, and
-``annotation_eval_runner.py``. The canned constants below are asserted verbatim
-by the frontend E2E specs — keep them stable.
+Output shapes mirror the readers in ``routers/agent_tests.py``, ``stt.py``,
+``tts.py``, ``simulations.py``, and ``annotation_eval_runner.py``. The constants
+below are asserted by the frontend integration tests — keep them stable.
 """
 
 import csv
@@ -29,7 +19,7 @@ import sys
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-# --- Canned constants (frontend E2E asserts these) --------------------------
+# --- Canned constants (frontend integration tests assert these) -------------
 FAKE_RESPONSE = "Simulated agent reply."
 FAKE_REASONING = "Simulated judge reasoning: criteria satisfied."
 FAKE_LATENCY_MS = 100
@@ -551,15 +541,9 @@ def _cmd_annotation_simulation(opts: Dict[str, List[str]]) -> None:
 
 # --- status (provider health) -----------------------------------------------
 def _cmd_status() -> None:
-    """Emit a healthy provider-status payload.
-
-    Unreachable in the real flow: ``provider_status.run_check`` short-circuits
-    ``status`` under FAKE_AI_PROVIDERS and returns its own canonical healthy set,
-    so the fake is never spawned for it. Kept only so ``status`` stays a handled
-    subcommand (the guard test scans it as a real call site) and for manual runs
-    — hence a single placeholder here rather than a second copy of the canonical
-    provider list, which lives in ``provider_status._FAKE_PROVIDER_NAMES``.
-    """
+    """Placeholder healthy payload. `provider_status.run_check` short-circuits
+    `status` under the flag (returning `_FAKE_PROVIDER_NAMES`), so the fake is
+    never spawned for it; this stays only to keep `status` a handled subcommand."""
     sys.stdout.write(json.dumps({"openai": {"status": "pass"}}))
 
 

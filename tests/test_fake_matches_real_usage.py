@@ -1,15 +1,10 @@
-"""Guard: the fake eval CLI must cover every place the real one is spawned.
+"""Guard: the integration-testing fake must cover every place the real
+``calibrate-agent`` is spawned.
 
-The backend delegates all AI work to ``calibrate-agent`` and the fake
-([src/testing/fake_calibrate_agent.py]) stands in for it under
-``FAKE_AI_PROVIDERS=1``. If someone adds a new real invocation with a subcommand
-the fake doesn't handle, E2E would silently break. Rather than hand-maintain a
-list, this test statically scans the source for every ``calibrate-agent``
-invocation, extracts its subcommand, and asserts the fake supports it.
-
-It auto-captures new call sites: any ``[get_calibrate_agent_cli(), "<sub>", ...]``
-list (or ``create_subprocess_exec(..., get_calibrate_agent_cli(), "<sub>", ...)``)
-anywhere under ``src/`` is discovered without editing this test.
+Statically scans ``src/`` for every CLI invocation, extracts its subcommand, and
+asserts the fake ([src/testing/fake_calibrate_agent.py]) handles it — so a new
+real usage can't ship without a fake handler, and nobody has to hand-maintain a
+list. Auto-captures new call sites; no edit to this test needed.
 """
 
 from __future__ import annotations

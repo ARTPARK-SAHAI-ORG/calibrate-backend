@@ -13,10 +13,9 @@ from utils import env_bool, get_calibrate_agent_cli
 
 logger = logging.getLogger(__name__)
 
-# Providers surfaced as healthy in test mode: the union of the STT + TTS
-# integrations (see calibrate.artpark.ai/docs/integrations), minus groq — which
-# `_without_groq` strips from the real status anyway. Only used when
-# FAKE_AI_PROVIDERS is set.
+# Providers reported healthy during integration testing: the union of the STT +
+# TTS integrations (calibrate.artpark.ai/docs/integrations), minus groq — which
+# `_without_groq` strips from the real status anyway.
 _FAKE_PROVIDER_NAMES = (
     "openai",
     "deepgram",
@@ -172,9 +171,8 @@ class ProviderStatusMonitor:
         return stdout_bytes, stderr_bytes
 
     async def run_check(self) -> Dict[str, Any]:
-        # Test mode: skip the CLI health probe entirely and report every
-        # provider healthy, so status pills don't depend on the fake CLI
-        # implementing a `status` path (see FAKE_AI_PROVIDERS in utils.py).
+        # Integration testing: skip the CLI probe and report every provider
+        # healthy (see FAKE_AI_PROVIDERS in utils.py).
         if env_bool("FAKE_AI_PROVIDERS", False):
             return _fake_healthy_providers()
         try:
