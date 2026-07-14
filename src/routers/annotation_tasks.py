@@ -90,6 +90,7 @@ _TASK_TYPE_DESCRIPTION = (
     "- `stt`: judge a transcript on its own\n"
     "- `llm`: judge one response with its conversation history\n"
     "- `llm-general`: judge a standalone `input -> output` pair\n"
+    "- `llm-tool-call`: judge the tool calls an agent made for a turn\n"
     "- `conversation`: judge a full conversation"
 )
 
@@ -104,6 +105,8 @@ _ITEM_PAYLOAD_DESCRIPTION = (
     "- `llm`: `name`, `chat_history` (list of `{role, content}` turns ending at the user turn), "
     "`agent_response` (the reply to judge), optional `evaluator_variables`\n"
     "- `llm-general`: `name`, `input`, `output`, optional `evaluator_variables`\n"
+    "- `llm-tool-call`: `name`, `chat_history` (list of `{role, content}` turns ending at the user turn), "
+    "`tool_calls` (list of `{tool, arguments}` the agent produced)\n"
     "- `conversation`: `name`, `transcript` (list of `{role, content}` turns), optional `evaluator_variables`\n\n"
     "`evaluator_variables` maps an evaluator ID to that evaluator's `{{variable}}` values for this item"
 )
@@ -126,6 +129,15 @@ _ITEM_PAYLOAD_EXAMPLES = [
         "name": "pair-001",
         "input": "Summarize: the meeting is moved to 3pm.",
         "output": "The meeting is now at 3pm.",
+    },
+    {
+        "name": "call-001",
+        "chat_history": [
+            {"role": "user", "content": "What's the weather in Paris?"},
+        ],
+        "tool_calls": [
+            {"tool": "get_weather", "arguments": {"city": "Paris"}},
+        ],
     },
     {
         "name": "convo-001",
