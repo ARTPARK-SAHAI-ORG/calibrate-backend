@@ -14,6 +14,7 @@ from urllib.parse import quote
 
 import boto3
 from botocore.config import Config
+from botocore.exceptions import ClientError
 import openpyxl
 import sentry_sdk
 from pydantic import BaseModel, Field, StringConstraints
@@ -771,7 +772,13 @@ def resolve_stored_audio_bucket_and_key(audio_path: str) -> Tuple[str, str]:
 
 
 def stored_audio_exists(bucket: str, s3_key: str) -> bool:
-    """Return whether an object exists at the given storage location."""
+    """Return whether an object exists at the given storage location.
+
+    Only a genuine "not found" answers False. Any other failure (a network
+    blip, a 403 permissions gap) is re-raised so callers surface the real error
+    instead of a misleading "audio file not found" — a present clip must never
+    be reported missing because storage hiccupped.
+    """
     if not s3_key:
         return False
     if is_local_object_storage():
@@ -785,8 +792,14 @@ def stored_audio_exists(bucket: str, s3_key: str) -> bool:
     try:
         s3.head_object(Bucket=bucket, Key=s3_key)
         return True
-    except Exception:
-        return False
+    except ClientError as e:
+        # head_object returns 404 for a missing key; some S3-compatible stores
+        # phrase it as NoSuchKey/NotFound. Everything else (403, throttling,
+        # connection errors) is a real fault, not an absence.
+        error_code = (e.response.get("Error") or {}).get("Code")
+        if error_code in ("404", "NoSuchKey", "NotFound"):
+            return False
+        raise
 
 
 def presign_audio_path(
