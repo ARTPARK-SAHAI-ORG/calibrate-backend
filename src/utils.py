@@ -737,28 +737,15 @@ def generate_presigned_download_url(
 
 
 def normalize_stored_audio_path(audio_path: Optional[str]) -> Optional[str]:
-    """Collapse a persisted audio reference to a bare storage key.
+    """Trim a persisted audio reference to a canonical storage reference.
 
-    Annotation items should store keys (``tts/media/<uuid>.wav``) or
-    ``s3://bucket/key`` URIs. The frontend sometimes round-trips a dev
-    ``LOCAL_ARTIFACTS_URL_PREFIX`` playback URL instead — strip that prefix so
-    download/presign resolve the same object."""
+    Annotation items store either a bare key (``tts/media/<uuid>.wav``) or an
+    ``s3://bucket/key`` URI — exactly what ``POST /presigned-url`` returns. Just
+    strip surrounding whitespace and any leading slash; an ``s3://`` URI is left
+    intact (it has no leading slash to strip)."""
     if not audio_path:
         return audio_path
-    path = str(audio_path).strip()
-    if path.startswith("s3://"):
-        return path
-    if path.startswith(LOCAL_ARTIFACTS_URL_PREFIX):
-        return path[len(LOCAL_ARTIFACTS_URL_PREFIX) :].lstrip("/")
-    if path.startswith("http://") or path.startswith("https://"):
-        from urllib.parse import urlparse
-
-        parsed = urlparse(path)
-        idx = parsed.path.find(LOCAL_ARTIFACTS_URL_PREFIX)
-        if idx != -1:
-            return parsed.path[idx + len(LOCAL_ARTIFACTS_URL_PREFIX) :].lstrip("/")
-        return path
-    return path.lstrip("/")
+    return str(audio_path).strip().lstrip("/")
 
 
 def resolve_stored_audio_bucket_and_key(audio_path: str) -> Tuple[str, str]:
@@ -784,10 +771,8 @@ def presign_audio_path(
     if not audio_path:
         return audio_path
     normalized = normalize_stored_audio_path(audio_path)
-    # A real external URL (not a dev LOCAL_ARTIFACTS_URL_PREFIX playback URL, which
-    # normalize collapses to a bare key) is already fetchable — pass it through.
-    # This also means resolve_stored_audio_bucket_and_key below never sees an
-    # external URL, so it can't raise.
+    # An external URL is already fetchable — pass it through. This also keeps
+    # resolve_stored_audio_bucket_and_key below from seeing one (it would raise).
     if normalized and (
         normalized.startswith("http://") or normalized.startswith("https://")
     ):

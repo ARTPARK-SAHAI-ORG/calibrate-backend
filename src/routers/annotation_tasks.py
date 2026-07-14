@@ -74,7 +74,6 @@ from utils import (
     InitialTaskStatus,
     can_start_job,
     compute_share_token_toggle,
-    normalize_stored_audio_path,
     presign_annotation_items_audio,
     try_start_queued_job,
 )
@@ -349,19 +348,6 @@ def _enrich_evaluators_with_live_version(
 
 
 router = APIRouter(prefix="/annotation-tasks", tags=["annotation-tasks"])
-
-
-def _normalize_tts_item_payload(payload: Any) -> Any:
-    """Persist bare storage keys for TTS items, not dev playback URLs."""
-    if not isinstance(payload, dict):
-        return payload
-    audio_path = payload.get("audio_path")
-    if not audio_path:
-        return payload
-    normalized = normalize_stored_audio_path(str(audio_path))
-    if normalized == audio_path:
-        return payload
-    return {**payload, "audio_path": normalized}
 
 
 class AnnotationTaskCreate(BaseModel):
@@ -1007,13 +993,7 @@ async def bulk_create_items(
     new_uuids = create_annotation_items(
         task_uuid,
         [
-            {
-                "payload": (
-                    _normalize_tts_item_payload(it.payload)
-                    if task.get("type") == "tts"
-                    else it.payload
-                )
-            }
+            {"payload": it.payload}
             for i, it in enumerate(payload.items)
             if i not in matched_existing
         ],
@@ -1225,12 +1205,9 @@ async def bulk_update_items(
             )
 
     try:
-        updates = [u.dict() for u in payload.updates]
-        if task.get("type") == "tts":
-            for entry in updates:
-                if isinstance(entry.get("payload"), dict):
-                    entry["payload"] = _normalize_tts_item_payload(entry["payload"])
-        updated_count = bulk_update_annotation_items(task_uuid, updates)
+        updated_count = bulk_update_annotation_items(
+            task_uuid, [u.dict() for u in payload.updates]
+        )
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
     return {"updated_count": updated_count}

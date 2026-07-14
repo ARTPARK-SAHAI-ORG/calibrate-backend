@@ -343,23 +343,13 @@ def test_normalize_stored_audio_path():
 
     assert normalize_stored_audio_path(None) is None
     assert normalize_stored_audio_path("") == ""
-    # s3:// URIs pass through untouched.
+    # s3:// URIs pass through untouched (no leading slash to strip).
     assert normalize_stored_audio_path("s3://b/tts/media/a.wav") == "s3://b/tts/media/a.wav"
-    # A bare dev playback path collapses to its key.
-    assert normalize_stored_audio_path("/local-artifacts/tts/media/a.wav") == "tts/media/a.wav"
-    # A full dev playback URL collapses to the same key.
-    assert (
-        normalize_stored_audio_path("http://localhost:8000/local-artifacts/tts/media/a.wav")
-        == "tts/media/a.wav"
-    )
-    # A real external URL (no local-artifacts marker) is left as-is.
-    assert (
-        normalize_stored_audio_path("https://cdn.example/audio.mp3")
-        == "https://cdn.example/audio.mp3"
-    )
-    # A leading slash on a bare key is stripped.
-    assert normalize_stored_audio_path("/tts/media/a.wav") == "tts/media/a.wav"
+    # A bare key is returned as-is; a leading slash and surrounding whitespace
+    # are trimmed.
     assert normalize_stored_audio_path("tts/media/a.wav") == "tts/media/a.wav"
+    assert normalize_stored_audio_path("/tts/media/a.wav") == "tts/media/a.wav"
+    assert normalize_stored_audio_path("  tts/media/a.wav  ") == "tts/media/a.wav"
 
 
 def test_resolve_stored_audio_bucket_and_key(monkeypatch):
