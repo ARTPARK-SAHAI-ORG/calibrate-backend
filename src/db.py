@@ -6808,7 +6808,7 @@ def _parse_annotation_task_row(row: sqlite3.Row) -> Dict[str, Any]:
     return dict(row)
 
 
-ANNOTATION_TASK_TYPES = ("llm", "llm-general", "stt", "conversation")
+ANNOTATION_TASK_TYPES = ("llm", "llm-general", "stt", "conversation", "tts")
 
 
 def create_annotation_task(

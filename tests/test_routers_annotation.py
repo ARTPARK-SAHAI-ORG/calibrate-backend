@@ -189,6 +189,55 @@ def test_annotation_task_crud(client):
     assert client.delete(f"/annotation-tasks/{task_uuid}", headers=h).status_code == 404
 
 
+def _tts_evaluator(client, h):
+    evaluators = client.get("/evaluators", headers=h).json()["items"]
+    return next(e for e in evaluators if e.get("evaluator_type") == "tts")
+
+
+def test_tts_task_type_parity_but_run_deferred(client):
+    """`tts` is an accepted task type (create/items/evaluator-linking parity with
+    `stt`), but evaluator runs are deferred — the CLI has no `tts --eval-only`
+    judge, so launching a run 400s."""
+    auth = _signup(client)
+    h = auth["headers"]
+    tts_ev = _tts_evaluator(client, h)
+
+    # Create a tts task, linking a tts evaluator at creation.
+    name = f"tts-task-{uuid.uuid4().hex[:6]}"
+    create = client.post(
+        "/annotation-tasks",
+        json={"name": name, "type": "tts", "evaluator_ids": [tts_ev["uuid"]]},
+        headers=h,
+    )
+    assert create.status_code == 200
+    task_uuid = create.json()["uuid"]
+
+    detail = client.get(f"/annotation-tasks/{task_uuid}", headers=h).json()
+    assert detail["type"] == "tts"
+    assert [e["uuid"] for e in detail["evaluators"]] == [tts_ev["uuid"]]
+
+    # Item creation works (only `name` is required, same as every type).
+    items = client.post(
+        f"/annotation-tasks/{task_uuid}/items",
+        json={"items": [{"payload": {"name": "clip-1"}}]},
+        headers=h,
+    )
+    assert items.status_code == 200
+    item_ids = items.json()["item_ids"]
+
+    # Evaluator run is not supported for tts → 400.
+    run = client.post(
+        f"/annotation-tasks/{task_uuid}/evaluator-runs",
+        json={
+            "evaluators": [{"evaluator_id": tts_ev["uuid"]}],
+            "item_ids": item_ids,
+        },
+        headers=h,
+    )
+    assert run.status_code == 400
+    assert "task type 'tts'" in run.json()["detail"]
+
+
 def test_list_annotation_tasks_batched_evaluators_match_per_task(client):
     """GET /annotation-tasks batches evaluator enrichment into one query; the
     per-task evaluator data on a multi-item page must be byte-for-byte identical
@@ -1928,17 +1977,20 @@ def test_annotation_eval_llm_general_payload_validation(client):
     assert "input" in resp.json()["detail"]
 
 
-def test_annotation_eval_supported_task_types_cover_all_creatable_types():
-    """Every creatable annotation task type must be eval-run supported, so the
-    unsupported-type 400 guard in the evaluator-runs endpoint is defensive-only
-    and can't be hit through a real task. (tts was the last creatable-but-
-    unsupported type and is no longer a valid annotation task type.)"""
+def test_annotation_eval_supported_task_types_gap_is_exactly_tts():
+    """`tts` is a creatable annotation task type but has no evaluator-run path
+    (the CLI has no `tts --eval-only` judge), so it is deliberately kept out of
+    SUPPORTED_EVAL_TASK_TYPES. That makes the unsupported-type 400 guard in the
+    evaluator-runs endpoint reachable — pin the gap to exactly `{tts}` so any
+    other creatable-but-unsupported type is caught (either wire its eval path or
+    make the deferral explicit)."""
     import db as db_mod
     from annotation_eval_runner import SUPPORTED_EVAL_TASK_TYPES
 
-    assert "tts" not in db_mod.ANNOTATION_TASK_TYPES
+    assert "tts" in db_mod.ANNOTATION_TASK_TYPES
+    assert "tts" not in SUPPORTED_EVAL_TASK_TYPES
     unsupported = set(db_mod.ANNOTATION_TASK_TYPES) - set(SUPPORTED_EVAL_TASK_TYPES)
-    assert unsupported == set(), f"creatable task types with no eval support: {unsupported}"
+    assert unsupported == {"tts"}, f"unexpected creatable task types with no eval support: {unsupported}"
 
 
 def test_annotation_task_summary_pagination(client):

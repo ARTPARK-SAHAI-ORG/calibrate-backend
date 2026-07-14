@@ -103,10 +103,13 @@ EVAL_JOB_TYPES = ["stt-eval", "tts-eval", "annotation-eval"]
 ANNOTATION_EVAL_JOB_TYPE = "annotation-eval"
 
 # Task types whose annotation rows we know how to evaluate via the CLI's
-# --eval-only modes. `tts` is omitted because annotation tasks don't store
-# audio S3 keys today; `voice` simulation isn't supported by the CLI in
-# eval-only mode. `llm-general` (non-conversational input -> output) uses the
-# dedicated `calibrate general` command — see `_build_llm_general_dataset`.
+# --eval-only modes. This is a STRICT SUBSET of db.ANNOTATION_TASK_TYPES: `tts`
+# is an accepted task type (create/items/link) but has no eval path — the CLI
+# has no `tts --eval-only` judge and annotation items store no audio S3 keys, so
+# a tts task hits the unsupported-type 400 guard in the evaluator-runs endpoint.
+# `voice` simulation likewise isn't supported by the CLI in eval-only mode.
+# `llm-general` (non-conversational input -> output) uses the dedicated
+# `calibrate general` command — see `_build_llm_general_dataset`.
 SUPPORTED_EVAL_TASK_TYPES = ("stt", "llm", "llm-general", "conversation")
 
 logger = logging.getLogger(__name__)
