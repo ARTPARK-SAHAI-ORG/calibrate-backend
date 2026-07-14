@@ -797,23 +797,22 @@ def presign_audio_path(
     if not audio_path:
         return audio_path
     normalized = normalize_stored_audio_path(audio_path)
-    if normalized and normalized.startswith("s3://"):
-        parts = normalized[5:].split("/", 1)
-        bucket = parts[0]
-        key = parts[1] if len(parts) > 1 else ""
-        return (
-            generate_presigned_download_url(key, bucket=bucket, expiration=expiration)
-            or audio_path
-        )
+    # A real external URL (not a dev /local-artifacts/ playback URL, which
+    # normalize collapses to a bare key) is already fetchable — pass it through.
     if normalized and (
         normalized.startswith("http://") or normalized.startswith("https://")
     ):
         return normalized
+    try:
+        bucket, key = resolve_stored_audio_bucket_and_key(audio_path)
+    except ValueError:
+        return audio_path
+    if not key:
+        return audio_path
     return (
-        generate_presigned_download_url(normalized, expiration=expiration)
-        if normalized
-        else audio_path
-    ) or audio_path
+        generate_presigned_download_url(key, bucket=bucket, expiration=expiration)
+        or audio_path
+    )
 
 
 # Long TTL for audio playback URLs handed to annotation reads. Unauthenticated
