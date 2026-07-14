@@ -1528,6 +1528,24 @@ def init_db():
                     "templates to org forks"
                 )
 
+        # Rewrite FINISHED-run evaluator references (job snapshots + eval-run /
+        # labelling columns) from the shared template to the run's-org fork, so a
+        # past run's evaluator click opens the fork. One-time; runs after the fork
+        # backfill so the forks exist.
+        if not _schema_migration_applied(
+            cursor, REPOINT_DEFAULT_JOB_SNAPSHOTS_MIGRATION
+        ):
+            snaps = _backfill_repoint_default_job_snapshots(cursor)
+            _mark_schema_migration_applied(
+                cursor, REPOINT_DEFAULT_JOB_SNAPSHOTS_MIGRATION
+            )
+            conn.commit()
+            if snaps:
+                logger.info(
+                    f"Re-pointed {snaps} finished-run evaluator reference(s) "
+                    "from default templates to org forks"
+                )
+
         conn.commit()
         logger.info("Database initialized successfully")
 
@@ -2573,6 +2591,7 @@ def _backfill_agent_evaluator_links(cursor: sqlite3.Cursor) -> int:
 
 FORK_DEFAULT_EVALUATORS_MIGRATION = "fork_default_evaluators_per_org_v1"
 REPOINT_DEFAULT_LINKS_MIGRATION = "repoint_default_evaluator_links_to_forks_v1"
+REPOINT_DEFAULT_JOB_SNAPSHOTS_MIGRATION = "repoint_default_evaluator_job_snapshots_v1"
 
 
 def _org_owner_user_id(cursor: sqlite3.Cursor, org_uuid: str) -> Optional[str]:
@@ -2867,6 +2886,133 @@ def _backfill_repoint_default_links_to_forks(cursor: sqlite3.Cursor) -> int:
                 )
             repointed += 1
     return repointed
+
+
+# Finished-run stores that reference an evaluator by uuid. The JSON stores keep
+# the evaluator uuid as a literal token inside `details`/`results`; the column
+# stores keep it in `evaluator_id` (with the parent's org reachable by join).
+_DEFAULT_SNAPSHOT_JSON_STORES = (
+    # (table, org-resolving JOIN + org column alias)
+    ("agent_test_jobs", "JOIN agents p ON p.uuid = t.agent_id", "p.org_uuid"),
+    ("simulation_jobs", "JOIN simulations p ON p.uuid = t.simulation_id", "p.org_uuid"),
+    ("jobs", "", "t.org_uuid"),
+)
+_DEFAULT_SNAPSHOT_COLUMN_STORES = (
+    # (table, org-resolving JOIN, org column, has evaluator_version_id column)
+    ("evaluator_runs", "JOIN jobs p ON p.uuid = t.job_id", "p.org_uuid", True),
+    (
+        "annotation_job_evaluators",
+        "JOIN annotation_jobs aj ON aj.uuid = t.job_id "
+        "JOIN annotation_tasks p ON p.uuid = aj.task_id",
+        "p.org_uuid",
+        False,
+    ),
+)
+
+
+def _backfill_repoint_default_job_snapshots(cursor: sqlite3.Cursor) -> int:
+    """One-time migration: rewrite FINISHED-run evaluator references from the
+    shared default *templates* to the run's-org fork, so a past run's evaluator
+    click opens the org's editable copy instead of the read-only template.
+
+    Two store shapes, both keyed off the run's org:
+      * JSON stores (`agent_test_jobs`, `simulation_jobs`, `jobs`) keep the
+        evaluator uuid as a literal token in `details`/`results`. Because a uuid
+        is a globally-unique 36-char string, a per-row org-scoped string replace
+        of `template_uuid → fork_uuid` rewrites every occurrence (snapshot block,
+        judge_results, config) consistently — no JSON parsing, and the frozen
+        prompt/rubric/scores are untouched (only the evaluator's identity moves).
+      * Column stores (`evaluator_runs`, `annotation_job_evaluators`) keep it in
+        `evaluator_id`; update to the fork (and re-pin `evaluator_version_id` to
+        the fork's live version where that column exists).
+
+    A run whose org has no fork for that template (org deleted it) is left on the
+    template. Idempotent — after the swap no template uuids remain — but caller
+    still flag-gates it. Caller commits and records
+    `REPOINT_DEFAULT_JOB_SNAPSHOTS_MIGRATION` in the same transaction.
+    """
+    cursor.execute(
+        "SELECT uuid, slug FROM evaluators "
+        "WHERE org_uuid IS NULL AND slug IS NOT NULL AND deleted_at IS NULL"
+    )
+    slug_by_template = {r["uuid"]: r["slug"] for r in cursor.fetchall()}
+    if not slug_by_template:
+        return 0
+    template_uuids = tuple(slug_by_template)
+    placeholders = ",".join("?" * len(template_uuids))
+
+    cursor.execute(
+        "SELECT org_uuid, source_default_slug, uuid, live_version_id "
+        "FROM evaluators WHERE source_default_slug IS NOT NULL AND deleted_at IS NULL"
+    )
+    fork_by_org_slug = {
+        (r["org_uuid"], r["source_default_slug"]): (r["uuid"], r["live_version_id"])
+        for r in cursor.fetchall()
+    }
+
+    def _fork(org, template_uuid):
+        return fork_by_org_slug.get((org, slug_by_template.get(template_uuid)))
+
+    changed = 0
+
+    for table, join, org_col in _DEFAULT_SNAPSHOT_JSON_STORES:
+        cursor.execute(
+            f"SELECT t.id AS id, t.details AS details, t.results AS results, "
+            f"{org_col} AS org FROM {table} t {join}"
+        )
+        for row in cursor.fetchall():
+            org = row["org"]
+            if org is None:
+                continue
+            details, results = row["details"], row["results"]
+            new_details, new_results, touched = details, results, False
+            for t_uuid in template_uuids:
+                fork = _fork(org, t_uuid)
+                if not fork:
+                    continue
+                f_uuid = fork[0]
+                if new_details and t_uuid in new_details:
+                    new_details = new_details.replace(t_uuid, f_uuid)
+                    touched = True
+                if new_results and t_uuid in new_results:
+                    new_results = new_results.replace(t_uuid, f_uuid)
+                    touched = True
+            if touched:
+                cursor.execute(
+                    f"UPDATE {table} SET details = ?, results = ? WHERE id = ?",
+                    (new_details, new_results, row["id"]),
+                )
+                changed += 1
+
+    for table, join, org_col, has_version in _DEFAULT_SNAPSHOT_COLUMN_STORES:
+        cursor.execute(
+            f"SELECT t.id AS id, t.evaluator_id AS evaluator_id, {org_col} AS org "
+            f"FROM {table} t {join} "
+            f"WHERE t.evaluator_id IN ({placeholders})",
+            template_uuids,
+        )
+        for row in cursor.fetchall():
+            org = row["org"]
+            if org is None:
+                continue
+            fork = _fork(org, row["evaluator_id"])
+            if not fork:
+                continue
+            f_uuid, f_live = fork
+            if has_version and f_live:
+                cursor.execute(
+                    f"UPDATE {table} SET evaluator_id = ?, evaluator_version_id = ? "
+                    "WHERE id = ?",
+                    (f_uuid, f_live, row["id"]),
+                )
+            else:
+                cursor.execute(
+                    f"UPDATE {table} SET evaluator_id = ? WHERE id = ?",
+                    (f_uuid, row["id"]),
+                )
+            changed += 1
+
+    return changed
 
 
 # ============ Users Functions ============

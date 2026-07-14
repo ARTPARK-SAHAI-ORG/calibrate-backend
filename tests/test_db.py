@@ -973,6 +973,160 @@ def test_repoint_default_links_runs_via_init_db_and_is_flag_gated():
     assert row["evaluator_id"] == fork["uuid"]
 
 
+# ---------------------------------------------------------------------------
+# Finished-run snapshot re-point (past runs' evaluator click → org fork)
+# ---------------------------------------------------------------------------
+
+
+def _run_snapshot_repoint():
+    with db.get_db_connection() as conn:
+        n = db._backfill_repoint_default_job_snapshots(conn.cursor())
+        conn.commit()
+        return n
+
+
+def test_repoint_job_snapshots_rewrites_template_uuid_in_json():
+    _user, org_uuid = _fresh_org()
+    tmpl = db.get_evaluator_by_slug("default-safety")
+    fork = _forks_by_slug(org_uuid)["default-safety"]
+    job_uuid = _u("job")
+    details = f'{{"evaluators": [{{"uuid": "{tmpl["uuid"]}", "name": "Safety"}}]}}'
+    results = f'{{"rows": [{{"evaluator_id": "{tmpl["uuid"]}"}}]}}'
+    with db.get_db_connection() as conn:
+        conn.execute(
+            "INSERT INTO jobs (uuid, type, status, org_uuid, details, results) "
+            "VALUES (?, 'stt-eval', 'done', ?, ?, ?)",
+            (job_uuid, org_uuid, details, results),
+        )
+        conn.commit()
+
+    _run_snapshot_repoint()
+
+    with db.get_db_connection() as conn:
+        row = conn.execute(
+            "SELECT details, results FROM jobs WHERE uuid = ?", (job_uuid,)
+        ).fetchone()
+    # Both the details snapshot AND the results are rewritten to the fork; no
+    # trace of the template uuid remains.
+    assert fork["uuid"] in row["details"] and tmpl["uuid"] not in row["details"]
+    assert fork["uuid"] in row["results"] and tmpl["uuid"] not in row["results"]
+
+
+def test_repoint_job_snapshots_updates_evaluator_runs_column_and_repins_version():
+    _user, org_uuid = _fresh_org()
+    tmpl = db.get_evaluator_by_slug("default-helpfulness")
+    fork = _forks_by_slug(org_uuid)["default-helpfulness"]
+    job_uuid, run_uuid = _u("job"), _u("run")
+    with db.get_db_connection() as conn:
+        conn.execute(
+            "INSERT INTO jobs (uuid, type, status, org_uuid) "
+            "VALUES (?, 'annotation-eval', 'done', ?)",
+            (job_uuid, org_uuid),
+        )
+        conn.execute(
+            "INSERT INTO evaluator_runs "
+            "(uuid, job_id, item_id, evaluator_id, evaluator_version_id) "
+            "VALUES (?, ?, ?, ?, ?)",
+            (run_uuid, job_uuid, _u("item"), tmpl["uuid"], tmpl["live_version_id"]),
+        )
+        conn.commit()
+
+    _run_snapshot_repoint()
+
+    with db.get_db_connection() as conn:
+        row = conn.execute(
+            "SELECT evaluator_id, evaluator_version_id FROM evaluator_runs "
+            "WHERE uuid = ?",
+            (run_uuid,),
+        ).fetchone()
+    assert row["evaluator_id"] == fork["uuid"]
+    assert row["evaluator_version_id"] == fork["live_version_id"]
+
+
+def test_repoint_job_snapshots_updates_annotation_job_evaluators_column():
+    user_uuid, org_uuid = _fresh_org()
+    tmpl = db.get_evaluator_by_slug("default-conciseness")
+    fork = _forks_by_slug(org_uuid)["default-conciseness"]
+    task_uuid, job_uuid = _u("task"), _u("ajob")
+    with db.get_db_connection() as conn:
+        conn.execute(
+            "INSERT INTO annotation_tasks (uuid, user_id, name, org_uuid) "
+            "VALUES (?, ?, 'T', ?)",
+            (task_uuid, user_uuid, org_uuid),
+        )
+        conn.execute(
+            "INSERT INTO annotation_jobs (uuid, task_id, annotator_id, public_token) "
+            "VALUES (?, ?, ?, ?)",
+            (job_uuid, task_uuid, _u("ann"), _u("tok")),
+        )
+        conn.execute(
+            "INSERT INTO annotation_job_evaluators (job_id, evaluator_id, position) "
+            "VALUES (?, ?, 0)",
+            (job_uuid, tmpl["uuid"]),
+        )
+        conn.commit()
+
+    _run_snapshot_repoint()
+
+    with db.get_db_connection() as conn:
+        row = conn.execute(
+            "SELECT evaluator_id FROM annotation_job_evaluators WHERE job_id = ?",
+            (job_uuid,),
+        ).fetchone()
+    assert row["evaluator_id"] == fork["uuid"]
+
+
+def test_repoint_job_snapshots_leaves_template_when_org_deleted_fork():
+    _user, org_uuid = _fresh_org()
+    tmpl = db.get_evaluator_by_slug("default-faithfulness")
+    fork = _forks_by_slug(org_uuid)["default-faithfulness"]
+    assert db.delete_evaluator(fork["uuid"]) is True  # org deleted its fork
+    job_uuid = _u("job")
+    details = f'{{"evaluators": [{{"uuid": "{tmpl["uuid"]}"}}]}}'
+    with db.get_db_connection() as conn:
+        conn.execute(
+            "INSERT INTO jobs (uuid, type, status, org_uuid, details) "
+            "VALUES (?, 'stt-eval', 'done', ?, ?)",
+            (job_uuid, org_uuid, details),
+        )
+        conn.commit()
+
+    _run_snapshot_repoint()
+
+    with db.get_db_connection() as conn:
+        row = conn.execute(
+            "SELECT details FROM jobs WHERE uuid = ?", (job_uuid,)
+        ).fetchone()
+    assert tmpl["uuid"] in row["details"]  # no fork to move to → unchanged
+
+
+def test_repoint_job_snapshots_runs_via_init_db_and_is_flag_gated():
+    _user, org_uuid = _fresh_org()
+    tmpl = db.get_evaluator_by_slug("default-instruction-following")
+    fork = _forks_by_slug(org_uuid)["default-instruction-following"]
+    job_uuid = _u("job")
+    details = f'{{"evaluators": [{{"uuid": "{tmpl["uuid"]}"}}]}}'
+    with db.get_db_connection() as conn:
+        conn.execute(
+            "INSERT INTO jobs (uuid, type, status, org_uuid, details) "
+            "VALUES (?, 'stt-eval', 'done', ?, ?)",
+            (job_uuid, org_uuid, details),
+        )
+        conn.execute(
+            "DELETE FROM _schema_migrations WHERE name = ?",
+            (db.REPOINT_DEFAULT_JOB_SNAPSHOTS_MIGRATION,),
+        )
+        conn.commit()
+
+    db.init_db()
+
+    with db.get_db_connection() as conn:
+        row = conn.execute(
+            "SELECT details FROM jobs WHERE uuid = ?", (job_uuid,)
+        ).fetchone()
+    assert fork["uuid"] in row["details"]
+
+
 def test_get_evaluators_for_test_resolves_live_version(user):
     """A test run must always use the evaluator's CURRENT live version, not the
     version pinned on the pivot at link time. Editing the evaluator (new live
