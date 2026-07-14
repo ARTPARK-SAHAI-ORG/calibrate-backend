@@ -855,6 +855,124 @@ def test_create_organization_provisions_default_forks():
     assert forks["default-safety"]["owner_user_id"] == owner
 
 
+def _run_repoint():
+    with db.get_db_connection() as conn:
+        n = db._backfill_repoint_default_links_to_forks(conn.cursor())
+        conn.commit()
+        return n
+
+
+def _active_test_link(test_uuid):
+    with db.get_db_connection() as conn:
+        return conn.execute(
+            "SELECT evaluator_id, evaluator_version_id FROM test_evaluators "
+            "WHERE test_id = ? AND deleted_at IS NULL",
+            (test_uuid,),
+        ).fetchall()
+
+
+def test_repoint_relinks_test_template_link_to_fork_and_repins_version():
+    user_uuid, org_uuid = _fresh_org()
+    tmpl = db.get_evaluator_by_slug("default-safety")
+    test_uuid = db.create_test(
+        name=_u("t-repoint"), type="llm", user_id=user_uuid, org_uuid=org_uuid
+    )
+    db.add_evaluator_to_test(test_uuid, tmpl["uuid"], tmpl["live_version_id"])
+
+    _run_repoint()
+
+    fork = _forks_by_slug(org_uuid)["default-safety"]
+    rows = _active_test_link(test_uuid)
+    assert [r["evaluator_id"] for r in rows] == [fork["uuid"]]
+    # the pinned version follows the fork (the template's version id doesn't
+    # exist under the fork)
+    assert rows[0]["evaluator_version_id"] == fork["live_version_id"]
+
+
+def test_repoint_relinks_agent_template_link_to_fork():
+    user_uuid, org_uuid = _fresh_org()
+    tmpl = db.get_evaluator_by_slug("default-helpfulness")
+    agent_uuid = db.create_agent(
+        name=_u("a-repoint"), user_id=user_uuid, org_uuid=org_uuid
+    )
+    db.add_evaluator_to_agent(agent_uuid, tmpl["uuid"])
+
+    _run_repoint()
+
+    fork = _forks_by_slug(org_uuid)["default-helpfulness"]
+    with db.get_db_connection() as conn:
+        row = conn.execute(
+            "SELECT evaluator_id FROM agent_evaluators "
+            "WHERE agent_id = ? AND deleted_at IS NULL",
+            (agent_uuid,),
+        ).fetchone()
+    assert row["evaluator_id"] == fork["uuid"]
+
+
+def test_repoint_soft_deletes_redundant_template_link_on_collision():
+    user_uuid, org_uuid = _fresh_org()
+    tmpl = db.get_evaluator_by_slug("default-safety")
+    fork = _forks_by_slug(org_uuid)["default-safety"]
+    test_uuid = db.create_test(
+        name=_u("t-collide"), type="llm", user_id=user_uuid, org_uuid=org_uuid
+    )
+    # The test already links the fork AND (legacy) the template.
+    db.add_evaluator_to_test(test_uuid, fork["uuid"], fork["live_version_id"])
+    db.add_evaluator_to_test(test_uuid, tmpl["uuid"], tmpl["live_version_id"])
+
+    _run_repoint()
+
+    # Only the fork link survives; the redundant template link is soft-deleted —
+    # no UNIQUE(test_id, evaluator_id) collision, no duplicate.
+    rows = _active_test_link(test_uuid)
+    assert [r["evaluator_id"] for r in rows] == [fork["uuid"]]
+
+
+def test_repoint_leaves_link_on_template_when_org_deleted_its_fork():
+    user_uuid, org_uuid = _fresh_org()
+    tmpl = db.get_evaluator_by_slug("default-conciseness")
+    fork = _forks_by_slug(org_uuid)["default-conciseness"]
+    test_uuid = db.create_test(
+        name=_u("t-nofork"), type="llm", user_id=user_uuid, org_uuid=org_uuid
+    )
+    db.add_evaluator_to_test(test_uuid, tmpl["uuid"], tmpl["live_version_id"])
+    assert db.delete_evaluator(fork["uuid"]) is True  # org deleted its fork
+
+    _run_repoint()
+
+    # No fork to move to ⇒ the link stays on the template (still resolvable).
+    rows = _active_test_link(test_uuid)
+    assert [r["evaluator_id"] for r in rows] == [tmpl["uuid"]]
+
+
+def test_repoint_default_links_runs_via_init_db_and_is_flag_gated():
+    user_uuid, org_uuid = _fresh_org()
+    tmpl = db.get_evaluator_by_slug("default-instruction-following")
+    agent_uuid = db.create_agent(
+        name=_u("a-repoint-initdb"), user_id=user_uuid, org_uuid=org_uuid
+    )
+    db.add_evaluator_to_agent(agent_uuid, tmpl["uuid"])
+
+    # Simulate a pre-migration DB: clear the flag so init_db re-runs the re-point.
+    with db.get_db_connection() as conn:
+        conn.execute(
+            "DELETE FROM _schema_migrations WHERE name = ?",
+            (db.REPOINT_DEFAULT_LINKS_MIGRATION,),
+        )
+        conn.commit()
+
+    db.init_db()
+
+    fork = _forks_by_slug(org_uuid)["default-instruction-following"]
+    with db.get_db_connection() as conn:
+        row = conn.execute(
+            "SELECT evaluator_id FROM agent_evaluators "
+            "WHERE agent_id = ? AND deleted_at IS NULL",
+            (agent_uuid,),
+        ).fetchone()
+    assert row["evaluator_id"] == fork["uuid"]
+
+
 def test_get_evaluators_for_test_resolves_live_version(user):
     """A test run must always use the evaluator's CURRENT live version, not the
     version pinned on the pivot at link time. Editing the evaluator (new live

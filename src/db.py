@@ -1515,6 +1515,19 @@ def init_db():
                     f"Forked default evaluators into existing orgs: {forked} copy(ies)"
                 )
 
+        # Re-point pre-existing evaluator links from the shared default templates
+        # to each org's fork (one-time). Runs after the fork backfill so the
+        # forks exist. Finished-run job snapshots stay frozen.
+        if not _schema_migration_applied(cursor, REPOINT_DEFAULT_LINKS_MIGRATION):
+            repointed = _backfill_repoint_default_links_to_forks(cursor)
+            _mark_schema_migration_applied(cursor, REPOINT_DEFAULT_LINKS_MIGRATION)
+            conn.commit()
+            if repointed:
+                logger.info(
+                    f"Re-pointed {repointed} evaluator link(s) from default "
+                    "templates to org forks"
+                )
+
         conn.commit()
         logger.info("Database initialized successfully")
 
@@ -2559,6 +2572,7 @@ def _backfill_agent_evaluator_links(cursor: sqlite3.Cursor) -> int:
 
 
 FORK_DEFAULT_EVALUATORS_MIGRATION = "fork_default_evaluators_per_org_v1"
+REPOINT_DEFAULT_LINKS_MIGRATION = "repoint_default_evaluator_links_to_forks_v1"
 
 
 def _org_owner_user_id(cursor: sqlite3.Cursor, org_uuid: str) -> Optional[str]:
@@ -2749,6 +2763,110 @@ def _backfill_fork_default_evaluators(cursor: sqlite3.Cursor) -> int:
     for org_uuid in org_uuids:
         total += _provision_default_evaluators_for_org(cursor, org_uuid)
     return total
+
+
+# The evaluator link pivots that a live entity uses for FUTURE runs, with the
+# parent's org column and whether the pivot pins an evaluator_version_id. Job
+# snapshots (agent_test_jobs / simulation_jobs / STT-TTS job details /
+# annotation_job_evaluators) are deliberately excluded — a finished run stays
+# frozen against the version it actually used.
+_DEFAULT_LINK_PIVOTS = (
+    ("test_evaluators", "test_id", "tests", True),
+    ("agent_evaluators", "agent_id", "agents", False),
+    ("simulation_evaluators", "simulation_id", "simulations", True),
+    ("annotation_task_evaluators", "task_id", "annotation_tasks", False),
+)
+
+
+def _backfill_repoint_default_links_to_forks(cursor: sqlite3.Cursor) -> int:
+    """One-time migration: re-point existing evaluator links from the shared
+    default *templates* to each linking entity's org-specific fork.
+
+    Before per-org forks, tests/agents/simulations/annotation-tasks linked the
+    shared template (`org_uuid IS NULL`). After forking, those links must follow
+    the org's editable copy so the user's edits reach already-linked entities and
+    the linked evaluator shows up in their list. Only the live pivots are
+    re-pointed; finished-run job snapshots stay frozen for reproducibility.
+
+    For each active link pointing at a template, resolve the parent's org and
+    that org's live fork of the template's slug, then update `evaluator_id` (and,
+    for the two versioned pivots, `evaluator_version_id` → the fork's live
+    version). Links whose org deleted its fork are left on the template (still
+    resolvable). If the parent already links the fork, the redundant template
+    link is soft-deleted to respect `UNIQUE(parent, evaluator_id)`.
+
+    Caller commits and records `REPOINT_DEFAULT_LINKS_MIGRATION` in the same
+    transaction so a crash mid-migration retries on next init_db.
+    """
+    cursor.execute(
+        "SELECT uuid, slug FROM evaluators "
+        "WHERE org_uuid IS NULL AND slug IS NOT NULL AND deleted_at IS NULL"
+    )
+    slug_by_template = {r["uuid"]: r["slug"] for r in cursor.fetchall()}
+    if not slug_by_template:
+        return 0
+
+    cursor.execute(
+        "SELECT org_uuid, source_default_slug, uuid, live_version_id "
+        "FROM evaluators WHERE source_default_slug IS NOT NULL AND deleted_at IS NULL"
+    )
+    fork_by_org_slug = {
+        (r["org_uuid"], r["source_default_slug"]): (r["uuid"], r["live_version_id"])
+        for r in cursor.fetchall()
+    }
+
+    placeholders = ",".join("?" * len(slug_by_template))
+    template_uuids = tuple(slug_by_template)
+    repointed = 0
+    for pivot, parent_col, parent_table, has_version in _DEFAULT_LINK_PIVOTS:
+        cursor.execute(
+            f"""
+            SELECT pv.id AS pivot_id, pv.{parent_col} AS parent_id,
+                   pv.evaluator_id AS evaluator_id, p.org_uuid AS org_uuid
+              FROM {pivot} pv
+              JOIN {parent_table} p ON p.uuid = pv.{parent_col}
+             WHERE pv.deleted_at IS NULL
+               AND pv.evaluator_id IN ({placeholders})
+            """,
+            template_uuids,
+        )
+        for row in cursor.fetchall():
+            org = row["org_uuid"]
+            if org is None:
+                continue
+            fork = fork_by_org_slug.get((org, slug_by_template[row["evaluator_id"]]))
+            if not fork:
+                continue  # org deleted its fork → leave the link on the template
+            fork_uuid, fork_live = fork
+            if has_version and not fork_live:
+                continue  # fork somehow has no live version → don't break the pin
+
+            # UNIQUE(parent, evaluator_id): if the parent already links the fork,
+            # soft-delete this redundant template link instead of colliding.
+            cursor.execute(
+                f"SELECT 1 FROM {pivot} "
+                f"WHERE {parent_col} = ? AND evaluator_id = ? AND deleted_at IS NULL "
+                "LIMIT 1",
+                (row["parent_id"], fork_uuid),
+            )
+            if cursor.fetchone() is not None:
+                cursor.execute(
+                    f"UPDATE {pivot} SET deleted_at = CURRENT_TIMESTAMP WHERE id = ?",
+                    (row["pivot_id"],),
+                )
+            elif has_version:
+                cursor.execute(
+                    f"UPDATE {pivot} "
+                    "SET evaluator_id = ?, evaluator_version_id = ? WHERE id = ?",
+                    (fork_uuid, fork_live, row["pivot_id"]),
+                )
+            else:
+                cursor.execute(
+                    f"UPDATE {pivot} SET evaluator_id = ? WHERE id = ?",
+                    (fork_uuid, row["pivot_id"]),
+                )
+            repointed += 1
+    return repointed
 
 
 # ============ Users Functions ============
