@@ -27,6 +27,36 @@ _FAKE_PROVIDER_NAMES = (
     "smallest",
 )
 
+# Every provider the calibrate CLI can probe, mapped to the env vars that must
+# ALL be set for it to be usable. Mirrors calibrate_agent.status.PROVIDERS —
+# kept in sync by hand because the backend only ever spawns that CLI as a
+# subprocess, never imports it as a library.
+PROVIDER_ENV_VARS: Dict[str, list[str]] = {
+    "deepgram": ["DEEPGRAM_API_KEY"],
+    "openai": ["OPENAI_API_KEY"],
+    "groq": ["GROQ_API_KEY"],
+    "google": ["GOOGLE_APPLICATION_CREDENTIALS", "GOOGLE_CLOUD_PROJECT_ID"],
+    "gemini": ["GOOGLE_API_KEY"],
+    "sarvam": ["SARVAM_API_KEY"],
+    "elevenlabs": ["ELEVENLABS_API_KEY"],
+    "cartesia": ["CARTESIA_API_KEY"],
+    "smallest": ["SMALLEST_API_KEY"],
+    "openrouter": ["OPENROUTER_API_KEY"],
+}
+
+
+def available_provider_names() -> list[str]:
+    """Provider names whose required env vars are all set (registry order)."""
+    # Integration testing: treat every provider as configured so the UI shows
+    # the full set without real keys (see FAKE_AI_PROVIDERS in utils.py).
+    if env_bool("FAKE_AI_PROVIDERS", False):
+        return list(PROVIDER_ENV_VARS)
+    return [
+        name
+        for name, env_vars in PROVIDER_ENV_VARS.items()
+        if all(os.getenv(var) for var in env_vars)
+    ]
+
 
 def _fake_healthy_providers() -> Dict[str, Any]:
     return {name: {"status": "pass"} for name in _FAKE_PROVIDER_NAMES}
