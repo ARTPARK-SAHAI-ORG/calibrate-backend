@@ -9,7 +9,7 @@ import json
 from datetime import datetime, timedelta
 from enum import Enum
 from pathlib import Path
-from typing import Annotated, List, Literal, Optional, Dict, Any, Union
+from typing import Annotated, List, Literal, Optional, Dict, Any, Union, Tuple
 from urllib.parse import quote
 
 import boto3
@@ -618,6 +618,11 @@ def download_file_from_s3(
     """
     if is_local_object_storage():
         source = get_local_artifact_path(s3_key)
+        if not source.is_file():
+            raise FileNotFoundError(
+                f"Audio file not found for storage key {s3_key!r} "
+                f"(expected at {source}). Upload the file before running evaluators."
+            )
         Path(local_path).parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(source, local_path)
         return
@@ -724,6 +729,66 @@ def generate_presigned_download_url(
         return None
 
 
+def normalize_stored_audio_path(audio_path: Optional[str]) -> Optional[str]:
+    """Collapse a persisted audio reference to a bare storage key.
+
+    Annotation items should store keys (``tts/media/<uuid>.wav``) or
+    ``s3://bucket/key`` URIs. The frontend sometimes round-trips a dev
+    ``/local-artifacts/…`` playback URL instead — strip that prefix so
+    download/presign resolve the same object."""
+    if not audio_path:
+        return audio_path
+    path = str(audio_path).strip()
+    if path.startswith("s3://"):
+        return path
+    if path.startswith("/local-artifacts/"):
+        return path[len("/local-artifacts/") :].lstrip("/")
+    if path.startswith("http://") or path.startswith("https://"):
+        from urllib.parse import urlparse
+
+        parsed = urlparse(path)
+        marker = "/local-artifacts/"
+        idx = parsed.path.find(marker)
+        if idx != -1:
+            return parsed.path[idx + len(marker) :].lstrip("/")
+        return path
+    return path.lstrip("/")
+
+
+def resolve_stored_audio_bucket_and_key(audio_path: str) -> Tuple[str, str]:
+    """Parse a normalized or raw stored audio reference into (bucket, key)."""
+    normalized = normalize_stored_audio_path(audio_path) or ""
+    if normalized.startswith("s3://"):
+        parts = normalized[5:].split("/", 1)
+        bucket = parts[0]
+        key = parts[1] if len(parts) > 1 else ""
+        return bucket, key
+    if normalized.startswith("http://") or normalized.startswith("https://"):
+        raise ValueError(
+            "audio_path must be a storage key or s3:// URI, not an external URL"
+        )
+    return get_s3_output_config(), normalized
+
+
+def stored_audio_exists(bucket: str, s3_key: str) -> bool:
+    """Return whether an object exists at the given storage location."""
+    if not s3_key:
+        return False
+    if is_local_object_storage():
+        try:
+            return get_local_artifact_path(s3_key).is_file()
+        except ValueError:
+            return False
+    s3 = get_s3_client()
+    if s3 is None:
+        return False
+    try:
+        s3.head_object(Bucket=bucket, Key=s3_key)
+        return True
+    except Exception:
+        return False
+
+
 def presign_audio_path(
     audio_path: Optional[str],
     expiration: int = PRESIGNED_URL_EXPIRY_SECONDS,
@@ -731,17 +796,24 @@ def presign_audio_path(
     """Convert an s3://bucket/key path (or plain key) to a presigned download URL."""
     if not audio_path:
         return audio_path
-    if audio_path.startswith("s3://"):
-        parts = audio_path[5:].split("/", 1)
+    normalized = normalize_stored_audio_path(audio_path)
+    if normalized and normalized.startswith("s3://"):
+        parts = normalized[5:].split("/", 1)
         bucket = parts[0]
         key = parts[1] if len(parts) > 1 else ""
         return (
             generate_presigned_download_url(key, bucket=bucket, expiration=expiration)
             or audio_path
         )
-    if audio_path.startswith("http"):
-        return audio_path
-    return generate_presigned_download_url(audio_path, expiration=expiration) or audio_path
+    if normalized and (
+        normalized.startswith("http://") or normalized.startswith("https://")
+    ):
+        return normalized
+    return (
+        generate_presigned_download_url(normalized, expiration=expiration)
+        if normalized
+        else audio_path
+    ) or audio_path
 
 
 # Long TTL for audio playback URLs handed to annotation reads. Unauthenticated

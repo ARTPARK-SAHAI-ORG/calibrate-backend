@@ -8,6 +8,7 @@ seam or the fake's per-subcommand output contract.
 
 import asyncio
 import os
+from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -303,6 +304,10 @@ _ANNOTATION_CASES = {
             {"role": "assistant", "content": "hello"},
         ]
     },
+    "tts": {
+        "text": "hello",
+        "audio_path": "s3://bucket/tts/media/clip.wav",
+    },
 }
 
 
@@ -348,7 +353,12 @@ def test_annotation_eval_run_job_end_to_end_with_fake_cli(task_type):
         "annotation_eval_runner.get_s3_client", return_value=MagicMock()
     ), patch(
         "annotation_eval_runner.get_s3_output_config", return_value="bucket"
-    ), patch("annotation_eval_runner.upload_file_to_s3"), patch(
+    ), patch(
+        "annotation_eval_runner.download_file_from_s3",
+        side_effect=lambda _s3, _b, _k, local: Path(local).write_bytes(b"wav"),
+    ), patch("annotation_eval_runner.stored_audio_exists", return_value=True), patch(
+        "annotation_eval_runner.upload_file_to_s3"
+    ), patch(
         "annotation_eval_runner.time.sleep"
     ):
         _run_job("j-1", "task-1", "u-1", [resolved], item_ids=None)

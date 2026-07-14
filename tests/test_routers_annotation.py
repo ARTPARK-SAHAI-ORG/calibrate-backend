@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import uuid
+from pathlib import Path
 from unittest.mock import patch
 
 import pytest
@@ -194,15 +195,12 @@ def _tts_evaluator(client, h):
     return next(e for e in evaluators if e.get("evaluator_type") == "tts")
 
 
-def test_tts_task_type_parity_but_run_deferred(client):
-    """`tts` is an accepted task type (create/items/evaluator-linking parity with
-    `stt`), but evaluator runs are deferred — the CLI has no `tts --eval-only`
-    judge, so launching a run 400s."""
+def test_tts_task_type_evaluator_run_launches(client, monkeypatch):
+    """`tts` tasks accept evaluator runs once items carry `text` + `audio_path`."""
     auth = _signup(client)
     h = auth["headers"]
     tts_ev = _tts_evaluator(client, h)
 
-    # Create a tts task, linking a tts evaluator at creation.
     name = f"tts-task-{uuid.uuid4().hex[:6]}"
     create = client.post(
         "/annotation-tasks",
@@ -212,20 +210,62 @@ def test_tts_task_type_parity_but_run_deferred(client):
     assert create.status_code == 200
     task_uuid = create.json()["uuid"]
 
-    detail = client.get(f"/annotation-tasks/{task_uuid}", headers=h).json()
-    assert detail["type"] == "tts"
-    assert [e["uuid"] for e in detail["evaluators"]] == [tts_ev["uuid"]]
+    item_ids = client.post(
+        f"/annotation-tasks/{task_uuid}/items",
+        json={
+            "items": [
+                {
+                    "payload": {
+                        "name": "clip-1",
+                        "text": "Hello world",
+                        "audio_path": "s3://test-bucket/tts/media/abc.wav",
+                    }
+                }
+            ]
+        },
+        headers=h,
+    ).json()["item_ids"]
 
-    # Item creation works (only `name` is required, same as every type).
-    items = client.post(
+    monkeypatch.setenv("FAKE_AI_PROVIDERS", "1")
+    with patch(
+        "annotation_eval_runner.download_file_from_s3",
+        side_effect=lambda _s3, _b, _k, local: Path(local).write_bytes(b"wav"),
+    ), patch("annotation_eval_runner.stored_audio_exists", return_value=True):
+        run = client.post(
+            f"/annotation-tasks/{task_uuid}/evaluator-runs",
+            json={
+                "evaluators": [{"evaluator_id": tts_ev["uuid"]}],
+                "item_ids": item_ids,
+            },
+            headers=h,
+        )
+    assert run.status_code == 200, run.text
+    body = run.json()
+    assert body["evaluator_count"] == 1
+    assert body["item_count"] == 1
+    assert body["status"] in ("in_progress", "queued")
+
+
+def test_tts_evaluator_run_requires_text_and_audio_path(client):
+    """TTS evaluator runs 400 when items lack `text` or `audio_path`."""
+    auth = _signup(client)
+    h = auth["headers"]
+    tts_ev = _tts_evaluator(client, h)
+    task_uuid = client.post(
+        "/annotation-tasks",
+        json={
+            "name": f"tts-{uuid.uuid4().hex[:6]}",
+            "type": "tts",
+            "evaluator_ids": [tts_ev["uuid"]],
+        },
+        headers=h,
+    ).json()["uuid"]
+    item_ids = client.post(
         f"/annotation-tasks/{task_uuid}/items",
         json={"items": [{"payload": {"name": "clip-1"}}]},
         headers=h,
-    )
-    assert items.status_code == 200
-    item_ids = items.json()["item_ids"]
+    ).json()["item_ids"]
 
-    # Evaluator run is not supported for tts → 400.
     run = client.post(
         f"/annotation-tasks/{task_uuid}/evaluator-runs",
         json={
@@ -235,7 +275,7 @@ def test_tts_task_type_parity_but_run_deferred(client):
         headers=h,
     )
     assert run.status_code == 400
-    assert "task type 'tts'" in run.json()["detail"]
+    assert "text" in run.json()["detail"] and "audio_path" in run.json()["detail"]
 
 
 def test_tts_item_audio_path_signed_on_reads(client):
@@ -2027,20 +2067,12 @@ def test_annotation_eval_llm_general_payload_validation(client):
     assert "input" in resp.json()["detail"]
 
 
-def test_annotation_eval_supported_task_types_gap_is_exactly_tts():
-    """`tts` is a creatable annotation task type but has no evaluator-run path
-    (the CLI has no `tts --eval-only` judge), so it is deliberately kept out of
-    SUPPORTED_EVAL_TASK_TYPES. That makes the unsupported-type 400 guard in the
-    evaluator-runs endpoint reachable — pin the gap to exactly `{tts}` so any
-    other creatable-but-unsupported type is caught (either wire its eval path or
-    make the deferral explicit)."""
+def test_annotation_eval_supported_task_types_match_creatable():
+    """Every creatable annotation task type has a wired evaluator-run path."""
     import db as db_mod
     from annotation_eval_runner import SUPPORTED_EVAL_TASK_TYPES
 
-    assert "tts" in db_mod.ANNOTATION_TASK_TYPES
-    assert "tts" not in SUPPORTED_EVAL_TASK_TYPES
-    unsupported = set(db_mod.ANNOTATION_TASK_TYPES) - set(SUPPORTED_EVAL_TASK_TYPES)
-    assert unsupported == {"tts"}, f"unexpected creatable task types with no eval support: {unsupported}"
+    assert set(db_mod.ANNOTATION_TASK_TYPES) == set(SUPPORTED_EVAL_TASK_TYPES)
 
 
 def test_annotation_task_summary_pagination(client):

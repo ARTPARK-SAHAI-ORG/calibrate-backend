@@ -1,7 +1,8 @@
 """Background worker for annotation-task evaluator runs.
 
-Routes the LLM-as-judge work through the calibrate CLI's STT `--eval-only` mode
-so the judge logic isn't duplicated between backend and CLI.
+Routes LLM-as-judge work through the calibrate CLI's STT/TTS `--eval-only`
+modes (and `calibrate general` for `llm-general`) so the judge logic isn't
+duplicated between backend and CLI.
 
 Reuses the existing eval-output helpers (`_read_results_csv`, `_read_metrics_json`,
 `upload_top_level_files_to_s3`, `build_evaluator_cli_payload`) — nothing here
@@ -48,12 +49,16 @@ from utils import (
     TaskStatus,
     capture_exception_to_sentry,
     coerce_evaluator_score,
+    download_file_from_s3,
     get_calibrate_agent_cli,
     get_s3_client,
     get_s3_output_config,
     is_job_timed_out,
     kill_process_group,
+    normalize_stored_audio_path,
     register_job_starter,
+    resolve_stored_audio_bucket_and_key,
+    stored_audio_exists,
     try_start_queued_job,
     upload_file_to_s3,
     upload_top_level_files_to_s3,
@@ -103,14 +108,11 @@ EVAL_JOB_TYPES = ["stt-eval", "tts-eval", "annotation-eval"]
 ANNOTATION_EVAL_JOB_TYPE = "annotation-eval"
 
 # Task types whose annotation rows we know how to evaluate via the CLI's
-# --eval-only modes. This is a STRICT SUBSET of db.ANNOTATION_TASK_TYPES: `tts`
-# is an accepted task type (create/items/link) but has no eval path — the CLI
-# has no `tts --eval-only` judge and annotation items store no audio S3 keys, so
-# a tts task hits the unsupported-type 400 guard in the evaluator-runs endpoint.
-# `voice` simulation likewise isn't supported by the CLI in eval-only mode.
+# --eval-only modes (or `calibrate general` for `llm-general`). Matches
+# db.ANNOTATION_TASK_TYPES — every creatable task type has a run path.
 # `llm-general` (non-conversational input -> output) uses the dedicated
 # `calibrate general` command — see `_build_llm_general_dataset`.
-SUPPORTED_EVAL_TASK_TYPES = ("stt", "llm", "llm-general", "conversation")
+SUPPORTED_EVAL_TASK_TYPES = ("stt", "llm", "llm-general", "conversation", "tts")
 
 logger = logging.getLogger(__name__)
 
@@ -442,6 +444,84 @@ def _build_llm_general_dataset(
     return out
 
 
+def _resolve_s3_bucket_and_key(audio_path: str) -> Tuple[str, str]:
+    """Parse a stored annotation audio reference into (bucket, key)."""
+    try:
+        return resolve_stored_audio_bucket_and_key(audio_path)
+    except ValueError as e:
+        raise DatasetBuildError(str(e)) from e
+
+
+def _build_tts_dataset(items: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """TTS --eval-only: validate `{id, text, audio_path}` rows.
+
+    The CLI reads a run directory's ``results.csv`` plus local audio files, not
+    a JSON dataset — see :func:`_prepare_tts_eval_run_dir`. This builder only
+    validates payload shape for the synchronous 400 guard and documents the
+    per-item contract."""
+    out: List[Dict[str, Any]] = []
+    for it in items:
+        payload = _payload_dict(it)
+        text = payload.get("text")
+        raw_audio_path = payload.get("audio_path")
+        if text is None or not raw_audio_path:
+            raise DatasetBuildError(
+                f"Item {it['uuid']}: TTS items need `text` and `audio_path` "
+                "in payload"
+            )
+        audio_path = normalize_stored_audio_path(str(raw_audio_path)) or ""
+        if audio_path.startswith("http://") or audio_path.startswith("https://"):
+            raise DatasetBuildError(
+                f"Item {it['uuid']}: `audio_path` must be a storage key or "
+                "s3:// URI (store the key from POST /presigned-url, not the "
+                "upload or playback URL)"
+            )
+        bucket, key = _resolve_s3_bucket_and_key(audio_path)
+        if not stored_audio_exists(bucket, key):
+            raise DatasetBuildError(
+                f"Item {it['uuid']}: audio file not found for key {key!r}. "
+                "Upload the clip via the presigned URL before running evaluators."
+            )
+        out.append(
+            {
+                "id": it["uuid"],
+                "text": str(text),
+                "audio_path": audio_path,
+            }
+        )
+    return out
+
+
+def _prepare_tts_eval_run_dir(input_dir: Path, items: List[Dict[str, Any]]) -> Path:
+    """Materialize the run directory ``calibrate-agent tts --eval-only`` expects.
+
+    Downloads each item's audio from S3 server-side (using the stored key, not
+    any client-signed URL), writes ``results.csv`` with absolute local paths,
+    and returns the run dir passed to ``--dataset``. ``output_dir`` must differ
+    from this path so calibrate does not overwrite the input run."""
+    rows = _build_tts_dataset(items)
+    run_dir = input_dir / "tts_run"
+    audios_dir = run_dir / "audios"
+    audios_dir.mkdir(parents=True, exist_ok=True)
+
+    s3 = get_s3_client()
+    csv_rows: List[List[str]] = []
+
+    for row in rows:
+        bucket, key = _resolve_s3_bucket_and_key(row["audio_path"])
+        suffix = Path(key).suffix or ".wav"
+        local_audio = audios_dir / f"{row['id']}{suffix}"
+        download_file_from_s3(s3, bucket, key, local_audio)
+        csv_rows.append([row["id"], row["text"], str(local_audio.resolve())])
+
+    with open(run_dir / "results.csv", "w", newline="", encoding="utf-8") as f:
+        writer = csv.writer(f)
+        writer.writerow(["id", "text", "audio_path"])
+        writer.writerows(csv_rows)
+
+    return run_dir
+
+
 def _build_simulation_dataset(items: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     """Text-simulation --eval-only: [{name, conversation_history}].
 
@@ -477,9 +557,11 @@ def build_dataset_for_task_type(
         return _build_llm_general_dataset(items, evaluators_resolved)
     if task_type == "conversation":
         return _build_simulation_dataset(items)
+    if task_type == "tts":
+        return _build_tts_dataset(items)
     raise DatasetBuildError(
         f"Evaluator runs are not supported for task type {task_type!r} "
-        "(supported: stt, llm, llm-general, conversation)"
+        "(supported: stt, llm, llm-general, conversation, tts)"
     )
 
 
@@ -520,6 +602,13 @@ def calibrate_command_for_task_type(
             "--eval-only",
             "--dataset", str(dataset_path),
             "-o", str(output_dir),
+        ]
+    if task_type == "tts":
+        return [
+            cli, "tts", "--eval-only",
+            "--dataset", str(dataset_path),
+            "-o", str(output_dir),
+            "--config", str(config_path),
         ]
     raise DatasetBuildError(f"Unsupported task type: {task_type!r}")
 
@@ -881,6 +970,8 @@ def parse_results_for_task_type(
         return _parse_results_simulation(
             output_dir, evaluators_resolved, job_uuid, items=items
         )
+    if task_type == "tts":
+        return _parse_results_stt(output_dir, evaluators_resolved, job_uuid)
     return []
 
 
@@ -1129,13 +1220,17 @@ def _run_job(
             output_dir.mkdir()
             output_dir_for_partial = output_dir
 
-            # 1. Dataset.
-            dataset = build_dataset_for_task_type(
-                task_type, items, evaluators_resolved
-            )
-            dataset_path = input_dir / "dataset.json"
-            with open(dataset_path, "w", encoding="utf-8") as f:
-                json.dump(dataset, f, ensure_ascii=False)
+            # 1. Dataset. TTS --eval-only reads a run directory (results.csv +
+            # local audio), not a JSON file — materialize that layout here.
+            if task_type == "tts":
+                dataset_path = _prepare_tts_eval_run_dir(input_dir, items)
+            else:
+                dataset = build_dataset_for_task_type(
+                    task_type, items, evaluators_resolved
+                )
+                dataset_path = input_dir / "dataset.json"
+                with open(dataset_path, "w", encoding="utf-8") as f:
+                    json.dump(dataset, f, ensure_ascii=False)
 
             # 2. Config (evaluators only). For LLM + llm-general tasks, leave
             # {{variable}} placeholders unrendered so calibrate substitutes them

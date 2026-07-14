@@ -463,6 +463,36 @@ def _cmd_simulations(opts: Dict[str, List[str]]) -> None:
 
 
 # --- Annotation eval-only flows ---------------------------------------------
+def _cmd_annotation_tts(opts: Dict[str, List[str]]) -> None:
+    """`tts --eval-only` reads a prior run dir's ``results.csv`` (id, text,
+    audio_path) and writes judged ``results.csv`` + ``metrics.json`` under
+    ``-o`` — same flat layout as STT eval-only, but with TTS base columns."""
+    output_dir = Path(_first(opts, "-o", "--output"))
+    output_dir.mkdir(parents=True, exist_ok=True)
+    run_dir = Path(_first(opts, "--dataset"))
+    evaluators = _evaluators_from_config(_load_json(_first(opts, "-c", "--config")))
+
+    csv_path = run_dir / "results.csv"
+    rows: List[Dict[str, Any]] = []
+    if csv_path.exists():
+        with open(csv_path, newline="", encoding="utf-8") as f:
+            rows = list(csv.DictReader(f))
+
+    ev_cols, ev_values = _evaluator_row_cols(evaluators)
+    with open(output_dir / "results.csv", "w", newline="", encoding="utf-8") as f:
+        writer = csv.writer(f)
+        writer.writerow(["id", "text", "audio_path"] + ev_cols)
+        for row in rows:
+            writer.writerow(
+                [row.get("id"), row.get("text"), row.get("audio_path")]
+                + [ev_values[c] for c in ev_cols]
+            )
+
+    with open(output_dir / "metrics.json", "w", encoding="utf-8") as f:
+        json.dump(_tts_metrics(evaluators), f)
+    _write_config_json(output_dir, evaluators)
+
+
 def _cmd_annotation_stt_or_general(opts: Dict[str, List[str]]) -> None:
     """`stt --eval-only` and `general` both write a flat run-root results.csv
     (id + built-in cols + per-evaluator score/reasoning) keyed by dataset id."""
@@ -588,7 +618,7 @@ def main(argv: List[str]) -> int:
     elif sub == "stt":
         _cmd_annotation_stt_or_general(opts) if eval_only else _cmd_stt(opts)
     elif sub == "tts":
-        _cmd_tts(opts)
+        _cmd_annotation_tts(opts) if eval_only else _cmd_tts(opts)
     elif sub == "simulations":
         _cmd_annotation_simulation(opts) if eval_only else _cmd_simulations(opts)
     return 0

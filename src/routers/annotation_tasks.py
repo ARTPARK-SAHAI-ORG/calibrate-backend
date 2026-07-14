@@ -74,6 +74,7 @@ from utils import (
     InitialTaskStatus,
     can_start_job,
     compute_share_token_toggle,
+    normalize_stored_audio_path,
     presign_annotation_items_audio,
     try_start_queued_job,
 )
@@ -348,6 +349,19 @@ def _enrich_evaluators_with_live_version(
 
 
 router = APIRouter(prefix="/annotation-tasks", tags=["annotation-tasks"])
+
+
+def _normalize_tts_item_payload(payload: Any) -> Any:
+    """Persist bare storage keys for TTS items, not dev playback URLs."""
+    if not isinstance(payload, dict):
+        return payload
+    audio_path = payload.get("audio_path")
+    if not audio_path:
+        return payload
+    normalized = normalize_stored_audio_path(str(audio_path))
+    if normalized == audio_path:
+        return payload
+    return {**payload, "audio_path": normalized}
 
 
 class AnnotationTaskCreate(BaseModel):
@@ -993,7 +1007,13 @@ async def bulk_create_items(
     new_uuids = create_annotation_items(
         task_uuid,
         [
-            {"payload": it.payload}
+            {
+                "payload": (
+                    _normalize_tts_item_payload(it.payload)
+                    if task.get("type") == "tts"
+                    else it.payload
+                )
+            }
             for i, it in enumerate(payload.items)
             if i not in matched_existing
         ],
@@ -1205,9 +1225,12 @@ async def bulk_update_items(
             )
 
     try:
-        updated_count = bulk_update_annotation_items(
-            task_uuid, [u.dict() for u in payload.updates]
-        )
+        updates = [u.dict() for u in payload.updates]
+        if task.get("type") == "tts":
+            for entry in updates:
+                if isinstance(entry.get("payload"), dict):
+                    entry["payload"] = _normalize_tts_item_payload(entry["payload"])
+        updated_count = bulk_update_annotation_items(task_uuid, updates)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
     return {"updated_count": updated_count}
@@ -2358,7 +2381,7 @@ async def get_evaluator_run_job(
     # Empty for legacy jobs created before snapshotting (those will be
     # backfilled on first run; see annotation_eval_runner._run_job).
     # Snapshots freeze the raw S3 key, so old runs stay replayable — sign it
-    # fresh on each read (moot until a tts eval path exists, but kept uniform).
+    # on read like every other annotation-item path.
     shaped["items"] = presign_annotation_items_audio(
         get_eval_job_items(job_uuid), task.get("type")
     )
