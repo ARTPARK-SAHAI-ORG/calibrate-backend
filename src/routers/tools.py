@@ -10,51 +10,62 @@ router = APIRouter(prefix="/tools", tags=["tools"])
 
 _EXAMPLE_ID = "f47ac10b-58cc-4372-a567-0e02b2c3d479"
 
-# Keys under which a tool parameter can nest child parameters (an object's
-# fields, an array's element schema). The parameter tree is stored as opaque
-# JSON, so the walk is scoped to `config.parameters` and only follows these
-# container keys — it never inspects `name`s elsewhere in the config (e.g. a
-# webhook block).
-_PARAM_CONTAINER_KEYS = ("parameters", "properties", "items")
+# A tool parameter's identifier lives in its `id` field, and a duplicate is only
+# representable in the array-valued param lists: object children are stored as a
+# JSON object keyed by the child's name (`properties: {city: {...}}`), where a
+# duplicate key can't survive parsing (last-wins). So uniqueness is enforced on
+# the three arrays that carry entries — the structured-output `parameters` list
+# and the two webhook lists — descending each entry's nested schema
+# (`properties` children, `items` element) to reach any deeper array.
 
 
-def _iter_child_param_lists(node: Dict[str, Any]):
-    """Yield each list of sibling parameters nested under a parameter node."""
-    for key in _PARAM_CONTAINER_KEYS:
-        child = node.get(key)
-        if isinstance(child, list):
-            yield child
-        elif isinstance(child, dict):
-            # An array's `items` may be a single schema dict that itself holds
-            # nested parameters — descend one level to find them.
-            yield from _iter_child_param_lists(child)
-
-
-def _reject_duplicate_parameter_names(params: Any) -> None:
-    """Reject a parameter list where two siblings share a name, recursing into
-    nested object/array parameters. Names are compared case-insensitively after
-    trimming. Raises `ValueError` so it surfaces as a 422 from a model validator."""
-    if not isinstance(params, list):
+def _reject_duplicate_param_ids(entries: Any) -> None:
+    """Reject an array of parameter entries where two share an `id` (compared
+    case-insensitively after trimming), descending each entry's nested schema.
+    Raises `ValueError` so it surfaces as a 422 from a model validator."""
+    if not isinstance(entries, list):
         return
     seen: set = set()
-    for param in params:
-        if not isinstance(param, dict):
+    for entry in entries:
+        if not isinstance(entry, dict):
             continue
-        name = param.get("name")
-        if isinstance(name, str) and name.strip():
-            key = name.strip().lower()
+        entry_id = entry.get("id")
+        if isinstance(entry_id, str) and entry_id.strip():
+            key = entry_id.strip().lower()
             if key in seen:
                 raise ValueError(
-                    f'A parameter named "{name}" already exists at this level'
+                    f'A parameter with id "{entry_id}" already exists in this list'
                 )
             seen.add(key)
-        for child_list in _iter_child_param_lists(param):
-            _reject_duplicate_parameter_names(child_list)
+        _descend_param_schema(entry)
+
+
+def _descend_param_schema(node: Dict[str, Any]) -> None:
+    """Follow a parameter's nested schema — `properties` (object children, keyed
+    by name) and `items` (array element) — to reach any deeper param array. Keyed
+    object children can't hold a duplicate; only a nested array is checkable."""
+    props = node.get("properties")
+    if isinstance(props, dict):
+        for child in props.values():
+            if isinstance(child, dict):
+                _descend_param_schema(child)
+    items = node.get("items")
+    if isinstance(items, dict):
+        _descend_param_schema(items)
+    elif isinstance(items, list):
+        _reject_duplicate_param_ids(items)
 
 
 def _validate_tool_config_params(config: Optional[Dict[str, Any]]) -> None:
-    if config is not None:
-        _reject_duplicate_parameter_names(config.get("parameters"))
+    if not isinstance(config, dict):
+        return
+    _reject_duplicate_param_ids(config.get("parameters"))
+    webhook = config.get("webhook")
+    if isinstance(webhook, dict):
+        _reject_duplicate_param_ids(webhook.get("queryParameters"))
+        body = webhook.get("body")
+        if isinstance(body, dict):
+            _reject_duplicate_param_ids(body.get("parameters"))
 
 
 class ToolCreate(BaseModel):

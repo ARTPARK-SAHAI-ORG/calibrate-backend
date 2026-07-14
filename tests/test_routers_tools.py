@@ -1,8 +1,10 @@
-"""Tests for the tools router — parameter-name uniqueness validation.
+"""Tests for the tools router — parameter-id uniqueness validation.
 
-The frontend rejects duplicate parameter names among siblings (recursing into
-nested object/array parameters); these tests pin the same enforcement on the
-backend so an API caller can't slip a duplicate past it.
+A tool parameter is identified by its `id`, and a duplicate is only representable
+in the array-valued param lists (`config.parameters`, `config.webhook.queryParameters`,
+`config.webhook.body.parameters`) — object children are keyed by name so JSON
+parsing already dedupes them. The frontend rejects duplicate ids; these tests pin
+the same enforcement on the backend so an API caller can't slip one past it.
 """
 
 from __future__ import annotations
@@ -54,47 +56,56 @@ def _create(client, headers, config):
     )
 
 
-def test_create_tool_accepts_distinct_parameter_names(client):
+def test_create_tool_accepts_distinct_parameter_ids(client):
     h = _signup(client)
     resp = _create(
         client,
         h,
-        {"type": "structured_output", "parameters": [{"name": "a"}, {"name": "b"}]},
+        {"type": "structured_output", "parameters": [{"id": "a"}, {"id": "b"}]},
     )
     assert resp.status_code == 200, resp.text
 
 
-def test_create_tool_rejects_duplicate_sibling_parameter_names(client):
+def test_create_tool_rejects_duplicate_parameter_ids(client):
     h = _signup(client)
     resp = _create(
         client,
         h,
-        {"type": "structured_output", "parameters": [{"name": "a"}, {"name": "A"}]},
+        {"type": "structured_output", "parameters": [{"id": "a"}, {"id": "A"}]},
     )
     assert resp.status_code == 422, resp.text
     assert "parameter" in resp.text.lower()
 
 
-def test_create_tool_rejects_duplicate_nested_parameter_names(client):
+def test_create_tool_rejects_duplicate_webhook_query_parameter_ids(client):
     h = _signup(client)
     resp = _create(
         client,
         h,
         {
-            "type": "structured_output",
-            "parameters": [
-                {
-                    "name": "obj",
-                    "type": "object",
-                    "parameters": [{"name": "dup"}, {"name": "dup"}],
-                }
-            ],
+            "type": "webhook",
+            "webhook": {"queryParameters": [{"id": "q"}, {"id": "q"}]},
         },
     )
     assert resp.status_code == 422, resp.text
 
 
-def test_create_tool_same_name_across_levels_is_allowed(client):
+def test_create_tool_rejects_duplicate_webhook_body_parameter_ids(client):
+    h = _signup(client)
+    resp = _create(
+        client,
+        h,
+        {
+            "type": "webhook",
+            "webhook": {"body": {"parameters": [{"id": "b"}, {"id": "b"}]}},
+        },
+    )
+    assert resp.status_code == 422, resp.text
+
+
+def test_create_tool_object_children_keyed_by_name_are_not_flagged(client):
+    # Object children are a JSON object keyed by name — no `id` array, so no
+    # duplicate is representable even when a key repeats the top-level id.
     h = _signup(client)
     resp = _create(
         client,
@@ -102,22 +113,21 @@ def test_create_tool_same_name_across_levels_is_allowed(client):
         {
             "type": "structured_output",
             "parameters": [
-                {"name": "id"},
-                {"name": "obj", "type": "object", "parameters": [{"name": "id"}]},
+                {"id": "obj", "type": "object", "properties": {"city": {}, "region": {}}}
             ],
         },
     )
     assert resp.status_code == 200, resp.text
 
 
-def test_update_tool_rejects_duplicate_parameter_names(client):
+def test_update_tool_rejects_duplicate_parameter_ids(client):
     h = _signup(client)
     created = _create(
-        client, h, {"type": "structured_output", "parameters": [{"name": "a"}]}
+        client, h, {"type": "structured_output", "parameters": [{"id": "a"}]}
     ).json()
     resp = client.put(
         f"/tools/{created['uuid']}",
-        json={"config": {"parameters": [{"name": "x"}, {"name": "x"}]}},
+        json={"config": {"parameters": [{"id": "x"}, {"id": "x"}]}},
         headers=h,
     )
     assert resp.status_code == 422, resp.text
