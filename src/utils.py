@@ -518,6 +518,13 @@ def get_s3_client():
 
 LOCAL_STORAGE_BUCKET = "local-dev-artifacts"
 
+# URL path prefix for the dev-mode local object-storage stand-in. In local mode
+# (`OBJECT_STORAGE_MODE=local`) there is no S3 — files are served/uploaded via
+# `GET/PUT {LOCAL_ARTIFACTS_URL_PREFIX}<key>` (see the route in main.py). The
+# download-URL builder and the audio-path normalizer both key off this, so it
+# lives here as the single source of truth.
+LOCAL_ARTIFACTS_URL_PREFIX = "/local-artifacts/"
+
 
 def get_object_storage_mode() -> str:
     """Return the configured artifact storage mode.
@@ -556,7 +563,7 @@ def get_local_artifact_path(key: str) -> Path:
 
 def get_local_artifact_url(key: str) -> str:
     path = quote(key.lstrip("/"), safe="/")
-    relative_url = f"/local-artifacts/{path}"
+    relative_url = f"{LOCAL_ARTIFACTS_URL_PREFIX}{path}"
     base_url = os.getenv("LOCAL_ARTIFACT_BASE_URL")
     if not base_url:
         return relative_url
@@ -741,16 +748,15 @@ def normalize_stored_audio_path(audio_path: Optional[str]) -> Optional[str]:
     path = str(audio_path).strip()
     if path.startswith("s3://"):
         return path
-    if path.startswith("/local-artifacts/"):
-        return path[len("/local-artifacts/") :].lstrip("/")
+    if path.startswith(LOCAL_ARTIFACTS_URL_PREFIX):
+        return path[len(LOCAL_ARTIFACTS_URL_PREFIX) :].lstrip("/")
     if path.startswith("http://") or path.startswith("https://"):
         from urllib.parse import urlparse
 
         parsed = urlparse(path)
-        marker = "/local-artifacts/"
-        idx = parsed.path.find(marker)
+        idx = parsed.path.find(LOCAL_ARTIFACTS_URL_PREFIX)
         if idx != -1:
-            return parsed.path[idx + len(marker) :].lstrip("/")
+            return parsed.path[idx + len(LOCAL_ARTIFACTS_URL_PREFIX) :].lstrip("/")
         return path
     return path.lstrip("/")
 

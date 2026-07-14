@@ -57,6 +57,7 @@ from routers.annotation_agreement import router as annotation_agreement_router
 from routers.organizations import router as organizations_router
 from routers.api_keys import router as api_keys_router
 from utils import (
+    LOCAL_ARTIFACTS_URL_PREFIX,
     generate_presigned_upload_url,
     get_local_artifact_path,
     get_s3_output_config,
@@ -465,7 +466,7 @@ def read_root():
 
 
 @app.api_route(
-    "/local-artifacts/{artifact_path:path}",
+    f"{LOCAL_ARTIFACTS_URL_PREFIX}{{artifact_path:path}}",
     methods=["GET", "PUT"],
     include_in_schema=False,
 )
