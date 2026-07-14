@@ -367,6 +367,25 @@ def test_presigned_url_happy_path(client, monkeypatch):
     assert body["s3_path"].startswith("s3://my-bucket/stt/media/")
 
 
+def test_presigned_url_tts_lands_under_tts_prefix(client, monkeypatch):
+    """TTS annotation items upload their audio through the same endpoint; a
+    `tts` task_type stores the object under the `tts/` prefix (parity with stt)."""
+    h = _auth(client)["headers"]
+    monkeypatch.setenv("S3_OUTPUT_BUCKET", "my-bucket")
+    monkeypatch.delenv("OBJECT_STORAGE_MODE", raising=False)
+    with patch(
+        "main.generate_presigned_upload_url",
+        return_value="https://signed.example/x",
+    ):
+        resp = client.post(
+            "/presigned-url",
+            json={"task_type": "tts", "content_type": "audio/wav", "extension": "wav"},
+            headers=h,
+        )
+    assert resp.status_code == 200
+    assert resp.json()["s3_path"].startswith("s3://my-bucket/tts/media/")
+
+
 def test_presigned_url_local_storage_upload_roundtrip(client, monkeypatch, tmp_path):
     h = _auth(client)["headers"]
     monkeypatch.setenv("OBJECT_STORAGE_MODE", "local")
