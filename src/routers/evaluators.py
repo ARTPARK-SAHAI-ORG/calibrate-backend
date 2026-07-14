@@ -54,7 +54,42 @@ from utils import (
     EVALUATOR_TYPE_DESCRIPTION,
     DATA_TYPE_DESCRIPTION,
     OUTPUT_TYPE_DESCRIPTION,
+    RESERVED_EVALUATOR_NAMES,
 )
+
+
+def _reject_reserved_evaluator_name(name: str) -> None:
+    """Reject an evaluator name that collides with a reserved bulk-CSV output
+    column (see `RESERVED_EVALUATOR_NAMES`). Compared case-insensitively after
+    trimming. Raises `ValueError` so it surfaces as a 422 from a model validator."""
+    if name.strip().lower() in RESERVED_EVALUATOR_NAMES:
+        raise ValueError(
+            f'"{name}" is a reserved keyword and can\'t be used as an evaluator name'
+        )
+
+
+def _reject_duplicate_scale_points(output_config: "OutputConfig | None") -> None:
+    """Reject a rubric whose scale points repeat a label or a value. Labels are
+    compared case-insensitively after trimming; values compared as given. Raises
+    `ValueError` so it surfaces as a 422 from a model validator."""
+    if not output_config or not output_config.scale:
+        return
+    labels = [e.name.strip().lower() for e in output_config.scale]
+    dup_labels = sorted({n for n in labels if labels.count(n) > 1})
+    if dup_labels:
+        raise ValueError(
+            f"Duplicate scale point labels: {', '.join(dup_labels)}"
+        )
+    seen: List[Any] = []
+    dup_values: List[Any] = []
+    for e in output_config.scale:
+        if e.value in seen and e.value not in dup_values:
+            dup_values.append(e.value)
+        seen.append(e.value)
+    if dup_values:
+        raise ValueError(
+            f"Duplicate scale point values: {', '.join(str(v) for v in dup_values)}"
+        )
 
 router = APIRouter(prefix="/evaluators", tags=["evaluators"])
 
@@ -125,6 +160,11 @@ class EvaluatorVersionCreate(BaseModel):
         None, description="Declared prompt variables. Omit if the prompt has no `{{placeholders}}`"
     )
 
+    @model_validator(mode="after")
+    def _validate_scale_unique(self):
+        _reject_duplicate_scale_points(self.output_config)
+        return self
+
 
 class EvaluatorVersionCreateRequest(EvaluatorVersionCreate):
     """Request body for adding a version to an existing evaluator."""
@@ -165,6 +205,7 @@ class EvaluatorCreate(BaseModel):
 
     @model_validator(mode="after")
     def _validate_output(self):
+        _reject_reserved_evaluator_name(self.name)
         cfg = self.version.output_config if self.version else None
         if self.output_type == "rating":
             if not cfg or not cfg.scale or len(cfg.scale) < 2:
@@ -188,9 +229,20 @@ class EvaluatorUpdate(BaseModel):
         None, description="New output shape. Omit to leave unchanged"
     )
 
+    @model_validator(mode="after")
+    def _validate_name(self):
+        if self.name is not None:
+            _reject_reserved_evaluator_name(self.name)
+        return self
+
 
 class EvaluatorDuplicateRequest(BaseModel):
     name: str = Field(..., min_length=1, description="Name for the new copy, unique within your workspace")
+
+    @model_validator(mode="after")
+    def _validate_name(self):
+        _reject_reserved_evaluator_name(self.name)
+        return self
 
 
 class EvaluatorVersionResponse(BaseModel):

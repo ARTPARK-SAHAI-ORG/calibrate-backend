@@ -854,3 +854,38 @@ def test_datasets_validation_paths(client):
         "/datasets", json={"name": "x", "dataset_type": "bogus"}, headers=h
     )
     assert bad_type.status_code in (400, 422)
+
+
+def test_datasets_duplicate_name_conflicts(client):
+    auth = _signup(client)
+    h = auth["headers"]
+    name = f"ds-{uuid.uuid4().hex[:8]}"
+
+    first = client.post(
+        "/datasets", json={"name": name, "dataset_type": "stt"}, headers=h
+    )
+    assert first.status_code == 201, first.text
+
+    # Same name in the same workspace conflicts.
+    dup = client.post(
+        "/datasets", json={"name": name, "dataset_type": "tts"}, headers=h
+    )
+    assert dup.status_code == 409, dup.text
+
+    # Renaming another dataset onto the taken name also conflicts.
+    other = client.post(
+        "/datasets",
+        json={"name": f"ds-{uuid.uuid4().hex[:8]}", "dataset_type": "stt"},
+        headers=h,
+    ).json()
+    rename = client.patch(
+        f"/datasets/{other['uuid']}", json={"name": name}, headers=h
+    )
+    assert rename.status_code == 409, rename.text
+
+    # A different workspace can reuse the name.
+    other_h = _signup(client)["headers"]
+    ok = client.post(
+        "/datasets", json={"name": name, "dataset_type": "stt"}, headers=other_h
+    )
+    assert ok.status_code == 201, ok.text

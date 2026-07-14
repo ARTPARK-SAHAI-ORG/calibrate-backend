@@ -1509,3 +1509,91 @@ def test_add_evaluator_to_agent_race_restores_soft_deleted_winner():
     assert link_id == 77
     # The restore UPDATE ran (4 execute calls total incl. the restore).
     assert cursor.execute.call_count == 4
+
+
+# ---------------------------------------------------------------------------
+# Dataset name de-dup migration (guards idx_datasets_org_name_active build)
+# ---------------------------------------------------------------------------
+
+
+def _dataset_dedupe_conn():
+    """Minimal in-memory DB with just the columns the de-dup pass touches."""
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.execute(
+        "CREATE TABLE datasets (id INTEGER PRIMARY KEY AUTOINCREMENT, "
+        "uuid TEXT, name TEXT, org_uuid TEXT, deleted_at TIMESTAMP DEFAULT NULL)"
+    )
+    return conn
+
+
+def _insert_ds(conn, name, org, deleted=None):
+    conn.execute(
+        "INSERT INTO datasets (uuid, name, org_uuid, deleted_at) VALUES (?, ?, ?, ?)",
+        (_u("ds"), name, org, deleted),
+    )
+
+
+def test_dedupe_active_dataset_names_renames_newer_collisions():
+    conn = _dataset_dedupe_conn()
+    cur = conn.cursor()
+    # Two active collisions in org A (oldest keeps the name), one unrelated row.
+    _insert_ds(conn, "Marathi TTS", "orgA")
+    _insert_ds(conn, "Marathi TTS", "orgA")
+    _insert_ds(conn, "Marathi TTS", "orgA")
+    _insert_ds(conn, "Hindi TTS", "orgA")
+    # Same name in a different org must NOT be touched.
+    _insert_ds(conn, "Marathi TTS", "orgB")
+
+    renamed = db._dedupe_active_dataset_names(cur)
+    assert renamed == 2
+
+    rows = cur.execute(
+        "SELECT name FROM datasets WHERE org_uuid = 'orgA' ORDER BY id"
+    ).fetchall()
+    assert [r["name"] for r in rows] == [
+        "Marathi TTS",
+        "Marathi TTS (2)",
+        "Marathi TTS (3)",
+        "Hindi TTS",
+    ]
+    # Other org untouched.
+    other = cur.execute(
+        "SELECT name FROM datasets WHERE org_uuid = 'orgB'"
+    ).fetchone()
+    assert other["name"] == "Marathi TTS"
+
+    # The unique index the migration protects now builds without error.
+    cur.execute(
+        "CREATE UNIQUE INDEX idx ON datasets(org_uuid, name) WHERE deleted_at IS NULL"
+    )
+
+    # Idempotent: a second pass finds nothing to rename.
+    assert db._dedupe_active_dataset_names(cur) == 0
+
+
+def test_dedupe_active_dataset_names_skips_taken_suffix():
+    conn = _dataset_dedupe_conn()
+    cur = conn.cursor()
+    # "X (2)" already exists, so the renamed collision must jump to "X (3)".
+    _insert_ds(conn, "X", "orgA")
+    _insert_ds(conn, "X", "orgA")
+    _insert_ds(conn, "X (2)", "orgA")
+
+    renamed = db._dedupe_active_dataset_names(cur)
+    assert renamed == 1
+    names = {
+        r["name"]
+        for r in cur.execute("SELECT name FROM datasets WHERE org_uuid = 'orgA'")
+    }
+    assert names == {"X", "X (2)", "X (3)"}
+
+
+def test_dedupe_active_dataset_names_ignores_soft_deleted():
+    conn = _dataset_dedupe_conn()
+    cur = conn.cursor()
+    # A soft-deleted duplicate is not a collision (the index only covers active).
+    _insert_ds(conn, "Y", "orgA")
+    _insert_ds(conn, "Y", "orgA", deleted="2020-01-01")
+
+    assert db._dedupe_active_dataset_names(cur) == 0

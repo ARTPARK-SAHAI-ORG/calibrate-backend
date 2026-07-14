@@ -1,6 +1,6 @@
 from typing import Optional, List, Dict, Any
 from fastapi import APIRouter, HTTPException, Depends, Path
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 from db import create_tool, get_tool, get_all_tools, update_tool, delete_tool, ensure_name_unique
 from auth_utils import get_current_org, OrgContext
@@ -10,6 +10,63 @@ router = APIRouter(prefix="/tools", tags=["tools"])
 
 _EXAMPLE_ID = "f47ac10b-58cc-4372-a567-0e02b2c3d479"
 
+# A tool parameter's identifier lives in its `id` field, and a duplicate is only
+# representable in the array-valued param lists: object children are stored as a
+# JSON object keyed by the child's name (`properties: {city: {...}}`), where a
+# duplicate key can't survive parsing (last-wins). So uniqueness is enforced on
+# the three arrays that carry entries — the structured-output `parameters` list
+# and the two webhook lists — descending each entry's nested schema
+# (`properties` children, `items` element) to reach any deeper array.
+
+
+def _reject_duplicate_param_ids(entries: Any) -> None:
+    """Reject an array of parameter entries where two share an `id` (compared
+    case-insensitively after trimming), descending each entry's nested schema.
+    Raises `ValueError` so it surfaces as a 422 from a model validator."""
+    if not isinstance(entries, list):
+        return
+    seen: set = set()
+    for entry in entries:
+        if not isinstance(entry, dict):
+            continue
+        entry_id = entry.get("id")
+        if isinstance(entry_id, str) and entry_id.strip():
+            key = entry_id.strip().lower()
+            if key in seen:
+                raise ValueError(
+                    f'A parameter with id "{entry_id}" already exists in this list'
+                )
+            seen.add(key)
+        _descend_param_schema(entry)
+
+
+def _descend_param_schema(node: Dict[str, Any]) -> None:
+    """Follow a parameter's nested schema — `properties` (object children, keyed
+    by name) and `items` (array element) — to reach any deeper param array. Keyed
+    object children can't hold a duplicate; only a nested array is checkable."""
+    props = node.get("properties")
+    if isinstance(props, dict):
+        for child in props.values():
+            if isinstance(child, dict):
+                _descend_param_schema(child)
+    items = node.get("items")
+    if isinstance(items, dict):
+        _descend_param_schema(items)
+    elif isinstance(items, list):
+        _reject_duplicate_param_ids(items)
+
+
+def _validate_tool_config_params(config: Optional[Dict[str, Any]]) -> None:
+    if not isinstance(config, dict):
+        return
+    _reject_duplicate_param_ids(config.get("parameters"))
+    webhook = config.get("webhook")
+    if isinstance(webhook, dict):
+        _reject_duplicate_param_ids(webhook.get("queryParameters"))
+        body = webhook.get("body")
+        if isinstance(body, dict):
+            _reject_duplicate_param_ids(body.get("parameters"))
+
 
 class ToolCreate(BaseModel):
     name: str = Field(description="Tool name, unique within the workspace")
@@ -17,6 +74,11 @@ class ToolCreate(BaseModel):
     config: Optional[Dict[str, Any]] = Field(
         None, description="Tool config (e.g. JSON schema, parameters). Omit to leave unset"
     )
+
+    @model_validator(mode="after")
+    def _validate_config(self):
+        _validate_tool_config_params(self.config)
+        return self
 
 
 class ToolUpdate(BaseModel):
@@ -29,6 +91,11 @@ class ToolUpdate(BaseModel):
     config: Optional[Dict[str, Any]] = Field(
         None, description="New tool config. Omit to leave unchanged"
     )
+
+    @model_validator(mode="after")
+    def _validate_config(self):
+        _validate_tool_config_params(self.config)
+        return self
 
 
 class ToolResponse(BaseModel):

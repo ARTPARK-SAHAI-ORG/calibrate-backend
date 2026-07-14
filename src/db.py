@@ -49,6 +49,7 @@ _UNIQUE_NAME_TABLES: Dict[str, str] = {
     "annotation_tasks": "org_uuid",
     "annotators": "org_uuid",
     "evaluators": "org_uuid",
+    "datasets": "org_uuid",
 }
 
 
@@ -1360,6 +1361,20 @@ def init_db():
             except sqlite3.OperationalError:
                 pass
 
+        # Datasets never enforced name uniqueness before `idx_datasets_org_name_active`,
+        # so existing rows may collide. De-dupe them BEFORE the index loop — an
+        # index build over duplicates raises IntegrityError, which the loop's
+        # `except sqlite3.OperationalError` would NOT catch (it would crash init_db).
+        if not _schema_migration_applied(cursor, DATASET_NAME_DEDUPE_MIGRATION):
+            renamed = _dedupe_active_dataset_names(cursor)
+            _mark_schema_migration_applied(cursor, DATASET_NAME_DEDUPE_MIGRATION)
+            conn.commit()
+            if renamed:
+                logger.info(
+                    f"Renamed {renamed} duplicate active dataset name(s) before "
+                    "creating idx_datasets_org_name_active"
+                )
+
         for stmt in (
             "CREATE UNIQUE INDEX IF NOT EXISTS idx_tests_org_name_active "
             "ON tests(org_uuid, name) WHERE deleted_at IS NULL",
@@ -1377,6 +1392,8 @@ def init_db():
             "ON annotation_tasks(org_uuid, name) WHERE deleted_at IS NULL",
             "CREATE UNIQUE INDEX IF NOT EXISTS idx_annotators_org_name_active "
             "ON annotators(org_uuid, name) WHERE deleted_at IS NULL",
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_datasets_org_name_active "
+            "ON datasets(org_uuid, name) WHERE deleted_at IS NULL",
             # Evaluators have a dual ownership model: per-org (org_uuid set)
             # and seeded defaults (org_uuid IS NULL, visible to everyone).
             # SQLite treats multiple NULLs as distinct in unique indexes, so a
@@ -2408,6 +2425,62 @@ def _backfill_test_evaluator_links(
 
 
 AGENT_EVALUATORS_BACKFILL_MIGRATION = "agent_evaluators_from_test_evaluators_v1"
+DATASET_NAME_DEDUPE_MIGRATION = "dedupe_active_dataset_names_v1"
+
+
+def _dedupe_active_dataset_names(cursor: sqlite3.Cursor) -> int:
+    """Rename active datasets that share a `(org_uuid, name)` so the
+    `idx_datasets_org_name_active` unique index can be built.
+
+    Dataset names were never enforced for uniqueness before that index, so a
+    workspace can already hold two active datasets with the same name. Building
+    a UNIQUE index over such rows raises `sqlite3.IntegrityError` — NOT the
+    `sqlite3.OperationalError` the index-creation loop tolerates — which would
+    crash `init_db` on startup. This one-time pass keeps the oldest row (lowest
+    `id`) at its name and appends ` (2)`, ` (3)`, … to each newer collision,
+    skipping any suffix already taken by another active row in the same org.
+    Must run BEFORE the index is created. Returns the number of rows renamed.
+    """
+    cursor.execute(
+        """
+        SELECT org_uuid, name FROM datasets
+         WHERE deleted_at IS NULL
+         GROUP BY org_uuid, name
+        HAVING COUNT(*) > 1
+        """
+    )
+    collisions = cursor.fetchall()
+    renamed = 0
+    for collision in collisions:
+        org_uuid = collision["org_uuid"]
+        name = collision["name"]
+        cursor.execute(
+            """
+            SELECT id, uuid FROM datasets
+             WHERE deleted_at IS NULL AND org_uuid IS ? AND name = ?
+             ORDER BY id ASC
+            """,
+            (org_uuid, name),
+        )
+        rows = cursor.fetchall()
+        # Names already taken by an active dataset in this org, so a renamed
+        # row never collides with an untouched one.
+        cursor.execute(
+            "SELECT name FROM datasets WHERE deleted_at IS NULL AND org_uuid IS ?",
+            (org_uuid,),
+        )
+        taken = {r["name"] for r in cursor.fetchall()}
+        for row in rows[1:]:
+            suffix = 2
+            while f"{name} ({suffix})" in taken:
+                suffix += 1
+            new_name = f"{name} ({suffix})"
+            taken.add(new_name)
+            cursor.execute(
+                "UPDATE datasets SET name = ? WHERE id = ?", (new_name, row["id"])
+            )
+            renamed += 1
+    return renamed
 
 
 def _schema_migration_applied(cursor: sqlite3.Cursor, name: str) -> bool:
