@@ -366,6 +366,69 @@ def test_openrouter_filtered_list_http_error(client, monkeypatch):
 
 
 # ---------------------------------------------------------------------------
+# /providers — availability by env var
+# ---------------------------------------------------------------------------
+
+
+def _clear_provider_env(monkeypatch):
+    import provider_status
+
+    monkeypatch.delenv("FAKE_AI_PROVIDERS", raising=False)
+    for env_vars in provider_status.PROVIDER_ENV_VARS.values():
+        for var in env_vars:
+            monkeypatch.delenv(var, raising=False)
+
+
+def test_providers_none_configured(client, monkeypatch):
+    _clear_provider_env(monkeypatch)
+    resp = client.get("/providers")
+    assert resp.status_code == 200
+    assert resp.json() == {"providers": []}
+
+
+def test_providers_reports_only_configured(client, monkeypatch):
+    _clear_provider_env(monkeypatch)
+    monkeypatch.setenv("OPENAI_API_KEY", "k")
+    monkeypatch.setenv("DEEPGRAM_API_KEY", "k")
+
+    resp = client.get("/providers")
+    assert resp.status_code == 200
+    assert set(resp.json()["providers"]) == {"openai", "deepgram"}
+
+
+def test_providers_empty_string_key_is_unset(client, monkeypatch):
+    _clear_provider_env(monkeypatch)
+    monkeypatch.setenv("SARVAM_API_KEY", "")
+
+    resp = client.get("/providers")
+    assert "sarvam" not in resp.json()["providers"]
+
+
+def test_providers_multi_var_requires_all(client, monkeypatch):
+    _clear_provider_env(monkeypatch)
+    # google needs BOTH credentials + project id — one alone is not enough.
+    monkeypatch.setenv("GOOGLE_APPLICATION_CREDENTIALS", "/creds.json")
+
+    resp = client.get("/providers")
+    assert "google" not in resp.json()["providers"]
+
+    monkeypatch.setenv("GOOGLE_CLOUD_PROJECT_ID", "proj")
+    resp = client.get("/providers")
+    assert "google" in resp.json()["providers"]
+
+
+def test_providers_fake_flag_returns_all(client, monkeypatch):
+    import provider_status
+
+    _clear_provider_env(monkeypatch)
+    monkeypatch.setenv("FAKE_AI_PROVIDERS", "1")
+
+    resp = client.get("/providers")
+    assert resp.status_code == 200
+    assert resp.json()["providers"] == list(provider_status.PROVIDER_ENV_VARS)
+
+
+# ---------------------------------------------------------------------------
 # /sentry-debug
 # ---------------------------------------------------------------------------
 

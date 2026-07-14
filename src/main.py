@@ -64,7 +64,7 @@ from utils import (
     PRESIGNED_URL_EXPIRY_SECONDS,
 )
 from job_recovery import recover_pending_jobs
-from provider_status import provider_status_monitor
+from provider_status import available_provider_names, provider_status_monitor
 
 
 # Set up logger
@@ -569,6 +569,19 @@ async def get_provider_status(request: Request, refresh: bool = False):
     """
     force_refresh = refresh and request.method == "GET"
     return await provider_status_monitor.response(force_refresh=force_refresh)
+
+
+@app.get("/providers")
+async def list_available_providers() -> Dict[str, Any]:
+    """
+    List providers enabled by the current environment's API keys.
+
+    A provider is available when every environment variable it requires is set,
+    so the frontend can show only the providers it can actually run. This is a
+    cheap config check — it does not verify the keys work (see `/provider-status`
+    for live reachability).
+    """
+    return {"providers": available_provider_names()}
 
 
 @app.get("/openrouter/providers")

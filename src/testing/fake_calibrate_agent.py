@@ -557,8 +557,8 @@ def _cmd_annotation_simulation(opts: Dict[str, List[str]]) -> None:
 # --- status (provider health) -----------------------------------------------
 def _cmd_status() -> None:
     """Placeholder healthy payload. `provider_status.run_check` short-circuits
-    `status` under the flag (returning `_FAKE_PROVIDER_NAMES`), so the fake is
-    never spawned for it; this stays only to keep `status` a handled subcommand."""
+    `status` under the flag (returning `_fake_healthy_providers()`), so the fake
+    is never spawned for it; this stays only to keep `status` a handled subcommand."""
     sys.stdout.write(json.dumps({"openai": {"status": "pass"}}))
 
 
