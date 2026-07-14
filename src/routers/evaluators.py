@@ -40,6 +40,7 @@ from db import (
     duplicate_evaluator,
     evaluator_name_exists,
     get_all_evaluators,
+    provision_default_evaluators_for_org,
     get_evaluator,
     get_evaluator_version,
     get_evaluator_versions,
@@ -624,6 +625,10 @@ async def list_evaluators(
     pagination: OptionalPaginationParams = Depends(),
 ):
     """List your evaluators"""
+    # Lazily fork any not-yet-provisioned default evaluators into this org, so a
+    # default added in a later release shows up on the next list. Idempotent and
+    # cheap (a receipt-ledger check) — forks only when a new template exists.
+    provision_default_evaluators_for_org(ctx.org_uuid)
     # `evaluator_type`/`data_type`/`include_defaults` filter server-side; then
     # optional `?q=` name search + `?limit=&offset=` paging. Returns the
     # `{items, total, limit, offset}` envelope.

@@ -410,11 +410,13 @@ def _create_evaluator(client, h, name=None):
 
 
 def _default_evaluator_uuid(client, h):
-    """A seeded default evaluator (owner_user_id IS NULL), visible to every org."""
+    """The org's fork of a seeded default (provisioned at signup). Forks are
+    ordinary editable rows in the org's list (is_default False); the "Safety"
+    default is always provisioned."""
     items = client.get("/evaluators", headers=h).json()["items"]
-    defaults = [e for e in items if e["is_default"]]
-    assert defaults, "expected at least one seeded default evaluator"
-    return defaults[0]["uuid"]
+    fork = next((e for e in items if e.get("name") == "Safety"), None)
+    assert fork is not None, "expected the org's forked Safety default"
+    return fork["uuid"]
 
 
 def test_link_list_and_unlink_evaluator(client):

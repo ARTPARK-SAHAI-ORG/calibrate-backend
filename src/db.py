@@ -433,6 +433,28 @@ def init_db():
         """
         )
 
+        # Provisioning receipt: records that a given seeded default (by slug) was
+        # already forked into a given org. The org's forked copy is fully
+        # editable/deletable/renameable; this ledger — NOT the presence of the
+        # forked row — is the source of truth for "already provisioned", so a
+        # deleted or renamed fork is never resurrected on the next provisioning
+        # pass. `evaluator_uuid` is the fork that was created, or NULL when
+        # provisioning skipped it (e.g. a name collision with an existing custom
+        # evaluator). The UNIQUE(org_uuid, source_default_slug) + INSERT OR IGNORE
+        # makes provisioning idempotent and safe under concurrent readers.
+        cursor.execute(
+            """
+            CREATE TABLE IF NOT EXISTS org_default_evaluators (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                org_uuid TEXT NOT NULL,
+                source_default_slug TEXT NOT NULL,
+                evaluator_uuid TEXT DEFAULT NULL,
+                provisioned_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                UNIQUE(org_uuid, source_default_slug)
+            )
+        """
+        )
+
         cursor.execute(
             """
             CREATE TABLE IF NOT EXISTS agent_evaluators (
@@ -670,6 +692,11 @@ def init_db():
             # this RENAME and the ADD COLUMN below are no-ops.
             "ALTER TABLE evaluators RENAME COLUMN data_type TO evaluator_type",
             "ALTER TABLE evaluators ADD COLUMN data_type TEXT NOT NULL DEFAULT 'text'",
+            # Provenance for per-org forks of a seeded default: the source default's
+            # `slug`. NULL on both the seed templates themselves and on hand-made
+            # custom evaluators. Drives the `org_default_evaluators` provisioning
+            # ledger — see `_provision_default_evaluators_for_org`.
+            "ALTER TABLE evaluators ADD COLUMN source_default_slug TEXT DEFAULT NULL",
         ):
             try:
                 cursor.execute(stmt)
@@ -1474,6 +1501,18 @@ def init_db():
             if inserted:
                 logger.info(
                     f"Backfilled {inserted} agent-evaluator link(s) from test evaluators"
+                )
+
+        # Fork the seeded defaults into every existing org (one-time). Runs after
+        # `_seed_default_evaluators` so the templates exist. New orgs fork at
+        # creation time; later-added defaults propagate via lazy provision-on-read.
+        if not _schema_migration_applied(cursor, FORK_DEFAULT_EVALUATORS_MIGRATION):
+            forked = _backfill_fork_default_evaluators(cursor)
+            _mark_schema_migration_applied(cursor, FORK_DEFAULT_EVALUATORS_MIGRATION)
+            conn.commit()
+            if forked:
+                logger.info(
+                    f"Forked default evaluators into existing orgs: {forked} copy(ies)"
                 )
 
         conn.commit()
@@ -2519,6 +2558,199 @@ def _backfill_agent_evaluator_links(cursor: sqlite3.Cursor) -> int:
     return int(row[0]) if row else 0
 
 
+FORK_DEFAULT_EVALUATORS_MIGRATION = "fork_default_evaluators_per_org_v1"
+
+
+def _org_owner_user_id(cursor: sqlite3.Cursor, org_uuid: str) -> Optional[str]:
+    """The user_id of the org's owner member. Used as `owner_user_id` on forked
+    default evaluators so they read as editable custom rows (`is_default` False),
+    not read-only seeds (which have a NULL owner)."""
+    cursor.execute(
+        "SELECT user_id FROM organization_members "
+        "WHERE org_uuid = ? AND role = 'owner' ORDER BY rowid ASC LIMIT 1",
+        (org_uuid,),
+    )
+    row = cursor.fetchone()
+    return row["user_id"] if row else None
+
+
+def _fork_default_evaluator_row(
+    cursor: sqlite3.Cursor,
+    template: Dict[str, Any],
+    org_uuid: str,
+    owner_user_id: Optional[str],
+) -> str:
+    """Insert an editable per-org copy of a seed template (the evaluator row plus
+    its live version as v1) and return the new uuid. The copy gets `slug=NULL`
+    (the slug is globally UNIQUE and stays with the template) and
+    `source_default_slug` set for provenance."""
+    new_uuid = str(uuid.uuid4())
+    cursor.execute(
+        """
+        INSERT INTO evaluators
+            (uuid, name, description, owner_user_id, org_uuid,
+             evaluator_type, data_type, kind, output_type, source_default_slug)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            new_uuid,
+            template["name"],
+            template.get("description"),
+            owner_user_id,
+            org_uuid,
+            template.get("evaluator_type", "llm"),
+            template.get("data_type", "text"),
+            template.get("kind", "single"),
+            template.get("output_type", "binary"),
+            template["slug"],
+        ),
+    )
+
+    live_version_id = template.get("live_version_id")
+    if live_version_id:
+        cursor.execute(
+            "SELECT * FROM evaluator_versions WHERE uuid = ?", (live_version_id,)
+        )
+    else:
+        cursor.execute(
+            "SELECT * FROM evaluator_versions WHERE evaluator_id = ? "
+            "ORDER BY version_number DESC LIMIT 1",
+            (template["uuid"],),
+        )
+    version_row = cursor.fetchone()
+    if version_row:
+        sv = _parse_evaluator_version_row(version_row)
+        version_uuid = str(uuid.uuid4())
+        cursor.execute(
+            """
+            INSERT INTO evaluator_versions
+                (uuid, evaluator_id, version_number, judge_model, system_prompt,
+                 output_config, variables)
+            VALUES (?, ?, 1, ?, ?, ?, ?)
+            """,
+            (
+                version_uuid,
+                new_uuid,
+                sv["judge_model"],
+                sv["system_prompt"],
+                (
+                    json.dumps(sv["output_config"])
+                    if sv.get("output_config") is not None
+                    else None
+                ),
+                (
+                    json.dumps(sv["variables"])
+                    if sv.get("variables") is not None
+                    else None
+                ),
+            ),
+        )
+        cursor.execute(
+            "UPDATE evaluators SET live_version_id = ? WHERE uuid = ?",
+            (version_uuid, new_uuid),
+        )
+    return new_uuid
+
+
+def _provision_default_evaluators_for_org(
+    cursor: sqlite3.Cursor,
+    org_uuid: str,
+    owner_user_id: Optional[str] = None,
+) -> int:
+    """Fork an editable copy of every seeded default evaluator into `org_uuid`.
+
+    Idempotent via the `org_default_evaluators` receipt ledger: a default is
+    forked only when the org has no receipt for that slug yet — so a fork the
+    user later renames or deletes is never re-created. New defaults shipped in a
+    later release have no receipt, so they are picked up automatically on the
+    next call.
+
+    Runs on the caller's cursor and does NOT commit — callers own the
+    transaction (org creation forks inside its own INSERT txn; the lazy-read and
+    backfill wrappers commit). Returns the number of forks created. A default
+    whose name already collides with an existing custom evaluator in the org is
+    skipped, with a receipt written (NULL evaluator_uuid) so it isn't retried.
+    """
+    if owner_user_id is None:
+        owner_user_id = _org_owner_user_id(cursor, org_uuid)
+
+    # Seed templates are the only evaluators with a slug and no org.
+    cursor.execute(
+        "SELECT * FROM evaluators "
+        "WHERE org_uuid IS NULL AND slug IS NOT NULL AND deleted_at IS NULL"
+    )
+    templates = [dict(r) for r in cursor.fetchall()]
+
+    cursor.execute(
+        "SELECT source_default_slug FROM org_default_evaluators WHERE org_uuid = ?",
+        (org_uuid,),
+    )
+    already = {r["source_default_slug"] for r in cursor.fetchall()}
+
+    forked = 0
+    for template in templates:
+        slug = template["slug"]
+        if slug in already:
+            continue
+
+        cursor.execute(
+            "SELECT 1 FROM evaluators "
+            "WHERE org_uuid = ? AND name = ? AND deleted_at IS NULL LIMIT 1",
+            (org_uuid, template["name"]),
+        )
+        if cursor.fetchone() is not None:
+            cursor.execute(
+                "INSERT OR IGNORE INTO org_default_evaluators "
+                "(org_uuid, source_default_slug, evaluator_uuid) VALUES (?, ?, NULL)",
+                (org_uuid, slug),
+            )
+            logger.info(
+                f"Skipped forking default {slug} into org {org_uuid}: name already in use"
+            )
+            continue
+
+        fork_uuid = _fork_default_evaluator_row(
+            cursor, template, org_uuid, owner_user_id
+        )
+        cursor.execute(
+            "INSERT OR IGNORE INTO org_default_evaluators "
+            "(org_uuid, source_default_slug, evaluator_uuid) VALUES (?, ?, ?)",
+            (org_uuid, slug, fork_uuid),
+        )
+        forked += 1
+
+    return forked
+
+
+def provision_default_evaluators_for_org(
+    org_uuid: str, owner_user_id: Optional[str] = None
+) -> int:
+    """Committing wrapper around `_provision_default_evaluators_for_org` for
+    callers that own their connection (the lazy provision-on-read hook and the
+    one-time backfill). Returns the number of forks created."""
+    with get_db_connection() as conn:
+        cursor = conn.cursor()
+        forked = _provision_default_evaluators_for_org(
+            cursor, org_uuid, owner_user_id
+        )
+        conn.commit()
+        return forked
+
+
+def _backfill_fork_default_evaluators(cursor: sqlite3.Cursor) -> int:
+    """One-time migration: fork the seeded defaults into every existing org.
+    Caller commits and records `FORK_DEFAULT_EVALUATORS_MIGRATION` in the same
+    transaction so a crash mid-migration retries on next init_db. Orgs created
+    afterwards get their forks at creation time; defaults added in a later
+    release propagate via the lazy provision-on-read hook."""
+    cursor.execute("SELECT uuid FROM organizations WHERE deleted_at IS NULL")
+    org_uuids = [r["uuid"] for r in cursor.fetchall()]
+    total = 0
+    for org_uuid in org_uuids:
+        total += _provision_default_evaluators_for_org(cursor, org_uuid)
+    return total
+
+
 # ============ Users Functions ============
 
 
@@ -2563,6 +2795,10 @@ def _create_personal_org_for_user(
         """,
         (org_uuid, user_uuid),
     )
+    # Fork the seeded defaults into the new org. No-op during the init_db
+    # personal-org backfill (it runs before `_seed_default_evaluators`, so no
+    # templates exist yet); those orgs are covered by the one-time fork backfill.
+    _provision_default_evaluators_for_org(cursor, org_uuid, user_uuid)
     return org_uuid
 
 
@@ -2821,6 +3057,7 @@ def create_organization(name: str, owner_user_id: str) -> str:
             """,
             (org_uuid, owner_user_id),
         )
+        _provision_default_evaluators_for_org(cursor, org_uuid, owner_user_id)
         conn.commit()
         return org_uuid
 
@@ -4369,13 +4606,17 @@ def evaluator_name_exists(
     org_uuid: Optional[str],
     exclude_uuid: Optional[str] = None,
 ) -> bool:
-    """True if `name` is already used in the evaluator namespace visible to an org."""
+    """True if `name` is already used in the evaluator namespace visible to an org.
+
+    Scoped to the org's own rows (its forks + custom evaluators); the seed
+    templates (`org_uuid IS NULL`) live in their own namespace and don't collide.
+    """
     clauses = ["deleted_at IS NULL", "name = ?"]
     params: List[Any] = [name]
     if org_uuid is None:
         clauses.append("org_uuid IS NULL")
     else:
-        clauses.append("(org_uuid = ? OR org_uuid IS NULL)")
+        clauses.append("org_uuid = ?")
         params.append(org_uuid)
     if exclude_uuid is not None:
         clauses.append("uuid != ?")
@@ -4396,21 +4637,21 @@ def get_all_evaluators(
     evaluator_type: Optional[str] = None,
     data_type: Optional[str] = None,
 ) -> List[Dict[str, Any]]:
-    """List evaluators visible to an org: their own + (optionally) seeded defaults.
+    """List an org's own evaluators (which include its forked copies of the
+    seeded defaults). Seed templates themselves (`org_uuid IS NULL`) are never
+    returned to an org — each org sees its editable fork instead.
 
-    When org_uuid is None, returns all non-deleted evaluators (admin view).
+    When org_uuid is None, returns all non-deleted evaluators (admin view),
+    including the seed templates. `include_defaults` is retained for call-site
+    compatibility but is a no-op now that defaults are per-org forks.
     """
     with get_db_connection() as conn:
         cursor = conn.cursor()
         clauses = ["deleted_at IS NULL"]
         params: List[Any] = []
         if org_uuid is not None:
-            if include_defaults:
-                clauses.append("(org_uuid = ? OR org_uuid IS NULL)")
-                params.append(org_uuid)
-            else:
-                clauses.append("org_uuid = ?")
-                params.append(org_uuid)
+            clauses.append("org_uuid = ?")
+            params.append(org_uuid)
         if evaluator_type is not None:
             clauses.append("evaluator_type = ?")
             params.append(evaluator_type)
@@ -4420,7 +4661,7 @@ def get_all_evaluators(
         query = (
             "SELECT * FROM evaluators WHERE "
             + " AND ".join(clauses)
-            + " ORDER BY org_uuid IS NULL DESC, created_at DESC"
+            + " ORDER BY created_at DESC"
         )
         cursor.execute(query, params)
         return [_parse_evaluator_row(r) for r in cursor.fetchall()]

@@ -669,6 +669,192 @@ def test_backfill_agent_evaluator_links_retries_after_crash_mid_migration(user):
     assert linked == {seeded["uuid"]}
 
 
+# ---------------------------------------------------------------------------
+# Per-org default-evaluator provisioning (fork-on-provision)
+# ---------------------------------------------------------------------------
+
+_DEFAULT_SLUGS = {s["slug"] for s in db.DEFAULT_EVALUATORS_SEED}
+
+
+def _fresh_org():
+    """A brand-new user + personal org. Signup auto-forks the seeded defaults."""
+    user_uuid = db.create_user("P", "V", _u("prov") + "@x.com")
+    return user_uuid, db.get_personal_org_for_user(user_uuid)["uuid"]
+
+
+def _forks_by_slug(org_uuid):
+    return {
+        e["source_default_slug"]: e
+        for e in db.get_all_evaluators(org_uuid=org_uuid)
+        if e.get("source_default_slug")
+    }
+
+
+def test_new_org_is_provisioned_editable_forks_of_every_default():
+    user_uuid, org_uuid = _fresh_org()
+    forks = _forks_by_slug(org_uuid)
+    assert set(forks) == _DEFAULT_SLUGS
+
+    safety = forks["default-safety"]
+    assert safety["org_uuid"] == org_uuid  # scoped to the org
+    assert safety["owner_user_id"] == user_uuid  # owned ⇒ editable, is_default False
+    assert safety["slug"] is None  # the globally-unique slug stays with the template
+    assert safety["live_version_id"]  # live version copied
+
+    # The seed templates themselves are never returned to the org.
+    assert all(
+        e.get("slug") is None for e in db.get_all_evaluators(org_uuid=org_uuid)
+    )
+
+
+def test_provision_default_evaluators_is_idempotent():
+    _user, org_uuid = _fresh_org()
+    before = len(db.get_all_evaluators(org_uuid=org_uuid))
+    assert db.provision_default_evaluators_for_org(org_uuid) == 0
+    assert len(db.get_all_evaluators(org_uuid=org_uuid)) == before
+
+
+def test_provision_never_resurrects_deleted_or_renamed_fork():
+    _user, org_uuid = _fresh_org()
+    forks = _forks_by_slug(org_uuid)
+
+    assert db.delete_evaluator(forks["default-safety"]["uuid"]) is True
+    assert (
+        db.update_evaluator(forks["default-conciseness"]["uuid"], name="My Renamed")
+        is True
+    )
+
+    # Re-provisioning must not re-create the deleted one or duplicate the renamed one.
+    assert db.provision_default_evaluators_for_org(org_uuid) == 0
+    after = _forks_by_slug(org_uuid)
+    assert "default-safety" not in after
+    assert after["default-conciseness"]["name"] == "My Renamed"
+    assert (
+        len(
+            [
+                e
+                for e in db.get_all_evaluators(org_uuid=org_uuid)
+                if e.get("source_default_slug") == "default-conciseness"
+            ]
+        )
+        == 1
+    )
+
+
+def test_provision_picks_up_a_newly_added_default():
+    _user, org_uuid = _fresh_org()
+    new_slug = _u("default-new")
+    tmpl = db.create_evaluator(
+        name=_u("New Default"),
+        evaluator_type="llm",
+        output_type="binary",
+        slug=new_slug,
+    )
+    v = db.create_evaluator_version(tmpl, judge_model="m", system_prompt="p")
+    db.set_evaluator_live_version(tmpl, v["uuid"])
+    try:
+        assert db.provision_default_evaluators_for_org(org_uuid) == 1
+        assert new_slug in _forks_by_slug(org_uuid)
+    finally:
+        # Keep the shared session DB clean: this template would otherwise be
+        # forked into every org created by a later test.
+        with db.get_db_connection() as conn:
+            conn.execute(
+                "DELETE FROM evaluator_versions WHERE evaluator_id IN "
+                "(SELECT uuid FROM evaluators WHERE slug = ? OR source_default_slug = ?)",
+                (new_slug, new_slug),
+            )
+            conn.execute(
+                "DELETE FROM evaluators WHERE slug = ? OR source_default_slug = ?",
+                (new_slug, new_slug),
+            )
+            conn.execute(
+                "DELETE FROM org_default_evaluators WHERE source_default_slug = ?",
+                (new_slug,),
+            )
+            conn.commit()
+
+
+def test_provision_skips_default_whose_name_collides_with_a_custom():
+    user_uuid, org_uuid = _fresh_org()
+    safety = _forks_by_slug(org_uuid)["default-safety"]
+
+    # Simulate a not-yet-provisioned org that already has a custom evaluator
+    # named like the default: drop the fork + its receipt, then add the collision.
+    with db.get_db_connection() as conn:
+        conn.execute("DELETE FROM evaluators WHERE uuid = ?", (safety["uuid"],))
+        conn.execute(
+            "DELETE FROM org_default_evaluators "
+            "WHERE org_uuid = ? AND source_default_slug = ?",
+            (org_uuid, "default-safety"),
+        )
+        conn.commit()
+    db.create_evaluator(
+        name="Safety",
+        evaluator_type="llm",
+        output_type="binary",
+        owner_user_id=user_uuid,
+        org_uuid=org_uuid,
+    )
+
+    assert db.provision_default_evaluators_for_org(org_uuid) == 0  # skipped
+    safeties = [
+        e for e in db.get_all_evaluators(org_uuid=org_uuid) if e["name"] == "Safety"
+    ]
+    assert len(safeties) == 1  # only the custom, no second copy
+    assert safeties[0].get("source_default_slug") is None
+
+    # A receipt is still written (NULL evaluator_uuid) so it isn't retried.
+    with db.get_db_connection() as conn:
+        row = conn.execute(
+            "SELECT evaluator_uuid FROM org_default_evaluators "
+            "WHERE org_uuid = ? AND source_default_slug = ?",
+            (org_uuid, "default-safety"),
+        ).fetchone()
+    assert row is not None and row["evaluator_uuid"] is None
+
+
+def test_backfill_forks_defaults_into_existing_orgs_and_runs_once():
+    """One-time fork backfill provisions every existing org; once the migration
+    flag is set, a later init_db() does not resurrect a fork the user deleted."""
+    _user, org_uuid = _fresh_org()
+
+    # Simulate a pre-feature DB: this org has no forks / receipts, flag unset.
+    with db.get_db_connection() as conn:
+        conn.execute(
+            "DELETE FROM evaluators "
+            "WHERE org_uuid = ? AND source_default_slug IS NOT NULL",
+            (org_uuid,),
+        )
+        conn.execute(
+            "DELETE FROM org_default_evaluators WHERE org_uuid = ?", (org_uuid,)
+        )
+        conn.execute(
+            "DELETE FROM _schema_migrations WHERE name = ?",
+            (db.FORK_DEFAULT_EVALUATORS_MIGRATION,),
+        )
+        conn.commit()
+    assert _forks_by_slug(org_uuid) == {}
+
+    db.init_db()
+    assert set(_forks_by_slug(org_uuid)) == _DEFAULT_SLUGS
+
+    # Flag now set + receipt on file ⇒ deleting a fork and re-running init_db
+    # does NOT bring it back.
+    assert db.delete_evaluator(_forks_by_slug(org_uuid)["default-safety"]["uuid"]) is True
+    db.init_db()
+    assert "default-safety" not in _forks_by_slug(org_uuid)
+
+
+def test_create_organization_provisions_default_forks():
+    """An explicitly-created workspace (not just the personal org) is forked."""
+    owner = db.create_user("O", "W", _u("orgowner") + "@x.com")
+    org_uuid = db.create_organization(_u("Workspace"), owner)
+    forks = _forks_by_slug(org_uuid)
+    assert set(forks) == _DEFAULT_SLUGS
+    assert forks["default-safety"]["owner_user_id"] == owner
+
+
 def test_get_evaluators_for_test_resolves_live_version(user):
     """A test run must always use the evaluator's CURRENT live version, not the
     version pinned on the pivot at link time. Editing the evaluator (new live

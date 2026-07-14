@@ -174,23 +174,28 @@ def test_evaluators_full_lifecycle(client):
     no_op = client.put(f"/evaluators/{ev_uuid}", json={}, headers=h)
     assert no_op.status_code == 400
 
-    # Default evaluator cannot be modified
+    # The org's list contains only its own editable forks — no read-only seeds.
     seeds = client.get("/evaluators", headers=h).json()["items"]
-    default = next(e for e in seeds if e.get("owner_user_id") is None)
+    assert all(e.get("is_default") is False for e in seeds)
+
+    # The seed templates themselves stay immutable (403 on org_uuid IS NULL). An
+    # org can't discover a template uuid through the API anymore, so fetch one
+    # directly to exercise the guard.
+    from db import get_evaluator_by_slug
+
+    template_uuid = get_evaluator_by_slug("default-safety")["uuid"]
     forbidden = client.put(
-        f"/evaluators/{default['uuid']}",
+        f"/evaluators/{template_uuid}",
         json={"description": "x"},
         headers=h,
     )
     assert forbidden.status_code == 403
 
-    # Default evaluator cannot be deleted
-    cannot_delete = client.delete(f"/evaluators/{default['uuid']}", headers=h)
+    cannot_delete = client.delete(f"/evaluators/{template_uuid}", headers=h)
     assert cannot_delete.status_code == 403
 
-    # Adding a version to a default evaluator
     cannot_version = client.post(
-        f"/evaluators/{default['uuid']}/versions",
+        f"/evaluators/{template_uuid}/versions",
         json={"judge_model": "x", "system_prompt": "p"},
         headers=h,
     )
