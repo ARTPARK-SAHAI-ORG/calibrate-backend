@@ -278,6 +278,65 @@ def test_tts_evaluator_run_requires_text_and_audio_path(client):
     assert "text" in run.json()["detail"] and "audio_path" in run.json()["detail"]
 
 
+def test_tts_item_audio_path_normalized_to_bare_key_on_write(client):
+    """TTS item create AND update persist a bare storage key, stripping any dev
+    /local-artifacts/ playback URL the frontend round-trips."""
+    import db
+
+    auth = _signup(client)
+    h = auth["headers"]
+    tts_ev = _tts_evaluator(client, h)
+    task_uuid = client.post(
+        "/annotation-tasks",
+        json={
+            "name": f"tts-{uuid.uuid4().hex[:6]}",
+            "type": "tts",
+            "evaluator_ids": [tts_ev["uuid"]],
+        },
+        headers=h,
+    ).json()["uuid"]
+
+    # Create with a full dev playback URL → stored as the bare key.
+    item_id = client.post(
+        f"/annotation-tasks/{task_uuid}/items",
+        json={
+            "items": [
+                {
+                    "payload": {
+                        "name": "clip",
+                        "text": "hi",
+                        "audio_path": "http://localhost:8000/local-artifacts/tts/media/x.wav",
+                    }
+                }
+            ]
+        },
+        headers=h,
+    ).json()["item_ids"][0]
+    stored = db.get_annotation_items_for_task(task_uuid)[0]["payload"]["audio_path"]
+    assert stored == "tts/media/x.wav"
+
+    # Update with another dev URL → also normalized to a bare key.
+    upd = client.put(
+        f"/annotation-tasks/{task_uuid}/items",
+        json={
+            "updates": [
+                {
+                    "uuid": item_id,
+                    "payload": {
+                        "name": "clip",
+                        "text": "hi",
+                        "audio_path": "/local-artifacts/tts/media/y.wav",
+                    },
+                }
+            ]
+        },
+        headers=h,
+    )
+    assert upd.status_code == 200
+    stored2 = db.get_annotation_items_for_task(task_uuid)[0]["payload"]["audio_path"]
+    assert stored2 == "tts/media/y.wav"
+
+
 def test_tts_item_audio_path_signed_on_reads(client):
     """TTS items store `audio_path` as an S3 key; every read path signs it into a
     presigned URL so the clip plays — including the unauthenticated public

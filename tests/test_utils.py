@@ -327,6 +327,57 @@ def test_download_file_from_s3_s3_mode(monkeypatch):
     )
 
 
+def test_download_file_from_s3_local_missing_raises(monkeypatch, tmp_path):
+    monkeypatch.setenv("OBJECT_STORAGE_MODE", "local")
+    monkeypatch.setenv("LOCAL_ARTIFACT_ROOT", str(tmp_path / "artifacts"))
+    # Nothing uploaded → a genuine "missing" surfaces as FileNotFoundError,
+    # not a silent empty copy.
+    with pytest.raises(FileNotFoundError, match="tts/media/nope.wav"):
+        download_file_from_s3(
+            None, "local-dev-artifacts", "tts/media/nope.wav", tmp_path / "out.wav"
+        )
+
+
+def test_normalize_stored_audio_path():
+    from utils import normalize_stored_audio_path
+
+    assert normalize_stored_audio_path(None) is None
+    assert normalize_stored_audio_path("") == ""
+    # s3:// URIs pass through untouched.
+    assert normalize_stored_audio_path("s3://b/tts/media/a.wav") == "s3://b/tts/media/a.wav"
+    # A bare dev playback path collapses to its key.
+    assert normalize_stored_audio_path("/local-artifacts/tts/media/a.wav") == "tts/media/a.wav"
+    # A full dev playback URL collapses to the same key.
+    assert (
+        normalize_stored_audio_path("http://localhost:8000/local-artifacts/tts/media/a.wav")
+        == "tts/media/a.wav"
+    )
+    # A real external URL (no local-artifacts marker) is left as-is.
+    assert (
+        normalize_stored_audio_path("https://cdn.example/audio.mp3")
+        == "https://cdn.example/audio.mp3"
+    )
+    # A leading slash on a bare key is stripped.
+    assert normalize_stored_audio_path("/tts/media/a.wav") == "tts/media/a.wav"
+    assert normalize_stored_audio_path("tts/media/a.wav") == "tts/media/a.wav"
+
+
+def test_resolve_stored_audio_bucket_and_key(monkeypatch):
+    from utils import resolve_stored_audio_bucket_and_key
+
+    monkeypatch.setenv("S3_OUTPUT_BUCKET", "out-bucket")
+    monkeypatch.delenv("OBJECT_STORAGE_MODE", raising=False)
+    # s3:// splits into bucket + key.
+    assert resolve_stored_audio_bucket_and_key("s3://b/tts/media/a.wav") == ("b", "tts/media/a.wav")
+    # s3:// with no key.
+    assert resolve_stored_audio_bucket_and_key("s3://b") == ("b", "")
+    # A bare key resolves against the configured output bucket.
+    assert resolve_stored_audio_bucket_and_key("tts/media/a.wav") == ("out-bucket", "tts/media/a.wav")
+    # An external URL is not a storage location.
+    with pytest.raises(ValueError):
+        resolve_stored_audio_bucket_and_key("https://cdn.example/audio.mp3")
+
+
 def test_list_object_keys_local(monkeypatch, tmp_path):
     monkeypatch.setenv("OBJECT_STORAGE_MODE", "local")
     monkeypatch.setenv("LOCAL_ARTIFACT_ROOT", str(tmp_path / "artifacts"))
@@ -422,6 +473,8 @@ def test_presign_audio_path_branches(monkeypatch):
         assert presign_audio_path("https://already.example/x") == "https://already.example/x"
         assert presign_audio_path("s3://bucket/key.wav") == fake_url
         assert presign_audio_path("raw-key.wav") == fake_url
+        # Normalizes to an empty key → nothing to sign, returned as-is.
+        assert presign_audio_path("/") == "/"
 
 
 def test_presign_annotation_items_audio(monkeypatch):

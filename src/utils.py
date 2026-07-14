@@ -780,14 +780,13 @@ def presign_audio_path(
     normalized = normalize_stored_audio_path(audio_path)
     # A real external URL (not a dev /local-artifacts/ playback URL, which
     # normalize collapses to a bare key) is already fetchable — pass it through.
+    # This also means resolve_stored_audio_bucket_and_key below never sees an
+    # external URL, so it can't raise.
     if normalized and (
         normalized.startswith("http://") or normalized.startswith("https://")
     ):
         return normalized
-    try:
-        bucket, key = resolve_stored_audio_bucket_and_key(audio_path)
-    except ValueError:
-        return audio_path
+    bucket, key = resolve_stored_audio_bucket_and_key(audio_path)
     if not key:
         return audio_path
     return (

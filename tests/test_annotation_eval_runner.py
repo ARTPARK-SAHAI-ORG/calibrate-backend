@@ -360,6 +360,13 @@ def test_build_tts_dataset_normalizes_local_artifacts_url():
     assert out[0]["audio_path"] == "tts/media/a.wav"
 
 
+def test_resolve_s3_bucket_and_key_wraps_external_url():
+    # An external URL isn't a storage location — the resolver's ValueError is
+    # surfaced as a DatasetBuildError so the job fails cleanly.
+    with pytest.raises(runner.DatasetBuildError):
+        runner._resolve_s3_bucket_and_key("https://cdn.example/audio.mp3")
+
+
 def test_build_tts_dataset_missing_fields():
     with pytest.raises(runner.DatasetBuildError):
         runner._build_tts_dataset([{"uuid": "i1", "payload": {"name": "x"}}])
