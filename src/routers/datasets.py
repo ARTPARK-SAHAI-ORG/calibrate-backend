@@ -7,6 +7,7 @@ from pydantic import BaseModel, Field
 from auth_utils import get_current_org, OrgContext
 from utils import presign_audio_path
 from db import (
+    ensure_name_unique,
     create_dataset,
     get_dataset,
     get_all_datasets,
@@ -156,12 +157,13 @@ async def create_new_dataset(
     ctx: OrgContext = Depends(get_current_org),
 ):
     """Create a new empty dataset. Add items separately"""
-    dataset_uuid = create_dataset(
-        name=request.name,
-        dataset_type=request.dataset_type,
-        org_uuid=ctx.org_uuid,
-        user_id=ctx.user_id,
-    )
+    with ensure_name_unique("datasets", request.name, ctx.org_uuid, entity="Dataset"):
+        dataset_uuid = create_dataset(
+            name=request.name,
+            dataset_type=request.dataset_type,
+            org_uuid=ctx.org_uuid,
+            user_id=ctx.user_id,
+        )
     row = get_dataset(dataset_uuid, org_uuid=ctx.org_uuid)
     return _dataset_row_to_response(row, item_count=0, eval_count=0)
 
@@ -234,7 +236,10 @@ async def rename_dataset(
     if not row:
         raise HTTPException(status_code=404, detail="Dataset not found")
 
-    update_dataset_name(dataset_id, org_uuid=ctx.org_uuid, name=request.name)
+    with ensure_name_unique(
+        "datasets", request.name, ctx.org_uuid, entity="Dataset", exclude_uuid=dataset_id
+    ):
+        update_dataset_name(dataset_id, org_uuid=ctx.org_uuid, name=request.name)
     row = get_dataset(dataset_id, org_uuid=ctx.org_uuid)
     counts = get_dataset_item_counts([dataset_id])
     eval_counts = get_dataset_eval_counts([dataset_id])

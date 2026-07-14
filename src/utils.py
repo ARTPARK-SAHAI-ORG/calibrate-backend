@@ -205,6 +205,12 @@ TestTypeLiteral = Literal["response", "tool_call", "conversation"]
 MemberRoleLiteral = Literal["owner", "admin"]  # mirrors DB CHECK(role IN ('owner','admin'))
 EvaluatorUuid = Annotated[str, StringConstraints(min_length=36, max_length=36)]
 
+# Evaluator names that collide with reserved bulk-CSV output columns (an
+# evaluator's name becomes a `<name>`/`<name>_reasoning` column in eval result
+# rows, so a name matching a built-in column would clobber it). Compared
+# case-insensitively after trimming.
+RESERVED_EVALUATOR_NAMES = frozenset({"name", "conversation_history"})
+
 # Bulleted gloss of the agent `type` enum, shared across every model that
 # exposes it (agents, agent-tools, agent-tests, simulations) so the two values
 # read identically everywhere.

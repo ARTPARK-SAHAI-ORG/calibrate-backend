@@ -204,3 +204,102 @@ def test_get_evaluator_detail_compact_nulls_heavy_version_fields(client):
     assert ver["uuid"] == v_uuid
     assert ver["version_number"] == 1
     assert ver["judge_model"] == "openai/gpt-4"
+
+
+# ---------------------------------------------------------------------------
+# Reserved evaluator names (collide with bulk-CSV output columns)
+# ---------------------------------------------------------------------------
+
+
+def _binary_create_body(name):
+    return {
+        "name": name,
+        "evaluator_type": "llm",
+        "output_type": "binary",
+        "version": {
+            "judge_model": "openai/gpt-4",
+            "system_prompt": "Judge it",
+        },
+    }
+
+
+@pytest.mark.parametrize("reserved", ["name", "conversation_history", "  Name ", "NAME"])
+def test_create_evaluator_rejects_reserved_name(client, reserved):
+    h = _signup(client)
+    resp = client.post("/evaluators", json=_binary_create_body(reserved), headers=h)
+    assert resp.status_code == 422, resp.text
+    assert "reserved" in resp.text.lower()
+
+
+def test_update_evaluator_rejects_reserved_name(client):
+    h = _signup(client)
+    _, ev_uuid, _ = _create_rating_evaluator(client, h)
+    resp = client.put(
+        f"/evaluators/{ev_uuid}", json={"name": "conversation_history"}, headers=h
+    )
+    assert resp.status_code == 422, resp.text
+
+
+def test_duplicate_evaluator_rejects_reserved_name(client):
+    h = _signup(client)
+    _, ev_uuid, _ = _create_rating_evaluator(client, h)
+    resp = client.post(
+        f"/evaluators/{ev_uuid}/duplicate", json={"name": "name"}, headers=h
+    )
+    assert resp.status_code == 422, resp.text
+
+
+# ---------------------------------------------------------------------------
+# Duplicate rubric scale points
+# ---------------------------------------------------------------------------
+
+
+def test_create_evaluator_rejects_duplicate_scale_labels(client):
+    h = _signup(client)
+    body = _binary_create_body(f"ev-{uuid.uuid4().hex[:6]}")
+    body["output_type"] = "rating"
+    body["version"]["output_config"] = {
+        "scale": [
+            {"value": 1, "name": "Good"},
+            {"value": 2, "name": "good"},
+        ]
+    }
+    resp = client.post("/evaluators", json=body, headers=h)
+    assert resp.status_code == 422, resp.text
+    assert "label" in resp.text.lower()
+
+
+def test_create_evaluator_rejects_duplicate_scale_values(client):
+    h = _signup(client)
+    body = _binary_create_body(f"ev-{uuid.uuid4().hex[:6]}")
+    body["output_type"] = "rating"
+    body["version"]["output_config"] = {
+        "scale": [
+            {"value": 1, "name": "Bad"},
+            {"value": 1, "name": "Good"},
+        ]
+    }
+    resp = client.post("/evaluators", json=body, headers=h)
+    assert resp.status_code == 422, resp.text
+    assert "value" in resp.text.lower()
+
+
+def test_add_version_rejects_duplicate_scale_labels(client):
+    h = _signup(client)
+    _, ev_uuid, _ = _create_rating_evaluator(client, h)
+    resp = client.post(
+        f"/evaluators/{ev_uuid}/versions",
+        json={
+            "judge_model": "openai/gpt-4",
+            "system_prompt": "Judge {{criteria}} carefully",
+            "variables": [{"name": "criteria"}],
+            "output_config": {
+                "scale": [
+                    {"value": 1, "name": "Dup"},
+                    {"value": 2, "name": "Dup"},
+                ]
+            },
+        },
+        headers=h,
+    )
+    assert resp.status_code == 422, resp.text

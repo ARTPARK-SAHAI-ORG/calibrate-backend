@@ -1,6 +1,6 @@
 from typing import Optional, List, Dict, Any
 from fastapi import APIRouter, HTTPException, Depends, Path
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 from db import create_tool, get_tool, get_all_tools, update_tool, delete_tool, ensure_name_unique
 from auth_utils import get_current_org, OrgContext
@@ -10,6 +10,52 @@ router = APIRouter(prefix="/tools", tags=["tools"])
 
 _EXAMPLE_ID = "f47ac10b-58cc-4372-a567-0e02b2c3d479"
 
+# Keys under which a tool parameter can nest child parameters (an object's
+# fields, an array's element schema). The parameter tree is stored as opaque
+# JSON, so the walk is scoped to `config.parameters` and only follows these
+# container keys — it never inspects `name`s elsewhere in the config (e.g. a
+# webhook block).
+_PARAM_CONTAINER_KEYS = ("parameters", "properties", "items")
+
+
+def _iter_child_param_lists(node: Dict[str, Any]):
+    """Yield each list of sibling parameters nested under a parameter node."""
+    for key in _PARAM_CONTAINER_KEYS:
+        child = node.get(key)
+        if isinstance(child, list):
+            yield child
+        elif isinstance(child, dict):
+            # An array's `items` may be a single schema dict that itself holds
+            # nested parameters — descend one level to find them.
+            yield from _iter_child_param_lists(child)
+
+
+def _reject_duplicate_parameter_names(params: Any) -> None:
+    """Reject a parameter list where two siblings share a name, recursing into
+    nested object/array parameters. Names are compared case-insensitively after
+    trimming. Raises `ValueError` so it surfaces as a 422 from a model validator."""
+    if not isinstance(params, list):
+        return
+    seen: set = set()
+    for param in params:
+        if not isinstance(param, dict):
+            continue
+        name = param.get("name")
+        if isinstance(name, str) and name.strip():
+            key = name.strip().lower()
+            if key in seen:
+                raise ValueError(
+                    f'A parameter named "{name}" already exists at this level'
+                )
+            seen.add(key)
+        for child_list in _iter_child_param_lists(param):
+            _reject_duplicate_parameter_names(child_list)
+
+
+def _validate_tool_config_params(config: Optional[Dict[str, Any]]) -> None:
+    if config is not None:
+        _reject_duplicate_parameter_names(config.get("parameters"))
+
 
 class ToolCreate(BaseModel):
     name: str = Field(description="Tool name, unique within the workspace")
@@ -17,6 +63,11 @@ class ToolCreate(BaseModel):
     config: Optional[Dict[str, Any]] = Field(
         None, description="Tool config (e.g. JSON schema, parameters). Omit to leave unset"
     )
+
+    @model_validator(mode="after")
+    def _validate_config(self):
+        _validate_tool_config_params(self.config)
+        return self
 
 
 class ToolUpdate(BaseModel):
@@ -29,6 +80,11 @@ class ToolUpdate(BaseModel):
     config: Optional[Dict[str, Any]] = Field(
         None, description="New tool config. Omit to leave unchanged"
     )
+
+    @model_validator(mode="after")
+    def _validate_config(self):
+        _validate_tool_config_params(self.config)
+        return self
 
 
 class ToolResponse(BaseModel):

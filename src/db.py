@@ -49,6 +49,7 @@ _UNIQUE_NAME_TABLES: Dict[str, str] = {
     "annotation_tasks": "org_uuid",
     "annotators": "org_uuid",
     "evaluators": "org_uuid",
+    "datasets": "org_uuid",
 }
 
 
@@ -1377,6 +1378,8 @@ def init_db():
             "ON annotation_tasks(org_uuid, name) WHERE deleted_at IS NULL",
             "CREATE UNIQUE INDEX IF NOT EXISTS idx_annotators_org_name_active "
             "ON annotators(org_uuid, name) WHERE deleted_at IS NULL",
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_datasets_org_name_active "
+            "ON datasets(org_uuid, name) WHERE deleted_at IS NULL",
             # Evaluators have a dual ownership model: per-org (org_uuid set)
             # and seeded defaults (org_uuid IS NULL, visible to everyone).
             # SQLite treats multiple NULLs as distinct in unique indexes, so a
