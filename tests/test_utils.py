@@ -424,35 +424,6 @@ def test_presign_audio_path_branches(monkeypatch):
         assert presign_audio_path("raw-key.wav") == fake_url
 
 
-def test_stored_audio_exists_distinguishes_missing_from_errors():
-    from botocore.exceptions import ClientError
-
-    from utils import stored_audio_exists
-
-    assert stored_audio_exists("b", "") is False
-
-    s3 = MagicMock()
-    with patch("utils.is_local_object_storage", return_value=False), patch(
-        "utils.get_s3_client", return_value=s3
-    ):
-        # Present.
-        s3.head_object.return_value = {}
-        assert stored_audio_exists("b", "k.wav") is True
-
-        # Genuinely missing → False.
-        s3.head_object.side_effect = ClientError(
-            {"Error": {"Code": "404"}}, "HeadObject"
-        )
-        assert stored_audio_exists("b", "k.wav") is False
-
-        # Permissions/transient fault → re-raised, never reported as "missing".
-        s3.head_object.side_effect = ClientError(
-            {"Error": {"Code": "403"}}, "HeadObject"
-        )
-        with pytest.raises(ClientError):
-            stored_audio_exists("b", "k.wav")
-
-
 def test_presign_annotation_items_audio(monkeypatch):
     from utils import (
         ANNOTATION_AUDIO_URL_EXPIRY_SECONDS,

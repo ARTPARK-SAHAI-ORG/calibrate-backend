@@ -330,6 +330,7 @@ def test_build_dataset_dispatch_llm_general():
 
 
 def test_build_tts_dataset():
+    # Shape-only validation: no storage probe at submit time.
     items = [
         {
             "uuid": "i1",
@@ -339,8 +340,7 @@ def test_build_tts_dataset():
             },
         }
     ]
-    with patch("annotation_eval_runner.stored_audio_exists", return_value=True):
-        out = runner._build_tts_dataset(items)
+    out = runner._build_tts_dataset(items)
     assert out == [
         {"id": "i1", "text": "hello", "audio_path": "s3://bucket/key.wav"}
     ]
@@ -356,8 +356,7 @@ def test_build_tts_dataset_normalizes_local_artifacts_url():
             },
         }
     ]
-    with patch("annotation_eval_runner.stored_audio_exists", return_value=True):
-        out = runner._build_tts_dataset(items)
+    out = runner._build_tts_dataset(items)
     assert out[0]["audio_path"] == "tts/media/a.wav"
 
 
@@ -368,22 +367,6 @@ def test_build_tts_dataset_missing_fields():
         runner._build_tts_dataset(
             [{"uuid": "i1", "payload": {"text": "hi", "audio_path": "https://x"}}]
         )
-
-
-def test_build_tts_dataset_missing_audio_file():
-    with patch("annotation_eval_runner.stored_audio_exists", return_value=False):
-        with pytest.raises(runner.DatasetBuildError, match="audio file not found"):
-            runner._build_tts_dataset(
-                [
-                    {
-                        "uuid": "i1",
-                        "payload": {
-                            "text": "hi",
-                            "audio_path": "tts/media/missing.wav",
-                        },
-                    }
-                ]
-            )
 
 
 def test_prepare_tts_eval_run_dir_downloads_audio(tmp_path):
@@ -405,8 +388,6 @@ def test_prepare_tts_eval_run_dir_downloads_audio(tmp_path):
     ), patch(
         "annotation_eval_runner.get_s3_output_config", return_value="test-bucket"
     ), patch(
-        "annotation_eval_runner.stored_audio_exists", return_value=True
-    ), patch(
         "annotation_eval_runner.download_file_from_s3", side_effect=_fake_download
     ):
         run_dir = runner._prepare_tts_eval_run_dir(tmp_path, items)
@@ -417,6 +398,27 @@ def test_prepare_tts_eval_run_dir_downloads_audio(tmp_path):
     assert rows[0]["id"] == "i1"
     assert rows[0]["text"] == "hello"
     assert rows[0]["audio_path"].endswith("i1.wav")
+
+
+def test_prepare_tts_eval_run_dir_missing_clip_fails_with_item_and_key(tmp_path):
+    # The download IS the existence check: a missing clip raises here (in the
+    # background worker), naming the item + key.
+    items = [
+        {"uuid": "i1", "payload": {"text": "hi", "audio_path": "tts/media/missing.wav"}}
+    ]
+
+    def _fake_download(_s3, _bucket, _key, _local_path):
+        raise FileNotFoundError("no such object")
+
+    with patch(
+        "annotation_eval_runner.get_s3_client", return_value=MagicMock()
+    ), patch(
+        "annotation_eval_runner.get_s3_output_config", return_value="test-bucket"
+    ), patch(
+        "annotation_eval_runner.download_file_from_s3", side_effect=_fake_download
+    ):
+        with pytest.raises(runner.DatasetBuildError, match="tts/media/missing.wav"):
+            runner._prepare_tts_eval_run_dir(tmp_path, items)
 
 
 def test_build_simulation_dataset():

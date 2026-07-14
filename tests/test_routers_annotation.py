@@ -230,7 +230,7 @@ def test_tts_task_type_evaluator_run_launches(client, monkeypatch):
     with patch(
         "annotation_eval_runner.download_file_from_s3",
         side_effect=lambda _s3, _b, _k, local: Path(local).write_bytes(b"wav"),
-    ), patch("annotation_eval_runner.stored_audio_exists", return_value=True):
+    ):
         run = client.post(
             f"/annotation-tasks/{task_uuid}/evaluator-runs",
             json={

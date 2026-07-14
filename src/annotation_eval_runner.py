@@ -58,7 +58,6 @@ from utils import (
     normalize_stored_audio_path,
     register_job_starter,
     resolve_stored_audio_bucket_and_key,
-    stored_audio_exists,
     try_start_queued_job,
     upload_file_to_s3,
     upload_top_level_files_to_s3,
@@ -457,8 +456,12 @@ def _build_tts_dataset(items: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
 
     The CLI reads a run directory's ``results.csv`` plus local audio files, not
     a JSON dataset — see :func:`_prepare_tts_eval_run_dir`. This builder only
-    validates payload shape for the synchronous 400 guard and documents the
-    per-item contract."""
+    validates payload SHAPE (present `text` + a key-like `audio_path`) for the
+    synchronous 400 guard. It deliberately does NOT check that each clip exists
+    in storage: that would be one blocking S3 call per item inside the request
+    that launches the run. The background worker downloads every clip anyway
+    (see :func:`_prepare_tts_eval_run_dir`), so a genuinely-missing clip fails
+    there — no redundant per-item existence probe at submit time."""
     out: List[Dict[str, Any]] = []
     for it in items:
         payload = _payload_dict(it)
@@ -476,12 +479,6 @@ def _build_tts_dataset(items: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
                 "s3:// URI (store the key from POST /presigned-url, not the "
                 "upload or playback URL)"
             )
-        bucket, key = _resolve_s3_bucket_and_key(audio_path)
-        if not stored_audio_exists(bucket, key):
-            raise DatasetBuildError(
-                f"Item {it['uuid']}: audio file not found for key {key!r}. "
-                "Upload the clip via the presigned URL before running evaluators."
-            )
         out.append(
             {
                 "id": it["uuid"],
@@ -498,7 +495,11 @@ def _prepare_tts_eval_run_dir(input_dir: Path, items: List[Dict[str, Any]]) -> P
     Downloads each item's audio from S3 server-side (using the stored key, not
     any client-signed URL), writes ``results.csv`` with absolute local paths,
     and returns the run dir passed to ``--dataset``. ``output_dir`` must differ
-    from this path so calibrate does not overwrite the input run."""
+    from this path so calibrate does not overwrite the input run.
+
+    The download is also the existence check: a missing clip raises here (in the
+    background worker), naming the item + key, so the job fails with a clear
+    reason instead of the submit request paying for a per-item probe up front."""
     rows = _build_tts_dataset(items)
     run_dir = input_dir / "tts_run"
     audios_dir = run_dir / "audios"
@@ -511,7 +512,13 @@ def _prepare_tts_eval_run_dir(input_dir: Path, items: List[Dict[str, Any]]) -> P
         bucket, key = _resolve_s3_bucket_and_key(row["audio_path"])
         suffix = Path(key).suffix or ".wav"
         local_audio = audios_dir / f"{row['id']}{suffix}"
-        download_file_from_s3(s3, bucket, key, local_audio)
+        try:
+            download_file_from_s3(s3, bucket, key, local_audio)
+        except Exception as e:
+            raise DatasetBuildError(
+                f"Item {row['id']}: could not fetch audio for key {key!r}: {e}. "
+                "Upload the clip via the presigned URL before running evaluators."
+            ) from e
         csv_rows.append([row["id"], row["text"], str(local_audio.resolve())])
 
     with open(run_dir / "results.csv", "w", newline="", encoding="utf-8") as f:

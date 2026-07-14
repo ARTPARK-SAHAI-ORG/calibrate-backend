@@ -356,7 +356,7 @@ def test_annotation_eval_run_job_end_to_end_with_fake_cli(task_type):
     ), patch(
         "annotation_eval_runner.download_file_from_s3",
         side_effect=lambda _s3, _b, _k, local: Path(local).write_bytes(b"wav"),
-    ), patch("annotation_eval_runner.stored_audio_exists", return_value=True), patch(
+    ), patch(
         "annotation_eval_runner.upload_file_to_s3"
     ), patch(
         "annotation_eval_runner.time.sleep"
