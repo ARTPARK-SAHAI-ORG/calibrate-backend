@@ -424,6 +424,37 @@ def test_presign_audio_path_branches(monkeypatch):
         assert presign_audio_path("raw-key.wav") == fake_url
 
 
+def test_presign_annotation_items_audio(monkeypatch):
+    from utils import (
+        ANNOTATION_AUDIO_URL_EXPIRY_SECONDS,
+        presign_annotation_items_audio,
+    )
+
+    monkeypatch.setenv("S3_OUTPUT_BUCKET", "my-bucket")
+    fake_url = "https://example.com/signed"
+    s3_mock = MagicMock()
+    s3_mock.generate_presigned_url.return_value = fake_url
+    with patch("utils.get_s3_client", return_value=s3_mock):
+        # Non-tts task → left untouched (no-op) even when audio is present.
+        stt_items = [{"payload": {"name": "x", "audio_path": "s3://b/a.wav"}}]
+        presign_annotation_items_audio(stt_items, "stt")
+        assert stt_items[0]["payload"]["audio_path"] == "s3://b/a.wav"
+
+        # tts task → audio_path signed in place; items without audio untouched.
+        tts_items = [
+            {"payload": {"name": "clip", "audio_path": "s3://b/a.wav"}},
+            {"payload": {"name": "no-audio"}},
+            {"payload": None},
+        ]
+        returned = presign_annotation_items_audio(tts_items, "tts")
+        assert returned is tts_items  # mutates + returns the same list
+        assert tts_items[0]["payload"]["audio_path"] == fake_url
+        assert "audio_path" not in tts_items[1]["payload"]
+        # Long TTL passed through so annotator sessions don't expire mid-play.
+        _, kwargs = s3_mock.generate_presigned_url.call_args
+        assert kwargs["ExpiresIn"] == ANNOTATION_AUDIO_URL_EXPIRY_SECONDS
+
+
 # ---------------------------------------------------------------------------
 # Job queue helpers (real DB)
 # ---------------------------------------------------------------------------

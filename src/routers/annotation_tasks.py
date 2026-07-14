@@ -74,6 +74,7 @@ from utils import (
     InitialTaskStatus,
     can_start_job,
     compute_share_token_toggle,
+    presign_annotation_items_audio,
     try_start_queued_job,
 )
 
@@ -548,6 +549,8 @@ async def get_annotation_task_endpoint(
             runs_by_item.get(item["uuid"], []),
             evaluator_ids,
         )
+    # TTS items store audio as an S3 key; sign it so the Items tab can play it.
+    presign_annotation_items_audio(items, task.get("type"))
     task["items"] = items
     return task
 
@@ -2328,7 +2331,7 @@ async def get_evaluator_run_job(
     ctx: OrgContext = Depends(get_org_jwt_or_api_key),
 ):
     """Get one evaluator-run job with results and human-agreement summary"""
-    _ensure_owned_task(task_uuid, ctx.org_uuid)
+    task = _ensure_owned_task(task_uuid, ctx.org_uuid)
     job = get_job(job_uuid, org_uuid=ctx.org_uuid)
     if (
         not job
@@ -2354,7 +2357,11 @@ async def get_evaluator_run_job(
     # any post-submit edits / soft-deletes on the source annotation_items.
     # Empty for legacy jobs created before snapshotting (those will be
     # backfilled on first run; see annotation_eval_runner._run_job).
-    shaped["items"] = get_eval_job_items(job_uuid)
+    # Snapshots freeze the raw S3 key, so old runs stay replayable — sign it
+    # fresh on each read (moot until a tts eval path exists, but kept uniform).
+    shaped["items"] = presign_annotation_items_audio(
+        get_eval_job_items(job_uuid), task.get("type")
+    )
     return shaped
 
 
@@ -2833,6 +2840,8 @@ async def task_summary(
         items = [it for it in items if _item_disagrees(it)]
     total_items = len(items)
     paged_items = items[pagination.offset : pagination.offset + pagination.limit]
+    # Sign TTS audio once per page item; rows below reuse the same payload dict.
+    presign_annotation_items_audio(paged_items, task.get("type"))
 
     rows: List[Dict[str, Any]] = []
     for item in paged_items:

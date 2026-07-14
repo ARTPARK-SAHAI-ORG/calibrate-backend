@@ -724,7 +724,10 @@ def generate_presigned_download_url(
         return None
 
 
-def presign_audio_path(audio_path: Optional[str]) -> Optional[str]:
+def presign_audio_path(
+    audio_path: Optional[str],
+    expiration: int = PRESIGNED_URL_EXPIRY_SECONDS,
+) -> Optional[str]:
     """Convert an s3://bucket/key path (or plain key) to a presigned download URL."""
     if not audio_path:
         return audio_path
@@ -732,10 +735,47 @@ def presign_audio_path(audio_path: Optional[str]) -> Optional[str]:
         parts = audio_path[5:].split("/", 1)
         bucket = parts[0]
         key = parts[1] if len(parts) > 1 else ""
-        return generate_presigned_download_url(key, bucket=bucket) or audio_path
+        return (
+            generate_presigned_download_url(key, bucket=bucket, expiration=expiration)
+            or audio_path
+        )
     if audio_path.startswith("http"):
         return audio_path
-    return generate_presigned_download_url(audio_path) or audio_path
+    return generate_presigned_download_url(audio_path, expiration=expiration) or audio_path
+
+
+# Long TTL for audio playback URLs handed to annotation reads. Unauthenticated
+# annotators (public labelling / view routes) may keep a labelling job open for
+# a whole work session, so a 1-hour URL would expire mid-session and break
+# playback. 12h comfortably covers a working day and stays well under S3
+# SigV4's 7-day presign ceiling.
+ANNOTATION_AUDIO_URL_EXPIRY_SECONDS = 12 * 3600
+
+
+def presign_annotation_items_audio(
+    items: List[Dict[str, Any]],
+    task_type: Optional[str],
+    expiration: int = ANNOTATION_AUDIO_URL_EXPIRY_SECONDS,
+) -> List[Dict[str, Any]]:
+    """For a `tts` annotation task, replace each item's stored `payload.audio_path`
+    (an S3 key/URI, never a persisted signed URL) with a freshly presigned
+    download URL so the clip plays in the browser.
+
+    Mutates the item payloads in place and returns the same list. No-op for
+    non-tts tasks or items whose payload carries no `audio_path`, so it is safe
+    to call on every annotation-item read path. Signing on read (rather than
+    storing a URL) keeps frozen evaluator-run snapshots replayable — the key
+    never expires, only the URL minted per request does.
+    """
+    if task_type != "tts":
+        return items
+    for item in items:
+        payload = item.get("payload") if isinstance(item, dict) else None
+        if isinstance(payload, dict) and payload.get("audio_path"):
+            payload["audio_path"] = presign_audio_path(
+                payload["audio_path"], expiration=expiration
+            )
+    return items
 
 
 def generate_presigned_upload_url(

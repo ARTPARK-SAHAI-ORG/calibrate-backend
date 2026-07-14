@@ -238,6 +238,56 @@ def test_tts_task_type_parity_but_run_deferred(client):
     assert "task type 'tts'" in run.json()["detail"]
 
 
+def test_tts_item_audio_path_signed_on_reads(client):
+    """TTS items store `audio_path` as an S3 key; every read path signs it into a
+    presigned URL so the clip plays — including the unauthenticated public
+    labelling form."""
+    auth = _signup(client)
+    h = auth["headers"]
+    tts_ev = _tts_evaluator(client, h)
+    task_uuid = client.post(
+        "/annotation-tasks",
+        json={
+            "name": f"tts-{uuid.uuid4().hex[:6]}",
+            "type": "tts",
+            "evaluator_ids": [tts_ev["uuid"]],
+        },
+        headers=h,
+    ).json()["uuid"]
+    item_ids = client.post(
+        f"/annotation-tasks/{task_uuid}/items",
+        json={
+            "items": [
+                {"payload": {"name": "clip", "audio_path": "s3://test-bucket/tts/media/abc.wav"}}
+            ]
+        },
+        headers=h,
+    ).json()["item_ids"]
+
+    signed = "https://signed.example/audio"
+    with patch("utils.generate_presigned_download_url", return_value=signed):
+        # Admin: task detail (Items tab).
+        detail = client.get(f"/annotation-tasks/{task_uuid}", headers=h).json()
+        assert detail["items"][0]["payload"]["audio_path"] == signed
+
+        # Admin: summary rows (item detail dialog).
+        summ = client.get(f"/annotation-tasks/{task_uuid}/summary", headers=h).json()
+        assert summ["rows"][0]["payload"]["audio_path"] == signed
+
+        # Annotator: unauthenticated public labelling form (no bearer).
+        annotator = client.post(
+            "/annotators", json={"name": f"a-{uuid.uuid4().hex[:6]}"}, headers=h
+        ).json()
+        job = client.post(
+            f"/annotation-tasks/{task_uuid}/jobs",
+            json={"annotator_ids": [annotator["uuid"]], "item_ids": item_ids},
+            headers=h,
+        ).json()["jobs"][0]
+        form = client.get(f"/public/annotation-jobs/{job['public_token']}")
+        assert form.status_code == 200
+        assert form.json()["items"][0]["payload"]["audio_path"] == signed
+
+
 def test_list_annotation_tasks_batched_evaluators_match_per_task(client):
     """GET /annotation-tasks batches evaluator enrichment into one query; the
     per-task evaluator data on a multi-item page must be byte-for-byte identical

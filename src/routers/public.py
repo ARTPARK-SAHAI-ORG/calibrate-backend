@@ -48,6 +48,7 @@ from utils import (
     load_evaluator_metric_key_map,
     normalize_metrics,
     post_process_provider_results,
+    presign_annotation_items_audio,
     presign_audio_path,
 )
 
@@ -855,6 +856,9 @@ def _build_annotation_job_payload(
         ev["scale_max"] = scale_max
         ev["variables"] = version.get("variables") if version else None
     items = get_job_items(job["uuid"])
+    # Annotators open this form unauthenticated and may keep it open for hours;
+    # sign TTS audio with a long TTL so playback doesn't die mid-session.
+    presign_annotation_items_audio(items, task.get("type"))
     annotations = get_annotations_for_job(job["uuid"])
 
     return {
