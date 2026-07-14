@@ -741,7 +741,7 @@ def normalize_stored_audio_path(audio_path: Optional[str]) -> Optional[str]:
 
     Annotation items should store keys (``tts/media/<uuid>.wav``) or
     ``s3://bucket/key`` URIs. The frontend sometimes round-trips a dev
-    ``/local-artifacts/…`` playback URL instead — strip that prefix so
+    ``LOCAL_ARTIFACTS_URL_PREFIX`` playback URL instead — strip that prefix so
     download/presign resolve the same object."""
     if not audio_path:
         return audio_path
@@ -784,7 +784,7 @@ def presign_audio_path(
     if not audio_path:
         return audio_path
     normalized = normalize_stored_audio_path(audio_path)
-    # A real external URL (not a dev /local-artifacts/ playback URL, which
+    # A real external URL (not a dev LOCAL_ARTIFACTS_URL_PREFIX playback URL, which
     # normalize collapses to a bare key) is already fetchable — pass it through.
     # This also means resolve_stored_audio_bucket_and_key below never sees an
     # external URL, so it can't raise.
