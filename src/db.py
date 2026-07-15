@@ -14,7 +14,7 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 # Database path
-DB_PATH = Path(join(os.getenv("DB_ROOT_DIR"), "pense.prod.db"))
+DB_PATH = Path(join(os.getenv("DB_ROOT_DIR"), "pense.db"))
 
 # Default user configuration — set via environment variables for local dev
 DEFAULT_USER_EMAIL = os.getenv("DEFAULT_USER_EMAIL", "")
