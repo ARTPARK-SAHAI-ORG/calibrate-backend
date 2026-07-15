@@ -35,6 +35,7 @@ from utils import (
     enrich_evaluator_runs_with_current_names,
     load_evaluator_metric_key_map,
     post_process_provider_results,
+    presign_tts_provider_results_audio,
     get_s3_client,
     get_s3_output_config,
     can_start_job,
@@ -1096,25 +1097,8 @@ async def get_tts_evaluation_status(
         evaluator_id_by_metric_key=evaluator_id_by_metric_key,
     )
 
-    # Generate presigned URLs on the fly for completed or failed jobs
-    if status in (TaskStatus.DONE.value, TaskStatus.FAILED.value):
-        for provider_result in provider_results:
-            if provider_result.get("results"):
-                for result_row in provider_result["results"]:
-                    if "audio_path" in result_row and result_row["audio_path"]:
-                        audio_s3_key = result_row["audio_path"]
-                        # Skip if already a URL (backwards compatibility)
-                        if audio_s3_key.startswith("http"):
-                            continue
-                        # Expose the raw stored key/URI alongside the presigned URL
-                        # so clients can copy it into a TTS annotation item's
-                        # payload.audio_path (which stores the key, not a signed URL).
-                        result_row["audio_s3_path"] = audio_s3_key
-                        if audio_s3_key.startswith("s3://"):
-                            continue
-                        presigned_url = generate_presigned_download_url(audio_s3_key)
-                        if presigned_url:
-                            result_row["audio_path"] = presigned_url
+    if provider_results:
+        presign_tts_provider_results_audio(provider_results, status)
 
     return TaskStatusResponse(
         task_id=task_id,

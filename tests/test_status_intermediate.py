@@ -212,7 +212,7 @@ def test_tts_get_done_exposes_raw_audio_key(client):
         },
     )
     with patch(
-        "routers.tts.generate_presigned_download_url",
+        "utils.generate_presigned_download_url",
         return_value="https://signed",
     ):
         resp = client.get(f"/tts/evaluate/{job_uuid}", headers=h)

@@ -50,6 +50,7 @@ from utils import (
     post_process_provider_results,
     presign_annotation_items_audio,
     presign_audio_path,
+    presign_tts_provider_results_audio,
 )
 
 # Re-use the audio URL helper from simulations (no circular import risk)
@@ -317,35 +318,6 @@ class PublicDefaultEvaluatorResponse(BaseModel):
 # ---------------------------------------------------------------------------
 
 
-def _build_tts_provider_results_with_presigned_urls(
-    provider_results: List[Dict[str, Any]],
-    status: str,
-) -> List[Dict[str, Any]]:
-    """
-    For DONE/FAILED TTS jobs regenerate presigned download URLs for audio
-    entries whose audio_path is an S3 key rather than an http URL.
-    Mirrors the logic in routers/tts.py::get_tts_evaluation_status.
-    """
-    if status not in (TaskStatus.DONE.value, TaskStatus.FAILED.value):
-        return provider_results
-
-    for provider_result in provider_results:
-        if provider_result.get("results"):
-            for result_row in provider_result["results"]:
-                if "audio_path" in result_row and result_row["audio_path"]:
-                    audio_s3_key = result_row["audio_path"]
-                    if audio_s3_key.startswith("http"):
-                        continue
-                    result_row["audio_s3_path"] = audio_s3_key
-                    if audio_s3_key.startswith("s3://"):
-                        continue
-                    presigned_url = generate_presigned_download_url(audio_s3_key)
-                    if presigned_url:
-                        result_row["audio_path"] = presigned_url
-
-    return provider_results
-
-
 def _build_simulation_results_with_presigned_urls(
     job: Dict[str, Any],
     simulation_results: List[Dict[str, Any]],
@@ -591,10 +563,7 @@ async def get_public_tts(
         evaluator_id_by_metric_key=load_evaluator_metric_key_map(details),
     )
 
-    # Regenerate presigned audio URLs for completed/failed jobs
-    provider_results = _build_tts_provider_results_with_presigned_urls(
-        provider_results, status
-    )
+    provider_results = presign_tts_provider_results_audio(provider_results, status)
 
     return PublicTTSResponse(
         task_id=task_id,
