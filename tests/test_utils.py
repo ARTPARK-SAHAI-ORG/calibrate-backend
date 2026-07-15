@@ -467,6 +467,34 @@ def test_presign_audio_path_branches(monkeypatch):
         assert presign_audio_path("/") == "/"
 
 
+def test_presign_tts_provider_results_audio_branches():
+    from utils import presign_tts_provider_results_audio
+
+    rows = [
+        {"audio_path": "raw/key.wav"},
+        {"audio_path": "s3://bucket/key.wav"},
+        {"audio_path": "https://already/signed"},
+        {"audio_path": None},
+        {},
+    ]
+    provider_results = [{"results": rows}]
+    with patch("utils.generate_presigned_download_url", return_value="https://signed"):
+        # Non-terminal status is a no-op.
+        presign_tts_provider_results_audio(provider_results, "in_progress")
+        assert "audio_s3_path" not in rows[0]
+
+        presign_tts_provider_results_audio(provider_results, "done")
+    # Bare key: signed, raw key exposed.
+    assert rows[0] == {"audio_path": "https://signed", "audio_s3_path": "raw/key.wav"}
+    # s3:// URI: key exposed but not re-signed.
+    assert rows[1] == {
+        "audio_path": "s3://bucket/key.wav",
+        "audio_s3_path": "s3://bucket/key.wav",
+    }
+    # Already an http URL: untouched.
+    assert rows[2] == {"audio_path": "https://already/signed"}
+
+
 def test_presign_annotation_items_audio(monkeypatch):
     from utils import (
         ANNOTATION_AUDIO_URL_EXPIRY_SECONDS,

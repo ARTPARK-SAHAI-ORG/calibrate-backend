@@ -1437,6 +1437,36 @@ def _row_value_looks_like_error(raw_value: Any, reasoning: Any) -> bool:
     return False
 
 
+def presign_tts_provider_results_audio(
+    provider_results: List[Dict[str, Any]],
+    status: str,
+) -> List[Dict[str, Any]]:
+    """For DONE/FAILED TTS jobs, presign each result row's audio and expose its
+    raw S3 key. Mutates rows in place and returns the same list.
+
+    ``audio_path`` becomes a presigned download URL; ``audio_s3_path`` carries
+    the raw stored key/URI so clients can copy it into a TTS annotation item
+    (which stores the key, not a signed URL). Rows already holding an http URL
+    are left untouched; s3:// URIs get the key exposed but are not re-signed.
+    """
+    if status not in (TaskStatus.DONE.value, TaskStatus.FAILED.value):
+        return provider_results
+
+    for provider_result in provider_results:
+        for result_row in provider_result.get("results") or []:
+            audio_s3_key = result_row.get("audio_path")
+            if not audio_s3_key or audio_s3_key.startswith("http"):
+                continue
+            result_row["audio_s3_path"] = audio_s3_key
+            if audio_s3_key.startswith("s3://"):
+                continue
+            presigned_url = generate_presigned_download_url(audio_s3_key)
+            if presigned_url:
+                result_row["audio_path"] = presigned_url
+
+    return provider_results
+
+
 def post_process_provider_results(
     provider_results: Optional[List[Dict[str, Any]]],
     evaluator_snapshots: Optional[List[Dict[str, Any]]] = None,

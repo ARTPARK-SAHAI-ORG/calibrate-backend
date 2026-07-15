@@ -176,6 +176,50 @@ def test_tts_get_in_progress_reads_intermediate(client, tmp_path):
     assert resp.status_code == 200
     body = resp.json()
     assert body["provider_results"]
+    # Raw S3 key is exposed alongside the presigned audio_path so it can be
+    # copied into a TTS annotation item.
+    row = body["provider_results"][0]["results"][0]
+    assert row["audio_path"] == "https://signed"
+    assert row["audio_s3_path"] == f"tts/evals/{job_uuid}/outputs/openai/audio_1.wav"
+
+
+def test_tts_get_done_exposes_raw_audio_key(client):
+    auth = _signup(client)
+    h = auth["headers"]
+    user_id = auth["user_uuid"]
+    org_uuid = auth["org_uuid"]
+    raw_key = "tts/evals/done-job/outputs/openai/audio_1.wav"
+    job_uuid = db.create_job(
+        job_type="tts-eval",
+        org_uuid=org_uuid,
+        user_id=user_id,
+        status="done",
+        details={
+            "providers": ["openai"],
+            "language": "en",
+            "texts": ["hi"],
+            "s3_bucket": "bucket",
+            "evaluators": [],
+        },
+        results={
+            "provider_results": [
+                {
+                    "provider": "openai",
+                    "success": True,
+                    "results": [{"id": "row_1", "text": "hi", "audio_path": raw_key}],
+                }
+            ],
+        },
+    )
+    with patch(
+        "utils.generate_presigned_download_url",
+        return_value="https://signed",
+    ):
+        resp = client.get(f"/tts/evaluate/{job_uuid}", headers=h)
+    assert resp.status_code == 200
+    row = resp.json()["provider_results"][0]["results"][0]
+    assert row["audio_path"] == "https://signed"
+    assert row["audio_s3_path"] == raw_key
 
 
 def test_tts_get_timeout_path(client, tmp_path):
