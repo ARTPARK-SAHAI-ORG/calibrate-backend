@@ -106,18 +106,14 @@ async def list_jobs(
     return JobsListResponse(jobs=job_items)
 
 
-@router.delete("/{job_uuid}", summary="Delete job")
-async def delete_job_endpoint(
-    job_uuid: str = Path(
-        description="Job to delete",
-        examples=["a3b2c1d0-e5f4-3210-abcd-ef1234567890"],
-    ),
-    ctx: OrgContext = Depends(get_current_org),
-):
-    """Delete a job, stopping it first if it is still running"""
-    job = get_job(job_uuid, org_uuid=ctx.org_uuid)
+def _delete_one_job(job_uuid: str, org_uuid: str) -> bool:
+    """Delete a single job owned by ``org_uuid``, killing it first if running.
+
+    Returns True on success, False if the job does not exist for this org.
+    """
+    job = get_job(job_uuid, org_uuid=org_uuid)
     if not job:
-        raise HTTPException(status_code=404, detail="Job not found")
+        return False
 
     was_running = job.get("status") == TaskStatus.IN_PROGRESS.value
     details = job.get("details") or {}
@@ -127,11 +123,60 @@ async def delete_job_endpoint(
         if running_pids:
             kill_processes_from_dict(running_pids, job_uuid)
 
-    deleted = delete_job(job_uuid)
-    if not deleted:
-        raise HTTPException(status_code=404, detail="Job not found")
+    if not delete_job(job_uuid):
+        return False
 
     if was_running:
         try_start_queued_job(EVAL_JOB_TYPES)
+
+    return True
+
+
+class BulkDeleteJobsRequest(BaseModel):
+    job_uuids: List[str] = Field(
+        min_length=1,
+        description="Jobs to delete",
+    )
+
+
+class BulkDeleteJobsResponse(BaseModel):
+    deleted_count: int = Field(description="Number of jobs deleted")
+    not_found: List[str] = Field(
+        description="Requested job IDs that did not exist for this workspace"
+    )
+
+
+@router.delete("", response_model=BulkDeleteJobsResponse, summary="Bulk delete jobs")
+async def bulk_delete_jobs_endpoint(
+    payload: BulkDeleteJobsRequest = ...,
+    ctx: OrgContext = Depends(get_current_org),
+):
+    """Delete several jobs at once, stopping any that are still running"""
+    seen: set[str] = set()
+    deleted_count = 0
+    not_found: List[str] = []
+    for job_uuid in payload.job_uuids:
+        if job_uuid in seen:
+            continue
+        seen.add(job_uuid)
+        if _delete_one_job(job_uuid, ctx.org_uuid):
+            deleted_count += 1
+        else:
+            not_found.append(job_uuid)
+
+    return BulkDeleteJobsResponse(deleted_count=deleted_count, not_found=not_found)
+
+
+@router.delete("/{job_uuid}", summary="Delete job")
+async def delete_job_endpoint(
+    job_uuid: str = Path(
+        description="Job to delete",
+        examples=["a3b2c1d0-e5f4-3210-abcd-ef1234567890"],
+    ),
+    ctx: OrgContext = Depends(get_current_org),
+):
+    """Delete a job, stopping it first if it is still running"""
+    if not _delete_one_job(job_uuid, ctx.org_uuid):
+        raise HTTPException(status_code=404, detail="Job not found")
 
     return {"message": "Job deleted successfully"}

@@ -1527,6 +1527,58 @@ def test_jobs_router(client):
     assert client.delete(f"/jobs/{j_uuid}", headers=h).status_code == 404
 
 
+def test_jobs_bulk_delete(client):
+    import db as db_mod
+
+    auth = _auth(client)
+    h = auth["headers"]
+    org_uuid = db_mod.get_personal_org_for_user(auth["user_uuid"])["uuid"]
+
+    j1 = db_mod.create_job(
+        job_type="stt-eval", org_uuid=org_uuid, user_id=auth["user_uuid"]
+    )
+    j2 = db_mod.create_job(
+        job_type="tts-eval", org_uuid=org_uuid, user_id=auth["user_uuid"]
+    )
+    missing = str(uuid.uuid4())
+
+    resp = client.request(
+        "DELETE",
+        "/jobs",
+        headers=h,
+        json={"job_uuids": [j1, j2, j1, missing]},
+    )
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["deleted_count"] == 2
+    assert body["not_found"] == [missing]
+
+    # Both are gone; re-deleting reports them as not found
+    assert db_mod.get_job(j1, org_uuid=org_uuid) is None
+    assert db_mod.get_job(j2, org_uuid=org_uuid) is None
+
+    # Another org cannot delete this org's jobs (they read as not-found)
+    other = _auth(client)
+    other_org = db_mod.get_personal_org_for_user(other["user_uuid"])["uuid"]
+    j3 = db_mod.create_job(
+        job_type="stt-eval", org_uuid=org_uuid, user_id=auth["user_uuid"]
+    )
+    cross = client.request(
+        "DELETE", "/jobs", headers=other["headers"], json={"job_uuids": [j3]}
+    )
+    assert cross.status_code == 200
+    assert cross.json() == {"deleted_count": 0, "not_found": [j3]}
+    assert db_mod.get_job(j3, org_uuid=org_uuid) is not None
+
+    # Empty list is rejected by validation
+    assert (
+        client.request(
+            "DELETE", "/jobs", headers=h, json={"job_uuids": []}
+        ).status_code
+        == 422
+    )
+
+
 # ---------------------------------------------------------------------------
 # Agent-Tools router
 # ---------------------------------------------------------------------------
