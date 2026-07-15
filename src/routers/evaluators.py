@@ -1,9 +1,9 @@
 """Evaluators router.
 
 Replaces the legacy `metrics` router. Adds:
- - Built-in default vs user-created evaluators
+ - Each workspace's editable default forks vs user-created evaluators
  - Versioned prompts with judge_model, rating scale, variables
- - Duplicate a built-in default into an editable copy
+ - Duplicate any evaluator into a new editable one
  - Live-version selection
  - API-key-authenticated invocation endpoint
 """
@@ -625,7 +625,7 @@ async def list_evaluators(
         None, description="Filter by modality. Omit for all"
     ),
     include_defaults: bool = Query(
-        True, description="When `true`, include the built-in default evaluators alongside the ones you created"
+        True, description="Retained for backward compatibility and no longer filters. Your evaluators, including your editable copies of the defaults, are always returned"
     ),
     ctx: OrgContext = Depends(get_org_jwt_or_api_key),
     search: _EvaluatorSearch = Depends(),

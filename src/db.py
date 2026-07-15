@@ -4987,7 +4987,9 @@ def update_evaluator(
 
 
 def delete_evaluator(evaluator_uuid: str) -> bool:
-    """Soft-delete an evaluator. Seeded default (org_uuid IS NULL) evaluators cannot be deleted."""
+    """Soft-delete an evaluator. Only the hidden seed templates (org_uuid IS NULL)
+    are protected; a per-org fork of a default (org_uuid set) is an ordinary
+    deletable row like any custom evaluator."""
     with get_db_connection() as conn:
         cursor = conn.cursor()
         cursor.execute(
