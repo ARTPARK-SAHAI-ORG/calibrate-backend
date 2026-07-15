@@ -2784,6 +2784,30 @@ def _backfill_fork_default_evaluators(cursor: sqlite3.Cursor) -> int:
     return total
 
 
+def _template_and_fork_maps(cursor: sqlite3.Cursor):
+    """Shared lookups for the two default-re-point migrations:
+      - `slug_by_template`: template evaluator uuid -> its slug (empty => nothing
+        to re-point).
+      - `fork_by_org_slug`: (org_uuid, source_default_slug) -> (fork_uuid,
+        fork_live_version_id).
+    """
+    cursor.execute(
+        "SELECT uuid, slug FROM evaluators "
+        "WHERE org_uuid IS NULL AND slug IS NOT NULL AND deleted_at IS NULL"
+    )
+    slug_by_template = {r["uuid"]: r["slug"] for r in cursor.fetchall()}
+
+    cursor.execute(
+        "SELECT org_uuid, source_default_slug, uuid, live_version_id "
+        "FROM evaluators WHERE source_default_slug IS NOT NULL AND deleted_at IS NULL"
+    )
+    fork_by_org_slug = {
+        (r["org_uuid"], r["source_default_slug"]): (r["uuid"], r["live_version_id"])
+        for r in cursor.fetchall()
+    }
+    return slug_by_template, fork_by_org_slug
+
+
 # The evaluator link pivots that a live entity uses for FUTURE runs, with the
 # parent's org column and whether the pivot pins an evaluator_version_id. Job
 # snapshots (agent_test_jobs / simulation_jobs / STT-TTS job details /
@@ -2817,22 +2841,9 @@ def _backfill_repoint_default_links_to_forks(cursor: sqlite3.Cursor) -> int:
     Caller commits and records `REPOINT_DEFAULT_LINKS_MIGRATION` in the same
     transaction so a crash mid-migration retries on next init_db.
     """
-    cursor.execute(
-        "SELECT uuid, slug FROM evaluators "
-        "WHERE org_uuid IS NULL AND slug IS NOT NULL AND deleted_at IS NULL"
-    )
-    slug_by_template = {r["uuid"]: r["slug"] for r in cursor.fetchall()}
+    slug_by_template, fork_by_org_slug = _template_and_fork_maps(cursor)
     if not slug_by_template:
         return 0
-
-    cursor.execute(
-        "SELECT org_uuid, source_default_slug, uuid, live_version_id "
-        "FROM evaluators WHERE source_default_slug IS NOT NULL AND deleted_at IS NULL"
-    )
-    fork_by_org_slug = {
-        (r["org_uuid"], r["source_default_slug"]): (r["uuid"], r["live_version_id"])
-        for r in cursor.fetchall()
-    }
 
     placeholders = ",".join("?" * len(slug_by_template))
     template_uuids = tuple(slug_by_template)
@@ -2931,24 +2942,11 @@ def _backfill_repoint_default_job_snapshots(cursor: sqlite3.Cursor) -> int:
     still flag-gates it. Caller commits and records
     `REPOINT_DEFAULT_JOB_SNAPSHOTS_MIGRATION` in the same transaction.
     """
-    cursor.execute(
-        "SELECT uuid, slug FROM evaluators "
-        "WHERE org_uuid IS NULL AND slug IS NOT NULL AND deleted_at IS NULL"
-    )
-    slug_by_template = {r["uuid"]: r["slug"] for r in cursor.fetchall()}
+    slug_by_template, fork_by_org_slug = _template_and_fork_maps(cursor)
     if not slug_by_template:
         return 0
     template_uuids = tuple(slug_by_template)
     placeholders = ",".join("?" * len(template_uuids))
-
-    cursor.execute(
-        "SELECT org_uuid, source_default_slug, uuid, live_version_id "
-        "FROM evaluators WHERE source_default_slug IS NOT NULL AND deleted_at IS NULL"
-    )
-    fork_by_org_slug = {
-        (r["org_uuid"], r["source_default_slug"]): (r["uuid"], r["live_version_id"])
-        for r in cursor.fetchall()
-    }
 
     def _fork(org, template_uuid):
         return fork_by_org_slug.get((org, slug_by_template.get(template_uuid)))
