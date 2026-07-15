@@ -6379,14 +6379,16 @@ FINISHED_JOB_STATUSES = ("done", "failed")
 def bulk_delete_finished_jobs(
     job_uuids: List[str], org_uuid: str
 ) -> Dict[str, List[str]]:
-    """Delete an org's finished (done/failed) jobs from the given IDs in one pass.
+    """Delete an org's jobs, but only if every requested ID is finished and present.
 
-    Running or queued jobs are left untouched — those must be deleted one at a
-    time so their process group can be killed and the queue re-triggered.
-    Returns `{deleted, skipped_active, not_found}` lists of UUIDs.
+    Bulk delete is all-or-nothing: if any requested job is still queued or
+    in progress, or is unknown to this org, NOTHING is deleted and the
+    offending IDs are returned (`active` / `not_found`) so the caller can
+    reject the batch. Only when all requested jobs are done/failed does the
+    single batched DELETE run. Returns `{deleted, active, not_found}`.
     """
     if not job_uuids:
-        return {"deleted": [], "skipped_active": [], "not_found": []}
+        return {"deleted": [], "active": [], "not_found": []}
     with get_db_connection() as conn:
         cursor = conn.cursor()
         placeholders = ",".join("?" for _ in job_uuids)
@@ -6397,25 +6399,20 @@ def bulk_delete_finished_jobs(
         )
         status_by_uuid = {row["uuid"]: row["status"] for row in cursor.fetchall()}
         not_found = [u for u in job_uuids if u not in status_by_uuid]
-        deleted = [
-            u for u, s in status_by_uuid.items() if s in FINISHED_JOB_STATUSES
+        active = [
+            u for u in job_uuids
+            if u in status_by_uuid and status_by_uuid[u] not in FINISHED_JOB_STATUSES
         ]
-        skipped_active = [
-            u for u, s in status_by_uuid.items() if s not in FINISHED_JOB_STATUSES
-        ]
-        if deleted:
-            del_placeholders = ",".join("?" for _ in deleted)
-            cursor.execute(
-                f"DELETE FROM jobs WHERE uuid IN ({del_placeholders})",
-                tuple(deleted),
-            )
-            conn.commit()
-            logger.info(f"Bulk-deleted {len(deleted)} finished jobs for org {org_uuid}")
-    return {
-        "deleted": deleted,
-        "skipped_active": skipped_active,
-        "not_found": not_found,
-    }
+        if not_found or active:
+            return {"deleted": [], "active": active, "not_found": not_found}
+
+        cursor.execute(
+            f"DELETE FROM jobs WHERE uuid IN ({placeholders})",
+            tuple(job_uuids),
+        )
+        conn.commit()
+        logger.info(f"Bulk-deleted {len(job_uuids)} finished jobs for org {org_uuid}")
+    return {"deleted": list(job_uuids), "active": [], "not_found": []}
 
 
 # ============ Agent Test Jobs Functions ============

@@ -1552,27 +1552,32 @@ def test_jobs_bulk_delete(client):
     )
     missing = str(uuid.uuid4())
 
-    resp = client.request(
+    # Strict / all-or-nothing: one unfinished (or unknown) ID rejects the whole
+    # batch and deletes nothing.
+    reject = client.request(
         "DELETE",
         "/jobs",
         headers=h,
-        # `done` is repeated to prove duplicate IDs are de-duped
-        json={"job_uuids": [done, failed, done, running, queued, missing]},
+        json={"job_uuids": [done, failed, running, queued, missing]},
     )
-    assert resp.status_code == 200
-    body = resp.json()
-    assert body["deleted_count"] == 2
-    assert body["not_found"] == [missing]
-    # Finished-only: running + queued jobs are reported, not deleted
-    assert sorted(body["skipped_active"]) == sorted([running, queued])
+    assert reject.status_code == 400
+    detail = reject.json()["detail"]
+    assert sorted(detail["active"]) == sorted([running, queued])
+    assert detail["not_found"] == [missing]
+    # Nothing was deleted — every job still present
+    for j in (done, failed, running, queued):
+        assert db_mod.get_job(j, org_uuid=org_uuid) is not None
 
-    # Finished jobs are gone; active ones survive
+    # All-finished batch succeeds; `done` repeated proves duplicate IDs de-dupe
+    ok = client.request(
+        "DELETE", "/jobs", headers=h, json={"job_uuids": [done, failed, done]}
+    )
+    assert ok.status_code == 200
+    assert ok.json() == {"deleted_count": 2}
     assert db_mod.get_job(done, org_uuid=org_uuid) is None
     assert db_mod.get_job(failed, org_uuid=org_uuid) is None
-    assert db_mod.get_job(running, org_uuid=org_uuid) is not None
-    assert db_mod.get_job(queued, org_uuid=org_uuid) is not None
 
-    # Another org cannot delete this org's jobs (they read as not-found)
+    # Another org's finished job reads as not-found and rejects the batch
     other = _auth(client)
     j_other = db_mod.create_job(
         job_type="stt-eval", org_uuid=org_uuid, user_id=auth["user_uuid"],
@@ -1581,12 +1586,8 @@ def test_jobs_bulk_delete(client):
     cross = client.request(
         "DELETE", "/jobs", headers=other["headers"], json={"job_uuids": [j_other]}
     )
-    assert cross.status_code == 200
-    assert cross.json() == {
-        "deleted_count": 0,
-        "skipped_active": [],
-        "not_found": [j_other],
-    }
+    assert cross.status_code == 400
+    assert cross.json()["detail"]["not_found"] == [j_other]
     assert db_mod.get_job(j_other, org_uuid=org_uuid) is not None
 
     # Empty list is rejected by validation

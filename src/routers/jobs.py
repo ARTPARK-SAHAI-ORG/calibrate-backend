@@ -121,12 +121,6 @@ class BulkDeleteJobsRequest(BaseModel):
 
 class BulkDeleteJobsResponse(BaseModel):
     deleted_count: int = Field(description="Number of jobs deleted")
-    skipped_active: List[str] = Field(
-        description="Requested job IDs left untouched because they are still queued or running"
-    )
-    not_found: List[str] = Field(
-        description="Requested job IDs that did not exist for this workspace"
-    )
 
 
 @router.delete("", response_model=BulkDeleteJobsResponse, summary="Bulk delete jobs")
@@ -134,14 +128,22 @@ async def bulk_delete_jobs_endpoint(
     payload: BulkDeleteJobsRequest = ...,
     ctx: OrgContext = Depends(get_current_org),
 ):
-    """Delete several finished jobs at once, skipping any still queued or running"""
+    """Delete several finished jobs at once, rejecting the batch if any is unfinished or unknown"""
     unique_uuids = list(dict.fromkeys(payload.job_uuids))
     result = bulk_delete_finished_jobs(unique_uuids, ctx.org_uuid)
-    return BulkDeleteJobsResponse(
-        deleted_count=len(result["deleted"]),
-        skipped_active=result["skipped_active"],
-        not_found=result["not_found"],
-    )
+    if result["active"] or result["not_found"]:
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "message": (
+                    "No jobs were deleted. Every job must be finished "
+                    "(done or failed) and belong to this workspace."
+                ),
+                "active": result["active"],
+                "not_found": result["not_found"],
+            },
+        )
+    return BulkDeleteJobsResponse(deleted_count=len(result["deleted"]))
 
 
 @router.delete("/{job_uuid}", summary="Delete job")
