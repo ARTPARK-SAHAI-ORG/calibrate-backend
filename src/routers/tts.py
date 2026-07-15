@@ -1028,6 +1028,9 @@ async def get_tts_evaluation_status(
                                     )
                                     s3_key = f"{results_prefix}/{relative_path}"
                                     upload_file_to_s3(s3, local_path, s3_bucket, s3_key)
+                                    # Raw key for copying into an annotation item;
+                                    # audio_path itself becomes a presigned URL.
+                                    row["audio_s3_path"] = s3_key
                                     presigned_url = generate_presigned_download_url(
                                         s3_key
                                     )
@@ -1103,9 +1106,13 @@ async def get_tts_evaluation_status(
                     if "audio_path" in result_row and result_row["audio_path"]:
                         audio_s3_key = result_row["audio_path"]
                         # Skip if already a URL (backwards compatibility)
-                        if audio_s3_key.startswith("http") or audio_s3_key.startswith(
-                            "s3://"
-                        ):
+                        if audio_s3_key.startswith("http"):
+                            continue
+                        # Expose the raw stored key/URI alongside the presigned URL
+                        # so clients can copy it into a TTS annotation item's
+                        # payload.audio_path (which stores the key, not a signed URL).
+                        result_row["audio_s3_path"] = audio_s3_key
+                        if audio_s3_key.startswith("s3://"):
                             continue
                         presigned_url = generate_presigned_download_url(audio_s3_key)
                         if presigned_url:
