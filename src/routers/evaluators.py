@@ -1,9 +1,9 @@
 """Evaluators router.
 
 Replaces the legacy `metrics` router. Adds:
- - Built-in default vs user-created evaluators
+ - Each workspace's editable default forks vs user-created evaluators
  - Versioned prompts with judge_model, rating scale, variables
- - Duplicate a built-in default into an editable copy
+ - Duplicate any evaluator into a new editable one
  - Live-version selection
  - API-key-authenticated invocation endpoint
 """
@@ -316,9 +316,13 @@ class EvaluatorResponseBase(BaseModel):
         examples=[_EXAMPLE_USER_UUID],
     )
     is_default: bool = Field(
-        description="True for a built-in default evaluator, which you can't edit. False for an evaluator you created, which you can edit and add versions to"
+        description="True when the evaluator is a built-in default or your workspace's editable copy of one. False for an evaluator you created yourself"
     )
     slug: Optional[str] = Field(None, description="Stable slug for a built-in default evaluator")
+    source_default_slug: Optional[str] = Field(
+        None,
+        description="Stable slug of the built-in default this evaluator is your editable copy of. Set on your default forks so you can identify a specific default by it",
+    )
     live_version_id: Optional[str] = Field(
         None,
         min_length=36,
@@ -492,8 +496,16 @@ def _evaluator_response(
         kind=evaluator.get("kind", "single"),
         output_type=evaluator.get("output_type", "binary"),
         owner_user_id=evaluator.get("owner_user_id"),
-        is_default=evaluator.get("owner_user_id") is None,
+        # A per-org fork of a seeded default (`source_default_slug` set) reads as
+        # a default too, not a from-scratch custom — so the UI groups it under
+        # "Default" while it stays editable. Templates (`owner_user_id` null,
+        # not returned to orgs) still count as default via the owner check.
+        is_default=(
+            evaluator.get("source_default_slug") is not None
+            or evaluator.get("owner_user_id") is None
+        ),
         slug=evaluator.get("slug"),
+        source_default_slug=evaluator.get("source_default_slug"),
         live_version_id=evaluator.get("live_version_id"),
         created_at=evaluator["created_at"],
         updated_at=evaluator["updated_at"],
@@ -617,7 +629,7 @@ async def list_evaluators(
         None, description="Filter by modality. Omit for all"
     ),
     include_defaults: bool = Query(
-        True, description="When `true`, include the built-in default evaluators alongside the ones you created"
+        True, description="Retained for backward compatibility and no longer filters. Your evaluators, including your editable copies of the defaults, are always returned"
     ),
     ctx: OrgContext = Depends(get_org_jwt_or_api_key),
     search: _EvaluatorSearch = Depends(),

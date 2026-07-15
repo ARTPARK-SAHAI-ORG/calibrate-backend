@@ -747,14 +747,26 @@ def test_evaluators_list_and_default_prompt(client):
     h = auth["headers"]
     listing = client.get("/evaluators", headers=h)
     assert listing.status_code == 200
-    assert any(e.get("slug") == "default-safety" for e in listing.json()["items"])
+    # Every org gets its OWN editable fork of each seeded default (provisioned at
+    # signup). Forks carry no `slug` (that stays with the hidden template) but
+    # still read as `is_default` True so the UI groups them under "Default" while
+    # they stay editable. The safety default surfaces by its display name, "Safety".
+    safety = next(
+        (e for e in listing.json()["items"] if e.get("name") == "Safety"), None
+    )
+    assert safety is not None
+    assert safety["is_default"] is True
+    assert safety.get("slug") is None
+    # The fork carries its origin in `source_default_slug` (the slug stays with
+    # the hidden template) so clients can still identify a specific default.
+    assert safety["source_default_slug"] == "default-safety"
+    # The correctness default the FE seeds new tests with is identifiable this way.
+    assert any(
+        e.get("source_default_slug") == "default-llm-next-reply"
+        for e in listing.json()["items"]
+    )
 
-    # Seeded defaults are read-only ⇒ is_default True; the raw owner_user_id is
-    # never exposed on the public API surface (only is_default is).
-    seeded = next(e for e in listing.json()["items"] if e.get("slug") == "default-safety")
-    assert seeded["is_default"] is True
-
-    # A custom evaluator is editable ⇒ is_default False.
+    # A from-scratch custom evaluator is NOT a default ⇒ is_default False.
     created = client.post(
         "/evaluators",
         json={
@@ -769,6 +781,7 @@ def test_evaluators_list_and_default_prompt(client):
     detail = client.get(f"/evaluators/{created.json()['uuid']}", headers=h)
     assert detail.status_code == 200
     assert detail.json()["is_default"] is False
+    assert detail.json()["source_default_slug"] is None  # not derived from a default
 
     prompt = client.get(
         "/evaluators/default-prompt", params={"purpose": "llm"}, headers=h
@@ -784,8 +797,8 @@ def test_evaluators_list_and_default_prompt(client):
     assert general.json()["evaluator_type"] == "llm-general"
     assert general.json()["data_type"] == "text"
 
-    # The seeded default-llm-general evaluator should be visible in the list.
-    assert any(e.get("slug") == "default-llm-general" for e in listing.json()["items"])
+    # The org's fork of the llm-general default should be visible by its name.
+    assert any(e.get("name") == "Output correctness" for e in listing.json()["items"])
 
     bad = client.get(
         "/evaluators/default-prompt", params={"purpose": "bogus"}, headers=h

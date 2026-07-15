@@ -669,6 +669,591 @@ def test_backfill_agent_evaluator_links_retries_after_crash_mid_migration(user):
     assert linked == {seeded["uuid"]}
 
 
+# ---------------------------------------------------------------------------
+# Per-org default-evaluator provisioning (fork-on-provision)
+# ---------------------------------------------------------------------------
+
+_DEFAULT_SLUGS = {s["slug"] for s in db.DEFAULT_EVALUATORS_SEED}
+
+
+def _fresh_org():
+    """A brand-new user + personal org. Signup auto-forks the seeded defaults."""
+    user_uuid = db.create_user("P", "V", _u("prov") + "@x.com")
+    return user_uuid, db.get_personal_org_for_user(user_uuid)["uuid"]
+
+
+def _forks_by_slug(org_uuid):
+    return {
+        e["source_default_slug"]: e
+        for e in db.get_all_evaluators(org_uuid=org_uuid)
+        if e.get("source_default_slug")
+    }
+
+
+def test_new_org_is_provisioned_editable_forks_of_every_default():
+    user_uuid, org_uuid = _fresh_org()
+    forks = _forks_by_slug(org_uuid)
+    assert set(forks) == _DEFAULT_SLUGS
+
+    safety = forks["default-safety"]
+    assert safety["org_uuid"] == org_uuid  # scoped to the org
+    assert safety["owner_user_id"] == user_uuid  # owned ⇒ editable (reads is_default True at the API)
+    assert safety["slug"] is None  # the globally-unique slug stays with the template
+    assert safety["live_version_id"]  # live version copied
+
+    # The seed templates themselves are never returned to the org.
+    assert all(
+        e.get("slug") is None for e in db.get_all_evaluators(org_uuid=org_uuid)
+    )
+
+
+def test_provision_default_evaluators_is_idempotent():
+    _user, org_uuid = _fresh_org()
+    before = len(db.get_all_evaluators(org_uuid=org_uuid))
+    assert db.provision_default_evaluators_for_org(org_uuid) == 0
+    assert len(db.get_all_evaluators(org_uuid=org_uuid)) == before
+
+
+def test_provision_never_resurrects_deleted_or_renamed_fork():
+    _user, org_uuid = _fresh_org()
+    forks = _forks_by_slug(org_uuid)
+
+    assert db.delete_evaluator(forks["default-safety"]["uuid"]) is True
+    assert (
+        db.update_evaluator(forks["default-conciseness"]["uuid"], name="My Renamed")
+        is True
+    )
+
+    # Re-provisioning must not re-create the deleted one or duplicate the renamed one.
+    assert db.provision_default_evaluators_for_org(org_uuid) == 0
+    after = _forks_by_slug(org_uuid)
+    assert "default-safety" not in after
+    assert after["default-conciseness"]["name"] == "My Renamed"
+    assert (
+        len(
+            [
+                e
+                for e in db.get_all_evaluators(org_uuid=org_uuid)
+                if e.get("source_default_slug") == "default-conciseness"
+            ]
+        )
+        == 1
+    )
+
+
+def test_provision_picks_up_a_newly_added_default():
+    _user, org_uuid = _fresh_org()
+    new_slug = _u("default-new")
+    tmpl = db.create_evaluator(
+        name=_u("New Default"),
+        evaluator_type="llm",
+        output_type="binary",
+        slug=new_slug,
+    )
+    v = db.create_evaluator_version(tmpl, judge_model="m", system_prompt="p")
+    db.set_evaluator_live_version(tmpl, v["uuid"])
+    try:
+        assert db.provision_default_evaluators_for_org(org_uuid) == 1
+        assert new_slug in _forks_by_slug(org_uuid)
+    finally:
+        # Keep the shared session DB clean: this template would otherwise be
+        # forked into every org created by a later test.
+        with db.get_db_connection() as conn:
+            conn.execute(
+                "DELETE FROM evaluator_versions WHERE evaluator_id IN "
+                "(SELECT uuid FROM evaluators WHERE slug = ? OR source_default_slug = ?)",
+                (new_slug, new_slug),
+            )
+            conn.execute(
+                "DELETE FROM evaluators WHERE slug = ? OR source_default_slug = ?",
+                (new_slug, new_slug),
+            )
+            conn.execute(
+                "DELETE FROM org_default_evaluators WHERE source_default_slug = ?",
+                (new_slug,),
+            )
+            conn.commit()
+
+
+def test_provision_skips_default_whose_name_collides_with_a_custom():
+    user_uuid, org_uuid = _fresh_org()
+    safety = _forks_by_slug(org_uuid)["default-safety"]
+
+    # Simulate a not-yet-provisioned org that already has a custom evaluator
+    # named like the default: drop the fork + its receipt, then add the collision.
+    with db.get_db_connection() as conn:
+        conn.execute("DELETE FROM evaluators WHERE uuid = ?", (safety["uuid"],))
+        conn.execute(
+            "DELETE FROM org_default_evaluators "
+            "WHERE org_uuid = ? AND source_default_slug = ?",
+            (org_uuid, "default-safety"),
+        )
+        conn.commit()
+    db.create_evaluator(
+        name="Safety",
+        evaluator_type="llm",
+        output_type="binary",
+        owner_user_id=user_uuid,
+        org_uuid=org_uuid,
+    )
+
+    assert db.provision_default_evaluators_for_org(org_uuid) == 0  # skipped
+    safeties = [
+        e for e in db.get_all_evaluators(org_uuid=org_uuid) if e["name"] == "Safety"
+    ]
+    assert len(safeties) == 1  # only the custom, no second copy
+    assert safeties[0].get("source_default_slug") is None
+
+    # A receipt is still written (NULL evaluator_uuid) so it isn't retried.
+    with db.get_db_connection() as conn:
+        row = conn.execute(
+            "SELECT evaluator_uuid FROM org_default_evaluators "
+            "WHERE org_uuid = ? AND source_default_slug = ?",
+            (org_uuid, "default-safety"),
+        ).fetchone()
+    assert row is not None and row["evaluator_uuid"] is None
+
+
+def test_backfill_forks_defaults_into_existing_orgs_and_runs_once():
+    """One-time fork backfill provisions every existing org; once the migration
+    flag is set, a later init_db() does not resurrect a fork the user deleted."""
+    _user, org_uuid = _fresh_org()
+
+    # Simulate a pre-feature DB: this org has no forks / receipts, flag unset.
+    with db.get_db_connection() as conn:
+        conn.execute(
+            "DELETE FROM evaluators "
+            "WHERE org_uuid = ? AND source_default_slug IS NOT NULL",
+            (org_uuid,),
+        )
+        conn.execute(
+            "DELETE FROM org_default_evaluators WHERE org_uuid = ?", (org_uuid,)
+        )
+        conn.execute(
+            "DELETE FROM _schema_migrations WHERE name = ?",
+            (db.FORK_DEFAULT_EVALUATORS_MIGRATION,),
+        )
+        conn.commit()
+    assert _forks_by_slug(org_uuid) == {}
+
+    db.init_db()
+    assert set(_forks_by_slug(org_uuid)) == _DEFAULT_SLUGS
+
+    # Flag now set + receipt on file ⇒ deleting a fork and re-running init_db
+    # does NOT bring it back.
+    assert db.delete_evaluator(_forks_by_slug(org_uuid)["default-safety"]["uuid"]) is True
+    db.init_db()
+    assert "default-safety" not in _forks_by_slug(org_uuid)
+
+
+def test_create_organization_provisions_default_forks():
+    """An explicitly-created workspace (not just the personal org) is forked."""
+    owner = db.create_user("O", "W", _u("orgowner") + "@x.com")
+    org_uuid = db.create_organization(_u("Workspace"), owner)
+    forks = _forks_by_slug(org_uuid)
+    assert set(forks) == _DEFAULT_SLUGS
+    assert forks["default-safety"]["owner_user_id"] == owner
+
+
+def _run_repoint():
+    with db.get_db_connection() as conn:
+        n = db._backfill_repoint_default_links_to_forks(conn.cursor())
+        conn.commit()
+        return n
+
+
+def _active_test_link(test_uuid):
+    with db.get_db_connection() as conn:
+        return conn.execute(
+            "SELECT evaluator_id, evaluator_version_id FROM test_evaluators "
+            "WHERE test_id = ? AND deleted_at IS NULL",
+            (test_uuid,),
+        ).fetchall()
+
+
+def test_repoint_relinks_test_template_link_to_fork_and_repins_version():
+    user_uuid, org_uuid = _fresh_org()
+    tmpl = db.get_evaluator_by_slug("default-safety")
+    test_uuid = db.create_test(
+        name=_u("t-repoint"), type="llm", user_id=user_uuid, org_uuid=org_uuid
+    )
+    db.add_evaluator_to_test(test_uuid, tmpl["uuid"], tmpl["live_version_id"])
+
+    _run_repoint()
+
+    fork = _forks_by_slug(org_uuid)["default-safety"]
+    rows = _active_test_link(test_uuid)
+    assert [r["evaluator_id"] for r in rows] == [fork["uuid"]]
+    # the pinned version follows the fork (the template's version id doesn't
+    # exist under the fork)
+    assert rows[0]["evaluator_version_id"] == fork["live_version_id"]
+
+
+def test_repoint_relinks_agent_template_link_to_fork():
+    user_uuid, org_uuid = _fresh_org()
+    tmpl = db.get_evaluator_by_slug("default-helpfulness")
+    agent_uuid = db.create_agent(
+        name=_u("a-repoint"), user_id=user_uuid, org_uuid=org_uuid
+    )
+    db.add_evaluator_to_agent(agent_uuid, tmpl["uuid"])
+
+    _run_repoint()
+
+    fork = _forks_by_slug(org_uuid)["default-helpfulness"]
+    with db.get_db_connection() as conn:
+        row = conn.execute(
+            "SELECT evaluator_id FROM agent_evaluators "
+            "WHERE agent_id = ? AND deleted_at IS NULL",
+            (agent_uuid,),
+        ).fetchone()
+    assert row["evaluator_id"] == fork["uuid"]
+
+
+def test_repoint_soft_deletes_redundant_template_link_on_collision():
+    user_uuid, org_uuid = _fresh_org()
+    tmpl = db.get_evaluator_by_slug("default-safety")
+    fork = _forks_by_slug(org_uuid)["default-safety"]
+    test_uuid = db.create_test(
+        name=_u("t-collide"), type="llm", user_id=user_uuid, org_uuid=org_uuid
+    )
+    # The test already links the fork AND (legacy) the template.
+    db.add_evaluator_to_test(test_uuid, fork["uuid"], fork["live_version_id"])
+    db.add_evaluator_to_test(test_uuid, tmpl["uuid"], tmpl["live_version_id"])
+
+    _run_repoint()
+
+    # Only the fork link survives; the redundant template link is soft-deleted —
+    # no UNIQUE(test_id, evaluator_id) collision, no duplicate.
+    rows = _active_test_link(test_uuid)
+    assert [r["evaluator_id"] for r in rows] == [fork["uuid"]]
+
+
+def test_repoint_leaves_link_on_template_when_org_deleted_its_fork():
+    user_uuid, org_uuid = _fresh_org()
+    tmpl = db.get_evaluator_by_slug("default-conciseness")
+    fork = _forks_by_slug(org_uuid)["default-conciseness"]
+    test_uuid = db.create_test(
+        name=_u("t-nofork"), type="llm", user_id=user_uuid, org_uuid=org_uuid
+    )
+    db.add_evaluator_to_test(test_uuid, tmpl["uuid"], tmpl["live_version_id"])
+    assert db.delete_evaluator(fork["uuid"]) is True  # org deleted its fork
+
+    _run_repoint()
+
+    # No fork to move to ⇒ the link stays on the template (still resolvable).
+    rows = _active_test_link(test_uuid)
+    assert [r["evaluator_id"] for r in rows] == [tmpl["uuid"]]
+
+
+def test_repoint_default_links_runs_via_init_db_and_is_flag_gated():
+    user_uuid, org_uuid = _fresh_org()
+    tmpl = db.get_evaluator_by_slug("default-instruction-following")
+    agent_uuid = db.create_agent(
+        name=_u("a-repoint-initdb"), user_id=user_uuid, org_uuid=org_uuid
+    )
+    db.add_evaluator_to_agent(agent_uuid, tmpl["uuid"])
+
+    # Simulate a pre-migration DB: clear the flag so init_db re-runs the re-point.
+    with db.get_db_connection() as conn:
+        conn.execute(
+            "DELETE FROM _schema_migrations WHERE name = ?",
+            (db.REPOINT_DEFAULT_LINKS_MIGRATION,),
+        )
+        conn.commit()
+
+    db.init_db()
+
+    fork = _forks_by_slug(org_uuid)["default-instruction-following"]
+    with db.get_db_connection() as conn:
+        row = conn.execute(
+            "SELECT evaluator_id FROM agent_evaluators "
+            "WHERE agent_id = ? AND deleted_at IS NULL",
+            (agent_uuid,),
+        ).fetchone()
+    assert row["evaluator_id"] == fork["uuid"]
+
+
+# ---------------------------------------------------------------------------
+# Finished-run snapshot re-point (past runs' evaluator click → org fork)
+# ---------------------------------------------------------------------------
+
+
+def _run_snapshot_repoint():
+    with db.get_db_connection() as conn:
+        n = db._backfill_repoint_default_job_snapshots(conn.cursor())
+        conn.commit()
+        return n
+
+
+def test_repoint_job_snapshots_rewrites_template_uuid_in_json():
+    _user, org_uuid = _fresh_org()
+    tmpl = db.get_evaluator_by_slug("default-safety")
+    fork = _forks_by_slug(org_uuid)["default-safety"]
+    job_uuid = _u("job")
+    details = f'{{"evaluators": [{{"uuid": "{tmpl["uuid"]}", "name": "Safety"}}]}}'
+    results = f'{{"rows": [{{"evaluator_id": "{tmpl["uuid"]}"}}]}}'
+    with db.get_db_connection() as conn:
+        conn.execute(
+            "INSERT INTO jobs (uuid, type, status, org_uuid, details, results) "
+            "VALUES (?, 'stt-eval', 'done', ?, ?, ?)",
+            (job_uuid, org_uuid, details, results),
+        )
+        conn.commit()
+
+    _run_snapshot_repoint()
+
+    with db.get_db_connection() as conn:
+        row = conn.execute(
+            "SELECT details, results FROM jobs WHERE uuid = ?", (job_uuid,)
+        ).fetchone()
+    # Both the details snapshot AND the results are rewritten to the fork; no
+    # trace of the template uuid remains.
+    assert fork["uuid"] in row["details"] and tmpl["uuid"] not in row["details"]
+    assert fork["uuid"] in row["results"] and tmpl["uuid"] not in row["results"]
+
+
+def test_repoint_job_snapshots_updates_evaluator_runs_column_and_repins_version():
+    _user, org_uuid = _fresh_org()
+    tmpl = db.get_evaluator_by_slug("default-helpfulness")
+    fork = _forks_by_slug(org_uuid)["default-helpfulness"]
+    job_uuid, run_uuid = _u("job"), _u("run")
+    with db.get_db_connection() as conn:
+        conn.execute(
+            "INSERT INTO jobs (uuid, type, status, org_uuid) "
+            "VALUES (?, 'annotation-eval', 'done', ?)",
+            (job_uuid, org_uuid),
+        )
+        conn.execute(
+            "INSERT INTO evaluator_runs "
+            "(uuid, job_id, item_id, evaluator_id, evaluator_version_id) "
+            "VALUES (?, ?, ?, ?, ?)",
+            (run_uuid, job_uuid, _u("item"), tmpl["uuid"], tmpl["live_version_id"]),
+        )
+        conn.commit()
+
+    _run_snapshot_repoint()
+
+    with db.get_db_connection() as conn:
+        row = conn.execute(
+            "SELECT evaluator_id, evaluator_version_id FROM evaluator_runs "
+            "WHERE uuid = ?",
+            (run_uuid,),
+        ).fetchone()
+    assert row["evaluator_id"] == fork["uuid"]
+    assert row["evaluator_version_id"] == fork["live_version_id"]
+
+
+def test_repoint_job_snapshots_updates_annotation_job_evaluators_column():
+    user_uuid, org_uuid = _fresh_org()
+    tmpl = db.get_evaluator_by_slug("default-conciseness")
+    fork = _forks_by_slug(org_uuid)["default-conciseness"]
+    task_uuid, job_uuid = _u("task"), _u("ajob")
+    with db.get_db_connection() as conn:
+        conn.execute(
+            "INSERT INTO annotation_tasks (uuid, user_id, name, org_uuid) "
+            "VALUES (?, ?, 'T', ?)",
+            (task_uuid, user_uuid, org_uuid),
+        )
+        conn.execute(
+            "INSERT INTO annotation_jobs (uuid, task_id, annotator_id, public_token) "
+            "VALUES (?, ?, ?, ?)",
+            (job_uuid, task_uuid, _u("ann"), _u("tok")),
+        )
+        conn.execute(
+            "INSERT INTO annotation_job_evaluators (job_id, evaluator_id, position) "
+            "VALUES (?, ?, 0)",
+            (job_uuid, tmpl["uuid"]),
+        )
+        conn.commit()
+
+    _run_snapshot_repoint()
+
+    with db.get_db_connection() as conn:
+        row = conn.execute(
+            "SELECT evaluator_id FROM annotation_job_evaluators WHERE job_id = ?",
+            (job_uuid,),
+        ).fetchone()
+    assert row["evaluator_id"] == fork["uuid"]
+
+
+def test_repoint_job_snapshots_leaves_template_when_org_deleted_fork():
+    _user, org_uuid = _fresh_org()
+    tmpl = db.get_evaluator_by_slug("default-faithfulness")
+    fork = _forks_by_slug(org_uuid)["default-faithfulness"]
+    assert db.delete_evaluator(fork["uuid"]) is True  # org deleted its fork
+    job_uuid = _u("job")
+    details = f'{{"evaluators": [{{"uuid": "{tmpl["uuid"]}"}}]}}'
+    with db.get_db_connection() as conn:
+        conn.execute(
+            "INSERT INTO jobs (uuid, type, status, org_uuid, details) "
+            "VALUES (?, 'stt-eval', 'done', ?, ?)",
+            (job_uuid, org_uuid, details),
+        )
+        conn.commit()
+
+    _run_snapshot_repoint()
+
+    with db.get_db_connection() as conn:
+        row = conn.execute(
+            "SELECT details FROM jobs WHERE uuid = ?", (job_uuid,)
+        ).fetchone()
+    assert tmpl["uuid"] in row["details"]  # no fork to move to → unchanged
+
+
+def test_repoint_job_snapshots_runs_via_init_db_and_is_flag_gated():
+    _user, org_uuid = _fresh_org()
+    tmpl = db.get_evaluator_by_slug("default-instruction-following")
+    fork = _forks_by_slug(org_uuid)["default-instruction-following"]
+    job_uuid = _u("job")
+    details = f'{{"evaluators": [{{"uuid": "{tmpl["uuid"]}"}}]}}'
+    with db.get_db_connection() as conn:
+        conn.execute(
+            "INSERT INTO jobs (uuid, type, status, org_uuid, details) "
+            "VALUES (?, 'stt-eval', 'done', ?, ?)",
+            (job_uuid, org_uuid, details),
+        )
+        conn.execute(
+            "DELETE FROM _schema_migrations WHERE name = ?",
+            (db.REPOINT_DEFAULT_JOB_SNAPSHOTS_MIGRATION,),
+        )
+        conn.commit()
+
+    db.init_db()
+
+    with db.get_db_connection() as conn:
+        row = conn.execute(
+            "SELECT details FROM jobs WHERE uuid = ?", (job_uuid,)
+        ).fetchone()
+    assert fork["uuid"] in row["details"]
+
+
+def test_repoint_job_snapshots_agent_test_jobs_org_via_agent_join():
+    """agent_test_jobs resolves its org through agents.org_uuid (JOIN, not a
+    direct column) — exercise that path explicitly."""
+    user_uuid, org_uuid = _fresh_org()
+    tmpl = db.get_evaluator_by_slug("default-safety")
+    fork = _forks_by_slug(org_uuid)["default-safety"]
+    agent_uuid = db.create_agent(
+        name=_u("a-snap"), user_id=user_uuid, org_uuid=org_uuid
+    )
+    job_uuid = _u("atj")
+    details = f'{{"evaluators_by_test_id": {{"t1": [{{"uuid": "{tmpl["uuid"]}"}}]}}}}'
+    results = f'{{"judge": {{"evaluator_id": "{tmpl["uuid"]}"}}}}'
+    with db.get_db_connection() as conn:
+        conn.execute(
+            "INSERT INTO agent_test_jobs (uuid, agent_id, type, status, details, results) "
+            "VALUES (?, ?, 'llm-unit-test', 'done', ?, ?)",
+            (job_uuid, agent_uuid, details, results),
+        )
+        conn.commit()
+
+    _run_snapshot_repoint()
+
+    with db.get_db_connection() as conn:
+        row = conn.execute(
+            "SELECT details, results FROM agent_test_jobs WHERE uuid = ?", (job_uuid,)
+        ).fetchone()
+    assert fork["uuid"] in row["details"] and tmpl["uuid"] not in row["details"]
+    assert fork["uuid"] in row["results"] and tmpl["uuid"] not in row["results"]
+
+
+def test_repoint_job_snapshots_simulation_jobs_org_via_simulation_join():
+    """simulation_jobs resolves its org through simulations.org_uuid (JOIN)."""
+    _user, org_uuid = _fresh_org()
+    tmpl = db.get_evaluator_by_slug("default-sim-goal-completion")
+    fork = _forks_by_slug(org_uuid)["default-sim-goal-completion"]
+    sim_uuid, job_uuid = _u("sim"), _u("simjob")
+    details = f'{{"evaluators": [{{"uuid": "{tmpl["uuid"]}"}}]}}'
+    with db.get_db_connection() as conn:
+        conn.execute(
+            "INSERT INTO simulations (uuid, name, org_uuid) VALUES (?, 'S', ?)",
+            (sim_uuid, org_uuid),
+        )
+        conn.execute(
+            "INSERT INTO simulation_jobs (uuid, simulation_id, type, status, details) "
+            "VALUES (?, ?, 'text', 'done', ?)",
+            (job_uuid, sim_uuid, details),
+        )
+        conn.commit()
+
+    _run_snapshot_repoint()
+
+    with db.get_db_connection() as conn:
+        row = conn.execute(
+            "SELECT details FROM simulation_jobs WHERE uuid = ?", (job_uuid,)
+        ).fetchone()
+    assert fork["uuid"] in row["details"] and tmpl["uuid"] not in row["details"]
+
+
+def test_repoint_job_snapshots_rewrites_only_templates_not_customs():
+    """A snapshot mixing two templates and a custom evaluator: both templates
+    move to their forks; the custom uuid is left exactly as-is."""
+    user_uuid, org_uuid = _fresh_org()
+    t1 = db.get_evaluator_by_slug("default-safety")
+    t2 = db.get_evaluator_by_slug("default-helpfulness")
+    f1 = _forks_by_slug(org_uuid)["default-safety"]
+    f2 = _forks_by_slug(org_uuid)["default-helpfulness"]
+    custom = db.create_evaluator(
+        name=_u("Custom"),
+        evaluator_type="llm",
+        output_type="binary",
+        owner_user_id=user_uuid,
+        org_uuid=org_uuid,
+    )
+    job_uuid = _u("job")
+    details = (
+        f'{{"evaluators": [{{"uuid": "{t1["uuid"]}"}}, '
+        f'{{"uuid": "{t2["uuid"]}"}}, {{"uuid": "{custom}"}}]}}'
+    )
+    with db.get_db_connection() as conn:
+        conn.execute(
+            "INSERT INTO jobs (uuid, type, status, org_uuid, details) "
+            "VALUES (?, 'stt-eval', 'done', ?, ?)",
+            (job_uuid, org_uuid, details),
+        )
+        conn.commit()
+
+    _run_snapshot_repoint()
+
+    with db.get_db_connection() as conn:
+        d = conn.execute(
+            "SELECT details FROM jobs WHERE uuid = ?", (job_uuid,)
+        ).fetchone()["details"]
+    assert f1["uuid"] in d and t1["uuid"] not in d
+    assert f2["uuid"] in d and t2["uuid"] not in d
+    assert custom in d  # custom evaluator untouched
+
+
+def test_repoint_job_snapshots_is_idempotent():
+    _user, org_uuid = _fresh_org()
+    tmpl = db.get_evaluator_by_slug("default-instruction-following")
+    fork = _forks_by_slug(org_uuid)["default-instruction-following"]
+    job_uuid = _u("job")
+    details = f'{{"evaluators": [{{"uuid": "{tmpl["uuid"]}"}}]}}'
+    with db.get_db_connection() as conn:
+        conn.execute(
+            "INSERT INTO jobs (uuid, type, status, org_uuid, details) "
+            "VALUES (?, 'stt-eval', 'done', ?, ?)",
+            (job_uuid, org_uuid, details),
+        )
+        conn.commit()
+
+    _run_snapshot_repoint()  # first pass rewrites it
+    with db.get_db_connection() as conn:
+        after_first = conn.execute(
+            "SELECT details FROM jobs WHERE uuid = ?", (job_uuid,)
+        ).fetchone()["details"]
+    assert fork["uuid"] in after_first
+
+    second = _run_snapshot_repoint()  # nothing left to rewrite
+    with db.get_db_connection() as conn:
+        after_second = conn.execute(
+            "SELECT details FROM jobs WHERE uuid = ?", (job_uuid,)
+        ).fetchone()["details"]
+    assert second == 0
+    assert after_second == after_first  # byte-identical, no double-rewrite
+
+
 def test_get_evaluators_for_test_resolves_live_version(user):
     """A test run must always use the evaluator's CURRENT live version, not the
     version pinned on the pivot at link time. Editing the evaluator (new live

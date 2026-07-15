@@ -433,6 +433,28 @@ def init_db():
         """
         )
 
+        # Provisioning receipt: records that a given seeded default (by slug) was
+        # already forked into a given org. The org's forked copy is fully
+        # editable/deletable/renameable; this ledger — NOT the presence of the
+        # forked row — is the source of truth for "already provisioned", so a
+        # deleted or renamed fork is never resurrected on the next provisioning
+        # pass. `evaluator_uuid` is the fork that was created, or NULL when
+        # provisioning skipped it (e.g. a name collision with an existing custom
+        # evaluator). The UNIQUE(org_uuid, source_default_slug) + INSERT OR IGNORE
+        # makes provisioning idempotent and safe under concurrent readers.
+        cursor.execute(
+            """
+            CREATE TABLE IF NOT EXISTS org_default_evaluators (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                org_uuid TEXT NOT NULL,
+                source_default_slug TEXT NOT NULL,
+                evaluator_uuid TEXT DEFAULT NULL,
+                provisioned_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                UNIQUE(org_uuid, source_default_slug)
+            )
+        """
+        )
+
         cursor.execute(
             """
             CREATE TABLE IF NOT EXISTS agent_evaluators (
@@ -670,6 +692,11 @@ def init_db():
             # this RENAME and the ADD COLUMN below are no-ops.
             "ALTER TABLE evaluators RENAME COLUMN data_type TO evaluator_type",
             "ALTER TABLE evaluators ADD COLUMN data_type TEXT NOT NULL DEFAULT 'text'",
+            # Provenance for per-org forks of a seeded default: the source default's
+            # `slug`. NULL on both the seed templates themselves and on hand-made
+            # custom evaluators. Drives the `org_default_evaluators` provisioning
+            # ledger — see `_provision_default_evaluators_for_org`.
+            "ALTER TABLE evaluators ADD COLUMN source_default_slug TEXT DEFAULT NULL",
         ):
             try:
                 cursor.execute(stmt)
@@ -1474,6 +1501,50 @@ def init_db():
             if inserted:
                 logger.info(
                     f"Backfilled {inserted} agent-evaluator link(s) from test evaluators"
+                )
+
+        # Fork the seeded defaults into every existing org (one-time). Runs after
+        # `_seed_default_evaluators` so the templates exist. New orgs fork at
+        # creation time; a default added in a later release needs a new backfill
+        # (there is no on-read provisioning).
+        if not _schema_migration_applied(cursor, FORK_DEFAULT_EVALUATORS_MIGRATION):
+            forked = _backfill_fork_default_evaluators(cursor)
+            _mark_schema_migration_applied(cursor, FORK_DEFAULT_EVALUATORS_MIGRATION)
+            conn.commit()
+            if forked:
+                logger.info(
+                    f"Forked default evaluators into existing orgs: {forked} copy(ies)"
+                )
+
+        # Re-point pre-existing evaluator links from the shared default templates
+        # to each org's fork (one-time). Runs after the fork backfill so the
+        # forks exist. Finished-run job snapshots stay frozen.
+        if not _schema_migration_applied(cursor, REPOINT_DEFAULT_LINKS_MIGRATION):
+            repointed = _backfill_repoint_default_links_to_forks(cursor)
+            _mark_schema_migration_applied(cursor, REPOINT_DEFAULT_LINKS_MIGRATION)
+            conn.commit()
+            if repointed:
+                logger.info(
+                    f"Re-pointed {repointed} evaluator link(s) from default "
+                    "templates to org forks"
+                )
+
+        # Rewrite FINISHED-run evaluator references (job snapshots + eval-run /
+        # labelling columns) from the shared template to the run's-org fork, so a
+        # past run's evaluator click opens the fork. One-time; runs after the fork
+        # backfill so the forks exist.
+        if not _schema_migration_applied(
+            cursor, REPOINT_DEFAULT_JOB_SNAPSHOTS_MIGRATION
+        ):
+            snaps = _backfill_repoint_default_job_snapshots(cursor)
+            _mark_schema_migration_applied(
+                cursor, REPOINT_DEFAULT_JOB_SNAPSHOTS_MIGRATION
+            )
+            conn.commit()
+            if snaps:
+                logger.info(
+                    f"Re-pointed {snaps} finished-run evaluator reference(s) "
+                    "from default templates to org forks"
                 )
 
         conn.commit()
@@ -2519,6 +2590,430 @@ def _backfill_agent_evaluator_links(cursor: sqlite3.Cursor) -> int:
     return int(row[0]) if row else 0
 
 
+FORK_DEFAULT_EVALUATORS_MIGRATION = "fork_default_evaluators_per_org_v1"
+REPOINT_DEFAULT_LINKS_MIGRATION = "repoint_default_evaluator_links_to_forks_v1"
+REPOINT_DEFAULT_JOB_SNAPSHOTS_MIGRATION = "repoint_default_evaluator_job_snapshots_v1"
+
+
+def _org_owner_user_id(cursor: sqlite3.Cursor, org_uuid: str) -> Optional[str]:
+    """The user_id of the org's owner member. Used as `owner_user_id` on forked
+    default evaluators so they read as editable custom rows (`is_default` False),
+    not read-only seeds (which have a NULL owner)."""
+    cursor.execute(
+        "SELECT user_id FROM organization_members "
+        "WHERE org_uuid = ? AND role = 'owner' ORDER BY rowid ASC LIMIT 1",
+        (org_uuid,),
+    )
+    row = cursor.fetchone()
+    return row["user_id"] if row else None
+
+
+def _fork_default_evaluator_row(
+    cursor: sqlite3.Cursor,
+    template: Dict[str, Any],
+    org_uuid: str,
+    owner_user_id: Optional[str],
+) -> str:
+    """Insert an editable per-org copy of a seed template (the evaluator row plus
+    its live version as v1) and return the new uuid. The copy gets `slug=NULL`
+    (the slug is globally UNIQUE and stays with the template) and
+    `source_default_slug` set for provenance."""
+    new_uuid = str(uuid.uuid4())
+    cursor.execute(
+        """
+        INSERT INTO evaluators
+            (uuid, name, description, owner_user_id, org_uuid,
+             evaluator_type, data_type, kind, output_type, source_default_slug)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            new_uuid,
+            template["name"],
+            template.get("description"),
+            owner_user_id,
+            org_uuid,
+            template.get("evaluator_type", "llm"),
+            template.get("data_type", "text"),
+            template.get("kind", "single"),
+            template.get("output_type", "binary"),
+            template["slug"],
+        ),
+    )
+
+    live_version_id = template.get("live_version_id")
+    if live_version_id:
+        cursor.execute(
+            "SELECT * FROM evaluator_versions WHERE uuid = ?", (live_version_id,)
+        )
+    else:
+        cursor.execute(
+            "SELECT * FROM evaluator_versions WHERE evaluator_id = ? "
+            "ORDER BY version_number DESC LIMIT 1",
+            (template["uuid"],),
+        )
+    version_row = cursor.fetchone()
+    if version_row:
+        sv = _parse_evaluator_version_row(version_row)
+        version_uuid = str(uuid.uuid4())
+        cursor.execute(
+            """
+            INSERT INTO evaluator_versions
+                (uuid, evaluator_id, version_number, judge_model, system_prompt,
+                 output_config, variables)
+            VALUES (?, ?, 1, ?, ?, ?, ?)
+            """,
+            (
+                version_uuid,
+                new_uuid,
+                sv["judge_model"],
+                sv["system_prompt"],
+                (
+                    json.dumps(sv["output_config"])
+                    if sv.get("output_config") is not None
+                    else None
+                ),
+                (
+                    json.dumps(sv["variables"])
+                    if sv.get("variables") is not None
+                    else None
+                ),
+            ),
+        )
+        cursor.execute(
+            "UPDATE evaluators SET live_version_id = ? WHERE uuid = ?",
+            (version_uuid, new_uuid),
+        )
+    return new_uuid
+
+
+def _provision_default_evaluators_for_org(
+    cursor: sqlite3.Cursor,
+    org_uuid: str,
+    owner_user_id: Optional[str] = None,
+) -> int:
+    """Fork an editable copy of every seeded default evaluator into `org_uuid`.
+
+    Idempotent via the `org_default_evaluators` receipt ledger: a default is
+    forked only when the org has no receipt for that slug yet — so a fork the
+    user later renames or deletes is never re-created. A default shipped in a
+    later release has no receipt, so a later provisioning pass (org creation, or
+    a new backfill) forks it — there is no on-read provisioning.
+
+    Runs on the caller's cursor and does NOT commit — callers own the
+    transaction (org creation forks inside its own INSERT txn; the committing
+    wrapper and the backfill commit). Returns the number of forks created. A default
+    whose name already collides with an existing custom evaluator in the org is
+    skipped, with a receipt written (NULL evaluator_uuid) so it isn't retried.
+    """
+    if owner_user_id is None:
+        owner_user_id = _org_owner_user_id(cursor, org_uuid)
+
+    # Seed templates are the only evaluators with a slug and no org.
+    cursor.execute(
+        "SELECT * FROM evaluators "
+        "WHERE org_uuid IS NULL AND slug IS NOT NULL AND deleted_at IS NULL"
+    )
+    templates = [dict(r) for r in cursor.fetchall()]
+
+    cursor.execute(
+        "SELECT source_default_slug FROM org_default_evaluators WHERE org_uuid = ?",
+        (org_uuid,),
+    )
+    already = {r["source_default_slug"] for r in cursor.fetchall()}
+
+    forked = 0
+    for template in templates:
+        slug = template["slug"]
+        if slug in already:
+            continue
+
+        cursor.execute(
+            "SELECT 1 FROM evaluators "
+            "WHERE org_uuid = ? AND name = ? AND deleted_at IS NULL LIMIT 1",
+            (org_uuid, template["name"]),
+        )
+        if cursor.fetchone() is not None:
+            cursor.execute(
+                "INSERT OR IGNORE INTO org_default_evaluators "
+                "(org_uuid, source_default_slug, evaluator_uuid) VALUES (?, ?, NULL)",
+                (org_uuid, slug),
+            )
+            logger.info(
+                f"Skipped forking default {slug} into org {org_uuid}: name already in use"
+            )
+            continue
+
+        fork_uuid = _fork_default_evaluator_row(
+            cursor, template, org_uuid, owner_user_id
+        )
+        cursor.execute(
+            "INSERT OR IGNORE INTO org_default_evaluators "
+            "(org_uuid, source_default_slug, evaluator_uuid) VALUES (?, ?, ?)",
+            (org_uuid, slug, fork_uuid),
+        )
+        forked += 1
+
+    return forked
+
+
+def provision_default_evaluators_for_org(
+    org_uuid: str, owner_user_id: Optional[str] = None
+) -> int:
+    """Committing wrapper around `_provision_default_evaluators_for_org` for a
+    self-contained provisioning pass on its own connection. Returns the number
+    of forks created."""
+    with get_db_connection() as conn:
+        cursor = conn.cursor()
+        forked = _provision_default_evaluators_for_org(
+            cursor, org_uuid, owner_user_id
+        )
+        conn.commit()
+        return forked
+
+
+def _backfill_fork_default_evaluators(cursor: sqlite3.Cursor) -> int:
+    """One-time migration: fork the seeded defaults into every existing org.
+    Caller commits and records `FORK_DEFAULT_EVALUATORS_MIGRATION` in the same
+    transaction so a crash mid-migration retries on next init_db. Orgs created
+    afterwards get their forks at creation time; a default added in a later
+    release needs a new one-time backfill (there is no on-read provisioning)."""
+    cursor.execute("SELECT uuid FROM organizations WHERE deleted_at IS NULL")
+    org_uuids = [r["uuid"] for r in cursor.fetchall()]
+    total = 0
+    for org_uuid in org_uuids:
+        total += _provision_default_evaluators_for_org(cursor, org_uuid)
+    return total
+
+
+def _template_and_fork_maps(cursor: sqlite3.Cursor):
+    """Shared lookups for the two default-re-point migrations:
+      - `slug_by_template`: template evaluator uuid -> its slug (empty => nothing
+        to re-point).
+      - `fork_by_org_slug`: (org_uuid, source_default_slug) -> (fork_uuid,
+        fork_live_version_id).
+    """
+    cursor.execute(
+        "SELECT uuid, slug FROM evaluators "
+        "WHERE org_uuid IS NULL AND slug IS NOT NULL AND deleted_at IS NULL"
+    )
+    slug_by_template = {r["uuid"]: r["slug"] for r in cursor.fetchall()}
+
+    cursor.execute(
+        "SELECT org_uuid, source_default_slug, uuid, live_version_id "
+        "FROM evaluators WHERE source_default_slug IS NOT NULL AND deleted_at IS NULL"
+    )
+    fork_by_org_slug = {
+        (r["org_uuid"], r["source_default_slug"]): (r["uuid"], r["live_version_id"])
+        for r in cursor.fetchall()
+    }
+    return slug_by_template, fork_by_org_slug
+
+
+# The evaluator link pivots that a live entity uses for FUTURE runs, with the
+# parent's org column and whether the pivot pins an evaluator_version_id. Job
+# snapshots (agent_test_jobs / simulation_jobs / STT-TTS job details /
+# annotation_job_evaluators) are deliberately excluded — a finished run stays
+# frozen against the version it actually used.
+_DEFAULT_LINK_PIVOTS = (
+    ("test_evaluators", "test_id", "tests", True),
+    ("agent_evaluators", "agent_id", "agents", False),
+    ("simulation_evaluators", "simulation_id", "simulations", True),
+    ("annotation_task_evaluators", "task_id", "annotation_tasks", False),
+)
+
+
+def _backfill_repoint_default_links_to_forks(cursor: sqlite3.Cursor) -> int:
+    """One-time migration: re-point existing evaluator links from the shared
+    default *templates* to each linking entity's org-specific fork.
+
+    Before per-org forks, tests/agents/simulations/annotation-tasks linked the
+    shared template (`org_uuid IS NULL`). After forking, those links must follow
+    the org's editable copy so the user's edits reach already-linked entities and
+    the linked evaluator shows up in their list. Only the live pivots are
+    re-pointed; finished-run job snapshots stay frozen for reproducibility.
+
+    For each active link pointing at a template, resolve the parent's org and
+    that org's live fork of the template's slug, then update `evaluator_id` (and,
+    for the two versioned pivots, `evaluator_version_id` → the fork's live
+    version). Links whose org deleted its fork are left on the template (still
+    resolvable). If the parent already links the fork, the redundant template
+    link is soft-deleted to respect `UNIQUE(parent, evaluator_id)`.
+
+    Caller commits and records `REPOINT_DEFAULT_LINKS_MIGRATION` in the same
+    transaction so a crash mid-migration retries on next init_db.
+    """
+    slug_by_template, fork_by_org_slug = _template_and_fork_maps(cursor)
+    if not slug_by_template:
+        return 0
+
+    placeholders = ",".join("?" * len(slug_by_template))
+    template_uuids = tuple(slug_by_template)
+    repointed = 0
+    for pivot, parent_col, parent_table, has_version in _DEFAULT_LINK_PIVOTS:
+        cursor.execute(
+            f"""
+            SELECT pv.id AS pivot_id, pv.{parent_col} AS parent_id,
+                   pv.evaluator_id AS evaluator_id, p.org_uuid AS org_uuid
+              FROM {pivot} pv
+              JOIN {parent_table} p ON p.uuid = pv.{parent_col}
+             WHERE pv.deleted_at IS NULL
+               AND pv.evaluator_id IN ({placeholders})
+            """,
+            template_uuids,
+        )
+        for row in cursor.fetchall():
+            org = row["org_uuid"]
+            if org is None:
+                continue
+            fork = fork_by_org_slug.get((org, slug_by_template[row["evaluator_id"]]))
+            if not fork:
+                continue  # org deleted its fork → leave the link on the template
+            fork_uuid, fork_live = fork
+            if has_version and not fork_live:
+                continue  # fork somehow has no live version → don't break the pin
+
+            # UNIQUE(parent, evaluator_id): if the parent already links the fork,
+            # soft-delete this redundant template link instead of colliding.
+            cursor.execute(
+                f"SELECT 1 FROM {pivot} "
+                f"WHERE {parent_col} = ? AND evaluator_id = ? AND deleted_at IS NULL "
+                "LIMIT 1",
+                (row["parent_id"], fork_uuid),
+            )
+            if cursor.fetchone() is not None:
+                cursor.execute(
+                    f"UPDATE {pivot} SET deleted_at = CURRENT_TIMESTAMP WHERE id = ?",
+                    (row["pivot_id"],),
+                )
+            elif has_version:
+                cursor.execute(
+                    f"UPDATE {pivot} "
+                    "SET evaluator_id = ?, evaluator_version_id = ? WHERE id = ?",
+                    (fork_uuid, fork_live, row["pivot_id"]),
+                )
+            else:
+                cursor.execute(
+                    f"UPDATE {pivot} SET evaluator_id = ? WHERE id = ?",
+                    (fork_uuid, row["pivot_id"]),
+                )
+            repointed += 1
+    return repointed
+
+
+# Finished-run stores that reference an evaluator by uuid. The JSON stores keep
+# the evaluator uuid as a literal token inside `details`/`results`; the column
+# stores keep it in `evaluator_id` (with the parent's org reachable by join).
+_DEFAULT_SNAPSHOT_JSON_STORES = (
+    # (table, org-resolving JOIN + org column alias)
+    ("agent_test_jobs", "JOIN agents p ON p.uuid = t.agent_id", "p.org_uuid"),
+    ("simulation_jobs", "JOIN simulations p ON p.uuid = t.simulation_id", "p.org_uuid"),
+    ("jobs", "", "t.org_uuid"),
+)
+_DEFAULT_SNAPSHOT_COLUMN_STORES = (
+    # (table, org-resolving JOIN, org column, has evaluator_version_id column)
+    ("evaluator_runs", "JOIN jobs p ON p.uuid = t.job_id", "p.org_uuid", True),
+    (
+        "annotation_job_evaluators",
+        "JOIN annotation_jobs aj ON aj.uuid = t.job_id "
+        "JOIN annotation_tasks p ON p.uuid = aj.task_id",
+        "p.org_uuid",
+        False,
+    ),
+)
+
+
+def _backfill_repoint_default_job_snapshots(cursor: sqlite3.Cursor) -> int:
+    """One-time migration: rewrite FINISHED-run evaluator references from the
+    shared default *templates* to the run's-org fork, so a past run's evaluator
+    click opens the org's editable copy instead of the read-only template.
+
+    Two store shapes, both keyed off the run's org:
+      * JSON stores (`agent_test_jobs`, `simulation_jobs`, `jobs`) keep the
+        evaluator uuid as a literal token in `details`/`results`. Because a uuid
+        is a globally-unique 36-char string, a per-row org-scoped string replace
+        of `template_uuid → fork_uuid` rewrites every occurrence (snapshot block,
+        judge_results, config) consistently — no JSON parsing, and the frozen
+        prompt/rubric/scores are untouched (only the evaluator's identity moves).
+      * Column stores (`evaluator_runs`, `annotation_job_evaluators`) keep it in
+        `evaluator_id`; update to the fork (and re-pin `evaluator_version_id` to
+        the fork's live version where that column exists).
+
+    A run whose org has no fork for that template (org deleted it) is left on the
+    template. Idempotent — after the swap no template uuids remain — but caller
+    still flag-gates it. Caller commits and records
+    `REPOINT_DEFAULT_JOB_SNAPSHOTS_MIGRATION` in the same transaction.
+    """
+    slug_by_template, fork_by_org_slug = _template_and_fork_maps(cursor)
+    if not slug_by_template:
+        return 0
+    template_uuids = tuple(slug_by_template)
+    placeholders = ",".join("?" * len(template_uuids))
+
+    def _fork(org, template_uuid):
+        return fork_by_org_slug.get((org, slug_by_template.get(template_uuid)))
+
+    changed = 0
+
+    for table, join, org_col in _DEFAULT_SNAPSHOT_JSON_STORES:
+        cursor.execute(
+            f"SELECT t.id AS id, t.details AS details, t.results AS results, "
+            f"{org_col} AS org FROM {table} t {join}"
+        )
+        for row in cursor.fetchall():
+            org = row["org"]
+            if org is None:
+                continue
+            details, results = row["details"], row["results"]
+            new_details, new_results, touched = details, results, False
+            for t_uuid in template_uuids:
+                fork = _fork(org, t_uuid)
+                if not fork:
+                    continue
+                f_uuid = fork[0]
+                if new_details and t_uuid in new_details:
+                    new_details = new_details.replace(t_uuid, f_uuid)
+                    touched = True
+                if new_results and t_uuid in new_results:
+                    new_results = new_results.replace(t_uuid, f_uuid)
+                    touched = True
+            if touched:
+                cursor.execute(
+                    f"UPDATE {table} SET details = ?, results = ? WHERE id = ?",
+                    (new_details, new_results, row["id"]),
+                )
+                changed += 1
+
+    for table, join, org_col, has_version in _DEFAULT_SNAPSHOT_COLUMN_STORES:
+        cursor.execute(
+            f"SELECT t.id AS id, t.evaluator_id AS evaluator_id, {org_col} AS org "
+            f"FROM {table} t {join} "
+            f"WHERE t.evaluator_id IN ({placeholders})",
+            template_uuids,
+        )
+        for row in cursor.fetchall():
+            org = row["org"]
+            if org is None:
+                continue
+            fork = _fork(org, row["evaluator_id"])
+            if not fork:
+                continue
+            f_uuid, f_live = fork
+            if has_version and f_live:
+                cursor.execute(
+                    f"UPDATE {table} SET evaluator_id = ?, evaluator_version_id = ? "
+                    "WHERE id = ?",
+                    (f_uuid, f_live, row["id"]),
+                )
+            else:
+                cursor.execute(
+                    f"UPDATE {table} SET evaluator_id = ? WHERE id = ?",
+                    (f_uuid, row["id"]),
+                )
+            changed += 1
+
+    return changed
+
+
 # ============ Users Functions ============
 
 
@@ -2563,6 +3058,10 @@ def _create_personal_org_for_user(
         """,
         (org_uuid, user_uuid),
     )
+    # Fork the seeded defaults into the new org. No-op during the init_db
+    # personal-org backfill (it runs before `_seed_default_evaluators`, so no
+    # templates exist yet); those orgs are covered by the one-time fork backfill.
+    _provision_default_evaluators_for_org(cursor, org_uuid, user_uuid)
     return org_uuid
 
 
@@ -2821,6 +3320,7 @@ def create_organization(name: str, owner_user_id: str) -> str:
             """,
             (org_uuid, owner_user_id),
         )
+        _provision_default_evaluators_for_org(cursor, org_uuid, owner_user_id)
         conn.commit()
         return org_uuid
 
@@ -4369,13 +4869,17 @@ def evaluator_name_exists(
     org_uuid: Optional[str],
     exclude_uuid: Optional[str] = None,
 ) -> bool:
-    """True if `name` is already used in the evaluator namespace visible to an org."""
+    """True if `name` is already used in the evaluator namespace visible to an org.
+
+    Scoped to the org's own rows (its forks + custom evaluators); the seed
+    templates (`org_uuid IS NULL`) live in their own namespace and don't collide.
+    """
     clauses = ["deleted_at IS NULL", "name = ?"]
     params: List[Any] = [name]
     if org_uuid is None:
         clauses.append("org_uuid IS NULL")
     else:
-        clauses.append("(org_uuid = ? OR org_uuid IS NULL)")
+        clauses.append("org_uuid = ?")
         params.append(org_uuid)
     if exclude_uuid is not None:
         clauses.append("uuid != ?")
@@ -4396,21 +4900,21 @@ def get_all_evaluators(
     evaluator_type: Optional[str] = None,
     data_type: Optional[str] = None,
 ) -> List[Dict[str, Any]]:
-    """List evaluators visible to an org: their own + (optionally) seeded defaults.
+    """List an org's own evaluators (which include its forked copies of the
+    seeded defaults). Seed templates themselves (`org_uuid IS NULL`) are never
+    returned to an org — each org sees its editable fork instead.
 
-    When org_uuid is None, returns all non-deleted evaluators (admin view).
+    When org_uuid is None, returns all non-deleted evaluators (admin view),
+    including the seed templates. `include_defaults` is retained for call-site
+    compatibility but is a no-op now that defaults are per-org forks.
     """
     with get_db_connection() as conn:
         cursor = conn.cursor()
         clauses = ["deleted_at IS NULL"]
         params: List[Any] = []
         if org_uuid is not None:
-            if include_defaults:
-                clauses.append("(org_uuid = ? OR org_uuid IS NULL)")
-                params.append(org_uuid)
-            else:
-                clauses.append("org_uuid = ?")
-                params.append(org_uuid)
+            clauses.append("org_uuid = ?")
+            params.append(org_uuid)
         if evaluator_type is not None:
             clauses.append("evaluator_type = ?")
             params.append(evaluator_type)
@@ -4420,7 +4924,7 @@ def get_all_evaluators(
         query = (
             "SELECT * FROM evaluators WHERE "
             + " AND ".join(clauses)
-            + " ORDER BY org_uuid IS NULL DESC, created_at DESC"
+            + " ORDER BY created_at DESC"
         )
         cursor.execute(query, params)
         return [_parse_evaluator_row(r) for r in cursor.fetchall()]
@@ -4482,7 +4986,9 @@ def update_evaluator(
 
 
 def delete_evaluator(evaluator_uuid: str) -> bool:
-    """Soft-delete an evaluator. Seeded default (org_uuid IS NULL) evaluators cannot be deleted."""
+    """Soft-delete an evaluator. Only the hidden seed templates (org_uuid IS NULL)
+    are protected; a per-org fork of a default (org_uuid set) is an ordinary
+    deletable row like any custom evaluator."""
     with get_db_connection() as conn:
         cursor = conn.cursor()
         cursor.execute(
