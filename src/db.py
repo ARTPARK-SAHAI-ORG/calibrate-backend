@@ -14,7 +14,7 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 # Database path
-DB_PATH = Path(join(os.getenv("DB_ROOT_DIR"), "pense.db"))
+DB_PATH = Path(join(os.getenv("DB_ROOT_DIR"), "pense.prod.db"))
 
 # Default user configuration — set via environment variables for local dev
 DEFAULT_USER_EMAIL = os.getenv("DEFAULT_USER_EMAIL", "")
@@ -1035,6 +1035,17 @@ def init_db():
             # for the read-side ORDER BY.
             "ALTER TABLE annotation_task_evaluators ADD COLUMN position INTEGER DEFAULT NULL",
             "ALTER TABLE annotation_job_evaluators ADD COLUMN position INTEGER DEFAULT NULL",
+            # Denormalized STT/TTS list-header fields, promoted out of the heavy
+            # `details` JSON blob so the jobs-list query never has to read or
+            # parse it. Written at create time by `create_job`; legacy rows
+            # backfilled once via `_backfill_jobs_summary_columns`. `providers`
+            # holds the JSON-text array; `dataset_id` is a single nullable FK
+            # (a job has at most one dataset — the live name is JOINed at read
+            # time, never stored). See `get_all_jobs_summary`.
+            "ALTER TABLE jobs ADD COLUMN dataset_id TEXT DEFAULT NULL",
+            "ALTER TABLE jobs ADD COLUMN language TEXT DEFAULT NULL",
+            "ALTER TABLE jobs ADD COLUMN providers TEXT DEFAULT NULL",
+            "ALTER TABLE jobs ADD COLUMN sample_count INTEGER DEFAULT NULL",
         ):
             try:
                 cursor.execute(stmt)
@@ -1485,18 +1496,33 @@ def init_db():
                 f"Backfilled org_limits from user_limits ({cursor.rowcount} row(s))"
             )
 
+        # Supports the jobs-list scan+sort (`get_all_jobs_summary`). Created
+        # here, after the `org_uuid` ADD COLUMN migration above, so the column
+        # exists. Partial on `deleted_at IS NULL` to match the query's filter.
+        cursor.execute(
+            "CREATE INDEX IF NOT EXISTS idx_jobs_org_created "
+            "ON jobs(org_uuid, created_at) WHERE deleted_at IS NULL"
+        )
+
+        # Backfill the denormalized jobs-list header columns from `details` for
+        # rows predating them. One-time + gated: never re-runs (so a later
+        # hand-edit of a column is never clobbered) and idempotent if a crash
+        # interrupts it before the flag is recorded.
+        if not _schema_migration_applied(cursor, JOBS_SUMMARY_BACKFILL_MIGRATION):
+            filled = _backfill_jobs_summary_columns(cursor)
+            _mark_schema_migration_applied(cursor, JOBS_SUMMARY_BACKFILL_MIGRATION)
+            conn.commit()
+            if filled:
+                logger.info(f"Backfilled jobs-list header columns on {filled} row(s)")
+
         conn.commit()
 
         # ============ Evaluator migrations + seed ============
         _seed_default_evaluators(cursor, conn)
         _backfill_test_evaluator_links(cursor, conn)
-        if not _schema_migration_applied(
-            cursor, AGENT_EVALUATORS_BACKFILL_MIGRATION
-        ):
+        if not _schema_migration_applied(cursor, AGENT_EVALUATORS_BACKFILL_MIGRATION):
             inserted = _backfill_agent_evaluator_links(cursor)
-            _mark_schema_migration_applied(
-                cursor, AGENT_EVALUATORS_BACKFILL_MIGRATION
-            )
+            _mark_schema_migration_applied(cursor, AGENT_EVALUATORS_BACKFILL_MIGRATION)
             conn.commit()
             if inserted:
                 logger.info(
@@ -2497,6 +2523,7 @@ def _backfill_test_evaluator_links(
 
 AGENT_EVALUATORS_BACKFILL_MIGRATION = "agent_evaluators_from_test_evaluators_v1"
 DATASET_NAME_DEDUPE_MIGRATION = "dedupe_active_dataset_names_v1"
+JOBS_SUMMARY_BACKFILL_MIGRATION = "backfill_jobs_summary_columns_v1"
 
 
 def _dedupe_active_dataset_names(cursor: sqlite3.Cursor) -> int:
@@ -2583,6 +2610,33 @@ def _backfill_agent_evaluator_links(cursor: sqlite3.Cursor) -> int:
           JOIN tests t
             ON t.uuid = at.test_id AND t.deleted_at IS NULL
          WHERE at.deleted_at IS NULL
+        """
+    )
+    cursor.execute("SELECT changes()")
+    row = cursor.fetchone()
+    return int(row[0]) if row else 0
+
+
+def _backfill_jobs_summary_columns(cursor: sqlite3.Cursor) -> int:
+    """One-time migration: promote the jobs-list header fields out of the
+    `details` JSON blob into their dedicated columns for rows that predate them.
+
+    `providers` lands as JSON text (the array serialized), mirroring what
+    `create_job` stores; `sample_count` is the length of `details.texts` (0 when
+    absent). Only touches rows whose columns are still NULL, so it never
+    overwrites a value already written at create time. Caller commits and
+    records `JOBS_SUMMARY_BACKFILL_MIGRATION` in the same transaction.
+    """
+    cursor.execute(
+        """
+        UPDATE jobs SET
+            dataset_id = json_extract(details, '$.dataset_id'),
+            language = json_extract(details, '$.language'),
+            providers = json_extract(details, '$.providers'),
+            sample_count = COALESCE(json_array_length(details, '$.texts'), 0)
+        WHERE details IS NOT NULL
+          AND dataset_id IS NULL AND language IS NULL
+          AND providers IS NULL AND sample_count IS NULL
         """
     )
     cursor.execute("SELECT changes()")
@@ -2764,9 +2818,7 @@ def provision_default_evaluators_for_org(
     of forks created."""
     with get_db_connection() as conn:
         cursor = conn.cursor()
-        forked = _provision_default_evaluators_for_org(
-            cursor, org_uuid, owner_user_id
-        )
+        forked = _provision_default_evaluators_for_org(cursor, org_uuid, owner_user_id)
         conn.commit()
         return forked
 
@@ -2787,10 +2839,10 @@ def _backfill_fork_default_evaluators(cursor: sqlite3.Cursor) -> int:
 
 def _template_and_fork_maps(cursor: sqlite3.Cursor):
     """Shared lookups for the two default-re-point migrations:
-      - `slug_by_template`: template evaluator uuid -> its slug (empty => nothing
-        to re-point).
-      - `fork_by_org_slug`: (org_uuid, source_default_slug) -> (fork_uuid,
-        fork_live_version_id).
+    - `slug_by_template`: template evaluator uuid -> its slug (empty => nothing
+      to re-point).
+    - `fork_by_org_slug`: (org_uuid, source_default_slug) -> (fork_uuid,
+      fork_live_version_id).
     """
     cursor.execute(
         "SELECT uuid, slug FROM evaluators "
@@ -6098,12 +6150,34 @@ def create_job(
         job_uuid = str(uuid.uuid4())
         details_json = json.dumps(details) if details is not None else None
         results_json = json.dumps(results) if results is not None else None
+        # Denormalized list-header columns kept in sync with `details` so the
+        # jobs-list query never parses the blob. See `get_all_jobs_summary`.
+        header = details or {}
+        providers = header.get("providers")
+        providers_json = json.dumps(providers) if providers is not None else None
+        texts = header.get("texts")
+        sample_count = len(texts) if isinstance(texts, list) else None
         cursor.execute(
             """
-            INSERT INTO jobs (uuid, user_id, org_uuid, type, status, details, results)
-            VALUES (?, ?, ?, ?, ?, ?, ?)
+            INSERT INTO jobs (
+                uuid, user_id, org_uuid, type, status, details, results,
+                dataset_id, language, providers, sample_count
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
-            (job_uuid, user_id, org_uuid, job_type, status, details_json, results_json),
+            (
+                job_uuid,
+                user_id,
+                org_uuid,
+                job_type,
+                status,
+                details_json,
+                results_json,
+                header.get("dataset_id"),
+                header.get("language"),
+                providers_json,
+                sample_count,
+            ),
         )
         conn.commit()
         logger.info(
@@ -6165,32 +6239,34 @@ def get_all_jobs_summary(
 ) -> List[Dict[str, Any]]:
     """Lightweight per-job headers for the jobs-list endpoint.
 
-    Deliberately never reads the heavy `results` column nor materializes the
-    large `details` sub-fields (evaluators/audio_paths/texts) — it pulls only
-    the few header fields via `json_extract`, so a list over many completed
-    STT/TTS eval jobs stays cheap. Full detail is fetched per job by the
-    detail endpoints. `providers` is decoded from its stored JSON array;
-    `sample_count` is the row count derived from `details.texts`.
+    Reads only the denormalized header columns (kept in sync with `details` by
+    `create_job`) plus the dataset's live name via a LEFT JOIN — it never reads
+    or parses the heavy `details`/`results` blobs, so a list over many completed
+    STT/TTS eval jobs stays cheap. The JOIN also folds in the "is the source
+    dataset still active" check: a soft-deleted (or absent) dataset yields a
+    NULL name, and both `dataset_id` and `dataset_name` are then nulled out —
+    matching the old `get_active_dataset_ids` behavior. Full detail is fetched
+    per job by the detail endpoints.
     """
     select = (
-        "SELECT uuid, type, status, created_at, updated_at, "
-        "json_extract(details, '$.dataset_id') AS dataset_id, "
-        "json_extract(details, '$.dataset_name') AS dataset_name, "
-        "json_extract(details, '$.language') AS language, "
-        "json_extract(details, '$.providers') AS providers, "
-        "json_array_length(details, '$.texts') AS sample_count "
-        "FROM jobs WHERE org_uuid = ? AND deleted_at IS NULL"
+        "SELECT j.uuid, j.type, j.status, j.created_at, j.updated_at, "
+        "j.dataset_id, j.language, j.providers, j.sample_count, "
+        "d.name AS dataset_name, d.uuid AS dataset_matched "
+        "FROM jobs j "
+        "LEFT JOIN datasets d "
+        "  ON d.uuid = j.dataset_id AND d.deleted_at IS NULL "
+        "WHERE j.org_uuid = ? AND j.deleted_at IS NULL"
     )
     with get_db_connection() as conn:
         cursor = conn.cursor()
         if job_type:
             cursor.execute(
-                select + " AND type = ? ORDER BY created_at DESC",
+                select + " AND j.type = ? ORDER BY j.created_at DESC",
                 (org_uuid, job_type),
             )
         else:
             cursor.execute(
-                select + " ORDER BY created_at DESC",
+                select + " ORDER BY j.created_at DESC",
                 (org_uuid,),
             )
         rows = cursor.fetchall()
@@ -6203,13 +6279,19 @@ def get_all_jobs_summary(
             providers = json.loads(providers_raw) if providers_raw else []
         except (json.JSONDecodeError, TypeError):
             providers = []
+        # No joined row means the dataset is deleted or the run was inline (no
+        # dataset) — drop both id and name. Keyed on row existence, not name
+        # truthiness, so an active dataset with a blank name still shows.
+        matched = row.get("dataset_matched") is not None
+        dataset_name = row.get("dataset_name") if matched else None
+        dataset_id = row.get("dataset_id") if matched else None
         result.append(
             {
                 "uuid": row["uuid"],
                 "type": row["type"],
                 "status": row["status"],
-                "dataset_id": row.get("dataset_id"),
-                "dataset_name": row.get("dataset_name"),
+                "dataset_id": dataset_id,
+                "dataset_name": dataset_name,
                 "language": row.get("language"),
                 "providers": providers if isinstance(providers, list) else [],
                 "sample_count": row.get("sample_count") or 0,
@@ -6460,7 +6542,8 @@ def bulk_delete_finished_jobs(
         status_by_uuid = {row["uuid"]: row["status"] for row in cursor.fetchall()}
         not_found = [u for u in job_uuids if u not in status_by_uuid]
         active = [
-            u for u in job_uuids
+            u
+            for u in job_uuids
             if u in status_by_uuid and status_by_uuid[u] not in FINISHED_JOB_STATUSES
         ]
         if not_found or active:

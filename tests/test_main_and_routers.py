@@ -1630,6 +1630,140 @@ def test_jobs_bulk_delete(client):
     )
 
 
+def test_jobs_list_shows_live_dataset_name(client):
+    import db as db_mod
+
+    auth = _auth(client)
+    h = auth["headers"]
+    org_uuid = db_mod.get_personal_org_for_user(auth["user_uuid"])["uuid"]
+
+    ds_uuid = db_mod.create_dataset(
+        name=f"live-name-{uuid.uuid4().hex[:8]}",
+        dataset_type="stt",
+        org_uuid=org_uuid,
+        user_id=auth["user_uuid"],
+    )
+    live_name = db_mod.get_dataset(ds_uuid, org_uuid)["name"]
+
+    j_uuid = db_mod.create_job(
+        job_type="stt-eval",
+        org_uuid=org_uuid,
+        user_id=auth["user_uuid"],
+        status="done",
+        details={"dataset_id": ds_uuid, "dataset_name": "STALE NAME"},
+    )
+
+    body = client.get("/jobs", headers=h).json()
+    item = next(j for j in body["items"] if j["uuid"] == j_uuid)
+    # The list reads the dataset's live name via JOIN, not the stale snapshot.
+    assert item["dataset_name"] == live_name
+    assert item["dataset_name"] != "STALE NAME"
+    assert item["dataset_id"] == ds_uuid
+
+
+def test_jobs_list_nulls_deleted_dataset(client):
+    import db as db_mod
+
+    auth = _auth(client)
+    h = auth["headers"]
+    org_uuid = db_mod.get_personal_org_for_user(auth["user_uuid"])["uuid"]
+
+    ds_uuid = db_mod.create_dataset(
+        name=f"to-delete-{uuid.uuid4().hex[:8]}",
+        dataset_type="stt",
+        org_uuid=org_uuid,
+        user_id=auth["user_uuid"],
+    )
+    j_uuid = db_mod.create_job(
+        job_type="stt-eval",
+        org_uuid=org_uuid,
+        user_id=auth["user_uuid"],
+        status="done",
+        details={"dataset_id": ds_uuid},
+    )
+
+    item = next(
+        j for j in client.get("/jobs", headers=h).json()["items"] if j["uuid"] == j_uuid
+    )
+    assert item["dataset_id"] == ds_uuid
+    assert item["dataset_name"] is not None
+
+    # Soft-deleting the source dataset nulls BOTH id and name in the list.
+    assert db_mod.delete_dataset(ds_uuid, org_uuid) is True
+    item = next(
+        j for j in client.get("/jobs", headers=h).json()["items"] if j["uuid"] == j_uuid
+    )
+    assert item["dataset_id"] is None
+    assert item["dataset_name"] is None
+
+
+def test_jobs_list_search_by_dataset_name(client):
+    import db as db_mod
+
+    auth = _auth(client)
+    h = auth["headers"]
+    org_uuid = db_mod.get_personal_org_for_user(auth["user_uuid"])["uuid"]
+
+    tag = uuid.uuid4().hex[:8]
+    alpha_ds = db_mod.create_dataset(
+        name=f"alpha-{tag}", dataset_type="stt", org_uuid=org_uuid,
+        user_id=auth["user_uuid"],
+    )
+    beta_ds = db_mod.create_dataset(
+        name=f"beta-{tag}", dataset_type="stt", org_uuid=org_uuid,
+        user_id=auth["user_uuid"],
+    )
+    alpha_job = db_mod.create_job(
+        job_type="stt-eval", org_uuid=org_uuid, user_id=auth["user_uuid"],
+        status="done", details={"dataset_id": alpha_ds},
+    )
+    beta_job = db_mod.create_job(
+        job_type="stt-eval", org_uuid=org_uuid, user_id=auth["user_uuid"],
+        status="done", details={"dataset_id": beta_ds},
+    )
+
+    body = client.get("/jobs", params={"q": f"alpha-{tag}"}, headers=h).json()
+    uuids = {j["uuid"] for j in body["items"]}
+    assert alpha_job in uuids
+    assert beta_job not in uuids
+    assert body["total"] == 1
+
+
+def test_jobs_list_sort_order(client):
+    import db as db_mod
+
+    auth = _auth(client)
+    h = auth["headers"]
+    org_uuid = db_mod.get_personal_org_for_user(auth["user_uuid"])["uuid"]
+
+    first = db_mod.create_job(
+        job_type="stt-eval", org_uuid=org_uuid, user_id=auth["user_uuid"],
+        status="done",
+    )
+    second = db_mod.create_job(
+        job_type="stt-eval", org_uuid=org_uuid, user_id=auth["user_uuid"],
+        status="done",
+    )
+
+    asc = client.get(
+        "/jobs", params={"sort_by": "created_at", "order": "asc"}, headers=h
+    )
+    desc = client.get(
+        "/jobs", params={"sort_by": "created_at", "order": "desc"}, headers=h
+    )
+    assert asc.status_code == 200 and desc.status_code == 200
+    asc_uuids = [j["uuid"] for j in asc.json()["items"]]
+    desc_uuids = [j["uuid"] for j in desc.json()["items"]]
+    assert {first, second} <= set(asc_uuids)
+    assert {first, second} <= set(desc_uuids)
+
+    # Second-resolution timestamps can tie; the secondary uuid key still gives a
+    # stable order that reverses between asc and desc.
+    asc_pair = [u for u in asc_uuids if u in (first, second)]
+    desc_pair = [u for u in desc_uuids if u in (first, second)]
+    assert asc_pair == list(reversed(desc_pair))
+
+
 # ---------------------------------------------------------------------------
 # Agent-Tools router
 # ---------------------------------------------------------------------------

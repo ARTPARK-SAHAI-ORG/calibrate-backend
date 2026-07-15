@@ -1485,6 +1485,192 @@ def test_generic_jobs_and_queue(user):
 
 
 # ---------------------------------------------------------------------------
+# Jobs-summary denormalized header columns + backfill
+# ---------------------------------------------------------------------------
+
+
+def _summary_item(org_uuid, job_uuid, job_type=None):
+    for item in db.get_all_jobs_summary(org_uuid, job_type=job_type):
+        if item["uuid"] == job_uuid:
+            return item
+    return None
+
+
+def test_create_job_populates_summary_columns(user):
+    job_uuid = db.create_job(
+        job_type="stt-eval",
+        user_id=user["uuid"],
+        org_uuid=user["org_uuid"],
+        details={
+            "providers": ["deepgram", "openai"],
+            "language": "hindi",
+            "texts": ["a", "b", "c"],
+            "evaluators": [{"heavy": "x" * 500}],
+        },
+    )
+
+    item = _summary_item(user["org_uuid"], job_uuid)
+    assert item is not None
+    assert item["providers"] == ["deepgram", "openai"]
+    assert item["language"] == "hindi"
+    assert item["sample_count"] == 3
+
+    # Prove it's a real column, not derived from the details blob at read time.
+    with db.get_db_connection() as conn:
+        row = conn.execute(
+            "SELECT providers, sample_count FROM jobs WHERE uuid = ?", (job_uuid,)
+        ).fetchone()
+    import json as _json
+
+    assert _json.loads(row["providers"]) == ["deepgram", "openai"]
+    assert row["sample_count"] == 3
+
+
+def test_jobs_summary_uses_live_dataset_name_via_join(user):
+    ds_uuid = db.create_dataset(_u("live-ds"), "stt", user["org_uuid"], user["uuid"])
+    job_uuid = db.create_job(
+        job_type="stt-eval",
+        user_id=user["uuid"],
+        org_uuid=user["org_uuid"],
+        details={
+            "dataset_id": ds_uuid,
+            "dataset_name": "STALE-FROZEN-NAME",
+            "providers": ["openai"],
+            "texts": ["a"],
+        },
+    )
+
+    item = _summary_item(user["org_uuid"], job_uuid)
+    assert item["dataset_id"] == ds_uuid
+    assert item["dataset_name"] != "STALE-FROZEN-NAME"
+
+    new_name = _u("renamed-ds")
+    assert db.update_dataset_name(ds_uuid, user["org_uuid"], new_name) is True
+    item = _summary_item(user["org_uuid"], job_uuid)
+    assert item["dataset_name"] == new_name
+
+
+def test_jobs_summary_nulls_dataset_when_soft_deleted(user):
+    ds_uuid = db.create_dataset(_u("del-ds"), "stt", user["org_uuid"], user["uuid"])
+    job_uuid = db.create_job(
+        job_type="stt-eval",
+        user_id=user["uuid"],
+        org_uuid=user["org_uuid"],
+        details={"dataset_id": ds_uuid, "providers": ["openai"], "texts": ["a"]},
+    )
+
+    item = _summary_item(user["org_uuid"], job_uuid)
+    assert item["dataset_id"] == ds_uuid
+    assert item["dataset_name"] is not None
+
+    assert db.delete_dataset(ds_uuid, user["org_uuid"]) is True
+    item = _summary_item(user["org_uuid"], job_uuid)
+    assert item["dataset_id"] is None
+    assert item["dataset_name"] is None
+
+
+def test_jobs_summary_inline_run_has_no_dataset(user):
+    job_uuid = db.create_job(
+        job_type="stt-eval",
+        user_id=user["uuid"],
+        org_uuid=user["org_uuid"],
+        details={"providers": ["openai", "deepgram"], "texts": ["a", "b"]},
+    )
+
+    item = _summary_item(user["org_uuid"], job_uuid)
+    assert item["dataset_id"] is None
+    assert item["dataset_name"] is None
+    assert item["sample_count"] == 2
+
+
+def test_jobs_summary_active_dataset_with_blank_name_still_shows(user):
+    """An active dataset with an empty name must still surface — nulling is
+    keyed on the joined row existing, not on the name being truthy."""
+    ds_uuid = db.create_dataset(
+        name=_u("blank-name-ds"), dataset_type="stt", org_uuid=user["org_uuid"]
+    )
+    with db.get_db_connection() as conn:
+        conn.execute("UPDATE datasets SET name = '' WHERE uuid = ?", (ds_uuid,))
+        conn.commit()
+
+    job_uuid = db.create_job(
+        job_type="stt-eval",
+        user_id=user["uuid"],
+        org_uuid=user["org_uuid"],
+        details={"providers": ["openai"], "texts": ["a"], "dataset_id": ds_uuid},
+    )
+
+    item = _summary_item(user["org_uuid"], job_uuid)
+    assert item["dataset_id"] == ds_uuid
+    assert item["dataset_name"] == ""
+
+
+def test_backfill_jobs_summary_columns_fills_legacy_rows(user):
+    job_uuid = db.create_job(
+        job_type="stt-eval",
+        user_id=user["uuid"],
+        org_uuid=user["org_uuid"],
+        details={
+            "providers": ["deepgram"],
+            "language": "tamil",
+            "texts": ["a", "b", "c", "d"],
+        },
+    )
+
+    # Simulate a legacy row that predates the columns and the migration.
+    with db.get_db_connection() as conn:
+        conn.execute(
+            "UPDATE jobs SET dataset_id=NULL, language=NULL, providers=NULL, "
+            "sample_count=NULL WHERE uuid=?",
+            (job_uuid,),
+        )
+        conn.execute(
+            "DELETE FROM _schema_migrations WHERE name = ?",
+            (db.JOBS_SUMMARY_BACKFILL_MIGRATION,),
+        )
+        conn.commit()
+
+    db.init_db()
+
+    item = _summary_item(user["org_uuid"], job_uuid)
+    assert item["providers"] == ["deepgram"]
+    assert item["language"] == "tamil"
+    assert item["sample_count"] == 4
+
+
+def test_backfill_jobs_summary_runs_once_and_never_again(user):
+    job_uuid = db.create_job(
+        job_type="stt-eval",
+        user_id=user["uuid"],
+        org_uuid=user["org_uuid"],
+        details={"providers": ["openai"], "language": "hindi", "texts": ["a"]},
+    )
+
+    # The backfill flag is already set (created via create_job / prior init_db).
+    # A user hand-edits a column afterwards; the migration must not re-run and
+    # clobber it.
+    with db.get_db_connection() as conn:
+        flag = conn.execute(
+            "SELECT 1 FROM _schema_migrations WHERE name = ?",
+            (db.JOBS_SUMMARY_BACKFILL_MIGRATION,),
+        ).fetchone()
+        assert flag is not None
+        conn.execute(
+            "UPDATE jobs SET language = 'MANUALLY_EDITED' WHERE uuid = ?",
+            (job_uuid,),
+        )
+        conn.commit()
+
+    db.init_db()
+
+    with db.get_db_connection() as conn:
+        language = conn.execute(
+            "SELECT language FROM jobs WHERE uuid = ?", (job_uuid,)
+        ).fetchone()["language"]
+    assert language == "MANUALLY_EDITED"
+
+
+# ---------------------------------------------------------------------------
 # Agent Test Jobs
 # ---------------------------------------------------------------------------
 
