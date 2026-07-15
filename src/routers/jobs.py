@@ -9,7 +9,6 @@ from db import (
     get_job,
     delete_job,
     bulk_delete_finished_jobs,
-    get_active_dataset_ids,
 )
 from auth_utils import get_current_org, OrgContext
 from pagination import (
@@ -96,14 +95,6 @@ async def list_jobs(
     db_job_type = JOB_TYPE_MAP.get(job_type) if job_type else None
 
     jobs = get_all_jobs_summary(org_uuid=ctx.org_uuid, job_type=db_job_type)
-
-    active_dataset_ids = get_active_dataset_ids(
-        [job["dataset_id"] for job in jobs if job.get("dataset_id")]
-    )
-    for job in jobs:
-        if job.get("dataset_id") not in active_dataset_ids:
-            job["dataset_id"] = None
-            job["dataset_name"] = None
 
     jobs = search.apply(jobs)
     jobs = sort.apply(jobs)
