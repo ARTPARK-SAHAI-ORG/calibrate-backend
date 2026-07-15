@@ -757,6 +757,14 @@ def test_evaluators_list_and_default_prompt(client):
     assert safety is not None
     assert safety["is_default"] is True
     assert safety.get("slug") is None
+    # The fork carries its origin in `source_default_slug` (the slug stays with
+    # the hidden template) so clients can still identify a specific default.
+    assert safety["source_default_slug"] == "default-safety"
+    # The correctness default the FE seeds new tests with is identifiable this way.
+    assert any(
+        e.get("source_default_slug") == "default-llm-next-reply"
+        for e in listing.json()["items"]
+    )
 
     # A from-scratch custom evaluator is NOT a default ⇒ is_default False.
     created = client.post(
@@ -773,6 +781,7 @@ def test_evaluators_list_and_default_prompt(client):
     detail = client.get(f"/evaluators/{created.json()['uuid']}", headers=h)
     assert detail.status_code == 200
     assert detail.json()["is_default"] is False
+    assert detail.json()["source_default_slug"] is None  # not derived from a default
 
     prompt = client.get(
         "/evaluators/default-prompt", params={"purpose": "llm"}, headers=h

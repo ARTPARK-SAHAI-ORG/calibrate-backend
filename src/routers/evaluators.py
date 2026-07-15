@@ -320,6 +320,10 @@ class EvaluatorResponseBase(BaseModel):
         description="True when the evaluator is a built-in default or your workspace's editable copy of one. False for an evaluator you created yourself"
     )
     slug: Optional[str] = Field(None, description="Stable slug for a built-in default evaluator")
+    source_default_slug: Optional[str] = Field(
+        None,
+        description="Stable slug of the built-in default this evaluator is your editable copy of. Set on your default forks so you can identify a specific default by it",
+    )
     live_version_id: Optional[str] = Field(
         None,
         min_length=36,
@@ -502,6 +506,7 @@ def _evaluator_response(
             or evaluator.get("owner_user_id") is None
         ),
         slug=evaluator.get("slug"),
+        source_default_slug=evaluator.get("source_default_slug"),
         live_version_id=evaluator.get("live_version_id"),
         created_at=evaluator["created_at"],
         updated_at=evaluator["updated_at"],
