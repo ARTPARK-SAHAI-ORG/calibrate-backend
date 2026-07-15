@@ -1505,7 +1505,8 @@ def init_db():
 
         # Fork the seeded defaults into every existing org (one-time). Runs after
         # `_seed_default_evaluators` so the templates exist. New orgs fork at
-        # creation time; later-added defaults propagate via lazy provision-on-read.
+        # creation time; a default added in a later release needs a new backfill
+        # (there is no on-read provisioning).
         if not _schema_migration_applied(cursor, FORK_DEFAULT_EVALUATORS_MIGRATION):
             forked = _backfill_fork_default_evaluators(cursor)
             _mark_schema_migration_applied(cursor, FORK_DEFAULT_EVALUATORS_MIGRATION)
@@ -2694,13 +2695,13 @@ def _provision_default_evaluators_for_org(
 
     Idempotent via the `org_default_evaluators` receipt ledger: a default is
     forked only when the org has no receipt for that slug yet — so a fork the
-    user later renames or deletes is never re-created. New defaults shipped in a
-    later release have no receipt, so they are picked up automatically on the
-    next call.
+    user later renames or deletes is never re-created. A default shipped in a
+    later release has no receipt, so a later provisioning pass (org creation, or
+    a new backfill) forks it — there is no on-read provisioning.
 
     Runs on the caller's cursor and does NOT commit — callers own the
-    transaction (org creation forks inside its own INSERT txn; the lazy-read and
-    backfill wrappers commit). Returns the number of forks created. A default
+    transaction (org creation forks inside its own INSERT txn; the committing
+    wrapper and the backfill commit). Returns the number of forks created. A default
     whose name already collides with an existing custom evaluator in the org is
     skipped, with a receipt written (NULL evaluator_uuid) so it isn't retried.
     """
@@ -2758,9 +2759,9 @@ def _provision_default_evaluators_for_org(
 def provision_default_evaluators_for_org(
     org_uuid: str, owner_user_id: Optional[str] = None
 ) -> int:
-    """Committing wrapper around `_provision_default_evaluators_for_org` for
-    callers that own their connection (the lazy provision-on-read hook and the
-    one-time backfill). Returns the number of forks created."""
+    """Committing wrapper around `_provision_default_evaluators_for_org` for a
+    self-contained provisioning pass on its own connection. Returns the number
+    of forks created."""
     with get_db_connection() as conn:
         cursor = conn.cursor()
         forked = _provision_default_evaluators_for_org(
@@ -2774,8 +2775,8 @@ def _backfill_fork_default_evaluators(cursor: sqlite3.Cursor) -> int:
     """One-time migration: fork the seeded defaults into every existing org.
     Caller commits and records `FORK_DEFAULT_EVALUATORS_MIGRATION` in the same
     transaction so a crash mid-migration retries on next init_db. Orgs created
-    afterwards get their forks at creation time; defaults added in a later
-    release propagate via the lazy provision-on-read hook."""
+    afterwards get their forks at creation time; a default added in a later
+    release needs a new one-time backfill (there is no on-read provisioning)."""
     cursor.execute("SELECT uuid FROM organizations WHERE deleted_at IS NULL")
     org_uuids = [r["uuid"] for r in cursor.fetchall()]
     total = 0
