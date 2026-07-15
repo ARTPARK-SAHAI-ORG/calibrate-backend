@@ -14,7 +14,7 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 # Database path
-DB_PATH = Path(join(os.getenv("DB_ROOT_DIR"), "pense.db"))
+DB_PATH = Path(join(os.getenv("DB_ROOT_DIR"), "pense.prod.db"))
 
 # Default user configuration — set via environment variables for local dev
 DEFAULT_USER_EMAIL = os.getenv("DEFAULT_USER_EMAIL", "")
@@ -1513,22 +1513,16 @@ def init_db():
             _mark_schema_migration_applied(cursor, JOBS_SUMMARY_BACKFILL_MIGRATION)
             conn.commit()
             if filled:
-                logger.info(
-                    f"Backfilled jobs-list header columns on {filled} row(s)"
-                )
+                logger.info(f"Backfilled jobs-list header columns on {filled} row(s)")
 
         conn.commit()
 
         # ============ Evaluator migrations + seed ============
         _seed_default_evaluators(cursor, conn)
         _backfill_test_evaluator_links(cursor, conn)
-        if not _schema_migration_applied(
-            cursor, AGENT_EVALUATORS_BACKFILL_MIGRATION
-        ):
+        if not _schema_migration_applied(cursor, AGENT_EVALUATORS_BACKFILL_MIGRATION):
             inserted = _backfill_agent_evaluator_links(cursor)
-            _mark_schema_migration_applied(
-                cursor, AGENT_EVALUATORS_BACKFILL_MIGRATION
-            )
+            _mark_schema_migration_applied(cursor, AGENT_EVALUATORS_BACKFILL_MIGRATION)
             conn.commit()
             if inserted:
                 logger.info(
@@ -2824,9 +2818,7 @@ def provision_default_evaluators_for_org(
     of forks created."""
     with get_db_connection() as conn:
         cursor = conn.cursor()
-        forked = _provision_default_evaluators_for_org(
-            cursor, org_uuid, owner_user_id
-        )
+        forked = _provision_default_evaluators_for_org(cursor, org_uuid, owner_user_id)
         conn.commit()
         return forked
 
@@ -2847,10 +2839,10 @@ def _backfill_fork_default_evaluators(cursor: sqlite3.Cursor) -> int:
 
 def _template_and_fork_maps(cursor: sqlite3.Cursor):
     """Shared lookups for the two default-re-point migrations:
-      - `slug_by_template`: template evaluator uuid -> its slug (empty => nothing
-        to re-point).
-      - `fork_by_org_slug`: (org_uuid, source_default_slug) -> (fork_uuid,
-        fork_live_version_id).
+    - `slug_by_template`: template evaluator uuid -> its slug (empty => nothing
+      to re-point).
+    - `fork_by_org_slug`: (org_uuid, source_default_slug) -> (fork_uuid,
+      fork_live_version_id).
     """
     cursor.execute(
         "SELECT uuid, slug FROM evaluators "
@@ -6259,7 +6251,7 @@ def get_all_jobs_summary(
     select = (
         "SELECT j.uuid, j.type, j.status, j.created_at, j.updated_at, "
         "j.dataset_id, j.language, j.providers, j.sample_count, "
-        "d.name AS dataset_name "
+        "d.name AS dataset_name, d.uuid AS dataset_matched "
         "FROM jobs j "
         "LEFT JOIN datasets d "
         "  ON d.uuid = j.dataset_id AND d.deleted_at IS NULL "
@@ -6287,10 +6279,12 @@ def get_all_jobs_summary(
             providers = json.loads(providers_raw) if providers_raw else []
         except (json.JSONDecodeError, TypeError):
             providers = []
-        # A NULL joined name means the dataset is deleted or the run was inline
-        # (no dataset) — drop the id too so the client shows neither.
-        dataset_name = row.get("dataset_name")
-        dataset_id = row.get("dataset_id") if dataset_name else None
+        # No joined row means the dataset is deleted or the run was inline (no
+        # dataset) — drop both id and name. Keyed on row existence, not name
+        # truthiness, so an active dataset with a blank name still shows.
+        matched = row.get("dataset_matched") is not None
+        dataset_name = row.get("dataset_name") if matched else None
+        dataset_id = row.get("dataset_id") if matched else None
         result.append(
             {
                 "uuid": row["uuid"],
@@ -6548,7 +6542,8 @@ def bulk_delete_finished_jobs(
         status_by_uuid = {row["uuid"]: row["status"] for row in cursor.fetchall()}
         not_found = [u for u in job_uuids if u not in status_by_uuid]
         active = [
-            u for u in job_uuids
+            u
+            for u in job_uuids
             if u in status_by_uuid and status_by_uuid[u] not in FINISHED_JOB_STATUSES
         ]
         if not_found or active:

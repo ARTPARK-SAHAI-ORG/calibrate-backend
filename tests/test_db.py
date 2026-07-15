@@ -1583,6 +1583,28 @@ def test_jobs_summary_inline_run_has_no_dataset(user):
     assert item["sample_count"] == 2
 
 
+def test_jobs_summary_active_dataset_with_blank_name_still_shows(user):
+    """An active dataset with an empty name must still surface — nulling is
+    keyed on the joined row existing, not on the name being truthy."""
+    ds_uuid = db.create_dataset(
+        name=_u("blank-name-ds"), dataset_type="stt", org_uuid=user["org_uuid"]
+    )
+    with db.get_db_connection() as conn:
+        conn.execute("UPDATE datasets SET name = '' WHERE uuid = ?", (ds_uuid,))
+        conn.commit()
+
+    job_uuid = db.create_job(
+        job_type="stt-eval",
+        user_id=user["uuid"],
+        org_uuid=user["org_uuid"],
+        details={"providers": ["openai"], "texts": ["a"], "dataset_id": ds_uuid},
+    )
+
+    item = _summary_item(user["org_uuid"], job_uuid)
+    assert item["dataset_id"] == ds_uuid
+    assert item["dataset_name"] == ""
+
+
 def test_backfill_jobs_summary_columns_fills_legacy_rows(user):
     job_uuid = db.create_job(
         job_type="stt-eval",
