@@ -1527,6 +1527,10 @@ def test_jobs_router(client):
     # Paginated envelope, not the old {"jobs": [...]}.
     assert set(body) == {"items", "total", "limit", "offset"}
     assert body["total"] >= 1
+    # Pagination is optional: omitting limit returns the full list (limit=null),
+    # so an account's whole job history stays visible without paging.
+    assert body["limit"] is None
+    assert len(body["items"]) == body["total"]
     item = next(j for j in body["items"] if j["uuid"] == j_uuid)
     # Slim header fields, all top-level.
     assert item["providers"] == ["deepgram", "openai"]

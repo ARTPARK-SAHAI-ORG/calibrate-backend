@@ -13,7 +13,7 @@ from db import (
 )
 from auth_utils import get_current_org, OrgContext
 from pagination import (
-    PaginationParams,
+    OptionalPaginationParams,
     PaginatedResponse,
     count_and_page,
     page_envelope,
@@ -89,7 +89,7 @@ async def list_jobs(
     ),
     search: _JobsSearch = Depends(),
     sort: _JobsSort = Depends(),
-    pagination: PaginationParams = Depends(),
+    pagination: OptionalPaginationParams = Depends(),
     ctx: OrgContext = Depends(get_current_org),
 ):
     """List jobs, newest first"""
