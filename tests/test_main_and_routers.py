@@ -1534,11 +1534,21 @@ def test_jobs_bulk_delete(client):
     h = auth["headers"]
     org_uuid = db_mod.get_personal_org_for_user(auth["user_uuid"])["uuid"]
 
-    j1 = db_mod.create_job(
-        job_type="stt-eval", org_uuid=org_uuid, user_id=auth["user_uuid"]
+    done = db_mod.create_job(
+        job_type="stt-eval", org_uuid=org_uuid, user_id=auth["user_uuid"],
+        status="done",
     )
-    j2 = db_mod.create_job(
-        job_type="tts-eval", org_uuid=org_uuid, user_id=auth["user_uuid"]
+    failed = db_mod.create_job(
+        job_type="tts-eval", org_uuid=org_uuid, user_id=auth["user_uuid"],
+        status="failed",
+    )
+    running = db_mod.create_job(
+        job_type="stt-eval", org_uuid=org_uuid, user_id=auth["user_uuid"],
+        status="in_progress",
+    )
+    queued = db_mod.create_job(
+        job_type="stt-eval", org_uuid=org_uuid, user_id=auth["user_uuid"],
+        status="queued",
     )
     missing = str(uuid.uuid4())
 
@@ -1546,29 +1556,38 @@ def test_jobs_bulk_delete(client):
         "DELETE",
         "/jobs",
         headers=h,
-        json={"job_uuids": [j1, j2, j1, missing]},
+        # `done` is repeated to prove duplicate IDs are de-duped
+        json={"job_uuids": [done, failed, done, running, queued, missing]},
     )
     assert resp.status_code == 200
     body = resp.json()
     assert body["deleted_count"] == 2
     assert body["not_found"] == [missing]
+    # Finished-only: running + queued jobs are reported, not deleted
+    assert sorted(body["skipped_active"]) == sorted([running, queued])
 
-    # Both are gone; re-deleting reports them as not found
-    assert db_mod.get_job(j1, org_uuid=org_uuid) is None
-    assert db_mod.get_job(j2, org_uuid=org_uuid) is None
+    # Finished jobs are gone; active ones survive
+    assert db_mod.get_job(done, org_uuid=org_uuid) is None
+    assert db_mod.get_job(failed, org_uuid=org_uuid) is None
+    assert db_mod.get_job(running, org_uuid=org_uuid) is not None
+    assert db_mod.get_job(queued, org_uuid=org_uuid) is not None
 
     # Another org cannot delete this org's jobs (they read as not-found)
     other = _auth(client)
-    other_org = db_mod.get_personal_org_for_user(other["user_uuid"])["uuid"]
-    j3 = db_mod.create_job(
-        job_type="stt-eval", org_uuid=org_uuid, user_id=auth["user_uuid"]
+    j_other = db_mod.create_job(
+        job_type="stt-eval", org_uuid=org_uuid, user_id=auth["user_uuid"],
+        status="done",
     )
     cross = client.request(
-        "DELETE", "/jobs", headers=other["headers"], json={"job_uuids": [j3]}
+        "DELETE", "/jobs", headers=other["headers"], json={"job_uuids": [j_other]}
     )
     assert cross.status_code == 200
-    assert cross.json() == {"deleted_count": 0, "not_found": [j3]}
-    assert db_mod.get_job(j3, org_uuid=org_uuid) is not None
+    assert cross.json() == {
+        "deleted_count": 0,
+        "skipped_active": [],
+        "not_found": [j_other],
+    }
+    assert db_mod.get_job(j_other, org_uuid=org_uuid) is not None
 
     # Empty list is rejected by validation
     assert (

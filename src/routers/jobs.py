@@ -4,7 +4,13 @@ from enum import Enum
 from fastapi import APIRouter, Query, Depends, HTTPException, Path
 from pydantic import BaseModel, Field
 
-from db import get_all_jobs, get_job, delete_job, get_active_dataset_ids
+from db import (
+    get_all_jobs,
+    get_job,
+    delete_job,
+    bulk_delete_finished_jobs,
+    get_active_dataset_ids,
+)
 from auth_utils import get_current_org, OrgContext
 from utils import (
     TaskStatus,
@@ -106,32 +112,6 @@ async def list_jobs(
     return JobsListResponse(jobs=job_items)
 
 
-def _delete_one_job(job_uuid: str, org_uuid: str) -> bool:
-    """Delete a single job owned by ``org_uuid``, killing it first if running.
-
-    Returns True on success, False if the job does not exist for this org.
-    """
-    job = get_job(job_uuid, org_uuid=org_uuid)
-    if not job:
-        return False
-
-    was_running = job.get("status") == TaskStatus.IN_PROGRESS.value
-    details = job.get("details") or {}
-
-    if was_running:
-        running_pids = details.get("running_pids")
-        if running_pids:
-            kill_processes_from_dict(running_pids, job_uuid)
-
-    if not delete_job(job_uuid):
-        return False
-
-    if was_running:
-        try_start_queued_job(EVAL_JOB_TYPES)
-
-    return True
-
-
 class BulkDeleteJobsRequest(BaseModel):
     job_uuids: List[str] = Field(
         min_length=1,
@@ -141,6 +121,9 @@ class BulkDeleteJobsRequest(BaseModel):
 
 class BulkDeleteJobsResponse(BaseModel):
     deleted_count: int = Field(description="Number of jobs deleted")
+    skipped_active: List[str] = Field(
+        description="Requested job IDs left untouched because they are still queued or running"
+    )
     not_found: List[str] = Field(
         description="Requested job IDs that did not exist for this workspace"
     )
@@ -151,20 +134,14 @@ async def bulk_delete_jobs_endpoint(
     payload: BulkDeleteJobsRequest = ...,
     ctx: OrgContext = Depends(get_current_org),
 ):
-    """Delete several jobs at once, stopping any that are still running"""
-    seen: set[str] = set()
-    deleted_count = 0
-    not_found: List[str] = []
-    for job_uuid in payload.job_uuids:
-        if job_uuid in seen:
-            continue
-        seen.add(job_uuid)
-        if _delete_one_job(job_uuid, ctx.org_uuid):
-            deleted_count += 1
-        else:
-            not_found.append(job_uuid)
-
-    return BulkDeleteJobsResponse(deleted_count=deleted_count, not_found=not_found)
+    """Delete several finished jobs at once, skipping any still queued or running"""
+    unique_uuids = list(dict.fromkeys(payload.job_uuids))
+    result = bulk_delete_finished_jobs(unique_uuids, ctx.org_uuid)
+    return BulkDeleteJobsResponse(
+        deleted_count=len(result["deleted"]),
+        skipped_active=result["skipped_active"],
+        not_found=result["not_found"],
+    )
 
 
 @router.delete("/{job_uuid}", summary="Delete job")
@@ -176,7 +153,23 @@ async def delete_job_endpoint(
     ctx: OrgContext = Depends(get_current_org),
 ):
     """Delete a job, stopping it first if it is still running"""
-    if not _delete_one_job(job_uuid, ctx.org_uuid):
+    job = get_job(job_uuid, org_uuid=ctx.org_uuid)
+    if not job:
         raise HTTPException(status_code=404, detail="Job not found")
+
+    was_running = job.get("status") == TaskStatus.IN_PROGRESS.value
+    details = job.get("details") or {}
+
+    if was_running:
+        running_pids = details.get("running_pids")
+        if running_pids:
+            kill_processes_from_dict(running_pids, job_uuid)
+
+    deleted = delete_job(job_uuid)
+    if not deleted:
+        raise HTTPException(status_code=404, detail="Job not found")
+
+    if was_running:
+        try_start_queued_job(EVAL_JOB_TYPES)
 
     return {"message": "Job deleted successfully"}
