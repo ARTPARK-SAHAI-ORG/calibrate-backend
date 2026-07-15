@@ -6625,12 +6625,12 @@ def get_agent_test_jobs_for_agent(
         cursor = conn.cursor()
         if job_type:
             cursor.execute(
-                "SELECT * FROM agent_test_jobs WHERE agent_id = ? AND type = ? ORDER BY created_at DESC",
+                "SELECT * FROM agent_test_jobs WHERE agent_id = ? AND type = ? ORDER BY created_at DESC, id DESC",
                 (agent_id, job_type),
             )
         else:
             cursor.execute(
-                "SELECT * FROM agent_test_jobs WHERE agent_id = ? ORDER BY created_at DESC",
+                "SELECT * FROM agent_test_jobs WHERE agent_id = ? ORDER BY created_at DESC, id DESC",
                 (agent_id,),
             )
         rows = cursor.fetchall()
@@ -6643,11 +6643,13 @@ def get_all_agent_test_jobs(job_type: Optional[str] = None) -> List[Dict[str, An
         cursor = conn.cursor()
         if job_type:
             cursor.execute(
-                "SELECT * FROM agent_test_jobs WHERE type = ? ORDER BY created_at DESC",
+                "SELECT * FROM agent_test_jobs WHERE type = ? ORDER BY created_at DESC, id DESC",
                 (job_type,),
             )
         else:
-            cursor.execute("SELECT * FROM agent_test_jobs ORDER BY created_at DESC")
+            cursor.execute(
+                "SELECT * FROM agent_test_jobs ORDER BY created_at DESC, id DESC"
+            )
         rows = cursor.fetchall()
         return [_parse_agent_test_job_row(row) for row in rows]
 
@@ -6670,7 +6672,7 @@ def get_agent_test_jobs_for_org(
                 FROM agent_test_jobs atj
                 JOIN agents a ON atj.agent_id = a.uuid
                 WHERE a.org_uuid = ? AND a.deleted_at IS NULL AND atj.type = ?
-                ORDER BY atj.updated_at DESC
+                ORDER BY atj.updated_at DESC, atj.id DESC
                 """,
                 (org_uuid, job_type),
             )
@@ -6681,7 +6683,7 @@ def get_agent_test_jobs_for_org(
                 FROM agent_test_jobs atj
                 JOIN agents a ON atj.agent_id = a.uuid
                 WHERE a.org_uuid = ? AND a.deleted_at IS NULL
-                ORDER BY atj.updated_at DESC
+                ORDER BY atj.updated_at DESC, atj.id DESC
                 """,
                 (org_uuid,),
             )

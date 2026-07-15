@@ -811,23 +811,27 @@ async def get_agent_test_runs(
     # Get all jobs for this agent
     jobs = get_agent_test_jobs_for_agent(agent_uuid)
 
-    # Build every run item FIRST (before filtering) so the "Run N"/"Benchmark N"
-    # display names stay stable regardless of which filters are applied.
+    # Name in chronological order (oldest = "Run 1") so a run's number never
+    # shifts when a newer run is added, then build items newest-first. Names are
+    # assigned before any filtering so they stay stable regardless of filters.
+    jobs_asc = sorted(jobs, key=lambda j: (j.get("created_at", ""), j.get("id", 0)))
     unit_test_count = 0
     benchmark_count = 0
-
-    runs = []
-    for job in jobs:
+    name_map: Dict[str, str] = {}
+    for job in jobs_asc:
         job_type = job.get("type", "")
         if job_type == "llm-unit-test":
             unit_test_count += 1
-            name = f"Run {unit_test_count}"
+            name_map[job["uuid"]] = f"Run {unit_test_count}"
         elif job_type == "llm-benchmark":
             benchmark_count += 1
-            name = f"Benchmark {benchmark_count}"
+            name_map[job["uuid"]] = f"Benchmark {benchmark_count}"
         else:
-            name = f"Job {len(runs) + 1}"
+            name_map[job["uuid"]] = "Job"
 
+    runs = []
+    for job in jobs:  # already newest-first
+        name = name_map.get(job["uuid"], "Job")
         run_item = AgentTestRunListItem(**_build_agent_test_run_item_fields(job, name))
         runs.append(run_item)
 
@@ -879,7 +883,7 @@ async def get_all_test_runs_for_user(
 
     # Per-agent counters for naming ("Run 1", "Benchmark 2", …).
     # We need ascending order to assign names correctly, then flip back.
-    jobs_asc = sorted(jobs, key=lambda j: j.get("created_at", ""))
+    jobs_asc = sorted(jobs, key=lambda j: (j.get("created_at", ""), j.get("id", 0)))
     agent_unit_counts: Dict[str, int] = {}
     agent_benchmark_counts: Dict[str, int] = {}
     name_map: Dict[str, str] = {}  # job uuid → display name
