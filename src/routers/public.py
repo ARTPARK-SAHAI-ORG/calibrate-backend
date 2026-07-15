@@ -336,8 +336,6 @@ def _build_tts_provider_results_with_presigned_urls(
                     audio_s3_key = result_row["audio_path"]
                     if audio_s3_key.startswith("http"):
                         continue
-                    # Expose the raw key/URI alongside the presigned URL, mirroring
-                    # routers/tts.py::get_tts_evaluation_status.
                     result_row["audio_s3_path"] = audio_s3_key
                     if audio_s3_key.startswith("s3://"):
                         continue
