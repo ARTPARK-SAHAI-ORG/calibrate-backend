@@ -1028,8 +1028,6 @@ async def get_tts_evaluation_status(
                                     )
                                     s3_key = f"{results_prefix}/{relative_path}"
                                     upload_file_to_s3(s3, local_path, s3_bucket, s3_key)
-                                    # Raw key for copying into an annotation item;
-                                    # audio_path itself becomes a presigned URL.
                                     row["audio_s3_path"] = s3_key
                                     presigned_url = generate_presigned_download_url(
                                         s3_key
