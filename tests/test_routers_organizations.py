@@ -66,15 +66,15 @@ def test_signup_creates_personal_org_with_owner_membership(client):
 
 def test_new_org_is_provisioned_with_editable_default_forks(client):
     """Both org-creation paths surface an editable fork of every seeded default
-    through the API: forks read as customs (is_default False), not read-only
-    seeds, and expose no slug."""
+    through the API. A fresh org holds only forks, which read as `is_default`
+    True (grouped under "Default", still editable) and expose no slug."""
     auth = _signup(client)
     h = auth["headers"]
 
-    # Personal org (created at signup).
+    # Personal org (created at signup) — only forks yet, so all read as defaults.
     items = client.get("/evaluators", headers=h).json()["items"]
     assert items, "personal org should be provisioned with default forks"
-    assert all(e["is_default"] is False for e in items)
+    assert all(e["is_default"] is True for e in items)
     assert all(e.get("slug") is None for e in items)
     assert any(e["name"] == "Safety" for e in items)
 
@@ -83,7 +83,7 @@ def test_new_org_is_provisioned_with_editable_default_forks(client):
     scoped = {**h, "X-Org-UUID": org["uuid"]}
     new_items = client.get("/evaluators", headers=scoped).json()["items"]
     assert any(e["name"] == "Safety" for e in new_items)
-    assert all(e["is_default"] is False for e in new_items)
+    assert all(e["is_default"] is True for e in new_items)
 
 
 def test_create_and_rename_org(client):

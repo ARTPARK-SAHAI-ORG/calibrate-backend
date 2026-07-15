@@ -411,8 +411,8 @@ def _create_evaluator(client, h, name=None):
 
 def _default_evaluator_uuid(client, h):
     """The org's fork of a seeded default (provisioned at signup). Forks are
-    ordinary editable rows in the org's list (is_default False); the "Safety"
-    default is always provisioned."""
+    editable rows that read as `is_default` True; the "Safety" default is always
+    provisioned."""
     items = client.get("/evaluators", headers=h).json()["items"]
     fork = next((e for e in items if e.get("name") == "Safety"), None)
     assert fork is not None, "expected the org's forked Safety default"

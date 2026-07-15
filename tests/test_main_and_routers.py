@@ -748,17 +748,17 @@ def test_evaluators_list_and_default_prompt(client):
     listing = client.get("/evaluators", headers=h)
     assert listing.status_code == 200
     # Every org gets its OWN editable fork of each seeded default (provisioned at
-    # signup). Forks carry no `slug` (that stays with the hidden template) and
-    # read as editable customs ⇒ is_default False. The safety default surfaces by
-    # its display name, "Safety".
+    # signup). Forks carry no `slug` (that stays with the hidden template) but
+    # still read as `is_default` True so the UI groups them under "Default" while
+    # they stay editable. The safety default surfaces by its display name, "Safety".
     safety = next(
         (e for e in listing.json()["items"] if e.get("name") == "Safety"), None
     )
     assert safety is not None
-    assert safety["is_default"] is False
+    assert safety["is_default"] is True
     assert safety.get("slug") is None
 
-    # A custom evaluator is also editable ⇒ is_default False.
+    # A from-scratch custom evaluator is NOT a default ⇒ is_default False.
     created = client.post(
         "/evaluators",
         json={

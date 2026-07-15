@@ -174,9 +174,10 @@ def test_evaluators_full_lifecycle(client):
     no_op = client.put(f"/evaluators/{ev_uuid}", json={}, headers=h)
     assert no_op.status_code == 400
 
-    # The org's list contains only its own editable forks — no read-only seeds.
+    # The org's list never exposes a read-only seed template (those keep the
+    # `slug`; forks and customs don't), so every listed row is editable.
     seeds = client.get("/evaluators", headers=h).json()["items"]
-    assert all(e.get("is_default") is False for e in seeds)
+    assert all(e.get("slug") is None for e in seeds)
 
     # The seed templates themselves stay immutable (403 on org_uuid IS NULL). An
     # org can't discover a template uuid through the API anymore, so fetch one

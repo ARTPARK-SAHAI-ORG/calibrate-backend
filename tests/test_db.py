@@ -697,7 +697,7 @@ def test_new_org_is_provisioned_editable_forks_of_every_default():
 
     safety = forks["default-safety"]
     assert safety["org_uuid"] == org_uuid  # scoped to the org
-    assert safety["owner_user_id"] == user_uuid  # owned ⇒ editable, is_default False
+    assert safety["owner_user_id"] == user_uuid  # owned ⇒ editable (reads is_default True at the API)
     assert safety["slug"] is None  # the globally-unique slug stays with the template
     assert safety["live_version_id"]  # live version copied
 
