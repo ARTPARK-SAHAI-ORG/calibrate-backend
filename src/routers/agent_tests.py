@@ -32,6 +32,7 @@ from db import (
     bulk_remove_tests_from_agent,
     bulk_delete_tests,
     get_tests_for_agent,
+    get_tests_for_agent_summary,
     get_agents_for_test,
     get_agent_test_link,
     get_all_agent_tests,
@@ -667,7 +668,7 @@ async def get_agent_tests_endpoint(
     # `{items, total, limit, offset}` envelope. Each item is the trimmed list
     # shape (uuid/name/type + config.description, no evaluator hydration);
     # the transform runs only on the returned page.
-    tests = get_tests_for_agent(agent_uuid)
+    tests = get_tests_for_agent_summary(agent_uuid)
     tests = search.apply(tests)
     page, total = count_and_page(tests, pagination)
     return page_envelope([to_test_list_response(t) for t in page], total, pagination)

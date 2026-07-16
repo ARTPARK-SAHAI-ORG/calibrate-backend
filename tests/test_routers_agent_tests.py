@@ -243,6 +243,83 @@ def test_agent_tests_list_returns_trimmed_shape(client):
     assert "evaluation" not in (item.get("config") or {})
 
 
+def test_agent_tests_list_never_ships_heavy_config_blocks(client):
+    """The per-agent tests list uses the slim summary (json_extract of
+    `config.description` only). A linked test carrying heavy
+    `history`/`evaluation`/`settings` blocks stuffed with sentinels must expose
+    none of them through `GET /agent-tests/agent/{uuid}/tests`."""
+    import json as _json
+
+    auth = _signup(client)
+    h = auth["headers"]
+    agent = _create_agent(client, h)
+    hist_sentinel = f"HIST-{uuid.uuid4().hex}"
+    eval_sentinel = f"EVAL-{uuid.uuid4().hex}"
+    settings_sentinel = f"SET-{uuid.uuid4().hex}"
+    name = f"t-heavy-{uuid.uuid4().hex[:6]}"
+    test = client.post(
+        "/tests",
+        json={
+            "name": name,
+            "type": "response",
+            "config": {
+                "description": "keep me",
+                "history": [{"role": "user", "content": hist_sentinel}],
+                "evaluation": {"type": "response", "note": eval_sentinel},
+                "settings": {"language": settings_sentinel},
+            },
+        },
+        headers=h,
+    ).json()
+    client.post(
+        "/agent-tests",
+        json={"agent_uuid": agent["uuid"], "test_uuids": [test["uuid"]]},
+        headers=h,
+    )
+
+    r = client.get(f"/agent-tests/agent/{agent['uuid']}/tests", headers=h)
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert set(body) == {"items", "total", "limit", "offset"}
+    item = next(t for t in body["items"] if t["uuid"] == test["uuid"])
+    assert item["name"] == name
+    assert item["type"] == "response"
+    assert item["config"] == {"description": "keep me"}
+    assert "evaluators" not in item
+
+    dumped = _json.dumps(body)
+    assert hist_sentinel not in dumped
+    assert eval_sentinel not in dumped
+    assert settings_sentinel not in dumped
+
+
+def test_agent_tests_list_null_description(client):
+    """A linked test with no `config.description` still lists 200 with
+    description=null through the per-agent tests endpoint."""
+    auth = _signup(client)
+    h = auth["headers"]
+    agent = _create_agent(client, h)
+    test = client.post(
+        "/tests",
+        json={
+            "name": f"t-nodesc-{uuid.uuid4().hex[:6]}",
+            "type": "response",
+            "config": {"history": [{"role": "user", "content": "hi"}]},
+        },
+        headers=h,
+    ).json()
+    client.post(
+        "/agent-tests",
+        json={"agent_uuid": agent["uuid"], "test_uuids": [test["uuid"]]},
+        headers=h,
+    )
+
+    r = client.get(f"/agent-tests/agent/{agent['uuid']}/tests", headers=h)
+    assert r.status_code == 200, r.text
+    item = next(t for t in r.json()["items"] if t["uuid"] == test["uuid"])
+    assert item["config"] == {"description": None}
+
+
 def test_agent_runs_list_surfaces_perf_aggregates(client):
     """A completed unit-test run surfaces run-level latency/cost/total_tokens
     aggregates through the agent runs-list endpoint. The list is a lightweight

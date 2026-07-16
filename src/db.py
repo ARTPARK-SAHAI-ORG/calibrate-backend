@@ -1504,6 +1504,43 @@ def init_db():
             "ON jobs(org_uuid, created_at) WHERE deleted_at IS NULL"
         )
 
+        # Covering indexes for the hot parent-FK / queue / share-token lookups
+        # that previously full-scanned. Composite `(fk, deleted_at)` serves both
+        # the common `WHERE fk = ? AND deleted_at IS NULL` reads and the rarer
+        # include-deleted variants; the job tables have no `deleted_at`.
+        for index_sql in (
+            # Child rows read by parent FK on every list/results/agreement path.
+            "CREATE INDEX IF NOT EXISTS idx_annotation_items_task "
+            "ON annotation_items(task_id, deleted_at)",
+            "CREATE INDEX IF NOT EXISTS idx_evaluator_runs_job "
+            "ON evaluator_runs(job_id, deleted_at)",
+            "CREATE INDEX IF NOT EXISTS idx_dataset_items_dataset "
+            "ON dataset_items(dataset_id, deleted_at)",
+            # Queue poller: WHERE status = ? [AND type IN (...)] ORDER BY created_at.
+            "CREATE INDEX IF NOT EXISTS idx_jobs_status_type_created "
+            "ON jobs(status, type, created_at)",
+            # Agent-test job reads: per-agent run list, queue capacity, public share.
+            "CREATE INDEX IF NOT EXISTS idx_agent_test_jobs_agent_created "
+            "ON agent_test_jobs(agent_id, created_at)",
+            "CREATE INDEX IF NOT EXISTS idx_agent_test_jobs_status "
+            "ON agent_test_jobs(status)",
+            "CREATE INDEX IF NOT EXISTS idx_agent_test_jobs_share "
+            "ON agent_test_jobs(share_token)",
+            # Simulation job reads: per-simulation run list, queue capacity, share.
+            "CREATE INDEX IF NOT EXISTS idx_simulation_jobs_sim_created "
+            "ON simulation_jobs(simulation_id, created_at)",
+            "CREATE INDEX IF NOT EXISTS idx_simulation_jobs_status "
+            "ON simulation_jobs(status)",
+            "CREATE INDEX IF NOT EXISTS idx_simulation_jobs_share "
+            "ON simulation_jobs(share_token)",
+            # Annotation jobs read by task (list/agreement) and by annotator.
+            "CREATE INDEX IF NOT EXISTS idx_annotation_jobs_task "
+            "ON annotation_jobs(task_id, deleted_at)",
+            "CREATE INDEX IF NOT EXISTS idx_annotation_jobs_annotator "
+            "ON annotation_jobs(annotator_id, deleted_at)",
+        ):
+            cursor.execute(index_sql)
+
         # Backfill the denormalized jobs-list header columns from `details` for
         # rows predating them. One-time + gated: never re-runs (so a later
         # hand-edit of a column is never clobbered) and idempotent if a crash
@@ -4369,6 +4406,68 @@ def get_all_tests(org_uuid: Optional[str] = None) -> List[Dict[str, Any]]:
             )
         rows = cursor.fetchall()
         return [_parse_test_row(row) for row in rows]
+
+
+# Slim projection for the tests-LIST endpoints (`to_test_list_response`). Pulls
+# only `config.description` via `json_extract` instead of parsing the whole
+# `config` blob (which holds conversation `history` transcripts + `evaluation` /
+# `settings`) for every row. Shaped as `config={"description": ...}` so
+# `to_test_list_response` consumes it unchanged.
+def _row_to_test_summary(row: sqlite3.Row) -> Dict[str, Any]:
+    row = dict(row)
+    return {
+        "uuid": row["uuid"],
+        "name": row["name"],
+        "type": row["type"],
+        "created_at": row["created_at"],
+        "updated_at": row["updated_at"],
+        "config": {"description": row.get("description")},
+    }
+
+
+# `t.`-qualified so the same projection works with the `agent_tests` JOIN
+# (both tables carry `created_at`).
+_TEST_SUMMARY_COLUMNS = (
+    "t.uuid, t.name, t.type, t.created_at, t.updated_at, "
+    "json_extract(t.config, '$.description') AS description"
+)
+
+
+def get_all_tests_summary(org_uuid: Optional[str] = None) -> List[Dict[str, Any]]:
+    """Slim tests-list headers (see `_row_to_test_summary`). Never parses the
+    full `config`. Ordering matches `get_all_tests`."""
+    with get_db_connection() as conn:
+        cursor = conn.cursor()
+        if org_uuid:
+            cursor.execute(
+                f"SELECT {_TEST_SUMMARY_COLUMNS} FROM tests t "
+                "WHERE t.deleted_at IS NULL AND t.org_uuid = ? ORDER BY t.created_at DESC",
+                (org_uuid,),
+            )
+        else:
+            cursor.execute(
+                f"SELECT {_TEST_SUMMARY_COLUMNS} FROM tests t "
+                "WHERE t.deleted_at IS NULL ORDER BY t.created_at DESC"
+            )
+        return [_row_to_test_summary(row) for row in cursor.fetchall()]
+
+
+def get_tests_for_agent_summary(agent_id: str) -> List[Dict[str, Any]]:
+    """Slim tests-list headers for one agent's linked tests (see
+    `_row_to_test_summary`). Never parses the full `config`. Ordering matches
+    `get_tests_for_agent`."""
+    with get_db_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            f"""
+            SELECT {_TEST_SUMMARY_COLUMNS} FROM tests t
+            INNER JOIN agent_tests at ON t.uuid = at.test_id
+            WHERE at.agent_id = ? AND at.deleted_at IS NULL AND t.deleted_at IS NULL
+            ORDER BY at.created_at DESC
+            """,
+            (agent_id,),
+        )
+        return [_row_to_test_summary(row) for row in cursor.fetchall()]
 
 
 def update_test(

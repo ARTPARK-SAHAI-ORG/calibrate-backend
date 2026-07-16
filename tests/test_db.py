@@ -2516,6 +2516,71 @@ def test_agent_test_jobs_for_org_summary_joins_agent_name(user):
     assert row["results"]["total_tests"] == 2
 
 
+def test_tests_summary_extracts_only_description(user):
+    agent_uuid = db.create_agent(
+        name=_u("a-tl"), user_id=user["uuid"], org_uuid=user["org_uuid"]
+    )
+    heavy_config = {
+        "description": "short desc",
+        # Heavy blocks the slim projection must never read.
+        "history": [{"role": "user", "content": "H" * 1000}],
+        "evaluation": {"criteria": "E" * 1000},
+        "settings": {"temperature": 0.7},
+    }
+    test_uuid = db.create_test(
+        name=_u("t-heavy"), type="response", config=heavy_config,
+        user_id=user["uuid"], org_uuid=user["org_uuid"],
+    )
+    db.add_test_to_agent(agent_uuid, test_uuid)
+
+    for rows in (
+        db.get_all_tests_summary(org_uuid=user["org_uuid"]),
+        db.get_tests_for_agent_summary(agent_uuid),
+    ):
+        row = next(r for r in rows if r["uuid"] == test_uuid)
+        assert row["name"]
+        assert row["type"] == "response"
+        # Only the description survives; heavy blocks are absent.
+        assert row["config"] == {"description": "short desc"}
+
+
+def test_tests_summary_handles_missing_description(user):
+    test_uuid = db.create_test(
+        name=_u("t-nodesc"), type="response", config={"history": []},
+        user_id=user["uuid"], org_uuid=user["org_uuid"],
+    )
+    row = next(
+        r for r in db.get_all_tests_summary(org_uuid=user["org_uuid"])
+        if r["uuid"] == test_uuid
+    )
+    assert row["config"] == {"description": None}
+
+
+def test_new_indexes_exist():
+    with db.get_db_connection() as conn:
+        names = {
+            r[0]
+            for r in conn.execute(
+                "SELECT name FROM sqlite_master WHERE type = 'index'"
+            ).fetchall()
+        }
+    expected = {
+        "idx_annotation_items_task",
+        "idx_evaluator_runs_job",
+        "idx_dataset_items_dataset",
+        "idx_jobs_status_type_created",
+        "idx_agent_test_jobs_agent_created",
+        "idx_agent_test_jobs_status",
+        "idx_agent_test_jobs_share",
+        "idx_simulation_jobs_sim_created",
+        "idx_simulation_jobs_status",
+        "idx_simulation_jobs_share",
+        "idx_annotation_jobs_task",
+        "idx_annotation_jobs_annotator",
+    }
+    assert expected <= names
+
+
 def test_simulation_jobs_summary_returns_headers_only(user):
     agent_uuid = db.create_agent(
         name=_u("a-simrun"), user_id=user["uuid"], org_uuid=user["org_uuid"]
