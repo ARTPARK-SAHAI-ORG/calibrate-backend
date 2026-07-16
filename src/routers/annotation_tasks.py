@@ -56,8 +56,8 @@ from db import (
     get_evaluator_runs_for_job,
     get_evaluator_runs_for_item,
     get_evaluator_runs_for_task,
-    get_evaluator_runs_for_org,
-    get_annotations_for_org,
+    get_evaluator_runs_for_tasks,
+    get_annotations_for_tasks,
     clear_evaluator_runs_for_job,
 )
 from annotation_eval_runner import (
@@ -523,16 +523,15 @@ async def list_annotation_tasks(
     # Fetch all linked evaluators for the PAGE in ONE query, then bucket by task
     # uuid — avoids a per-task N+1 (mirrors the pre-fetch/bucket pattern used in
     # `get_annotation_task_endpoint`), and only over the rows actually returned.
-    evaluators_by_task = get_evaluators_for_annotation_tasks(
-        [task["uuid"] for task in page]
-    )
-    # All-time `has_agreement` flag, computed for the whole page from two
-    # org-wide reads (no per-task N+1).
+    page_task_ids = [task["uuid"] for task in page]
+    evaluators_by_task = get_evaluators_for_annotation_tasks(page_task_ids)
+    # All-time `has_agreement` flag, computed for the page in two reads scoped
+    # to the page's tasks (no per-task N+1, no whole-org scan).
     annotations_by_task: Dict[str, List[Dict[str, Any]]] = {}
-    for ann in get_annotations_for_org(ctx.org_uuid):
+    for ann in get_annotations_for_tasks(page_task_ids):
         annotations_by_task.setdefault(ann.get("task_id"), []).append(ann)
     runs_by_task: Dict[str, List[Dict[str, Any]]] = {}
-    for run in get_evaluator_runs_for_org(ctx.org_uuid):
+    for run in get_evaluator_runs_for_tasks(page_task_ids):
         runs_by_task.setdefault(run.get("task_id"), []).append(run)
     for task in page:
         linked = evaluators_by_task.get(task["uuid"], [])
