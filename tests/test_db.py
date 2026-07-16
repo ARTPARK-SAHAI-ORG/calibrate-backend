@@ -310,6 +310,61 @@ def test_tests_crud_and_bulk(user):
     assert db.bulk_delete_tests([str(_uuid.uuid4())], user["org_uuid"]) == 0
 
 
+def test_bulk_delete_agents_cascade_and_scoping(user):
+    def _agent(name):
+        return db.create_agent(
+            name=_u(name), agent_type="agent", config={},
+            user_id=user["uuid"], org_uuid=user["org_uuid"],
+        )
+
+    a1, a2 = _agent("bd1"), _agent("bd2")
+
+    tool = db.create_tool(
+        name=_u("bd-tool"), description="d",
+        config={"type": "structured_output", "parameters": []},
+        user_id=user["uuid"], org_uuid=user["org_uuid"],
+    )
+    test = db.create_test(name=_u("bd-test"), type="llm", user_id=user["uuid"], org_uuid=user["org_uuid"])
+    ev = db.get_evaluator_by_slug("default-safety")
+    db.add_tool_to_agent(a1, tool)
+    db.add_test_to_agent(a1, test)
+    db.add_evaluator_to_agent(a1, ev["uuid"])
+
+    # Empty / dedupe.
+    assert db.bulk_delete_agents([], user["org_uuid"]) == {"deleted_count": 0, "not_found": []}
+
+    # An unknown UUID makes it all-or-nothing — nothing is deleted.
+    ghost = str(_uuid.uuid4())
+    res = db.bulk_delete_agents([a1, ghost], user["org_uuid"])
+    assert res == {"deleted_count": 0, "not_found": [ghost]}
+    assert db.get_agent(a1) is not None
+
+    # Happy path deletes both and cascades the pivots.
+    res = db.bulk_delete_agents([a1, a1, a2], user["org_uuid"])
+    assert res == {"deleted_count": 2, "not_found": []}
+    assert db.get_agent(a1) is None and db.get_agent(a2) is None
+    assert db.get_tools_for_agent(a1) == []
+    assert db.get_tests_for_agent(a1) == []
+    assert db.get_evaluators_for_agent(a1) == []
+    # Pre-existing entities themselves are untouched.
+    assert db.get_tool(tool) is not None
+    assert db.get_test(test) is not None
+
+
+def test_bulk_delete_agents_is_org_scoped(user):
+    agent = db.create_agent(
+        name=_u("scoped"), agent_type="agent", config={},
+        user_id=user["uuid"], org_uuid=user["org_uuid"],
+    )
+    other = db.create_user("Bob", "B", f"{_u('other')}@example.com")
+    other_org = db.get_personal_org_for_user(other)["uuid"]
+
+    # Caller in another org can't reach it → reported not_found, not deleted.
+    res = db.bulk_delete_agents([agent], other_org)
+    assert res == {"deleted_count": 0, "not_found": [agent]}
+    assert db.get_agent(agent) is not None
+
+
 # ---------------------------------------------------------------------------
 # Personas + Scenarios
 # ---------------------------------------------------------------------------

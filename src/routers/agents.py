@@ -29,6 +29,7 @@ from db import (
     get_all_agents,
     update_agent,
     delete_agent,
+    bulk_delete_agents,
     get_tools_for_agent,
     get_tests_for_agent,
     add_tool_to_agent,
@@ -486,6 +487,18 @@ class EvaluatorLinkResponse(BaseModel):
     )
 
 
+class BulkAgentDelete(BaseModel):
+    agent_uuids: List[str] = Field(
+        description="IDs of the agents to delete",
+        examples=[["f47ac10b-58cc-4372-a567-0e02b2c3d479"]],
+    )
+
+
+class BulkAgentDeleteResponse(BaseModel):
+    deleted_count: int = Field(description="Number of agents deleted")
+    message: str = Field(description="Confirmation message")
+
+
 class ResolveAgentNamesRequest(BaseModel):
     names: List[str] = Field(
         description="Agent names to resolve to IDs",
@@ -801,6 +814,37 @@ async def update_agent_endpoint(
 
     updated_agent = get_agent(agent_uuid)
     return updated_agent
+
+
+@router.post(
+    "/bulk-delete",
+    response_model=BulkAgentDeleteResponse,
+    summary="Bulk delete agents",
+)
+async def bulk_delete_agents_endpoint(
+    payload: BulkAgentDelete, ctx: OrgContext = Depends(get_current_org)
+):
+    """Soft-delete multiple agents by ID, along with their linked tools, tests, and evaluators. Pre-existing job runs are kept"""
+    if not payload.agent_uuids:
+        raise HTTPException(status_code=400, detail="agent_uuids must not be empty")
+
+    result = bulk_delete_agents(
+        agent_uuids=payload.agent_uuids, org_uuid=ctx.org_uuid
+    )
+    if result["not_found"]:
+        raise HTTPException(
+            status_code=404,
+            detail={
+                "message": "One or more agents were not found in your workspace",
+                "not_found": result["not_found"],
+            },
+        )
+
+    deleted_count = result["deleted_count"]
+    return BulkAgentDeleteResponse(
+        deleted_count=deleted_count,
+        message=f"Successfully deleted {deleted_count} agent(s)",
+    )
 
 
 @router.delete("/{agent_uuid}", summary="Delete agent")

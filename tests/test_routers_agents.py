@@ -454,6 +454,48 @@ def test_link_list_and_unlink_evaluator(client):
     assert r.status_code == 404
 
 
+def test_bulk_delete_agents(client):
+    h = _signup(client)
+    a1 = _create_agent(client, h, f"bd-{uuid.uuid4().hex[:6]}")["uuid"]
+    a2 = _create_agent(client, h, f"bd-{uuid.uuid4().hex[:6]}")["uuid"]
+
+    r = client.post("/agents/bulk-delete", json={"agent_uuids": [a1, a2]}, headers=h)
+    assert r.status_code == 200, r.text
+    assert r.json()["deleted_count"] == 2
+    assert client.get(f"/agents/{a1}", headers=h).status_code == 404
+    assert client.get(f"/agents/{a2}", headers=h).status_code == 404
+
+
+def test_bulk_delete_agents_rejects_empty(client):
+    h = _signup(client)
+    r = client.post("/agents/bulk-delete", json={"agent_uuids": []}, headers=h)
+    assert r.status_code == 400
+
+
+def test_bulk_delete_agents_404_on_unknown_is_atomic(client):
+    """An unknown id 404s and deletes nothing (all-or-nothing)."""
+    h = _signup(client)
+    a1 = _create_agent(client, h, f"bd-{uuid.uuid4().hex[:6]}")["uuid"]
+    ghost = str(uuid.uuid4())
+
+    r = client.post("/agents/bulk-delete", json={"agent_uuids": [a1, ghost]}, headers=h)
+    assert r.status_code == 404, r.text
+    assert r.json()["detail"]["not_found"] == [ghost]
+    # a1 survives — nothing was deleted.
+    assert client.get(f"/agents/{a1}", headers=h).status_code == 200
+
+
+def test_bulk_delete_agents_is_org_scoped(client):
+    """An agent in org A can't be bulk-deleted by a caller in org B."""
+    ha = _signup(client)
+    agent = _create_agent(client, ha, f"bd-{uuid.uuid4().hex[:6]}")["uuid"]
+
+    hb = _signup(client)
+    r = client.post("/agents/bulk-delete", json={"agent_uuids": [agent]}, headers=hb)
+    assert r.status_code == 404, r.text
+    assert client.get(f"/agents/{agent}", headers=ha).status_code == 200
+
+
 def test_link_multiple_evaluators_skips_already_linked(client):
     h = _signup(client)
     agent = _create_agent(client, h, f"ev-agent-{uuid.uuid4().hex[:6]}")

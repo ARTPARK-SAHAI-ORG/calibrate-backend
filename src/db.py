@@ -3867,6 +3867,58 @@ def delete_agent(agent_uuid: str) -> bool:
         return deleted
 
 
+def bulk_delete_agents(
+    agent_uuids: List[str], org_uuid: str
+) -> Dict[str, Any]:
+    """Soft delete multiple agents owned by an org in a single batch.
+
+    All-or-nothing: if any requested UUID is not a live agent in the org, no
+    deletion happens and the missing UUIDs are returned under ``not_found``
+    (request order, de-duplicated). Otherwise every agent and its related
+    agent_tools / agent_tests / agent_evaluators rows are soft-deleted with
+    set-based ``IN`` updates (no per-agent loop). Pre-existing job runs are
+    left untouched, mirroring the single-agent delete_agent cascade.
+    """
+    seen: set = set()
+    unique_uuids = [u for u in agent_uuids if not (u in seen or seen.add(u))]
+    if not unique_uuids:
+        return {"deleted_count": 0, "not_found": []}
+
+    with get_db_connection() as conn:
+        cursor = conn.cursor()
+
+        placeholders = ",".join("?" for _ in unique_uuids)
+        cursor.execute(
+            f"SELECT uuid FROM agents "
+            f"WHERE uuid IN ({placeholders}) "
+            f"AND org_uuid = ? AND deleted_at IS NULL",
+            (*unique_uuids, org_uuid),
+        )
+        owned = {row["uuid"] for row in cursor.fetchall()}
+
+        not_found = [u for u in unique_uuids if u not in owned]
+        if not_found:
+            return {"deleted_count": 0, "not_found": not_found}
+
+        cursor.execute(
+            f"UPDATE agents SET deleted_at = CURRENT_TIMESTAMP "
+            f"WHERE uuid IN ({placeholders}) AND deleted_at IS NULL",
+            unique_uuids,
+        )
+        deleted_count = cursor.rowcount
+
+        for table in ("agent_tools", "agent_tests", "agent_evaluators"):
+            cursor.execute(
+                f"UPDATE {table} SET deleted_at = CURRENT_TIMESTAMP "
+                f"WHERE agent_id IN ({placeholders}) AND deleted_at IS NULL",
+                unique_uuids,
+            )
+
+        logger.info(f"Bulk soft deleted {deleted_count} agents for org {org_uuid}")
+        conn.commit()
+        return {"deleted_count": deleted_count, "not_found": []}
+
+
 def create_tool(
     name: str,
     description: str,
