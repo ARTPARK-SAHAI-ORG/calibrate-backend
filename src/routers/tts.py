@@ -22,7 +22,11 @@ from db import (
     update_job,
     update_job_visibility,
 )
-from dataset_utils import resolve_dataset_inputs, resolve_eval_rerun_inputs_from_job_details
+from dataset_utils import (
+    present_dataset_identity,
+    resolve_dataset_inputs,
+    resolve_eval_rerun_inputs_from_job_details,
+)
 from auth_utils import get_current_org, OrgContext
 from llm_judge import build_evaluator_cli_payload, refresh_evaluators_to_live
 from utils import (
@@ -1100,12 +1104,14 @@ async def get_tts_evaluation_status(
     if provider_results:
         presign_tts_provider_results_audio(provider_results, status)
 
+    dataset_id, dataset_name = present_dataset_identity(details, org_uuid=ctx.org_uuid)
+
     return TaskStatusResponse(
         task_id=task_id,
         status=status,
         language=details.get("language"),
-        dataset_id=details.get("dataset_id"),
-        dataset_name=details.get("dataset_name"),
+        dataset_id=dataset_id,
+        dataset_name=dataset_name,
         provider_results=provider_results,
         leaderboard_summary=results.get("leaderboard_summary"),
         error=results.get("error"),
