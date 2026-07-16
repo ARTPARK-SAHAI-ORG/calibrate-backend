@@ -274,8 +274,8 @@ def test_tests_crud_and_bulk(user):
     assert db.get_test(t_uuid)["config"] == {"k": "v"}
     assert db.update_test(t_uuid, name=_u("renamed"), type="llm", config={"k": "v2"})
     assert db.update_test(t_uuid) is False
-    assert any(t["uuid"] == t_uuid for t in db.get_all_tests(org_uuid=user["org_uuid"]))
-    assert any(t["uuid"] == t_uuid for t in db.get_all_tests())
+    assert any(t["uuid"] == t_uuid for t in db.get_all_tests_summary(org_uuid=user["org_uuid"]))
+    assert any(t["uuid"] == t_uuid for t in db.get_all_tests_summary())
 
     with pytest.raises(ValueError):
         db.create_test(name=_u("no-owner-test"), type="llm", org_uuid=None)
@@ -1684,20 +1684,20 @@ def test_agent_test_jobs(user):
     )
     assert db.get_agent_test_job(j_uuid)["details"] == {"x": 1}
     assert any(
-        j["uuid"] == j_uuid for j in db.get_agent_test_jobs_for_agent(agent_uuid)
+        j["uuid"] == j_uuid for j in db.get_agent_test_jobs_for_agent_summary(agent_uuid)
     )
     assert any(
         j["uuid"] == j_uuid
-        for j in db.get_agent_test_jobs_for_agent(agent_uuid, job_type="llm-unit-test")
+        for j in db.get_agent_test_jobs_for_agent_summary(agent_uuid, job_type="llm-unit-test")
     )
     assert any(j["uuid"] == j_uuid for j in db.get_all_agent_test_jobs())
     assert any(
         j["uuid"] == j_uuid for j in db.get_all_agent_test_jobs(job_type="llm-unit-test")
     )
-    assert any(j["uuid"] == j_uuid for j in db.get_agent_test_jobs_for_org(user["org_uuid"]))
+    assert any(j["uuid"] == j_uuid for j in db.get_agent_test_jobs_for_org_summary(user["org_uuid"]))
     assert any(
         j["uuid"] == j_uuid
-        for j in db.get_agent_test_jobs_for_org(user["org_uuid"], job_type="llm-unit-test")
+        for j in db.get_agent_test_jobs_for_org_summary(user["org_uuid"], job_type="llm-unit-test")
     )
 
     queued_uuid = db.create_agent_test_job(

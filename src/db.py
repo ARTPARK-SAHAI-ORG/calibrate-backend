@@ -4391,23 +4391,6 @@ def get_test(test_uuid: str) -> Optional[Dict[str, Any]]:
         return None
 
 
-def get_all_tests(org_uuid: Optional[str] = None) -> List[Dict[str, Any]]:
-    """Get all tests, optionally filtered by org_uuid."""
-    with get_db_connection() as conn:
-        cursor = conn.cursor()
-        if org_uuid:
-            cursor.execute(
-                "SELECT * FROM tests WHERE deleted_at IS NULL AND org_uuid = ? ORDER BY created_at DESC",
-                (org_uuid,),
-            )
-        else:
-            cursor.execute(
-                "SELECT * FROM tests WHERE deleted_at IS NULL ORDER BY created_at DESC"
-            )
-        rows = cursor.fetchall()
-        return [_parse_test_row(row) for row in rows]
-
-
 # Slim projection for the tests-LIST endpoints (`to_test_list_response`). Pulls
 # only `config.description` via `json_extract` instead of parsing the whole
 # `config` blob (which holds conversation `history` transcripts + `evaluation` /
@@ -4435,7 +4418,7 @@ _TEST_SUMMARY_COLUMNS = (
 
 def get_all_tests_summary(org_uuid: Optional[str] = None) -> List[Dict[str, Any]]:
     """Slim tests-list headers (see `_row_to_test_summary`). Never parses the
-    full `config`. Ordering matches `get_all_tests`."""
+    full `config`. Newest-created first."""
     with get_db_connection() as conn:
         cursor = conn.cursor()
         if org_uuid:
@@ -6716,26 +6699,6 @@ def get_agent_test_job(job_uuid: str) -> Optional[Dict[str, Any]]:
         return None
 
 
-def get_agent_test_jobs_for_agent(
-    agent_id: str, job_type: Optional[str] = None
-) -> List[Dict[str, Any]]:
-    """Get all agent test jobs for a specific agent, optionally filtered by type."""
-    with get_db_connection() as conn:
-        cursor = conn.cursor()
-        if job_type:
-            cursor.execute(
-                "SELECT * FROM agent_test_jobs WHERE agent_id = ? AND type = ? ORDER BY created_at DESC, id DESC",
-                (agent_id, job_type),
-            )
-        else:
-            cursor.execute(
-                "SELECT * FROM agent_test_jobs WHERE agent_id = ? ORDER BY created_at DESC, id DESC",
-                (agent_id,),
-            )
-        rows = cursor.fetchall()
-        return [_parse_agent_test_job_row(row) for row in rows]
-
-
 def get_all_agent_test_jobs(job_type: Optional[str] = None) -> List[Dict[str, Any]]:
     """Get all agent test jobs, optionally filtered by type."""
     with get_db_connection() as conn:
@@ -6748,43 +6711,6 @@ def get_all_agent_test_jobs(job_type: Optional[str] = None) -> List[Dict[str, An
         else:
             cursor.execute(
                 "SELECT * FROM agent_test_jobs ORDER BY created_at DESC, id DESC"
-            )
-        rows = cursor.fetchall()
-        return [_parse_agent_test_job_row(row) for row in rows]
-
-
-def get_agent_test_jobs_for_org(
-    org_uuid: str, job_type: Optional[str] = None
-) -> List[Dict[str, Any]]:
-    """Get all agent test jobs belonging to an org (across all its agents).
-
-    Joins agent_test_jobs with agents so that each returned dict includes
-    ``agent_name`` and ``agent_id`` alongside the normal job fields.
-    Results are ordered newest-updated-first.
-    """
-    with get_db_connection() as conn:
-        cursor = conn.cursor()
-        if job_type:
-            cursor.execute(
-                """
-                SELECT atj.*, a.name AS agent_name, a.uuid AS agent_id
-                FROM agent_test_jobs atj
-                JOIN agents a ON atj.agent_id = a.uuid
-                WHERE a.org_uuid = ? AND a.deleted_at IS NULL AND atj.type = ?
-                ORDER BY atj.updated_at DESC, atj.id DESC
-                """,
-                (org_uuid, job_type),
-            )
-        else:
-            cursor.execute(
-                """
-                SELECT atj.*, a.name AS agent_name, a.uuid AS agent_id
-                FROM agent_test_jobs atj
-                JOIN agents a ON atj.agent_id = a.uuid
-                WHERE a.org_uuid = ? AND a.deleted_at IS NULL
-                ORDER BY atj.updated_at DESC, atj.id DESC
-                """,
-                (org_uuid,),
             )
         rows = cursor.fetchall()
         return [_parse_agent_test_job_row(row) for row in rows]
@@ -6871,7 +6797,7 @@ def get_agent_test_jobs_for_agent_summary(
 ) -> List[Dict[str, Any]]:
     """Slim run-list headers for one agent's test jobs (see
     `_AGENT_TEST_JOB_SUMMARY_COLUMNS`). Never reads `details` nor the heavy
-    `results` sub-trees. Ordering matches `get_agent_test_jobs_for_agent`."""
+    `results` sub-trees. Newest-created first (ties broken by `id`)."""
     select = (
         f"SELECT {_AGENT_TEST_JOB_SUMMARY_COLUMNS} FROM agent_test_jobs atj "
         "WHERE atj.agent_id = ?"
@@ -6897,7 +6823,7 @@ def get_agent_test_jobs_for_org_summary(
 ) -> List[Dict[str, Any]]:
     """Slim run-list headers for an org's test jobs across all its agents, with
     `agent_name`/`agent_id` from the joined agent. Never reads `details` nor the
-    heavy `results` sub-trees. Ordering matches `get_agent_test_jobs_for_org`."""
+    heavy `results` sub-trees. Newest-updated first (ties broken by `id`)."""
     select = (
         f"SELECT {_AGENT_TEST_JOB_SUMMARY_COLUMNS}, a.name AS agent_name "
         "FROM agent_test_jobs atj "
