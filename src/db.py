@@ -8866,7 +8866,7 @@ def get_evaluator_runs_for_org(org_uuid: str) -> List[Dict[str, Any]]:
         cursor = conn.cursor()
         cursor.execute(
             """
-            SELECT er.*
+            SELECT er.*, ai.task_id AS task_id
               FROM evaluator_runs er
               JOIN annotation_items ai ON ai.uuid = er.item_id
               JOIN annotation_tasks t ON t.uuid = ai.task_id

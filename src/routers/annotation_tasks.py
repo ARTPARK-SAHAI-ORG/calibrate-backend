@@ -56,6 +56,8 @@ from db import (
     get_evaluator_runs_for_job,
     get_evaluator_runs_for_item,
     get_evaluator_runs_for_task,
+    get_evaluator_runs_for_org,
+    get_annotations_for_org,
     clear_evaluator_runs_for_job,
 )
 from annotation_eval_runner import (
@@ -302,6 +304,7 @@ from annotation_metrics import (
     aggregate_human_evaluator_agreement,
     evaluator_human_pair_agreement,
     per_item_agreement,
+    has_any_comparable_pair,
     trend_series,
     trend_series_human_evaluator,
     filter_runs_to_live_versions,
@@ -390,6 +393,10 @@ class AnnotationTaskResponse(BaseModel):
     )
     item_count: Optional[int] = Field(
         None, description="Number of items in the task"
+    )
+    has_agreement: bool = Field(
+        default=False,
+        description="Whether the task has at least one comparable human-vs-human or human-vs-evaluator pair, computed over all time",
     )
     # Inlined on the single-task fetch only; the list endpoint leaves these
     # empty (use the dedicated /items and /jobs endpoints for those views).
@@ -507,8 +514,31 @@ async def list_annotation_tasks(
     evaluators_by_task = get_evaluators_for_annotation_tasks(
         [task["uuid"] for task in page]
     )
+    # All-time `has_agreement` flag, computed for the whole page from two
+    # org-wide reads (no per-task N+1). Runs are filtered to each evaluator's
+    # live version so the flag matches what `GET /{uuid}/agreement` returns.
+    live_map = {
+        e["uuid"]: e.get("live_version_id")
+        for evs in evaluators_by_task.values()
+        for e in evs
+    }
+    annotations_by_task: Dict[str, List[Dict[str, Any]]] = {}
+    for ann in get_annotations_for_org(ctx.org_uuid):
+        annotations_by_task.setdefault(ann.get("task_id"), []).append(ann)
+    runs_by_task: Dict[str, List[Dict[str, Any]]] = {}
+    for run in get_evaluator_runs_for_org(ctx.org_uuid):
+        runs_by_task.setdefault(run.get("task_id"), []).append(run)
     for task in page:
-        task["evaluators"] = evaluators_by_task.get(task["uuid"], [])
+        linked = evaluators_by_task.get(task["uuid"], [])
+        task["evaluators"] = linked
+        runs = filter_runs_to_live_versions(
+            runs_by_task.get(task["uuid"], []), live_map
+        )
+        task["has_agreement"] = has_any_comparable_pair(
+            annotations_by_task.get(task["uuid"], []),
+            runs,
+            [e["uuid"] for e in linked],
+        )
     return page_envelope(page, total, pagination)
 
 

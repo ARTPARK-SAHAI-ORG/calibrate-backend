@@ -2221,7 +2221,9 @@ def test_annotation_pipeline(user):
     assert len(run_ids) == 1
     assert db.get_evaluator_runs_for_job(job_uuid)
     assert db.get_evaluator_runs_for_task(task_uuid)
-    assert db.get_evaluator_runs_for_org(user["org_uuid"])
+    org_runs = db.get_evaluator_runs_for_org(user["org_uuid"])
+    assert org_runs
+    assert all(r["task_id"] == task_uuid for r in org_runs)
     assert db.get_evaluator_runs_for_evaluator_org_scoped(
         seeded["uuid"], user["org_uuid"]
     )
