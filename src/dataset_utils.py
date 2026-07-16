@@ -109,6 +109,21 @@ def resolve_dataset_inputs(
     )
 
 
+def present_dataset_identity(
+    details: dict, *, org_uuid: str
+) -> tuple[Optional[str], Optional[str]]:
+    """Return a job's (dataset_id, dataset_name), both nulled when the referenced dataset is gone.
+
+    Lets STT/TTS result reads signal a since-deleted dataset without a second fetch.
+    Inline-only jobs (no dataset_id) pass through unchanged.
+    """
+    dataset_id = details.get("dataset_id")
+    dataset_name = details.get("dataset_name")
+    if dataset_id and not get_dataset(dataset_id, org_uuid=org_uuid):
+        return None, None
+    return dataset_id, dataset_name
+
+
 def resolve_eval_rerun_inputs_from_job_details(
     details: dict,
     *,
@@ -122,6 +137,11 @@ def resolve_eval_rerun_inputs_from_job_details(
     """
     dataset_id = details.get("dataset_id")
     if dataset_id:
+        if not get_dataset(dataset_id, org_uuid=org_uuid):
+            raise HTTPException(
+                status_code=400,
+                detail="The dataset for this evaluation no longer exists.",
+            )
         return resolve_dataset_inputs(
             dataset_id=dataset_id,
             org_uuid=org_uuid,

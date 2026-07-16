@@ -545,6 +545,70 @@ def test_stt_retry_missing_bucket(client, monkeypatch):
     assert resp.status_code == 500
 
 
+def _dataset_backed_stt_job(db_mod, auth):
+    org_uuid = db_mod.get_personal_org_for_user(auth["user_uuid"])["uuid"]
+    ds_uuid = db_mod.create_dataset(
+        name="gone-ds",
+        dataset_type="stt",
+        org_uuid=org_uuid,
+        user_id=auth["user_uuid"],
+    )
+    item_ids = db_mod.add_dataset_items(
+        ds_uuid, [{"text": "hi", "audio_path": "s3://b/k.wav"}]
+    )
+    task_id = db_mod.create_job(
+        job_type="stt-eval",
+        org_uuid=org_uuid,
+        user_id=auth["user_uuid"],
+        status="failed",
+        details={
+            "audio_paths": ["s3://b/k.wav"],
+            "texts": ["hi"],
+            "providers": ["openai"],
+            "language": "en",
+            "dataset_id": ds_uuid,
+            "dataset_name": "gone-ds",
+            "dataset_item_ids": item_ids,
+            "evaluators": [],
+        },
+        results={"error": "failed"},
+    )
+    return task_id, org_uuid, ds_uuid
+
+
+def test_stt_status_nulls_dataset_when_deleted(client):
+    import db as db_mod
+
+    auth = _signup(client)
+    task_id, org_uuid, ds_uuid = _dataset_backed_stt_job(db_mod, auth)
+
+    before = client.get(f"/stt/evaluate/{task_id}", headers=auth["headers"]).json()
+    assert before["dataset_id"] == ds_uuid
+    assert before["dataset_name"] == "gone-ds"
+
+    db_mod.delete_dataset(ds_uuid, org_uuid)
+
+    after = client.get(f"/stt/evaluate/{task_id}", headers=auth["headers"]).json()
+    assert after["dataset_id"] is None
+    assert after["dataset_name"] is None
+
+
+def test_stt_retry_deleted_dataset_returns_clear_error(client, monkeypatch):
+    import db as db_mod
+
+    auth = _signup(client)
+    monkeypatch.setenv("S3_OUTPUT_BUCKET", "test-bucket")
+    task_id, org_uuid, ds_uuid = _dataset_backed_stt_job(db_mod, auth)
+    db_mod.delete_dataset(ds_uuid, org_uuid)
+
+    resp = client.post(
+        f"/stt/evaluate/{task_id}/retry",
+        headers=auth["headers"],
+    )
+    assert resp.status_code == 400
+    assert "no longer exists" in resp.json()["detail"]
+
+
 # ---------------------------------------------------------------------------
 # _refresh_evaluators_to_live (re-hydrate snapshot to live version at run time)
 # ---------------------------------------------------------------------------
@@ -975,3 +1039,64 @@ def test_tts_retry_rereads_linked_dataset(client, monkeypatch):
     assert resp.status_code == 200
     job = db_mod.get_job(task_id, org_uuid=org_uuid)
     assert job["details"]["texts"] == ["fixed line"]
+
+
+def _dataset_backed_tts_job(db_mod, auth):
+    org_uuid = db_mod.get_personal_org_for_user(auth["user_uuid"])["uuid"]
+    ds_uuid = db_mod.create_dataset(
+        name="gone-tts-ds",
+        dataset_type="tts",
+        org_uuid=org_uuid,
+        user_id=auth["user_uuid"],
+    )
+    item_ids = db_mod.add_dataset_items(ds_uuid, [{"text": "line"}])
+    task_id = db_mod.create_job(
+        job_type="tts-eval",
+        org_uuid=org_uuid,
+        user_id=auth["user_uuid"],
+        status="failed",
+        details={
+            "texts": ["line"],
+            "providers": ["openai"],
+            "language": "en",
+            "dataset_id": ds_uuid,
+            "dataset_name": "gone-tts-ds",
+            "dataset_item_ids": item_ids,
+            "evaluators": [],
+        },
+        results={"error": "failed"},
+    )
+    return task_id, org_uuid, ds_uuid
+
+
+def test_tts_status_nulls_dataset_when_deleted(client):
+    import db as db_mod
+
+    auth = _signup(client)
+    task_id, org_uuid, ds_uuid = _dataset_backed_tts_job(db_mod, auth)
+
+    before = client.get(f"/tts/evaluate/{task_id}", headers=auth["headers"]).json()
+    assert before["dataset_id"] == ds_uuid
+    assert before["dataset_name"] == "gone-tts-ds"
+
+    db_mod.delete_dataset(ds_uuid, org_uuid)
+
+    after = client.get(f"/tts/evaluate/{task_id}", headers=auth["headers"]).json()
+    assert after["dataset_id"] is None
+    assert after["dataset_name"] is None
+
+
+def test_tts_retry_deleted_dataset_returns_clear_error(client, monkeypatch):
+    import db as db_mod
+
+    auth = _signup(client)
+    monkeypatch.setenv("S3_OUTPUT_BUCKET", "test-bucket")
+    task_id, org_uuid, ds_uuid = _dataset_backed_tts_job(db_mod, auth)
+    db_mod.delete_dataset(ds_uuid, org_uuid)
+
+    resp = client.post(
+        f"/tts/evaluate/{task_id}/retry",
+        headers=auth["headers"],
+    )
+    assert resp.status_code == 400
+    assert "no longer exists" in resp.json()["detail"]
