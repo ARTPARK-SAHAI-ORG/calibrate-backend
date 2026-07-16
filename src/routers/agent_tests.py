@@ -46,8 +46,8 @@ from db import (
     get_agent_test_job,
     update_agent_test_job,
     update_agent_test_job_visibility,
-    get_agent_test_jobs_for_agent,
-    get_agent_test_jobs_for_org,
+    get_agent_test_jobs_for_agent_summary,
+    get_agent_test_jobs_for_org_summary,
     delete_agent_test_job,
 )
 from llm_judge import build_test_evaluators_payload, evaluator_value_name
@@ -809,7 +809,7 @@ async def get_agent_test_runs(
         raise HTTPException(status_code=404, detail="Agent not found")
 
     # Get all jobs for this agent
-    jobs = get_agent_test_jobs_for_agent(agent_uuid)
+    jobs = get_agent_test_jobs_for_agent_summary(agent_uuid)
 
     # Name in chronological order (oldest = "Run 1") so a run's number never
     # shifts when a newer run is added, then build items newest-first. Names are
@@ -879,7 +879,7 @@ async def get_all_test_runs_for_user(
     pagination: OptionalPaginationParams = Depends(),
 ):
     """List all test runs, most recent first."""
-    jobs = get_agent_test_jobs_for_org(ctx.org_uuid, job_type=type)
+    jobs = get_agent_test_jobs_for_org_summary(ctx.org_uuid, job_type=type)
 
     # Per-agent counters for naming ("Run 1", "Benchmark 2", …).
     # We need ascending order to assign names correctly, then flip back.

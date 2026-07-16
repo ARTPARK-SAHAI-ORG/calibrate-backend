@@ -6691,6 +6691,136 @@ def get_agent_test_jobs_for_org(
         return [_parse_agent_test_job_row(row) for row in rows]
 
 
+# Per-row projection for the run-LIST endpoints. Pulls only the header columns
+# plus the scalar aggregates and the two slim per-row arrays out of the heavy
+# `results` blob, and never reads `details` at all — the run-list index needs
+# neither the full `details` nor the bulky `results` sub-trees (agent outputs,
+# judge reasoning, test-case bodies, per-model `test_results`, leaderboard).
+# The slim `test_results`/`model_results` arrays are rebuilt inside SQLite via
+# `json_each` so only the trimmed rows cross into Python. Kept aligned with the
+# fields `_build_agent_test_run_item_fields` reads in routers/agent_tests.py.
+_AGENT_TEST_JOB_SUMMARY_COLUMNS = """
+        atj.uuid, atj.type, atj.status, atj.agent_id,
+        atj.is_public, atj.share_token, atj.created_at, atj.updated_at, atj.id,
+        json_extract(atj.results, '$.total_tests') AS total_tests,
+        json_extract(atj.results, '$.passed') AS passed,
+        json_extract(atj.results, '$.failed') AS failed,
+        json_extract(atj.results, '$.latency_ms') AS latency_ms,
+        json_extract(atj.results, '$.cost') AS cost,
+        json_extract(atj.results, '$.total_tokens') AS total_tokens,
+        json_extract(atj.results, '$.error') AS error,
+        (SELECT json_group_array(json_object(
+            'name', COALESCE(json_extract(je.value, '$.name'),
+                             json_extract(je.value, '$.test_case.name')),
+            'passed', json_extract(je.value, '$.passed')
+         )) FROM json_each(COALESCE(atj.results, '{}'), '$.test_results') je
+         WHERE je.type = 'object'
+        ) AS test_results,
+        (SELECT json_group_array(json_object(
+            'model', json_extract(je.value, '$.model'),
+            'success', json_extract(je.value, '$.success'),
+            'message', json_extract(je.value, '$.message'),
+            'total_tests', json_extract(je.value, '$.total_tests'),
+            'passed', json_extract(je.value, '$.passed'),
+            'failed', json_extract(je.value, '$.failed')
+         )) FROM json_each(COALESCE(atj.results, '{}'), '$.model_results') je
+         WHERE je.type = 'object'
+        ) AS model_results
+"""
+
+
+def _row_to_agent_test_job_summary(row: sqlite3.Row) -> Dict[str, Any]:
+    """Shape a slim agent-test-job row into the same dict the run-list routers
+    consume: header fields plus a reduced `results` sub-dict (no `details`)."""
+    row = dict(row)
+
+    def _loads(value: Any) -> Any:
+        if value is None:
+            return None
+        try:
+            return json.loads(value)
+        except (TypeError, json.JSONDecodeError):
+            return value
+
+    return {
+        "uuid": row["uuid"],
+        "type": row["type"],
+        "status": row["status"],
+        "agent_id": row.get("agent_id"),
+        "agent_name": row.get("agent_name"),
+        "is_public": row.get("is_public"),
+        "share_token": row.get("share_token"),
+        "created_at": row["created_at"],
+        "updated_at": row["updated_at"],
+        "id": row.get("id"),
+        "results": {
+            "total_tests": row.get("total_tests"),
+            "passed": row.get("passed"),
+            "failed": row.get("failed"),
+            "latency_ms": _loads(row.get("latency_ms")),
+            "cost": _loads(row.get("cost")),
+            "total_tokens": _loads(row.get("total_tokens")),
+            "error": row.get("error"),
+            "test_results": _loads(row.get("test_results")),
+            "model_results": _loads(row.get("model_results")),
+        },
+    }
+
+
+def get_agent_test_jobs_for_agent_summary(
+    agent_id: str, job_type: Optional[str] = None
+) -> List[Dict[str, Any]]:
+    """Slim run-list headers for one agent's test jobs (see
+    `_AGENT_TEST_JOB_SUMMARY_COLUMNS`). Never reads `details` nor the heavy
+    `results` sub-trees. Ordering matches `get_agent_test_jobs_for_agent`."""
+    select = (
+        f"SELECT {_AGENT_TEST_JOB_SUMMARY_COLUMNS} FROM agent_test_jobs atj "
+        "WHERE atj.agent_id = ?"
+    )
+    with get_db_connection() as conn:
+        cursor = conn.cursor()
+        if job_type:
+            cursor.execute(
+                select + " AND atj.type = ? ORDER BY atj.created_at DESC, atj.id DESC",
+                (agent_id, job_type),
+            )
+        else:
+            cursor.execute(
+                select + " ORDER BY atj.created_at DESC, atj.id DESC",
+                (agent_id,),
+            )
+        rows = cursor.fetchall()
+        return [_row_to_agent_test_job_summary(row) for row in rows]
+
+
+def get_agent_test_jobs_for_org_summary(
+    org_uuid: str, job_type: Optional[str] = None
+) -> List[Dict[str, Any]]:
+    """Slim run-list headers for an org's test jobs across all its agents, with
+    `agent_name`/`agent_id` from the joined agent. Never reads `details` nor the
+    heavy `results` sub-trees. Ordering matches `get_agent_test_jobs_for_org`."""
+    select = (
+        f"SELECT {_AGENT_TEST_JOB_SUMMARY_COLUMNS}, a.name AS agent_name "
+        "FROM agent_test_jobs atj "
+        "JOIN agents a ON atj.agent_id = a.uuid "
+        "WHERE a.org_uuid = ? AND a.deleted_at IS NULL"
+    )
+    with get_db_connection() as conn:
+        cursor = conn.cursor()
+        if job_type:
+            cursor.execute(
+                select + " AND atj.type = ? ORDER BY atj.updated_at DESC, atj.id DESC",
+                (org_uuid, job_type),
+            )
+        else:
+            cursor.execute(
+                select + " ORDER BY atj.updated_at DESC, atj.id DESC",
+                (org_uuid,),
+            )
+        rows = cursor.fetchall()
+        return [_row_to_agent_test_job_summary(row) for row in rows]
+
+
 def get_pending_agent_test_jobs() -> List[Dict[str, Any]]:
     """Get all agent test jobs with status 'in_progress' (for recovery on restart)."""
     with get_db_connection() as conn:
@@ -6936,6 +7066,33 @@ def get_simulation_jobs_for_simulation(
             )
         rows = cursor.fetchall()
         return [_parse_simulation_job_row(row) for row in rows]
+
+
+def get_simulation_jobs_summary(
+    simulation_id: str, job_type: Optional[str] = None
+) -> List[Dict[str, Any]]:
+    """Slim run-list headers for a simulation's jobs. The run-list needs only
+    `uuid/status/type/created_at/updated_at`, so this never reads the heavy
+    `details` (config) nor `results` (full transcript + judge output) blobs.
+    Ordering matches `get_simulation_jobs_for_simulation`."""
+    select = (
+        "SELECT uuid, status, type, created_at, updated_at, id "
+        "FROM simulation_jobs WHERE simulation_id = ?"
+    )
+    with get_db_connection() as conn:
+        cursor = conn.cursor()
+        if job_type:
+            cursor.execute(
+                select + " AND type = ? ORDER BY created_at DESC",
+                (simulation_id, job_type),
+            )
+        else:
+            cursor.execute(
+                select + " ORDER BY created_at DESC",
+                (simulation_id,),
+            )
+        rows = cursor.fetchall()
+        return [dict(row) for row in rows]
 
 
 def get_all_simulation_jobs(job_type: Optional[str] = None) -> List[Dict[str, Any]]:
