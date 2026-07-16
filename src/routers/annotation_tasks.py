@@ -582,6 +582,13 @@ async def get_annotation_task_endpoint(
             runs_by_item.get(item["uuid"], []),
             evaluator_ids,
         )
+    # Same all-time flag the list endpoint sets, so the detail view agrees.
+    # Aggregated agreement filters runs to each evaluator's live version.
+    task["has_agreement"] = has_any_comparable_pair(
+        all_annotations,
+        _runs_at_live_versions(all_runs, evaluators),
+        evaluator_ids,
+    )
     # TTS items store audio as an S3 key; sign it so the Items tab can play it.
     presign_annotation_items_audio(items, task.get("type"))
     task["items"] = items

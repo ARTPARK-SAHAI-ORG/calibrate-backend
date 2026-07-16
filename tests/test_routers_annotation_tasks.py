@@ -107,3 +107,9 @@ def test_list_has_agreement_flag(client):
     by_uuid = {t["uuid"]: t for t in all_items}
     assert by_uuid[empty_task]["has_agreement"] is False
     assert by_uuid[paired_task]["has_agreement"] is True
+
+    # The single-task detail endpoint reports the same flag as the list.
+    empty_detail = client.get(f"/annotation-tasks/{empty_task}", headers=h).json()
+    assert empty_detail["has_agreement"] is False
+    paired_detail = client.get(f"/annotation-tasks/{paired_task}", headers=h).json()
+    assert paired_detail["has_agreement"] is True
