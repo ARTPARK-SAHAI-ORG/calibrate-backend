@@ -113,3 +113,58 @@ def test_list_has_agreement_flag(client):
     assert empty_detail["has_agreement"] is False
     paired_detail = client.get(f"/annotation-tasks/{paired_task}", headers=h).json()
     assert paired_detail["has_agreement"] is True
+
+
+def test_has_agreement_human_evaluator_path(client):
+    # One human annotation plus one live-version evaluator run on the same slot
+    # (no second human) must still flag has_agreement via the human-vs-evaluator
+    # branch, exercising the live-version filter end-to-end.
+    import db
+
+    h = _signup(client)
+    llm_ev = _llm_ev(client, h)
+    live_version_id = llm_ev["live_version"]["uuid"]
+
+    task = _create_task(client, h, llm_ev)
+    item_id = client.post(
+        f"/annotation-tasks/{task}/items",
+        json={"items": [{"payload": {"name": "i1"}}]},
+        headers=h,
+    ).json()["item_ids"][0]
+
+    annotator = _create_annotator(client, h)
+    token = client.post(
+        f"/annotation-tasks/{task}/jobs",
+        json={"annotator_ids": [annotator["uuid"]], "item_ids": [item_id]},
+        headers=h,
+    ).json()["jobs"][0]["public_token"]
+    assert (
+        client.post(
+            f"/public/annotation-jobs/{token}/annotations",
+            json={
+                "item_id": item_id,
+                "annotations": [
+                    {"evaluator_id": llm_ev["uuid"], "value": {"value": True}}
+                ],
+            },
+        ).status_code
+        == 200
+    )
+
+    db.create_evaluator_runs(
+        [
+            {
+                "job_id": "eval-run-" + uuid.uuid4().hex[:8],
+                "item_id": item_id,
+                "evaluator_id": llm_ev["uuid"],
+                "evaluator_version_id": live_version_id,
+                "value": {"value": True},
+                "status": "completed",
+            }
+        ]
+    )
+
+    detail = client.get(f"/annotation-tasks/{task}", headers=h).json()
+    assert detail["has_agreement"] is True
+    listed = client.get("/annotation-tasks", headers=h).json()["items"]
+    assert next(t for t in listed if t["uuid"] == task)["has_agreement"] is True
