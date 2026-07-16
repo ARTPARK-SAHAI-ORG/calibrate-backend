@@ -3833,6 +3833,12 @@ def update_agent(
         return updated
 
 
+# Pivot tables whose rows are soft-deleted when their parent agent is. Job-run
+# tables are deliberately excluded — deleting an agent keeps its run history.
+# Single source of truth for both delete_agent and bulk_delete_agents.
+_AGENT_CASCADE_PIVOTS = ("agent_tools", "agent_tests", "agent_evaluators")
+
+
 def delete_agent(agent_uuid: str) -> bool:
     """Soft delete an agent. Returns True if the agent was found and deleted.
     Also soft deletes related agent_tools, agent_tests, and agent_evaluators.
@@ -3846,21 +3852,11 @@ def delete_agent(agent_uuid: str) -> bool:
         deleted = cursor.rowcount > 0
 
         if deleted:
-            # Soft delete related agent_tools
-            cursor.execute(
-                "UPDATE agent_tools SET deleted_at = CURRENT_TIMESTAMP WHERE agent_id = ? AND deleted_at IS NULL",
-                (agent_uuid,),
-            )
-            # Soft delete related agent_tests
-            cursor.execute(
-                "UPDATE agent_tests SET deleted_at = CURRENT_TIMESTAMP WHERE agent_id = ? AND deleted_at IS NULL",
-                (agent_uuid,),
-            )
-            # Soft delete related agent_evaluators
-            cursor.execute(
-                "UPDATE agent_evaluators SET deleted_at = CURRENT_TIMESTAMP WHERE agent_id = ? AND deleted_at IS NULL",
-                (agent_uuid,),
-            )
+            for table in _AGENT_CASCADE_PIVOTS:
+                cursor.execute(
+                    f"UPDATE {table} SET deleted_at = CURRENT_TIMESTAMP WHERE agent_id = ? AND deleted_at IS NULL",
+                    (agent_uuid,),
+                )
             logger.info(f"Soft deleted agent with UUID: {agent_uuid}")
 
         conn.commit()
@@ -3907,7 +3903,7 @@ def bulk_delete_agents(
         )
         deleted_count = cursor.rowcount
 
-        for table in ("agent_tools", "agent_tests", "agent_evaluators"):
+        for table in _AGENT_CASCADE_PIVOTS:
             cursor.execute(
                 f"UPDATE {table} SET deleted_at = CURRENT_TIMESTAMP "
                 f"WHERE agent_id IN ({placeholders}) AND deleted_at IS NULL",
