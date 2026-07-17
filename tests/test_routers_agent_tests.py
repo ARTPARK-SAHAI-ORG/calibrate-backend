@@ -668,6 +668,14 @@ def test_run_detail_default_is_full(client):
     body = resp.json()
     assert body["test_uuids"] == ["tc_pass", "tc_fail", "tc_pending"]
     assert len(body["results"]) == 3
+    # Results are positionally aligned with test_uuids by test_case_id (the
+    # test's UUID, echoed back by calibrate) — NOT by the display `name`. The
+    # pending row is unfinished, so it carries no test_case_id yet.
+    assert [r["test_case_id"] for r in body["results"]] == [
+        "tc_pass",
+        "tc_fail",
+        None,
+    ]
     case = body["results"][0]
     assert case["output"] is not None
     assert case["test_case"] is not None
@@ -762,17 +770,21 @@ def _seed_benchmark_job(client, h, agent):
                     "test_results": [
                         {
                             "name": "tc_pass",
+                            "test_case_id": "tc_pass",
                             "passed": True,
                             "output": {"response": "hi"},
                         },
                         {
                             "name": "tc_fail",
+                            "test_case_id": "tc_fail",
                             "passed": False,
                             "output": {"response": "no"},
                         },
                         {
-                            # Pending case — not finished yet (`passed is None`).
+                            # Pending case — not finished yet (`passed is None`);
+                            # a real pending placeholder carries no test_case_id.
                             "name": "tc_pending",
+                            "test_case_id": None,
                             "passed": None,
                             "output": None,
                         },
@@ -797,6 +809,13 @@ def test_benchmark_detail_default_is_full(client):
     assert body["test_uuids"] == ["tc_pass", "tc_fail", "tc_pending"]
     model = body["model_results"][0]
     assert len(model["test_results"]) == 3
+    # Each model's test_results are positionally aligned with test_uuids by
+    # test_case_id (the test's UUID), not the display `name`.
+    assert [r["test_case_id"] for r in model["test_results"]] == [
+        "tc_pass",
+        "tc_fail",
+        None,
+    ]
     assert body["evaluators"][0]["output_config"] is not None
 
 
