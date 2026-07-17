@@ -3,7 +3,7 @@ import copy
 import uuid
 import asyncio
 import logging
-from typing import Literal, Optional, Dict, Any
+from typing import Literal, List, Optional, Dict, Any
 from contextlib import asynccontextmanager
 
 import httpx
@@ -588,15 +588,19 @@ async def list_available_providers() -> Dict[str, Any]:
 @app.get("/openrouter/providers")
 async def list_openrouter_providers() -> Optional[Dict[str, Any]]:
     """
-    List providers available on OpenRouter.
+    List model authors available on OpenRouter.
 
     If `OPENROUTER_API_KEY` is not set, returns `null` (OpenRouter is disabled).
 
-    Otherwise, if `OPENROUTER_ALLOWED_PROVIDERS` is set (comma-separated provider
-    slugs), fetches the canonical list from `https://openrouter.ai/api/v1/providers`,
-    filters to that subset, and returns `{"providers": [{slug, name}, ...]}`.
+    Otherwise, if `OPENROUTER_ALLOWED_PROVIDERS` is set (comma-separated author
+    slugs), fetches `https://openrouter.ai/api/v1/models`, derives each author from
+    the model-id prefix (`google/gemini-2.5-pro` → `google`), filters to the allowed
+    subset, and returns `{"providers": [{slug, name}, ...]}`.
 
-    If `OPENROUTER_ALLOWED_PROVIDERS` is empty/unset, all providers are supported —
+    The slug is the model-id author prefix — the same key the model dropdown groups
+    by — NOT an OpenRouter serving-provider slug (`google`, not `google-ai-studio`).
+
+    If `OPENROUTER_ALLOWED_PROVIDERS` is empty/unset, all authors are supported —
     returns `{"providers": "all"}`.
     """
     api_key = os.getenv("OPENROUTER_API_KEY")
@@ -612,7 +616,7 @@ async def list_openrouter_providers() -> Optional[Dict[str, Any]]:
     try:
         async with httpx.AsyncClient(timeout=15) as client:
             response = await client.get(
-                "https://openrouter.ai/api/v1/providers",
+                "https://openrouter.ai/api/v1/models",
                 headers={"Authorization": f"Bearer {api_key}"},
             )
             response.raise_for_status()
@@ -620,15 +624,21 @@ async def list_openrouter_providers() -> Optional[Dict[str, Any]]:
     except httpx.HTTPError as exc:
         raise HTTPException(
             status_code=502,
-            detail=f"Failed to fetch OpenRouter providers: {exc}",
+            detail=f"Failed to fetch OpenRouter models: {exc}",
         )
 
-    raw_providers = payload.get("data", []) if isinstance(payload, dict) else []
-    providers = [
-        {"slug": p.get("slug"), "name": p.get("name")}
-        for p in raw_providers
-        if p.get("slug") in allowed
-    ]
+    raw_models = payload.get("data", []) if isinstance(payload, dict) else []
+    providers: List[Dict[str, str]] = []
+    seen: set[str] = set()
+    for model in raw_models:
+        model_id = model.get("id") or ""
+        slug = model_id.split("/", 1)[0]
+        if slug not in allowed or slug in seen:
+            continue
+        seen.add(slug)
+        # Model names are "Author: Model" — the author label is display-only.
+        display = (model.get("name") or "").split(":", 1)[0].strip() or slug
+        providers.append({"slug": slug, "name": display})
 
     return {"providers": providers}
 

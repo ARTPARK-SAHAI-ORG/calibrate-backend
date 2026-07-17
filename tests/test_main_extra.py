@@ -315,18 +315,7 @@ def test_provider_status_logs_streamed_output(client, caplog):
 # ---------------------------------------------------------------------------
 
 
-def test_openrouter_filtered_list(client, monkeypatch):
-    monkeypatch.setenv("OPENROUTER_API_KEY", "k")
-    monkeypatch.setenv("OPENROUTER_ALLOWED_PROVIDERS", "anthropic,openai")
-
-    payload = {
-        "data": [
-            {"slug": "anthropic", "name": "Anthropic"},
-            {"slug": "openai", "name": "OpenAI"},
-            {"slug": "google", "name": "Google"},
-        ]
-    }
-
+def _openrouter_models_client(payload):
     class FakeResp:
         status_code = 200
 
@@ -340,13 +329,53 @@ def test_openrouter_filtered_list(client, monkeypatch):
     fake_client.get = AsyncMock(return_value=FakeResp())
     fake_client.__aenter__ = AsyncMock(return_value=fake_client)
     fake_client.__aexit__ = AsyncMock(return_value=None)
+    return fake_client
 
+
+def test_openrouter_filtered_list(client, monkeypatch):
+    monkeypatch.setenv("OPENROUTER_API_KEY", "k")
+    monkeypatch.setenv("OPENROUTER_ALLOWED_PROVIDERS", "anthropic,openai")
+
+    payload = {
+        "data": [
+            {"id": "anthropic/claude-sonnet-5", "name": "Anthropic: Claude Sonnet 5"},
+            {"id": "openai/gpt-5", "name": "OpenAI: GPT-5"},
+            {"id": "openai/gpt-4o", "name": "OpenAI: GPT-4o"},
+            {"id": "google/gemini-2.5-pro", "name": "Google: Gemini 2.5 Pro"},
+        ]
+    }
+
+    fake_client = _openrouter_models_client(payload)
     with patch("main.httpx.AsyncClient", return_value=fake_client):
         resp = client.get("/openrouter/providers")
     assert resp.status_code == 200
     body = resp.json()
-    slugs = {p["slug"] for p in body["providers"]}
-    assert slugs == {"anthropic", "openai"}
+    # Slug is the model-id author prefix, de-duped across models; name is the label.
+    assert body["providers"] == [
+        {"slug": "anthropic", "name": "Anthropic"},
+        {"slug": "openai", "name": "OpenAI"},
+    ]
+
+
+def test_openrouter_filters_by_author_prefix_not_serving_provider(client, monkeypatch):
+    monkeypatch.setenv("OPENROUTER_API_KEY", "k")
+    # The user allows "google" (the model-id author), NOT "google-ai-studio"
+    # (OpenRouter's serving-provider slug) — Gemini must still surface.
+    monkeypatch.setenv("OPENROUTER_ALLOWED_PROVIDERS", "openai,google")
+
+    payload = {
+        "data": [
+            {"id": "openai/gpt-5", "name": "OpenAI: GPT-5"},
+            {"id": "google/gemini-2.5-pro", "name": "Google: Gemini 2.5 Pro"},
+        ]
+    }
+
+    fake_client = _openrouter_models_client(payload)
+    with patch("main.httpx.AsyncClient", return_value=fake_client):
+        resp = client.get("/openrouter/providers")
+    assert resp.status_code == 200
+    slugs = {p["slug"] for p in resp.json()["providers"]}
+    assert slugs == {"openai", "google"}
 
 
 def test_openrouter_filtered_list_http_error(client, monkeypatch):
