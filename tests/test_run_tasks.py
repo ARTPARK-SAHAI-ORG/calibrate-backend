@@ -12,13 +12,9 @@ from __future__ import annotations
 
 import json
 import os
-import shutil
-import subprocess
-import sys
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
-import pytest
 
 import db
 
@@ -111,16 +107,16 @@ def test_stt_run_evaluation_task_success(tmp_path):
         return process
 
     s3_mock = MagicMock()
-    with patch("routers.stt.subprocess.Popen", side_effect=fake_popen), patch(
+    with patch("eval_common.subprocess.Popen", side_effect=fake_popen), patch(
         "routers.stt.get_s3_client", return_value=s3_mock
-    ), patch("routers.stt.upload_file_to_s3"), patch(
+    ), patch("eval_common.upload_file_to_s3"), patch(
         "routers.stt.upload_top_level_files_to_s3"
     ), patch(
-        "routers.stt.upload_directory_tree_to_s3"
+        "eval_common.upload_directory_tree_to_s3"
     ), patch(
         "routers.stt.try_start_queued_job"
     ), patch(
-        "routers.stt.time.sleep"
+        "eval_common.time.sleep"
     ):
         request = STTEvaluationRequest(
             audio_paths=["s3://bucket/key.wav"],
@@ -207,16 +203,16 @@ def test_stt_run_evaluation_task_refreshes_evaluators_to_live():
         return process
 
     s3_mock = MagicMock()
-    with patch("routers.stt.subprocess.Popen", side_effect=fake_popen), patch(
+    with patch("eval_common.subprocess.Popen", side_effect=fake_popen), patch(
         "routers.stt.get_s3_client", return_value=s3_mock
-    ), patch("routers.stt.upload_file_to_s3"), patch(
+    ), patch("eval_common.upload_file_to_s3"), patch(
         "routers.stt.upload_top_level_files_to_s3"
     ), patch(
-        "routers.stt.upload_directory_tree_to_s3"
+        "eval_common.upload_directory_tree_to_s3"
     ), patch(
         "routers.stt.try_start_queued_job"
     ), patch(
-        "routers.stt.time.sleep"
+        "eval_common.time.sleep"
     ):
         request = STTEvaluationRequest(
             audio_paths=["s3://bucket/key.wav"],
@@ -240,16 +236,16 @@ def test_stt_run_evaluation_task_subprocess_failure(tmp_path):
 
     process = _FakeProcess(returncode=1, poll_results=[None, 1])
     s3_mock = MagicMock()
-    with patch("routers.stt.subprocess.Popen", return_value=process), patch(
+    with patch("eval_common.subprocess.Popen", return_value=process), patch(
         "routers.stt.get_s3_client", return_value=s3_mock
-    ), patch("routers.stt.upload_file_to_s3"), patch(
+    ), patch("eval_common.upload_file_to_s3"), patch(
         "routers.stt.upload_top_level_files_to_s3"
     ), patch(
-        "routers.stt.upload_directory_tree_to_s3"
+        "eval_common.upload_directory_tree_to_s3"
     ), patch(
         "routers.stt.try_start_queued_job"
     ), patch(
-        "routers.stt.time.sleep"
+        "eval_common.time.sleep"
     ):
         request = STTEvaluationRequest(
             audio_paths=["s3://bucket/key.wav"],
@@ -271,7 +267,7 @@ def test_stt_run_evaluation_task_unexpected_exception():
     s3_mock.download_file.side_effect = RuntimeError("boom")
     with patch("routers.stt.get_s3_client", return_value=s3_mock), patch(
         "routers.stt.try_start_queued_job"
-    ), patch("routers.stt.time.sleep"):
+    ), patch("eval_common.time.sleep"):
         request = STTEvaluationRequest(
             audio_paths=["s3://bucket/key.wav"],
             texts=["hi"],
@@ -326,16 +322,16 @@ def test_tts_run_evaluation_task_with_outputs():
         return process
 
     s3_mock = MagicMock()
-    with patch("routers.tts.subprocess.Popen", side_effect=fake_popen), patch(
+    with patch("eval_common.subprocess.Popen", side_effect=fake_popen), patch(
         "routers.tts.get_s3_client", return_value=s3_mock
-    ), patch("routers.tts.upload_file_to_s3"), patch(
+    ), patch("eval_common.upload_file_to_s3"), patch(
         "routers.tts.upload_top_level_files_to_s3"
     ), patch(
-        "routers.tts.upload_directory_tree_to_s3"
+        "eval_common.upload_directory_tree_to_s3"
     ), patch(
         "routers.tts.try_start_queued_job"
     ), patch(
-        "routers.tts.time.sleep"
+        "eval_common.time.sleep"
     ):
         request = TTSEvaluationRequest(
             texts=["hi"], providers=["openai"], language="en"
@@ -365,16 +361,16 @@ def test_tts_run_evaluation_task_refreshes_evaluators_to_live():
         return process
 
     s3_mock = MagicMock()
-    with patch("routers.tts.subprocess.Popen", side_effect=fake_popen), patch(
+    with patch("eval_common.subprocess.Popen", side_effect=fake_popen), patch(
         "routers.tts.get_s3_client", return_value=s3_mock
-    ), patch("routers.tts.upload_file_to_s3"), patch(
+    ), patch("eval_common.upload_file_to_s3"), patch(
         "routers.tts.upload_top_level_files_to_s3"
     ), patch(
-        "routers.tts.upload_directory_tree_to_s3"
+        "eval_common.upload_directory_tree_to_s3"
     ), patch(
         "routers.tts.try_start_queued_job"
     ), patch(
-        "routers.tts.time.sleep"
+        "eval_common.time.sleep"
     ):
         request = TTSEvaluationRequest(
             texts=["hi"], providers=["openai"], language="en"
@@ -393,16 +389,16 @@ def test_tts_run_evaluation_task_failure():
     _, job_uuid = _make_tts_job()
     process = _FakeProcess(returncode=1, poll_results=[None, 1])
     s3_mock = MagicMock()
-    with patch("routers.tts.subprocess.Popen", return_value=process), patch(
+    with patch("eval_common.subprocess.Popen", return_value=process), patch(
         "routers.tts.get_s3_client", return_value=s3_mock
-    ), patch("routers.tts.upload_file_to_s3"), patch(
+    ), patch("eval_common.upload_file_to_s3"), patch(
         "routers.tts.upload_top_level_files_to_s3"
     ), patch(
-        "routers.tts.upload_directory_tree_to_s3"
+        "eval_common.upload_directory_tree_to_s3"
     ), patch(
         "routers.tts.try_start_queued_job"
     ), patch(
-        "routers.tts.time.sleep"
+        "eval_common.time.sleep"
     ):
         request = TTSEvaluationRequest(
             texts=["hi"], providers=["openai"], language="en"
@@ -420,7 +416,7 @@ def test_tts_collect_intermediate_results(tmp_path):
     _make_tts_output_dir(tmp_path, ["openai"], total=2)
     s3_mock = MagicMock()
     with patch("routers.tts.get_s3_client", return_value=s3_mock), patch(
-        "routers.tts.upload_file_to_s3"
+        "eval_common.upload_file_to_s3"
     ):
         results = _collect_tts_intermediate_results(
             tmp_path, ["openai", "missing"], "task-1", "bucket", expected_total=2
@@ -635,7 +631,7 @@ def test_build_calibrate_config_includes_conversation_tests():
     agent_uuid = db.create_agent(
         name=f"a-{os.urandom(4).hex()}", org_uuid=org_uuid, user_id=user_uuid
     )
-    test_uuid, ev_uuid = _make_conversation_test(db, org_uuid, user_uuid)
+    test_uuid, _ev_uuid = _make_conversation_test(db, org_uuid, user_uuid)
     agent = db.get_agent(agent_uuid)
     test = db.get_test(test_uuid)
 

@@ -51,7 +51,6 @@ from db import (
     get_eval_job_items,
     get_generic_jobs_for_task,
     soft_delete_job,
-    update_job,
     update_job_visibility,
     get_evaluator_runs_for_job,
     get_evaluator_runs_for_item,

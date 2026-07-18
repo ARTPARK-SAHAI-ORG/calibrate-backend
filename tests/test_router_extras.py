@@ -766,7 +766,6 @@ def test_google_login_no_email(client):
 
 
 def test_google_login_token_verify_failure(client):
-    import httpx
 
     # The verify_google_token coroutine raises an HTTPException
     async def fake_verify(_id_token):

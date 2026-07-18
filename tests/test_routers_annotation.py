@@ -9,7 +9,6 @@ from unittest.mock import patch
 import pytest
 from fastapi.testclient import TestClient
 
-from conftest import NONEXISTENT_UUID, NONEXISTENT_UUID_2
 
 
 @pytest.fixture(scope="module")
@@ -2574,7 +2573,7 @@ def test_summary_disagreement_only_filters_rows(client):
     at the ITEM level, so `pagination.total` reflects the disagreeing items."""
     auth = _signup(client)
     h = auth["headers"]
-    task_uuid, item_agree, item_disagree, _ = _seed_summary_with_agreement(client, h, auth["user_uuid"])
+    task_uuid, _item_agree, item_disagree, _ = _seed_summary_with_agreement(client, h, auth["user_uuid"])
 
     body = client.get(
         f"/annotation-tasks/{task_uuid}/summary?live_only=true&disagreement_only=true",
@@ -2604,7 +2603,7 @@ def test_summary_disagreement_only_survives_pagination(client):
     disagreement."""
     auth = _signup(client)
     h = auth["headers"]
-    task_uuid, item_agree, item_disagree, extra = _seed_summary_with_agreement(
+    task_uuid, _item_agree, item_disagree, _extra = _seed_summary_with_agreement(
         client, h, auth["user_uuid"], n_extra_agree=4
     )
 

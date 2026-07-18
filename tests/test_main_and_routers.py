@@ -1423,7 +1423,7 @@ def test_agent_verify_and_duplicate(client):
 
     # Verify on unknown agent → 404
     unknown = client.post(
-        f"/agents/nope/verify-connection",
+        "/agents/nope/verify-connection",
         json={},
         headers=h,
     )

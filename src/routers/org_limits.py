@@ -85,7 +85,7 @@ async def get_max_rows_per_eval(ctx: OrgContext = Depends(get_current_org)):
 
 @router.post("", response_model=OrgLimitsCreateResponse, summary="Create workspace limits")
 async def create_org_limits_endpoint(
-    data: OrgLimitsCreate, user_id: str = Depends(require_superadmin)
+    data: OrgLimitsCreate, user_id: str = Depends(require_superadmin)  # noqa: ARG001
 ):
     """Create limits for a workspace. Superadmin only"""
     # 404 if workspace missing; 409 if limits already exist (use PUT to update).
@@ -133,7 +133,7 @@ async def update_org_limits_endpoint(
         examples=["f47ac10b-58cc-4372-a567-0e02b2c3d479"],
     ),
     data: OrgLimitsUpdate = ...,
-    user_id: str = Depends(require_superadmin),
+    user_id: str = Depends(require_superadmin)  # noqa: ARG001,
 ):
     """Update limits for a workspace. Superadmin only"""
     updated = update_org_limits(org_uuid=target_org_uuid, limits=data.limits)
@@ -148,7 +148,7 @@ async def delete_org_limits_endpoint(
         description="The workspace whose limits to delete",
         examples=["f47ac10b-58cc-4372-a567-0e02b2c3d479"],
     ),
-    user_id: str = Depends(require_superadmin),
+    user_id: str = Depends(require_superadmin)  # noqa: ARG001,
 ):
     """Delete limits for a workspace, reverting it to the server default. Superadmin only"""
     deleted = delete_org_limits(target_org_uuid)

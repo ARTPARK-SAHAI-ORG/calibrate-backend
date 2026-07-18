@@ -5,7 +5,6 @@ from __future__ import annotations
 from datetime import datetime, timedelta
 from unittest.mock import MagicMock, patch
 
-import pytest
 
 
 def test_should_regenerate_presigned_urls_no_timestamp():
@@ -175,7 +174,7 @@ def test_apply_simulation_job_evaluator_enrichment():
 def test_apply_simulation_job_evaluator_enrichment_no_snaps():
     from routers.simulations import apply_simulation_job_evaluator_enrichment
 
-    evaluators_out, sim_out = apply_simulation_job_evaluator_enrichment(
+    evaluators_out, _sim_out = apply_simulation_job_evaluator_enrichment(
         {"evaluators": []}, []
     )
     assert evaluators_out is None

@@ -60,7 +60,6 @@ from utils import (
     resolve_stored_audio_bucket_and_key,
     try_start_queued_job,
     upload_file_to_s3,
-    upload_top_level_files_to_s3,
 )
 
 
@@ -1163,7 +1162,7 @@ def _try_upload_partial_outputs(
 def _run_job(
     job_uuid: str,
     task_uuid: str,
-    user_id: str,
+    user_id: str,  # noqa: ARG001
     evaluators_resolved: List[Dict[str, Any]],
     item_ids: Optional[List[str]] = None,
 ):

@@ -8,7 +8,6 @@ from __future__ import annotations
 
 import csv
 import json
-import os
 import uuid
 from pathlib import Path
 from unittest.mock import patch
@@ -123,8 +122,8 @@ def test_stt_get_timeout_path(client, tmp_path):
         },
     )
 
-    with patch("routers.stt.is_job_timed_out", return_value=True), patch(
-        "routers.stt.kill_process_group"
+    with patch("eval_common.is_job_timed_out", return_value=True), patch(
+        "eval_common.kill_process_group"
     ), patch("routers.stt.try_start_queued_job"):
         resp = client.get(f"/stt/evaluate/{job_uuid}", headers=h)
     assert resp.status_code == 200
@@ -166,7 +165,7 @@ def test_tts_get_in_progress_reads_intermediate(client, tmp_path):
             "evaluators": [],
         },
     )
-    with patch("routers.tts.upload_file_to_s3"), patch(
+    with patch("eval_common.upload_file_to_s3"), patch(
         "routers.tts.get_s3_client"
     ), patch(
         "routers.tts.generate_presigned_download_url",
@@ -243,10 +242,10 @@ def test_tts_get_timeout_path(client, tmp_path):
             "evaluators": [],
         },
     )
-    with patch("routers.tts.is_job_timed_out", return_value=True), patch(
-        "routers.tts.kill_process_group"
+    with patch("eval_common.is_job_timed_out", return_value=True), patch(
+        "eval_common.kill_process_group"
     ), patch("routers.tts.try_start_queued_job"), patch(
-        "routers.tts.upload_file_to_s3"
+        "eval_common.upload_file_to_s3"
     ), patch("routers.tts.get_s3_client"):
         resp = client.get(f"/tts/evaluate/{job_uuid}", headers=h)
     assert resp.status_code == 200

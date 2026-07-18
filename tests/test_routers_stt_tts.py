@@ -95,7 +95,7 @@ def test_stt_evaluate_queued_path(client, monkeypatch):
     dataset_inputs, create_job."""
     auth = _signup(client)
     monkeypatch.setenv("S3_OUTPUT_BUCKET", "test-bucket")
-    with patch("routers.stt.can_start_job", return_value=False), patch(
+    with patch("eval_common.can_start_job", return_value=False), patch(
         "threading.Thread"
     ):
         resp = client.post(
@@ -132,7 +132,7 @@ def test_stt_evaluate_snapshots_sarvam_judges(
 
     auth = _signup(client)
     monkeypatch.setenv("S3_OUTPUT_BUCKET", "test-bucket")
-    with patch("routers.stt.can_start_job", return_value=False), patch(
+    with patch("eval_common.can_start_job", return_value=False), patch(
         "threading.Thread"
     ):
         resp = client.post(
@@ -156,7 +156,7 @@ def test_stt_evaluate_snapshots_sarvam_judges(
 def test_stt_evaluate_inflight_path(client, monkeypatch):
     auth = _signup(client)
     monkeypatch.setenv("S3_OUTPUT_BUCKET", "test-bucket")
-    with patch("routers.stt.can_start_job", return_value=True), patch(
+    with patch("eval_common.can_start_job", return_value=True), patch(
         "routers.stt.threading.Thread"
     ) as thread_mock:
         resp = client.post(
@@ -203,7 +203,7 @@ def test_stt_evaluate_local_storage_without_bucket(client, monkeypatch, tmp_path
     monkeypatch.delenv("S3_OUTPUT_BUCKET", raising=False)
     monkeypatch.setenv("LOCAL_ARTIFACT_ROOT", str(tmp_path / "artifacts"))
 
-    with patch("routers.stt.can_start_job", return_value=False), patch(
+    with patch("eval_common.can_start_job", return_value=False), patch(
         "routers.stt.threading.Thread"
     ):
         resp = client.post(
@@ -227,7 +227,7 @@ def test_stt_evaluate_no_evaluators_snapshots_empty(client, monkeypatch):
 
     auth = _signup(client)
     monkeypatch.setenv("S3_OUTPUT_BUCKET", "test-bucket")
-    with patch("routers.stt.can_start_job", return_value=False), patch(
+    with patch("eval_common.can_start_job", return_value=False), patch(
         "threading.Thread"
     ):
         resp = client.post(
@@ -286,7 +286,7 @@ def test_stt_evaluate_wrong_evaluator_type(client, monkeypatch):
 def test_stt_visibility_toggle(client, monkeypatch):
     auth = _signup(client)
     monkeypatch.setenv("S3_OUTPUT_BUCKET", "test-bucket")
-    with patch("routers.stt.can_start_job", return_value=False), patch(
+    with patch("eval_common.can_start_job", return_value=False), patch(
         "threading.Thread"
     ):
         resp = client.post(
@@ -337,7 +337,7 @@ def test_stt_get_status_unknown(client):
 def test_stt_retry_reruns_same_job(client, monkeypatch):
     auth = _signup(client)
     monkeypatch.setenv("S3_OUTPUT_BUCKET", "test-bucket")
-    with patch("routers.stt.can_start_job", return_value=False), patch(
+    with patch("eval_common.can_start_job", return_value=False), patch(
         "threading.Thread"
     ):
         original = client.post(
@@ -366,7 +366,7 @@ def test_stt_retry_reruns_same_job(client, monkeypatch):
 def test_stt_retry_rejects_in_progress(client, monkeypatch):
     auth = _signup(client)
     monkeypatch.setenv("S3_OUTPUT_BUCKET", "test-bucket")
-    with patch("routers.stt.can_start_job", return_value=True), patch(
+    with patch("eval_common.can_start_job", return_value=True), patch(
         "routers.stt.threading.Thread"
     ):
         original = client.post(
@@ -401,7 +401,7 @@ def test_stt_retry_not_found(client):
 def test_stt_retry_wrong_job_type(client, monkeypatch):
     auth = _signup(client)
     monkeypatch.setenv("S3_OUTPUT_BUCKET", "test-bucket")
-    with patch("routers.tts.can_start_job", return_value=False), patch(
+    with patch("eval_common.can_start_job", return_value=False), patch(
         "threading.Thread"
     ):
         tts = client.post(
@@ -457,7 +457,7 @@ def test_stt_retry_rereads_linked_dataset(client, monkeypatch):
     )
     db_mod.update_dataset_item(item_ids[0], ds_uuid, audio_path="s3://b/fixed.wav")
 
-    with patch("routers.stt.can_start_job", return_value=False), patch(
+    with patch("eval_common.can_start_job", return_value=False), patch(
         "threading.Thread"
     ):
         resp = client.post(
@@ -486,7 +486,7 @@ def test_stt_retry_starts_immediately(client, monkeypatch):
             "evaluators": [],
         },
     )
-    with patch("routers.stt.can_start_job", return_value=True), patch(
+    with patch("eval_common.can_start_job", return_value=True), patch(
         "routers.stt.threading.Thread"
     ) as thread_mock:
         resp = client.post(
@@ -732,7 +732,7 @@ def test_tts_evaluate_no_providers(client):
 def test_tts_evaluate_queued_path(client, monkeypatch):
     auth = _signup(client)
     monkeypatch.setenv("S3_OUTPUT_BUCKET", "test-bucket")
-    with patch("routers.tts.can_start_job", return_value=False), patch(
+    with patch("eval_common.can_start_job", return_value=False), patch(
         "threading.Thread"
     ):
         resp = client.post(
@@ -755,7 +755,7 @@ def test_tts_evaluate_queued_path(client, monkeypatch):
 def test_tts_evaluate_inflight_path(client, monkeypatch):
     auth = _signup(client)
     monkeypatch.setenv("S3_OUTPUT_BUCKET", "test-bucket")
-    with patch("routers.tts.can_start_job", return_value=True), patch(
+    with patch("eval_common.can_start_job", return_value=True), patch(
         "routers.tts.threading.Thread"
     ) as thread_mock:
         resp = client.post(
@@ -804,7 +804,7 @@ def test_tts_evaluate_legacy_field_rejected(client):
 def test_tts_visibility_toggle(client, monkeypatch):
     auth = _signup(client)
     monkeypatch.setenv("S3_OUTPUT_BUCKET", "test-bucket")
-    with patch("routers.tts.can_start_job", return_value=False), patch(
+    with patch("eval_common.can_start_job", return_value=False), patch(
         "threading.Thread"
     ):
         resp = client.post(
@@ -845,7 +845,7 @@ def test_tts_get_status_unknown(client):
 def test_tts_retry_reruns_same_job(client, monkeypatch):
     auth = _signup(client)
     monkeypatch.setenv("S3_OUTPUT_BUCKET", "test-bucket")
-    with patch("routers.tts.can_start_job", return_value=False), patch(
+    with patch("eval_common.can_start_job", return_value=False), patch(
         "threading.Thread"
     ):
         original = client.post(
@@ -873,7 +873,7 @@ def test_tts_retry_reruns_same_job(client, monkeypatch):
 def test_tts_retry_rejects_in_progress(client, monkeypatch):
     auth = _signup(client)
     monkeypatch.setenv("S3_OUTPUT_BUCKET", "test-bucket")
-    with patch("routers.tts.can_start_job", return_value=True), patch(
+    with patch("eval_common.can_start_job", return_value=True), patch(
         "routers.tts.threading.Thread"
     ):
         original = client.post(
@@ -907,7 +907,7 @@ def test_tts_retry_not_found(client):
 def test_tts_retry_wrong_job_type(client, monkeypatch):
     auth = _signup(client)
     monkeypatch.setenv("S3_OUTPUT_BUCKET", "test-bucket")
-    with patch("routers.stt.can_start_job", return_value=False), patch(
+    with patch("eval_common.can_start_job", return_value=False), patch(
         "threading.Thread"
     ):
         stt = client.post(
@@ -945,7 +945,7 @@ def test_tts_retry_starts_immediately(client, monkeypatch):
             "evaluators": [],
         },
     )
-    with patch("routers.tts.can_start_job", return_value=True), patch(
+    with patch("eval_common.can_start_job", return_value=True), patch(
         "routers.tts.threading.Thread"
     ) as thread_mock:
         resp = client.post(
@@ -1029,7 +1029,7 @@ def test_tts_retry_rereads_linked_dataset(client, monkeypatch):
     )
     db_mod.update_dataset_item(item_ids[0], ds_uuid, text="fixed line")
 
-    with patch("routers.tts.can_start_job", return_value=False), patch(
+    with patch("eval_common.can_start_job", return_value=False), patch(
         "threading.Thread"
     ):
         resp = client.post(

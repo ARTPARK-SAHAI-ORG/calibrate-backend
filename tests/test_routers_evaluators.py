@@ -74,7 +74,7 @@ def _create_rating_evaluator(client, headers):
 
 def test_list_evaluators_live_version_is_slim(client):
     h = _signup(client)
-    name, ev_uuid, v_uuid = _create_rating_evaluator(client, h)
+    _name, ev_uuid, v_uuid = _create_rating_evaluator(client, h)
 
     resp = client.get("/evaluators?include_defaults=false", headers=h)
     assert resp.status_code == 200
@@ -143,7 +143,7 @@ def test_list_evaluators_batched_live_version_matches_detail(client):
 
 def test_get_evaluator_detail_returns_full_versions(client):
     h = _signup(client)
-    name, ev_uuid, v_uuid = _create_rating_evaluator(client, h)
+    _name, ev_uuid, v_uuid = _create_rating_evaluator(client, h)
 
     resp = client.get(f"/evaluators/{ev_uuid}", headers=h)
     assert resp.status_code == 200

@@ -2380,7 +2380,7 @@ def _seed_default_evaluators(cursor: sqlite3.Cursor, conn: sqlite3.Connection) -
                     seed["slug"],
                 ),
             )
-            _insert_seed_live_version(cursor, evaluator_uuid, seed, is_first=True)
+            _insert_seed_live_version(cursor, evaluator_uuid, seed)
             logger.info(f"Seeded default evaluator: {seed['slug']}")
             continue
 
@@ -2410,7 +2410,7 @@ def _seed_default_evaluators(cursor: sqlite3.Cursor, conn: sqlite3.Connection) -
 
         # Case 2: no live version yet (partial seed from an earlier crash)
         if not existing["live_version_id"]:
-            _insert_seed_live_version(cursor, evaluator_uuid, seed, is_first=True)
+            _insert_seed_live_version(cursor, evaluator_uuid, seed)
             logger.info(f"Repaired missing live version for: {seed['slug']}")
             continue
 
@@ -2423,7 +2423,7 @@ def _seed_default_evaluators(cursor: sqlite3.Cursor, conn: sqlite3.Connection) -
         live = _parse_evaluator_version_row(live_row) if live_row else None
         if live and _version_matches_seed(live, seed["version"]):
             continue
-        _insert_seed_live_version(cursor, evaluator_uuid, seed, is_first=False)
+        _insert_seed_live_version(cursor, evaluator_uuid, seed)
         logger.info(f"Bumped default evaluator to new live version: {seed['slug']}")
 
     conn.commit()
@@ -2451,7 +2451,6 @@ def _insert_seed_live_version(
     cursor: sqlite3.Cursor,
     evaluator_uuid: str,
     seed: Dict[str, Any],
-    is_first: bool,
 ) -> None:
     """Insert a new version for a seeded evaluator and mark it as live. Used by both the
     fresh-create path and the reconcile-on-change path."""
@@ -3043,10 +3042,10 @@ def _backfill_repoint_default_job_snapshots(cursor: sqlite3.Cursor) -> int:
 
     changed = 0
 
-    for table, join, org_col in _DEFAULT_SNAPSHOT_JSON_STORES:
+    for table, join_clause, org_col in _DEFAULT_SNAPSHOT_JSON_STORES:
         cursor.execute(
             f"SELECT t.id AS id, t.details AS details, t.results AS results, "
-            f"{org_col} AS org FROM {table} t {join}"
+            f"{org_col} AS org FROM {table} t {join_clause}"
         )
         for row in cursor.fetchall():
             org = row["org"]
@@ -3072,10 +3071,10 @@ def _backfill_repoint_default_job_snapshots(cursor: sqlite3.Cursor) -> int:
                 )
                 changed += 1
 
-    for table, join, org_col, has_version in _DEFAULT_SNAPSHOT_COLUMN_STORES:
+    for table, join_clause, org_col, has_version in _DEFAULT_SNAPSHOT_COLUMN_STORES:
         cursor.execute(
             f"SELECT t.id AS id, t.evaluator_id AS evaluator_id, {org_col} AS org "
-            f"FROM {table} t {join} "
+            f"FROM {table} t {join_clause} "
             f"WHERE t.evaluator_id IN ({placeholders})",
             template_uuids,
         )
@@ -5078,7 +5077,7 @@ def evaluator_name_exists(
 
 def get_all_evaluators(
     org_uuid: Optional[str] = None,
-    include_defaults: bool = True,
+    include_defaults: bool = True,  # noqa: ARG001
     evaluator_type: Optional[str] = None,
     data_type: Optional[str] = None,
 ) -> List[Dict[str, Any]]:

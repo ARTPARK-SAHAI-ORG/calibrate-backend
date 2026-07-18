@@ -681,6 +681,45 @@ def apply_simulation_job_evaluator_enrichment(
     return top, simulation_results
 
 
+def apply_voice_simulation_presigned_urls(
+    job: Dict[str, Any],
+    simulation_results: List[Dict[str, Any]],
+    status: str,
+) -> List[Dict[str, Any]]:
+    """Regenerate voice-simulation audio URLs on read; they are never persisted.
+
+    In-progress runs keep the URLs written during monitoring, so only DONE runs
+    are re-signed here."""
+    if job.get("type") != "voice" or not simulation_results:
+        return simulation_results
+    if status != TaskStatus.DONE.value:
+        return simulation_results
+
+    try:
+        s3_bucket = get_s3_output_config()
+        for sim_result in simulation_results:
+            audios_s3_key_prefix = sim_result.get("audios_s3_path")
+            if audios_s3_key_prefix:
+                sim_result["audio_urls"] = _get_audio_urls_from_s3_key(
+                    audios_s3_key_prefix,
+                    s3_bucket,
+                    transcript=sim_result.get("transcript"),
+                )
+
+            conversation_wav_s3_key = sim_result.get("conversation_wav_s3_key")
+            if conversation_wav_s3_key:
+                conversation_wav_url = generate_presigned_download_url(
+                    conversation_wav_s3_key, bucket=s3_bucket
+                )
+                sim_result["conversation_wav_url"] = conversation_wav_url or ""
+            else:
+                sim_result["conversation_wav_url"] = ""
+    except Exception as exc:
+        logger.warning(f"Failed to generate audio URLs: {exc}")
+
+    return simulation_results
+
+
 @router.post("", response_model=SimulationCreateResponse, summary="Create simulation")
 async def create_simulation_endpoint(
     simulation: SimulationCreate, ctx: OrgContext = Depends(get_current_org)
@@ -882,49 +921,9 @@ async def get_simulation_run_status(
                 break
 
     simulation_results = results.get("simulation_results") or []
-
-    # If this is a voice simulation, handle presigned URLs based on status
-    if job.get("type") == "voice" and simulation_results:
-        if status == TaskStatus.DONE.value:
-            # For done status: generate presigned URLs on-the-fly from S3 paths
-            # Don't cache them in the database
-            try:
-                s3_bucket = get_s3_output_config()
-
-                for sim_result in simulation_results:
-                    # Generate audio URLs from S3 path
-                    audios_s3_key_prefix = sim_result.get("audios_s3_path")
-                    if audios_s3_key_prefix:
-                        audio_urls = _get_audio_urls_from_s3_key(
-                            audios_s3_key_prefix,
-                            s3_bucket,
-                            transcript=sim_result.get("transcript"),
-                        )
-                        sim_result["audio_urls"] = audio_urls
-                        logger.info(
-                            f"Generated {len(audio_urls)} presigned URLs on-the-fly for simulation {sim_result.get('simulation_name')}"
-                        )
-
-                    # Generate presigned URL for conversation.wav
-                    conversation_wav_s3_key = sim_result.get("conversation_wav_s3_key")
-                    if conversation_wav_s3_key:
-                        conversation_wav_url = generate_presigned_download_url(
-                            conversation_wav_s3_key, bucket=s3_bucket
-                        )
-                        sim_result["conversation_wav_url"] = (
-                            conversation_wav_url if conversation_wav_url else ""
-                        )
-                        logger.info(
-                            f"Generated presigned URL on-the-fly for conversation.wav for simulation {sim_result.get('simulation_name')}"
-                        )
-                    else:
-                        sim_result["conversation_wav_url"] = ""
-
-            except Exception as e:
-                logger.warning(f"Failed to generate audio URLs: {str(e)}")
-                # Continue without audio URLs if generation fails
-        # For in-progress status: presigned URLs are already stored in results during monitoring
-        # Just return them as-is (they were generated when the audio files were uploaded)
+    simulation_results = apply_voice_simulation_presigned_urls(
+        job, simulation_results, status
+    )
 
     evaluators_out, simulation_results = apply_simulation_job_evaluator_enrichment(
         details, simulation_results
@@ -1425,7 +1424,7 @@ def _get_text_simulation_directories(output_dir: Path) -> List[Path]:
     sim_dirs = []
     if not output_dir.exists():
         return sim_dirs
-    for root, dirs, files in os.walk(output_dir):
+    for root, dirs, _files in os.walk(output_dir):
         for dir_name in dirs:
             if dir_name.startswith("simulation_persona_"):
                 sim_dirs.append(Path(root) / dir_name)
@@ -1671,7 +1670,7 @@ def _run_calibrate_text_simulation(
             simulation_results.append(sim_result)
 
     # Upload results to S3
-    for root, dirs, files in os.walk(output_dir):
+    for root, _dirs, files in os.walk(output_dir):
         for file in files:
             local_file_path = Path(root) / file
             relative_path = local_file_path.relative_to(output_dir)
@@ -2234,25 +2233,16 @@ def _run_calibrate_voice_simulation(
         sim_result.pop("audio_urls", None)
         sim_result.pop("conversation_wav_url", None)
 
-    # Parse final results (metrics.json and results.csv)
+    # Parse final results (metrics.json)
     metrics_data = None
     metrics_file = output_dir / "metrics.json"
-    results_file = output_dir / "results.csv"
 
     if metrics_file.exists():
         with open(metrics_file, "r", encoding="utf-8") as f:
             metrics_data = json.load(f)
 
-    # Parse results.csv for aggregated scores
-    if results_file.exists():
-        import csv
-
-        with open(results_file, "r", encoding="utf-8") as f:
-            reader = csv.DictReader(f)
-            results_data = list(reader)
-
     # Upload all other results to S3 (excluding audios which are already uploaded)
-    for root, dirs, files in os.walk(output_dir):
+    for root, _dirs, files in os.walk(output_dir):
         # Skip audios directories as they're already uploaded
         if "audios" in root.split(os.sep):
             continue

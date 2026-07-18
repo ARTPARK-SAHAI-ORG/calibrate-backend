@@ -182,10 +182,10 @@ def test_run_stt_evaluation_task_end_to_end_with_fake_cli():
     with patch.dict(os.environ, {"FAKE_AI_PROVIDERS": "1"}), patch(
         "routers.stt.get_s3_client", return_value=MagicMock()
     ), patch("routers.stt.download_file_from_s3"), patch(
-        "routers.stt.upload_file_to_s3"
+        "eval_common.upload_file_to_s3"
     ), patch("routers.stt.upload_top_level_files_to_s3"), patch(
-        "routers.stt.upload_directory_tree_to_s3"
-    ), patch("routers.stt.try_start_queued_job"), patch("routers.stt.time.sleep"):
+        "eval_common.upload_directory_tree_to_s3"
+    ), patch("routers.stt.try_start_queued_job"), patch("eval_common.time.sleep"):
         request = STTEvaluationRequest(
             audio_paths=["s3://bucket/key.wav"],
             texts=["hi"],
@@ -224,10 +224,10 @@ def test_run_stt_evaluation_task_omits_sarvam_judges_when_disabled():
     with patch.dict(os.environ, {"FAKE_AI_PROVIDERS": "1"}), patch(
         "routers.stt.get_s3_client", return_value=MagicMock()
     ), patch("routers.stt.download_file_from_s3"), patch(
-        "routers.stt.upload_file_to_s3"
+        "eval_common.upload_file_to_s3"
     ), patch("routers.stt.upload_top_level_files_to_s3"), patch(
-        "routers.stt.upload_directory_tree_to_s3"
-    ), patch("routers.stt.try_start_queued_job"), patch("routers.stt.time.sleep"):
+        "eval_common.upload_directory_tree_to_s3"
+    ), patch("routers.stt.try_start_queued_job"), patch("eval_common.time.sleep"):
         request = STTEvaluationRequest(
             audio_paths=["s3://bucket/key.wav"],
             texts=["hi"],
@@ -260,11 +260,11 @@ def test_run_tts_evaluation_task_end_to_end_with_fake_cli():
 
     with patch.dict(os.environ, {"FAKE_AI_PROVIDERS": "1"}), patch(
         "routers.tts.get_s3_client", return_value=MagicMock()
-    ), patch("routers.tts.upload_file_to_s3"), patch(
+    ), patch("eval_common.upload_file_to_s3"), patch(
         "routers.tts.upload_top_level_files_to_s3"
-    ), patch("routers.tts.upload_directory_tree_to_s3"), patch(
+    ), patch("eval_common.upload_directory_tree_to_s3"), patch(
         "routers.tts.try_start_queued_job"
-    ), patch("routers.tts.time.sleep"):
+    ), patch("eval_common.time.sleep"):
         request = TTSEvaluationRequest(
             texts=["hi"], providers=["cartesia"], language="en"
         )

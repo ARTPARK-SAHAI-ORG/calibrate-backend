@@ -71,7 +71,11 @@ docker-compose up -d
 
 A **pytest** suite lives under **`tests/`** (dev deps: **`[dependency-groups] dev`** — `pytest`, `pytest-cov`, `pre-commit`). Run from repo root: **`uv run --group dev pytest`**. Coverage is enabled by default via `pyproject.toml` (`--cov=src --cov-report=term-missing`); scope to a single file/test with **`uv run --group dev pytest tests/test_foo.py::test_bar -q`** or **`uv run --group dev pytest -k <pattern>`**. `tests/conftest.py` sets `DB_ROOT_DIR` to a tmp dir and seeds JWT/S3 env vars before importing any `src/` module, then initializes the schema once per session — individual tests use fresh UUIDs to stay isolated.
 
-CI runs on push/PR to `main` (`.github/workflows/tests.yml`) and uploads coverage to Codecov. Optional local hook: **`.githooks/pre-commit`** — enable with **`git config core.hooksPath .githooks`** (runs tests on **`main`** only when `.py`/`.json` are staged). There is no separate linter or formatter in `pyproject.toml`.
+CI runs on push/PR to `main` (`.github/workflows/tests.yml`) and uploads coverage to Codecov. Optional local hook: **`.githooks/pre-commit`** — enable with **`git config core.hooksPath .githooks`** (runs the lint gate on every branch when any `.py` is staged, and the tests on **`main`** only).
+
+**Lint gate — unused, dead and duplicate code.** `./scripts/lint.sh` is the single entry point, called by both `.githooks/pre-commit` and `.github/workflows/lint.yml`; all three tools are configured in `pyproject.toml`. It runs **ruff** (`F`, `B007`, `RUF059`, `ARG` — unused imports/variables/arguments only; `ARG` is exempted in `tests/` where doubles match real signatures), **vulture** (dead code, `min_confidence = 80`), and **pylint** restricted to `duplicate-code` (`min-similarity-lines = 8`, `ignore-imports`/`ignore-signatures` on). The repo is at zero findings and CI fails on any new one. Style, formatting and type-modernization rules are deliberately **not** enabled — turning them on would flag thousands of pre-existing lines without catching the class of bug this gate exists for. If a finding is structurally required rather than dead (a FastAPI `Depends` param kept only for its auth side effect, a thread-target signature), silence it with a bare `# noqa: ARG001` rather than deleting the parameter.
+
+**Gotcha when running tests locally:** a developer `src/.env` is loaded by `load_dotenv()` in `main.py` and leaks into the test process. If it sets `OBJECT_STORAGE_MODE=local`, roughly 15 tests fail on ordering (`get_s3_client` returns `None`, `get_s3_output_config` stops raising). CI has no `src/.env`. Move it aside before trusting a local full-suite run.
 
 ## Testing Discipline (load-bearing)
 
@@ -93,6 +97,7 @@ All application code lives under `src/` and runs with `src/` as the working dire
 - `src/auth_utils.py` — JWT verification, `get_current_user_id` dependency, `require_superadmin`
 - `src/org_scope.py` — shared org-ownership guards (`ensure_owned_agent`, `ensure_owned_evaluator`) used by routers that link evaluators; 404 on cross-org access
 - `src/dataset_utils.py` — `resolve_dataset_inputs()` / `inject_dataset_item_ids()` shared by STT and TTS routers
+- `src/eval_common.py` — everything the STT and TTS eval routers share: evaluator resolution, `results.csv`/`metrics.json` readers, the calibrate spawn-and-poll loop, S3 upload helpers, timeout/failure handling, queue-slot claiming, and the visibility + status response shapes. The two routers keep only what genuinely differs by media type (STT downloads audio and builds `stt.csv`; TTS maps synthesized clips to S3 keys and presigns them)
 - `src/job_recovery.py` — on startup, kills orphaned process groups and restarts `in_progress` jobs
 - `src/llm_judge.py` — `{{variable}}` template rendering, OpenRouter-based judge invocation, and `build_evaluator_cli_payload()` that shapes linked evaluators into the dict sent to the calibrate CLI (STT/TTS/LLM tests/simulations all share this).
 - `src/annotation_eval_runner.py` — background worker for annotation-task evaluator runs; routes LLM-judge work through the calibrate CLI's STT `--eval-only` mode so judge logic isn't duplicated.

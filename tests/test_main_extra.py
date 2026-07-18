@@ -196,7 +196,6 @@ def test_provider_status_not_checked_yet(client):
 
 
 def test_provider_status_force_refresh(client):
-    import provider_status
 
     process = _make_fake_process(
         0, json.dumps({"openai": {"status": "pass"}}).encode(), b""

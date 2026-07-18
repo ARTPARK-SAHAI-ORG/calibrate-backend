@@ -29,7 +29,6 @@ from __future__ import annotations
 
 import ast
 import re
-import sys
 from pathlib import Path
 from typing import Optional
 
@@ -329,7 +328,7 @@ def _arg_defaults(func) -> dict[str, ast.expr]:
     a = func.args
     defaults: dict[str, ast.expr] = {}
     posonly = list(a.posonlyargs) + list(a.args)
-    for i, arg in enumerate(posonly):
+    for _i, arg in enumerate(posonly):
         defaults[arg.arg] = None
     # positional defaults align to the tail of posonly+args
     if a.defaults:

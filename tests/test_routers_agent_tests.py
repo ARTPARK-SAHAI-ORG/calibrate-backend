@@ -883,8 +883,7 @@ def test_agent_tests_link_with_missing(client):
 
 
 def test_agent_tests_delete_link_not_found(client):
-    auth = _signup(client)
-    h = auth["headers"]
+    _signup(client)
     resp = client.request(
         "DELETE",
         "/agent-tests",
@@ -1517,7 +1516,7 @@ def test_run_tests_batch_by_names(client, monkeypatch):
     n1, n2, n3 = (f"agent-{uuid.uuid4().hex[:6]}" for _ in range(3))
     a1 = _create_agent(client, h, name=n1)
     a2 = _create_agent(client, h, name=n2)
-    a3_no_tests = _create_agent(client, h, name=n3)
+    _create_agent(client, h, name=n3)
     t1 = _create_test(client, h)
     t2 = _create_test(client, h)
     client.post(

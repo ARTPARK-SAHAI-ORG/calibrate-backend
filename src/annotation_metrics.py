@@ -154,7 +154,7 @@ def aggregate_agreement(
 
     total_weighted = 0.0
     total_pairs = 0
-    for slot, per_annotator in by_slot.items():
+    for _slot, per_annotator in by_slot.items():
         if len(per_annotator) < 2:
             continue
         mean, pairs = _pairwise_agreement(list(per_annotator.values()))
@@ -621,7 +621,7 @@ def aggregate_agreement_for_annotator(
 
     total_weighted = 0.0
     total_pairs = 0
-    for slot, per_annotator in by_slot.items():
+    for _slot, per_annotator in by_slot.items():
         if annotator_id not in per_annotator:
             continue
         if len(per_annotator) < 2:

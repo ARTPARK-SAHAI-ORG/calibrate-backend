@@ -1,10 +1,6 @@
-import os
 import csv
-import json
 import subprocess
 import tempfile
-import time
-import traceback
 import threading
 import logging
 from pathlib import Path
@@ -16,10 +12,37 @@ from pydantic import BaseModel, ConfigDict, Field
 from db import (
     create_job,
     get_job,
-    get_evaluator,
-    get_evaluator_version,
     update_job,
-    update_job_visibility,
+)
+from eval_common import (
+    EVAL_JOB_TYPES,
+    claim_eval_queue_slot,
+    begin_eval_rerun,
+    require_providers,
+    apply_eval_job_timeout,
+    load_eval_job_for_status,
+    record_eval_task_crash,
+    build_completed_provider_result,
+    build_eval_status_response,
+    load_eval_job_for_retry,
+    normalize_and_enrich_provider_results,
+    record_eval_failure,
+    upload_leaderboard,
+    upload_provider_dir,
+    finalize_eval_results,
+    run_calibrate_eval,
+    write_evaluator_config,
+    VisibilityRequest,
+    VisibilityResponse,
+    build_in_progress_provider_result,
+    build_intermediate_provider_result,
+    build_run_config_fallback,
+    find_provider_output_dir,
+    queued_provider_result,
+    read_metrics_json,
+    read_results_csv,
+    resolve_evaluators_for_eval_job,
+    set_eval_job_visibility,
 )
 from dataset_utils import (
     present_dataset_identity,
@@ -27,112 +50,22 @@ from dataset_utils import (
     resolve_eval_rerun_inputs_from_job_details,
 )
 from auth_utils import get_current_org, OrgContext
-from llm_judge import build_evaluator_cli_payload, refresh_evaluators_to_live
 from utils import (
     TaskStatus,
     ProviderResult,
     TaskCreateResponse,
     TaskStatusResponse,
-    build_evaluator_runs_for_eval_job,
-    compute_share_token_toggle,
-    enrich_evaluator_runs_with_current_names,
-    load_evaluator_metric_key_map,
-    post_process_provider_results,
     get_s3_client,
     get_s3_output_config,
     download_file_from_s3,
-    can_start_job,
     try_start_queued_job,
     register_job_starter,
-    is_job_timed_out,
-    kill_process_group,
-    capture_exception_to_sentry,
     get_calibrate_agent_cli,
-    normalize_metrics,
-    read_leaderboard_xlsx,
     read_evaluators_map_from_config,
     presign_audio_path,
-    upload_directory_tree_to_s3,
     upload_file_to_s3,
     upload_top_level_files_to_s3,
 )
-
-# Job types that share the same queue
-EVAL_JOB_TYPES = ["stt-eval", "tts-eval", "annotation-eval"]
-
-
-def _resolve_evaluators_for_job(
-    uuids: Optional[List[str]],
-    org_uuid: str,
-    expected_evaluator_type: str,
-) -> List[dict]:
-    """Resolve evaluator UUIDs into a list of fully-hydrated dicts ready to serialize
-    into the calibrate CLI config.
-
-    - Returns an empty list when no UUIDs are provided: the run then skips the
-      LLM judge entirely (no evaluator config reaches the calibrate CLI).
-    - Pins each evaluator to its current live version at submission time.
-    - Enforces `evaluator.evaluator_type == expected_evaluator_type`. 400 on mismatch.
-    """
-    resolved: List[dict] = []
-    effective_refs: List[dict] = [
-        {"evaluator_uuid": uid, "version_uuid": None, "variable_values": None}
-        for uid in (uuids or [])
-    ]
-
-    for ref in effective_refs:
-        evaluator = get_evaluator(ref["evaluator_uuid"])
-        if not evaluator:
-            raise HTTPException(
-                status_code=404, detail=f"Evaluator {ref['evaluator_uuid']} not found"
-            )
-        if (
-            evaluator.get("org_uuid") is not None
-            and evaluator["org_uuid"] != org_uuid
-        ):
-            raise HTTPException(
-                status_code=404, detail=f"Evaluator {ref['evaluator_uuid']} not found"
-            )
-        if evaluator.get("evaluator_type") != expected_evaluator_type:
-            raise HTTPException(
-                status_code=400,
-                detail=(
-                    f"Evaluator {ref['evaluator_uuid']} has evaluator_type="
-                    f"'{evaluator.get('evaluator_type')}' but this job requires "
-                    f"'{expected_evaluator_type}' evaluators."
-                ),
-            )
-        version_uuid = ref["version_uuid"] or evaluator.get("live_version_id")
-        if not version_uuid:
-            raise HTTPException(
-                status_code=400,
-                detail=f"Evaluator {ref['evaluator_uuid']} has no live version",
-            )
-        version = get_evaluator_version(version_uuid)
-        if not version or version["evaluator_id"] != evaluator["uuid"]:
-            raise HTTPException(
-                status_code=400,
-                detail=f"Evaluator version {version_uuid} not found for evaluator {ref['evaluator_uuid']}",
-            )
-        resolved.append(
-            {
-                "uuid": evaluator["uuid"],
-                "name": evaluator["name"],
-                "evaluator_type": evaluator.get(
-                    "evaluator_type", expected_evaluator_type
-                ),
-                "data_type": evaluator.get("data_type", "text"),
-                "kind": evaluator.get("kind", "single"),
-                "output_type": evaluator.get("output_type", "binary"),
-                "evaluator_version_id": version["uuid"],
-                "judge_model": version["judge_model"],
-                "system_prompt": version["system_prompt"],
-                "output_config": version.get("output_config"),
-                "variables": version.get("variables"),
-                "variable_values": ref.get("variable_values") or {},
-            }
-        )
-    return resolved
 
 
 def _start_stt_job_from_queue(job: dict) -> bool:
@@ -170,50 +103,20 @@ _EXAMPLE_ID = "f47ac10b-58cc-4372-a567-0e02b2c3d479"
 def _collect_intermediate_results(
     output_dir: Path, providers: list, expected_total: int
 ) -> list:
-    """Read whatever intermediate results are available from disk for each provider.
-
-    Returns a list of ProviderResult objects preserving any partial results.
-    A provider is only marked ``success=True`` when it has BOTH a complete
-    row count (``>= expected_total``) AND an aggregate ``metrics.json`` on
-    disk — matching the contract used by the in-progress GET reader. Any
-    weaker signal (some rows but no metrics, or fewer rows than expected)
-    means calibrate crashed mid-run for that provider, so we surface the
-    partial rows but mark ``success=False`` to avoid lying to the FE.
-    """
+    """Read whatever intermediate results are available from disk for each provider."""
     evaluator_id_by_metric_key = read_evaluators_map_from_config(output_dir)
     provider_results = []
     for provider in providers:
-        provider_output_dir = _find_provider_output_dir(output_dir, provider)
-        results_data = _read_results_csv(provider_output_dir)
-        metrics_data = _read_metrics_json(provider_output_dir)
-        runs = (
-            build_evaluator_runs_for_eval_job(
-                metrics_data, evaluator_id_by_metric_key
+        provider_output_dir = find_provider_output_dir(output_dir, provider)
+        provider_results.append(
+            build_intermediate_provider_result(
+                provider,
+                read_results_csv(provider_output_dir),
+                read_metrics_json(provider_output_dir),
+                evaluator_id_by_metric_key,
+                expected_total,
             )
-            if metrics_data is not None
-            else []
         )
-        if results_data:
-            provider_done = (
-                metrics_data is not None
-                and len(results_data) >= expected_total
-            )
-            provider_results.append(
-                ProviderResult(
-                    provider=provider,
-                    success=True if provider_done else False,
-                    metrics=metrics_data,
-                    results=results_data,
-                    evaluator_runs=runs or None,
-                )
-            )
-        else:
-            provider_results.append(
-                ProviderResult(
-                    provider=provider,
-                    success=False,
-                )
-            )
     return provider_results
 
 
@@ -263,52 +166,6 @@ def _stt_request_from_job_details(details: dict) -> STTEvaluationRequest:
         language=details.get("language", ""),
         sarvam_judges=details.get("sarvam_judges", True),
     )
-
-
-def _find_provider_output_dir(output_dir: Path, provider: str) -> Optional[Path]:
-    """Find the provider-specific output directory."""
-    if not output_dir.exists():
-        return None
-    for item in output_dir.iterdir():
-        if item.is_dir() and provider in item.name.lower():
-            return item
-    return None
-
-
-def _read_results_csv(provider_output_dir: Path) -> Optional[List[dict]]:
-    """Read results.csv from provider output directory if it exists."""
-    if not provider_output_dir:
-        return None
-    results_file = provider_output_dir / "results.csv"
-    if not results_file.exists():
-        return None
-    try:
-        results_data = []
-        with open(results_file, "r", encoding="utf-8") as f:
-            reader = csv.DictReader(f)
-            for row in reader:
-                results_data.append(dict(row))
-        return results_data
-    except Exception:
-        return None
-
-
-def _read_metrics_json(provider_output_dir: Path) -> Optional[dict]:
-    """Read metrics.json from provider output directory if it exists.
-
-    Handles both new format (dict) and old format (list of dicts) for backward compatibility.
-    """
-    if not provider_output_dir:
-        return None
-    metrics_file = provider_output_dir / "metrics.json"
-    if not metrics_file.exists():
-        return None
-    try:
-        with open(metrics_file, "r", encoding="utf-8") as f:
-            data = json.load(f)
-            return data
-    except Exception:
-        return None
 
 
 def run_evaluation_task(
@@ -396,7 +253,6 @@ def run_evaluation_task(
                     ]
                 )
 
-                # Calibrate: --config <path> with {evaluators: [...]}
                 job_details = (get_job(task_id) or {}).get("details", {}) or {}
 
                 # Sarvam judge bundle is a metrics-axis toggle independent of the
@@ -406,115 +262,38 @@ def run_evaluation_task(
                 if not job_details.get("sarvam_judges", True):
                     eval_cmd.append("--skip-llm-judges")
 
-                raw_evaluators = job_details.get("evaluators") or []
-                if raw_evaluators:
-                    # Re-hydrate to each evaluator's CURRENT live version at run
-                    # time (consistent with LLM tests / simulations), so editing
-                    # an evaluator while the job is queued takes effect. Persist
-                    # the live-at-run-time snapshot back into details so
-                    # finished-run reads render the exact version that ran.
-                    raw_evaluators = refresh_evaluators_to_live(raw_evaluators)
-                    update_job(task_id, details={"evaluators": raw_evaluators})
-                    evaluator_payload = build_evaluator_cli_payload(raw_evaluators)
-                    config_path = input_dir / "config.json"
-                    with open(config_path, "w", encoding="utf-8") as f:
-                        json.dump(
-                            {"evaluators": evaluator_payload}, f, ensure_ascii=False
-                        )
+                config_path = write_evaluator_config(task_id, job_details, input_dir)
+                if config_path:
                     eval_cmd.extend(["--config", str(config_path)])
 
                 logger.info(f"Running STT eval command: {' '.join(eval_cmd)}")
-
-                # Create temp files for stdout/stderr
-                stdout_path = output_dir / "stdout.log"
-                stderr_path = output_dir / "stderr.log"
-
-                with (
-                    open(stdout_path, "w") as stdout_f,
-                    open(stderr_path, "w") as stderr_f,
-                ):
-                    process = subprocess.Popen(
-                        eval_cmd,
-                        stdout=stdout_f,
-                        stderr=stderr_f,
-                        text=True,
-                        start_new_session=True,
-                        cwd=str(temp_path),
-                    )
-
-                    # Store PID and output dir for cleanup and intermediate results
-                    update_job(
-                        task_id,
-                        details={
-                            "pid": process.pid,
-                            "pgid": process.pid,
-                            "output_dir": str(output_dir),
-                        },
-                    )
-
-                    # Poll for process completion with heartbeat to keep updated_at fresh
-                    # This prevents the job from being marked as timed out during long runs
-                    HEARTBEAT_INTERVAL = 2  # seconds
-                    while process.poll() is None:
-                        time.sleep(HEARTBEAT_INTERVAL)
-                        if process.poll() is None:
-                            # Process still running, send heartbeat to refresh updated_at
-                            update_job(task_id)
-
-                # Read stdout/stderr
-                with open(stdout_path, "r") as f:
-                    stdout = f.read()
-                with open(stderr_path, "r") as f:
-                    stderr = f.read()
-
-                if process.returncode != 0:
-                    logger.error(f"STT eval failed with code {process.returncode}")
-                    logger.error(f"stderr: {stderr}")
-                    raise subprocess.CalledProcessError(
-                        process.returncode, eval_cmd, stdout, stderr
-                    )
-
-                logger.info("STT eval command completed successfully")
+                run_calibrate_eval(eval_cmd, task_id, output_dir, temp_path, "STT")
 
                 # Read results for each provider
                 provider_results = []
                 evaluator_id_by_metric_key = read_evaluators_map_from_config(output_dir)
                 for provider in request.providers:
-                    provider_output_dir = _find_provider_output_dir(
+                    provider_output_dir = find_provider_output_dir(
                         output_dir, provider
                     )
                     if provider_output_dir:
-                        metrics_data = _read_metrics_json(provider_output_dir)
-                        results_data = _read_results_csv(provider_output_dir)
+                        metrics_data = read_metrics_json(provider_output_dir)
+                        results_data = read_results_csv(provider_output_dir)
 
-                        # Upload provider results to S3
-                        results_prefix = f"stt/evals/{task_id}/outputs/{provider}"
-                        for root, dirs, files in os.walk(provider_output_dir):
-                            for file in files:
-                                local_file_path = Path(root) / file
-                                relative_path = local_file_path.relative_to(
-                                    provider_output_dir
-                                )
-                                s3_key = f"{results_prefix}/{relative_path}"
-                                upload_file_to_s3(
-                                    s3, local_file_path, s3_bucket, s3_key
-                                )
+                        upload_provider_dir(
+                            s3,
+                            provider_output_dir,
+                            s3_bucket,
+                            f"stt/evals/{task_id}/outputs/{provider}",
+                        )
 
-                        eruns = (
-                            build_evaluator_runs_for_eval_job(
+                        provider_results.append(
+                            build_completed_provider_result(
+                                provider,
+                                results_data,
                                 metrics_data,
                                 evaluator_id_by_metric_key,
-                            )
-                            if metrics_data is not None
-                            else []
-                        )
-                        provider_results.append(
-                            ProviderResult(
-                                provider=provider,
-                                success=True,
-                                metrics=metrics_data,
-                                results=results_data,
-                                evaluator_runs=eruns or None,
+                                True,
                             )
                         )
                     else:
@@ -533,142 +312,47 @@ def run_evaluation_task(
                     f"stt/evals/{task_id}/outputs",
                 )
 
-                # Read leaderboard from output directory
-                leaderboard_dir = output_dir / "leaderboard"
-                leaderboard_summary = None
-
-                # Log what's in output_dir for debugging
-                logger.info(
-                    f"Output directory contents: {[f.name for f in output_dir.iterdir()]}"
+                leaderboard_summary = upload_leaderboard(
+                    s3, output_dir, s3_bucket, f"stt/evals/{task_id}/leaderboard"
                 )
 
-                if leaderboard_dir.exists():
-                    logger.info(f"Leaderboard directory exists: {leaderboard_dir}")
-                    leaderboard_summary = read_leaderboard_xlsx(leaderboard_dir)
-
-                    # Upload leaderboard to S3
-                    leaderboard_prefix = f"stt/evals/{task_id}/leaderboard"
-                    for root, dirs, files in os.walk(leaderboard_dir):
-                        for file in files:
-                            local_file_path = Path(root) / file
-                            relative_path = local_file_path.relative_to(leaderboard_dir)
-                            s3_key = f"{leaderboard_prefix}/{relative_path}"
-                            upload_file_to_s3(s3, local_file_path, s3_bucket, s3_key)
-                else:
-                    logger.warning(
-                        f"Leaderboard directory does not exist: {leaderboard_dir}"
-                    )
-
-                # Prefer calibrate's run-root config.json because it contains evaluator IDs/maps.
-                config_file = output_dir / "config.json"
-                if not config_file.exists():
-                    config_data = {
+                config_file = build_run_config_fallback(
+                    output_dir,
+                    temp_path,
+                    {
                         "providers": request.providers,
                         "language": request.language,
                         "audio_count": len(request.audio_paths),
-                    }
-                    config_file = temp_path / "config.json"
-                    with open(config_file, "w", encoding="utf-8") as f:
-                        json.dump(config_data, f, indent=2)
+                    },
+                )
                 config_s3_key = f"stt/evals/{task_id}/config.json"
                 upload_file_to_s3(s3, config_file, s3_bucket, config_s3_key)
                 logger.info(f"Uploaded config file to S3: {config_s3_key}")
 
-                # Check if all providers succeeded
-                all_succeeded = all(r.success for r in provider_results)
-                final_status = (
-                    TaskStatus.DONE.value if all_succeeded else TaskStatus.FAILED.value
+                finalize_eval_results(
+                    task_id, provider_results, leaderboard_summary
                 )
 
-                error_msg = None
-                if not all_succeeded:
-                    failed = [r.provider for r in provider_results if not r.success]
-                    error_msg = f"Some providers failed: {', '.join(failed)}"
-
-                # Update job with results
-                update_job(
-                    task_id,
-                    status=final_status,
-                    results={
-                        "provider_results": [r.model_dump() for r in provider_results],
-                        "leaderboard_summary": leaderboard_summary,
-                        "error": error_msg,
-                    },
-                )
-
-            except subprocess.CalledProcessError as e:
-                traceback.print_exc()
-                capture_exception_to_sentry(e)
-                error_results = {
-                    "error": f"STT evaluation failed: {e.stderr if hasattr(e, 'stderr') else str(e)}",
-                }
-                # Preserve any intermediate results already written to disk
-                try:
-                    if output_dir.exists():
-                        intermediate = _collect_intermediate_results(
-                            output_dir,
-                            request.providers,
-                            len(request.audio_paths),
-                        )
-                        if intermediate:
-                            error_results["provider_results"] = [
-                                r.model_dump() for r in intermediate
-                            ]
-                        if output_dir.exists():
-                            upload_directory_tree_to_s3(
-                                s3,
-                                output_dir,
-                                s3_bucket,
-                                f"stt/evals/{task_id}/outputs",
-                            )
-                except Exception:
-                    pass
-                update_job(
-                    task_id,
-                    status=TaskStatus.FAILED.value,
-                    results=error_results,
-                )
             except Exception as e:
-                traceback.print_exc()
-                capture_exception_to_sentry(e)
-                error_results = {
-                    "error": f"Unexpected error during STT evaluation: {str(e)}",
-                }
-                # Preserve any intermediate results already written to disk
-                try:
-                    if output_dir.exists():
-                        intermediate = _collect_intermediate_results(
-                            output_dir,
-                            request.providers,
-                            len(request.audio_paths),
-                        )
-                        if intermediate:
-                            error_results["provider_results"] = [
-                                r.model_dump() for r in intermediate
-                            ]
-                        if output_dir.exists():
-                            upload_directory_tree_to_s3(
-                                s3,
-                                output_dir,
-                                s3_bucket,
-                                f"stt/evals/{task_id}/outputs",
-                            )
-                except Exception:
-                    pass
-                update_job(
+                if isinstance(e, subprocess.CalledProcessError):
+                    message = f"STT evaluation failed: {e.stderr if hasattr(e, 'stderr') else str(e)}"
+                else:
+                    message = f"Unexpected error during STT evaluation: {str(e)}"
+                record_eval_failure(
                     task_id,
-                    status=TaskStatus.FAILED.value,
-                    results=error_results,
+                    e,
+                    message,
+                    s3,
+                    output_dir,
+                    s3_bucket,
+                    f"stt/evals/{task_id}/outputs",
+                    lambda: _collect_intermediate_results(
+                        output_dir, request.providers, len(request.audio_paths)
+                    ),
                 )
 
     except Exception as e:
-        traceback.print_exc()
-        capture_exception_to_sentry(e)
-        update_job(
-            task_id,
-            status=TaskStatus.FAILED.value,
-            results={"error": f"Task failed: {str(e)}"},
-        )
+        record_eval_task_crash(task_id, e)
     finally:
         # Try to start the next queued job
         try_start_queued_job(EVAL_JOB_TYPES)
@@ -679,11 +363,7 @@ async def evaluate_stt(
     request: STTEvaluationRequest, ctx: OrgContext = Depends(get_current_org)
 ):
     """Benchmark STT providers against a dataset as a background job"""
-    if not request.providers:
-        raise HTTPException(
-            status_code=400,
-            detail="At least one provider must be specified",
-        )
+    require_providers(request.providers)
 
     resolved = resolve_dataset_inputs(
         dataset_id=request.dataset_id,
@@ -707,16 +387,13 @@ async def evaluate_stt(
     except ValueError as e:
         raise HTTPException(status_code=500, detail=str(e))
 
-    resolved_evaluators = _resolve_evaluators_for_job(
+    resolved_evaluators = resolve_evaluators_for_eval_job(
         uuids=request.evaluator_uuids,
         org_uuid=ctx.org_uuid,
         expected_evaluator_type="stt",
     )
 
-    can_start = can_start_job(EVAL_JOB_TYPES, ctx.org_uuid)
-    initial_status = (
-        TaskStatus.IN_PROGRESS.value if can_start else TaskStatus.QUEUED.value
-    )
+    can_start, initial_status = claim_eval_queue_slot(ctx.org_uuid)
 
     job_id = create_job(
         job_type="stt-eval",
@@ -771,22 +448,9 @@ async def retry_stt_evaluation(
     ctx: OrgContext = Depends(get_current_org),
 ):
     """Re-run the same STT evaluation job with its stored providers and evaluators, re-reading the dataset when one is linked"""
-    job = get_job(task_id, org_uuid=ctx.org_uuid)
-    if not job or job.get("type") != "stt-eval":
-        raise HTTPException(status_code=404, detail="Task not found")
-    if job["status"] == TaskStatus.IN_PROGRESS.value:
-        raise HTTPException(
-            status_code=400,
-            detail="Cannot retry a job that is still in progress",
-        )
-
-    details = job.get("details") or {}
-    providers = details.get("providers") or []
-    if not providers:
-        raise HTTPException(
-            status_code=400,
-            detail="Original job is missing provider configuration",
-        )
+    _job, details, providers = load_eval_job_for_retry(
+        task_id, "stt-eval", ctx.org_uuid
+    )
 
     try:
         s3_bucket = get_s3_output_config()
@@ -812,17 +476,8 @@ async def retry_stt_evaluation(
         "sarvam_judges": details.get("sarvam_judges", True),
     }
 
-    can_start = can_start_job(EVAL_JOB_TYPES, ctx.org_uuid)
-    initial_status = (
-        TaskStatus.IN_PROGRESS.value if can_start else TaskStatus.QUEUED.value
-    )
-
-    update_job(
-        task_id,
-        status=initial_status,
-        results={},
-        details=rerun_details,
-        replace_details=True,
+    can_start, initial_status = begin_eval_rerun(
+        task_id, ctx.org_uuid, rerun_details
     )
 
     request = _stt_request_from_job_details(rerun_details)
@@ -845,20 +500,6 @@ async def retry_stt_evaluation(
     )
 
 
-class VisibilityRequest(BaseModel):
-    is_public: bool = Field(
-        description="`true` to make the job publicly shareable. `false` to make it private"
-    )
-
-
-class VisibilityResponse(BaseModel):
-    is_public: bool = Field(description="Whether the job is now publicly shareable")
-    share_token: str | None = Field(
-        None,
-        description="Opaque token for the public share URL when `is_public` is true",
-    )
-
-
 @router.patch(
     "/evaluate/{task_id}/visibility",
     response_model=VisibilityResponse,
@@ -873,16 +514,8 @@ async def update_stt_visibility(
     ctx: OrgContext = Depends(get_current_org),
 ):
     """Update public sharing for an STT evaluation"""
-    job = get_job(task_id, org_uuid=ctx.org_uuid)
-    if not job or job.get("type") != "stt-eval":
-        raise HTTPException(status_code=404, detail="Task not found")
-
-    token_to_persist, token_to_return = compute_share_token_toggle(
-        job, body.is_public
-    )
-    update_job_visibility(task_id, body.is_public, token_to_persist)
-    return VisibilityResponse(
-        is_public=body.is_public, share_token=token_to_return
+    return set_eval_job_visibility(
+        task_id, "stt-eval", ctx.org_uuid, body.is_public
     )
 
 
@@ -899,97 +532,24 @@ async def get_evaluation_status(
     ctx: OrgContext = Depends(get_current_org),
 ):
     """Get the status and results of an STT evaluation"""
-    job = get_job(task_id, org_uuid=ctx.org_uuid)
-    if not job:
-        raise HTTPException(status_code=404, detail="Task not found")
+    job, status, results, details = load_eval_job_for_status(task_id, ctx.org_uuid)
 
-    status = job["status"]
-    results = job.get("results") or {}
-    details = job.get("details") or {}
-
-    # Check for timeout on in-progress jobs
-    if status == TaskStatus.IN_PROGRESS.value:
-        updated_at = job.get("updated_at")
-        if updated_at and is_job_timed_out(updated_at):
-            logger.warning(f"Job {task_id} timed out, marking as failed")
-
-            # Kill running process
-            pid = details.get("pid") or details.get("pgid")
-            if pid:
-                kill_process_group(pid, task_id)
-
-            # Preserve intermediate results from disk before marking as failed
-            # IMPORTANT: Merge with existing results, don't overwrite successful ones
-            requested_providers = details.get("providers", [])
-            output_dir_str = details.get("output_dir")
-            existing_provider_results = results.get("provider_results", [])
-
-            # Build a map of existing successful results (don't overwrite these)
-            existing_success_map = {}
-            for pr in existing_provider_results:
-                if pr.get("success") is True:
-                    existing_success_map[pr.get("provider")] = pr
-
-            if output_dir_str:
-                try:
-                    output_dir = Path(output_dir_str)
-                    if output_dir.exists():
-                        intermediate = _collect_intermediate_results(
-                            output_dir,
-                            requested_providers,
-                            len(details.get("audio_paths") or []),
-                        )
-                        # Merge: keep existing successful results, add new ones from disk
-                        merged_results = []
-                        intermediate_map = {
-                            r.provider: r.model_dump() for r in intermediate
-                        }
-                        for provider in requested_providers:
-                            if provider in existing_success_map:
-                                # Keep the existing successful result
-                                merged_results.append(existing_success_map[provider])
-                            elif provider in intermediate_map:
-                                # Use intermediate result from disk
-                                merged_results.append(intermediate_map[provider])
-                            else:
-                                # Provider not found anywhere, mark as failed
-                                merged_results.append(
-                                    {
-                                        "provider": provider,
-                                        "success": False,
-                                        "metrics": None,
-                                        "results": None,
-                                    }
-                                )
-                        results["provider_results"] = merged_results
-                except Exception as exc:
-                    logger.warning(
-                        f"Failed to collect intermediate results on timeout: {exc}"
-                    )
-                    # Even on exception, preserve any existing successful results
-                    if existing_provider_results:
-                        results["provider_results"] = existing_provider_results
-
-            # Mark job as failed
-            results["error"] = "Job timed out after 5 minutes of inactivity"
-            update_job(
-                task_id,
-                status=TaskStatus.FAILED.value,
-                results=results,
-            )
-            status = TaskStatus.FAILED.value
-
-            # Try to start the next queued job
-            try_start_queued_job(EVAL_JOB_TYPES)
+    status = apply_eval_job_timeout(
+        task_id,
+        job,
+        details,
+        results,
+        status,
+        lambda out_dir, providers: _collect_intermediate_results(
+            out_dir, providers, len(details.get("audio_paths") or [])
+        ),
+    )
 
     # Get list of all requested providers from job details
     requested_providers = details.get("providers", [])
 
     # Build provider results
     provider_results = results.get("provider_results")
-    # `evaluator_id_by_metric_key` lets the post-processor build
-    # `evaluator_runs[]` mid-flight from a freshly-landed metrics.json.
-    evaluator_id_by_metric_key = load_evaluator_metric_key_map(details)
     output_dir_str = details.get("output_dir")
     output_dir_root = Path(output_dir_str) if (
         output_dir_str and Path(output_dir_str).exists()
@@ -1001,68 +561,24 @@ async def get_evaluation_status(
             output_dir = output_dir_root
             provider_results = []
             for provider in requested_providers:
-                provider_output_dir = _find_provider_output_dir(output_dir, provider)
-                results_data = _read_results_csv(provider_output_dir)
-                metrics_data = _read_metrics_json(provider_output_dir)
-                if results_data:
-                    # If all files are processed and metrics are ready, mark as done
-                    provider_done = (
-                        len(results_data) >= expected_total and metrics_data is not None
+                provider_output_dir = find_provider_output_dir(output_dir, provider)
+                provider_results.append(
+                    build_in_progress_provider_result(
+                        provider,
+                        read_results_csv(provider_output_dir),
+                        read_metrics_json(provider_output_dir),
+                        expected_total,
+                        "files",
                     )
-                    provider_results.append(
-                        {
-                            "provider": provider,
-                            "success": True if provider_done else None,
-                            "message": (
-                                f"Done ({len(results_data)} files processed)"
-                                if provider_done
-                                else f"Running... ({len(results_data)} files processed)"
-                            ),
-                            "metrics": metrics_data,
-                            "results": results_data,
-                        }
-                    )
-                else:
-                    provider_results.append(
-                        {
-                            "provider": provider,
-                            "success": None,
-                            "message": "Queued...",
-                            "metrics": None,
-                            "results": None,
-                        }
-                    )
+                )
 
     if provider_results is None:
         # Job hasn't completed yet or no output dir available, show all as queued
         provider_results = [
-            {
-                "provider": provider,
-                "success": None,
-                "message": "Queued...",
-                "metrics": None,
-                "results": None,
-            }
-            for provider in requested_providers
+            queued_provider_result(provider) for provider in requested_providers
         ]
 
-    # Normalize metrics format for backward compatibility (list -> dict)
-    for provider_result in provider_results:
-        if provider_result.get("metrics"):
-            provider_result["metrics"] = normalize_metrics(provider_result["metrics"])
-
-    enrich_evaluator_runs_with_current_names(
-        provider_results, details.get("evaluators") or []
-    )
-
-    # Canonical post-processing: lift per-row outputs into evaluator_outputs[uuid],
-    # type-coerce values, build evaluator_runs from in-progress metrics, surface
-    # per-row judge errors. Idempotent — safe across in-progress / done / failed.
-    post_process_provider_results(
-        provider_results,
-        evaluator_snapshots=details.get("evaluators") or [],
-        evaluator_id_by_metric_key=evaluator_id_by_metric_key,
-    )
+    normalize_and_enrich_provider_results(provider_results, details)
 
     # Enrich each result row with a presigned audio URL from the dataset.
     # Only presign IDs that actually appear in results to avoid unnecessary
@@ -1089,15 +605,7 @@ async def get_evaluation_status(
 
     dataset_id, dataset_name = present_dataset_identity(details, org_uuid=ctx.org_uuid)
 
-    return TaskStatusResponse(
-        task_id=task_id,
-        status=status,
-        language=details.get("language"),
-        dataset_id=dataset_id,
-        dataset_name=dataset_name,
-        provider_results=provider_results,
-        leaderboard_summary=results.get("leaderboard_summary"),
-        error=results.get("error"),
-        is_public=bool(job.get("is_public")),
-        share_token=job.get("share_token"),
+    return build_eval_status_response(
+        task_id, status, job, details, results, provider_results,
+        dataset_id, dataset_name,
     )

@@ -117,7 +117,7 @@ def _validate_agent_url(url: str) -> None:
             status_code=400, detail="agent_url hostname could not be resolved"
         )
 
-    for family, _type, _proto, _canonname, sockaddr in addr_infos:
+    for _family, _type, _proto, _canonname, sockaddr in addr_infos:
         ip_str = sockaddr[0]
         if _is_private_ip(ip_str):
             raise HTTPException(
@@ -563,7 +563,7 @@ class VerifyConnectionResponse(BaseModel):
 )
 async def verify_agent_connection_presave(
     request: VerifyConnectionRequest,
-    ctx: OrgContext = Depends(get_current_org),
+    ctx: OrgContext = Depends(get_current_org),  # noqa: ARG001
 ):
     """Verify an agent connection without creating an agent. Nothing is persisted"""
     if not request.agent_url:

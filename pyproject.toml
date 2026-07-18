@@ -23,7 +23,36 @@ dev = [
     "pytest>=8.0.0",
     "pytest-cov>=6.0.0",
     "pre-commit>=4.0.0",
+    "ruff>=0.9.0",
+    "vulture>=2.14",
+    "pylint>=3.3.0",
 ]
+
+[tool.ruff]
+target-version = "py311"
+
+[tool.ruff.lint]
+# Unused and dead code only. Style/formatting/modernization rules are
+# deliberately not enabled — they'd flag thousands of pre-existing lines
+# without catching the class of bug this gate exists for.
+select = ["F", "B007", "RUF059", "ARG"]
+
+[tool.ruff.lint.per-file-ignores]
+# Test doubles take arguments they never read, to match the real signature.
+"tests/*" = ["ARG"]
+
+[tool.pylint.main]
+disable = ["all"]
+enable = ["duplicate-code"]
+
+[tool.pylint.similarities]
+min-similarity-lines = 8
+ignore-imports = true
+ignore-signatures = true
+
+[tool.vulture]
+paths = ["src"]
+min_confidence = 80
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

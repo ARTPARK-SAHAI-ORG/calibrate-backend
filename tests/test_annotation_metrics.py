@@ -223,7 +223,7 @@ def test_aggregate_agreement_for_annotator():
         # No scalar — skipped
         {"item_id": "i5", "evaluator_id": "e1", "annotator_id": None, "value": None},
     ]
-    agree, pairs = aggregate_agreement_for_annotator(annotations, "a")
+    _agree, pairs = aggregate_agreement_for_annotator(annotations, "a")
     assert pairs >= 2
 
 

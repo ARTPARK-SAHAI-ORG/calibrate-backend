@@ -667,7 +667,7 @@ def upload_directory_tree_to_s3(
         return
     local_root = local_root.resolve()
     prefix = key_prefix.rstrip("/")
-    for root, dirs, files in os.walk(local_root):
+    for root, _dirs, files in os.walk(local_root):
         for file in files:
             local_file_path = Path(root) / file
             relative_path = local_file_path.relative_to(local_root)

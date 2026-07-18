@@ -43,8 +43,6 @@ from utils import (
     OUTPUT_TYPE_DESCRIPTION,
     ProviderResult,
     enrich_evaluator_runs_with_current_names,
-    generate_presigned_download_url,
-    get_s3_output_config,
     load_evaluator_metric_key_map,
     normalize_metrics,
     post_process_provider_results,
@@ -53,22 +51,19 @@ from utils import (
     presign_tts_provider_results_audio,
 )
 
-# Re-use the audio URL helper from simulations (no circular import risk)
+# Re-use the result-shaping helpers from the authed routers (no circular import risk)
 from routers.simulations import (
     SimulationEvaluatorRef,
     apply_simulation_job_evaluator_enrichment,
-    _get_audio_urls_from_s3_key,
+    apply_voice_simulation_presigned_urls,
 )
 from routers.agent_tests import (
-    _enrich_test_results_with_evaluators,
-    _enrich_model_results_with_evaluators,
-    _build_evaluators_block_for_test_run,
+    enrich_agent_test_job_evaluators,
     LEADERBOARD_SUMMARY_DESCRIPTION,
     LEADERBOARD_SUMMARY_EXAMPLE,
 )
 from routers.annotation_tasks import (
     _build_evaluators_block_for_eval_job,
-    _strip_details_evaluators,
     _strip_run_evaluator_blocks,
     _human_agreement_for_run,
     _shape_eval_job_for_response,
@@ -318,45 +313,6 @@ class PublicDefaultEvaluatorResponse(BaseModel):
 # ---------------------------------------------------------------------------
 
 
-def _build_simulation_results_with_presigned_urls(
-    job: Dict[str, Any],
-    simulation_results: List[Dict[str, Any]],
-    status: str,
-) -> List[Dict[str, Any]]:
-    """
-    For DONE voice simulations regenerate presigned audio URLs on-the-fly.
-    Mirrors the logic in routers/simulations.py::get_simulation_run_status.
-    """
-    if job.get("type") != "voice" or not simulation_results:
-        return simulation_results
-
-    if status == TaskStatus.DONE.value:
-        try:
-            s3_bucket = get_s3_output_config()
-            for sim_result in simulation_results:
-                audios_s3_key_prefix = sim_result.get("audios_s3_path")
-                if audios_s3_key_prefix:
-                    audio_urls = _get_audio_urls_from_s3_key(
-                        audios_s3_key_prefix,
-                        s3_bucket,
-                        transcript=sim_result.get("transcript"),
-                    )
-                    sim_result["audio_urls"] = audio_urls
-
-                conversation_wav_s3_key = sim_result.get("conversation_wav_s3_key")
-                if conversation_wav_s3_key:
-                    conversation_wav_url = generate_presigned_download_url(
-                        conversation_wav_s3_key, bucket=s3_bucket
-                    )
-                    sim_result["conversation_wav_url"] = conversation_wav_url or ""
-                else:
-                    sim_result["conversation_wav_url"] = ""
-        except Exception as exc:
-            logger.warning(f"Failed to generate audio URLs for public endpoint: {exc}")
-
-    return simulation_results
-
-
 def _get_simulation_run_name(job: Dict[str, Any]) -> str:
     """Return 'Run N' by looking at the job's position among sibling jobs."""
     simulation_id = job.get("simulation_id")
@@ -591,16 +547,7 @@ async def get_public_test_run(
     results = job.get("results") or {}
     details = job.get("details") or {}
 
-    evaluators_snapshot = details.get("evaluators_by_test_id") or {}
-    evaluator_cache: Dict[str, Optional[Dict[str, Any]]] = {}
-    _enrich_test_results_with_evaluators(
-        results.get("test_results"), evaluators_snapshot, evaluator_cache
-    )
-    evaluators_block = _build_evaluators_block_for_test_run(
-        evaluators_snapshot,
-        test_results=results.get("test_results"),
-        evaluator_cache=evaluator_cache,
-    )
+    evaluators_block = enrich_agent_test_job_evaluators(details, results)
 
     return PublicTestRunResponse(
         task_id=task_id,
@@ -631,16 +578,7 @@ async def get_public_benchmark(
     results = job.get("results") or {}
     details = job.get("details") or {}
 
-    evaluators_snapshot = details.get("evaluators_by_test_id") or {}
-    evaluator_cache: Dict[str, Optional[Dict[str, Any]]] = {}
-    _enrich_model_results_with_evaluators(
-        results.get("model_results"), evaluators_snapshot, evaluator_cache
-    )
-    evaluators_block = _build_evaluators_block_for_test_run(
-        evaluators_snapshot,
-        model_results=results.get("model_results"),
-        evaluator_cache=evaluator_cache,
-    )
+    evaluators_block = enrich_agent_test_job_evaluators(details, results, benchmark=True)
 
     return PublicBenchmarkResponse(
         task_id=task_id,
@@ -666,7 +604,7 @@ async def get_public_simulation_run(
     results = job.get("results") or {}
 
     simulation_results = results.get("simulation_results") or []
-    simulation_results = _build_simulation_results_with_presigned_urls(
+    simulation_results = apply_voice_simulation_presigned_urls(
         job, simulation_results, status
     )
 

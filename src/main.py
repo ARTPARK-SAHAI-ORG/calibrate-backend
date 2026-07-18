@@ -76,7 +76,7 @@ logging.basicConfig(
 
 
 @asynccontextmanager
-async def lifespan(app: FastAPI):
+async def lifespan(app: FastAPI):  # noqa: ARG001
     """Lifespan context manager for startup and shutdown events."""
     # Startup: Initialize database and recover in_progress jobs
     init_db()
@@ -493,7 +493,7 @@ async def local_artifact(artifact_path: str, request: Request):
 @app.post("/presigned-url", response_model=PresignedURLResponse)
 async def get_presigned_url(
     request: PresignedURLRequest,
-    user_id: str = Depends(get_current_user_id),
+    user_id: str = Depends(get_current_user_id),  # noqa: ARG001
 ):
     """
     Generate a presigned URL for uploading files to S3.
@@ -645,4 +645,4 @@ async def list_openrouter_providers() -> Optional[Dict[str, Any]]:
 
 @app.get("/sentry-debug")
 async def trigger_error():
-    division_by_zero = 1 / 0
+    1 / 0

@@ -5,10 +5,7 @@ Mocks subprocess + S3 + DB writes; walks the success and failure paths.
 
 from __future__ import annotations
 
-import csv
-import json
 import os
-from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pytest

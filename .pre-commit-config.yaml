@@ -1,7 +1,16 @@
 # See https://pre-commit.com
+# This repo normally runs .githooks/pre-commit instead
+# (git config core.hooksPath .githooks). Both call scripts/lint.sh.
 repos:
   - repo: local
     hooks:
+      - id: lint
+        name: unused / dead / duplicate code
+        entry: ./scripts/lint.sh
+        language: system
+        pass_filenames: false
+        types: [python]
+        stages: [pre-commit]
       - id: pytest-on-main
         name: pytest (main branch only)
         entry: uv run python scripts/precommit_pytest_on_main.py

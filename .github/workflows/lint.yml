@@ -1,0 +1,44 @@
+name: Lint for unused, dead and duplicate code
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "**.py"
+      - "pyproject.toml"
+      - "uv.lock"
+      - "scripts/lint.sh"
+      - ".github/workflows/lint.yml"
+  pull_request:
+    branches: [main]
+    paths:
+      - "**.py"
+      - "pyproject.toml"
+      - "uv.lock"
+      - "scripts/lint.sh"
+      - ".github/workflows/lint.yml"
+  workflow_call:
+
+permissions:
+  contents: read
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install system dependencies
+        run: sudo apt-get update && sudo apt-get install -y libasound2-dev
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+
+      - name: Install dependencies
+        run: uv sync --frozen --group dev
+
+      - name: Run lint
+        run: ./scripts/lint.sh

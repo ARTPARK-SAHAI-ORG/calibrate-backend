@@ -2,11 +2,9 @@
 
 from __future__ import annotations
 
-import csv
 import json
 from unittest.mock import MagicMock, patch
 
-import pytest
 
 
 def test_is_simulation_complete(tmp_path):
@@ -44,7 +42,7 @@ def test_upload_audio_and_generate_urls_no_audios(tmp_path):
         out = _upload_audio_and_generate_urls(
             sim_dir, tmp_path, "bucket", "prefix", set()
         )
-    audios_s3_path, conversation_wav_s3_key, audio_urls, conversation_wav_url = out
+    audios_s3_path, _conversation_wav_s3_key, audio_urls, _conversation_wav_url = out
     assert audios_s3_path is None
     assert audio_urls == []
 

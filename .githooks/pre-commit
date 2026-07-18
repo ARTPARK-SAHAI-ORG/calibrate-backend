@@ -1,11 +1,24 @@
 #!/usr/bin/env bash
 # Pre-commit checks:
-#   1. On ANY branch: enforce the api-writing-style skill when routers change.
-#   2. On main only: run the full unit test suite.
+#   1. On ANY branch: unused / dead / duplicate code, when any .py changed.
+#   2. On ANY branch: enforce the api-writing-style skill when routers change.
+#   3. On main only: run the full unit test suite.
 
 branch=$(git symbolic-ref --short HEAD 2>/dev/null)
 
-# 1) API doc-style gate — runs on every branch, but only when a router changed.
+# 1) Lint gate — runs on every branch, but only when a .py file changed.
+if git diff --cached --name-only --diff-filter=ACMR | grep -qE '\.py$'; then
+    if ! command -v uv >/dev/null 2>&1; then
+        echo "✗ uv not found on PATH — install uv or run './scripts/lint.sh' manually." >&2
+        exit 1
+    fi
+    if ! ./scripts/lint.sh; then
+        echo "  Commit aborted. Run 'git commit --no-verify' to bypass."
+        exit 1
+    fi
+fi
+
+# 2) API doc-style gate — runs on every branch, but only when a router changed.
 if git diff --cached --name-only --diff-filter=ACMR | grep -qE '^src/routers/.*\.py$'; then
     if ! command -v uv >/dev/null 2>&1; then
         echo "✗ uv not found on PATH — install uv or run 'uv run python scripts/check_api_docs_style.py' manually." >&2
@@ -21,7 +34,7 @@ if git diff --cached --name-only --diff-filter=ACMR | grep -qE '^src/routers/.*\
     fi
 fi
 
-# 2) Full test suite — main only.
+# 3) Full test suite — main only.
 if [ "$branch" != "main" ]; then
     exit 0
 fi

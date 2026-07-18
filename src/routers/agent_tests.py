@@ -56,7 +56,6 @@ from auth_utils import get_current_org, get_org_jwt_or_api_key, OrgContext
 from utils import (
     TaskStatus,
     InitialTaskStatus,
-    TaskCreateResponse,
     EXAMPLE_TEST_UUID,
     TestListResponse,
     to_test_list_response,
@@ -68,7 +67,6 @@ from utils import (
     can_start_agent_test_job,
     try_start_queued_agent_test_job,
     register_job_starter,
-    is_job_timed_out,
     capture_exception_to_sentry,
     build_tool_configs,
     get_calibrate_agent_cli,
@@ -1330,7 +1328,7 @@ def _read_agent_test_results_json(output_dir: Path) -> Optional[List[dict]]:
     """Read results.json from agent test output directory if it exists."""
     if not output_dir or not output_dir.exists():
         return None
-    for root, dirs, files in os.walk(output_dir):
+    for root, _dirs, files in os.walk(output_dir):
         for file in files:
             if file == "results.json":
                 file_path = Path(root) / file
@@ -1346,7 +1344,7 @@ def _read_agent_test_metrics_json(output_dir: Path) -> Optional[dict]:
     """Read metrics.json from agent test output directory if it exists."""
     if not output_dir or not output_dir.exists():
         return None
-    for root, dirs, files in os.walk(output_dir):
+    for root, _dirs, files in os.walk(output_dir):
         for file in files:
             if file == "metrics.json":
                 file_path = Path(root) / file
@@ -1557,6 +1555,30 @@ def _build_evaluators_block_for_test_run(
     return block
 
 
+def enrich_agent_test_job_evaluators(
+    details: Dict[str, Any],
+    results: Dict[str, Any],
+    benchmark: bool = False,
+) -> List[Dict[str, Any]]:
+    """Enrich a finished job's result rows in place and return its `evaluators[]` block.
+
+    Set ``benchmark`` for jobs whose rows live under `model_results` rather than
+    `test_results`."""
+    snapshot = details.get("evaluators_by_test_id") or {}
+    cache: Dict[str, Optional[Dict[str, Any]]] = {}
+    if benchmark:
+        model_results = results.get("model_results")
+        _enrich_model_results_with_evaluators(model_results, snapshot, cache)
+        return _build_evaluators_block_for_test_run(
+            snapshot, model_results=model_results, evaluator_cache=cache
+        )
+    test_results = results.get("test_results")
+    _enrich_test_results_with_evaluators(test_results, snapshot, cache)
+    return _build_evaluators_block_for_test_run(
+        snapshot, test_results=test_results, evaluator_cache=cache
+    )
+
+
 def _enrich_test_results_with_evaluators(
     test_results: Optional[List[Dict[str, Any]]],
     evaluators_by_test_id: Optional[Dict[str, List[Dict[str, Any]]]],
@@ -1630,7 +1652,7 @@ def _enrich_test_results_with_evaluators(
             continue
 
         out: List[Dict[str, Any]] = []
-        for cal_name, entry in raw.items():
+        for _cal_name, entry in raw.items():
             if not isinstance(entry, dict):
                 continue
             echoed_uid = entry.get("evaluator_id")
@@ -1771,7 +1793,7 @@ def _find_all_results_in_output(output_dir: Path) -> Dict[str, tuple]:
     if not output_dir.exists():
         return found
 
-    for root, dirs, files in os.walk(output_dir):
+    for root, _dirs, files in os.walk(output_dir):
         root_path = Path(root)
         results_data = None
         metrics_data = None
@@ -2091,7 +2113,7 @@ def run_llm_test_task(
                 results_data = None
                 metrics_data = None
 
-                for root, dirs, files in os.walk(output_dir):
+                for root, _dirs, files in os.walk(output_dir):
                     for file in files:
                         file_path = Path(root) / file
                         if file == "results.json" and results_data is None:
@@ -2600,16 +2622,7 @@ async def get_agent_test_run_status(
     #         # Try to start the next queued job
     #         try_start_queued_agent_test_job(AGENT_TEST_JOB_TYPES)
 
-    evaluators_snapshot = details.get("evaluators_by_test_id") or {}
-    evaluator_cache: Dict[str, Optional[Dict[str, Any]]] = {}
-    _enrich_test_results_with_evaluators(
-        results.get("test_results"), evaluators_snapshot, evaluator_cache
-    )
-    evaluators_block = _build_evaluators_block_for_test_run(
-        evaluators_snapshot,
-        test_results=results.get("test_results"),
-        evaluator_cache=evaluator_cache,
-    )
+    evaluators_block = enrich_agent_test_job_evaluators(details, results)
 
     response = TestRunStatusResponse(
         task_id=task_id,
@@ -2779,7 +2792,7 @@ def _update_benchmark_intermediate_results(
                     {
                         "model": model,
                         "success": True,
-                        "message": f"Completed",
+                        "message": "Completed",
                         "total_tests": total,
                         "passed": passed,
                         "failed": total - passed,
@@ -3108,7 +3121,7 @@ def run_benchmark_task(
 
                     # Upload leaderboard to S3
                     results_prefix = f"agent-tests/benchmarks/{task_id}"
-                    for root, dirs, files in os.walk(leaderboard_dir):
+                    for root, _dirs, files in os.walk(leaderboard_dir):
                         for file in files:
                             local_file_path = Path(root) / file
                             relative_path = local_file_path.relative_to(leaderboard_dir)
@@ -3438,16 +3451,7 @@ async def get_benchmark_status(
     #         # Try to start the next queued job
     #         try_start_queued_agent_test_job(AGENT_TEST_JOB_TYPES)
 
-    evaluators_snapshot = details.get("evaluators_by_test_id") or {}
-    evaluator_cache: Dict[str, Optional[Dict[str, Any]]] = {}
-    _enrich_model_results_with_evaluators(
-        results.get("model_results"), evaluators_snapshot, evaluator_cache
-    )
-    evaluators_block = _build_evaluators_block_for_test_run(
-        evaluators_snapshot,
-        model_results=results.get("model_results"),
-        evaluator_cache=evaluator_cache,
-    )
+    evaluators_block = enrich_agent_test_job_evaluators(details, results, benchmark=True)
 
     response = BenchmarkStatusResponse(
         task_id=task_id,

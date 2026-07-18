@@ -15,8 +15,6 @@ from db import (
     get_pending_simulation_jobs,
     update_agent_test_job,
     update_simulation_job,
-    get_persona,
-    get_scenario,
     get_personas_for_simulation,
     get_scenarios_for_simulation,
     get_evaluators_for_simulation,
@@ -27,6 +25,7 @@ from db import (
 )
 from utils import (
     TaskStatus,
+    kill_processes_from_dict,
     try_start_queued_job,
     try_start_queued_agent_test_job,
     try_start_queued_simulation_job,
@@ -67,49 +66,6 @@ def _start_queued_jobs():
         )
         while try_start_queued_simulation_job(SIMULATION_JOB_TYPES):
             pass
-
-
-def _kill_orphaned_processes_from_dict(pids_dict: dict, job_id: str) -> None:
-    """
-    Kill multiple orphaned processes from a dict mapping (e.g., provider -> PID).
-
-    Args:
-        pids_dict: Dict mapping names to PIDs (e.g., {"deepgram": 12345, "openai": 12346})
-        job_id: Job ID for logging
-    """
-    if not pids_dict:
-        logger.info(f"Job {job_id}: No running PIDs to kill")
-        return
-
-    for name, pid in pids_dict.items():
-        if not pid:
-            continue
-        try:
-            # Kill the process group (PID equals PGID when start_new_session=True)
-            os.killpg(pid, signal.SIGTERM)
-            logger.info(f"Job {job_id}: Sent SIGTERM to process group {pid} ({name})")
-
-            time.sleep(0.5)
-
-            try:
-                os.killpg(pid, signal.SIGKILL)
-                logger.info(
-                    f"Job {job_id}: Sent SIGKILL to process group {pid} ({name})"
-                )
-            except ProcessLookupError:
-                logger.info(
-                    f"Job {job_id}: Process group {pid} ({name}) already terminated"
-                )
-        except ProcessLookupError:
-            logger.info(f"Job {job_id}: Process group {pid} ({name}) not found")
-        except PermissionError:
-            logger.warning(
-                f"Job {job_id}: No permission to kill process group {pid} ({name})"
-            )
-        except Exception as e:
-            logger.error(
-                f"Job {job_id}: Error killing process group {pid} ({name}): {e}"
-            )
 
 
 def _kill_orphaned_process(details: dict, job_id: str) -> bool:
@@ -341,7 +297,7 @@ def _recover_stt_job(job_id: str, details: dict):
     logger.info(f"Recovering STT job {job_id}")
 
     # Kill any orphaned processes from previous run
-    _kill_orphaned_processes_from_dict(details.get("running_pids", {}), job_id)
+    kill_processes_from_dict(details.get("running_pids", {}), job_id)
 
     request = STTEvaluationRequest(
         audio_paths=details["audio_paths"],
@@ -367,7 +323,7 @@ def _recover_tts_job(job_id: str, details: dict):
     logger.info(f"Recovering TTS job {job_id}")
 
     # Kill any orphaned processes from previous run
-    _kill_orphaned_processes_from_dict(details.get("running_pids", {}), job_id)
+    kill_processes_from_dict(details.get("running_pids", {}), job_id)
 
     request = TTSEvaluationRequest(
         texts=details["texts"],
