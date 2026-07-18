@@ -7,7 +7,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 - **Start every new task in a fresh worktree when you're on `main`.** Before touching anything, check the current branch. If it's `main`, do NOT work on it directly — create a new git worktree on its own branch for the task and do all the work there. Only skip this if the user has already put you on a task branch/worktree or explicitly says to work on the current branch.
 - **Before any change or new feature, do this first — every time.** Whenever you're asked to make a change, add a feature, or modify anything:
   1. **Review the existing code thoroughly** for code/functionality that already does (or partly does) what's being asked — don't build on an empty assumption.
-  2. **Make a plan** that splits the work into independent subtasks, to be executed in parallel by multiple weaker agents wherever the subtasks are disjoint (see the `parallelize` skill).
+  2. **Make a plan** that splits the work into independent subtasks, then run the `parallelize` skill to execute the disjoint ones in parallel (see "Parallel execution" below — the skill is mandatory, not optional).
   3. **Identify code to reuse or repackage** into shared, reusable functions to support what needs to be built, rather than duplicating logic.
   4. **Prefer well-known, reliable libraries** over re-implementing functionality that already exists in one — unless the requirements genuinely demand a custom solution.
   5. **Share the plan and ask** about any choices that need to be made, laying out the tradeoffs, instead of making assumptions on the user's behalf.
@@ -23,7 +23,9 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Parallel execution (default)
 
-For any multi-step or multi-file task, first write a short plan that splits the work into subtasks and marks which are independent. Run independent subtasks as parallel agents, each owning a disjoint set of files/sections so they never edit the same file at once. Keep dependent subtasks sequential. Show the plan before launching. See the `parallelize` skill for the full playbook.
+**Always invoke the `parallelize` skill before writing any code.** Once the plan is settled and you are ready to implement, run the skill first — every time, whether or not the user asks for it, and whether or not the task looks small. Do not start editing files without it. The only exception is a change confined to a single file with no independent parts; say so in one line and proceed.
+
+The skill splits the work into subtasks, marks which are independent, and runs those as parallel agents, each owning a disjoint set of files/sections so they never edit the same file at once. Dependent subtasks stay sequential. Show the plan before launching.
 
 ## Project Summary
 
