@@ -6241,17 +6241,6 @@ def get_agent_test_link(agent_id: str, test_id: str) -> Optional[Dict[str, Any]]
         return None
 
 
-def get_all_agent_tests() -> List[Dict[str, Any]]:
-    """Get all agent-test links."""
-    with get_db_connection() as conn:
-        cursor = conn.cursor()
-        cursor.execute(
-            "SELECT * FROM agent_tests WHERE deleted_at IS NULL ORDER BY created_at DESC"
-        )
-        rows = cursor.fetchall()
-        return [dict(row) for row in rows]
-
-
 # ============ Jobs Functions ============
 
 
