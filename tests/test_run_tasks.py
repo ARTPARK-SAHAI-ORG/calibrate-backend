@@ -656,6 +656,32 @@ def test_build_calibrate_config_includes_conversation_tests():
     assert evaluators_by_test_id[test_uuid][0]["version_number"] == 1
 
 
+def test_build_calibrate_config_connection_mode_passes_default_inputs():
+    """Connection-mode agents pass their config `default_inputs` through to the
+    calibrate config, mirroring `agent_headers`."""
+    from routers.agent_tests import _build_calibrate_config
+
+    user_uuid = db.create_user("R", "DI", f"rdi-{os.urandom(4).hex()}@x.com")
+    org_uuid = db.get_personal_org_for_user(user_uuid)["uuid"]
+    agent_uuid = db.create_agent(
+        name=f"a-{os.urandom(4).hex()}",
+        org_uuid=org_uuid,
+        agent_type="connection",
+        config={
+            "agent_url": "https://example.com/agent",
+            "default_inputs": {"condition_area": "cardiology"},
+        },
+        user_id=user_uuid,
+    )
+    test_uuid, _ = _make_conversation_test(db, org_uuid, user_uuid)
+    agent = db.get_agent(agent_uuid)
+    test = db.get_test(test_uuid)
+
+    config, _ = _build_calibrate_config(agent, [test])
+
+    assert config["default_inputs"] == {"condition_area": "cardiology"}
+
+
 def test_conversation_test_no_legacy_llm_evaluator_fallback():
     """The legacy string-criteria fallback synthesizes the default-llm-next-reply
     LLM evaluator and must be RESPONSE-ONLY. A conversation test with no linked

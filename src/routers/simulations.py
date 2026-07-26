@@ -2469,6 +2469,12 @@ async def run_simulation_endpoint(
                 detail="Agent connection not verified. Call POST /agents/{agent_uuid}/verify-connection first.",
             )
 
+    if request.type == "text" and agent_config.get("default_inputs"):
+        raise HTTPException(
+            status_code=400,
+            detail="Text simulations are not supported for agents with default inputs. Use a voice simulation instead.",
+        )
+
     # Get linked entities
     personas = get_personas_for_simulation(simulation_uuid)
     scenarios = get_scenarios_for_simulation(simulation_uuid)
