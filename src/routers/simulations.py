@@ -2472,7 +2472,7 @@ async def run_simulation_endpoint(
     if request.type == "text" and agent_config.get("default_inputs"):
         raise HTTPException(
             status_code=400,
-            detail="Text simulations are not supported for agents with default inputs. Use a voice simulation instead.",
+            detail="Simulations are not supported for agents with default inputs. Run an agent test instead.",
         )
 
     # Get linked entities
