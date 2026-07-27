@@ -2469,7 +2469,7 @@ async def run_simulation_endpoint(
                 detail="Agent connection not verified. Call POST /agents/{agent_uuid}/verify-connection first.",
             )
 
-    if request.type == "text" and agent_config.get("default_inputs"):
+    if agent_config.get("default_inputs"):
         raise HTTPException(
             status_code=400,
             detail="Simulations are not supported for agents with default inputs. Run an agent test instead.",
