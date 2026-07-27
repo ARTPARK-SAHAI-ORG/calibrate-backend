@@ -679,7 +679,7 @@ def test_build_calibrate_config_connection_mode_passes_default_inputs():
 
     config, _ = _build_calibrate_config(agent, [test])
 
-    assert config["default_inputs"] == {"condition_area": "cardiology"}
+    assert config["agent_default_inputs"] == {"condition_area": "cardiology"}
 
 
 def test_conversation_test_no_legacy_llm_evaluator_fallback():

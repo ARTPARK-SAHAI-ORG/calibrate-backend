@@ -1291,7 +1291,7 @@ def _build_calibrate_config(
         if agent_config.get("agent_headers"):
             config["agent_headers"] = agent_config["agent_headers"]
         if agent_config.get("default_inputs"):
-            config["default_inputs"] = agent_config["default_inputs"]
+            config["agent_default_inputs"] = agent_config["default_inputs"]
         return config, evaluators_by_test_id
 
     # Calibrate agent mode

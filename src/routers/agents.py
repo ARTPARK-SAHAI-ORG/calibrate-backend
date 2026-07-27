@@ -138,11 +138,15 @@ async def _verify_agent_connection(
     agent_headers: Optional[Dict[str, str]] = None,
     model: Optional[str] = None,
     messages: Optional[List[Dict[str, str]]] = None,
+    default_inputs: Optional[Dict[str, Any]] = None,
+    inputs: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     """Verify agent connection using calibrate's TextAgentConnection."""
     _validate_agent_url(agent_url)
     safe_headers = _sanitize_headers(agent_headers)
-    agent = TextAgentConnection(url=agent_url, headers=safe_headers)
+    agent = TextAgentConnection(
+        url=agent_url, headers=safe_headers, default_inputs=default_inputs
+    )
 
     try:
         kwargs = {}
@@ -150,6 +154,8 @@ async def _verify_agent_connection(
             kwargs["model"] = model
         if messages:
             kwargs["messages"] = messages
+        if inputs:
+            kwargs["inputs"] = inputs
         result = await agent.verify(**kwargs)
     except Exception as e:
         logger.exception(
@@ -530,6 +536,11 @@ class AgentVerifyRequest(BaseModel):
         description="Sample chat messages to send during verification. Omit to use the default probe",
         examples=[[{"role": "user", "content": "Hello"}]],
     )
+    inputs: Optional[Dict[str, Any]] = Field(
+        None,
+        description="Extra request fields for this probe, overriding the agent's stored `default_inputs` per key",
+        examples=[{"condition_area": "cardiology"}],
+    )
 
 
 class VerifyConnectionRequest(AgentVerifyRequest):
@@ -542,6 +553,11 @@ class VerifyConnectionRequest(AgentVerifyRequest):
         None,
         description="Extra request headers to send to your agent, e.g. an auth token. Omit if none are needed",
         examples=[{"Authorization": "Bearer <token>"}],
+    )
+    default_inputs: Optional[Dict[str, Any]] = Field(
+        None,
+        description="Extra fields merged into every request to the agent, since no agent is stored yet",
+        examples=[{"condition_area": "cardiology"}],
     )
 
 
@@ -574,6 +590,8 @@ async def verify_agent_connection_presave(
         agent_headers=request.agent_headers,
         model=request.model,
         messages=request.messages,
+        default_inputs=request.default_inputs,
+        inputs=request.inputs,
     )
     return VerifyConnectionResponse(**result)
 
@@ -621,6 +639,8 @@ async def verify_agent_connection(
         agent_headers=agent_headers,
         model=verify_model,
         messages=request.messages,
+        default_inputs=agent_config.get("default_inputs"),
+        inputs=request.inputs,
     )
 
     # Only persist successful verification results into agent config.
