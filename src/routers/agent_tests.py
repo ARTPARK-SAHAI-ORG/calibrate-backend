@@ -396,6 +396,10 @@ class TestCaseResult(BaseModel):
     test_case: Optional[Dict[str, Any]] = Field(
         None, description="The test case definition that was run"
     )
+    inputs: Optional[Dict[str, Any]] = Field(
+        None,
+        description="Extra request fields sent to the agent for this case, the agent's `default_inputs` with this case's overrides applied",
+    )
     judge_results: Optional[List[JudgeResult]] = Field(
         None,
         description="One verdict for each evaluator",
@@ -1360,7 +1364,10 @@ def _read_agent_test_metrics_json(output_dir: Path) -> Optional[dict]:
     return None
 
 
-def _parse_agent_test_results(results_data: Optional[List[dict]]) -> List[dict]:
+def _parse_agent_test_results(
+    results_data: Optional[List[dict]],
+    default_inputs: Optional[Dict[str, Any]] = None,
+) -> List[dict]:
     """Parse results.json data into the format expected by the API.
 
     `judge_results` is preserved as the raw calibrate-emitted dict
@@ -1376,6 +1383,8 @@ def _parse_agent_test_results(results_data: Optional[List[dict]]) -> List[dict]:
         output_data = r.get("output", {})
         metrics = r.get("metrics", {})
         test_case = r.get("test_case", {})
+        case_inputs = test_case.get("inputs") or {}
+        effective_inputs = {**(default_inputs or {}), **case_inputs}
         test_results.append(
             {
                 "name": test_case.get("name"),
@@ -1387,6 +1396,7 @@ def _parse_agent_test_results(results_data: Optional[List[dict]]) -> List[dict]:
                     "tool_calls": output_data.get("tool_calls"),
                 },
                 "test_case": test_case,
+                "inputs": effective_inputs or None,
                 "judge_results": metrics.get("judge_results"),
                 # latency_ms is top-level on the calibrate result object (sibling of
                 # output/metrics); cost is nested inside output. Different depths by
@@ -1408,6 +1418,7 @@ def _pending_test_case_result_placeholder(name: str) -> Dict[str, Any]:
         "reasoning": None,
         "output": None,
         "test_case": None,
+        "inputs": None,
         "judge_results": None,
         "latency_ms": None,
         "cost": None,
@@ -1882,6 +1893,7 @@ def _update_agent_test_intermediate_results(
     task_id: str,
     output_dir: Path,
     test_names: List[str],
+    default_inputs: Optional[Dict[str, Any]] = None,
 ) -> int:
     """
     Update intermediate results for an agent test job.
@@ -1892,7 +1904,7 @@ def _update_agent_test_intermediate_results(
         return 0
 
     # Parse results
-    test_results = _parse_agent_test_results(results_data)
+    test_results = _parse_agent_test_results(results_data, default_inputs)
     completed_count = len(test_results)
 
     # Build intermediate results: show completed tests with results, pending tests with just name
@@ -1978,6 +1990,7 @@ def run_llm_test_task(
                     task_id, agent, tests
                 )
                 agent_config = agent.get("config") or {}
+                default_inputs = agent_config.get("default_inputs")
 
                 # Create directories
                 input_dir = temp_path / "input"
@@ -2047,7 +2060,7 @@ def run_llm_test_task(
                     prev_completed = 0
                     while process.poll() is None:
                         completed = _update_agent_test_intermediate_results(
-                            task_id, output_dir, test_names
+                            task_id, output_dir, test_names, default_inputs
                         )
                         if completed != prev_completed:
                             logger.info(
@@ -2058,7 +2071,7 @@ def run_llm_test_task(
 
                     # Final update after process completes
                     _update_agent_test_intermediate_results(
-                        task_id, output_dir, test_names
+                        task_id, output_dir, test_names, default_inputs
                     )
 
                 # Read stdout/stderr
@@ -2110,7 +2123,7 @@ def run_llm_test_task(
                     raise subprocess.CalledProcessError(0, run_cmd, stdout, stderr)
 
                 # Parse results
-                test_results = _parse_agent_test_results(results_data)
+                test_results = _parse_agent_test_results(results_data, default_inputs)
 
                 # Add name field for consistency
                 for i, r in enumerate(test_results):
@@ -2733,6 +2746,7 @@ def _update_benchmark_intermediate_results(
     models: List[str],
     test_names: List[str],
     cli_models: Optional[List[str]] = None,
+    default_inputs: Optional[Dict[str, Any]] = None,
 ) -> int:
     """
     Update intermediate results for a benchmark job.
@@ -2759,7 +2773,7 @@ def _update_benchmark_intermediate_results(
             results_data, metrics_data = all_results[matched_folder]
 
             # Parse results
-            test_results = _parse_agent_test_results(results_data)
+            test_results = _parse_agent_test_results(results_data, default_inputs)
 
             # Add name field for consistency
             for i, r in enumerate(test_results):
@@ -2892,6 +2906,7 @@ def run_benchmark_task(
                     task_id, agent, tests
                 )
                 agent_config = agent.get("config") or {}
+                default_inputs = agent_config.get("default_inputs")
 
                 # Clear any model from config — models are passed via CLI flags
                 if "params" in calibrate_config:
@@ -2965,7 +2980,8 @@ def run_benchmark_task(
                     prev_completed = 0
                     while process.poll() is None:
                         completed = _update_benchmark_intermediate_results(
-                            task_id, output_dir, models, test_names, cli_models
+                            task_id, output_dir, models, test_names, cli_models,
+                            default_inputs,
                         )
                         if completed != prev_completed:
                             logger.info(
@@ -2976,7 +2992,8 @@ def run_benchmark_task(
 
                     # Final update after process completes
                     _update_benchmark_intermediate_results(
-                        task_id, output_dir, models, test_names, cli_models
+                        task_id, output_dir, models, test_names, cli_models,
+                        default_inputs,
                     )
 
                 # Read stdout/stderr

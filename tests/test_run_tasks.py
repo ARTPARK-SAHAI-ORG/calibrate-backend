@@ -682,6 +682,29 @@ def test_build_calibrate_config_connection_mode_passes_default_inputs():
     assert config["agent_default_inputs"] == {"condition_area": "cardiology"}
 
 
+def test_parse_agent_test_results_surfaces_effective_inputs():
+    """Each result carries the agent's default_inputs with any per-case override."""
+    from routers.agent_tests import _parse_agent_test_results
+
+    rows = [
+        {
+            "test_case": {"id": "t1", "name": "n1", "inputs": {"trimester": 3}},
+            "metrics": {"passed": True},
+        },
+        {"test_case": {"id": "t2", "name": "n2"}, "metrics": {"passed": True}},
+    ]
+    parsed = _parse_agent_test_results(
+        rows, default_inputs={"condition_area": "anc", "trimester": 2}
+    )
+    # Per-case value overrides the default per key; untouched keys keep the default.
+    assert parsed[0]["inputs"] == {"condition_area": "anc", "trimester": 3}
+    assert parsed[1]["inputs"] == {"condition_area": "anc", "trimester": 2}
+
+    # No defaults and no per-case inputs → None, not an empty dict.
+    plain = _parse_agent_test_results([{"test_case": {"id": "t3"}, "metrics": {}}])
+    assert plain[0]["inputs"] is None
+
+
 def test_conversation_test_no_legacy_llm_evaluator_fallback():
     """The legacy string-criteria fallback synthesizes the default-llm-next-reply
     LLM evaluator and must be RESPONSE-ONLY. A conversation test with no linked
