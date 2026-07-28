@@ -330,7 +330,7 @@ def _build_simulation_results_with_presigned_urls(
     if job.get("type") != "voice" or not simulation_results:
         return simulation_results
 
-    if status == TaskStatus.DONE.value:
+    if status in (TaskStatus.DONE.value, TaskStatus.CANCELLED.value):
         try:
             s3_bucket = get_s3_output_config()
             for sim_result in simulation_results:
