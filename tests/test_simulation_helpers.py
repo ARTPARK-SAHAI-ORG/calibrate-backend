@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import asyncio
+import uuid
 from datetime import datetime, timedelta
 from unittest.mock import MagicMock, patch
 
@@ -179,3 +181,34 @@ def test_apply_simulation_job_evaluator_enrichment_no_snaps():
         {"evaluators": []}, []
     )
     assert evaluators_out is None
+
+
+def test_abort_simulation_run_marks_job_cancelled():
+    """Aborting parks the job at `cancelled`, not `done`, so an aborted run is
+    distinguishable from one that finished on its own (issue #46)."""
+    import db
+    from auth_utils import OrgContext
+    from routers.simulations import abort_simulation_run
+    from utils import TaskStatus
+
+    org_uuid = str(uuid.uuid4())
+    simulation_uuid = db.create_simulation(
+        name=f"abort-sim-{uuid.uuid4().hex[:6]}", org_uuid=org_uuid
+    )
+    job_uuid = db.create_simulation_job(
+        simulation_id=simulation_uuid,
+        job_type="text",
+        status=TaskStatus.IN_PROGRESS.value,
+        details={"pid": None},
+        results={"simulation_results": [{"simulation_name": "s1"}]},
+    )
+
+    ctx = OrgContext(user_id=str(uuid.uuid4()), org_uuid=org_uuid, role="owner")
+    with patch("routers.simulations.try_start_queued_simulation_job"):
+        response = asyncio.run(abort_simulation_run(job_uuid=job_uuid, ctx=ctx))
+
+    assert response.status == TaskStatus.CANCELLED
+
+    stored = db.get_simulation_job(job_uuid)
+    assert stored["status"] == "cancelled"
+    assert stored["details"]["aborted"] is True
