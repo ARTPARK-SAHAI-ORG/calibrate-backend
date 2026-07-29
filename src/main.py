@@ -240,6 +240,10 @@ def _strip_freeform_titles(node: Any) -> None:
 # Keyed by component-schema name.
 _PUBLIC_SPEC_HIDDEN_FIELDS: Dict[str, tuple] = {
     "AgentUpdate": ("connection_verified", "benchmark_models_verified"),
+    # The saved agent's stored `default_inputs` is applied automatically on verify,
+    # so the public verify body stays minimal (model + messages). The per-key
+    # `inputs` override is a JWT/UI convenience, not part of the key API surface.
+    "AgentVerifyRequest": ("inputs",),
     # Auto-increment pivot-row IDs from the link endpoints — internal DB keys a
     # UUID-based public client has no use for. `ids` is too generic to strip
     # globally, so it's pinned to the link responses that return it.

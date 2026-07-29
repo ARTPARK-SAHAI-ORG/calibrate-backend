@@ -270,6 +270,10 @@ class BulkTestItem(BaseModel):
     tool_calls: Optional[List[ExpectedToolCall]] = Field(
         None, description="Expected tool calls. **Required for `tool_call` batches**"
     )
+    inputs: Optional[Dict[str, Any]] = Field(
+        None,
+        description="Extra request fields for this test, overriding the agent's `default_inputs` per key",
+    )
 
 
 class BulkTestUpload(BaseModel):
@@ -464,6 +468,8 @@ async def bulk_upload_tests(
         }
         if payload.language:
             config["settings"] = {"language": payload.language}
+        if t.inputs:
+            config["inputs"] = t.inputs
 
         db_tests.append(
             {
