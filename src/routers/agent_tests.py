@@ -490,6 +490,9 @@ class TestRunStatusResponse(BaseModel):
         None, description="Results for each test case"
     )
     error: bool = Field(False, description="True if the run failed")
+    error_message: Optional[str] = Field(
+        None, description="Why the run failed, such as the agent being unreachable"
+    )
     is_public: bool = Field(False, description="Whether the run is shared publicly")
     share_token: Optional[str] = Field(
         None, description="Token for building the public share URL"
@@ -1409,6 +1412,33 @@ def _parse_agent_test_results(
     return test_results
 
 
+_AGENT_CONNECTION_ERROR_PREFIXES = (
+    "Agent returned HTTP ",
+    "Could not connect to agent at ",
+    "Agent request timed out",
+)
+
+
+def _extract_agent_connection_error(stderr: Optional[str]) -> Optional[str]:
+    """Pull a concise agent-connection failure out of calibrate's stderr.
+
+    calibrate raises these as ``RuntimeError`` and the CLI dumps the whole
+    traceback (plus, for an HTTP error, the agent's response body) to stderr.
+    Return just the one-line reason, or None if no connection error is present.
+    """
+    if not stderr:
+        return None
+    for line in stderr.splitlines():
+        msg = line.strip().split("RuntimeError: ", 1)[-1]
+        for prefix in _AGENT_CONNECTION_ERROR_PREFIXES:
+            if msg.startswith(prefix):
+                # Trim the echoed response body after the status code.
+                if prefix == "Agent returned HTTP ":
+                    return msg.split(":", 1)[0].strip()
+                return msg
+    return None
+
+
 def _pending_test_case_result_placeholder(name: str) -> Dict[str, Any]:
     """``TestCaseResult`` shape for rows not yet finished (explicit nulls for clients)."""
     return {
@@ -2194,8 +2224,13 @@ def run_llm_test_task(
                 existing_results = (
                     (existing_job.get("results") or {}) if existing_job else {}
                 )
+                agent_error = _extract_agent_connection_error(
+                    getattr(e, "stderr", None)
+                )
                 existing_results["error"] = (
-                    f"LLM test failed: {e.stderr if hasattr(e, 'stderr') else str(e)}"
+                    f"Could not reach the agent: {agent_error}"
+                    if agent_error
+                    else "The test run failed. See the run logs for details."
                 )
                 try:
                     if output_dir.exists():
@@ -2639,6 +2674,7 @@ async def get_agent_test_run_status(
         evaluators=evaluators_block or None,
         results=results.get("test_results"),
         error=bool(results.get("error")),
+        error_message=results.get("error") or None,
         is_public=bool(job.get("is_public")),
         share_token=job.get("share_token"),
     )
@@ -2734,6 +2770,9 @@ class BenchmarkStatusResponse(BaseModel):
         examples=[LEADERBOARD_SUMMARY_EXAMPLE],
     )
     error: bool = Field(False, description="True if the run failed")
+    error_message: Optional[str] = Field(
+        None, description="Why the run failed, such as the agent being unreachable"
+    )
     is_public: bool = Field(False, description="Whether the run is shared publicly")
     share_token: Optional[str] = Field(
         None, description="Token for building the public share URL"
@@ -3193,8 +3232,15 @@ def run_benchmark_task(
             except subprocess.CalledProcessError as e:
                 traceback.print_exc()
                 capture_exception_to_sentry(e)
+                agent_error = _extract_agent_connection_error(
+                    getattr(e, "stderr", None)
+                )
                 failed_results: Dict[str, Any] = {
-                    "error": f"Benchmark failed: {e.stderr if hasattr(e, 'stderr') else str(e)}",
+                    "error": (
+                        f"Could not reach the agent: {agent_error}"
+                        if agent_error
+                        else "The benchmark run failed. See the run logs for details."
+                    ),
                 }
                 try:
                     if output_dir.exists():
@@ -3476,6 +3522,7 @@ async def get_benchmark_status(
         model_results=results.get("model_results"),
         leaderboard_summary=results.get("leaderboard_summary"),
         error=bool(results.get("error")),
+        error_message=results.get("error") or None,
         is_public=bool(job.get("is_public")),
         share_token=job.get("share_token"),
     )
