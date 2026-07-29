@@ -432,18 +432,24 @@ class AgentSummary(BaseModel):
         None,
         description="Whether the agent's connection has been verified, for a `type=connection` agent",
     )
+    has_default_inputs: bool = Field(
+        description="Whether the agent has custom request fields configured",
+    )
 
 
 def _to_agent_summary(agent: Dict[str, Any]) -> AgentSummary:
     """Project an agent row to the trimmed list shape, lifting
-    `config.connection_verified` to a top-level flag (None when absent)."""
-    verified = (agent.get("config") or {}).get("connection_verified")
+    `config.connection_verified` and a `config.default_inputs` presence flag to
+    top-level fields."""
+    config = agent.get("config") or {}
+    verified = config.get("connection_verified")
     return AgentSummary(
         uuid=agent["uuid"],
         name=agent["name"],
         type=agent["type"],
         updated_at=agent["updated_at"],
         connection_verified=None if verified is None else bool(verified),
+        has_default_inputs=bool(config.get("default_inputs")),
     )
 
 
