@@ -13,6 +13,7 @@ Canonical placeholders live in [`src/.env.example`](src/.env.example). When you 
 | **`OBJECT_STORAGE_MODE`**     | Artifact storage backend. Set to **`local`** for development without AWS; uploads and job artifacts are stored on disk while keeping `s3://local-dev-artifacts/...` paths in API payloads. **Deployments always use `s3`** — `local` is a local, dev-only convenience.                        |
 | **`LOCAL_ARTIFACT_ROOT`**     | Directory used when `OBJECT_STORAGE_MODE=local`. Defaults to `${DB_ROOT_DIR}/artifacts`. The backend serves these files through development-only `/local-artifacts/...` URLs.                                                                                                                 |
 | **`LOCAL_ARTIFACT_BASE_URL`** | Public backend base URL used when `OBJECT_STORAGE_MODE=local` to make both upload and download `/local-artifacts/...` URLs absolute. Set to `http://localhost:8000` for normal local dev so frontend upload targets and audio links point back to the backend; if unset, those URLs are returned relative (only works when the frontend is same-origin as the backend).                                   |
+| **`LOCAL_ARTIFACT_BUCKET`**   | Sentinel bucket name used in `s3://bucket/key`-shaped paths when `OBJECT_STORAGE_MODE=local`. Defaults to **`local-dev-artifacts`** (`LOCAL_STORAGE_BUCKET` in [`src/utils.py`](src/utils.py)) if unset.                                                                                                                                                                                                      |
 | **`AWS_ACCESS_KEY_ID`**       | AWS access key for boto3 S3 calls (presigned URLs, uploads). Optional when using IAM/instance credentials or another auth mechanism supported by boto3. Empty values are treated as unset. Only used when `OBJECT_STORAGE_MODE=s3`.                                                           |
 | **`AWS_SECRET_ACCESS_KEY`**   | Secret key paired with `AWS_ACCESS_KEY_ID`. Only used when `OBJECT_STORAGE_MODE=s3`.                                                                                                                                                                                                          |
 | **`AWS_REGION`**              | AWS region for the S3 client. Defaults to **`ap-south-1`** if unset or empty ([`src/utils.py`](src/utils.py)). Only used when `OBJECT_STORAGE_MODE=s3`.                                                                                                                                       |
@@ -23,7 +24,7 @@ Canonical placeholders live in [`src/.env.example`](src/.env.example). When you 
 
 ## Provider API keys (calibrate / jobs)
 
-These are **not read directly** by most backend modules; they are passed through to the **`calibrate`** CLI subprocess (inherits the backend environment). Configure keys only for providers you actually use.
+These are **not read directly** by most backend modules; they are passed through to the **`calibrate-agent`** CLI subprocess (inherits the backend environment). Configure keys only for providers you actually use.
 
 | Variable                             | Meaning                                                                                                                                                                                                                                                  |
 | ------------------------------------ | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
@@ -64,7 +65,7 @@ These are **not read directly** by most backend modules; they are passed through
 | **`GOOGLE_CLIENT_ID`**     | Google OAuth client ID used by the auth router (same as the one used for setting up auth on frontend)([`src/routers/auth.py`](src/routers/auth.py)).                                                                  |
 | **`JWT_SECRET_KEY`**       | HMAC secret for signing JWTs. **Must be set in production** (use a long random value, e.g. `openssl rand -base64 32`). A weak development default exists in code if unset ([`src/auth_utils.py`](src/auth_utils.py)). |
 | **`JWT_EXPIRATION_HOURS`** | JWT lifetime in hours. Default **`168`** (7 days).                                                                                                                                                                    |
-| **`SUPERADMIN_EMAIL`**     | Email address allowed to mutate **user limit** endpoints (`POST`/`PUT`/`DELETE` on user-limits). Enforced by [`require_superadmin`](src/auth_utils.py).                                                               |
+| **`SUPERADMIN_EMAIL`**     | Email address allowed to mutate **org limit** endpoints (`POST`/`PUT`/`DELETE` on `/org-limits`, renamed from the legacy `/user-limits`). Enforced by [`require_superadmin`](src/auth_utils.py).                     |
 
 ---
 
@@ -73,8 +74,8 @@ These are **not read directly** by most backend modules; they are passed through
 | Variable                            | Meaning                                                                                                                                                                                                                                                                                |
 | ----------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | **`MAX_CONCURRENT_JOBS`**           | Global cap on concurrent background jobs across queues. Read as **`int(os.getenv(...))`** with **no fallback** in code ([`src/utils.py`](src/utils.py)), so it **must be set** for queue helpers to work (tests and Compose default this to **`1`**).                                  |
-| **`MAX_CONCURRENT_JOBS_PER_USER`**  | Per-user concurrent job cap. Default **`1`**. Set to **`0`** to disable the per-user limit ([`src/utils.py`](src/utils.py)).                                                                                                                                                           |
-| **`DEFAULT_MAX_ROWS_PER_EVAL`**     | Default maximum rows per evaluation run when no per-user override exists ([`src/routers/user_limits.py`](src/routers/user_limits.py)). Default **`20`**.                                                                                                                               |
+| **`MAX_CONCURRENT_JOBS_PER_ORG`**   | Per-org concurrent job cap. Default **`1`**. Set to **`0`** to disable the per-org limit ([`src/utils.py`](src/utils.py)). Renamed from **`MAX_CONCURRENT_JOBS_PER_USER`**, which still works as a deprecated fallback (logs a warning) — set the new name in new deployments.        |
+| **`DEFAULT_MAX_ROWS_PER_EVAL`**     | Default maximum rows per evaluation run when no per-org override exists ([`src/routers/org_limits.py`](src/routers/org_limits.py)). Default **`20`**.                                                                                                                                  |
 | **`CALIBRATE_TEST_PARALLEL`**       | How many test cases `calibrate-agent llm` evaluates in parallel per model. Read **natively by calibrate-agent** (`-n flag > CALIBRATE_TEST_PARALLEL > default 4`); the backend doesn't pass `-n` for LLM tests, it just lets the subprocess inherit this var. Unset ⇒ CLI default **`4`**. |
 | **`CALIBRATE_SIMULATION_PARALLEL`** | How many simulations `calibrate-agent simulations` runs in parallel (text and voice). Read **natively by calibrate-agent**; the backend doesn't pass `-n`, it just lets the subprocess inherit this var. Unset ⇒ the CLI's own default.                                                    |
 
@@ -93,7 +94,7 @@ These are **not read directly** by most backend modules; they are passed through
 
 ## Observability / Langfuse / OpenTelemetry
 
-These variables appear in [`src/.env.example`](src/.env.example) and deployment manifests. **This FastAPI codebase does not reference most of them in Python**; they are intended for OpenTelemetry exporters and tooling (including **`calibrate`** subprocesses that inherit the environment). Align values with your Langfuse or OTLP collector setup ([`SELF_HOSTING.md`](SELF_HOSTING.md) has examples).
+These variables appear in [`src/.env.example`](src/.env.example) and deployment manifests. **This FastAPI codebase does not reference most of them in Python**; they are intended for OpenTelemetry exporters and tooling (including **`calibrate-agent`** subprocesses that inherit the environment). Align values with your Langfuse or OTLP collector setup ([`SELF_HOSTING.md`](SELF_HOSTING.md) has examples).
 
 | Variable                           | Meaning                                                                                                                                                                                                    |
 | ---------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
@@ -116,7 +117,7 @@ Partial defaults applied when creating agents ([`src/routers/agents.py`](src/rou
 | Variable                          | Meaning                                                                                               |
 | --------------------------------- | ----------------------------------------------------------------------------------------------------- |
 | **`DEFAULT_AGENT_SYSTEM_PROMPT`** | Default `system_prompt`. Hardcoded fallback: “You are a helpful assistant.”                           |
-| **`DEFAULT_AGENT_LLM_MODEL`**     | Default LLM model string (OpenRouter-style id). Fallback **`google/gemini-2.5-flash`**.               |
+| **`DEFAULT_AGENT_LLM_MODEL`**     | Default LLM model string (OpenRouter-style id). Fallback **`google/gemini-2.5-flash`** at agent creation ([`src/routers/agents.py`](src/routers/agents.py)) — this default didn't exist before commit `93f75fac` (2026-05-06), which introduced `_default_agent_config()`. The same var is also read at simulation runtime for agents whose stored config lacks `llm.model` ([`src/routers/simulations.py`](src/routers/simulations.py)), where the fallback is **`gpt-4.1`** — a much older hardcoded value dating to the simulation feature's original implementation (`3dd080d`, 2026-01-13); `93f75fac` only wrapped that pre-existing string in the shared env var, it didn't create it. Both predate the repo's first version tag (`v0.0.1`, 2026-05-11). |
 | **`DEFAULT_AGENT_STT_PROVIDER`**  | Default speech-to-text provider name. Fallback **`google`**.                                          |
 | **`DEFAULT_AGENT_TTS_PROVIDER`**  | Default text-to-speech provider name. Fallback **`google`**.                                          |
 | **`DEFAULT_AGENT_SPEAKS_FIRST`**  | Boolean (`1`/`true`/`yes`/`on`, etc.). Fallback in code is **`true`** (matches simulation behaviour). |
@@ -133,6 +134,18 @@ Used when building simulation run configuration and a persona omits fields ([`sr
 | **`DEFAULT_PERSONA_GENDER`**                   | Fallback persona gender. Default **`female`**.           |
 | **`DEFAULT_PERSONA_LANGUAGE`**                 | Fallback language. Default **`english`**.                |
 | **`DEFAULT_PERSONA_INTERRUPTION_SENSITIVITY`** | Fallback interruption sensitivity. Default **`medium`**. |
+
+---
+
+## Provider status monitor
+
+Background monitor in [`src/provider_status.py`](src/provider_status.py) that periodically runs `calibrate-agent status` and caches the result for `GET /provider-status`.
+
+| Variable                                   | Meaning                                                                  |
+| ------------------------------------------- | ------------------------------------------------------------------------- |
+| **`PROVIDER_STATUS_REFRESH_INTERVAL_SECONDS`** | How often the background monitor re-checks provider status. Default **`300`** (5 min). |
+| **`PROVIDER_STATUS_CACHE_MAX_AGE_SECONDS`**    | How stale the cached result can be before a request forces a fresh check. Default **`900`** (15 min). |
+| **`PROVIDER_STATUS_CHECK_TIMEOUT_SECONDS`**    | Timeout for a single `calibrate-agent status` invocation. Default **`120`**.  |
 
 ---
 

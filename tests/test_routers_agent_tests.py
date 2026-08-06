@@ -128,8 +128,8 @@ def test_agent_tests_link_crud(client):
     )
     assert again.status_code == 200
 
-    # List
-    assert client.get("/agent-tests").status_code == 200
+    # List (the global unauthenticated GET /agent-tests link-list was removed)
+    assert client.get("/agent-tests", headers=h).status_code == 405
     assert (
         client.get(
             f"/agent-tests/agent/{agent['uuid']}/tests", headers=h
@@ -137,9 +137,14 @@ def test_agent_tests_link_crud(client):
         == 200
     )
     assert (
-        client.get(f"/agent-tests/test/{test_a['uuid']}/agents").status_code == 200
+        client.get(
+            f"/agent-tests/test/{test_a['uuid']}/agents", headers=h
+        ).status_code
+        == 200
     )
-    assert client.get("/agent-tests/test/missing/agents").status_code == 404
+    assert (
+        client.get("/agent-tests/test/missing/agents", headers=h).status_code == 404
+    )
     assert (
         client.get("/agent-tests/agent/missing/tests", headers=h).status_code == 404
     )
@@ -166,11 +171,13 @@ def test_agent_tests_link_crud(client):
     empty = client.post(
         "/agent-tests/bulk-unlink",
         json={"agent_uuid": agent["uuid"], "test_uuids": []},
+        headers=h,
     )
     assert empty.status_code == 400
     bulk_unlink = client.post(
         "/agent-tests/bulk-unlink",
         json={"agent_uuid": agent["uuid"], "test_uuids": [test_a["uuid"]]},
+        headers=h,
     )
     assert bulk_unlink.status_code == 200
 
@@ -178,6 +185,7 @@ def test_agent_tests_link_crud(client):
     missing = client.post(
         "/agent-tests/bulk-unlink",
         json={"agent_uuid": NONEXISTENT_UUID, "test_uuids": [test_b["uuid"]]},
+        headers=h,
     )
     assert missing.status_code == 404
 
@@ -885,12 +893,95 @@ def test_agent_tests_link_with_missing(client):
 def test_agent_tests_delete_link_not_found(client):
     auth = _signup(client)
     h = auth["headers"]
+    # Missing agent
     resp = client.request(
         "DELETE",
         "/agent-tests",
         json={"agent_uuid": NONEXISTENT_UUID, "test_uuid": NONEXISTENT_UUID_2},
+        headers=h,
     )
     assert resp.status_code == 404
+
+    # Existing agent, missing link
+    agent = _create_agent(client, h)
+    resp = client.request(
+        "DELETE",
+        "/agent-tests",
+        json={"agent_uuid": agent["uuid"], "test_uuid": NONEXISTENT_UUID_2},
+        headers=h,
+    )
+    assert resp.status_code == 404
+
+
+def test_agent_tests_link_routes_require_auth_and_org(client):
+    """The link-management routes are JWT-authed and org-scoped: no auth → 403,
+    another org's agent/test → 404 (and the link is left intact)."""
+    auth = _signup(client)
+    h = auth["headers"]
+    agent = _create_agent(client, h)
+    test = _create_test(client, h)
+    client.post(
+        "/agent-tests",
+        json={"agent_uuid": agent["uuid"], "test_uuids": [test["uuid"]]},
+        headers=h,
+    )
+
+    # Unauthenticated → 403 (HTTPBearer rejects the missing header)
+    assert client.get(f"/agent-tests/test/{test['uuid']}/agents").status_code == 403
+    assert (
+        client.request(
+            "DELETE",
+            "/agent-tests",
+            json={"agent_uuid": agent["uuid"], "test_uuid": test["uuid"]},
+        ).status_code
+        == 403
+    )
+    assert (
+        client.post(
+            "/agent-tests/bulk-unlink",
+            json={"agent_uuid": agent["uuid"], "test_uuids": [test["uuid"]]},
+        ).status_code
+        == 403
+    )
+
+    # Another org's caller → 404 on all three
+    other = _signup(client)["headers"]
+    assert (
+        client.get(
+            f"/agent-tests/test/{test['uuid']}/agents", headers=other
+        ).status_code
+        == 404
+    )
+    assert (
+        client.request(
+            "DELETE",
+            "/agent-tests",
+            json={"agent_uuid": agent["uuid"], "test_uuid": test["uuid"]},
+            headers=other,
+        ).status_code
+        == 404
+    )
+    assert (
+        client.post(
+            "/agent-tests/bulk-unlink",
+            json={"agent_uuid": agent["uuid"], "test_uuids": [test["uuid"]]},
+            headers=other,
+        ).status_code
+        == 404
+    )
+
+    # The cross-org attempts didn't unlink anything: the owner still sees the
+    # linked agent and can unlink it.
+    r = client.get(f"/agent-tests/test/{test['uuid']}/agents", headers=h)
+    assert r.status_code == 200
+    assert any(a["uuid"] == agent["uuid"] for a in r.json())
+    unlink = client.request(
+        "DELETE",
+        "/agent-tests",
+        json={"agent_uuid": agent["uuid"], "test_uuid": test["uuid"]},
+        headers=h,
+    )
+    assert unlink.status_code == 200
 
 
 # ---------------------------------------------------------------------------
