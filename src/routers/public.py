@@ -22,16 +22,16 @@ from db import (
     get_annotation_job_by_token,
     get_annotation_job_by_view_token,
     get_annotation_task,
-    get_evaluator_ids_for_job,
     get_evaluators_for_job,
     get_annotator,
     get_job_items,
     get_annotations_for_job,
-    upsert_annotation,
+    bulk_upsert_annotations,
     update_annotation_job_status,
     get_evaluator_runs_for_job,
     get_eval_job_items,
 )
+from llm_judge import enrich_evaluators_with_live_version
 from utils import (
     TaskStatus,
     AnnotationStatus,
@@ -807,24 +807,11 @@ def _build_annotation_job_payload(
     # Read the SNAPSHOTTED evaluator set so the labelling form columns match
     # exactly what was assigned at job creation, regardless of subsequent
     # link/unlink on the parent task.
-    evaluators = get_evaluators_for_job(job["uuid"])
-    # Enrich each evaluator with the live version's rubric, variable specs,
-    # and derived scale bounds so the FE has everything it needs to render
+    # The rubric, variable specs, and derived scale bounds let the FE render
     # the labelling form without a second roundtrip.
-    from llm_judge import _scale_bounds  # local to avoid module-load cycle
-
-    for ev in evaluators:
-        version = (
-            get_evaluator_version(ev["live_version_id"])
-            if ev.get("live_version_id")
-            else None
-        )
-        output_config = version.get("output_config") if version else None
-        scale_min, scale_max = _scale_bounds(output_config)
-        ev["output_config"] = output_config
-        ev["scale_min"] = scale_min
-        ev["scale_max"] = scale_max
-        ev["variables"] = version.get("variables") if version else None
+    evaluators = enrich_evaluators_with_live_version(get_evaluators_for_job(job["uuid"]))
+    # Each item carries its own `evaluator_ids` (frozen at job creation), so the
+    # form shows only the evaluators that item asks for.
     items = get_job_items(job["uuid"])
     # Annotators open this form unauthenticated and may keep it open for hours;
     # sign TTS audio with a long TTL so playback doesn't die mid-session.
@@ -918,38 +905,40 @@ def upsert_public_annotations(
     # soft-deleted after the job was created, but the snapshot is what the
     # annotator is actually labeling.
     job_items = get_job_items(job["uuid"])
-    if not any(it["uuid"] == payload.item_id for it in job_items):
+    item = next((it for it in job_items if it["uuid"] == payload.item_id), None)
+    if item is None:
         raise HTTPException(status_code=404, detail="Item not found in this job")
 
-    # Validate that every non-null `evaluator_id` is in the job's snapshotted
-    # evaluator set (NOT the task's current linked set — the contract is
-    # frozen at job creation). Without this, a token holder could upsert
-    # annotations against any evaluator UUID — polluting downstream agreement
-    # aggregates that read `annotations` joined through `annotation_jobs`.
-    # `evaluator_id IS NULL` is the row-level overall annotation case and is
-    # always allowed.
-    linked_evaluator_ids = set(get_evaluator_ids_for_job(job["uuid"]))
+    # Validate that every non-null `evaluator_id` is one this item asks for
+    # (frozen at job creation, not the task's current linked set). Without
+    # this, a token holder could upsert annotations against any evaluator UUID,
+    # polluting downstream agreement aggregates that read `annotations` joined
+    # through `annotation_jobs`. `evaluator_id IS NULL` is the row-level
+    # overall annotation and is always allowed.
+    item_evaluator_ids = set(item["evaluator_ids"])
     invalid = [
         entry.evaluator_id
         for entry in payload.annotations
         if entry.evaluator_id is not None
-        and entry.evaluator_id not in linked_evaluator_ids
+        and entry.evaluator_id not in item_evaluator_ids
     ]
     if invalid:
         raise HTTPException(
-            status_code=400,
-            detail=f"Evaluator(s) not linked to this task: {invalid}",
+            status_code=422,
+            detail=f"Evaluator(s) not assigned to this item: {invalid}",
         )
 
-    saved_uuids: List[str] = []
-    for entry in payload.annotations:
-        annotation_uuid = upsert_annotation(
-            job_id=job["uuid"],
-            item_id=payload.item_id,
-            evaluator_id=entry.evaluator_id,
-            value=entry.value,
-        )
-        saved_uuids.append(annotation_uuid)
+    saved_uuids = bulk_upsert_annotations(
+        [
+            {
+                "job_id": job["uuid"],
+                "item_id": payload.item_id,
+                "evaluator_id": entry.evaluator_id,
+                "value": entry.value,
+            }
+            for entry in payload.annotations
+        ]
+    )
 
     if job["status"] == "pending":
         update_annotation_job_status(job["uuid"], "in_progress")
@@ -958,18 +947,17 @@ def upsert_public_annotations(
     # We re-check on every save (including post-completion edits) so the
     # status remains accurate. `completed_at` is preserved on subsequent
     # edits — it marks the first time the job was fully filled.
-    # Both the items AND the evaluator set are read from the job's snapshot
-    # so post-creation link/unlink on the parent task can't shift the
+    # Both the items AND each item's evaluator set are read from the job's
+    # snapshot so post-creation link/unlink on the parent task can't shift the
     # completion bar under the annotator.
     job_items = get_job_items(job["uuid"])
-    evaluator_ids = get_evaluator_ids_for_job(job["uuid"])
     annotated_pairs = {
         (a["item_id"], a.get("evaluator_id"))
         for a in get_annotations_for_job(job["uuid"])
         if a.get("evaluator_id") is not None
     }
     expected_pairs = {
-        (it["uuid"], ev_id) for it in job_items for ev_id in evaluator_ids
+        (it["uuid"], ev_id) for it in job_items for ev_id in it["evaluator_ids"]
     }
     completed = bool(expected_pairs) and expected_pairs.issubset(annotated_pairs)
     if completed and job["status"] != "completed":

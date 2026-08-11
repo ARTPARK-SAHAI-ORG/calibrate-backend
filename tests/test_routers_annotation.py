@@ -806,7 +806,7 @@ def test_annotation_jobs_crud(client):
         },
         headers=h,
     )
-    assert bad_ev.status_code == 400
+    assert bad_ev.status_code == 422
 
     # Successful upsert
     upsert = client.post(

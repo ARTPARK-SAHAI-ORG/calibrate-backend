@@ -15,7 +15,7 @@ For mixed types within a slot, only same-type pairs contribute.
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
-from typing import Any, Dict, Iterable, List, Optional, Tuple
+from typing import Any, Dict, Iterable, List, Optional, Set, Tuple
 
 
 # All agreement floats returned to callers are rounded to this many decimal
@@ -98,6 +98,23 @@ def _pairwise_agreement(
 
 def _slot_key(annotation: Dict[str, Any]) -> Tuple[str, Optional[str]]:
     return (annotation["item_id"], annotation.get("evaluator_id"))
+
+
+def filter_to_applicable(
+    rows: Iterable[Dict[str, Any]],
+    applicable_pairs: Set[Tuple[str, str]],
+) -> List[Dict[str, Any]]:
+    """Keep only annotations or evaluator_runs whose (item_id, evaluator_id)
+    still applies, so rows left behind by an unlinked evaluator stay in the
+    table without counting toward an agreement denominator. Rows with
+    `evaluator_id is None` are the item's row-level overall judgement, tied to
+    no evaluator, and are always kept."""
+    return [
+        r
+        for r in rows
+        if r.get("evaluator_id") is None
+        or (r.get("item_id"), r.get("evaluator_id")) in applicable_pairs
+    ]
 
 
 def filter_runs_to_live_versions(

@@ -17,6 +17,7 @@ from annotation_metrics import (
     evaluator_human_pair_agreement,
     evaluator_result_summary,
     filter_runs_to_live_versions,
+    filter_to_applicable,
     has_any_comparable_pair,
     per_item_agreement,
     trend_series,
@@ -86,6 +87,31 @@ def test_filter_runs_to_live_versions():
     out = filter_runs_to_live_versions(runs, {"e1": "v-live", "e2": None})
     assert len(out) == 1
     assert out[0]["evaluator_id"] == "e1"
+
+
+def test_filter_to_applicable():
+    rows = [
+        {"item_id": "i1", "evaluator_id": "e1"},
+        {"item_id": "i1", "evaluator_id": "e2"},  # no longer applies to i1
+        {"item_id": "i2", "evaluator_id": "e2"},
+        {"item_id": "i1", "evaluator_id": None},  # row-level comment, always kept
+        {"item_id": "i9", "evaluator_id": None},  # even on an unlisted item
+    ]
+    before = [dict(r) for r in rows]
+    out = filter_to_applicable(rows, {("i1", "e1"), ("i2", "e2")})
+    assert out == [
+        {"item_id": "i1", "evaluator_id": "e1"},
+        {"item_id": "i2", "evaluator_id": "e2"},
+        {"item_id": "i1", "evaluator_id": None},
+        {"item_id": "i9", "evaluator_id": None},
+    ]
+    # An empty applicable set drops every evaluator row but keeps the
+    # row-level ones.
+    assert filter_to_applicable(rows, set()) == [
+        {"item_id": "i1", "evaluator_id": None},
+        {"item_id": "i9", "evaluator_id": None},
+    ]
+    assert rows == before
 
 
 def test_aggregate_agreement_empty_and_full():

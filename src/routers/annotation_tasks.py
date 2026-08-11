@@ -9,8 +9,15 @@ import secrets
 logger = logging.getLogger(__name__)
 
 from db import (
+    applicable_pairs_for_tasks,
+    bulk_upsert_annotations,
+    count_customised_items,
     create_annotation_task,
+    effective_evaluator_ids,
     ensure_name_unique,
+    get_evaluators_by_uuids,
+    get_evaluator_versions_by_uuids,
+    set_evaluator_ids_for_items,
     get_annotation_task,
     get_all_annotation_tasks,
     update_annotation_task,
@@ -21,8 +28,6 @@ from db import (
     set_evaluators_for_annotation_task,
     get_evaluators_for_annotation_task,
     get_evaluators_for_annotation_tasks,
-    get_evaluator,
-    get_evaluator_version,
     get_annotations_for_task,
     get_annotations_for_slots,
     create_annotation_items,
@@ -112,6 +117,10 @@ _ITEM_PAYLOAD_DESCRIPTION = (
     "`evaluator_variables` maps an evaluator ID to that evaluator's `{{variable}}` values for this item"
 )
 
+_CUSTOMISED_ITEM_COUNT_DESCRIPTION = (
+    "How many items carry their own evaluator list instead of following the task"
+)
+
 # Representative payloads, one per task type, surfaced as request examples in the docs.
 _ITEM_PAYLOAD_EXAMPLES = [
     {
@@ -182,6 +191,13 @@ class EvaluatorRunLaunchResponse(BaseModel):
     )
     evaluator_count: int = Field(description="How many evaluators the job will run")
     item_count: int = Field(description="How many items the job will run on")
+    skipped_pair_count: int = Field(
+        description="How many of the requested item and evaluator pairs were skipped because the evaluator does not judge that item"
+    )
+    evaluators_with_no_items: List[str] = Field(
+        description="IDs of requested evaluators skipped because they judge none of the selected items",
+        examples=[[_EXAMPLE_ID]],
+    )
 
 
 class PaginationMeta(BaseModel):
@@ -310,6 +326,7 @@ from annotation_metrics import (
     trend_series,
     trend_series_human_evaluator,
     filter_runs_to_live_versions,
+    filter_to_applicable,
     _pairwise_agreement,
     _scalar,
     _round_agreement,
@@ -334,34 +351,48 @@ def _runs_at_live_versions(
 
 # Re-exported for tests; canonical home is llm_judge so agent-tests/STT/TTS can
 # share the same scalar→label mapping.
-from llm_judge import evaluator_value_name as _evaluator_value_name  # noqa: E402
+from llm_judge import (  # noqa: E402
+    enrich_evaluators_with_live_version,
+    evaluator_value_name as _evaluator_value_name,
+)
 
 
-def _enrich_evaluators_with_live_version(
-    evaluators: List[Dict[str, Any]],
+def _with_effective_evaluator_ids(
+    items: List[Dict[str, Any]], task_evaluator_ids_ordered: List[str]
 ) -> List[Dict[str, Any]]:
-    """Mutate `evaluators` in place to add live-version fields the FE
-    needs to render the labelling form / display values against the
-    correct rubric: `output_config`, `scale_min`, `scale_max`,
-    `variables`. Mirrors the public-form enrichment in `routers/public.py`
-    so the owner-side and annotator-side responses match. Versions are
-    fetched via a tiny cache for each call so a task with N evaluators that
-    happen to share a live version (rare) doesn't issue N reads."""
-    from llm_judge import _scale_bounds  # local to avoid module-load cycle
+    """Add each item's resolved evaluator list alongside its raw one, so a
+    client can tell "follows the task" from "has its own list" and still know
+    what actually applies."""
+    for item in items:
+        item["effective_evaluator_ids"] = effective_evaluator_ids(
+            item.get("evaluator_ids"), task_evaluator_ids_ordered
+        )
+    return items
 
-    version_cache: Dict[str, Optional[Dict[str, Any]]] = {}
-    for ev in evaluators:
-        live_version_id = ev.get("live_version_id")
-        if live_version_id and live_version_id not in version_cache:
-            version_cache[live_version_id] = get_evaluator_version(live_version_id)
-        version = version_cache.get(live_version_id) if live_version_id else None
-        output_config = version.get("output_config") if version else None
-        scale_min, scale_max = _scale_bounds(output_config)
-        ev["output_config"] = output_config
-        ev["scale_min"] = scale_min
-        ev["scale_max"] = scale_max
-        ev["variables"] = version.get("variables") if version else None
-    return evaluators
+
+def _task_evaluator_ids(task_uuid: str) -> List[str]:
+    return [e["uuid"] for e in get_evaluators_for_annotation_task(task_uuid)]
+
+
+def _validate_item_evaluator_ids(
+    evaluator_ids: List[str], linked_ids: List[str], *, where: str
+) -> List[str]:
+    """Dedupe a caller-supplied per-item evaluator list and reject anything the
+    task is not linked to."""
+    deduped = list(dict.fromkeys(evaluator_ids))
+    if not deduped:
+        raise HTTPException(
+            status_code=400,
+            detail=f"{where}: evaluator_ids must be non-empty",
+        )
+    linked = set(linked_ids)
+    unknown = [e for e in deduped if e not in linked]
+    if unknown:
+        raise HTTPException(
+            status_code=400,
+            detail=f"{where}: evaluator_ids not linked to this task: {unknown}",
+        )
+    return deduped
 
 
 router = APIRouter(prefix="/annotation-tasks", tags=["annotation-tasks"])
@@ -407,6 +438,11 @@ class AnnotationTaskResponse(BaseModel):
     )
     item_count: Optional[int] = Field(
         None, description="Number of items in the task"
+    )
+    customised_item_count: Optional[int] = Field(
+        None,
+        description=_CUSTOMISED_ITEM_COUNT_DESCRIPTION
+        + ". Returned when you fetch one task by ID",
     )
     has_agreement: bool = Field(
         default=False,
@@ -470,6 +506,9 @@ class EvaluatorSetResponse(BaseModel):
     unlinked: List[str] = Field(
         description="Evaluator IDs unlinked by this request"
     )
+    customised_item_count: int = Field(
+        description=_CUSTOMISED_ITEM_COUNT_DESCRIPTION
+    )
 
 
 def _ensure_owned_task(task_uuid: str, org_uuid: str) -> Dict[str, Any]:
@@ -529,11 +568,14 @@ def list_annotation_tasks(
     evaluators_by_task = get_evaluators_for_annotation_tasks(page_task_ids)
     # All-time `has_agreement` flag, computed for the page in two reads scoped
     # to the page's tasks (no per-task N+1, no whole-org scan).
+    applicable = applicable_pairs_for_tasks(page_task_ids)
     annotations_by_task: Dict[str, List[Dict[str, Any]]] = {}
-    for ann in get_annotations_for_tasks(page_task_ids):
+    for ann in filter_to_applicable(get_annotations_for_tasks(page_task_ids), applicable):
         annotations_by_task.setdefault(ann.get("task_id"), []).append(ann)
     runs_by_task: Dict[str, List[Dict[str, Any]]] = {}
-    for run in get_evaluator_runs_for_tasks(page_task_ids):
+    for run in filter_to_applicable(
+        get_evaluator_runs_for_tasks(page_task_ids), applicable
+    ):
         runs_by_task.setdefault(run.get("task_id"), []).append(run)
     for task in page:
         linked = evaluators_by_task.get(task["uuid"], [])
@@ -557,11 +599,12 @@ def get_annotation_task_endpoint(
 ):
     """Get one annotation task with linked evaluators, items, and labelling jobs"""
     task = _ensure_owned_task(task_uuid, ctx.org_uuid)
-    evaluators = _enrich_evaluators_with_live_version(
+    evaluators = enrich_evaluators_with_live_version(
         get_evaluators_for_annotation_task(task_uuid)
     )
     task["evaluators"] = evaluators
     task["jobs"] = get_jobs_for_task_detailed(task_uuid)
+    task["customised_item_count"] = count_customised_items(task_uuid)
 
     items = get_annotation_items_for_task(task_uuid)
     # Pre-fetch annotations + evaluator_runs once and bucket by item to avoid
@@ -569,8 +612,11 @@ def get_annotation_task_endpoint(
     # agreement uses whichever evaluator version actually ran on each slot —
     # the live-version filter is reserved for AGGREGATED agreement (task-level
     # `/agreement` and account-level `/annotation-agreement/trend`).
-    all_annotations = get_annotations_for_task(task_uuid)
-    all_runs = get_evaluator_runs_for_task(task_uuid)
+    applicable = applicable_pairs_for_tasks([task_uuid])
+    all_annotations = filter_to_applicable(
+        get_annotations_for_task(task_uuid), applicable
+    )
+    all_runs = filter_to_applicable(get_evaluator_runs_for_task(task_uuid), applicable)
     annotations_by_item: Dict[str, List[Dict[str, Any]]] = {}
     for a in all_annotations:
         annotations_by_item.setdefault(a["item_id"], []).append(a)
@@ -578,11 +624,12 @@ def get_annotation_task_endpoint(
     for r in all_runs:
         runs_by_item.setdefault(r["item_id"], []).append(r)
     evaluator_ids = [e["uuid"] for e in evaluators]
+    _with_effective_evaluator_ids(items, evaluator_ids)
     for item in items:
         item["agreement"] = per_item_agreement(
             annotations_by_item.get(item["uuid"], []),
             runs_by_item.get(item["uuid"], []),
-            evaluator_ids,
+            item["effective_evaluator_ids"],
         )
     # Same all-time flag the list endpoint sets, so the detail view agrees.
     # Aggregated agreement filters runs to each evaluator's live version.
@@ -664,11 +711,7 @@ def list_task_evaluators(
         _live_version_index,
         _version_dict,
     )
-    from db import (
-        get_evaluators_by_uuids,
-        get_evaluator_versions_by_uuids,
-        get_evaluator_versions_for_evaluators,
-    )
+    from db import get_evaluator_versions_for_evaluators
 
     _ensure_owned_task(task_uuid, ctx.org_uuid)
     # `get_evaluators_for_annotation_task` projects a slim column set with a
@@ -781,6 +824,7 @@ def set_task_evaluators(
         evaluator_ids=current_ids,
         linked=changed["linked"],
         unlinked=changed["unlinked"],
+        customised_item_count=count_customised_items(task_uuid),
     )
 
 
@@ -797,6 +841,11 @@ class AnnotationItemPayload(BaseModel):
         None,
         description="Human annotations to seed, keyed by evaluator ID. Each evaluator ID must be linked to the task. Put the judgement in `value`, a bool for binary or a number for rating, with optional `reasoning`. Requires `annotator_id`",
         examples=[{_EXAMPLE_ID: {"value": True, "reasoning": "meets the bar"}}],
+    )
+    evaluator_ids: Optional[List[str]] = Field(
+        None,
+        description="IDs of the evaluators to judge this item on. Each must be linked to the task. Omit to follow the task's evaluators",
+        examples=[[_EXAMPLE_ID]],
     )
 
 
@@ -823,7 +872,9 @@ def list_task_items(
 ):
     """List non-deleted items in a task"""
     _ensure_owned_task(task_uuid, ctx.org_uuid)
-    return get_annotation_items_for_task(task_uuid)
+    return _with_effective_evaluator_ids(
+        get_annotation_items_for_task(task_uuid), _task_evaluator_ids(task_uuid)
+    )
 
 
 class AnnotatedItemsCheckRequest(BaseModel):
@@ -931,8 +982,10 @@ def bulk_create_items(
             },
         )
     existing_name_to_uuid: Dict[str, str] = {}
+    existing_by_uuid: Dict[str, Dict[str, Any]] = {}
     if task.get("item_count", 0) > 0:
         existing_items = get_annotation_items_for_task(task_uuid)
+        existing_by_uuid = {it["uuid"]: it for it in existing_items}
         existing_name_to_uuid = {
             it["payload"]["name"]: it["uuid"]
             for it in existing_items
@@ -971,16 +1024,41 @@ def bulk_create_items(
             },
         )
 
-    annotator: Optional[Dict[str, Any]] = None
-    linked_evaluator_ids: set = set()
+    linked_ids = _task_evaluator_ids(task_uuid)
+    # Per-request-index evaluator list: what the caller asked for on a new item,
+    # or what an existing name-matched item already carries.
+    own_evaluator_ids: Dict[int, Optional[List[str]]] = {}
+    # Evaluator list to write onto an existing item matched by name.
+    existing_evaluator_updates: Dict[str, Optional[List[str]]] = {}
+    for i, it in enumerate(payload.items):
+        supplied = (
+            _validate_item_evaluator_ids(
+                it.evaluator_ids, linked_ids, where=f"items[{i}]"
+            )
+            if it.evaluator_ids is not None
+            else None
+        )
+        if i in matched_existing:
+            if supplied is not None:
+                own_evaluator_ids[i] = supplied
+                existing_evaluator_updates[matched_existing[i]] = supplied
+            else:
+                own_evaluator_ids[i] = existing_by_uuid.get(
+                    matched_existing[i], {}
+                ).get("evaluator_ids")
+            continue
+        own_evaluator_ids[i] = supplied
+    effective_by_index: Dict[int, List[str]] = {
+        i: effective_evaluator_ids(own_evaluator_ids[i], linked_ids)
+        for i in range(len(payload.items))
+    }
+
     if items_with_annotations:
         annotator = get_annotator(payload.annotator_id)
         if not annotator or annotator.get("org_uuid") != ctx.org_uuid:
             # 404 (not 403) — avoid leaking existence
             raise HTTPException(status_code=404, detail="Annotator not found")
-        linked_evaluator_ids = {
-            e["uuid"] for e in get_evaluators_for_annotation_task(task_uuid)
-        }
+        linked_evaluator_ids = set(linked_ids)
         for idx, it in enumerate(items_with_annotations):
             if not isinstance(it.annotations, dict):
                 raise HTTPException(
@@ -1031,11 +1109,30 @@ def bulk_create_items(
                         ),
                     )
 
+        # An annotation can only be seeded on an evaluator that actually
+        # applies to that item, so the job has a slot to hold it.
+        for i, it in enumerate(payload.items):
+            if not it.annotations:
+                continue
+            applies = set(effective_by_index[i])
+            off_item = [ev for ev in it.annotations.keys() if ev not in applies]
+            if off_item:
+                raise HTTPException(
+                    status_code=400,
+                    detail=(
+                        f"items[{i}].annotations reference evaluator(s) that do "
+                        f"not apply to this item: {off_item}"
+                    ),
+                )
+
+    if existing_evaluator_updates:
+        set_evaluator_ids_for_items(task_uuid, existing_evaluator_updates)
+
     # Create only the items that don't already exist by name.
     new_uuids = create_annotation_items(
         task_uuid,
         [
-            {"payload": it.payload}
+            {"payload": it.payload, "evaluator_ids": own_evaluator_ids[i]}
             for i, it in enumerate(payload.items)
             if i not in matched_existing
         ],
@@ -1058,77 +1155,37 @@ def bulk_create_items(
         # snapshot — leaving their slots blank, which the auto-complete
         # check at job-status-time treats the same as a partial form.
         public_token = secrets.token_urlsafe(24)
-        job_uuid = create_annotation_job(
-            task_id=task_uuid,
-            annotator_id=payload.annotator_id,
-            item_uuids=all_item_uuids,
-            public_token=public_token,
-            status="pending",
-        )
-        # Re-validate every requested evaluator_id against the job's own
-        # snapshot, not the pre-creation linked set. Concurrent
-        # link/unlink between the upstream check and `create_annotation_job`
-        # can shift the snapshot under us; without this gate we'd persist
-        # annotations on slots the job doesn't own, polluting downstream
-        # `annotations`-by-task reads. Same contract enforced by the
-        # public-form upsert endpoint in `routers/public.py`.
-        snapshot_evaluator_ids = set(get_evaluator_ids_for_job(job_uuid))
-        snapshot_mismatch: List[str] = []
-        for it in payload.items:
-            if not it.annotations:
-                continue
-            for evaluator_id in it.annotations.keys():
-                if evaluator_id not in snapshot_evaluator_ids:
-                    snapshot_mismatch.append(evaluator_id)
-        if snapshot_mismatch:
-            # Roll back only the newly-created items and the job. Existing
-            # items that were matched by name must not be soft-deleted.
-            if new_uuids:
-                try:
-                    soft_delete_annotation_items(task_uuid, new_uuids)
-                except Exception as e:
-                    logger.warning(
-                        f"[bulk-create-items] rollback: failed to soft-delete "
-                        f"items {new_uuids} after snapshot mismatch: {e}"
-                    )
-            try:
-                soft_delete_annotation_job(job_uuid)
-            except Exception as e:
-                logger.warning(
-                    f"[bulk-create-items] rollback: failed to soft-delete "
-                    f"job {job_uuid} after snapshot mismatch: {e}"
-                )
-            raise HTTPException(
-                status_code=409,
-                detail=(
-                    f"Evaluator(s) were unlinked from this task between "
-                    f"validation and job creation: {sorted(set(snapshot_mismatch))}. "
-                    f"Re-link them and retry, or drop them from the request. "
-                    f"(The created items and job have been rolled back; "
-                    f"safe to retry as-is.)"
-                ),
+        try:
+            job_uuid = create_annotation_job(
+                task_id=task_uuid,
+                annotator_id=payload.annotator_id,
+                item_uuids=all_item_uuids,
+                public_token=public_token,
+                status="pending",
             )
-        any_annotation_written = False
-        for i, it in enumerate(payload.items):
-            if not it.annotations:
-                continue
-            item_uuid = item_uuid_by_index[i]
-            for evaluator_id, value in it.annotations.items():
-                upsert_annotation(
-                    job_id=job_uuid,
-                    item_id=item_uuid,
-                    value=value,
-                    evaluator_id=evaluator_id,
-                )
-                any_annotation_written = True
-        # Auto-complete contract: every item × every evaluator IN THE JOB
-        # SNAPSHOT must have a row. Same source of truth as the public-form
-        # auto-complete path (`get_evaluator_ids_for_job`) — see also the
-        # snapshot-mismatch gate above which uses the same set.
+        except ValueError as e:
+            raise HTTPException(status_code=400, detail=str(e))
+        entries = [
+            {
+                "job_id": job_uuid,
+                "item_id": item_uuid_by_index[i],
+                "value": value,
+                "evaluator_id": evaluator_id,
+            }
+            for i, it in enumerate(payload.items)
+            if it.annotations
+            for evaluator_id, value in it.annotations.items()
+        ]
+        bulk_upsert_annotations(entries)
+        any_annotation_written = bool(entries)
+        # Auto-complete contract: every evaluator that applies to an item must
+        # have a row on it. Items with no applicable evaluator are not in the
+        # job at all, so they can't hold it open.
         items_fully_annotated = all(
             it.annotations
-            and snapshot_evaluator_ids.issubset(set(it.annotations.keys()))
-            for it in payload.items
+            and set(effective_by_index[i]).issubset(set(it.annotations.keys()))
+            for i, it in enumerate(payload.items)
+            if effective_by_index[i]
         )
         if any_annotation_written and items_fully_annotated:
             update_annotation_job_status(
@@ -1161,13 +1218,19 @@ class ItemUpdatePayload(BaseModel):
         examples=[_EXAMPLE_ID],
     )
     payload: Any = Field(
-        description="The item's new payload. `payload['name']` is still required and must be unique within the task"
+        None,
+        description="The item's new payload. `payload['name']` is required and must be unique within the task. Omit to leave unchanged",
+    )
+    evaluator_ids: Optional[List[str]] = Field(
+        None,
+        description="IDs of the evaluators to judge this item on. Each must be linked to the task. Send `null` to go back to following the task's evaluators. Omit to leave unchanged",
+        examples=[[_EXAMPLE_ID]],
     )
 
 
 class BulkUpdateItemsRequest(BaseModel):
     updates: List[ItemUpdatePayload] = Field(
-        description="The new payload for each item you're updating. Entries not in this task, or referencing deleted items, are skipped"
+        description="What to change on each item you're updating. Entries not in this task, or referencing deleted items, are skipped"
     )
 
 
@@ -1180,21 +1243,24 @@ def bulk_update_items(
     payload: BulkUpdateItemsRequest = ...,
     ctx: OrgContext = Depends(get_org_jwt_or_api_key),
 ):
-    """Bulk-update item payloads in a task"""
+    """Update several items in a task at once"""
     task = _ensure_owned_task(task_uuid, ctx.org_uuid)
     if not payload.updates:
         raise HTTPException(status_code=400, detail="updates must be non-empty")
 
-    # A replacement payload must keep a non-empty `name`, same as create — an
-    # update replaces the whole payload, so a missing name would leave the item
-    # nameless and break the task-wide uniqueness invariant.
+    # An update that sends a payload replaces the whole payload, so a missing
+    # name would leave the item nameless and break the task-wide uniqueness
+    # invariant. Updates that only change evaluators never touch the payload.
+    with_payload = [
+        i for i, u in enumerate(payload.updates) if "payload" in u.model_fields_set
+    ]
     missing = [
         i
-        for i, u in enumerate(payload.updates)
+        for i in with_payload
         if not (
-            isinstance(u.payload, dict)
-            and isinstance(u.payload.get("name"), str)
-            and u.payload["name"]
+            isinstance(payload.updates[i].payload, dict)
+            and isinstance(payload.updates[i].payload.get("name"), str)
+            and payload.updates[i].payload["name"]
         )
     ]
     if missing:
@@ -1207,9 +1273,8 @@ def bulk_update_items(
         )
 
     incoming_names = [
-        (u.uuid, u.payload["name"])
-        for u in payload.updates
-        if isinstance(u.payload, dict) and isinstance(u.payload.get("name"), str) and u.payload["name"]
+        (payload.updates[i].uuid, payload.updates[i].payload["name"])
+        for i in with_payload
     ]
     if incoming_names:
         names_in_batch = [n for _, n in incoming_names]
@@ -1246,10 +1311,24 @@ def bulk_update_items(
                 },
             )
 
+    linked_ids = _task_evaluator_ids(task_uuid)
+    updates: List[Dict[str, Any]] = []
+    for i, u in enumerate(payload.updates):
+        update: Dict[str, Any] = {"uuid": u.uuid}
+        if "payload" in u.model_fields_set:
+            update["payload"] = u.payload
+        if "evaluator_ids" in u.model_fields_set:
+            update["evaluator_ids"] = (
+                _validate_item_evaluator_ids(
+                    u.evaluator_ids, linked_ids, where=f"updates[{i}]"
+                )
+                if u.evaluator_ids is not None
+                else None
+            )
+        updates.append(update)
+
     try:
-        updated_count = bulk_update_annotation_items(
-            task_uuid, [u.dict() for u in payload.updates]
-        )
+        updated_count = bulk_update_annotation_items(task_uuid, updates)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
     return {"updated_count": updated_count}
@@ -1295,6 +1374,117 @@ def _resolve_target_item_ids(
     return [it["uuid"] for it in items]
 
 
+class ItemEvaluatorsBulkRequest(BaseModel):
+    action: Literal["add", "remove"] = Field(
+        description=(
+            "What to do with these evaluators on the selected items:\n\n"
+            "- `add`: also judge those items on them\n"
+            "- `remove`: stop judging those items on them"
+        )
+    )
+    evaluator_ids: List[str] = Field(
+        description="The evaluators to add or remove. Each must be linked to the task",
+        examples=[[_EXAMPLE_ID]],
+    )
+    item_ids: List[str] = Field(
+        default=[],
+        description="Item IDs to change. **Required when `select_all=false`**. Ignored when `select_all=true`",
+    )
+    select_all: bool = Field(
+        False,
+        description="When `true`, target every item in the task and ignore `item_ids`. Set `q` to target only items whose name matches it",
+    )
+    q: Optional[str] = Field(
+        None,
+        description="Case-insensitive substring filter on `payload.name`. Applies only when `select_all=true`",
+    )
+
+
+class ItemEvaluatorsBulkResponse(BaseModel):
+    updated_count: int = Field(
+        description="How many items had their evaluators changed. Items the change would not alter are not counted"
+    )
+
+
+@router.post(
+    "/{task_uuid}/items/evaluators",
+    response_model=ItemEvaluatorsBulkResponse,
+    summary="Add or remove evaluators on items",
+)
+def bulk_set_item_evaluators(
+    task_uuid: str = Path(
+        description="Annotation task to act on",
+        examples=["f47ac10b-58cc-4372-a567-0e02b2c3d479"],
+    ),
+    payload: ItemEvaluatorsBulkRequest = ...,
+    ctx: OrgContext = Depends(get_current_org),
+):
+    """Change which evaluators judge the selected items"""
+    _ensure_owned_task(task_uuid, ctx.org_uuid)
+    linked_ids = _task_evaluator_ids(task_uuid)
+    requested = set(
+        _validate_item_evaluator_ids(
+            payload.evaluator_ids, linked_ids, where="request"
+        )
+    )
+
+    all_items = get_annotation_items_for_task(task_uuid)
+    target_ids = _resolve_target_item_ids(
+        task_uuid,
+        select_all=payload.select_all,
+        item_ids=payload.item_ids,
+        q=payload.q,
+        items=all_items,
+    )
+    if not target_ids:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "no items selected (provide item_ids, or select_all=true with "
+                "a filter that matches at least one item)"
+            ),
+        )
+    items_by_id = {it["uuid"]: it for it in all_items}
+    invalid = [i for i in target_ids if i not in items_by_id]
+    if invalid:
+        raise HTTPException(
+            status_code=400, detail=f"item_ids not in this task: {invalid}"
+        )
+
+    writes: Dict[str, Optional[List[str]]] = {}
+    emptied: List[str] = []
+    for item_id in dict.fromkeys(target_ids):
+        own = items_by_id[item_id].get("evaluator_ids")
+        if payload.action == "add":
+            # An item with no list of its own already gets every evaluator the
+            # task has. Writing one would stop it following the task.
+            if own is None:
+                continue
+            keep = set(own) | requested
+        else:
+            keep = set(own if own is not None else linked_ids) - requested
+        # Entries an item holds that the task no longer links are dormant, not
+        # deleted: re-linking the evaluator on the task brings them back, so
+        # they are carried through untouched.
+        new_list = [e for e in linked_ids if e in keep] + [
+            e for e in (own or []) if e in keep and e not in linked_ids
+        ]
+        if not new_list:
+            emptied.append(item_id)
+            continue
+        if own is None or set(new_list) != set(own):
+            writes[item_id] = new_list
+    if emptied:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"This would leave item(s) with no evaluator at all: "
+                f"{sorted(emptied)}"
+            ),
+        )
+    return {"updated_count": set_evaluator_ids_for_items(task_uuid, writes)}
+
+
 class BulkDeleteItemsRequest(BaseModel):
     item_ids: List[str] = Field(
         default=[],
@@ -1319,7 +1509,7 @@ def bulk_delete_items(
     payload: BulkDeleteItemsRequest = ...,
     ctx: OrgContext = Depends(get_current_org),
 ):
-    """Soft-delete items in a task, using explicit IDs or a select-all filter"""
+    """Soft-delete items in a task"""
     _ensure_owned_task(task_uuid, ctx.org_uuid)
     target_ids = _resolve_target_item_ids(
         task_uuid,
@@ -1356,7 +1546,7 @@ def get_item(
     item = get_annotation_item(item_uuid)
     if not item or item.get("task_id") != task_uuid:
         raise HTTPException(status_code=404, detail="Item not found")
-    return item
+    return _with_effective_evaluator_ids([item], _task_evaluator_ids(task_uuid))[0]
 
 
 @router.get("/{task_uuid}/items/{item_uuid}/annotations", summary="List item annotations")
@@ -1428,7 +1618,7 @@ def create_jobs(
     payload: CreateJobsRequest = ...,
     ctx: OrgContext = Depends(get_current_org),
 ):
-    """Assign items to annotators, creating one labelling job per annotator"""
+    """Assign items to annotators, creating one labelling job for each annotator"""
     _ensure_owned_task(task_uuid, ctx.org_uuid)
     if not payload.annotator_ids:
         raise HTTPException(
@@ -1516,21 +1706,28 @@ def create_jobs(
     jobs_created = []
     for annotator_id in payload.annotator_ids:
         public_token = secrets.token_urlsafe(24)
-        job_uuid = create_annotation_job(
-            task_id=task_uuid,
-            annotator_id=annotator_id,
-            item_uuids=target_ids,
-            public_token=public_token,
-            evaluator_ids=evaluator_ids,
-        )
+        try:
+            job_uuid = create_annotation_job(
+                task_id=task_uuid,
+                annotator_id=annotator_id,
+                item_uuids=target_ids,
+                public_token=public_token,
+                evaluator_ids=evaluator_ids,
+            )
+        except ValueError as e:
+            raise HTTPException(status_code=400, detail=str(e))
+        # Items whose evaluators don't overlap the job's set are dropped at
+        # creation, so the real item list comes back from the job.
+        job_item_ids = [it["uuid"] for it in get_job_items(job_uuid)]
         jobs_created.append(
             {
                 "uuid": job_uuid,
                 "public_token": public_token,
                 "annotator_id": annotator_id,
                 "annotator_name": annotators_by_id[annotator_id]["name"],
-                "item_ids": target_ids,
-                "item_count": len(target_ids),
+                "item_ids": job_item_ids,
+                "item_count": len(job_item_ids),
+                "skipped_item_count": len(target_ids) - len(job_item_ids),
                 "evaluator_ids": get_evaluator_ids_for_job(job_uuid),
                 "status": "pending",
             }
@@ -1707,18 +1904,22 @@ def upsert_annotation_endpoint(
     # Validate against the job's snapshotted items, not the source items
     # table — the source may have been edited or soft-deleted, but the
     # snapshot is what this job is contracted to label.
-    job_item_ids = {it["uuid"] for it in get_job_items(payload.job_id)}
-    if payload.item_id not in job_item_ids:
+    job_items_by_id = {it["uuid"]: it for it in get_job_items(payload.job_id)}
+    if payload.item_id not in job_items_by_id:
         raise HTTPException(status_code=404, detail="Item not in this job")
 
-    # Validate against the job's snapshotted evaluator set. `evaluator_id IS
-    # NULL` is the row-level overall annotation case and is always allowed.
+    # Validate against the item's own snapshotted evaluator list, matching the
+    # public labelling route, so the two write paths agree on what is legal.
+    # `evaluator_id IS NULL` is the row-level overall annotation case and is
+    # always allowed.
     if payload.evaluator_id is not None:
-        snapshot_evaluator_ids = set(get_evaluator_ids_for_job(payload.job_id))
-        if payload.evaluator_id not in snapshot_evaluator_ids:
+        item_evaluator_ids = set(
+            job_items_by_id[payload.item_id].get("evaluator_ids") or []
+        )
+        if payload.evaluator_id not in item_evaluator_ids:
             raise HTTPException(
-                status_code=400,
-                detail=f"Evaluator not in this job: {payload.evaluator_id}",
+                status_code=422,
+                detail=f"Evaluator not assigned to this item: {payload.evaluator_id}",
             )
 
     annotation_uuid = upsert_annotation(
@@ -1848,15 +2049,42 @@ def start_evaluator_run(
         items = [items_by_id[i] for i in ordered_subset_ids]
         item_ids_persisted = ordered_subset_ids
 
-    linked = {
-        e["uuid"] for e in get_evaluators_for_annotation_task(task_uuid)
-    }
+    linked_ids = _task_evaluator_ids(task_uuid)
     try:
         resolved = _resolve_evaluator_dicts(
-            [e.dict() for e in payload.evaluators], linked
+            [e.dict() for e in payload.evaluators], set(linked_ids)
         )
     except EvaluatorResolutionError as e:
         raise HTTPException(status_code=400, detail=str(e))
+
+    # Narrow the run to the item and evaluator pairs that actually apply. An
+    # item judged by none of the requested evaluators has nothing to run, and
+    # an evaluator that applies to no selected item would produce no results.
+    requested_ids = [ev["uuid"] for ev in resolved]
+    applicable_by_item: Dict[str, List[str]] = {}
+    for it in items:
+        applies = set(
+            effective_evaluator_ids(it.get("evaluator_ids"), linked_ids)
+        )
+        applicable_by_item[it["uuid"]] = [e for e in requested_ids if e in applies]
+    included = [it for it in items if applicable_by_item[it["uuid"]]]
+    covered = {e for it in included for e in applicable_by_item[it["uuid"]]}
+    evaluators_with_no_items = [e for e in requested_ids if e not in covered]
+    skipped_pair_count = len(items) * len(requested_ids) - sum(
+        len(applicable_by_item[it["uuid"]]) for it in included
+    )
+    if not included:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "none of the selected items are judged by any of the requested "
+                "evaluators"
+            ),
+        )
+    resolved = [ev for ev in resolved if ev["uuid"] in covered]
+    items = included
+    item_ids_persisted = [it["uuid"] for it in included]
+    item_evaluator_ids = {i: applicable_by_item[i] for i in item_ids_persisted}
 
     # Validate item payload shape early so we 400 instead of failing async.
     try:
@@ -1885,6 +2113,7 @@ def start_evaluator_run(
                 ],
                 "item_count": len(items),
                 "item_ids": item_ids_persisted,
+                "item_evaluator_ids": item_evaluator_ids,
             },
         )
     # Snapshot the resolved item set onto the job so the runner reads
@@ -1907,6 +2136,8 @@ def start_evaluator_run(
         "status": initial_status,
         "evaluator_count": len(resolved),
         "item_count": len(items),
+        "skipped_pair_count": skipped_pair_count,
+        "evaluators_with_no_items": evaluators_with_no_items,
     }
 
 
@@ -1925,18 +2156,16 @@ def _enrich_runs_with_live_evaluator(
         return runs
     from llm_judge import _scale_bounds  # local to avoid cycle on module load
 
-    eval_cache: Dict[str, Optional[Dict[str, Any]]] = {}
-    version_cache: Dict[str, Optional[Dict[str, Any]]] = {}
+    evaluators = get_evaluators_by_uuids(
+        [r.get("evaluator_id") for r in runs if r.get("evaluator_id")]
+    )
+    versions = get_evaluator_versions_by_uuids(
+        [r.get("evaluator_version_id") for r in runs if r.get("evaluator_version_id")]
+    )
     out: List[Dict[str, Any]] = []
     for run in runs:
-        ev_id = run.get("evaluator_id")
-        if ev_id and ev_id not in eval_cache:
-            eval_cache[ev_id] = get_evaluator(ev_id)
-        ev = eval_cache.get(ev_id) if ev_id else None
-        version_id = run.get("evaluator_version_id")
-        if version_id and version_id not in version_cache:
-            version_cache[version_id] = get_evaluator_version(version_id)
-        version = version_cache.get(version_id) if version_id else None
+        ev = evaluators.get(run.get("evaluator_id"))
+        version = versions.get(run.get("evaluator_version_id"))
         enriched = dict(run)
         enriched["evaluator"] = (
             {
@@ -2014,20 +2243,16 @@ def _build_evaluators_block_for_eval_job(
                 entry["evaluator_id"], entry.get("name") or ""
             )
 
-    eval_cache: Dict[str, Optional[Dict[str, Any]]] = {}
-    version_cache: Dict[str, Optional[Dict[str, Any]]] = {}
+    evaluators = get_evaluators_by_uuids([ev_id for ev_id, _ in slots])
+    versions = get_evaluator_versions_by_uuids([v for _, v in slots if v])
     out: List[Dict[str, Any]] = []
     for ev_id, version_id in slots:
-        if ev_id not in eval_cache:
-            eval_cache[ev_id] = get_evaluator(ev_id)
-        ev = eval_cache.get(ev_id)
         # If the evaluator was soft-deleted we still want a stub entry so
         # rows[] consumers can resolve the slot — otherwise the FE sees
         # `evaluator_id` references with no matching block entry. Fields
         # we can't recover (description, output_type, rubric) stay null.
-        if version_id and version_id not in version_cache:
-            version_cache[version_id] = get_evaluator_version(version_id)
-        version = version_cache.get(version_id) if version_id else None
+        ev = evaluators.get(ev_id)
+        version = versions.get(version_id) if version_id else None
         output_config = version.get("output_config") if version else None
         # Apply the Correct/Wrong fallback for binary evaluators whose
         # pinned version has a null rubric — consistent with the other
@@ -2574,9 +2799,15 @@ def task_agreement(
 ):
     """Get human-vs-human and human-vs-evaluator agreement metrics for a task"""
     _ensure_owned_task(task_uuid, ctx.org_uuid)
-    annotations = get_annotations_for_task(task_uuid)
+    applicable = applicable_pairs_for_tasks([task_uuid])
+    annotations = filter_to_applicable(
+        get_annotations_for_task(task_uuid), applicable
+    )
     linked = get_evaluators_for_annotation_task(task_uuid)
-    runs = _runs_at_live_versions(get_evaluator_runs_for_task(task_uuid), linked)
+    runs = _runs_at_live_versions(
+        filter_to_applicable(get_evaluator_runs_for_task(task_uuid), applicable),
+        linked,
+    )
 
     hh_current, hh_pairs = aggregate_agreement(annotations)
     hh_series = trend_series(annotations, bucket=bucket, days=days)
@@ -2626,6 +2857,17 @@ def task_summary(
     task = _ensure_owned_task(task_uuid, ctx.org_uuid)
     items = get_annotation_items_for_task(task_uuid)
     evaluators = get_evaluators_for_annotation_task(task_uuid)
+    linked_ids = [e["uuid"] for e in evaluators]
+    # Rows are built from what applies to each item; the `evaluators` block
+    # still lists everything linked so the table keeps stable columns.
+    evaluators_by_item: Dict[str, List[Dict[str, Any]]] = {}
+    for it in items:
+        applies = set(
+            effective_evaluator_ids(it.get("evaluator_ids"), linked_ids)
+        )
+        evaluators_by_item[it["uuid"]] = [
+            e for e in evaluators if e["uuid"] in applies
+        ]
     # Per-row view: latest run wins regardless of version, and per-row
     # `evaluator_agreement` compares annotators against THAT run. Aggregated
     # agreement (task-level / account-level) is the only place we restrict to
@@ -2771,29 +3013,24 @@ def task_summary(
     ]
     annotators.sort(key=lambda x: ((x.get("name") or "").lower(), x["uuid"]))
 
-    version_cache: Dict[str, Optional[Dict[str, Any]]] = {}
-
     from llm_judge import _scale_bounds  # local to avoid module-load cycle
 
+    version_rows = get_evaluator_versions_by_uuids(
+        [v for ids in versions_by_evaluator.values() for v in ids]
+    )
+    version_meta_by_id: Dict[str, Dict[str, Any]] = {}
+    for v in version_rows.values():
+        scale_min, scale_max = _scale_bounds(v.get("output_config"))
+        version_meta_by_id[v["uuid"]] = {
+            "uuid": v["uuid"],
+            "version_number": v.get("version_number"),
+            "scale_min": scale_min,
+            "scale_max": scale_max,
+            "output_config": v.get("output_config"),
+        }
+
     def _version_meta(version_id: Optional[str]) -> Optional[Dict[str, Any]]:
-        if not version_id:
-            return None
-        if version_id in version_cache:
-            return version_cache[version_id]
-        v = get_evaluator_version(version_id)
-        if v:
-            scale_min, scale_max = _scale_bounds(v.get("output_config"))
-            meta = {
-                "uuid": v["uuid"],
-                "version_number": v.get("version_number"),
-                "scale_min": scale_min,
-                "scale_max": scale_max,
-                "output_config": v.get("output_config"),
-            }
-        else:
-            meta = None
-        version_cache[version_id] = meta
-        return meta
+        return version_meta_by_id.get(version_id) if version_id else None
 
 
     def _scalar_and_reasoning(value: Any) -> tuple:
@@ -2824,8 +3061,14 @@ def task_summary(
     # Shared agreement math for the row builder and the `disagreement_only`
     # pre-filter, so the paging count and the visible rows can't diverge.
 
+    human_scalars_cache: Dict[tuple, List[Any]] = {}
+    agreement_cache: Dict[tuple, Optional[float]] = {}
+
     def _slot_human_scalars(item_uuid: str, ev_id: str) -> List[Any]:
         """Non-null human annotation scalars for one (item, evaluator) slot."""
+        key = (item_uuid, ev_id)
+        if key in human_scalars_cache:
+            return human_scalars_cache[key]
         out: List[Any] = []
         for annotator in annotators:
             a = latest_ann.get((item_uuid, ev_id, annotator["uuid"]))
@@ -2834,20 +3077,31 @@ def task_summary(
             scalar = _scalar(a.get("value"))
             if scalar is not None:
                 out.append(scalar)
+        human_scalars_cache[key] = out
         return out
 
     def _evaluator_agreement(
-        run_value: Any, slot_human_scalars: List[Any]
+        item_uuid: str, ev_id: str, version_id: Optional[str]
     ) -> Optional[float]:
         """Evaluator-vs-human agreement for one (item, evaluator, version) slot,
         or None when the evaluator produced no value or there are no human
-        labels. Shares `evaluator_human_pair_agreement` with the task-level
-        rollup so the two endpoints stay consistent."""
+        labels. Computed once per slot and read by both the row builder and the
+        `disagreement_only` pre-filter, so the visible rows and the paging count
+        can't diverge. Shares `evaluator_human_pair_agreement` with the
+        task-level rollup so the two endpoints stay consistent."""
+        key = (item_uuid, ev_id, version_id)
+        if key in agreement_cache:
+            return agreement_cache[key]
+        humans = _slot_human_scalars(item_uuid, ev_id)
+        run = latest_run.get(key)
+        run_value = run.get("value") if run else None
         eval_scalar = _scalar(run_value) if run_value is not None else None
-        if eval_scalar is None or not slot_human_scalars:
-            return None
-        total, pairs = evaluator_human_pair_agreement(eval_scalar, slot_human_scalars)
-        return _round_agreement(total / pairs) if pairs > 0 else None
+        result: Optional[float] = None
+        if eval_scalar is not None and humans:
+            total, pairs = evaluator_human_pair_agreement(eval_scalar, humans)
+            result = _round_agreement(total / pairs) if pairs > 0 else None
+        agreement_cache[key] = result
+        return result
 
     def _is_disagreement(agreement: Optional[float]) -> bool:
         """A slot disagrees when the evaluator scored below perfect agreement.
@@ -2857,17 +3111,13 @@ def task_summary(
     def _item_disagrees(item: Dict[str, Any]) -> bool:
         """True if any (evaluator, version) slot on this item disagrees."""
         item_uuid = item["uuid"]
-        for ev in evaluators:
+        for ev in evaluators_by_item.get(item_uuid, []):
             ev_id = ev["uuid"]
-            live_v = ev.get("live_version_id")
-            slot_human_scalars = _slot_human_scalars(item_uuid, ev_id)
-            if not slot_human_scalars:
+            if not _slot_human_scalars(item_uuid, ev_id):
                 continue
-            for version_id in _version_row_keys(ev_id, live_v):
-                run = latest_run.get((item_uuid, ev_id, version_id))
-                run_value = run.get("value") if run else None
+            for version_id in _version_row_keys(ev_id, ev.get("live_version_id")):
                 if _is_disagreement(
-                    _evaluator_agreement(run_value, slot_human_scalars)
+                    _evaluator_agreement(item_uuid, ev_id, version_id)
                 ):
                     return True
         return False
@@ -2887,7 +3137,7 @@ def task_summary(
         # Annotations are not version-scoped (the table has no
         # `evaluator_version_id`), so the same per-evaluator annotation cells
         # are reused across every version row for that (item, evaluator).
-        for ev in evaluators:
+        for ev in evaluators_by_item.get(item["uuid"], []):
             ev_id = ev["uuid"]
             live_v = ev.get("live_version_id")
 
@@ -2916,7 +3166,7 @@ def task_summary(
                 version_meta = _version_meta(version_id)
 
                 evaluator_agreement = _evaluator_agreement(
-                    run_value, slot_human_scalars
+                    item["uuid"], ev_id, version_id
                 )
 
                 rows.append(

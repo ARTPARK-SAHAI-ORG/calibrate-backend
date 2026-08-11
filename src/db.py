@@ -5,7 +5,7 @@ import uuid
 from os.path import join
 import os
 from pathlib import Path
-from typing import Optional, List, Dict, Any, TYPE_CHECKING
+from typing import Optional, List, Dict, Any, Tuple, TYPE_CHECKING
 from contextlib import contextmanager
 
 if TYPE_CHECKING:
@@ -959,6 +959,27 @@ def init_db():
         # frozen copies — edits/deletes on the source item don't affect jobs.
         try:
             cursor.execute("ALTER TABLE annotation_job_items ADD COLUMN payload TEXT")
+        except sqlite3.OperationalError:
+            pass
+
+        # Per-item evaluator selection. NULL means "inherit the task's linked
+        # set". An item's saved list is never rewritten when the task's set
+        # changes; it is filtered against the task at read time — see
+        # `effective_evaluator_ids`.
+        try:
+            cursor.execute(
+                "ALTER TABLE annotation_items ADD COLUMN evaluator_ids TEXT DEFAULT NULL"
+            )
+        except sqlite3.OperationalError:
+            pass
+
+        # The item's evaluator list frozen into the job at creation time,
+        # already crossed with the job's own evaluator filter. NULL reads as
+        # the job's full evaluator snapshot.
+        try:
+            cursor.execute(
+                "ALTER TABLE annotation_job_items ADD COLUMN evaluator_ids TEXT DEFAULT NULL"
+            )
         except sqlite3.OperationalError:
             pass
 
@@ -8242,6 +8263,22 @@ def delete_annotator(annotator_uuid: str) -> bool:
 # ============ Annotation Items ============
 
 
+def effective_evaluator_ids(
+    item_evaluator_ids: Optional[List[str]],
+    task_evaluator_ids_ordered: List[str],
+) -> List[str]:
+    """Which evaluators apply to one item: its own list, or the task's if it
+    has none, intersected with what the task still links, in task order.
+
+    Filtering at read time rather than rewriting item rows is what lets an
+    evaluator be unlinked and re-linked without losing each item's own choice.
+    """
+    if item_evaluator_ids is None:
+        return list(task_evaluator_ids_ordered)
+    chosen = set(item_evaluator_ids)
+    return [e for e in task_evaluator_ids_ordered if e in chosen]
+
+
 def _parse_annotation_item_row(row: sqlite3.Row) -> Dict[str, Any]:
     item = dict(row)
     if item.get("payload"):
@@ -8249,12 +8286,21 @@ def _parse_annotation_item_row(row: sqlite3.Row) -> Dict[str, Any]:
             item["payload"] = json.loads(item["payload"])
         except (TypeError, ValueError):
             pass
+    if item.get("evaluator_ids"):
+        try:
+            item["evaluator_ids"] = json.loads(item["evaluator_ids"])
+        except (TypeError, ValueError):
+            item["evaluator_ids"] = None
+    else:
+        item["evaluator_ids"] = None
     return item
 
 
 def create_annotation_items(task_id: str, items: List[Dict[str, Any]]) -> List[str]:
     """Bulk insert annotation items. Each `items[i]` must have a `payload`
-    (dict, list, or any JSON-serialisable value). Returns new item UUIDs."""
+    (dict, list, or any JSON-serialisable value) and may carry an optional
+    `evaluator_ids` list (omit or None to inherit the task's set). Returns new
+    item UUIDs."""
     if not items:
         return []
     new_uuids: List[str] = []
@@ -8265,16 +8311,116 @@ def create_annotation_items(task_id: str, items: List[Dict[str, Any]]) -> List[s
                 raise ValueError("each item must include a non-null `payload`")
             item_uuid = str(uuid.uuid4())
             payload_json = json.dumps(it["payload"])
+            ev_ids = it.get("evaluator_ids")
             cursor.execute(
                 """
-                INSERT INTO annotation_items (uuid, task_id, payload, updated_at)
-                VALUES (?, ?, ?, CURRENT_TIMESTAMP)
+                INSERT INTO annotation_items
+                    (uuid, task_id, payload, evaluator_ids, updated_at)
+                VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP)
                 """,
-                (item_uuid, task_id, payload_json),
+                (
+                    item_uuid,
+                    task_id,
+                    payload_json,
+                    json.dumps(list(ev_ids)) if ev_ids is not None else None,
+                ),
             )
             new_uuids.append(item_uuid)
         conn.commit()
     return new_uuids
+
+
+def applicable_pairs_for_tasks(task_ids: List[str]) -> set:
+    """Every `(item_id, evaluator_id)` pair that currently applies, across the
+    given tasks.
+
+    Agreement is measured over pairs that apply *now*. An annotation for an
+    evaluator later dropped from its item is kept in the table on purpose (so
+    re-adding the evaluator restores the history) but must not count toward a
+    denominator, and this set is what the metrics filter against."""
+    if not task_ids:
+        return set()
+    unique_ids = list({t for t in task_ids if t})
+    if not unique_ids:
+        return set()
+    placeholders = ",".join("?" for _ in unique_ids)
+    with get_db_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            f"""
+            SELECT task_id, evaluator_id FROM annotation_task_evaluators
+             WHERE task_id IN ({placeholders}) AND deleted_at IS NULL
+             ORDER BY position ASC, id ASC
+            """,
+            unique_ids,
+        )
+        task_evs: Dict[str, List[str]] = {}
+        for r in cursor.fetchall():
+            task_evs.setdefault(r["task_id"], []).append(r["evaluator_id"])
+
+        cursor.execute(
+            f"""
+            SELECT uuid, task_id, evaluator_ids FROM annotation_items
+             WHERE task_id IN ({placeholders}) AND deleted_at IS NULL
+            """,
+            unique_ids,
+        )
+        pairs = set()
+        for r in cursor.fetchall():
+            raw = r["evaluator_ids"]
+            try:
+                own = json.loads(raw) if raw else None
+            except (TypeError, ValueError):
+                own = None
+            for ev in effective_evaluator_ids(own, task_evs.get(r["task_id"], [])):
+                pairs.add((r["uuid"], ev))
+        return pairs
+
+
+def count_customised_items(task_id: str) -> int:
+    """How many live items in the task have their own evaluator list. Zero
+    means every item follows the task, so a client adding an evaluator has
+    nobody to ask about."""
+    with get_db_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            """
+            SELECT COUNT(*) AS n FROM annotation_items
+             WHERE task_id = ? AND deleted_at IS NULL
+               AND evaluator_ids IS NOT NULL
+            """,
+            (task_id,),
+        )
+        return int(cursor.fetchone()["n"])
+
+
+def set_evaluator_ids_for_items(
+    task_id: str, evaluator_ids_by_item: Dict[str, Optional[List[str]]]
+) -> int:
+    """Write `evaluator_ids` on several items of one task in one transaction.
+    A None value clears the item back to inheriting. Items not in this task
+    or soft-deleted are skipped silently. Returns rows updated."""
+    if not evaluator_ids_by_item:
+        return 0
+    rows_updated = 0
+    with get_db_connection() as conn:
+        cursor = conn.cursor()
+        for item_uuid, ev_ids in evaluator_ids_by_item.items():
+            cursor.execute(
+                """
+                UPDATE annotation_items
+                   SET evaluator_ids = ?, updated_at = CURRENT_TIMESTAMP
+                 WHERE uuid = ? AND task_id = ? AND deleted_at IS NULL
+                """,
+                (
+                    json.dumps(list(ev_ids)) if ev_ids is not None else None,
+                    item_uuid,
+                    task_id,
+                ),
+            )
+            rows_updated += cursor.rowcount
+        conn.commit()
+    return rows_updated
 
 
 def get_annotation_item(item_uuid: str) -> Optional[Dict[str, Any]]:
@@ -8289,9 +8435,16 @@ def get_annotation_item(item_uuid: str) -> Optional[Dict[str, Any]]:
 
 
 def bulk_update_annotation_items(task_id: str, updates: List[Dict[str, Any]]) -> int:
-    """Update `payload` on multiple items in one task. Each `updates[i]` must
-    have `uuid` and `payload`. Items not in this task or soft-deleted are
-    skipped silently. Returns rows updated."""
+    """Update `payload` and/or `evaluator_ids` on multiple items in one task.
+
+    Each `updates[i]` must have `uuid`. `payload` and `evaluator_ids` both use
+    the `...` sentinel for "not supplied, leave the column alone", so callers
+    can send either field independently and an explicit
+    `evaluator_ids=None` clears an item back to inheriting the task's set.
+    Omitting a field entirely and passing None for it are different things.
+
+    Items not in this task or soft-deleted are skipped silently. Returns rows
+    updated."""
     if not updates:
         return 0
     rows_updated = 0
@@ -8301,15 +8454,28 @@ def bulk_update_annotation_items(task_id: str, updates: List[Dict[str, Any]]) ->
             item_uuid = u.get("uuid")
             if not item_uuid:
                 raise ValueError("each update must include `uuid`")
-            if "payload" not in u or u["payload"] is None:
-                raise ValueError("each update must include a non-null `payload`")
+            payload = u.get("payload", ...)
+            ev_ids = u.get("evaluator_ids", ...)
+            if payload is None:
+                raise ValueError("`payload` cannot be null; omit it to leave it alone")
+            sets: List[str] = []
+            params: List[Any] = []
+            if payload is not ...:
+                sets.append("payload = ?")
+                params.append(json.dumps(payload))
+            if ev_ids is not ...:
+                sets.append("evaluator_ids = ?")
+                params.append(json.dumps(list(ev_ids)) if ev_ids is not None else None)
+            if not sets:
+                continue
+            sets.append("updated_at = CURRENT_TIMESTAMP")
             cursor.execute(
-                """
+                f"""
                 UPDATE annotation_items
-                   SET payload = ?, updated_at = CURRENT_TIMESTAMP
+                   SET {', '.join(sets)}
                  WHERE uuid = ? AND task_id = ? AND deleted_at IS NULL
                 """,
-                (json.dumps(u["payload"]), item_uuid, task_id),
+                [*params, item_uuid, task_id],
             )
             rows_updated += cursor.rowcount
         conn.commit()
@@ -8436,33 +8602,22 @@ def create_annotation_job(
     job_uuid = str(uuid.uuid4())
     with get_db_connection() as conn:
         cursor = conn.cursor()
-        # Snapshot the current payload of every item we're about to assign.
+        # Snapshot the current payload and evaluator list of every item we're
+        # about to assign.
         placeholders = ",".join("?" for _ in item_uuids)
         cursor.execute(
-            f"SELECT uuid, payload FROM annotation_items "
+            f"SELECT uuid, payload, evaluator_ids FROM annotation_items "
             f"WHERE uuid IN ({placeholders}) AND deleted_at IS NULL",
             item_uuids,
         )
         rows = cursor.fetchall()
-        payload_by_uuid = {r["uuid"]: r["payload"] for r in rows}
-        missing = [u for u in item_uuids if u not in payload_by_uuid]
+        item_by_uuid = {r["uuid"]: r for r in rows}
+        missing = [u for u in item_uuids if u not in item_by_uuid]
         if missing:
             raise ValueError(
                 f"Cannot snapshot item(s) — not found or already deleted: {missing}"
             )
 
-        cursor.execute(
-            """
-            INSERT INTO annotation_jobs (uuid, task_id, annotator_id, public_token, status)
-            VALUES (?, ?, ?, ?, ?)
-            """,
-            (job_uuid, task_id, annotator_id, public_token, status),
-        )
-        cursor.executemany(
-            "INSERT INTO annotation_job_items (job_id, item_id, payload) "
-            "VALUES (?, ?, ?)",
-            [(job_uuid, item_id, payload_by_uuid[item_id]) for item_id in item_uuids],
-        )
         # Snapshot the currently-linked evaluator set. Reads via
         # `get_evaluator_ids_for_job` give the auto-complete check a stable
         # view independent of later link/unlink on the parent task. The
@@ -8485,6 +8640,49 @@ def create_annotation_job(
             # positions stay gap-free).
             wanted = set(evaluator_ids)
             snapshot_rows = [r for r in snapshot_rows if r["evaluator_id"] in wanted]
+        job_evaluator_ids = [r["evaluator_id"] for r in snapshot_rows]
+
+        # Cross each item's own evaluator list with the job's filter. Because
+        # `job_evaluator_ids` is already the task's set in task order,
+        # resolving against it does the crossing and the ordering in one go.
+        # An item left with nothing has no questions to answer, so it is
+        # dropped from the job rather than shown blank; callers report the
+        # count by diffing against `get_job_items`.
+        item_rows: List[Tuple[str, str, str, str]] = []
+        for item_id in item_uuids:
+            row = item_by_uuid[item_id]
+            raw = row["evaluator_ids"]
+            try:
+                own = json.loads(raw) if raw else None
+            except (TypeError, ValueError):
+                own = None
+            item_evs = effective_evaluator_ids(own, job_evaluator_ids)
+            # A job on a task with no linked evaluators still collects the
+            # row-level overall annotation, so an empty set here is only a
+            # reason to drop the item when there was something to cross with.
+            if job_evaluator_ids and not item_evs:
+                continue
+            item_rows.append(
+                (job_uuid, item_id, row["payload"], json.dumps(item_evs))
+            )
+        if not item_rows:
+            raise ValueError(
+                "No item has an evaluator in common with this job's evaluator "
+                "set — nothing to label"
+            )
+
+        cursor.execute(
+            """
+            INSERT INTO annotation_jobs (uuid, task_id, annotator_id, public_token, status)
+            VALUES (?, ?, ?, ?, ?)
+            """,
+            (job_uuid, task_id, annotator_id, public_token, status),
+        )
+        cursor.executemany(
+            "INSERT INTO annotation_job_items "
+            "(job_id, item_id, payload, evaluator_ids) VALUES (?, ?, ?, ?)",
+            item_rows,
+        )
         if snapshot_rows:
             cursor.executemany(
                 "INSERT INTO annotation_job_evaluators "
@@ -9060,15 +9258,20 @@ def get_eval_job_items(job_uuid: str) -> List[Dict[str, Any]]:
 def get_job_items(job_uuid: str) -> List[Dict[str, Any]]:
     """Return the snapshotted items for a job. Read from `annotation_job_items.payload`
     so edits/deletes on the source `annotation_items` row don't affect the
-    job's view. `task_id` comes from the parent job (stable)."""
+    job's view. `task_id` comes from the parent job (stable).
+
+    Each row's `evaluator_ids` is the item's evaluator list frozen at job
+    creation, already crossed with the job's own evaluator filter. NULL falls
+    back to the job's full evaluator snapshot."""
     with get_db_connection() as conn:
         cursor = conn.cursor()
         cursor.execute(
             """
-            SELECT ji.id           AS id,
-                   ji.item_id      AS uuid,
-                   ji.payload      AS payload,
-                   j.task_id       AS task_id
+            SELECT ji.id            AS id,
+                   ji.item_id       AS uuid,
+                   ji.payload       AS payload,
+                   ji.evaluator_ids AS evaluator_ids,
+                   j.task_id        AS task_id
               FROM annotation_job_items ji
               JOIN annotation_jobs j ON j.uuid = ji.job_id
              WHERE ji.job_id = ? AND j.deleted_at IS NULL
@@ -9076,14 +9279,31 @@ def get_job_items(job_uuid: str) -> List[Dict[str, Any]]:
             """,
             (job_uuid,),
         )
+        rows = cursor.fetchall()
+        legacy_fallback: Optional[List[str]] = None
         out: List[Dict[str, Any]] = []
-        for row in cursor.fetchall():
+        for row in rows:
             d = dict(row)
             if d.get("payload"):
                 try:
                     d["payload"] = json.loads(d["payload"])
                 except (TypeError, ValueError):
                     pass
+            raw = d.get("evaluator_ids")
+            if raw:
+                try:
+                    d["evaluator_ids"] = json.loads(raw)
+                except (TypeError, ValueError):
+                    raw = None
+            if not raw:
+                if legacy_fallback is None:
+                    cursor.execute(
+                        "SELECT evaluator_id FROM annotation_job_evaluators "
+                        "WHERE job_id = ? ORDER BY position ASC, id ASC",
+                        (job_uuid,),
+                    )
+                    legacy_fallback = [r["evaluator_id"] for r in cursor.fetchall()]
+                d["evaluator_ids"] = list(legacy_fallback)
             out.append(d)
         return out
 
@@ -9129,55 +9349,92 @@ def upsert_annotation(
     Insert or update a judgement for (job_id, item_id, evaluator_id).
     Pass evaluator_id=None for a row-level (overall) annotation.
     """
-    value_json = json.dumps(value) if value is not None else None
     with get_db_connection() as conn:
         cursor = conn.cursor()
-        # SQLite treats NULLs as distinct in UNIQUE constraints, so handle row-level
-        # (evaluator_id IS NULL) explicitly. We deliberately DO match
-        # soft-deleted rows on the lookup: the table has UNIQUE(job_id,
-        # item_id, evaluator_id), so an INSERT against a tombstone would fail
-        # the constraint. Instead, upsert resurrects the row (clears
-        # `deleted_at`) and writes the new value — keeping the column
-        # consistent with how `annotation_task_evaluators` restore links.
-        if evaluator_id is None:
-            cursor.execute(
-                """
-                SELECT uuid FROM annotations
-                 WHERE job_id = ? AND item_id = ? AND evaluator_id IS NULL
-                """,
-                (job_id, item_id),
-            )
-        else:
-            cursor.execute(
-                """
-                SELECT uuid FROM annotations
-                 WHERE job_id = ? AND item_id = ? AND evaluator_id = ?
-                """,
-                (job_id, item_id, evaluator_id),
-            )
-        existing = cursor.fetchone()
-        if existing:
-            cursor.execute(
-                """
-                UPDATE annotations
-                   SET value = ?, updated_at = CURRENT_TIMESTAMP, deleted_at = NULL
-                 WHERE uuid = ?
-                """,
-                (value_json, existing["uuid"]),
-            )
-            conn.commit()
-            return existing["uuid"]
-
-        annotation_uuid = str(uuid.uuid4())
-        cursor.execute(
-            """
-            INSERT INTO annotations (uuid, job_id, item_id, evaluator_id, value)
-            VALUES (?, ?, ?, ?, ?)
-            """,
-            (annotation_uuid, job_id, item_id, evaluator_id, value_json),
+        annotation_uuid = _upsert_annotation_row(
+            cursor, job_id, item_id, value, evaluator_id
         )
         conn.commit()
         return annotation_uuid
+
+
+def bulk_upsert_annotations(entries: List[Dict[str, Any]]) -> List[str]:
+    """Upsert many judgements in one transaction. Each entry takes
+    `job_id`, `item_id`, `value` and an optional `evaluator_id`. Same
+    semantics as `upsert_annotation` per row; exists so seeding a bulk upload
+    doesn't open one connection per (item, evaluator) pair."""
+    if not entries:
+        return []
+    with get_db_connection() as conn:
+        cursor = conn.cursor()
+        out = [
+            _upsert_annotation_row(
+                cursor,
+                e["job_id"],
+                e["item_id"],
+                e.get("value"),
+                e.get("evaluator_id"),
+            )
+            for e in entries
+        ]
+        conn.commit()
+        return out
+
+
+def _upsert_annotation_row(
+    cursor: sqlite3.Cursor,
+    job_id: str,
+    item_id: str,
+    value: Optional[Dict[str, Any]],
+    evaluator_id: Optional[str] = None,
+) -> str:
+    """Cursor-level upsert shared by the single and bulk entry points. Does
+    not commit."""
+    value_json = json.dumps(value) if value is not None else None
+    # SQLite treats NULLs as distinct in UNIQUE constraints, so handle row-level
+    # (evaluator_id IS NULL) explicitly. We deliberately DO match
+    # soft-deleted rows on the lookup: the table has UNIQUE(job_id,
+    # item_id, evaluator_id), so an INSERT against a tombstone would fail
+    # the constraint. Instead, upsert resurrects the row (clears
+    # `deleted_at`) and writes the new value — keeping the column
+    # consistent with how `annotation_task_evaluators` restore links.
+    if evaluator_id is None:
+        cursor.execute(
+            """
+            SELECT uuid FROM annotations
+             WHERE job_id = ? AND item_id = ? AND evaluator_id IS NULL
+            """,
+            (job_id, item_id),
+        )
+    else:
+        cursor.execute(
+            """
+            SELECT uuid FROM annotations
+             WHERE job_id = ? AND item_id = ? AND evaluator_id = ?
+            """,
+            (job_id, item_id, evaluator_id),
+        )
+    existing = cursor.fetchone()
+    if existing:
+        cursor.execute(
+            """
+            UPDATE annotations
+               SET value = ?, updated_at = CURRENT_TIMESTAMP, deleted_at = NULL
+             WHERE uuid = ?
+            """,
+            (value_json, existing["uuid"]),
+        )
+        return existing["uuid"]
+
+    annotation_uuid = str(uuid.uuid4())
+    cursor.execute(
+        """
+        INSERT INTO annotations (uuid, job_id, item_id, evaluator_id, value)
+        VALUES (?, ?, ?, ?, ?)
+        """,
+        (annotation_uuid, job_id, item_id, evaluator_id, value_json),
+    )
+    return annotation_uuid
 
 
 def get_annotated_item_ids(annotator_id: str, item_ids: List[str]) -> List[str]:

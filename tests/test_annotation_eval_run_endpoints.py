@@ -337,7 +337,7 @@ def test_build_evaluators_block_keeps_stub_for_deleted_evaluator():
     raw_runs = [
         {"evaluator_id": "ev-gone", "evaluator_version_id": None}
     ]
-    with patch("routers.annotation_tasks.get_evaluator", return_value=None):
+    with patch("routers.annotation_tasks.get_evaluators_by_uuids", return_value={}):
         block = _build_evaluators_block_for_eval_job(job_details, raw_runs)
     assert len(block) == 1
     assert block[0]["uuid"] == "ev-gone"
@@ -443,18 +443,26 @@ def test_build_evaluators_block_applies_binary_default_for_null_rubric():
     }
     raw_runs = [{"evaluator_id": "ev-1", "evaluator_version_id": "v-legacy"}]
     with patch(
-        "routers.annotation_tasks.get_evaluator",
+        "routers.annotation_tasks.get_evaluators_by_uuids",
         return_value={
-            "uuid": "ev-1",
-            "name": "Safety",
-            "description": "d",
-            "output_type": "binary",
-            "evaluator_type": "llm",
-            "data_type": "text",
+            "ev-1": {
+                "uuid": "ev-1",
+                "name": "Safety",
+                "description": "d",
+                "output_type": "binary",
+                "evaluator_type": "llm",
+                "data_type": "text",
+            }
         },
     ), patch(
-        "routers.annotation_tasks.get_evaluator_version",
-        return_value={"uuid": "v-legacy", "version_number": 1, "output_config": None},
+        "routers.annotation_tasks.get_evaluator_versions_by_uuids",
+        return_value={
+            "v-legacy": {
+                "uuid": "v-legacy",
+                "version_number": 1,
+                "output_config": None,
+            }
+        },
     ):
         block = _build_evaluators_block_for_eval_job(job_details, raw_runs)
     assert len(block) == 1

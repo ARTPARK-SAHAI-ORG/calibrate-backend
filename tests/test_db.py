@@ -1972,8 +1972,11 @@ def test_annotation_pipeline(user):
         db.create_annotation_items(task_uuid, [{"payload": None}])
     with pytest.raises(ValueError):
         db.bulk_update_annotation_items(task_uuid, [{"payload": {"x": 1}}])
+    # Neither `payload` nor `evaluator_ids` supplied: nothing to change, so
+    # the entry is skipped rather than rejected.
+    assert db.bulk_update_annotation_items(task_uuid, [{"uuid": item_ids[0]}]) == 0
     with pytest.raises(ValueError):
-        db.bulk_update_annotation_items(task_uuid, [{"uuid": item_ids[0]}])
+        db.bulk_update_annotation_items(task_uuid, [{"uuid": item_ids[0], "payload": None}])
 
     # evaluator link to task
     seeded = db.get_evaluator_by_slug("default-safety")

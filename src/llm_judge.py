@@ -116,6 +116,35 @@ def _scale_bounds(output_config: Optional[Dict[str, Any]]) -> tuple[Optional[flo
     return (min(numeric_values), max(numeric_values))
 
 
+def enrich_evaluators_with_live_version(
+    evaluators: List[Dict[str, Any]],
+) -> List[Dict[str, Any]]:
+    """Add the live version's rubric fields (`output_config`, `scale_min`,
+    `scale_max`, `variables`) to each evaluator, in place.
+
+    Every surface that renders an evaluator against its rubric needs these:
+    the owner-side task detail and summary, and the annotator-side labelling
+    form. Versions are fetched in one batched read. An evaluator with no live
+    version gets None across the board rather than being dropped, so a slot
+    still renders.
+    """
+    from db import get_evaluator_versions_by_uuids
+
+    version_ids = [
+        ev["live_version_id"] for ev in evaluators if ev.get("live_version_id")
+    ]
+    versions = get_evaluator_versions_by_uuids(version_ids) if version_ids else {}
+    for ev in evaluators:
+        version = versions.get(ev.get("live_version_id"))
+        output_config = version.get("output_config") if version else None
+        scale_min, scale_max = _scale_bounds(output_config)
+        ev["output_config"] = output_config
+        ev["scale_min"] = scale_min
+        ev["scale_max"] = scale_max
+        ev["variables"] = version.get("variables") if version else None
+    return evaluators
+
+
 def _calibrate_evaluator_def(
     ev: Dict[str, Any],
     rendered_prompt: str,

@@ -285,7 +285,7 @@ def test_public_annotation_job_upsert_flow(client):
     )
     assert bad_item.status_code == 404
 
-    # POST annotation with unknown evaluator → 400
+    # POST annotation with an evaluator this item does not ask for → 422
     bad_ev = client.post(
         f"/public/annotation-jobs/{public_token}/annotations",
         json={
@@ -295,7 +295,7 @@ def test_public_annotation_job_upsert_flow(client):
             ],
         },
     )
-    assert bad_ev.status_code == 400
+    assert bad_ev.status_code == 422
 
     # POST proper annotations for item1
     ok1 = client.post(

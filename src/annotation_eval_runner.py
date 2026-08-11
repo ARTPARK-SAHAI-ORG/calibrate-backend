@@ -271,6 +271,24 @@ class DatasetBuildError(ValueError):
 # ---------------------------------------------------------------------------
 
 
+# ponytail: the stt, tts, conversation and llm-general CLI modes have no
+# per-row evaluator selection, so every evaluator grades every row and the
+# non-applicable results are dropped here instead of never being produced —
+# correct output, wasted tokens. Upgrade path: one CLI run per distinct
+# evaluator set, merged on the way back.
+def _pair_applies(
+    item_evaluator_ids: Optional[Dict[str, List[str]]],
+    item_id: str,
+    evaluator_id: str,
+) -> bool:
+    """An absent/empty map, or an item missing from it, means every evaluator
+    applies to that item."""
+    if not item_evaluator_ids:
+        return True
+    applicable = item_evaluator_ids.get(item_id)
+    return applicable is None or evaluator_id in applicable
+
+
 def _payload_dict(item: Dict[str, Any]) -> Dict[str, Any]:
     payload = item.get("payload")
     if not isinstance(payload, dict):
@@ -297,7 +315,9 @@ def _build_stt_dataset(items: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
 
 
 def _build_llm_dataset(
-    items: List[Dict[str, Any]], evaluators_resolved: List[Dict[str, Any]]
+    items: List[Dict[str, Any]],
+    evaluators_resolved: List[Dict[str, Any]],
+    item_evaluator_ids: Optional[Dict[str, List[str]]] = None,
 ) -> List[Dict[str, Any]]:
     """LLM --eval-only: [{test_case: {id, history, evaluation}, output: {response, tool_calls}}].
 
@@ -329,7 +349,9 @@ def _build_llm_dataset(
             raise DatasetBuildError(
                 f"Item {it['uuid']}: `tool_calls` must be a list if provided"
             )
-        criteria_refs = _criteria_refs_for_item(it, payload, evaluators_resolved)
+        criteria_refs = _criteria_refs_for_item(
+            it, payload, evaluators_resolved, item_evaluator_ids
+        )
         out.append(
             {
                 "test_case": {
@@ -377,14 +399,19 @@ def _criteria_refs_for_item(
     it: Dict[str, Any],
     payload: Dict[str, Any],
     evaluators_resolved: List[Dict[str, Any]],
+    item_evaluator_ids: Optional[Dict[str, List[str]]] = None,
 ) -> List[Dict[str, Any]]:
     """Build the per-test `evaluation.criteria` refs from an item's optional
-    `evaluator_variables` map. Each ref is `{name, arguments?}`; missing entries
-    → no arguments → calibrate falls back to the prompt placeholder/default.
-    Used by the `llm` dataset builder."""
+    `evaluator_variables` map, limited to the evaluators that apply to the item.
+    Each ref is `{name, arguments?}`; missing entries → no arguments → calibrate
+    falls back to the prompt placeholder/default. Used by the `llm` dataset
+    builder."""
     per_evaluator_vars = _validated_evaluator_variables(it, payload)
+    applicable = (item_evaluator_ids or {}).get(it["uuid"])
     criteria_refs: List[Dict[str, Any]] = []
     for ev in evaluators_resolved:
+        if applicable is not None and ev["uuid"] not in applicable:
+            continue
         ref: Dict[str, Any] = {"name": ev["name"]}
         args = per_evaluator_vars.get(ev["uuid"]) or {}
         if args:
@@ -394,7 +421,9 @@ def _criteria_refs_for_item(
 
 
 def _build_llm_general_dataset(
-    items: List[Dict[str, Any]], evaluators_resolved: List[Dict[str, Any]]
+    items: List[Dict[str, Any]],
+    evaluators_resolved: List[Dict[str, Any]],
+    item_evaluator_ids: Optional[Dict[str, List[str]]] = None,
 ) -> List[Dict[str, Any]]:
     """`calibrate general` dataset: a flat list of non-conversational
     `{id, input, output, arguments?}` rows. No agent and no conversation —
@@ -426,7 +455,9 @@ def _build_llm_general_dataset(
             )
         # Identical per-evaluator resolution to the `llm` builder; just reshape
         # the criteria refs into general's name-keyed `arguments` map.
-        criteria_refs = _criteria_refs_for_item(it, payload, evaluators_resolved)
+        criteria_refs = _criteria_refs_for_item(
+            it, payload, evaluators_resolved, item_evaluator_ids
+        )
         arguments = {
             ref["name"]: ref["arguments"]
             for ref in criteria_refs
@@ -555,13 +586,18 @@ def build_dataset_for_task_type(
     task_type: str,
     items: List[Dict[str, Any]],
     evaluators_resolved: List[Dict[str, Any]],
+    item_evaluator_ids: Optional[Dict[str, List[str]]] = None,
 ) -> List[Dict[str, Any]]:
+    """`item_evaluator_ids` maps item uuid → the evaluator uuids that apply to
+    it; None (or a missing item) means every resolved evaluator applies."""
     if task_type == "stt":
         return _build_stt_dataset(items)
     if task_type == "llm":
-        return _build_llm_dataset(items, evaluators_resolved)
+        return _build_llm_dataset(items, evaluators_resolved, item_evaluator_ids)
     if task_type == "llm-general":
-        return _build_llm_general_dataset(items, evaluators_resolved)
+        return _build_llm_general_dataset(
+            items, evaluators_resolved, item_evaluator_ids
+        )
     if task_type == "conversation":
         return _build_simulation_dataset(items)
     if task_type == "tts":
@@ -681,6 +717,7 @@ def _parse_results_stt(
     output_dir: Path,
     evaluators_resolved: List[Dict[str, Any]],
     job_uuid: str,
+    item_evaluator_ids: Optional[Dict[str, List[str]]] = None,
 ) -> List[Dict[str, Any]]:
     """STT outputs: <output_dir>/results.csv with columns id, gt, pred, wer,
     <column_name>, <column_name>_reasoning per evaluator.
@@ -732,6 +769,8 @@ def _parse_results_stt(
             item_id = row.get("id")
             if not item_id:
                 continue
+            if not _pair_applies(item_evaluator_ids, item_id, evaluator_id):
+                continue
             value = _row_evaluator_value(row, column_name, output_type)
             runs.append(
                 {
@@ -750,6 +789,7 @@ def _parse_results_general(
     output_dir: Path,
     evaluators_resolved: List[Dict[str, Any]],
     job_uuid: str,
+    item_evaluator_ids: Optional[Dict[str, List[str]]] = None,
 ) -> List[Dict[str, Any]]:
     """`calibrate general` writes the same `results.csv` shape as STT: an `id`
     column plus a `<name>`/`<name>_reasoning` pair per evaluator, with the
@@ -757,13 +797,16 @@ def _parse_results_general(
     difference is the built-in columns (`input, output` instead of `gt, pred,
     wer`), which the column-map-driven parser ignores — so the STT CSV parser
     handles general results verbatim."""
-    return _parse_results_stt(output_dir, evaluators_resolved, job_uuid)
+    return _parse_results_stt(
+        output_dir, evaluators_resolved, job_uuid, item_evaluator_ids
+    )
 
 
 def _parse_results_llm(
     output_dir: Path,
     evaluators_resolved: List[Dict[str, Any]],
     job_uuid: str,
+    item_evaluator_ids: Optional[Dict[str, List[str]]] = None,
 ) -> List[Dict[str, Any]]:
     """LLM outputs: <output_dir>/results.json — list of per-test-case results.
     Each entry is `{output, metrics, test_case, test_case_id?}`; per-row
@@ -805,6 +848,8 @@ def _parse_results_llm(
             if not ev:
                 continue
             evaluator_id = name_to_uuid_via_config.get(ev_name, ev["uuid"])
+            if not _pair_applies(item_evaluator_ids, item_id, evaluator_id):
+                continue
             if evaluator_id != ev["uuid"]:
                 logger.warning(
                     f"[annotation-eval] evaluators_map round-trip mismatch for "
@@ -866,6 +911,7 @@ def _parse_results_simulation(
     evaluators_resolved: List[Dict[str, Any]],
     job_uuid: str,
     items: Optional[List[Dict[str, Any]]] = None,
+    item_evaluator_ids: Optional[Dict[str, List[str]]] = None,
 ) -> List[Dict[str, Any]]:
     """Simulation outputs: per-simulation
     `<output_dir>/<row_id>/evaluation_results.csv` with one row per evaluator
@@ -928,6 +974,10 @@ def _parse_results_simulation(
                         or name_to_uuid_via_config.get(ev_name)
                         or ev["uuid"]
                     )
+                    if not _pair_applies(
+                        item_evaluator_ids, item_id, evaluator_id
+                    ):
+                        continue
                     if evaluator_id != ev["uuid"]:
                         logger.warning(
                             f"[annotation-eval] evaluator id mismatch for "
@@ -963,22 +1013,38 @@ def parse_results_for_task_type(
     evaluators_resolved: List[Dict[str, Any]],
     job_uuid: str,
     items: Optional[List[Dict[str, Any]]] = None,
+    item_evaluator_ids: Optional[Dict[str, List[str]]] = None,
 ) -> List[Dict[str, Any]]:
     """Dispatch per task type. `items` (in dataset order) is required for
     simulation — calibrate uses internal `row_<i>` ids and we map back to
-    annotation_item.uuid via `dataset_map.json` + this list."""
+    annotation_item.uuid via `dataset_map.json` + this list.
+    `item_evaluator_ids` maps item uuid → the evaluator uuids that apply to it;
+    rows outside that map are dropped. None (or a missing item) means every
+    resolved evaluator applies."""
     if task_type == "stt":
-        return _parse_results_stt(output_dir, evaluators_resolved, job_uuid)
+        return _parse_results_stt(
+            output_dir, evaluators_resolved, job_uuid, item_evaluator_ids
+        )
     if task_type == "llm":
-        return _parse_results_llm(output_dir, evaluators_resolved, job_uuid)
+        return _parse_results_llm(
+            output_dir, evaluators_resolved, job_uuid, item_evaluator_ids
+        )
     if task_type == "llm-general":
-        return _parse_results_general(output_dir, evaluators_resolved, job_uuid)
+        return _parse_results_general(
+            output_dir, evaluators_resolved, job_uuid, item_evaluator_ids
+        )
     if task_type == "conversation":
         return _parse_results_simulation(
-            output_dir, evaluators_resolved, job_uuid, items=items
+            output_dir,
+            evaluators_resolved,
+            job_uuid,
+            items=items,
+            item_evaluator_ids=item_evaluator_ids,
         )
     if task_type == "tts":
-        return _parse_results_stt(output_dir, evaluators_resolved, job_uuid)
+        return _parse_results_stt(
+            output_dir, evaluators_resolved, job_uuid, item_evaluator_ids
+        )
     return []
 
 
@@ -1180,6 +1246,12 @@ def _run_job(
         if not task:
             raise RuntimeError(f"Task {task_uuid} disappeared")
 
+        # The job's frozen `{item_uuid: [evaluator_uuid]}` map; absent means
+        # every resolved evaluator applies to every item.
+        job_row = get_job(job_uuid) or {}
+        stored = (job_row.get("details") or {}).get("item_evaluator_ids")
+        item_evaluator_ids = stored if isinstance(stored, dict) else None
+
         # Read the snapshot the submission endpoint wrote into
         # `annotation_eval_job_items`. This is the exact item set + payloads
         # the user submitted, frozen against subsequent edits / soft-deletes
@@ -1233,7 +1305,7 @@ def _run_job(
                 dataset_path = _prepare_tts_eval_run_dir(input_dir, items)
             else:
                 dataset = build_dataset_for_task_type(
-                    task_type, items, evaluators_resolved
+                    task_type, items, evaluators_resolved, item_evaluator_ids
                 )
                 dataset_path = input_dir / "dataset.json"
                 with open(dataset_path, "w", encoding="utf-8") as f:
@@ -1286,7 +1358,12 @@ def _run_job(
             # authoritative — name/description on the evaluator can change
             # later and the runs still resolve correctly.
             runs_to_insert = parse_results_for_task_type(
-                task_type, output_dir, evaluators_resolved, job_uuid, items=items
+                task_type,
+                output_dir,
+                evaluators_resolved,
+                job_uuid,
+                items=items,
+                item_evaluator_ids=item_evaluator_ids,
             )
             metrics = _read_metrics_json(output_dir)
             if runs_to_insert:
@@ -1377,7 +1454,13 @@ def start_annotation_eval_job(
     """Spawn the runner thread. Returns immediately."""
     t = threading.Thread(
         target=_run_job,
-        args=(job_uuid, task_uuid, user_id, evaluators_resolved, item_ids),
+        args=(
+            job_uuid,
+            task_uuid,
+            user_id,
+            evaluators_resolved,
+            item_ids,
+        ),
         daemon=True,
     )
     t.start()

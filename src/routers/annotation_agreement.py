@@ -3,6 +3,8 @@ from typing import Any, Dict, List, Optional
 from fastapi import APIRouter, Depends, HTTPException, Path, Query
 
 from db import (
+    applicable_pairs_for_tasks,
+    get_all_annotation_tasks,
     get_annotation_task,
     get_annotation_tasks_by_uuids,
     get_annotations_for_task,
@@ -19,6 +21,7 @@ from annotation_metrics import (
     aggregate_agreement,
     aggregate_human_evaluator_agreement,
     filter_runs_to_live_versions,
+    filter_to_applicable,
     trend_series,
     trend_series_evaluator_breakdown,
     trend_series_human_evaluator,
@@ -26,6 +29,21 @@ from annotation_metrics import (
 
 
 router = APIRouter(prefix="/annotation-agreement", tags=["annotation-agreement"])
+
+
+def _applicable_pairs(org_uuid: str, task_id: Optional[str]) -> set:
+    """Currently-applying (item, evaluator) pairs for one task, or for every
+    task in the workspace when unscoped. Keeps these trends counting the same
+    pairs the per-task agreement endpoint counts."""
+    # ponytail: unscoped builds one tuple per (item, evaluator) across the
+    # whole workspace. Join the pair set against the annotations/runs being
+    # filtered if item counts outgrow a dashboard request.
+    task_ids = (
+        [task_id]
+        if task_id
+        else [t["uuid"] for t in get_all_annotation_tasks(org_uuid)]
+    )
+    return applicable_pairs_for_tasks(task_ids)
 
 
 @router.get("/trend", summary="Get workspace agreement trend")
@@ -54,6 +72,10 @@ def agreement_trend(
     else:
         annotations = get_annotations_for_org(ctx.org_uuid)
         raw_runs = get_evaluator_runs_for_org(ctx.org_uuid)
+
+    applicable = _applicable_pairs(ctx.org_uuid, task_id)
+    annotations = filter_to_applicable(annotations, applicable)
+    raw_runs = filter_to_applicable(raw_runs, applicable)
 
     hh_current, hh_pairs = aggregate_agreement(annotations)
     hh_series = trend_series(annotations, bucket=bucket, days=days)
@@ -144,6 +166,10 @@ def evaluator_agreement_trend(
     runs = get_evaluator_runs_for_evaluator_org_scoped(
         evaluator_uuid, ctx.org_uuid, task_id=task_id, version_id=version_id
     )
+
+    applicable = _applicable_pairs(ctx.org_uuid, task_id)
+    annotations = filter_to_applicable(annotations, applicable)
+    runs = filter_to_applicable(runs, applicable)
 
     all_versions = get_evaluator_versions(evaluator_uuid) if runs else []
     version_number_by_id = {v["uuid"]: v["version_number"] for v in all_versions}
