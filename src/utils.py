@@ -8,6 +8,7 @@ import time
 import json
 from datetime import datetime, timedelta
 from enum import Enum
+from functools import lru_cache
 from pathlib import Path
 from typing import Annotated, List, Literal, Optional, Dict, Any, Union, Tuple
 from urllib.parse import quote
@@ -480,6 +481,36 @@ def is_job_timed_out(
         return False
 
 
+@lru_cache(maxsize=4)
+def _build_s3_client(
+    endpoint_url: Optional[str],
+    aws_access_key_id: Optional[str],
+    aws_secret_access_key: Optional[str],
+    aws_region: str,
+):
+    """Construct (and cache) one boto3 S3 client per credential/endpoint combo.
+
+    Client construction costs ~2ms — negligible once, ruinous in a loop. Read
+    paths that presign per row (e.g. `presign_annotation_items_audio` over a
+    620-item annotation task) called this once per item, which dominated the
+    whole request. Cached on the resolved settings rather than globally so a
+    test or a runtime env change still builds a matching client. boto3 clients
+    are thread-safe for the calls made here (signing + get/put object).
+    """
+    kwargs = {"region_name": aws_region}
+    if endpoint_url:
+        kwargs["endpoint_url"] = endpoint_url
+        kwargs["config"] = Config(
+            request_checksum_calculation="when_required",
+            response_checksum_validation="when_required",
+        )
+    if aws_access_key_id and aws_secret_access_key:
+        kwargs["aws_access_key_id"] = aws_access_key_id
+        kwargs["aws_secret_access_key"] = aws_secret_access_key
+
+    return boto3.client("s3", **kwargs)
+
+
 def get_s3_client():
     """Get S3-compatible client. Honors S3_ENDPOINT_URL for GCS interop.
 
@@ -497,23 +528,12 @@ def get_s3_client():
     if is_local_object_storage():
         return None
 
-    endpoint_url = os.getenv("S3_ENDPOINT_URL") or None
-    aws_access_key_id = os.getenv("AWS_ACCESS_KEY_ID") or None
-    aws_secret_access_key = os.getenv("AWS_SECRET_ACCESS_KEY") or None
-    aws_region = os.getenv("AWS_REGION") or "ap-south-1"
-
-    kwargs = {"region_name": aws_region}
-    if endpoint_url:
-        kwargs["endpoint_url"] = endpoint_url
-        kwargs["config"] = Config(
-            request_checksum_calculation="when_required",
-            response_checksum_validation="when_required",
-        )
-    if aws_access_key_id and aws_secret_access_key:
-        kwargs["aws_access_key_id"] = aws_access_key_id
-        kwargs["aws_secret_access_key"] = aws_secret_access_key
-
-    return boto3.client("s3", **kwargs)
+    return _build_s3_client(
+        os.getenv("S3_ENDPOINT_URL") or None,
+        os.getenv("AWS_ACCESS_KEY_ID") or None,
+        os.getenv("AWS_SECRET_ACCESS_KEY") or None,
+        os.getenv("AWS_REGION") or "ap-south-1",
+    )
 
 
 LOCAL_STORAGE_BUCKET = "local-dev-artifacts"

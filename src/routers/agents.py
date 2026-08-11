@@ -682,7 +682,7 @@ async def verify_agent_connection(
     tags=["Public API"],
     summary="Resolve agent names to IDs",
 )
-async def resolve_agent_names(
+def resolve_agent_names(
     request: ResolveAgentNamesRequest,
     ctx: OrgContext = Depends(get_org_jwt_or_api_key),
 ):
@@ -710,7 +710,7 @@ async def resolve_agent_names(
     summary="Create agent",
     openapi_extra={"x-codeSamples": _curl_code_samples(_CREATE_AGENT_EXAMPLES, "/agents")},
 )
-async def create_agent_endpoint(
+def create_agent_endpoint(
     agent: AgentCreate = Body(openapi_examples=_CREATE_AGENT_EXAMPLES),
     ctx: OrgContext = Depends(get_org_jwt_or_api_key),
 ):
@@ -740,7 +740,7 @@ async def create_agent_endpoint(
     tags=["Public API"],
     summary="List agents",
 )
-async def list_agents(
+def list_agents(
     ctx: OrgContext = Depends(get_org_jwt_or_api_key),
     search: _AgentSearch = Depends(),
     pagination: OptionalPaginationParams = Depends(),
@@ -766,7 +766,7 @@ async def list_agents(
     tags=["Public API"],
     summary="Get agent",
 )
-async def get_agent_endpoint(
+def get_agent_endpoint(
     agent_uuid: str = Path(
         description="The agent to retrieve",
         examples=["f47ac10b-58cc-4372-a567-0e02b2c3d479"],
@@ -786,7 +786,7 @@ async def get_agent_endpoint(
     tags=["Public API"],
     summary="Update agent",
 )
-async def update_agent_endpoint(
+def update_agent_endpoint(
     agent_uuid: str = Path(
         description="The agent to update",
         examples=["f47ac10b-58cc-4372-a567-0e02b2c3d479"],
@@ -847,7 +847,7 @@ async def update_agent_endpoint(
     response_model=BulkAgentDeleteResponse,
     summary="Bulk delete agents",
 )
-async def bulk_delete_agents_endpoint(
+def bulk_delete_agents_endpoint(
     payload: BulkAgentDelete, ctx: OrgContext = Depends(get_current_org)
 ):
     """Soft-delete multiple agents by ID, along with their linked tools, tests, and evaluators. Pre-existing job runs are kept"""
@@ -874,7 +874,7 @@ async def bulk_delete_agents_endpoint(
 
 
 @router.delete("/{agent_uuid}", summary="Delete agent")
-async def delete_agent_endpoint(
+def delete_agent_endpoint(
     agent_uuid: str = Path(
         description="The agent to delete",
         examples=["f47ac10b-58cc-4372-a567-0e02b2c3d479"],
@@ -897,7 +897,7 @@ async def delete_agent_endpoint(
     response_model=AgentDuplicateResponse,
     summary="Duplicate agent",
 )
-async def duplicate_agent_endpoint(
+def duplicate_agent_endpoint(
     agent_uuid: str = Path(
         description="The agent to duplicate",
         examples=["f47ac10b-58cc-4372-a567-0e02b2c3d479"],
@@ -975,7 +975,7 @@ async def duplicate_agent_endpoint(
     summary="List agent evaluators",
     tags=["Public API"],
 )
-async def list_agent_evaluators(
+def list_agent_evaluators(
     agent_uuid: str = Path(
         description="The agent whose evaluators to list",
         examples=["f47ac10b-58cc-4372-a567-0e02b2c3d479"],
@@ -998,7 +998,7 @@ async def list_agent_evaluators(
     summary="Link evaluators to agent",
     tags=["Public API"],
 )
-async def link_evaluators_to_agent(
+def link_evaluators_to_agent(
     agent_uuid: str = Path(
         description="The agent to link the evaluators to",
         examples=["f47ac10b-58cc-4372-a567-0e02b2c3d479"],
@@ -1035,7 +1035,7 @@ async def link_evaluators_to_agent(
     "/{agent_uuid}/evaluators/{evaluator_uuid}",
     summary="Unlink evaluator from agent",
 )
-async def unlink_evaluator_from_agent(
+def unlink_evaluator_from_agent(
     agent_uuid: str = Path(
         description="The agent to unlink the evaluator from",
         examples=["f47ac10b-58cc-4372-a567-0e02b2c3d479"],

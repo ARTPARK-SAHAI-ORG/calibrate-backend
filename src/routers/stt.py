@@ -675,7 +675,7 @@ def run_evaluation_task(
 
 
 @router.post("/evaluate", response_model=TaskCreateResponse, summary="Run STT evaluation")
-async def evaluate_stt(
+def evaluate_stt(
     request: STTEvaluationRequest, ctx: OrgContext = Depends(get_current_org)
 ):
     """Benchmark STT providers against a dataset as a background job"""
@@ -763,7 +763,7 @@ async def evaluate_stt(
     response_model=TaskCreateResponse,
     summary="Retry STT evaluation",
 )
-async def retry_stt_evaluation(
+def retry_stt_evaluation(
     task_id: str = PathParam(
         description="The STT evaluation to re-run",
         examples=["f47ac10b-58cc-4372-a567-0e02b2c3d479"],
@@ -864,7 +864,7 @@ class VisibilityResponse(BaseModel):
     response_model=VisibilityResponse,
     summary="Update STT evaluation visibility",
 )
-async def update_stt_visibility(
+def update_stt_visibility(
     body: VisibilityRequest,
     task_id: str = PathParam(
         description="The STT evaluation to update",
@@ -891,7 +891,7 @@ async def update_stt_visibility(
     response_model=TaskStatusResponse,
     summary="Get STT evaluation status",
 )
-async def get_evaluation_status(
+def get_evaluation_status(
     task_id: str = PathParam(
         description="The STT evaluation to poll",
         examples=["f47ac10b-58cc-4372-a567-0e02b2c3d479"],

@@ -605,7 +605,7 @@ class GlobalTestRunListItem(AgentTestRunListItem):
     summary="Link tests to agent",
     tags=["Public API"],
 )
-async def create_agent_test_links(
+def create_agent_test_links(
     agent_tests: AgentTestsCreate,
     ctx: OrgContext = Depends(get_org_jwt_or_api_key),
 ):
@@ -644,7 +644,7 @@ async def create_agent_test_links(
 
 
 @router.get("", response_model=List[AgentTestResponse], summary="List agent-test links")
-async def list_agent_tests():
+def list_agent_tests():
     """List which tests are linked to which agents."""
     links = get_all_agent_tests()
     return links
@@ -656,7 +656,7 @@ async def list_agent_tests():
     summary="List tests for agent",
     tags=["Public API"],
 )
-async def get_agent_tests_endpoint(
+def get_agent_tests_endpoint(
     agent_uuid: str = PathParam(
         description="Agent whose linked tests to list",
         examples=[_EXAMPLE_AGENT_UUID],
@@ -782,7 +782,7 @@ def _run_item_has_failures(item: AgentTestRunListItem) -> bool:
     summary="List test runs for agent",
     tags=["Public API"],
 )
-async def get_agent_test_runs(
+def get_agent_test_runs(
     agent_uuid: str = PathParam(
         description="Agent whose test runs to list",
         examples=[_EXAMPLE_AGENT_UUID],
@@ -863,7 +863,7 @@ async def get_agent_test_runs(
     response_model=PaginatedResponse[GlobalTestRunListItem],
     summary="List test runs for workspace",
 )
-async def get_all_test_runs_for_user(
+def get_all_test_runs_for_user(
     ctx: OrgContext = Depends(get_current_org),
     type: Optional[AgentTestJobType] = Query(
         None,
@@ -937,7 +937,7 @@ async def get_all_test_runs_for_user(
     response_model=List[AgentResponse],
     summary="List agents for test",
 )
-async def get_test_agents(
+def get_test_agents(
     test_uuid: str = PathParam(
         description="Test whose linked agents to list",
         examples=[EXAMPLE_TEST_UUID],
@@ -954,7 +954,7 @@ async def get_test_agents(
 
 
 @router.delete("", summary="Unlink test from agent")
-async def delete_agent_test_link(agent_test: AgentTestDelete):
+def delete_agent_test_link(agent_test: AgentTestDelete):
     """Unlink a test from an agent so it no longer runs for that agent."""
     deleted = remove_test_from_agent(agent_test.agent_uuid, agent_test.test_uuid)
     if not deleted:
@@ -976,7 +976,7 @@ class AgentTestBulkDelete(BaseModel):
 
 
 @router.post("/bulk-unlink", summary="Bulk unlink tests from agent")
-async def bulk_delete_agent_test_links(payload: AgentTestBulkDelete):
+def bulk_delete_agent_test_links(payload: AgentTestBulkDelete):
     """Unlink multiple tests from an agent."""
     if not payload.test_uuids:
         raise HTTPException(status_code=400, detail="test_uuids must not be empty")
@@ -1010,7 +1010,7 @@ class AgentTestsBulkDeleteAll(BaseModel):
 
 
 @router.post("/bulk-delete-tests", summary="Bulk delete agent tests")
-async def bulk_delete_agent_tests(
+def bulk_delete_agent_tests(
     payload: AgentTestsBulkDeleteAll,
     ctx: OrgContext = Depends(get_current_org),
 ):
@@ -2343,7 +2343,7 @@ def _launch_agent_test_run(
     tags=["Public API"],
     summary="Run agent tests",
 )
-async def run_agent_test(
+def run_agent_test(
     agent_uuid: str = PathParam(
         description="Agent to test",
         examples=[_EXAMPLE_AGENT_UUID],
@@ -2455,7 +2455,7 @@ def _run_tests_for_agents(
     tags=["Public API"],
     summary="Run agent tests in batch",
 )
-async def run_tests_batch(
+def run_tests_batch(
     request: Optional[BatchRunRequest] = None,
     ctx: OrgContext = Depends(get_org_jwt_or_api_key),
 ):
@@ -2538,7 +2538,7 @@ class VisibilityResponse(BaseModel):
     response_model=VisibilityResponse,
     summary="Update test run visibility",
 )
-async def update_test_run_visibility(
+def update_test_run_visibility(
     task_id: str = PathParam(
         description="Test run whose sharing settings to update",
         examples=[_EXAMPLE_TASK_UUID],
@@ -2577,7 +2577,7 @@ _RunProjection = make_projection_params(
     tags=["Public API"],
     summary="Get test run status",
 )
-async def get_agent_test_run_status(
+def get_agent_test_run_status(
     task_id: str = PathParam(
         description="Test run to poll for status and results",
         examples=[_EXAMPLE_TASK_UUID],
@@ -3259,7 +3259,7 @@ def run_benchmark_task(
     summary="Run agent benchmark",
     tags=["Public API"],
 )
-async def run_agent_benchmark(
+def run_agent_benchmark(
     agent_uuid: str = PathParam(
         description="Agent to benchmark",
         examples=[_EXAMPLE_AGENT_UUID],
@@ -3384,7 +3384,7 @@ async def run_agent_benchmark(
     response_model=VisibilityResponse,
     summary="Update benchmark visibility",
 )
-async def update_benchmark_visibility(
+def update_benchmark_visibility(
     task_id: str = PathParam(
         description="Benchmark run whose sharing settings to update",
         examples=[_EXAMPLE_TASK_UUID],
@@ -3420,7 +3420,7 @@ _BenchmarkProjection = make_projection_params(
     summary="Get benchmark status",
     tags=["Public API"],
 )
-async def get_benchmark_status(
+def get_benchmark_status(
     task_id: str = PathParam(
         description="Benchmark run to poll for status and results",
         examples=[_EXAMPLE_TASK_UUID],
@@ -3493,7 +3493,7 @@ async def get_benchmark_status(
 
 
 @router.delete("/job/{job_uuid}", summary="Delete test job")
-async def delete_agent_test_job_endpoint(
+def delete_agent_test_job_endpoint(
     job_uuid: str = PathParam(
         description="Test or benchmark job to delete",
         examples=[_EXAMPLE_TASK_UUID],

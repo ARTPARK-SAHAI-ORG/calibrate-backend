@@ -692,7 +692,7 @@ def run_tts_evaluation_task(
 
 
 @router.post("/evaluate", response_model=TaskCreateResponse, summary="Run TTS evaluation")
-async def evaluate_tts(
+def evaluate_tts(
     request: TTSEvaluationRequest, ctx: OrgContext = Depends(get_current_org)
 ):
     """Benchmark TTS providers against text inputs as a background job"""
@@ -776,7 +776,7 @@ async def evaluate_tts(
     response_model=TaskCreateResponse,
     summary="Retry TTS evaluation",
 )
-async def retry_tts_evaluation(
+def retry_tts_evaluation(
     task_id: str = PathParam(
         description="The TTS evaluation to re-run",
         examples=["f47ac10b-58cc-4372-a567-0e02b2c3d479"],
@@ -875,7 +875,7 @@ class VisibilityResponse(BaseModel):
     response_model=VisibilityResponse,
     summary="Update TTS evaluation visibility",
 )
-async def update_tts_visibility(
+def update_tts_visibility(
     body: VisibilityRequest,
     task_id: str = PathParam(
         description="The TTS evaluation to update",
@@ -902,7 +902,7 @@ async def update_tts_visibility(
     response_model=TaskStatusResponse,
     summary="Get TTS evaluation status",
 )
-async def get_tts_evaluation_status(
+def get_tts_evaluation_status(
     task_id: str = PathParam(
         description="The TTS evaluation to poll",
         examples=["f47ac10b-58cc-4372-a567-0e02b2c3d479"],
