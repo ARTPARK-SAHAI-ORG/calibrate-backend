@@ -54,6 +54,7 @@ from db import (
 from llm_judge import build_test_evaluators_payload, evaluator_value_name
 from auth_utils import get_current_org, get_org_jwt_or_api_key, OrgContext
 from utils import (
+    job_slot_lock,
     TaskStatus,
     InitialTaskStatus,
     TaskCreateResponse,
@@ -2289,11 +2290,6 @@ def _launch_agent_test_run(
     agent_uuid = agent["uuid"]
     org_uuid = agent.get("org_uuid")
 
-    can_start = can_start_agent_test_job(AGENT_TEST_JOB_TYPES, org_uuid)
-    initial_status = (
-        TaskStatus.IN_PROGRESS.value if can_start else TaskStatus.QUEUED.value
-    )
-
     # Extract test names for progress tracking
     test_names = [test.get("name") for test in tests if test.get("name")]
 
@@ -2303,24 +2299,30 @@ def _launch_agent_test_run(
 
     # Create job in database with details for recovery
     test_uuids = [t["uuid"] for t in tests]
-    job_id = create_agent_test_job(
-        agent_id=agent_uuid,
-        job_type="llm-unit-test",
-        status=initial_status,
-        details={
-            "agent_uuid": agent_uuid,
-            "test_uuids": test_uuids,
-            "test_names": test_names,
-            "s3_bucket": s3_bucket,
-            "calibrate_config": calibrate_config,
-            "evaluators_by_test_id": evaluators_by_test_id,
-        },
-        results={
-            "test_results": [
-                _pending_test_case_result_placeholder(name) for name in test_names
-            ]
-        },
-    )
+    with job_slot_lock():
+        can_start = can_start_agent_test_job(AGENT_TEST_JOB_TYPES, org_uuid)
+        initial_status = (
+            TaskStatus.IN_PROGRESS.value if can_start else TaskStatus.QUEUED.value
+        )
+
+        job_id = create_agent_test_job(
+            agent_id=agent_uuid,
+            job_type="llm-unit-test",
+            status=initial_status,
+            details={
+                "agent_uuid": agent_uuid,
+                "test_uuids": test_uuids,
+                "test_names": test_names,
+                "s3_bucket": s3_bucket,
+                "calibrate_config": calibrate_config,
+                "evaluators_by_test_id": evaluators_by_test_id,
+            },
+            results={
+                "test_results": [
+                    _pending_test_case_result_placeholder(name) for name in test_names
+                ]
+            },
+        )
 
     if can_start:
         # Start background task in a separate thread
@@ -3334,11 +3336,6 @@ def run_agent_benchmark(
     # Per-org limit check uses the agent's org.
     org_uuid = agent.get("org_uuid")
 
-    can_start = can_start_agent_test_job(AGENT_TEST_JOB_TYPES, org_uuid)
-    initial_status = (
-        TaskStatus.IN_PROGRESS.value if can_start else TaskStatus.QUEUED.value
-    )
-
     # Extract test names for progress tracking
     test_names = [test.get("name") for test in tests if test.get("name")]
 
@@ -3346,23 +3343,31 @@ def run_agent_benchmark(
 
     # Create job in database with details for recovery
     test_uuids = [t["uuid"] for t in tests]
-    job_id = create_agent_test_job(
-        agent_id=agent_uuid,
-        job_type="llm-benchmark",
-        status=initial_status,
-        details={
-            "agent_uuid": agent_uuid,
-            "test_uuids": test_uuids,
-            "test_names": test_names,
-            "models": request.models,
-            "s3_bucket": s3_bucket,
-            "calibrate_config": calibrate_config,
-            "evaluators_by_test_id": evaluators_by_test_id,
-        },
-        results={
-            "model_results": _benchmark_queued_model_results(request.models, test_names)
-        },
-    )
+    with job_slot_lock():
+        can_start = can_start_agent_test_job(AGENT_TEST_JOB_TYPES, org_uuid)
+        initial_status = (
+            TaskStatus.IN_PROGRESS.value if can_start else TaskStatus.QUEUED.value
+        )
+
+        job_id = create_agent_test_job(
+            agent_id=agent_uuid,
+            job_type="llm-benchmark",
+            status=initial_status,
+            details={
+                "agent_uuid": agent_uuid,
+                "test_uuids": test_uuids,
+                "test_names": test_names,
+                "models": request.models,
+                "s3_bucket": s3_bucket,
+                "calibrate_config": calibrate_config,
+                "evaluators_by_test_id": evaluators_by_test_id,
+            },
+            results={
+                "model_results": _benchmark_queued_model_results(
+                    request.models, test_names
+                )
+            },
+        )
 
     if can_start:
         # Start background task

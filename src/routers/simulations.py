@@ -46,6 +46,7 @@ from db import (
 )
 from llm_judge import build_evaluator_cli_payload
 from utils import (
+    job_slot_lock,
     AGENT_TYPE_DESCRIPTION,
     TaskStatus,
     TaskCreateResponse,
@@ -2498,24 +2499,25 @@ def run_simulation_endpoint(
     except ValueError as e:
         raise HTTPException(status_code=500, detail=str(e))
 
-    can_start = can_start_simulation_job(SIMULATION_JOB_TYPES, ctx.org_uuid)
-    initial_status = (
-        TaskStatus.IN_PROGRESS.value if can_start else TaskStatus.QUEUED.value
-    )
+    with job_slot_lock():
+        can_start = can_start_simulation_job(SIMULATION_JOB_TYPES, ctx.org_uuid)
+        initial_status = (
+            TaskStatus.IN_PROGRESS.value if can_start else TaskStatus.QUEUED.value
+        )
 
-    # Create job in database with details for recovery
-    job_id = create_simulation_job(
-        simulation_id=simulation_uuid,
-        job_type=request.type,
-        status=initial_status,
-        details={
-            "simulation_uuid": simulation_uuid,
-            "agent_uuid": agent_uuid,
-            "s3_bucket": s3_bucket,
-            "evaluators": _snapshot_evaluators_for_job_details(evaluators),
-        },
-        results=None,
-    )
+        # Create job in database with details for recovery
+        job_id = create_simulation_job(
+            simulation_id=simulation_uuid,
+            job_type=request.type,
+            status=initial_status,
+            details={
+                "simulation_uuid": simulation_uuid,
+                "agent_uuid": agent_uuid,
+                "s3_bucket": s3_bucket,
+                "evaluators": _snapshot_evaluators_for_job_details(evaluators),
+            },
+            results=None,
+        )
 
     if can_start:
         # Start background task in a separate thread

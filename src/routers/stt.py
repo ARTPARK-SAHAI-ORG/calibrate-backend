@@ -29,6 +29,7 @@ from dataset_utils import (
 from auth_utils import get_current_org, OrgContext
 from llm_judge import build_evaluator_cli_payload, refresh_evaluators_to_live
 from utils import (
+    job_slot_lock,
     TaskStatus,
     ProviderResult,
     TaskCreateResponse,
@@ -713,30 +714,31 @@ def evaluate_stt(
         expected_evaluator_type="stt",
     )
 
-    can_start = can_start_job(EVAL_JOB_TYPES, ctx.org_uuid)
-    initial_status = (
-        TaskStatus.IN_PROGRESS.value if can_start else TaskStatus.QUEUED.value
-    )
+    with job_slot_lock():
+        can_start = can_start_job(EVAL_JOB_TYPES, ctx.org_uuid)
+        initial_status = (
+            TaskStatus.IN_PROGRESS.value if can_start else TaskStatus.QUEUED.value
+        )
 
-    job_id = create_job(
-        job_type="stt-eval",
-        org_uuid=ctx.org_uuid,
-        user_id=ctx.user_id,
-        status=initial_status,
-        details={
-            "audio_paths": audio_paths,
-            "texts": texts,
-            "providers": request.providers,
-            "language": request.language,
-            "s3_bucket": s3_bucket,
-            "dataset_id": resolved_dataset_id,
-            "dataset_name": resolved_dataset_name,
-            "dataset_item_ids": dataset_item_ids,
-            "evaluators": resolved_evaluators,
-            "sarvam_judges": request.sarvam_judges,
-        },
-        results=None,
-    )
+        job_id = create_job(
+            job_type="stt-eval",
+            org_uuid=ctx.org_uuid,
+            user_id=ctx.user_id,
+            status=initial_status,
+            details={
+                "audio_paths": audio_paths,
+                "texts": texts,
+                "providers": request.providers,
+                "language": request.language,
+                "s3_bucket": s3_bucket,
+                "dataset_id": resolved_dataset_id,
+                "dataset_name": resolved_dataset_name,
+                "dataset_item_ids": dataset_item_ids,
+                "evaluators": resolved_evaluators,
+                "sarvam_judges": request.sarvam_judges,
+            },
+            results=None,
+        )
 
     if can_start:
         # Start background task in a separate thread
@@ -812,18 +814,19 @@ def retry_stt_evaluation(
         "sarvam_judges": details.get("sarvam_judges", True),
     }
 
-    can_start = can_start_job(EVAL_JOB_TYPES, ctx.org_uuid)
-    initial_status = (
-        TaskStatus.IN_PROGRESS.value if can_start else TaskStatus.QUEUED.value
-    )
+    with job_slot_lock():
+        can_start = can_start_job(EVAL_JOB_TYPES, ctx.org_uuid)
+        initial_status = (
+            TaskStatus.IN_PROGRESS.value if can_start else TaskStatus.QUEUED.value
+        )
 
-    update_job(
-        task_id,
-        status=initial_status,
-        results={},
-        details=rerun_details,
-        replace_details=True,
-    )
+        update_job(
+            task_id,
+            status=initial_status,
+            results={},
+            details=rerun_details,
+            replace_details=True,
+        )
 
     request = _stt_request_from_job_details(rerun_details)
     if can_start:

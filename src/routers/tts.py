@@ -30,6 +30,7 @@ from dataset_utils import (
 from auth_utils import get_current_org, OrgContext
 from llm_judge import build_evaluator_cli_payload, refresh_evaluators_to_live
 from utils import (
+    job_slot_lock,
     TaskStatus,
     ProviderResult,
     TaskCreateResponse,
@@ -728,28 +729,29 @@ def evaluate_tts(
         expected_evaluator_type="tts",
     )
 
-    can_start = can_start_job(EVAL_JOB_TYPES, ctx.org_uuid)
-    initial_status = (
-        TaskStatus.IN_PROGRESS.value if can_start else TaskStatus.QUEUED.value
-    )
+    with job_slot_lock():
+        can_start = can_start_job(EVAL_JOB_TYPES, ctx.org_uuid)
+        initial_status = (
+            TaskStatus.IN_PROGRESS.value if can_start else TaskStatus.QUEUED.value
+        )
 
-    job_id = create_job(
-        job_type="tts-eval",
-        org_uuid=ctx.org_uuid,
-        user_id=ctx.user_id,
-        status=initial_status,
-        details={
-            "texts": texts,
-            "providers": request.providers,
-            "language": request.language,
-            "s3_bucket": s3_bucket,
-            "dataset_id": resolved_dataset_id,
-            "dataset_name": resolved_dataset_name,
-            "dataset_item_ids": dataset_item_ids,
-            "evaluators": resolved_evaluators,
-        },
-        results=None,
-    )
+        job_id = create_job(
+            job_type="tts-eval",
+            org_uuid=ctx.org_uuid,
+            user_id=ctx.user_id,
+            status=initial_status,
+            details={
+                "texts": texts,
+                "providers": request.providers,
+                "language": request.language,
+                "s3_bucket": s3_bucket,
+                "dataset_id": resolved_dataset_id,
+                "dataset_name": resolved_dataset_name,
+                "dataset_item_ids": dataset_item_ids,
+                "evaluators": resolved_evaluators,
+            },
+            results=None,
+        )
 
     if can_start:
         # Start background task in a separate thread
@@ -823,18 +825,19 @@ def retry_tts_evaluation(
         "evaluators": details.get("evaluators", []),
     }
 
-    can_start = can_start_job(EVAL_JOB_TYPES, ctx.org_uuid)
-    initial_status = (
-        TaskStatus.IN_PROGRESS.value if can_start else TaskStatus.QUEUED.value
-    )
+    with job_slot_lock():
+        can_start = can_start_job(EVAL_JOB_TYPES, ctx.org_uuid)
+        initial_status = (
+            TaskStatus.IN_PROGRESS.value if can_start else TaskStatus.QUEUED.value
+        )
 
-    update_job(
-        task_id,
-        status=initial_status,
-        results={},
-        details=rerun_details,
-        replace_details=True,
-    )
+        update_job(
+            task_id,
+            status=initial_status,
+            results={},
+            details=rerun_details,
+            replace_details=True,
+        )
 
     request = _tts_request_from_job_details(rerun_details)
     if can_start:

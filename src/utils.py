@@ -6,6 +6,7 @@ import logging
 import threading
 import time
 import json
+from contextlib import contextmanager
 from datetime import datetime, timedelta
 from enum import Enum
 from functools import lru_cache
@@ -497,13 +498,18 @@ def _build_s3_client(
     test or a runtime env change still builds a matching client. boto3 clients
     are thread-safe for the calls made here (signing + get/put object).
     """
-    kwargs = {"region_name": aws_region}
+    # One shared client means one shared connection pool, so it has to be wide
+    # enough for the request thread pool plus the background job runners —
+    # botocore's default of 10 would leave concurrent artifact transfers opening
+    # and discarding sockets.
+    config_kwargs = {"max_pool_connections": 50}
+    if endpoint_url:
+        config_kwargs["request_checksum_calculation"] = "when_required"
+        config_kwargs["response_checksum_validation"] = "when_required"
+
+    kwargs = {"region_name": aws_region, "config": Config(**config_kwargs)}
     if endpoint_url:
         kwargs["endpoint_url"] = endpoint_url
-        kwargs["config"] = Config(
-            request_checksum_calculation="when_required",
-            response_checksum_validation="when_required",
-        )
     if aws_access_key_id and aws_secret_access_key:
         kwargs["aws_access_key_id"] = aws_access_key_id
         kwargs["aws_secret_access_key"] = aws_secret_access_key
@@ -909,8 +915,25 @@ def get_max_concurrent_jobs_per_org() -> int:
     return 1
 
 
-# Job queue lock to ensure thread-safe queue operations
-_job_queue_lock = threading.Lock()
+# Job queue lock to ensure thread-safe queue operations. Reentrant so a caller
+# can hold it across `can_start_*_job(...)` + the job INSERT (see
+# `job_slot_lock`) even though those helpers take it themselves.
+_job_queue_lock = threading.RLock()
+
+
+@contextmanager
+def job_slot_lock():
+    """Hold the queue lock across a capacity check and the job INSERT.
+
+    `can_start_*_job(...)` only locks while counting, so on its own it is a
+    check-then-act race: two submissions can both see a free slot and both
+    launch, blowing past MAX_CONCURRENT_JOBS. Request handlers run in the
+    thread pool, so this is reachable from plain concurrent HTTP calls. Wrap
+    the check AND the create so the row exists (counting against the limit)
+    before the next caller counts. Starting the thread can stay outside.
+    """
+    with _job_queue_lock:
+        yield
 
 # Registry of job starter callbacks by job type
 _job_starters: Dict[str, callable] = {}

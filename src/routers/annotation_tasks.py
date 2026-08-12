@@ -71,6 +71,7 @@ from annotation_eval_runner import (
     start_annotation_eval_job,
 )
 from utils import (
+    job_slot_lock,
     TaskStatus,
     AnnotationTaskTypeLiteral,
     InitialTaskStatus,
@@ -1863,30 +1864,31 @@ def start_evaluator_run(
         raise HTTPException(status_code=400, detail=str(e))
 
     # Decide queue vs immediate start (shared eval queue with stt-eval/tts-eval).
-    can_start = can_start_job(EVAL_JOB_TYPES, ctx.org_uuid)
-    initial_status = (
-        TaskStatus.IN_PROGRESS.value if can_start else TaskStatus.QUEUED.value
-    )
+    with job_slot_lock():
+        can_start = can_start_job(EVAL_JOB_TYPES, ctx.org_uuid)
+        initial_status = (
+            TaskStatus.IN_PROGRESS.value if can_start else TaskStatus.QUEUED.value
+        )
 
-    job_uuid = create_job(
-        job_type=ANNOTATION_EVAL_JOB_TYPE,
-        org_uuid=ctx.org_uuid,
-        user_id=ctx.user_id,
-        status=initial_status,
-        details={
-            "task_id": task_uuid,
-            "evaluators": [
-                {
-                    "evaluator_id": ev["uuid"],
-                    "evaluator_version_id": ev["_evaluator_version_id"],
-                    "name": ev["name"],
-                }
-                for ev in resolved
-            ],
-            "item_count": len(items),
-            "item_ids": item_ids_persisted,
-        },
-    )
+        job_uuid = create_job(
+            job_type=ANNOTATION_EVAL_JOB_TYPE,
+            org_uuid=ctx.org_uuid,
+            user_id=ctx.user_id,
+            status=initial_status,
+            details={
+                "task_id": task_uuid,
+                "evaluators": [
+                    {
+                        "evaluator_id": ev["uuid"],
+                        "evaluator_version_id": ev["_evaluator_version_id"],
+                        "name": ev["name"],
+                    }
+                    for ev in resolved
+                ],
+                "item_count": len(items),
+                "item_ids": item_ids_persisted,
+            },
+        )
     # Snapshot the resolved item set onto the job so the runner reads
     # frozen payloads regardless of any subsequent edit / soft-delete on
     # the source `annotation_items` row. Order matches submission order
