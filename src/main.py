@@ -39,7 +39,8 @@ from fastapi.middleware.cors import CORSMiddleware
 from db import (
     init_db,
     NameAlreadyExistsError,
-    find_other_member_org_for_resources,
+    find_member_org_for_resource,
+    get_personal_org_for_user,
 )
 from auth_utils import get_current_user_id, decode_token
 from routers.auth import router as auth_router
@@ -150,12 +151,20 @@ def _resource_org_hint(request: Request) -> Optional[str]:
     if not user_id:
         return None
 
-    uuids = [seg for seg in request.url.path.split("/") if len(seg) == 36]
-    # `or None` so an empty header falls back to the personal org, matching how
-    # `get_current_org` resolves the active org for the request itself.
-    return find_other_member_org_for_resources(
-        uuids, user_id, request.headers.get("x-org-uuid") or None
-    )
+    active_org = request.headers.get("x-org-uuid")
+    if not active_org:
+        personal = get_personal_org_for_user(user_id)
+        active_org = personal["uuid"] if personal else ""
+
+    for segment in request.url.path.split("/"):
+        if len(segment) == 36:
+            org_uuid = find_member_org_for_resource(segment, user_id)
+            # A parent uuid in the path usually resolves to the org the caller
+            # is already in; hinting it would send the frontend on a
+            # switch-and-retry loop that hides the real cause of the 404.
+            if org_uuid and org_uuid != active_org:
+                return org_uuid
+    return None
 
 
 @app.exception_handler(StarletteHTTPException)

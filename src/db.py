@@ -5,7 +5,7 @@ import uuid
 from os.path import join
 import os
 from pathlib import Path
-from typing import Optional, List, Dict, Any, Sequence, TYPE_CHECKING
+from typing import Optional, List, Dict, Any, TYPE_CHECKING
 from contextlib import contextmanager
 
 if TYPE_CHECKING:
@@ -3485,7 +3485,7 @@ def get_member_role(org_uuid: str, user_id: str) -> Optional[str]:
 
 
 _RESOURCE_ORG_SELECTS = tuple(
-    f"SELECT org_uuid FROM {t} WHERE uuid IN ({{ph}}) AND deleted_at IS NULL"
+    f"SELECT org_uuid FROM {t} WHERE uuid = ? AND deleted_at IS NULL"
     for t in (
         "agents",
         "tools",
@@ -3499,32 +3499,23 @@ _RESOURCE_ORG_SELECTS = tuple(
         "evaluators",
     )
 ) + (
-    "SELECT org_uuid FROM jobs WHERE uuid IN ({ph})",
-    "SELECT a.org_uuid FROM agent_test_jobs j JOIN agents a ON a.uuid = j.agent_id AND a.deleted_at IS NULL WHERE j.uuid IN ({ph})",
-    "SELECT s.org_uuid FROM simulation_jobs j JOIN simulations s ON s.uuid = j.simulation_id AND s.deleted_at IS NULL WHERE j.uuid IN ({ph})",
-    "SELECT t.org_uuid FROM annotation_items i JOIN annotation_tasks t ON t.uuid = i.task_id AND t.deleted_at IS NULL WHERE i.uuid IN ({ph}) AND i.deleted_at IS NULL",
-    "SELECT t.org_uuid FROM annotation_jobs j JOIN annotation_tasks t ON t.uuid = j.task_id AND t.deleted_at IS NULL WHERE j.uuid IN ({ph}) AND j.deleted_at IS NULL",
-    "SELECT t.org_uuid FROM evaluator_runs r JOIN annotation_items i ON i.uuid = r.item_id AND i.deleted_at IS NULL JOIN annotation_tasks t ON t.uuid = i.task_id AND t.deleted_at IS NULL WHERE r.uuid IN ({ph}) AND r.deleted_at IS NULL",
+    "SELECT org_uuid FROM jobs WHERE uuid = ?",
+    "SELECT a.org_uuid FROM agent_test_jobs j JOIN agents a ON a.uuid = j.agent_id AND a.deleted_at IS NULL WHERE j.uuid = ?",
+    "SELECT s.org_uuid FROM simulation_jobs j JOIN simulations s ON s.uuid = j.simulation_id AND s.deleted_at IS NULL WHERE j.uuid = ?",
+    "SELECT t.org_uuid FROM annotation_items i JOIN annotation_tasks t ON t.uuid = i.task_id AND t.deleted_at IS NULL WHERE i.uuid = ? AND i.deleted_at IS NULL",
+    "SELECT t.org_uuid FROM annotation_jobs j JOIN annotation_tasks t ON t.uuid = j.task_id AND t.deleted_at IS NULL WHERE j.uuid = ? AND j.deleted_at IS NULL",
+    "SELECT t.org_uuid FROM evaluator_runs r JOIN annotation_items i ON i.uuid = r.item_id AND i.deleted_at IS NULL JOIN annotation_tasks t ON t.uuid = i.task_id AND t.deleted_at IS NULL WHERE r.uuid = ? AND r.deleted_at IS NULL",
 )
 
 
-def find_other_member_org_for_resources(
-    resource_uuids: Sequence[str], user_id: str, active_org_uuid: Optional[str]
-) -> Optional[str]:
-    """Return the org owning any of `resource_uuids`, if it is one the caller
-    can switch to: they must be an active member, and it must not already be
-    their active org.
+def find_member_org_for_resource(resource_uuid: str, user_id: str) -> Optional[str]:
+    """Return the org owning `resource_uuid`, but only if `user_id` is a member.
 
-    Membership, the active-org exclusion, and the caller's personal-org
-    fallback all live inside the one statement — partly so a resource in an
-    org the caller cannot see can never be reported back (this feeds the
-    `organization_uuid` hint on 404s, which must not leak existence), partly
-    so a 404 costs exactly one read no matter how many uuids the path holds.
+    The membership join lives inside the SQL so a resource in an org the
+    caller cannot see can never be reported back — this feeds the
+    `organization_uuid` hint on 404 responses, which must not leak existence.
     """
-    if not resource_uuids:
-        return None
-    ph = ", ".join("?" * len(resource_uuids))
-    union = " UNION ALL ".join(s.format(ph=ph) for s in _RESOURCE_ORG_SELECTS)
+    union = " UNION ALL ".join(_RESOURCE_ORG_SELECTS)
     with get_db_connection() as conn:
         cursor = conn.cursor()
         cursor.execute(
@@ -3538,18 +3529,9 @@ def find_other_member_org_for_resources(
               JOIN organizations o
                 ON o.uuid = owner.org_uuid
                AND o.deleted_at IS NULL
-             WHERE owner.org_uuid <> COALESCE(
-                       ?,
-                       (SELECT uuid FROM organizations
-                         WHERE created_by_user_id = ?
-                           AND is_personal = 1
-                           AND deleted_at IS NULL),
-                       ''
-                   )
              LIMIT 1
             """,
-            tuple(resource_uuids) * len(_RESOURCE_ORG_SELECTS)
-            + (user_id, active_org_uuid, user_id),
+            (resource_uuid,) * len(_RESOURCE_ORG_SELECTS) + (user_id,),
         )
         row = cursor.fetchone()
         return row["org_uuid"] if row else None

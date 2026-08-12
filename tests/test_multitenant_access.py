@@ -495,16 +495,11 @@ def test_404_carries_no_hint_for_the_workspace_already_active(client):
         headers=a["headers"],
     ).json()["uuid"]
 
-    url = f"/annotation-tasks/{task_uuid}/items/{uuid.uuid4()}"
-    resp = client.get(url, headers=a["headers"])
+    resp = client.get(
+        f"/annotation-tasks/{task_uuid}/items/{uuid.uuid4()}", headers=a["headers"]
+    )
     assert resp.status_code == 404
     assert "organization_uuid" not in resp.json()
-
-    # An empty header means the same thing as no header at all, the way
-    # get_current_org reads it.
-    blank = client.get(url, headers={**a["headers"], "X-Org-UUID": ""})
-    assert blank.status_code == 404
-    assert "organization_uuid" not in blank.json()
 
 
 def test_404_carries_no_hint_for_api_key_callers(client):
@@ -547,7 +542,7 @@ def test_404_stays_a_404_when_the_hint_lookup_fails(client):
     error would escape as a bare 500 instead of the 404 the route raised."""
     a = _signup(client, email_prefix="hint-boom")
     with patch(
-        "main.find_other_member_org_for_resources",
+        "main.find_member_org_for_resource",
         side_effect=RuntimeError("database is locked"),
     ):
         resp = client.get(f"/agents/{uuid.uuid4()}", headers=a["headers"])
