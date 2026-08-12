@@ -611,6 +611,7 @@ def test_link_list_endpoints_do_not_ship_agent_credentials(client):
         assert [r["uuid"] for r in rows] == [agent["uuid"]], url
         assert "sk-secret-value" not in resp.text, url
         assert "config" not in rows[0], url
+        assert rows[0]["created_at"], url
 
     # The detail route still carries it, so the assertions above are the list
     # projection at work and not a missing agent.

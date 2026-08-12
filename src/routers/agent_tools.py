@@ -4,7 +4,7 @@ from pydantic import BaseModel, Field
 from sqlite3 import IntegrityError
 
 from auth_utils import get_current_org, OrgContext
-from routers.agents import AgentSummary, _to_agent_summary
+from routers.agents import AgentSummary, to_agent_summary
 from db import (
     add_tool_to_agent,
     remove_tool_from_agent,
@@ -175,7 +175,7 @@ def get_tool_agents(
     """List the agents a tool is linked to"""
     _require_owned_tool(tool_uuid, ctx.org_uuid)
     return [
-        _to_agent_summary(a)
+        to_agent_summary(a)
         for a in get_agents_for_tool(tool_uuid)
         if a.get("org_uuid") == ctx.org_uuid
     ]

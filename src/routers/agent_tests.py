@@ -52,7 +52,7 @@ from db import (
     delete_agent_test_job,
 )
 from llm_judge import build_test_evaluators_payload, evaluator_value_name
-from routers.agents import AgentSummary, _to_agent_summary
+from routers.agents import AgentSummary, to_agent_summary
 from auth_utils import get_current_org, get_org_jwt_or_api_key, OrgContext
 from utils import (
     job_slot,
@@ -935,7 +935,7 @@ def get_test_agents(
         raise HTTPException(status_code=404, detail="Test not found")
 
     return [
-        _to_agent_summary(a)
+        to_agent_summary(a)
         for a in get_agents_for_test(test_uuid)
         if a.get("org_uuid") == ctx.org_uuid
     ]

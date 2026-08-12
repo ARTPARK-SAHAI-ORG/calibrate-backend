@@ -425,6 +425,7 @@ class AgentSummary(BaseModel):
     )
     name: str = Field(description="Name of the agent")
     type: Literal["agent", "connection"] = Field(description=AGENT_TYPE_DESCRIPTION)
+    created_at: str = Field(description="When the agent was created (ISO 8601 UTC)")
     updated_at: str = Field(
         description="When the agent was last updated (ISO 8601 UTC)"
     )
@@ -437,16 +438,22 @@ class AgentSummary(BaseModel):
     )
 
 
-def _to_agent_summary(agent: Dict[str, Any]) -> AgentSummary:
+def to_agent_summary(agent: Dict[str, Any]) -> AgentSummary:
     """Project an agent row to the trimmed list shape, lifting
     `config.connection_verified` and a `config.default_inputs` presence flag to
-    top-level fields."""
+    top-level fields.
+
+    Every list endpoint that returns agents goes through this — the full row's
+    `config` carries `agent_headers`, the caller's auth token for their own
+    agent, which belongs on the detail route only.
+    """
     config = agent.get("config") or {}
     verified = config.get("connection_verified")
     return AgentSummary(
         uuid=agent["uuid"],
         name=agent["name"],
         type=agent["type"],
+        created_at=agent["created_at"],
         updated_at=agent["updated_at"],
         connection_verified=None if verified is None else bool(verified),
         has_default_inputs=bool(config.get("default_inputs")),
@@ -757,7 +764,7 @@ def list_agents(
     agents = get_all_agents(org_uuid=ctx.org_uuid)
     agents = search.apply(agents)
     page, total = count_and_page(agents, pagination)
-    return page_envelope([_to_agent_summary(a) for a in page], total, pagination)
+    return page_envelope([to_agent_summary(a) for a in page], total, pagination)
 
 
 @router.get(
