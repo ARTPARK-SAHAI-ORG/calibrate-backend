@@ -548,3 +548,71 @@ def test_404_stays_a_404_when_the_hint_lookup_fails(client):
         resp = client.get(f"/agents/{uuid.uuid4()}", headers=a["headers"])
     assert resp.status_code == 404
     assert resp.json() == {"detail": "Agent not found"}
+
+
+def test_link_list_endpoints_do_not_ship_agent_credentials(client):
+    """`config.agent_headers` holds the caller's own auth token for their bot.
+    It belongs on the agent detail route, never in a list."""
+    a = _signup(client, email_prefix="creds")
+    agent = client.post(
+        "/agents",
+        json={
+            "name": f"agent-{uuid.uuid4().hex[:6]}",
+            "type": "connection",
+            "config": {
+                "agent_url": "https://bot.example.com/chat",
+                "agent_headers": {"Authorization": "Bearer sk-secret-value"},
+            },
+        },
+        headers=a["headers"],
+    ).json()
+    test = client.post(
+        "/tests",
+        json={
+            "name": f"test-{uuid.uuid4().hex[:6]}",
+            "type": "tool_call",
+            "config": {
+                "history": [{"role": "user", "content": "hi"}],
+                "evaluation": {
+                    "type": "tool_call",
+                    "tool_calls": [{"tool": "x", "accept_any_arguments": True}],
+                },
+            },
+        },
+        headers=a["headers"],
+    ).json()
+    tool = client.post(
+        "/tools",
+        json={
+            "name": f"tool-{uuid.uuid4().hex[:6]}",
+            "description": "d",
+            "config": {"type": "structured_output", "parameters": []},
+        },
+        headers=a["headers"],
+    ).json()
+    client.post(
+        "/agent-tests",
+        json={"agent_uuid": agent["uuid"], "test_uuids": [test["uuid"]]},
+        headers=a["headers"],
+    )
+    client.post(
+        "/agent-tools",
+        json={"agent_uuid": agent["uuid"], "tool_uuids": [tool["uuid"]]},
+        headers=a["headers"],
+    )
+
+    for url in (
+        f"/agent-tests/test/{test['uuid']}/agents",
+        f"/agent-tools/tool/{tool['uuid']}/agents",
+    ):
+        resp = client.get(url, headers=a["headers"])
+        assert resp.status_code == 200, url
+        rows = resp.json()
+        assert [r["uuid"] for r in rows] == [agent["uuid"]], url
+        assert "sk-secret-value" not in resp.text, url
+        assert "config" not in rows[0], url
+
+    # The detail route still carries it, so the assertions above are the list
+    # projection at work and not a missing agent.
+    detail = client.get(f"/agents/{agent['uuid']}", headers=a["headers"]).json()
+    assert detail["config"]["agent_headers"]["Authorization"] == "Bearer sk-secret-value"

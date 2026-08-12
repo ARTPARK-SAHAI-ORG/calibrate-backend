@@ -4,7 +4,7 @@ from pydantic import BaseModel, Field
 from sqlite3 import IntegrityError
 
 from auth_utils import get_current_org, OrgContext
-from utils import AGENT_TYPE_DESCRIPTION
+from routers.agents import AgentSummary, _to_agent_summary
 from db import (
     add_tool_to_agent,
     remove_tool_from_agent,
@@ -90,24 +90,6 @@ class ToolResponse(BaseModel):
     updated_at: str = Field(description="When the tool was last updated (ISO 8601 UTC)")
 
 
-class AgentResponse(BaseModel):
-    uuid: str = Field(
-        min_length=36,
-        max_length=36,
-        description="ID of the agent",
-        examples=[_EXAMPLE_ID],
-    )
-    name: str = Field(description="Agent name")
-    type: Literal["agent", "connection"] = Field(
-        description=AGENT_TYPE_DESCRIPTION
-    )
-    config: Dict[str, Any] | None = Field(
-        None, description="Behavioral config"
-    )
-    created_at: str = Field(description="When the agent was created (ISO 8601 UTC)")
-    updated_at: str = Field(description="When the agent was last updated (ISO 8601 UTC)")
-
-
 def _require_owned_agent(agent_uuid: str, org_uuid: str) -> Dict[str, Any]:
     agent = get_agent(agent_uuid)
     if not agent or agent.get("org_uuid") != org_uuid:
@@ -180,7 +162,7 @@ def get_agent_tools(
 
 @router.get(
     "/tool/{tool_uuid}/agents",
-    response_model=List[AgentResponse],
+    response_model=List[AgentSummary],
     summary="List agents for tool",
 )
 def get_tool_agents(
@@ -192,7 +174,11 @@ def get_tool_agents(
 ):
     """List the agents a tool is linked to"""
     _require_owned_tool(tool_uuid, ctx.org_uuid)
-    return get_agents_for_tool(tool_uuid)
+    return [
+        _to_agent_summary(a)
+        for a in get_agents_for_tool(tool_uuid)
+        if a.get("org_uuid") == ctx.org_uuid
+    ]
 
 
 @router.delete("", summary="Unlink tool from agent")
