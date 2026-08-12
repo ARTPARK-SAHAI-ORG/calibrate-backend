@@ -943,11 +943,11 @@ def get_test_agents(
         description="Test whose linked agents to list",
         examples=[EXAMPLE_TEST_UUID],
     ),
+    ctx: OrgContext = Depends(get_current_org),
 ):
     """List the agents linked to a test."""
-    # Verify test exists
     test = get_test(test_uuid)
-    if not test:
+    if not test or test.get("org_uuid") != ctx.org_uuid:
         raise HTTPException(status_code=404, detail="Test not found")
 
     agents = get_agents_for_test(test_uuid)

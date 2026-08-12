@@ -343,3 +343,160 @@ def test_same_org_members_see_each_others_agents(client):
     own_listing = client.get("/agents", headers=member["headers"])
     assert own_listing.status_code == 200
     assert all(item["uuid"] != a_uuid for item in own_listing.json()["items"])
+
+
+# ---------------------------------------------------------------------------
+# 404 workspace hint (`organization_uuid`)
+# ---------------------------------------------------------------------------
+
+
+def test_404_hints_the_org_when_caller_is_a_member(client):
+    """A member fetching an agent under the wrong X-Org-UUID gets the owning
+    org back on the 404, so the frontend can switch workspace and retry."""
+    owner = _signup(client, email_prefix="hint-owner")
+    member = _signup(client, email_prefix="hint-member")
+    org_uuid = db.get_personal_org_for_user(owner["user_uuid"])["uuid"]
+    _invite_to_org(client, owner, org_uuid, member["email"])
+
+    a_uuid = client.post(
+        "/agents",
+        json={"name": f"hinted-{uuid.uuid4().hex[:6]}", "type": "agent"},
+        headers=owner["headers"],
+    ).json()["uuid"]
+
+    # Member's active workspace is their own personal org — wrong one.
+    resp = client.get(f"/agents/{a_uuid}", headers=member["headers"])
+    assert resp.status_code == 404
+    assert resp.json()["organization_uuid"] == org_uuid
+
+
+def test_404_hides_the_org_from_non_members(client):
+    a = _signup(client, email_prefix="hint-a")
+    b = _signup(client, email_prefix="hint-b")
+    a_uuid = client.post(
+        "/agents",
+        json={"name": f"private-{uuid.uuid4().hex[:6]}", "type": "agent"},
+        headers=a["headers"],
+    ).json()["uuid"]
+
+    resp = client.get(f"/agents/{a_uuid}", headers=b["headers"])
+    assert resp.status_code == 404
+    assert "organization_uuid" not in resp.json()
+
+
+def test_404_for_an_unknown_uuid_carries_no_hint(client):
+    a = _signup(client, email_prefix="hint-missing")
+    resp = client.get(f"/agents/{uuid.uuid4()}", headers=a["headers"])
+    assert resp.status_code == 404
+    assert "organization_uuid" not in resp.json()
+
+
+def test_404_hint_covers_jobs_and_annotation_tasks(client):
+    """The hint is not agent-specific: it works off any uuid in the path,
+    including tables that reach their org through a join."""
+    owner = _signup(client, email_prefix="hint-job-owner")
+    member = _signup(client, email_prefix="hint-job-member")
+    org_uuid = db.get_personal_org_for_user(owner["user_uuid"])["uuid"]
+    _invite_to_org(client, owner, org_uuid, member["email"])
+
+    task_uuid = client.post(
+        "/annotation-tasks",
+        json={"name": f"hint-task-{uuid.uuid4().hex[:6]}", "type": "llm"},
+        headers=owner["headers"],
+    ).json()["uuid"]
+    resp = client.get(f"/annotation-tasks/{task_uuid}", headers=member["headers"])
+    assert resp.status_code == 404
+    assert resp.json()["organization_uuid"] == org_uuid
+
+    # agent_test_jobs reaches its org via agents.
+    agent_uuid = client.post(
+        "/agents",
+        json={"name": f"hint-agent-{uuid.uuid4().hex[:6]}", "type": "agent"},
+        headers=owner["headers"],
+    ).json()["uuid"]
+    job_uuid = db.create_agent_test_job(agent_uuid, "llm-unit-test")
+    resp = client.get(f"/agent-tests/run/{job_uuid}", headers=member["headers"])
+    assert resp.status_code == 404
+    assert resp.json()["organization_uuid"] == org_uuid
+
+
+def test_cross_org_cannot_see_evaluator_agreement_trend(client):
+    a = _signup(client, email_prefix="trend-a")
+    b = _signup(client, email_prefix="trend-b")
+    ev = client.post(
+        "/evaluators",
+        json={
+            "name": f"ev-{uuid.uuid4().hex[:6]}",
+            "description": "d",
+            "evaluator_type": "llm",
+            "data_type": "text",
+            "kind": "single",
+            "output_type": "binary",
+            "version": {
+                "judge_model": "openai/gpt-4",
+                "system_prompt": "Judge it",
+                "output_config": {
+                    "scale": [
+                        {"value": True, "name": "Pass"},
+                        {"value": False, "name": "Fail"},
+                    ]
+                },
+            },
+        },
+        headers=a["headers"],
+    )
+    assert ev.status_code == 200, ev.text
+    ev_uuid = ev.json()["uuid"]
+
+    assert (
+        client.get(
+            f"/annotation-agreement/evaluator/{ev_uuid}/trend", headers=a["headers"]
+        ).status_code
+        == 200
+    )
+    assert (
+        client.get(
+            f"/annotation-agreement/evaluator/{ev_uuid}/trend", headers=b["headers"]
+        ).status_code
+        == 404
+    )
+
+
+def test_cross_org_cannot_list_agents_for_a_test(client):
+    a = _signup(client, email_prefix="test-agents-a")
+    b = _signup(client, email_prefix="test-agents-b")
+    test = client.post(
+        "/tests",
+        json={
+            "name": f"test-{uuid.uuid4().hex[:6]}",
+            "type": "tool_call",
+            "config": {
+                "history": [{"role": "user", "content": "hi"}],
+                "evaluation": {
+                    "type": "tool_call",
+                    "tool_calls": [{"tool": "x", "accept_any_arguments": True}],
+                },
+            },
+        },
+        headers=a["headers"],
+    ).json()
+    url = f"/agent-tests/test/{test['uuid']}/agents"
+    assert client.get(url, headers=a["headers"]).status_code == 200
+    assert client.get(url, headers=b["headers"]).status_code == 404
+
+
+def test_404_carries_no_hint_for_the_workspace_already_active(client):
+    """A parent uuid in the path resolves to the caller's own workspace, so
+    it must not produce a hint the frontend would loop on."""
+    a = _signup(client, email_prefix="hint-self")
+    task_uuid = client.post(
+        "/annotation-tasks",
+        json={"name": f"self-task-{uuid.uuid4().hex[:6]}", "type": "llm"},
+        headers=a["headers"],
+    ).json()["uuid"]
+
+    resp = client.get(
+        f"/annotation-tasks/{task_uuid}/items/{uuid.uuid4()}", headers=a["headers"]
+    )
+    assert resp.status_code == 404
+    assert "organization_uuid" not in resp.json()

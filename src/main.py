@@ -27,14 +27,22 @@ if sentry_dsn:
 import secrets
 
 from fastapi import Depends, FastAPI, HTTPException, Request
+from fastapi.exception_handlers import http_exception_handler
 from fastapi.responses import FileResponse, JSONResponse, Response
+from starlette.concurrency import run_in_threadpool
+from starlette.exceptions import HTTPException as StarletteHTTPException
 from fastapi.openapi.docs import get_swagger_ui_html, get_redoc_html
 from fastapi.security import HTTPBasic, HTTPBasicCredentials
 from pydantic import BaseModel
 from fastapi.middleware.cors import CORSMiddleware
 
-from db import init_db, NameAlreadyExistsError
-from auth_utils import get_current_user_id
+from db import (
+    init_db,
+    NameAlreadyExistsError,
+    find_member_org_for_resource,
+    get_personal_org_for_user,
+)
+from auth_utils import get_current_user_id, decode_token
 from routers.auth import router as auth_router
 from routers.agents import router as agents_router
 from routers.tools import router as tools_router
@@ -129,6 +137,62 @@ async def _name_already_exists_handler(_: Request, exc: NameAlreadyExistsError):
         status_code=409,
         content={"detail": f"{exc.entity_label} name already exists"},
     )
+
+
+def _resource_org_hint(request: Request) -> Optional[str]:
+    """Return the org owning a uuid in the request path, if the caller belongs to it.
+
+    Only JWT callers get a hint: an API key is bound to a single org, so
+    "the resource lives in another workspace" cannot apply to it.
+    """
+    auth = request.headers.get("authorization", "")
+    token = auth[7:].strip() if auth[:7].lower() == "bearer " else ""
+    user_id = (decode_token(token) or {}).get("sub") if token else None
+    if not user_id:
+        return None
+
+    active_org = request.headers.get("x-org-uuid")
+    if not active_org:
+        personal = get_personal_org_for_user(user_id)
+        active_org = personal["uuid"] if personal else ""
+
+    for segment in request.url.path.split("/"):
+        if len(segment) == 36:
+            org_uuid = find_member_org_for_resource(segment, user_id)
+            # A parent uuid in the path usually resolves to the org the caller
+            # is already in; hinting it would send the frontend on a
+            # switch-and-retry loop that hides the real cause of the 404.
+            if org_uuid and org_uuid != active_org:
+                return org_uuid
+    return None
+
+
+@app.exception_handler(StarletteHTTPException)
+async def _not_found_handler(request: Request, exc: StarletteHTTPException):
+    """Tell the caller which of their workspaces a 404'd resource lives in.
+
+    A shared link opens with whatever workspace the recipient had active, so
+    a resource they can see still 404s under the wrong `X-Org-UUID`. The
+    `organization_uuid` hint lets the frontend switch and retry instead of
+    showing a dead end. It is added only when the caller is a member of the
+    owning workspace, so it never reveals someone else's resource.
+    """
+    if exc.status_code == 404:
+        # An exception raised inside an exception handler bypasses Starlette's
+        # error middleware and becomes a bare 500, so a hint that cannot be
+        # resolved must degrade to the plain 404.
+        try:
+            org_uuid = await run_in_threadpool(_resource_org_hint, request)
+        except Exception:
+            logger.exception("Failed to resolve the workspace hint for a 404")
+            org_uuid = None
+        if org_uuid:
+            return JSONResponse(
+                status_code=404,
+                content={"detail": exc.detail, "organization_uuid": org_uuid},
+                headers=exc.headers,
+            )
+    return await http_exception_handler(request, exc)
 
 
 @app.get("/docs", include_in_schema=False)

@@ -7,7 +7,6 @@ from db import (
     get_annotation_tasks_by_uuids,
     get_annotations_for_task,
     get_annotations_for_org,
-    get_evaluator,
     get_evaluator_runs_for_evaluator_org_scoped,
     get_evaluator_runs_for_task,
     get_evaluator_runs_for_org,
@@ -15,6 +14,7 @@ from db import (
     get_evaluators_by_uuids,
 )
 from auth_utils import get_current_org, OrgContext
+from org_scope import ensure_owned_evaluator
 from annotation_metrics import (
     aggregate_agreement,
     aggregate_human_evaluator_agreement,
@@ -129,9 +129,7 @@ def evaluator_agreement_trend(
     ctx: OrgContext = Depends(get_current_org),
 ):
     """Get human-vs-evaluator agreement trends for one evaluator, broken down by version and task"""
-    evaluator = get_evaluator(evaluator_uuid)
-    if not evaluator:
-        raise HTTPException(status_code=404, detail="Evaluator not found")
+    evaluator = ensure_owned_evaluator(evaluator_uuid, ctx.org_uuid)
 
     if task_id:
         task = get_annotation_task(task_id)
