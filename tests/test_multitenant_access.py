@@ -500,3 +500,51 @@ def test_404_carries_no_hint_for_the_workspace_already_active(client):
     )
     assert resp.status_code == 404
     assert "organization_uuid" not in resp.json()
+
+
+def test_404_carries_no_hint_for_api_key_callers(client):
+    """An API key only ever works in the org it was minted in, so telling its
+    holder about a different workspace is useless and must not happen."""
+    owner = _signup(client, email_prefix="hint-key-owner")
+    other = _signup(client, email_prefix="hint-key-other")
+    owner_org = db.get_personal_org_for_user(owner["user_uuid"])["uuid"]
+    other_org = db.get_personal_org_for_user(other["user_uuid"])["uuid"]
+    # The key holder is a member of both orgs, so only the API-key rule can
+    # suppress the hint here.
+    _invite_to_org(client, other, other_org, owner["email"])
+
+    raw_key = client.post(
+        "/api-keys",
+        json={"name": f"key-{uuid.uuid4().hex[:6]}"},
+        headers={**owner["headers"], **_org_header(owner_org)},
+    ).json()["key"]
+
+    agent_uuid = client.post(
+        "/agents",
+        json={"name": f"keyed-{uuid.uuid4().hex[:6]}", "type": "agent"},
+        headers={**other["headers"], **_org_header(other_org)},
+    ).json()["uuid"]
+
+    resp = client.get(f"/agents/{agent_uuid}", headers={"X-API-Key": raw_key})
+    assert resp.status_code == 404
+    assert "organization_uuid" not in resp.json()
+
+    # Same request as a JWT caller does get the hint, so the 404 above is the
+    # API-key rule at work and not a missing link.
+    jwt_resp = client.get(
+        f"/agents/{agent_uuid}", headers={**owner["headers"], **_org_header(owner_org)}
+    )
+    assert jwt_resp.json()["organization_uuid"] == other_org
+
+
+def test_404_stays_a_404_when_the_hint_lookup_fails(client):
+    """The hint is resolved inside an exception handler, where an uncaught
+    error would escape as a bare 500 instead of the 404 the route raised."""
+    a = _signup(client, email_prefix="hint-boom")
+    with patch(
+        "main.find_other_member_org_for_resources",
+        side_effect=RuntimeError("database is locked"),
+    ):
+        resp = client.get(f"/agents/{uuid.uuid4()}", headers=a["headers"])
+    assert resp.status_code == 404
+    assert resp.json() == {"detail": "Agent not found"}
