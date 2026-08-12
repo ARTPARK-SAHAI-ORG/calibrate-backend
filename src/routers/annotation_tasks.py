@@ -212,7 +212,7 @@ class TaskAgreementResponse(BaseModel):
         description="Agreement between annotators who labelled the same items"
     )
     evaluators: List[Dict[str, Any]] = Field(
-        description="Agreement between each evaluator and the annotators, one entry per linked evaluator"
+        description="Agreement between each evaluator and the annotators, plus that evaluator's own results, one entry per linked evaluator"
     )
 
 
@@ -304,6 +304,7 @@ from annotation_metrics import (
     aggregate_agreement,
     aggregate_human_evaluator_agreement,
     evaluator_human_pair_agreement,
+    evaluator_result_summary,
     per_item_agreement,
     has_any_comparable_pair,
     trend_series,
@@ -2550,6 +2551,7 @@ def _evaluator_alignment_block(
                 "current": cur,
                 "pair_count": pairs,
                 "series": series_by_id.get(ev_id, []),
+                "result": evaluator_result_summary(evaluator_runs, ev_id),
             }
         )
     return out
