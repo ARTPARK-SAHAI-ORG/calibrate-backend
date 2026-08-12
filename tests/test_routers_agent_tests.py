@@ -137,9 +137,16 @@ def test_agent_tests_link_crud(client):
         == 200
     )
     assert (
-        client.get(f"/agent-tests/test/{test_a['uuid']}/agents").status_code == 200
+        client.get(
+            f"/agent-tests/test/{test_a['uuid']}/agents", headers=h
+        ).status_code
+        == 200
     )
-    assert client.get("/agent-tests/test/missing/agents").status_code == 404
+    # The route is org-scoped now, so it rejects an anonymous caller.
+    assert client.get(f"/agent-tests/test/{test_a['uuid']}/agents").status_code == 403
+    assert (
+        client.get("/agent-tests/test/missing/agents", headers=h).status_code == 404
+    )
     assert (
         client.get("/agent-tests/agent/missing/tests", headers=h).status_code == 404
     )

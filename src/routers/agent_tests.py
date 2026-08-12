@@ -52,6 +52,7 @@ from db import (
     delete_agent_test_job,
 )
 from llm_judge import build_test_evaluators_payload, evaluator_value_name
+from routers.agents import AgentSummary, to_agent_summary
 from auth_utils import get_current_org, get_org_jwt_or_api_key, OrgContext
 from utils import (
     job_slot,
@@ -62,7 +63,6 @@ from utils import (
     TestListResponse,
     to_test_list_response,
     OutputTypeLiteral,
-    AGENT_TYPE_DESCRIPTION,
     AgentTestJobType,
     get_s3_client,
     get_s3_output_config,
@@ -242,22 +242,6 @@ class AgentTestsCreateResponse(BaseModel):
         description="Identifiers for the links created by this call. Tests that were already linked are excluded"
     )
     message: str = Field(description="Confirmation message")
-
-
-class AgentResponse(BaseModel):
-    uuid: str = Field(
-        min_length=36,
-        max_length=36,
-        description="Agent ID",
-        examples=[_EXAMPLE_AGENT_UUID],
-    )
-    name: str = Field(description="Agent name")
-    type: Literal["agent", "connection"] = Field(description=AGENT_TYPE_DESCRIPTION)
-    config: Dict[str, Any] | None = Field(
-        None, description="How the agent behaves"
-    )
-    created_at: str = Field(description="When the agent was created (ISO 8601 UTC)")
-    updated_at: str = Field(description="When the agent was last updated (ISO 8601 UTC)")
 
 
 class RunTestRequest(BaseModel):
@@ -935,7 +919,7 @@ def get_all_test_runs_for_user(
 
 @router.get(
     "/test/{test_uuid}/agents",
-    response_model=List[AgentResponse],
+    response_model=List[AgentSummary],
     summary="List agents for test",
 )
 def get_test_agents(
@@ -943,15 +927,18 @@ def get_test_agents(
         description="Test whose linked agents to list",
         examples=[EXAMPLE_TEST_UUID],
     ),
+    ctx: OrgContext = Depends(get_current_org),
 ):
     """List the agents linked to a test."""
-    # Verify test exists
     test = get_test(test_uuid)
-    if not test:
+    if not test or test.get("org_uuid") != ctx.org_uuid:
         raise HTTPException(status_code=404, detail="Test not found")
 
-    agents = get_agents_for_test(test_uuid)
-    return agents
+    return [
+        to_agent_summary(a)
+        for a in get_agents_for_test(test_uuid)
+        if a.get("org_uuid") == ctx.org_uuid
+    ]
 
 
 @router.delete("", summary="Unlink test from agent")

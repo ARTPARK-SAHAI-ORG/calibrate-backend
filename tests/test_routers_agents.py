@@ -195,19 +195,20 @@ def test_list_agents_returns_trimmed_summary(client):
         "uuid",
         "name",
         "type",
+        "created_at",
         "updated_at",
         "connection_verified",
         "has_default_inputs",
     }
     assert item["name"] == name
     assert item["type"] == "agent"
+    assert item["created_at"]
     assert item["updated_at"]
 
-    # Full config / credentials / created_at are NOT shipped in the list.
+    # Full config / credentials are NOT shipped in the list.
     assert "config" not in item
     assert "system_prompt" not in item
     assert "agent_headers" not in item
-    assert "created_at" not in item
 
 
 def test_list_agents_derives_connection_verified(client):
