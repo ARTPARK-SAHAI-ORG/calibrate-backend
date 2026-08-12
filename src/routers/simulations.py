@@ -46,7 +46,7 @@ from db import (
 )
 from llm_judge import build_evaluator_cli_payload
 from utils import (
-    job_slot_lock,
+    job_slot,
     AGENT_TYPE_DESCRIPTION,
     TaskStatus,
     TaskCreateResponse,
@@ -2499,12 +2499,9 @@ def run_simulation_endpoint(
     except ValueError as e:
         raise HTTPException(status_code=500, detail=str(e))
 
-    with job_slot_lock():
-        can_start = can_start_simulation_job(SIMULATION_JOB_TYPES, ctx.org_uuid)
-        initial_status = (
-            TaskStatus.IN_PROGRESS.value if can_start else TaskStatus.QUEUED.value
-        )
-
+    with job_slot(
+        lambda: can_start_simulation_job(SIMULATION_JOB_TYPES, ctx.org_uuid)
+    ) as initial_status:
         # Create job in database with details for recovery
         job_id = create_simulation_job(
             simulation_id=simulation_uuid,
@@ -2519,7 +2516,7 @@ def run_simulation_endpoint(
             results=None,
         )
 
-    if can_start:
+    if initial_status == TaskStatus.IN_PROGRESS.value:
         # Start background task in a separate thread
         thread = threading.Thread(
             target=run_simulation_task,

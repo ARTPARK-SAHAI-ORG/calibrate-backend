@@ -29,7 +29,7 @@ from dataset_utils import (
 from auth_utils import get_current_org, OrgContext
 from llm_judge import build_evaluator_cli_payload, refresh_evaluators_to_live
 from utils import (
-    job_slot_lock,
+    job_slot,
     TaskStatus,
     ProviderResult,
     TaskCreateResponse,
@@ -714,12 +714,7 @@ def evaluate_stt(
         expected_evaluator_type="stt",
     )
 
-    with job_slot_lock():
-        can_start = can_start_job(EVAL_JOB_TYPES, ctx.org_uuid)
-        initial_status = (
-            TaskStatus.IN_PROGRESS.value if can_start else TaskStatus.QUEUED.value
-        )
-
+    with job_slot(lambda: can_start_job(EVAL_JOB_TYPES, ctx.org_uuid)) as initial_status:
         job_id = create_job(
             job_type="stt-eval",
             org_uuid=ctx.org_uuid,
@@ -740,7 +735,7 @@ def evaluate_stt(
             results=None,
         )
 
-    if can_start:
+    if initial_status == TaskStatus.IN_PROGRESS.value:
         # Start background task in a separate thread
         thread = threading.Thread(
             target=run_evaluation_task,
@@ -814,12 +809,9 @@ def retry_stt_evaluation(
         "sarvam_judges": details.get("sarvam_judges", True),
     }
 
-    with job_slot_lock():
-        can_start = can_start_job(EVAL_JOB_TYPES, ctx.org_uuid)
-        initial_status = (
-            TaskStatus.IN_PROGRESS.value if can_start else TaskStatus.QUEUED.value
-        )
-
+    with job_slot(
+        lambda: can_start_job(EVAL_JOB_TYPES, ctx.org_uuid)
+    ) as initial_status:
         update_job(
             task_id,
             status=initial_status,
@@ -829,7 +821,7 @@ def retry_stt_evaluation(
         )
 
     request = _stt_request_from_job_details(rerun_details)
-    if can_start:
+    if initial_status == TaskStatus.IN_PROGRESS.value:
         thread = threading.Thread(
             target=run_evaluation_task,
             args=(task_id, request, s3_bucket),

@@ -54,7 +54,7 @@ from db import (
 from llm_judge import build_test_evaluators_payload, evaluator_value_name
 from auth_utils import get_current_org, get_org_jwt_or_api_key, OrgContext
 from utils import (
-    job_slot_lock,
+    job_slot,
     TaskStatus,
     InitialTaskStatus,
     TaskCreateResponse,
@@ -2276,6 +2276,56 @@ def _agent_connection_unverified(agent: Dict[str, Any]) -> bool:
     )
 
 
+def _agent_test_job_details(
+    agent: Dict[str, Any],
+    tests: List[Dict[str, Any]],
+    s3_bucket: str,
+) -> tuple[List[str], Dict[str, Any]]:
+    """Build the `details` blob both agent-test launchers store on their job.
+
+    Returns ``(test_names, details)`` — test names come back separately because
+    each launcher also seeds its own placeholder `results` from them. The
+    calibrate config and per-test evaluator metadata are snapshotted here so the
+    worker (and enrichment) stay aligned even if links or live versions change
+    later.
+    """
+    test_names = [test.get("name") for test in tests if test.get("name")]
+    calibrate_config, evaluators_by_test_id = _build_calibrate_config(agent, tests)
+    return test_names, {
+        "agent_uuid": agent["uuid"],
+        "test_uuids": [t["uuid"] for t in tests],
+        "test_names": test_names,
+        "s3_bucket": s3_bucket,
+        "calibrate_config": calibrate_config,
+        "evaluators_by_test_id": evaluators_by_test_id,
+    }
+
+
+def _create_agent_test_job_in_slot(
+    agent: Dict[str, Any],
+    job_type: str,
+    details: Dict[str, Any],
+    results: Dict[str, Any],
+) -> tuple[str, str]:
+    """Claim a queue slot and create the job under one lock hold.
+
+    Returns ``(job_id, initial_status)``. The INSERT must stay inside
+    `job_slot` or concurrent submissions can each see the same free slot and
+    blow past MAX_CONCURRENT_JOBS.
+    """
+    with job_slot(
+        lambda: can_start_agent_test_job(AGENT_TEST_JOB_TYPES, agent.get("org_uuid"))
+    ) as initial_status:
+        job_id = create_agent_test_job(
+            agent_id=agent["uuid"],
+            job_type=job_type,
+            status=initial_status,
+            details=details,
+            results=results,
+        )
+    return job_id, initial_status
+
+
 def _launch_agent_test_run(
     agent: Dict[str, Any],
     tests: List[Dict[str, Any]],
@@ -2287,44 +2337,19 @@ def _launch_agent_test_run(
     ``(task_id, status)``. The caller owns agent-ownership, connection-verified,
     and non-empty ``tests`` checks. This just snapshots config and dispatches.
     """
-    agent_uuid = agent["uuid"]
-    org_uuid = agent.get("org_uuid")
+    test_names, details = _agent_test_job_details(agent, tests, s3_bucket)
+    job_id, initial_status = _create_agent_test_job_in_slot(
+        agent,
+        "llm-unit-test",
+        details,
+        results={
+            "test_results": [
+                _pending_test_case_result_placeholder(name) for name in test_names
+            ]
+        },
+    )
 
-    # Extract test names for progress tracking
-    test_names = [test.get("name") for test in tests if test.get("name")]
-
-    # Snapshot calibrate config and per-test evaluator metadata at submission so the
-    # worker (and enrichment) stay aligned even if links or live versions change later.
-    calibrate_config, evaluators_by_test_id = _build_calibrate_config(agent, tests)
-
-    # Create job in database with details for recovery
-    test_uuids = [t["uuid"] for t in tests]
-    with job_slot_lock():
-        can_start = can_start_agent_test_job(AGENT_TEST_JOB_TYPES, org_uuid)
-        initial_status = (
-            TaskStatus.IN_PROGRESS.value if can_start else TaskStatus.QUEUED.value
-        )
-
-        job_id = create_agent_test_job(
-            agent_id=agent_uuid,
-            job_type="llm-unit-test",
-            status=initial_status,
-            details={
-                "agent_uuid": agent_uuid,
-                "test_uuids": test_uuids,
-                "test_names": test_names,
-                "s3_bucket": s3_bucket,
-                "calibrate_config": calibrate_config,
-                "evaluators_by_test_id": evaluators_by_test_id,
-            },
-            results={
-                "test_results": [
-                    _pending_test_case_result_placeholder(name) for name in test_names
-                ]
-            },
-        )
-
-    if can_start:
+    if initial_status == TaskStatus.IN_PROGRESS.value:
         # Start background task in a separate thread
         thread = threading.Thread(
             target=run_llm_test_task,
@@ -3333,43 +3358,20 @@ def run_agent_benchmark(
     except ValueError as e:
         raise HTTPException(status_code=500, detail=str(e))
 
-    # Per-org limit check uses the agent's org.
-    org_uuid = agent.get("org_uuid")
+    test_names, details = _agent_test_job_details(agent, tests, s3_bucket)
+    details["models"] = request.models
+    job_id, initial_status = _create_agent_test_job_in_slot(
+        agent,
+        "llm-benchmark",
+        details,
+        results={
+            "model_results": _benchmark_queued_model_results(
+                request.models, test_names
+            )
+        },
+    )
 
-    # Extract test names for progress tracking
-    test_names = [test.get("name") for test in tests if test.get("name")]
-
-    calibrate_config, evaluators_by_test_id = _build_calibrate_config(agent, tests)
-
-    # Create job in database with details for recovery
-    test_uuids = [t["uuid"] for t in tests]
-    with job_slot_lock():
-        can_start = can_start_agent_test_job(AGENT_TEST_JOB_TYPES, org_uuid)
-        initial_status = (
-            TaskStatus.IN_PROGRESS.value if can_start else TaskStatus.QUEUED.value
-        )
-
-        job_id = create_agent_test_job(
-            agent_id=agent_uuid,
-            job_type="llm-benchmark",
-            status=initial_status,
-            details={
-                "agent_uuid": agent_uuid,
-                "test_uuids": test_uuids,
-                "test_names": test_names,
-                "models": request.models,
-                "s3_bucket": s3_bucket,
-                "calibrate_config": calibrate_config,
-                "evaluators_by_test_id": evaluators_by_test_id,
-            },
-            results={
-                "model_results": _benchmark_queued_model_results(
-                    request.models, test_names
-                )
-            },
-        )
-
-    if can_start:
+    if initial_status == TaskStatus.IN_PROGRESS.value:
         # Start background task
         thread = threading.Thread(
             target=run_benchmark_task,

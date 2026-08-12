@@ -71,7 +71,7 @@ from annotation_eval_runner import (
     start_annotation_eval_job,
 )
 from utils import (
-    job_slot_lock,
+    job_slot,
     TaskStatus,
     AnnotationTaskTypeLiteral,
     InitialTaskStatus,
@@ -1864,12 +1864,9 @@ def start_evaluator_run(
         raise HTTPException(status_code=400, detail=str(e))
 
     # Decide queue vs immediate start (shared eval queue with stt-eval/tts-eval).
-    with job_slot_lock():
-        can_start = can_start_job(EVAL_JOB_TYPES, ctx.org_uuid)
-        initial_status = (
-            TaskStatus.IN_PROGRESS.value if can_start else TaskStatus.QUEUED.value
-        )
-
+    with job_slot(
+        lambda: can_start_job(EVAL_JOB_TYPES, ctx.org_uuid)
+    ) as initial_status:
         job_uuid = create_job(
             job_type=ANNOTATION_EVAL_JOB_TYPE,
             org_uuid=ctx.org_uuid,
@@ -1896,7 +1893,7 @@ def start_evaluator_run(
     # exact byte sequence calibrate sees.
     snapshot_eval_job_items(job_uuid, items)
 
-    if can_start:
+    if initial_status == TaskStatus.IN_PROGRESS.value:
         start_annotation_eval_job(
             job_uuid=job_uuid,
             task_uuid=task_uuid,

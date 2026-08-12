@@ -917,23 +917,31 @@ def get_max_concurrent_jobs_per_org() -> int:
 
 # Job queue lock to ensure thread-safe queue operations. Reentrant so a caller
 # can hold it across `can_start_*_job(...)` + the job INSERT (see
-# `job_slot_lock`) even though those helpers take it themselves.
+# `job_slot`) even though those helpers take it themselves.
 _job_queue_lock = threading.RLock()
 
 
 @contextmanager
-def job_slot_lock():
-    """Hold the queue lock across a capacity check and the job INSERT.
+def job_slot(capacity_check: callable):
+    """Claim a queue slot: yields the status a new job should be created with.
 
     `can_start_*_job(...)` only locks while counting, so on its own it is a
     check-then-act race: two submissions can both see a free slot and both
     launch, blowing past MAX_CONCURRENT_JOBS. Request handlers run in the
-    thread pool, so this is reachable from plain concurrent HTTP calls. Wrap
-    the check AND the create so the row exists (counting against the limit)
-    before the next caller counts. Starting the thread can stay outside.
+    thread pool, so this is reachable from plain concurrent HTTP calls. Write
+    the job row inside the `with` so it counts against the limit before the
+    next caller counts. Starting the worker thread belongs outside.
+
+        with job_slot(lambda: can_start_job(EVAL_JOB_TYPES, org)) as status:
+            job_id = create_job(..., status=status)
     """
     with _job_queue_lock:
-        yield
+        yield (
+            TaskStatus.IN_PROGRESS.value
+            if capacity_check()
+            else TaskStatus.QUEUED.value
+        )
+
 
 # Registry of job starter callbacks by job type
 _job_starters: Dict[str, callable] = {}
