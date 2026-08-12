@@ -151,8 +151,10 @@ def _resource_org_hint(request: Request) -> Optional[str]:
         return None
 
     uuids = [seg for seg in request.url.path.split("/") if len(seg) == 36]
+    # `or None` so an empty header falls back to the personal org, matching how
+    # `get_current_org` resolves the active org for the request itself.
     return find_other_member_org_for_resources(
-        uuids, user_id, request.headers.get("x-org-uuid")
+        uuids, user_id, request.headers.get("x-org-uuid") or None
     )
 
 
