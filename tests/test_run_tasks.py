@@ -705,6 +705,29 @@ def test_parse_agent_test_results_surfaces_effective_inputs():
     assert plain[0]["inputs"] is None
 
 
+def test_extract_agent_connection_error():
+    """The concise agent-connection reason is pulled out of calibrate's stderr."""
+    from routers.agent_tests import _extract_agent_connection_error
+
+    http = "Traceback ...\nRuntimeError: Agent returned HTTP 404: <!DOCTYPE html>\n<html>...</html>"
+    assert _extract_agent_connection_error(http) == "Agent returned HTTP 404"
+
+    conn = "RuntimeError: Could not connect to agent at https://x.ngrok-free.app: [Errno 61]"
+    assert (
+        _extract_agent_connection_error(conn)
+        == "Could not connect to agent at https://x.ngrok-free.app: [Errno 61]"
+    )
+
+    timeout = "RuntimeError: Agent request timed out (60s): https://x.ngrok-free.app"
+    assert (
+        _extract_agent_connection_error(timeout)
+        == "Agent request timed out (60s): https://x.ngrok-free.app"
+    )
+
+    assert _extract_agent_connection_error("ValueError: boom") is None
+    assert _extract_agent_connection_error(None) is None
+
+
 def test_conversation_test_no_legacy_llm_evaluator_fallback():
     """The legacy string-criteria fallback synthesizes the default-llm-next-reply
     LLM evaluator and must be RESPONSE-ONLY. A conversation test with no linked
