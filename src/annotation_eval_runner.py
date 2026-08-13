@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import csv
 import datetime
+import io
 import json
 import logging
 import os
@@ -22,7 +23,7 @@ import threading
 import time
 import traceback
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 
 def _utcnow_str() -> str:
@@ -122,13 +123,22 @@ logger = logging.getLogger(__name__)
 
 
 def _read_results_csv(output_dir: Path) -> Optional[List[dict]]:
-    """One row per dataset entry: id, gt, pred, wer, <evaluator>, <evaluator>_reasoning, ..."""
+    """One row per dataset entry: id, gt, pred, wer, <evaluator>, <evaluator>_reasoning, ...
+
+    calibrate appends to this file while the run is in flight, so a read can
+    catch a line that is only half written. A file that does not end in a
+    newline has an incomplete last line — drop it, otherwise its missing
+    columns read back as a row with empty values and get stored as a failed
+    grade for an item calibrate has not finished yet."""
     p = output_dir / "results.csv"
     if not p.exists():
         return None
     try:
         with open(p, "r", encoding="utf-8") as f:
-            return [dict(row) for row in csv.DictReader(f)]
+            text = f.read()
+        if text and not text.endswith("\n"):
+            text = text[: text.rfind("\n") + 1]
+        return [dict(row) for row in csv.DictReader(io.StringIO(text))]
     except Exception as e:
         logger.warning(f"Failed to parse {p}: {e}")
         return None
@@ -1001,6 +1011,7 @@ def _run_calibrate_eval_only(
     heartbeat_seconds: int = 2,
     job_uuid: Optional[str] = None,
     timeout_seconds: int = ANNOTATION_EVAL_TIMEOUT_SECONDS,
+    on_tick: Optional[Callable[[], None]] = None,
 ) -> Tuple[int, str, str]:
     """Spawn the calibrate subprocess; redirect stdout/stderr to disk to avoid
     pipe-buffer deadlocks; poll until done; return (returncode, stdout, stderr).
@@ -1016,6 +1027,10 @@ def _run_calibrate_eval_only(
          disk has been silent for the full window — i.e. calibrate is
          genuinely stuck. Before raising, the process group is SIGTERM/
          SIGKILL'd via the standard helper.
+
+    `on_tick` runs once per poll, between those two steps, so the caller can
+    save whatever calibrate has written so far. It is best-effort: an
+    exception from it is logged and the run carries on.
     """
     stdout_path = log_dir / "stdout.log"
     stderr_path = log_dir / "stderr.log"
@@ -1056,6 +1071,11 @@ def _run_calibrate_eval_only(
                             f"[annotation-eval] heartbeat update_job failed "
                             f"for {job_uuid}: {e}"
                         )
+            if on_tick is not None:
+                try:
+                    on_tick()
+                except Exception as e:
+                    logger.warning(f"on_tick callback raised: {e}")
             job = get_job(job_uuid)
             updated_at = job.get("updated_at") if job else None
             if updated_at and is_job_timed_out(
@@ -1135,6 +1155,23 @@ def _persist_pgid(job_uuid: str, pid: int) -> None:
     update_job(job_uuid, details={"pid": pid, "pgid": pgid})
 
 
+def _flush_before_failure(
+    flush: Optional[Callable[[], None]], job_uuid: str
+) -> None:
+    """Save whatever calibrate had already graded before the job died. Never
+    raises: an error here would replace the real failure with a misleading
+    one."""
+    if flush is None:
+        return
+    try:
+        flush()
+    except Exception as e:
+        logger.warning(
+            f"[annotation-eval] final save of graded rows failed for "
+            f"{job_uuid}: {e}"
+        )
+
+
 def _try_upload_partial_outputs(
     output_dir: Optional[Path], task_uuid: str, job_uuid: str
 ) -> Optional[str]:
@@ -1175,6 +1212,7 @@ def _run_job(
     """
     logger.info(f"[annotation-eval] starting job {job_uuid} for task {task_uuid}")
     output_dir_for_partial: Optional[Path] = None
+    flush_before_failure: Optional[Callable[[], None]] = None
     try:
         task = get_annotation_task(task_uuid)
         if not task:
@@ -1265,29 +1303,80 @@ def _run_job(
             )
             logger.info(f"[annotation-eval] spawning: {' '.join(cmd)}")
 
-            rc, proc_stdout, proc_stderr = _run_calibrate_eval_only(
-                cmd,
-                cwd=tmp,
-                log_dir=output_dir,
-                on_started=lambda pid: _persist_pgid(job_uuid, pid),
-                job_uuid=job_uuid,
-            )
-            if rc != 0:
-                logger.error(
-                    f"[annotation-eval] calibrate exited rc={rc}\nstderr:\n{proc_stderr}"
+            # calibrate writes its results as it grades, so the graded rows
+            # are saved while the run is still going. A run that dies or is
+            # killed half way then keeps everything it had already graded
+            # instead of throwing all of it away.
+            inserted_keys: set = set()
+
+            def flush_graded_rows() -> None:
+                try:
+                    parsed = parse_results_for_task_type(
+                        task_type,
+                        output_dir,
+                        evaluators_resolved,
+                        job_uuid,
+                        items=items,
+                    )
+                    fresh = [
+                        r
+                        for r in parsed
+                        if r.get("status") == "completed"
+                        and (r["item_id"], r["evaluator_id"]) not in inserted_keys
+                    ]
+                    if not fresh:
+                        return
+                    create_evaluator_runs(fresh)
+                    for r in fresh:
+                        inserted_keys.add((r["item_id"], r["evaluator_id"]))
+                except Exception as e:
+                    # A results file caught mid-write must never fail the job;
+                    # the next tick (or the final parse) picks the rows up.
+                    logger.warning(
+                        f"[annotation-eval] progressive save failed for "
+                        f"{job_uuid}: {e}"
+                    )
+
+            flush_before_failure = flush_graded_rows
+            try:
+                rc, proc_stdout, proc_stderr = _run_calibrate_eval_only(
+                    cmd,
+                    cwd=tmp,
+                    log_dir=output_dir,
+                    on_started=lambda pid: _persist_pgid(job_uuid, pid),
+                    job_uuid=job_uuid,
+                    on_tick=flush_graded_rows,
                 )
-                raise subprocess.CalledProcessError(
-                    rc, cmd, output=proc_stdout, stderr=proc_stderr
-                )
+                if rc != 0:
+                    logger.error(
+                        f"[annotation-eval] calibrate exited rc={rc}\n"
+                        f"stderr:\n{proc_stderr}"
+                    )
+                    raise subprocess.CalledProcessError(
+                        rc, cmd, output=proc_stdout, stderr=proc_stderr
+                    )
+            except Exception:
+                # The output folder lives in a temp directory that is deleted
+                # on the way out of this block, so the last save has to happen
+                # here, while the files calibrate wrote are still on disk.
+                flush_graded_rows()
+                raise
 
             # 4. Parse outputs (per task type) into evaluator_runs rows. The
             # mapping name → evaluator_id is verified against the CLI's
             # `config.json` evaluators_map so the stored evaluator_id is
             # authoritative — name/description on the evaluator can change
             # later and the runs still resolve correctly.
-            runs_to_insert = parse_results_for_task_type(
-                task_type, output_dir, evaluators_resolved, job_uuid, items=items
-            )
+            # Rows already saved during the run are skipped here: the table
+            # has no unique key, so re-inserting them would store the same
+            # grade twice.
+            runs_to_insert = [
+                r
+                for r in parse_results_for_task_type(
+                    task_type, output_dir, evaluators_resolved, job_uuid, items=items
+                )
+                if (r["item_id"], r["evaluator_id"]) not in inserted_keys
+            ]
             metrics = _read_metrics_json(output_dir)
             if runs_to_insert:
                 create_evaluator_runs(runs_to_insert)
@@ -1329,6 +1418,7 @@ def _run_job(
         cli_err = _extract_calibrate_error(
             getattr(e, "stdout", "") or "", getattr(e, "stderr", "") or ""
         )
+        _flush_before_failure(flush_before_failure, job_uuid)
         s3_prefix = _try_upload_partial_outputs(
             output_dir_for_partial, task_uuid, job_uuid
         )
@@ -1345,6 +1435,7 @@ def _run_job(
         traceback.print_exc()
         logger.exception(f"[annotation-eval] job {job_uuid} failed: {e}")
         capture_exception_to_sentry(e)
+        _flush_before_failure(flush_before_failure, job_uuid)
         s3_prefix = _try_upload_partial_outputs(
             output_dir_for_partial, task_uuid, job_uuid
         )

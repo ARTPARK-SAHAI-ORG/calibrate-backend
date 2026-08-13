@@ -493,6 +493,21 @@ def test_read_results_csv(tmp_path):
         assert runner._read_results_csv(bad) is None
 
 
+def test_read_results_csv_drops_truncated_last_line(tmp_path):
+    """A file read while calibrate is still appending can end mid-row; that
+    partial row is dropped, the complete ones are kept."""
+    p = tmp_path / "results.csv"
+    p.write_text("id,gt,pred\n1,hi,hi\n2,by")
+    rows = runner._read_results_csv(tmp_path)
+    assert rows == [{"id": "1", "gt": "hi", "pred": "hi"}]
+
+    # Header alone, still being written → nothing usable yet.
+    only_header = tmp_path / "header"
+    only_header.mkdir()
+    (only_header / "results.csv").write_text("id,gt,pr")
+    assert runner._read_results_csv(only_header) == []
+
+
 def test_read_metrics_json(tmp_path):
     (tmp_path / "metrics.json").write_text(json.dumps({"a": 1}))
     assert runner._read_metrics_json(tmp_path) == {"a": 1}
@@ -854,6 +869,134 @@ def test_try_upload_partial_outputs_swallows_exception(tmp_path):
         side_effect=RuntimeError("nope"),
     ):
         assert runner._try_upload_partial_outputs(tmp_path, "t", "j") is None
+
+
+# ---------------------------------------------------------------------------
+# Saving graded rows while the run is in flight
+# ---------------------------------------------------------------------------
+
+
+_STREAM_ITEMS = [
+    {
+        "uuid": "i1",
+        "payload": {"predicted_transcript": "p1", "reference_transcript": "r1"},
+    },
+    {
+        "uuid": "i2",
+        "payload": {"predicted_transcript": "p2", "reference_transcript": "r2"},
+    },
+]
+
+
+class _CalibrateProcess:
+    """Stands in for the calibrate subprocess: writes its results file on the
+    poll whose index is `write_on_poll`, then reports `returncode`."""
+
+    def __init__(self, output_dir, polls, write_on_poll, returncode=0):
+        self.output_dir = output_dir
+        self._polls = list(polls)
+        self._write_on_poll = write_on_poll
+        self._poll_count = 0
+        self.returncode = returncode
+        self.pid = 4242
+        self.alive = True
+
+    def _write_results(self):
+        self.output_dir.mkdir(parents=True, exist_ok=True)
+        (self.output_dir / "config.json").write_text(
+            json.dumps({"evaluators_map": {"ev-1": "Safety"}})
+        )
+        (self.output_dir / "results.csv").write_text(
+            "id,gt,pred,Safety,Safety_reasoning\n"
+            "i1,r1,p1,1,ok\n"
+            "i2,r2,p2,,\n"
+        )
+
+    def poll(self):
+        self._poll_count += 1
+        if self._poll_count == self._write_on_poll:
+            self._write_results()
+        result = self._polls.pop(0) if self._polls else self.returncode
+        if result is not None:
+            self.alive = False
+        return result
+
+    def wait(self, timeout=None):
+        return self.returncode
+
+
+def _run_job_with(process_factory):
+    """Run _run_job over the two STT items above with everything external
+    mocked out. Returns the create_evaluator_runs mock and, per call to it,
+    whether the calibrate process was still running at that moment."""
+    spawned = []
+    still_running = []
+
+    def popen(cmd, **kwargs):
+        proc = process_factory(Path(kwargs["cwd"]) / "output")
+        spawned.append(proc)
+        return proc
+
+    def record(rows):
+        still_running.append(bool(spawned) and spawned[-1].alive)
+
+    with patch(
+        "annotation_eval_runner.get_annotation_task", return_value={"type": "stt"}
+    ), patch(
+        "annotation_eval_runner.get_eval_job_items", return_value=_STREAM_ITEMS
+    ), patch(
+        "annotation_eval_runner.subprocess.Popen", side_effect=popen
+    ), patch(
+        "annotation_eval_runner.create_evaluator_runs", side_effect=record
+    ) as create_runs, patch(
+        "annotation_eval_runner.update_job"
+    ), patch(
+        "annotation_eval_runner.try_start_queued_job"
+    ), patch(
+        "annotation_eval_runner.time.sleep"
+    ), patch(
+        "annotation_eval_runner.get_job",
+        return_value={"updated_at": "2099-01-01 00:00:00"},
+    ), patch(
+        "annotation_eval_runner.is_job_timed_out", return_value=False
+    ), patch(
+        "annotation_eval_runner._persist_pgid"
+    ), patch(
+        "annotation_eval_runner.get_s3_client", return_value=MagicMock()
+    ), patch(
+        "annotation_eval_runner.get_s3_output_config", return_value="bucket"
+    ), patch(
+        "annotation_eval_runner.upload_file_to_s3"
+    ):
+        runner._run_job("j-1", "t-1", "u-1", [_ev_resolved()], item_ids=None)
+    return create_runs, still_running
+
+
+def test_run_job_saves_rows_while_running_without_duplicating(tmp_path):
+    """A graded row is saved while calibrate is still running, and the parse
+    that happens after it exits does not save that row a second time."""
+    create_runs, still_running = _run_job_with(
+        lambda out: _CalibrateProcess(out, polls=[None, None, 0], write_on_poll=1)
+    )
+    inserted = [row for call in create_runs.call_args_list for row in call.args[0]]
+    assert [(r["item_id"], r["status"]) for r in inserted] == [
+        ("i1", "completed"),
+        ("i2", "failed"),
+    ]
+    # The graded row went in while calibrate was still running.
+    assert still_running[0] is True
+    assert create_runs.call_args_list[0].args[0][0]["item_id"] == "i1"
+
+
+def test_run_job_keeps_graded_rows_when_the_run_fails(tmp_path):
+    """calibrate exits non-zero after grading one item: that grade is kept."""
+    create_runs, _ = _run_job_with(
+        lambda out: _CalibrateProcess(
+            out, polls=[None, None, 1], write_on_poll=3, returncode=1
+        )
+    )
+    inserted = [row for call in create_runs.call_args_list for row in call.args[0]]
+    assert [(r["item_id"], r["status"]) for r in inserted] == [("i1", "completed")]
 
 
 # ---------------------------------------------------------------------------
