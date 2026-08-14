@@ -67,6 +67,7 @@ calibrate-backend/
 │       ├── annotators.py    # Annotator CRUD (human labelers)
 │       ├── annotation_tasks.py  # Annotation tasks, items, jobs, evaluator links, agreement runs
 │       ├── annotation_agreement.py  # Inter-annotator / human-vs-evaluator agreement metrics
+│       ├── traces.py        # Production trace ingestion (API key) + curation (JWT)
 │       └── user_limits.py   # Per-user limits CRUD and limit queries
 ├── tests/                   # Pytest suite (repo root); imports match runtime (`from llm_judge import …`) via configured pythonpath
 ├── .githooks/               # Git hooks (opt-in): `pre-commit` runs pytest on `main` only — enable with `git config core.hooksPath .githooks`
@@ -217,6 +218,20 @@ The `users` table supports two authentication methods. Columns:
 
 ---
 
+## Traces
+
+Production traces are the platform's one **machine-paced** write path (customer backends POST one trace per agent turn). They live in `pense.db` like every other table: `traces` is created in `init_db()` and its storage functions (`create_trace`, `get_trace`, `count_live_traces`, `list_traces`, `soft_delete_traces`) sit at the end of `db.py`. If traces ever outgrow SQLite, the whole database moves to Postgres together, not traces alone.
+
+This is deliberately a **first-rollout surface**: send a trace, list them, open one, delete some. Turning traces into tests was cut into a follow-up (parked on branch `traces-convert-to-tests-parked`, last full version at commit e844ea7) on the reasoning that you cannot curate traces you have not collected yet, and the conversion is better designed against real data. Text search, a `conversation_id` filter, delete-everything-matching, and a per-workspace configurable cap were cut with it.
+
+- **Schema** (`traces`): `id`, `uuid`, `org_uuid`, `agent_id` (required; the agent that produced the turn, validated at ingest), `message_id` and `conversation_id` (both **nullable, and pure labels** — the customer's own reference strings, stored and displayed, read by nothing), `input` JSON (OpenAI-format history, extra keys preserved verbatim), `output` JSON (`{response?, tool_calls?: [{tool, arguments}]}`), `metadata` JSON (`[{key, value}]`), `created_at`/`updated_at`/`deleted_at` (naive UTC). `input`/`output`/`metadata` are JSON stored as TEXT, the same convention as every other config column in `db.py`. Indexes: `idx_traces_org_agent_active` on `(org_uuid, agent_id, deleted_at)` for the agent filter, and `idx_traces_org_created` on `(org_uuid, deleted_at, created_at DESC, id DESC)` so a list page neither scans nor sorts the whole workspace.
+- **No de-duplication, deliberately.** `message_id` was once the idempotency key, enforced by a partial unique index. That made a customer's ID load-bearing: reusing one for a different turn returned the stored trace and silently discarded the new turn. Ingest now always inserts and the response carries no `created` flag, so a retry stores a visible, deletable duplicate instead of losing a turn. Do not re-attach logic to either label.
+- **Contract mirrors test creation** (see `routers/traces.py`): `input` is `tests.config.history` verbatim, and `output.tool_calls` uses the flat `{tool, arguments}` expected-tool-call shape (not OpenAI's nested `function` form), so the parked conversion needs no transformation.
+- **Cap**: `POST /traces` rejects new rows with **429** (body carries current count, cap, remediation) once the workspace holds `MAX_TRACES_PER_WORKSPACE` live traces — a module constant in `routers/traces.py` read from `DEFAULT_MAX_TRACES` (default 50000), NOT a per-workspace setting. The count and the insert are separate statements, so concurrent ingest can overshoot slightly; the cap is a guardrail, not an invariant.
+- **Validation**: a malformed request is 422 naming the field (unknown keys included — the models forbid extras); a well-formed `agent_id` that is unknown or belongs to another workspace is 404 `Agent not found`, checked before the cap so a bad agent never surfaces as a 429.
+
+---
+
 ## API Architecture
 
 ### Router Organization
@@ -261,6 +276,13 @@ The JWT token contains the user's UUID and is validated on every protected endpo
 - `/annotators` - Annotator CRUD (human labelers; unique active name per user)
 - `/annotation-tasks` - Annotation task CRUD, items, evaluator links, jobs, public labelling tokens, evaluator-run jobs (`annotation_eval_runner.py`). Evaluator link order on a task follows **`get_evaluators_for_annotation_task()`** (see **Annotation task evaluator ordering** under Database Schema).
 - `/annotation-agreement` - Agreement metrics for a task (human–human and human–evaluator)
+
+#### Traces
+
+- `POST /traces` - Ingest one production agent turn (`agent_id`, `input` history, `output`, optional `message_id`, `conversation_id`, `metadata`). Auth: `get_org_jwt_or_api_key` — machine-to-machine, deliberately **not** tagged `Public API` until that exposure is explicitly decided. Always stores a new trace: the two IDs are labels only, so a wrong or reused one can never drop a turn. 429 past the cap.
+- `GET /traces?limit=&offset=&agent_id=` - Paginated slim `TraceSummary` list in the shared `PaginatedResponse` envelope. JWT only. Filter and count run in SQL — never route this through `pagination.py`'s post-fetch `.apply()` helpers.
+- `GET /traces/{trace_uuid}` - Full `input`/`output`/`metadata`. JWT only.
+- `POST /traces/bulk-delete` - `{trace_ids}` (non-empty). Soft delete; frees capacity. JWT only — destructive, must never join the key-authed surface.
 
 #### Relationship Management
 

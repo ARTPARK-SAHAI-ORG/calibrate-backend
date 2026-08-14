@@ -5,7 +5,7 @@ import uuid
 from os.path import join
 import os
 from pathlib import Path
-from typing import Optional, List, Dict, Any, TYPE_CHECKING
+from typing import Optional, List, Dict, Any, Tuple, TYPE_CHECKING
 from contextlib import contextmanager
 
 if TYPE_CHECKING:
@@ -27,6 +27,13 @@ def get_db_connection():
     """Context manager for database connections."""
     conn = sqlite3.connect(str(DB_PATH))
     conn.row_factory = sqlite3.Row
+    # Both are per-connection and forgotten on close, so they are set every
+    # time: busy_timeout makes a second writer wait instead of failing
+    # instantly with "database is locked", and synchronous=NORMAL is the
+    # matching durability level for WAL. journal_mode=WAL is a property of the
+    # file itself and is set once in init_db().
+    conn.execute("PRAGMA busy_timeout=5000")
+    conn.execute("PRAGMA synchronous=NORMAL")
     try:
         yield conn
     finally:
@@ -1459,6 +1466,43 @@ def init_db():
 
         conn.commit()
 
+        # ============ traces ============
+        # Production agent turns, ingested machine-to-machine. `input`/`output`/
+        # `metadata` are JSON text, same convention as every other config column.
+        # `message_id`/`conversation_id` are the caller's own labels: stored and
+        # displayed, never matched on, so they are nullable and not unique.
+        # Making them load-bearing let a customer's reused ID silently discard a
+        # turn, which is why nothing reads them now.
+        cursor.execute(
+            """
+            CREATE TABLE IF NOT EXISTS traces (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                uuid TEXT NOT NULL UNIQUE,
+                org_uuid TEXT NOT NULL,
+                agent_id TEXT NOT NULL,
+                message_id TEXT,
+                conversation_id TEXT,
+                input TEXT NOT NULL,
+                output TEXT NOT NULL,
+                metadata TEXT DEFAULT NULL,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                deleted_at TIMESTAMP DEFAULT NULL,
+                FOREIGN KEY (org_uuid) REFERENCES organizations(uuid),
+                FOREIGN KEY (agent_id) REFERENCES agents(uuid)
+            )
+            """
+        )
+        cursor.execute(
+            "CREATE INDEX IF NOT EXISTS idx_traces_org_agent_active "
+            "ON traces(org_uuid, agent_id, deleted_at, created_at DESC, id DESC)"
+        )
+        cursor.execute(
+            "CREATE INDEX IF NOT EXISTS idx_traces_org_created "
+            "ON traces(org_uuid, deleted_at, created_at DESC, id DESC)"
+        )
+        conn.commit()
+
         # ============ org_limits (renamed from user_limits) ============
         # Same shape as `user_limits` but scoped by `org_uuid` instead of
         # `user_id`. The old table is kept around for rollback safety; new code
@@ -2570,6 +2614,7 @@ DATASET_NAME_DEDUPE_MIGRATION = "dedupe_active_dataset_names_v1"
 JOBS_SUMMARY_BACKFILL_MIGRATION = "backfill_jobs_summary_columns_v1"
 
 
+
 def _dedupe_active_dataset_names(cursor: sqlite3.Cursor) -> int:
     """Rename active datasets that share a `(org_uuid, name)` so the
     `idx_datasets_org_name_active` unique index can be built.
@@ -3497,6 +3542,7 @@ _RESOURCE_ORG_SELECTS = tuple(
         "annotation_tasks",
         "annotators",
         "evaluators",
+        "traces",
     )
 ) + (
     "SELECT org_uuid FROM jobs WHERE uuid = ?",
@@ -9507,3 +9553,151 @@ def get_evaluators_for_annotation_tasks(
             tid = d.pop("task_id")
             result.setdefault(tid, []).append(d)
     return result
+
+
+# ============================================================================
+# Traces
+# ============================================================================
+# Production agent turns, one row per turn. Ingest is machine-paced, so unlike
+# most tables here the search/filter/count run in SQL rather than post-fetch in
+# Python — the row count outgrows in-memory filtering fast.
+
+
+def _trace_row(row: sqlite3.Row) -> Dict[str, Any]:
+    return {
+        "uuid": row["uuid"],
+        "org_uuid": row["org_uuid"],
+        "agent_id": row["agent_id"],
+        "message_id": row["message_id"],
+        "conversation_id": row["conversation_id"],
+        "input": json.loads(row["input"]),
+        "output": json.loads(row["output"]),
+        "metadata": json.loads(row["metadata"]) if row["metadata"] else None,
+        "created_at": _trace_iso(row["created_at"]),
+        "updated_at": _trace_iso(row["updated_at"]),
+    }
+
+
+def _trace_iso(ts: Optional[str]) -> Optional[str]:
+    """Normalize SQLite's naive-UTC timestamp to explicit ISO-8601 UTC, so a
+    browser cannot parse it as local time."""
+    if not ts:
+        return ts
+    s = str(ts).strip().replace(" ", "T")
+    return s if s.endswith("Z") else s + "Z"
+
+
+def _trace_filters(org_uuid: str, agent_id: Optional[str] = None) -> Tuple[str, List[Any]]:
+    """Build the shared WHERE clause for every live-trace query."""
+    where = ["org_uuid = ?", "deleted_at IS NULL"]
+    params: List[Any] = [org_uuid]
+    if agent_id:
+        where.append("agent_id = ?")
+        params.append(agent_id)
+    return " AND ".join(where), params
+
+
+def get_trace(org_uuid: str, trace_uuid: str) -> Optional[Dict[str, Any]]:
+    with get_db_connection() as conn:
+        row = conn.execute(
+            "SELECT * FROM traces WHERE org_uuid = ? AND uuid = ? "
+            "AND deleted_at IS NULL",
+            (org_uuid, trace_uuid),
+        ).fetchone()
+        return _trace_row(row) if row else None
+
+
+def count_live_traces(org_uuid: str) -> int:
+    """Live trace count for the workspace cap. Deliberately not agent-scoped."""
+    with get_db_connection() as conn:
+        return conn.execute(
+            "SELECT COUNT(*) FROM traces WHERE org_uuid = ? AND deleted_at IS NULL",
+            (org_uuid,),
+        ).fetchone()[0]
+
+
+def create_trace(
+    org_uuid: str,
+    agent_id: str,
+    input: Any,
+    output: Any,
+    message_id: Optional[str] = None,
+    conversation_id: Optional[str] = None,
+    metadata: Optional[Any] = None,
+) -> Dict[str, Any]:
+    """Insert a trace and return it.
+
+    Every call stores a new row. `message_id` is the caller's own label, not a
+    key: matching on it meant a customer who reused one silently lost a turn.
+    """
+    trace_uuid = str(uuid.uuid4())
+    with get_db_connection() as conn:
+        conn.execute(
+            """
+            INSERT INTO traces
+                (uuid, org_uuid, agent_id, message_id, conversation_id,
+                 input, output, metadata)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                trace_uuid,
+                org_uuid,
+                agent_id,
+                message_id,
+                conversation_id,
+                json.dumps(input),
+                json.dumps(output),
+                json.dumps(metadata) if metadata is not None else None,
+            ),
+        )
+        conn.commit()
+        row = conn.execute(
+            "SELECT * FROM traces WHERE uuid = ?", (trace_uuid,)
+        ).fetchone()
+        return _trace_row(row)
+
+
+def list_traces(
+    org_uuid: str,
+    *,
+    limit: int,
+    offset: int,
+    agent_id: Optional[str] = None,
+) -> Tuple[List[Dict[str, Any]], int]:
+    """Return `(page, total)` newest-first; filters and count run in SQL."""
+    where, params = _trace_filters(org_uuid, agent_id)
+    with get_db_connection() as conn:
+        total = conn.execute(
+            f"SELECT COUNT(*) FROM traces WHERE {where}", params
+        ).fetchone()[0]
+        rows = conn.execute(
+            f"SELECT * FROM traces WHERE {where} "
+            "ORDER BY created_at DESC, id DESC LIMIT ? OFFSET ?",
+            params + [limit, offset],
+        ).fetchall()
+        return [_trace_row(r) for r in rows], total
+
+
+# SQLite caps a statement at 32,766 bound values, so a delete of every trace in
+# a full workspace has to be split. 500 keeps each statement small.
+_TRACE_DELETE_CHUNK = 500
+
+
+def soft_delete_traces(org_uuid: str, *, trace_ids: List[str]) -> int:
+    """Soft-delete the given traces, returning the number of rows flipped."""
+    if not trace_ids:
+        return 0
+    deleted = 0
+    with get_db_connection() as conn:
+        for start in range(0, len(trace_ids), _TRACE_DELETE_CHUNK):
+            chunk = trace_ids[start : start + _TRACE_DELETE_CHUNK]
+            placeholders = ",".join("?" * len(chunk))
+            cursor = conn.execute(
+                f"UPDATE traces SET deleted_at = CURRENT_TIMESTAMP, "
+                f"updated_at = CURRENT_TIMESTAMP WHERE org_uuid = ? "
+                f"AND deleted_at IS NULL AND uuid IN ({placeholders})",
+                [org_uuid] + list(chunk),
+            )
+            deleted += cursor.rowcount or 0
+        conn.commit()
+    return deleted
