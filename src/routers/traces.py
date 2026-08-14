@@ -1,16 +1,20 @@
-"""Production trace ingestion and curation.
+"""Production trace ingestion.
 
 Customer backends POST one trace per agent turn: the conversation history as
 `input` plus the produced `output`. Rows persist as a normal `traces` table in
-pense.db. The contract deliberately mirrors test creation:
-`input` is `tests.config.history` verbatim, and `output.tool_calls` matches
-the expected-tool-call shape, so curated traces convert to tests without
-transformation. New contract needs go into `metadata` keys, not new top-level
-fields: customers integrate against this shape, and every field deepens the
-eventual OTel-gateway migration.
+pense.db.
+
+The stored shape deliberately mirrors test creation. `input` is
+`tests.config.history` verbatim, and `output.tool_calls` matches the
+expected-tool-call shape, so the deferred "turn traces into tests" step will
+need no transformation. That endpoint is not here yet. It is parked on branch
+`traces-convert-to-tests-parked`.
+
+New contract needs go into `metadata` keys, not new top-level fields.
+Customers integrate against this shape, and every field deepens the eventual
+OTel-gateway migration.
 """
 
-import logging
 import os
 from typing import Any, Dict, List, Optional
 
@@ -28,8 +32,6 @@ from db import (
 from org_scope import ensure_owned_agent
 from pagination import PaginatedResponse, PaginationParams, page_envelope
 
-logger = logging.getLogger(__name__)
-
 router = APIRouter(prefix="/traces", tags=["traces"])
 
 # A fixed ceiling, not a per-workspace setting: one number is enough until a
@@ -40,10 +42,6 @@ MAX_INPUT_TURNS = 500
 MAX_TURN_CONTENT_CHARS = 50_000
 MAX_TOOL_CALLS = 50
 MAX_METADATA_ENTRIES = 100
-# One conversion request creates at most this many tests; a wider select_all
-# match 400s with a "narrow the filter" hint rather than mass-creating.
-MAX_CONVERT_BATCH = 500
-
 _EXAMPLE_TRACE_UUID = "f47ac10b-58cc-4372-a567-0e02b2c3d479"
 
 _TRACE_UUID_DESCRIPTION = "Unique ID for the trace"
@@ -295,7 +293,7 @@ def _to_summary(row: Dict[str, Any]) -> Dict[str, Any]:
 async def ingest_trace(
     payload: TraceIngest, ctx: OrgContext = Depends(get_org_jwt_or_api_key)
 ):
-    """Store a production agent turn and its conversation history for later curation"""
+    """Store a production agent turn and its conversation history for later review"""
     ensure_owned_agent(payload.agent_id, ctx.org_uuid)
 
     cap = MAX_TRACES_PER_WORKSPACE

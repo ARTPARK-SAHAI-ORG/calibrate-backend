@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import sqlite3
 import uuid
 
 import db
@@ -251,3 +252,91 @@ def test_init_db_rebuilds_legacy_not_null_label_columns():
     )
     assert row["message_id"] is None
     assert row["conversation_id"] is None
+
+
+# The pre-rebuild shape: both label columns were required.
+_LEGACY_TRACES_TABLE_BODY = """
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    uuid TEXT NOT NULL UNIQUE,
+    org_uuid TEXT NOT NULL,
+    agent_id TEXT NOT NULL,
+    message_id TEXT NOT NULL,
+    conversation_id TEXT NOT NULL,
+    input TEXT NOT NULL,
+    output TEXT NOT NULL,
+    metadata TEXT DEFAULT NULL,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    deleted_at TIMESTAMP DEFAULT NULL
+"""
+
+
+def _throwaway_db() -> sqlite3.Connection:
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    return conn
+
+
+def _seed_trace(conn: sqlite3.Connection, table: str, message_id: str) -> None:
+    conn.execute(
+        f"INSERT INTO {table} "
+        "(uuid, org_uuid, agent_id, message_id, conversation_id, input, output) "
+        "VALUES (?, 'org-legacy', 'agent-legacy', ?, 'c-keep', '[]', '{}')",
+        (str(uuid.uuid4()), message_id),
+    )
+
+
+def _table_names(conn: sqlite3.Connection) -> set:
+    return {
+        r[0]
+        for r in conn.execute("SELECT name FROM sqlite_master WHERE type = 'table'")
+    }
+
+
+def _trace_message_ids(conn: sqlite3.Connection) -> set:
+    return {r["message_id"] for r in conn.execute("SELECT message_id FROM traces")}
+
+
+def _insert_trace_without_labels(conn: sqlite3.Connection) -> None:
+    """Raises sqlite3.IntegrityError unless the rebuilt table allows NULL labels."""
+    conn.execute(
+        "INSERT INTO traces "
+        "(uuid, org_uuid, agent_id, message_id, conversation_id, input, output) "
+        "VALUES (?, 'org-legacy', 'agent-legacy', NULL, NULL, '[]', '{}')",
+        (str(uuid.uuid4()),),
+    )
+
+
+def test_rebuild_recovers_when_both_traces_and_traces_new_exist():
+    """Crash after the create, before the drop: redo the copy, lose no row."""
+    conn = _throwaway_db()
+    conn.execute(f"CREATE TABLE traces ({_LEGACY_TRACES_TABLE_BODY})")
+    _seed_trace(conn, "traces", "m-keep-1")
+    _seed_trace(conn, "traces", "m-keep-2")
+    # Half-finished copy left by the crashed run: only one row made it across.
+    conn.execute(f"CREATE TABLE traces_new ({db._TRACES_TABLE_BODY})")
+    _seed_trace(conn, "traces_new", "m-keep-1")
+
+    assert db._rebuild_traces_for_nullable_ids(conn.cursor()) is True
+
+    assert "traces_new" not in _table_names(conn)
+    assert _trace_message_ids(conn) == {"m-keep-1", "m-keep-2"}
+    _insert_trace_without_labels(conn)
+
+
+def test_rebuild_recovers_when_only_traces_new_exists():
+    """Crash after the drop, before the rename: the copy holds the only rows.
+
+    Dropping `traces_new` here instead of renaming it erases every trace in the
+    database, so this asserts on row content, not just on a table existing.
+    """
+    conn = _throwaway_db()
+    conn.execute(f"CREATE TABLE traces_new ({db._TRACES_TABLE_BODY})")
+    _seed_trace(conn, "traces_new", "m-keep-1")
+    _seed_trace(conn, "traces_new", "m-keep-2")
+
+    db._rebuild_traces_for_nullable_ids(conn.cursor())
+
+    assert _trace_message_ids(conn) == {"m-keep-1", "m-keep-2"}
+    assert "traces_new" not in _table_names(conn)
+    _insert_trace_without_labels(conn)

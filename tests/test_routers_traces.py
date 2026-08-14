@@ -223,6 +223,35 @@ def test_ingest_validation(client):
     ok = _post_trace(client, h, openai_history)
 
 
+def test_ingest_rejects_oversized_payloads(client):
+    h, agent_id = _signup_with_agent(client)
+
+    too_many_turns = _payload(
+        agent_id, _mid(), input=[{"role": "user", "content": "hi"}] * 501
+    )
+    assert client.post("/traces", json=too_many_turns, headers=h).status_code == 422
+
+    long_turn = _payload(
+        agent_id, _mid(), input=[{"role": "user", "content": "x" * 50_001}]
+    )
+    assert client.post("/traces", json=long_turn, headers=h).status_code == 422
+
+    long_response = _payload(agent_id, _mid(), output={"response": "x" * 50_001})
+    assert client.post("/traces", json=long_response, headers=h).status_code == 422
+
+    too_many_calls = _payload(
+        agent_id,
+        _mid(),
+        output={"response": "ok", "tool_calls": [{"tool": "get_schedule"}] * 51},
+    )
+    assert client.post("/traces", json=too_many_calls, headers=h).status_code == 422
+
+    too_much_metadata = _payload(
+        agent_id, _mid(), metadata=[{"key": "k", "value": "v"}] * 101
+    )
+    assert client.post("/traces", json=too_much_metadata, headers=h).status_code == 422
+
+
 def test_ingest_cap_returns_429(client, monkeypatch):
     from routers import traces as traces_mod
 
@@ -464,17 +493,48 @@ def test_output_with_multiple_tool_calls_roundtrips(client):
     assert full["output"]["response"] == output["response"]
 
 
+def test_previews_are_truncated_but_the_full_text_is_kept(client):
+    h, agent_id = _signup_with_agent(client)
+    question = "When is the next vaccination? " * 20
+    answer = "Aapki beti ka agla vaccination 14 weeks pe hai. " * 20
+    created = _post_trace(
+        client,
+        h,
+        _payload(
+            agent_id,
+            _mid(),
+            input=[{"role": "user", "content": question}],
+            output={"response": answer},
+        ),
+    )
+
+    summary = client.get("/traces", headers=h).json()["items"][0]
+    for preview, full_text in (
+        (summary["input_preview"], question),
+        (summary["response_preview"], answer),
+    ):
+        assert len(preview) == 160
+        assert preview.endswith("…")
+        assert preview[:-1] == full_text.strip()[:159]
+
+    full = client.get(f"/traces/{created['uuid']}", headers=h).json()
+    assert full["input"][0]["content"] == question
+    assert full["output"]["response"] == answer
+
+
 def test_list_pagination(client):
     h, agent_id = _signup_with_agent(client)
-    for _ in range(3):
-        _post_trace(client, h, _payload(agent_id, _mid()))
+    mids = [_mid() for _ in range(3)]
+    for mid in mids:
+        _post_trace(client, h, _payload(agent_id, mid))
 
-    page = client.get(
-        "/traces", params={"limit": 1, "offset": 1}, headers=h
-    ).json()
-    assert page["total"] == 3
-    assert len(page["items"]) == 1
-    assert page["limit"] == 1 and page["offset"] == 1
+    for offset, expected_mid in enumerate(reversed(mids)):
+        page = client.get(
+            "/traces", params={"limit": 1, "offset": offset}, headers=h
+        ).json()
+        assert page["total"] == 3
+        assert page["limit"] == 1 and page["offset"] == offset
+        assert [item["message_id"] for item in page["items"]] == [expected_mid]
 
 
 def test_bulk_delete_router_contract(client):
@@ -562,6 +622,37 @@ def test_list_filters_by_agent_id(client):
     only_b = client.get("/traces", params={"agent_id": agent_b}, headers=h).json()
     assert only_b["total"] == 1
     assert only_b["items"][0]["agent_id"] == agent_b
+
+
+def test_bulk_delete_ignores_another_workspaces_traces(client):
+    h, agent_id = _signup_with_agent(client)
+    mine = _post_trace(client, h, _payload(agent_id, _mid()))
+    other = _signup(client)
+
+    res = client.post(
+        "/traces/bulk-delete", json={"trace_ids": [mine["uuid"]]}, headers=other
+    )
+    assert res.status_code == 200, res.text
+    assert res.json() == {"deleted": 0}
+    assert client.get(f"/traces/{mine['uuid']}", headers=h).status_code == 200
+
+
+def test_trace_cap_comes_from_its_env_var():
+    """Reload re-runs the module body, which is where the env var is read."""
+    import importlib
+    import os
+
+    from routers import traces as traces_mod
+
+    original = os.environ["DEFAULT_MAX_TRACES"]
+    os.environ["DEFAULT_MAX_TRACES"] = "7"
+    try:
+        importlib.reload(traces_mod)
+        assert traces_mod.MAX_TRACES_PER_WORKSPACE == 7
+    finally:
+        os.environ["DEFAULT_MAX_TRACES"] = original
+        importlib.reload(traces_mod)
+    assert traces_mod.MAX_TRACES_PER_WORKSPACE == int(original)
 
 
 def test_bulk_delete_rejects_an_unknown_key(client):
