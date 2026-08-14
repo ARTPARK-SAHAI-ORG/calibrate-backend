@@ -1473,23 +1473,26 @@ def init_db():
         # displayed, never matched on, so they are nullable and not unique.
         # Making them load-bearing let a customer's reused ID silently discard a
         # turn, which is why nothing reads them now.
-        #
-        # CREATE TABLE IF NOT EXISTS does not relax NOT NULL on an existing
-        # table. DBs created when those columns were required keep the old
-        # constraint until `_rebuild_traces_for_nullable_ids`.
         cursor.execute(
-            f"CREATE TABLE IF NOT EXISTS traces ({_TRACES_TABLE_BODY})"
+            """
+            CREATE TABLE IF NOT EXISTS traces (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                uuid TEXT NOT NULL UNIQUE,
+                org_uuid TEXT NOT NULL,
+                agent_id TEXT NOT NULL,
+                message_id TEXT,
+                conversation_id TEXT,
+                input TEXT NOT NULL,
+                output TEXT NOT NULL,
+                metadata TEXT DEFAULT NULL,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                deleted_at TIMESTAMP DEFAULT NULL,
+                FOREIGN KEY (org_uuid) REFERENCES organizations(uuid),
+                FOREIGN KEY (agent_id) REFERENCES agents(uuid)
+            )
+            """
         )
-        # Dropped along with the uniqueness rule and the conversation filter.
-        cursor.execute("DROP INDEX IF EXISTS idx_traces_org_message_active")
-        cursor.execute("DROP INDEX IF EXISTS idx_traces_org_conversation")
-        if not _schema_migration_applied(cursor, TRACES_NULLABLE_IDS_MIGRATION):
-            rebuilt = _rebuild_traces_for_nullable_ids(cursor)
-            _mark_schema_migration_applied(cursor, TRACES_NULLABLE_IDS_MIGRATION)
-            if rebuilt:
-                logger.info(
-                    "Rebuilt traces so message_id and conversation_id can be null"
-                )
         cursor.execute(
             "CREATE INDEX IF NOT EXISTS idx_traces_org_agent_active "
             "ON traces(org_uuid, agent_id, deleted_at)"
@@ -2609,25 +2612,7 @@ def _backfill_test_evaluator_links(
 AGENT_EVALUATORS_BACKFILL_MIGRATION = "agent_evaluators_from_test_evaluators_v1"
 DATASET_NAME_DEDUPE_MIGRATION = "dedupe_active_dataset_names_v1"
 JOBS_SUMMARY_BACKFILL_MIGRATION = "backfill_jobs_summary_columns_v1"
-TRACES_NULLABLE_IDS_MIGRATION = "traces_nullable_ids_v1"
 
-# Shared by CREATE TABLE traces and the nullable-ids rebuild so they cannot drift.
-_TRACES_TABLE_BODY = """
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                uuid TEXT NOT NULL UNIQUE,
-                org_uuid TEXT NOT NULL,
-                agent_id TEXT NOT NULL,
-                message_id TEXT,
-                conversation_id TEXT,
-                input TEXT NOT NULL,
-                output TEXT NOT NULL,
-                metadata TEXT DEFAULT NULL,
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                deleted_at TIMESTAMP DEFAULT NULL,
-                FOREIGN KEY (org_uuid) REFERENCES organizations(uuid),
-                FOREIGN KEY (agent_id) REFERENCES agents(uuid)
-"""
 
 
 def _dedupe_active_dataset_names(cursor: sqlite3.Cursor) -> int:
@@ -2694,51 +2679,6 @@ def _mark_schema_migration_applied(cursor: sqlite3.Cursor, name: str) -> None:
     cursor.execute(
         "INSERT OR IGNORE INTO _schema_migrations (name) VALUES (?)", (name,)
     )
-
-
-def _traces_label_not_null(cursor: sqlite3.Cursor) -> bool:
-    for row in cursor.execute("PRAGMA table_info(traces)").fetchall():
-        if row["name"] in ("message_id", "conversation_id") and row["notnull"]:
-            return True
-    return False
-
-
-def _rebuild_traces_for_nullable_ids(cursor: sqlite3.Cursor) -> bool:
-    """Copy `traces` into a table whose label columns are nullable.
-
-    SQLite cannot DROP NOT NULL. A leftover `traces_new` from a crash mid-copy
-    is either dropped (old `traces` still present) or renamed (copy finished).
-    """
-    tables = {
-        r[0]
-        for r in cursor.execute(
-            "SELECT name FROM sqlite_master WHERE type = 'table' "
-            "AND name IN ('traces', 'traces_new')"
-        )
-    }
-    if "traces_new" in tables:
-        if "traces" in tables:
-            cursor.execute("DROP TABLE traces_new")
-        else:
-            cursor.execute("ALTER TABLE traces_new RENAME TO traces")
-            return True
-    if not _traces_label_not_null(cursor):
-        return False
-    cursor.execute(f"CREATE TABLE traces_new ({_TRACES_TABLE_BODY})")
-    cursor.execute(
-        """
-        INSERT INTO traces_new (
-            id, uuid, org_uuid, agent_id, message_id, conversation_id,
-            input, output, metadata, created_at, updated_at, deleted_at
-        )
-        SELECT id, uuid, org_uuid, agent_id, message_id, conversation_id,
-               input, output, metadata, created_at, updated_at, deleted_at
-          FROM traces
-        """
-    )
-    cursor.execute("DROP TABLE traces")
-    cursor.execute("ALTER TABLE traces_new RENAME TO traces")
-    return True
 
 
 def _backfill_agent_evaluator_links(cursor: sqlite3.Cursor) -> int:
