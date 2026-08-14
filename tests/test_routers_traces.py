@@ -547,6 +547,26 @@ def test_list_filters_by_agent_id(client):
     assert combined["items"][0]["message_id"] == mid_a
 
 
+def test_bulk_delete_rejects_an_unknown_filter_key(client):
+    """A misspelled filter must 422, not silently widen select_all to the whole
+    workspace."""
+    h, agent_id = _signup_with_agent(client)
+    client.post(
+        "/traces", json=_payload(agent_id, _mid(), conversation_id="keep"), headers=h
+    )
+    client.post(
+        "/traces", json=_payload(agent_id, _mid(), conversation_id="other"), headers=h
+    )
+
+    res = client.post(
+        "/traces/bulk-delete",
+        json={"select_all": True, "conversation_ids": "keep"},
+        headers=h,
+    )
+    assert res.status_code == 422, res.text
+    assert client.get("/traces", headers=h).json()["total"] == 2
+
+
 def test_bulk_delete_select_all_scopes_to_one_agent(client):
     h, agent_a = _signup_with_agent(client)
     agent_b = _create_agent(client, h)["uuid"]

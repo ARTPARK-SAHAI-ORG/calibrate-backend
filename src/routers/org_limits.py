@@ -163,6 +163,11 @@ def update_org_limits_endpoint(
     user_id: str = Depends(require_superadmin),
 ):
     """Update limits for a workspace. Superadmin only"""
+    # The stored limits are replaced wholesale, so an update that omits an
+    # optional limit would silently reset it. Carry the stored value forward.
+    if data.limits.max_traces is None:
+        stored = (get_org_limits(target_org_uuid) or {}).get("limits", {})
+        data.limits.max_traces = stored.get("max_traces")
     updated = update_org_limits(org_uuid=target_org_uuid, limits=data.limits)
     if not updated:
         raise HTTPException(status_code=404, detail="Organization limits not found")

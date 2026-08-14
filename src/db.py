@@ -239,11 +239,6 @@ def init_db():
     DB_PATH.parent.mkdir(parents=True, exist_ok=True)
 
     with get_db_connection() as conn:
-        # WAL lets readers run while a writer holds the lock, which matters now
-        # that machine-paced trace ingest shares this file. It persists in the
-        # database file, so it is set here rather than on every connection.
-        conn.execute("PRAGMA journal_mode=WAL")
-
         cursor = conn.cursor()
 
         # Write-ahead logging: readers no longer block the writer (or each

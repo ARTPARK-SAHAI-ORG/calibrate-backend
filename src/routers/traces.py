@@ -234,6 +234,10 @@ class TraceResponse(BaseModel):
 
 
 class BulkDeleteTracesRequest(BaseModel):
+    # Unknown keys must not be silently dropped: a misspelled filter would
+    # widen select_all from one conversation to the whole workspace.
+    model_config = ConfigDict(extra="forbid")
+
     trace_ids: Optional[List[str]] = Field(
         None,
         description="IDs of the traces to delete. **Required when `select_all` is false.** Ignored otherwise",

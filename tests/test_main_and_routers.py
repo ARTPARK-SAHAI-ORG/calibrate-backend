@@ -1977,6 +1977,16 @@ def test_org_limits_max_traces(client, monkeypatch):
     }
     assert org_limits_mod.get_max_traces_for_org(user_org_uuid) == 123
 
+    # An update that omits max_traces must not wipe the stored cap.
+    keep = client.put(
+        f"/org-limits/{user_org_uuid}",
+        json={"limits": {"max_rows_per_eval": 30}},
+        headers=h,
+    )
+    assert keep.status_code == 200, keep.text
+    assert keep.json()["limits"]["max_traces"] == 123
+    assert org_limits_mod.get_max_traces_for_org(user_org_uuid) == 123
+
     # max_traces has its own bounds (gt=0, le=1_000_000) — values above
     # max_rows_per_eval's le=10000 cap must be accepted.
     ok_large = client.put(
