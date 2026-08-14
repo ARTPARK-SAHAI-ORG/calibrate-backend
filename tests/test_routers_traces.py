@@ -6,6 +6,8 @@ import uuid
 from unittest.mock import patch
 
 import pytest
+
+from routers.traces import MAX_LIST_LIMIT
 from fastapi.testclient import TestClient
 
 
@@ -653,6 +655,26 @@ def test_trace_cap_comes_from_its_env_var():
         os.environ["DEFAULT_MAX_TRACES"] = original
         importlib.reload(traces_mod)
     assert traces_mod.MAX_TRACES_PER_WORKSPACE == int(original)
+
+
+def test_list_rejects_an_oversized_page(client):
+    """A list row parses each trace's whole conversation, so a huge page would
+    load the workspace into memory."""
+    h, _ = _signup_with_agent(client)
+    over = client.get(
+        "/traces", params={"limit": MAX_LIST_LIMIT + 1}, headers=h
+    )
+    assert over.status_code == 422, over.text
+    assert client.get(
+        "/traces", params={"limit": MAX_LIST_LIMIT}, headers=h
+    ).status_code == 200
+
+
+def test_bulk_delete_rejects_malformed_trace_ids(client):
+    h, _ = _signup_with_agent(client)
+    for bad in ("", "x" * 100_000, "too-short"):
+        res = client.post("/traces/bulk-delete", json={"trace_ids": [bad]}, headers=h)
+        assert res.status_code == 422, f"{bad[:20]!r} -> {res.text}"
 
 
 def test_bulk_delete_rejects_an_unknown_key(client):

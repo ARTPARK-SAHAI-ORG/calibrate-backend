@@ -16,10 +16,10 @@ OTel-gateway migration.
 """
 
 import os
-from typing import Any, Dict, List, Optional
+from typing import Annotated, Any, Dict, List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Path, Query
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, StringConstraints, model_validator
 
 from auth_utils import OrgContext, get_current_org, get_org_jwt_or_api_key
 from db import (
@@ -43,6 +43,11 @@ MAX_TRACES_PER_WORKSPACE = int(os.getenv("DEFAULT_MAX_TRACES", "50000"))
 # under it.
 MAX_DELETE_IDS = 50_000
 
+# A list row parses each trace's whole stored conversation to build its
+# previews, so pages stay small. The shared PaginationParams allows a million,
+# which would load every trace in a full workspace into memory at once.
+MAX_LIST_LIMIT = 200
+
 MAX_INPUT_TURNS = 500
 MAX_TURN_CONTENT_CHARS = 50_000
 MAX_TOOL_CALLS = 50
@@ -52,6 +57,10 @@ _EXAMPLE_TRACE_UUID = "f47ac10b-58cc-4372-a567-0e02b2c3d479"
 _TRACE_UUID_DESCRIPTION = "Unique ID for the trace"
 
 _AGENT_ID_DESCRIPTION = "ID of the agent that produced the turn"
+
+# Bounds each entry so a malformed list is rejected before it reaches the
+# database rather than being bound into a query.
+TraceUuid = Annotated[str, StringConstraints(min_length=36, max_length=36)]
 
 
 class TraceTurn(BaseModel):
@@ -239,7 +248,7 @@ class BulkDeleteTracesRequest(BaseModel):
     # otherwise look like it filtered something.
     model_config = ConfigDict(extra="forbid")
 
-    trace_ids: List[str] = Field(
+    trace_ids: List[TraceUuid] = Field(
         min_length=1,
         max_length=MAX_DELETE_IDS,
         description="IDs of the traces to delete",
@@ -345,6 +354,10 @@ async def list_traces_endpoint(
     ),
 ):
     """List ingested traces, newest first"""
+    if pagination.limit > MAX_LIST_LIMIT:
+        raise HTTPException(
+            status_code=422, detail=f"limit must be {MAX_LIST_LIMIT} or less"
+        )
     # Search/filter/count run in SQL (db.list_traces), not the post-fetch
     # pagination helpers, and paging uses the bounded PaginationParams rather
     # than the unbounded OptionalPaginationParams: traces are machine-written

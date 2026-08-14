@@ -1495,7 +1495,7 @@ def init_db():
         )
         cursor.execute(
             "CREATE INDEX IF NOT EXISTS idx_traces_org_agent_active "
-            "ON traces(org_uuid, agent_id, deleted_at)"
+            "ON traces(org_uuid, agent_id, deleted_at, created_at DESC, id DESC)"
         )
         cursor.execute(
             "CREATE INDEX IF NOT EXISTS idx_traces_org_created "
