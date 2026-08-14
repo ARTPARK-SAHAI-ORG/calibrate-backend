@@ -27,10 +27,11 @@ def get_db_connection():
     """Context manager for database connections."""
     conn = sqlite3.connect(str(DB_PATH))
     conn.row_factory = sqlite3.Row
-    # WAL lets readers run while a writer holds the lock, and busy_timeout makes
-    # a second writer wait instead of failing instantly with "database is
-    # locked". Both matter now that machine-paced trace ingest shares this file.
-    conn.execute("PRAGMA journal_mode=WAL")
+    # Both are per-connection and forgotten on close, so they are set every
+    # time: busy_timeout makes a second writer wait instead of failing
+    # instantly with "database is locked", and synchronous=NORMAL is the
+    # matching durability level for WAL. journal_mode=WAL is a property of the
+    # file itself and is set once in init_db().
     conn.execute("PRAGMA busy_timeout=5000")
     conn.execute("PRAGMA synchronous=NORMAL")
     try:
@@ -238,6 +239,11 @@ def init_db():
     DB_PATH.parent.mkdir(parents=True, exist_ok=True)
 
     with get_db_connection() as conn:
+        # WAL lets readers run while a writer holds the lock, which matters now
+        # that machine-paced trace ingest shares this file. It persists in the
+        # database file, so it is set here rather than on every connection.
+        conn.execute("PRAGMA journal_mode=WAL")
+
         cursor = conn.cursor()
 
         # Write-ahead logging: readers no longer block the writer (or each
@@ -3539,6 +3545,7 @@ _RESOURCE_ORG_SELECTS = tuple(
         "annotation_tasks",
         "annotators",
         "evaluators",
+        "traces",
     )
 ) + (
     "SELECT org_uuid FROM jobs WHERE uuid = ?",

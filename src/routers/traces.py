@@ -425,10 +425,6 @@ class ConvertTracesToTestsRequest(BaseModel):
         None,
         description="Limit `select_all` to traces from this conversation",
     )
-    agent_id: Optional[str] = Field(
-        None,
-        description="Limit `select_all` to traces from this agent",
-    )
     type: Literal["response", "tool_call"] = Field(description=_CONVERT_TYPE_DESCRIPTION)
     evaluators: Optional[List[EvaluatorRef]] = Field(
         None,
@@ -510,7 +506,6 @@ async def convert_traces_to_tests(
         select_all=payload.select_all,
         q=payload.q,
         conversation_id=payload.conversation_id,
-        agent_id=payload.agent_id,
         limit=MAX_CONVERT_BATCH + 1 if payload.select_all else None,
     )
     if not traces:

@@ -391,6 +391,36 @@ def test_404_for_an_unknown_uuid_carries_no_hint(client):
     assert "organization_uuid" not in resp.json()
 
 
+def test_404_hint_covers_traces(client):
+    """Traces share pense.db with everything else, so a trace link opened under
+    the wrong workspace gets the owning org back instead of a dead end."""
+    owner = _signup(client, email_prefix="hint-trace-owner")
+    member = _signup(client, email_prefix="hint-trace-member")
+    org_uuid = db.get_personal_org_for_user(owner["user_uuid"])["uuid"]
+    _invite_to_org(client, owner, org_uuid, member["email"])
+
+    agent_uuid = client.post(
+        "/agents",
+        json={"name": f"hint-trace-agent-{uuid.uuid4().hex[:6]}", "type": "agent"},
+        headers=owner["headers"],
+    ).json()["uuid"]
+    trace_uuid = client.post(
+        "/traces",
+        json={
+            "agent_id": agent_uuid,
+            "message_id": f"m-{uuid.uuid4().hex[:10]}",
+            "conversation_id": "conv-hint",
+            "input": [{"role": "user", "content": "hello"}],
+            "output": {"response": "hi"},
+        },
+        headers=owner["headers"],
+    ).json()["uuid"]
+
+    resp = client.get(f"/traces/{trace_uuid}", headers=member["headers"])
+    assert resp.status_code == 404
+    assert resp.json()["organization_uuid"] == org_uuid
+
+
 def test_404_hint_covers_jobs_and_annotation_tasks(client):
     """The hint is not agent-specific: it works off any uuid in the path,
     including tables that reach their org through a join."""
