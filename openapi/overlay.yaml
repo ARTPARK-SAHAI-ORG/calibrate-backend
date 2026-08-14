@@ -507,3 +507,43 @@ actions:
         openWorldHint: true
         description: |
           Get a paginated summary table for a task, with each item's evaluator values and human labels.
+  - target: $.paths['/annotators'].post
+    update:
+      x-speakeasy-group: annotators
+      x-speakeasy-name-override: create
+      x-speakeasy-mcp:
+        name: create-annotator
+        title: Create annotator
+        scopes: [write]
+        readOnlyHint: false
+        destructiveHint: false
+        openWorldHint: true
+        idempotentHint: false
+        description: |
+          Create an annotator, a human labeller who can be assigned annotation tasks.
+  - target: $.paths['/annotators'].get
+    update:
+      x-speakeasy-group: annotators
+      x-speakeasy-name-override: list
+      x-speakeasy-mcp:
+        name: list-annotators
+        title: List annotators
+        scopes: [read]
+        readOnlyHint: true
+        openWorldHint: true
+        description: |
+          List your annotators with their job counts and agreement scores.
+  - target: $.paths['/annotators/{annotator_uuid}'].put
+    update:
+      x-speakeasy-group: annotators
+      x-speakeasy-name-override: update
+      x-speakeasy-mcp:
+        name: update-annotator
+        title: Update annotator
+        scopes: [write]
+        readOnlyHint: false
+        destructiveHint: false
+        openWorldHint: true
+        idempotentHint: true
+        description: |
+          Rename an annotator in your workspace.

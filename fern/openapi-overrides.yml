@@ -141,3 +141,14 @@ paths:
     get:
       x-fern-sdk-group-name: annotation_tasks
       x-fern-sdk-method-name: get_summary
+  /annotators:
+    post:
+      x-fern-sdk-group-name: annotators
+      x-fern-sdk-method-name: create
+    get:
+      x-fern-sdk-group-name: annotators
+      x-fern-sdk-method-name: list
+  /annotators/{annotator_uuid}:
+    put:
+      x-fern-sdk-group-name: annotators
+      x-fern-sdk-method-name: update

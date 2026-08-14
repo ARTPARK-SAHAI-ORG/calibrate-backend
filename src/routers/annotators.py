@@ -14,7 +14,7 @@ from db import (
     get_annotations_for_org,
     get_annotations_for_annotator_overlap_slots,
 )
-from auth_utils import get_current_org, OrgContext
+from auth_utils import get_current_org, get_org_jwt_or_api_key, OrgContext
 from annotation_metrics import (
     aggregate_agreement_for_annotator,
     trend_series_for_annotator,
@@ -75,10 +75,10 @@ def _ensure_owned_annotator(annotator_uuid: str, org_uuid: str):
     return annotator
 
 
-@router.post("", response_model=AnnotatorCreateResponse, summary="Create annotator")
+@router.post("", response_model=AnnotatorCreateResponse, summary="Create annotator", tags=["Public API"])
 def create_annotator_endpoint(
     payload: AnnotatorCreate,
-    ctx: OrgContext = Depends(get_current_org),
+    ctx: OrgContext = Depends(get_org_jwt_or_api_key),
 ):
     """Create an annotator, a human labeller who can be assigned annotation tasks"""
     try:
@@ -95,8 +95,8 @@ def create_annotator_endpoint(
     )
 
 
-@router.get("", response_model=List[AnnotatorResponse], summary="List annotators")
-def list_annotators(ctx: OrgContext = Depends(get_current_org)):
+@router.get("", response_model=List[AnnotatorResponse], summary="List annotators", tags=["Public API"])
+def list_annotators(ctx: OrgContext = Depends(get_org_jwt_or_api_key)):
     """List annotators with job counts and agreement stats"""
     annotators = get_all_annotators(org_uuid=ctx.org_uuid)
     if not annotators:
@@ -171,14 +171,14 @@ def get_annotator_endpoint(
     }
 
 
-@router.put("/{annotator_uuid}", response_model=AnnotatorResponse, summary="Update annotator")
+@router.put("/{annotator_uuid}", response_model=AnnotatorResponse, summary="Update annotator", tags=["Public API"])
 def update_annotator_endpoint(
     annotator_uuid: str = Path(
         description="Annotator to update",
         examples=["f47ac10b-58cc-4372-a567-0e02b2c3d479"],
     ),
     payload: AnnotatorUpdate = ...,
-    ctx: OrgContext = Depends(get_current_org),
+    ctx: OrgContext = Depends(get_org_jwt_or_api_key),
 ):
     """Update an annotator's name"""
     _ensure_owned_annotator(annotator_uuid, ctx.org_uuid)

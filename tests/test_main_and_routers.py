@@ -152,8 +152,10 @@ def test_public_api_docs_are_unauthenticated_and_filtered(client, monkeypatch):
     assert "put" not in paths.get("/evaluators/{evaluator_uuid}", {})  # update stays JWT-only
     assert "get" not in paths.get("/evaluators/{evaluator_uuid}/versions", {})  # list-versions redundant with detail
     # Annotation long tail (human-labelling workflow, housekeeping reads,
-    # annotators, agreement trends) stays JWT-only.
-    assert "/annotators" not in paths
+    # agreement trends) stays JWT-only. Annotators are public for create/list/
+    # rename only — the detail route's trend series and delete stay JWT-only.
+    assert set(paths["/annotators"]) == {"post", "get"}
+    assert set(paths["/annotators/{annotator_uuid}"]) == {"put"}
     assert not any(p.startswith("/annotation-agreement") for p in paths)
     assert "put" not in paths.get("/annotation-tasks/{task_uuid}", {})  # task update stays JWT-only
     assert "/annotation-tasks/{task_uuid}/jobs" not in paths  # human labelling jobs
