@@ -11,39 +11,30 @@ eventual OTel-gateway migration.
 """
 
 import logging
-import uuid
-from typing import Any, Dict, List, Literal, Optional
+import os
+from typing import Any, Dict, List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Path, Query
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from auth_utils import OrgContext, get_current_org, get_org_jwt_or_api_key
 from db import (
-    add_test_to_agent,
-    bulk_create_tests,
     count_live_traces,
     create_trace,
-    get_agent,
-    get_all_tests_summary,
     get_trace,
-    get_trace_by_message_id,
     list_traces,
-    select_traces,
-    set_test_evaluators,
     soft_delete_traces,
 )
 from org_scope import ensure_owned_agent
 from pagination import PaginatedResponse, PaginationParams, page_envelope
-from routers.org_limits import get_max_traces_for_org
-
-# Reuse the test router's evaluator ref + validation so converted tests accept
-# exactly what POST /tests does (workspace-visible, evaluator_type matches).
-from routers.tests import EvaluatorRef, _validate_evaluators
-from utils import EXAMPLE_TEST_UUID
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/traces", tags=["traces"])
+
+# A fixed ceiling, not a per-workspace setting: one number is enough until a
+# customer actually needs a different one.
+MAX_TRACES_PER_WORKSPACE = int(os.getenv("DEFAULT_MAX_TRACES", "50000"))
 
 MAX_INPUT_TURNS = 500
 MAX_TURN_CONTENT_CHARS = 50_000
@@ -58,11 +49,6 @@ _EXAMPLE_TRACE_UUID = "f47ac10b-58cc-4372-a567-0e02b2c3d479"
 _TRACE_UUID_DESCRIPTION = "Unique ID for the trace"
 
 _AGENT_ID_DESCRIPTION = "ID of the agent that produced the turn"
-
-_Q_DESCRIPTION = (
-    "Case-insensitive substring search on `message_id`, `conversation_id`, "
-    "and message content"
-)
 
 
 class TraceTurn(BaseModel):
@@ -143,13 +129,13 @@ class TraceIngest(BaseModel):
         None,
         min_length=1,
         max_length=255,
-        description="Your ID for the last user message in `input`, unique within your workspace across all agents. Sending the same ID again returns the stored trace instead of creating a duplicate. Omit to have one generated, which stores every call as a new trace",
+        description="Your own ID for the last user message in `input`, stored for reference only. Omit if you have none",
     )
     conversation_id: Optional[str] = Field(
         None,
         min_length=1,
         max_length=255,
-        description="Your ID for the conversation this turn belongs to. Omit for a turn that stands alone, and it becomes its own conversation",
+        description="Your own ID for the conversation this turn belongs to, stored for reference only. Omit if you have none",
     )
     input: List[TraceTurn] = Field(
         min_length=1,
@@ -171,12 +157,11 @@ class TraceIngestResponse(BaseModel):
         description=_TRACE_UUID_DESCRIPTION,
         examples=[_EXAMPLE_TRACE_UUID],
     )
-    message_id: str = Field(description="Your ID for the trace's last user message")
-    conversation_id: str = Field(
-        description="Your ID for the conversation the trace belongs to"
+    message_id: Optional[str] = Field(
+        None, description="The message ID you sent, if any"
     )
-    created: bool = Field(
-        description="Whether this call stored a new trace. False when a trace with this `message_id` already existed"
+    conversation_id: Optional[str] = Field(
+        None, description="The conversation ID you sent, if any"
     )
     created_at: str = Field(description="When the trace was created (ISO 8601 UTC)")
 
@@ -189,15 +174,23 @@ class TraceSummary(BaseModel):
         examples=[_EXAMPLE_TRACE_UUID],
     )
     agent_id: str = Field(description=_AGENT_ID_DESCRIPTION)
-    message_id: str = Field(description="Your ID for the trace's last user message")
-    conversation_id: str = Field(
-        description="Your ID for the conversation the trace belongs to"
+    message_id: Optional[str] = Field(
+        None, description="The message ID you sent, if any"
+    )
+    conversation_id: Optional[str] = Field(
+        None, description="The conversation ID you sent, if any"
     )
     input_preview: Optional[str] = Field(
         None, description="The last user message, truncated for display"
     )
     response_preview: Optional[str] = Field(
         None, description="The agent reply, truncated for display"
+    )
+    tool_names: List[str] = Field(
+        description="Names of the tools the agent issued on this turn, in order"
+    )
+    tool_calls: List[TraceToolCall] = Field(
+        description="Tools the agent issued on this turn, with the arguments it passed"
     )
     turn_count: int = Field(
         description="Number of turns in the stored conversation history"
@@ -219,9 +212,11 @@ class TraceResponse(BaseModel):
         examples=[_EXAMPLE_TRACE_UUID],
     )
     agent_id: str = Field(description=_AGENT_ID_DESCRIPTION)
-    message_id: str = Field(description="Your ID for the trace's last user message")
-    conversation_id: str = Field(
-        description="Your ID for the conversation the trace belongs to"
+    message_id: Optional[str] = Field(
+        None, description="The message ID you sent, if any"
+    )
+    conversation_id: Optional[str] = Field(
+        None, description="The conversation ID you sent, if any"
     )
     input: List[TraceTurn] = Field(
         description="Conversation history stored for this trace, oldest turn first"
@@ -237,29 +232,13 @@ class TraceResponse(BaseModel):
 
 
 class BulkDeleteTracesRequest(BaseModel):
-    # Unknown keys must not be silently dropped: a misspelled filter would
-    # widen select_all from one conversation to the whole workspace.
+    # Unknown keys must not be silently dropped: a misspelled field would
+    # otherwise look like it filtered something.
     model_config = ConfigDict(extra="forbid")
 
-    trace_ids: Optional[List[str]] = Field(
-        None,
-        description="IDs of the traces to delete. **Required when `select_all` is false.** Ignored otherwise",
-    )
-    select_all: bool = Field(
-        False,
-        description="Delete every trace matching `q` and `conversation_id` instead of an explicit ID list",
-    )
-    q: Optional[str] = Field(
-        None,
-        description=_Q_DESCRIPTION + ". Applied when `select_all` is true",
-    )
-    conversation_id: Optional[str] = Field(
-        None,
-        description="Limit `select_all` to traces from this conversation",
-    )
-    agent_id: Optional[str] = Field(
-        None,
-        description="Limit `select_all` to traces from this agent",
+    trace_ids: List[str] = Field(
+        min_length=1,
+        description="IDs of the traces to delete",
     )
 
 
@@ -288,6 +267,11 @@ def _last_user_content(input_turns: List[Dict[str, Any]]) -> Optional[str]:
 
 def _to_summary(row: Dict[str, Any]) -> Dict[str, Any]:
     output = row.get("output") or {}
+    calls = [
+        call
+        for call in (output.get("tool_calls") or [])
+        if isinstance(call, dict) and call.get("tool")
+    ]
     return {
         "uuid": row["uuid"],
         "agent_id": row["agent_id"],
@@ -295,19 +279,14 @@ def _to_summary(row: Dict[str, Any]) -> Dict[str, Any]:
         "conversation_id": row["conversation_id"],
         "input_preview": _preview(_last_user_content(row.get("input") or [])),
         "response_preview": _preview(output.get("response")),
+        "tool_names": [call["tool"] for call in calls],
+        "tool_calls": [
+            {"tool": call["tool"], "arguments": call.get("arguments")}
+            for call in calls
+        ],
         "turn_count": len(row.get("input") or []),
-        "tool_call_count": len(output.get("tool_calls") or []),
+        "tool_call_count": len(calls),
         "metadata_count": len(row.get("metadata") or []),
-        "created_at": row["created_at"],
-    }
-
-
-def _ingest_response(row: Dict[str, Any], created: bool) -> Dict[str, Any]:
-    return {
-        "uuid": row["uuid"],
-        "message_id": row["message_id"],
-        "conversation_id": row["conversation_id"],
-        "created": created,
         "created_at": row["created_at"],
     }
 
@@ -318,16 +297,8 @@ async def ingest_trace(
 ):
     """Store a production agent turn and its conversation history for later curation"""
     ensure_owned_agent(payload.agent_id, ctx.org_uuid)
-    # Idempotency outranks the cap: a retry of an already-stored message_id
-    # must succeed even when the workspace is at its limit. A caller that sends
-    # no message_id gets a generated one, so there is nothing to match against
-    # and every call stores a new trace.
-    if payload.message_id:
-        existing = get_trace_by_message_id(ctx.org_uuid, payload.message_id)
-        if existing:
-            return _ingest_response(existing, created=False)
 
-    cap = get_max_traces_for_org(ctx.org_uuid)
+    cap = MAX_TRACES_PER_WORKSPACE
     current = count_live_traces(ctx.org_uuid)
     if current >= cap:
         raise HTTPException(
@@ -336,20 +307,15 @@ async def ingest_trace(
                 "error": "Trace limit reached for this workspace",
                 "current": current,
                 "max_traces": cap,
-                "hint": "Delete traces to free capacity or ask an administrator to raise the workspace limit",
+                "hint": "Delete traces to free capacity",
             },
         )
 
-    # A standalone turn is its own conversation, so the generated pair stays
-    # groupable by conversation_id like every other trace.
-    message_id = payload.message_id or str(uuid.uuid4())
-    conversation_id = payload.conversation_id or message_id
-
-    row, created = create_trace(
+    row = create_trace(
         org_uuid=ctx.org_uuid,
         agent_id=payload.agent_id,
-        message_id=message_id,
-        conversation_id=conversation_id,
+        message_id=payload.message_id,
+        conversation_id=payload.conversation_id,
         input=[turn.model_dump(exclude_none=True) for turn in payload.input],
         output=payload.output.model_dump(exclude_none=True),
         metadata=(
@@ -358,17 +324,18 @@ async def ingest_trace(
             else None
         ),
     )
-    return _ingest_response(row, created=created)
+    return {
+        "uuid": row["uuid"],
+        "message_id": row["message_id"],
+        "conversation_id": row["conversation_id"],
+        "created_at": row["created_at"],
+    }
 
 
 @router.get("", response_model=PaginatedResponse[TraceSummary], summary="List traces")
 async def list_traces_endpoint(
     ctx: OrgContext = Depends(get_current_org),
     pagination: PaginationParams = Depends(),
-    q: Optional[str] = Query(None, description=_Q_DESCRIPTION + ". Blank is a no-op"),
-    conversation_id: Optional[str] = Query(
-        None, description="Return only traces from this conversation"
-    ),
     agent_id: Optional[str] = Query(
         None, description="Return only traces from this agent"
     ),
@@ -382,8 +349,6 @@ async def list_traces_endpoint(
         ctx.org_uuid,
         limit=pagination.limit,
         offset=pagination.offset,
-        q=q,
-        conversation_id=conversation_id,
         agent_id=agent_id,
     )
     return page_envelope([_to_summary(row) for row in rows], total, pagination)
@@ -397,207 +362,9 @@ async def list_traces_endpoint(
 async def bulk_delete_traces(
     payload: BulkDeleteTracesRequest, ctx: OrgContext = Depends(get_current_org)
 ):
-    """Soft-delete traces, freeing their capacity and message IDs for re-ingestion"""
-    if not payload.select_all and not payload.trace_ids:
-        raise HTTPException(
-            status_code=400,
-            detail="trace_ids must be non-empty when select_all is false",
-        )
-    deleted = soft_delete_traces(
-        ctx.org_uuid,
-        trace_ids=payload.trace_ids,
-        select_all=payload.select_all,
-        q=payload.q,
-        conversation_id=payload.conversation_id,
-        agent_id=payload.agent_id,
-    )
+    """Soft-delete traces, freeing their capacity"""
+    deleted = soft_delete_traces(ctx.org_uuid, trace_ids=payload.trace_ids)
     return {"deleted": deleted}
-
-
-_CONVERT_TYPE_DESCRIPTION = (
-    "What the created tests judge:\n\n"
-    "- `response`: judge the agent's regenerated reply against the linked evaluators\n"
-    "- `tool_call`: diff the agent's regenerated tool calls against the ones the trace recorded"
-)
-
-
-class ConvertTracesToTestsRequest(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    trace_ids: Optional[List[str]] = Field(
-        None,
-        description="IDs of the traces to convert. **Required when `select_all` is false.** Ignored otherwise",
-    )
-    select_all: bool = Field(
-        False,
-        description="Convert every trace matching `q` and `conversation_id` instead of an explicit ID list",
-    )
-    q: Optional[str] = Field(
-        None,
-        description=_Q_DESCRIPTION + ". Applied when `select_all` is true",
-    )
-    conversation_id: Optional[str] = Field(
-        None,
-        description="Limit `select_all` to traces from this conversation",
-    )
-    type: Literal["response", "tool_call"] = Field(description=_CONVERT_TYPE_DESCRIPTION)
-    evaluators: Optional[List[EvaluatorRef]] = Field(
-        None,
-        description="Evaluators to link to each created test. **Required for `response`**, unused for `tool_call`",
-    )
-    agent_uuids: Optional[List[str]] = Field(
-        None,
-        description="IDs of agents to link every created test to. Omit to link none",
-    )
-    accept_any_arguments: bool = Field(
-        False,
-        description="For `tool_call`, match only the tool name and ignore the arguments the trace recorded",
-    )
-
-
-class ConvertTracesToTestsResponse(BaseModel):
-    created: int = Field(description="Number of tests created")
-    test_uuids: List[str] = Field(
-        description="IDs of the created tests, in creation order",
-        examples=[[EXAMPLE_TEST_UUID]],
-    )
-
-
-def _dedupe_test_names(candidates: List[str], taken: set) -> List[str]:
-    """Make each candidate test name unique against `taken` (existing workspace
-    test names, mutated as names are claimed) by appending ` (2)`, ` (3)`, …
-    Converting the same traces twice yields new names rather than a 400."""
-    out: List[str] = []
-    for base in candidates:
-        name = base
-        n = 2
-        while name in taken:
-            name = f"{base} ({n})"
-            n += 1
-        taken.add(name)
-        out.append(name)
-    return out
-
-
-@router.post(
-    "/convert-to-tests",
-    response_model=ConvertTracesToTestsResponse,
-    summary="Convert traces to tests",
-)
-async def convert_traces_to_tests(
-    payload: ConvertTracesToTestsRequest, ctx: OrgContext = Depends(get_current_org)
-):
-    """Turn production traces into regression tests you can run and benchmark"""
-    if not payload.select_all and not payload.trace_ids:
-        raise HTTPException(
-            status_code=400,
-            detail="trace_ids must be non-empty when select_all is false",
-        )
-
-    if payload.agent_uuids:
-        for agent_uuid in payload.agent_uuids:
-            agent = get_agent(agent_uuid)
-            if not agent or agent.get("org_uuid") != ctx.org_uuid:
-                raise HTTPException(
-                    status_code=404, detail=f"Agent {agent_uuid} not found"
-                )
-
-    # A converted response test re-runs the agent and judges the fresh reply, so
-    # it has no fallback judge — require at least one (llm) evaluator up front.
-    resolved_refs: Optional[List[Dict[str, Any]]] = None
-    if payload.type == "response":
-        if not payload.evaluators:
-            raise HTTPException(
-                status_code=400,
-                detail="response tests require at least one evaluator",
-            )
-        resolved_refs = _validate_evaluators(
-            payload.evaluators, ctx.org_uuid, "response"
-        )
-
-    traces = select_traces(
-        ctx.org_uuid,
-        trace_ids=payload.trace_ids,
-        select_all=payload.select_all,
-        q=payload.q,
-        conversation_id=payload.conversation_id,
-        limit=MAX_CONVERT_BATCH + 1 if payload.select_all else None,
-    )
-    if not traces:
-        raise HTTPException(status_code=404, detail="No matching traces found")
-    if len(traces) > MAX_CONVERT_BATCH:
-        raise HTTPException(
-            status_code=400,
-            detail=(
-                f"Too many traces selected (limit {MAX_CONVERT_BATCH}). "
-                "Narrow the search or conversation filter and try again."
-            ),
-        )
-
-    # tool_call tests assert the recorded calls, so every trace must have some.
-    if payload.type == "tool_call":
-        missing = [
-            t["message_id"]
-            for t in traces
-            if not (t.get("output") or {}).get("tool_calls")
-        ]
-        if missing:
-            raise HTTPException(
-                status_code=400,
-                detail={
-                    "error": "Some traces have no tool calls to convert to a tool_call test",
-                    "message_ids": missing,
-                },
-            )
-
-    existing_names = {t["name"] for t in get_all_tests_summary(org_uuid=ctx.org_uuid)}
-    names = _dedupe_test_names([t["message_id"] for t in traces], existing_names)
-
-    db_tests: List[Dict[str, Any]] = []
-    for trace, name in zip(traces, names):
-        evaluation: Dict[str, Any] = {"type": payload.type}
-        if payload.type == "tool_call":
-            evaluation["tool_calls"] = [
-                {
-                    "tool": tc["tool"],
-                    "arguments": tc.get("arguments"),
-                    "accept_any_arguments": payload.accept_any_arguments,
-                }
-                for tc in (trace["output"].get("tool_calls") or [])
-            ]
-        db_tests.append(
-            {
-                "name": name,
-                "type": payload.type,
-                # `input` is already OpenAI history; `output` is discarded for
-                # response tests (the agent is re-run) and captured as the
-                # expected assertion for tool_call tests above.
-                "config": {"history": trace["input"], "evaluation": evaluation},
-            }
-        )
-
-    try:
-        uuids = bulk_create_tests(
-            tests=db_tests, org_uuid=ctx.org_uuid, user_id=ctx.user_id
-        )
-    except ValueError as e:
-        raise HTTPException(status_code=400, detail=str(e))
-
-    if resolved_refs:
-        for test_uuid in uuids:
-            set_test_evaluators(test_uuid, resolved_refs)
-
-    if payload.agent_uuids:
-        for agent_uuid in payload.agent_uuids:
-            for test_uuid in uuids:
-                try:
-                    add_test_to_agent(agent_uuid, test_uuid)
-                except Exception as e:
-                    logger.warning(
-                        f"Failed to link test {test_uuid} to agent {agent_uuid}: {e}"
-                    )
-
-    return {"created": len(uuids), "test_uuids": uuids}
 
 
 @router.get("/{trace_uuid}", response_model=TraceResponse, summary="Get trace")

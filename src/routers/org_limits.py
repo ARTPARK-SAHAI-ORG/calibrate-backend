@@ -1,14 +1,11 @@
-"""Workspace limits (superadmin configuration).
+"""Workspace eval limits (superadmin configuration).
 
-Set caps for each workspace on dataset rows per eval run and on stored traces.
-Members can read their workspace's effective limits via `/me/max-rows-per-eval`
-and `/me/max-traces`.
+Set caps for each workspace on dataset rows per eval run. Members can read their
+workspace's effective limit via `/me/max-rows-per-eval`.
 """
 
 import os
 import sqlite3
-
-from typing import Optional
 
 from fastapi import APIRouter, HTTPException, Depends, Path
 from pydantic import BaseModel, Field
@@ -26,7 +23,6 @@ from auth_utils import get_current_org, OrgContext, require_superadmin, is_super
 router = APIRouter(prefix="/org-limits", tags=["org-limits"])
 
 DEFAULT_MAX_ROWS_PER_EVAL = int(os.getenv("DEFAULT_MAX_ROWS_PER_EVAL", "20"))
-DEFAULT_MAX_TRACES = int(os.getenv("DEFAULT_MAX_TRACES", "50000"))
 
 
 class OrgLimits(BaseModel):
@@ -35,23 +31,6 @@ class OrgLimits(BaseModel):
         le=10000,
         description="Maximum dataset rows a single eval run may process",
     )
-    # Traces are machine-ingested, so the ceiling is orders of magnitude above
-    # max_rows_per_eval's; don't reuse that field's le=10000 bound.
-    max_traces: Optional[int] = Field(
-        None,
-        gt=0,
-        le=1_000_000,
-        description="Maximum traces the workspace can store. Omit to keep the server default",
-    )
-
-
-def get_max_traces_for_org(org_uuid: str) -> int:
-    """Effective trace cap for a workspace: its org_limits row, else the
-    DEFAULT_MAX_TRACES env fallback. Enforced by POST /traces."""
-    limits = get_org_limits(org_uuid)
-    if limits and limits.get("limits", {}).get("max_traces"):
-        return limits["limits"]["max_traces"]
-    return DEFAULT_MAX_TRACES
 
 
 class OrgLimitsCreate(BaseModel):
@@ -102,12 +81,6 @@ def get_max_rows_per_eval(ctx: OrgContext = Depends(get_current_org)):
     if limits and "max_rows_per_eval" in limits.get("limits", {}):
         return {"max_rows_per_eval": limits["limits"]["max_rows_per_eval"]}
     return {"max_rows_per_eval": DEFAULT_MAX_ROWS_PER_EVAL}
-
-
-@router.get("/me/max-traces", summary="Get own max traces")
-async def get_max_traces(ctx: OrgContext = Depends(get_current_org)):
-    """Get the maximum number of traces your workspace can store"""
-    return {"max_traces": get_max_traces_for_org(ctx.org_uuid)}
 
 
 @router.post("", response_model=OrgLimitsCreateResponse, summary="Create workspace limits")
@@ -163,11 +136,6 @@ def update_org_limits_endpoint(
     user_id: str = Depends(require_superadmin),
 ):
     """Update limits for a workspace. Superadmin only"""
-    # The stored limits are replaced wholesale, so an update that omits an
-    # optional limit would silently reset it. Carry the stored value forward.
-    if data.limits.max_traces is None:
-        stored = (get_org_limits(target_org_uuid) or {}).get("limits", {})
-        data.limits.max_traces = stored.get("max_traces")
     updated = update_org_limits(org_uuid=target_org_uuid, limits=data.limits)
     if not updated:
         raise HTTPException(status_code=404, detail="Organization limits not found")

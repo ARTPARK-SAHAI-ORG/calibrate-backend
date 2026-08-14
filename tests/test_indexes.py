@@ -20,9 +20,8 @@ EXPECTED_INDEXES = [
     "idx_simulation_jobs_share",
     "idx_annotation_jobs_task",
     "idx_annotation_jobs_annotator",
-    "idx_traces_org_message_active",
     "idx_traces_org_agent_active",
-    "idx_traces_org_conversation",
+    "idx_traces_org_created",
 ]
 
 
@@ -119,18 +118,24 @@ def test_annotation_jobs_by_annotator_uses_index():
 
 
 def test_traces_by_agent_uses_index():
+    # The count query behind the agent filter. Its page query is left out on
+    # purpose: with an ORDER BY the planner prefers idx_traces_org_created,
+    # which hands back the rows already sorted.
     plan = _query_plan(
-        "SELECT * FROM traces WHERE org_uuid = ? AND agent_id = ? "
-        "AND deleted_at IS NULL ORDER BY created_at DESC, id DESC",
+        "SELECT COUNT(*) FROM traces WHERE org_uuid = ? AND deleted_at IS NULL "
+        "AND agent_id = ?",
         ("org", "agent"),
     )
     assert "idx_traces_org_agent_active" in plan, plan
 
 
-def test_traces_by_message_id_uses_index():
+def test_traces_default_list_sorts_from_the_index():
+    """The unfiltered list query must read rows already in newest-first order —
+    a TEMP B-TREE here means every workspace row is sorted on each page."""
     plan = _query_plan(
-        "SELECT * FROM traces WHERE org_uuid = ? AND message_id = ? "
-        "AND deleted_at IS NULL",
-        ("org", "m-1"),
+        "SELECT * FROM traces WHERE org_uuid = ? AND deleted_at IS NULL "
+        "ORDER BY created_at DESC, id DESC",
+        ("org",),
     )
-    assert "idx_traces_org_message_active" in plan, plan
+    assert "idx_traces_org_created" in plan, plan
+    assert "TEMP B-TREE" not in plan, plan

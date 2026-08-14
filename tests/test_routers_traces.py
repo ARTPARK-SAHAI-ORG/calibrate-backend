@@ -84,6 +84,12 @@ def _mid() -> str:
     return f"m-{uuid.uuid4().hex[:10]}"
 
 
+def _post_trace(client, h, payload):
+    res = client.post("/traces", json=payload, headers=h)
+    assert res.status_code == 200, res.text
+    return res.json()
+
+
 # ---------------------------------------------------------------------------
 # Ingestion
 # ---------------------------------------------------------------------------
@@ -105,32 +111,42 @@ def test_ingest_requires_auth(client):
     )
 
 
-def test_ingest_with_jwt_is_idempotent(client):
+def test_ingest_with_jwt_always_inserts(client):
+    """Reusing a message_id must keep both turns: matching on it once threw one
+    of them away."""
     h, agent_id = _signup_with_agent(client)
     mid = _mid()
 
-    first = client.post("/traces", json=_payload(agent_id, mid), headers=h)
-    assert first.status_code == 200, first.text
-    body = first.json()
-    assert body["created"] is True
-    assert len(body["uuid"]) == 36
-    assert body["message_id"] == mid
-    assert body["conversation_id"] == "conv-1"
-    assert body["created_at"].endswith("Z") and "T" in body["created_at"]
+    first = _post_trace(
+        client, h, _payload(agent_id, mid, output={"response": "first answer"})
+    )
+    assert len(first["uuid"]) == 36
+    assert first["message_id"] == mid
+    assert first["conversation_id"] == "conv-1"
+    assert first["created_at"].endswith("Z") and "T" in first["created_at"]
 
-    retry = client.post("/traces", json=_payload(agent_id, mid), headers=h)
-    assert retry.status_code == 200
-    assert retry.json()["created"] is False
-    assert retry.json()["uuid"] == body["uuid"]
+    retry = _post_trace(
+        client, h, _payload(agent_id, mid, output={"response": "second answer"})
+    )
+    assert retry["uuid"] != first["uuid"]
+
+    listed = client.get("/traces", headers=h).json()
+    assert listed["total"] == 2
+    assert {item["response_preview"] for item in listed["items"]} == {
+        "first answer",
+        "second answer",
+    }
+    for created, expected in ((first, "first answer"), (retry, "second answer")):
+        full = client.get(f"/traces/{created['uuid']}", headers=h).json()
+        assert full["output"]["response"] == expected
 
 
 def test_ingest_with_api_key(client):
     h, agent_id = _signup_with_agent(client)
     key_headers = _api_key_headers(client, h)
 
-    res = client.post("/traces", json=_payload(agent_id, _mid()), headers=key_headers)
-    assert res.status_code == 200, res.text
-    assert res.json()["created"] is True
+    body = _post_trace(client, key_headers, _payload(agent_id, _mid()))
+    assert len(body["uuid"]) == 36
 
 
 def test_ingest_validation(client):
@@ -153,8 +169,17 @@ def test_ingest_validation(client):
         _mid(),
         output={"tool_calls": [{"tool": "get_schedule", "arguments": {}}]},
     )
-    ok = client.post("/traces", json=tool_only, headers=h)
-    assert ok.status_code == 200 and ok.json()["created"] is True
+    ok = _post_trace(client, h, tool_only)
+    tool_only_row = next(
+        item
+        for item in client.get("/traces", headers=h).json()["items"]
+        if item["uuid"] == ok["uuid"]
+    )
+    assert tool_only_row["response_preview"] is None
+    assert tool_only_row["tool_names"] == ["get_schedule"]
+    assert tool_only_row["tool_calls"] == [
+        {"tool": "get_schedule", "arguments": {}}
+    ]
 
     # input must be non-empty.
     assert (
@@ -195,23 +220,16 @@ def test_ingest_validation(client):
             {"role": "tool", "content": "{\"weeks\": 14}", "tool_call_id": "call_1"},
         ],
     )
-    ok = client.post("/traces", json=openai_history, headers=h)
-    assert ok.status_code == 200 and ok.json()["created"] is True
+    ok = _post_trace(client, h, openai_history)
 
 
-def test_ingest_cap_returns_429_but_keeps_retries_idempotent(client, monkeypatch):
-    from routers import org_limits as org_limits_mod
+def test_ingest_cap_returns_429(client, monkeypatch):
+    from routers import traces as traces_mod
 
     h, agent_id = _signup_with_agent(client)
-    monkeypatch.setattr(org_limits_mod, "DEFAULT_MAX_TRACES", 1)
+    monkeypatch.setattr(traces_mod, "MAX_TRACES_PER_WORKSPACE", 1)
 
-    first_mid = _mid()
-    assert (
-        client.post(
-            "/traces", json=_payload(agent_id, first_mid), headers=h
-        ).status_code
-        == 200
-    )
+    _post_trace(client, h, _payload(agent_id, _mid()))
 
     capped = client.post("/traces", json=_payload(agent_id, _mid()), headers=h)
     assert capped.status_code == 429
@@ -220,31 +238,24 @@ def test_ingest_cap_returns_429_but_keeps_retries_idempotent(client, monkeypatch
     assert detail["max_traces"] == 1
     assert "hint" in detail
 
-    # A retry of an already-stored message_id still succeeds at the cap.
-    retry = client.post("/traces", json=_payload(agent_id, first_mid), headers=h)
-    assert retry.status_code == 200
-    assert retry.json()["created"] is False
 
-
-def test_ingest_without_ids_generates_them(client):
-    """message_id and conversation_id are optional: one is generated, and a
-    standalone turn becomes its own conversation."""
+def test_ingest_without_ids_stores_null_labels(client):
     h, agent_id = _signup_with_agent(client)
     body = _payload(agent_id, _mid())
     del body["message_id"]
     del body["conversation_id"]
 
-    res = client.post("/traces", json=body, headers=h)
-    assert res.status_code == 200, res.text
-    first = res.json()
-    assert first["created"] is True
-    assert len(first["message_id"]) == 36
-    assert first["conversation_id"] == first["message_id"]
+    first = _post_trace(client, h, body)
+    assert first["message_id"] is None
+    assert first["conversation_id"] is None
 
-    # Nothing to match on, so an identical call stores a second trace.
-    second = client.post("/traces", json=body, headers=h).json()
-    assert second["created"] is True
-    assert second["message_id"] != first["message_id"]
+    summary = client.get("/traces", headers=h).json()["items"][0]
+    assert summary["message_id"] is None and summary["conversation_id"] is None
+    full = client.get(f"/traces/{first['uuid']}", headers=h).json()
+    assert full["message_id"] is None and full["conversation_id"] is None
+
+    second = _post_trace(client, h, body)
+    assert second["uuid"] != first["uuid"]
     assert client.get("/traces", headers=h).json()["total"] == 2
 
 
@@ -254,10 +265,9 @@ def test_ingest_accepts_a_message_id_without_a_conversation_id(client):
     body = _payload(agent_id, mid)
     del body["conversation_id"]
 
-    created = client.post("/traces", json=body, headers=h).json()
-    assert created["conversation_id"] == mid
-    # An explicit message_id still de-dupes.
-    assert client.post("/traces", json=body, headers=h).json()["created"] is False
+    created = _post_trace(client, h, body)
+    assert created["message_id"] == mid
+    assert created["conversation_id"] is None
 
 
 def test_ingest_requires_a_known_agent(client):
@@ -266,6 +276,12 @@ def test_ingest_requires_a_known_agent(client):
     missing_agent = _payload(agent_id, _mid())
     del missing_agent["agent_id"]
     assert client.post("/traces", json=missing_agent, headers=h).status_code == 422
+
+    for bad_agent_id in ("", "x" * 37):
+        bad = client.post(
+            "/traces", json=_payload(bad_agent_id, _mid()), headers=h
+        )
+        assert bad.status_code == 422, bad.text
 
     unknown = client.post(
         "/traces",
@@ -285,13 +301,10 @@ def test_ingest_rejects_agent_from_another_workspace(client):
     assert res.json()["detail"] == "Agent not found"
 
 
-def test_ingest_checks_agent_before_idempotency(client):
+def test_ingest_checks_agent_before_writing(client):
     h, agent_id = _signup_with_agent(client)
     mid = _mid()
-    assert (
-        client.post("/traces", json=_payload(agent_id, mid), headers=h).status_code
-        == 200
-    )
+    _post_trace(client, h, _payload(agent_id, mid))
 
     retry = client.post(
         "/traces",
@@ -301,20 +314,19 @@ def test_ingest_checks_agent_before_idempotency(client):
     assert retry.status_code == 404, retry.text
 
 
-def test_message_id_is_unique_per_workspace_not_per_agent(client):
+def test_same_message_id_on_two_agents_is_two_traces(client):
     h, agent_id = _signup_with_agent(client)
     other_agent_id = _create_agent(client, h)["uuid"]
     mid = _mid()
 
-    first = client.post("/traces", json=_payload(agent_id, mid), headers=h)
-    assert first.status_code == 200, first.text
-    second = client.post("/traces", json=_payload(other_agent_id, mid), headers=h)
-    assert second.status_code == 200, second.text
-    assert second.json()["created"] is False
-    assert second.json()["uuid"] == first.json()["uuid"]
+    first = _post_trace(client, h, _payload(agent_id, mid))
+    second = _post_trace(client, h, _payload(other_agent_id, mid))
+    assert second["uuid"] != first["uuid"]
 
-    full = client.get(f"/traces/{first.json()['uuid']}", headers=h).json()
+    full = client.get(f"/traces/{first['uuid']}", headers=h).json()
     assert full["agent_id"] == agent_id
+    other = client.get(f"/traces/{second['uuid']}", headers=h).json()
+    assert other["agent_id"] == other_agent_id
 
 
 # ---------------------------------------------------------------------------
@@ -326,11 +338,18 @@ def test_curation_endpoints_are_jwt_only(client):
     h = _signup(client)
     key_headers = _api_key_headers(client, h)
 
+    trace_uuid = "00000000-0000-4000-8000-000000000001"
     assert client.get("/traces").status_code in (401, 403)
     assert client.get("/traces", headers=key_headers).status_code in (401, 403)
     assert (
+        client.get(f"/traces/{trace_uuid}", headers=key_headers).status_code
+        in (401, 403)
+    )
+    assert (
         client.post(
-            "/traces/bulk-delete", json={"select_all": True}, headers=key_headers
+            "/traces/bulk-delete",
+            json={"trace_ids": [trace_uuid]},
+            headers=key_headers,
         ).status_code
         in (401, 403)
     )
@@ -360,11 +379,11 @@ def test_list_and_detail_roundtrip(client):
         {"role": "tool", "content": "{\"weeks\": 14}", "tool_call_id": "call_1"},
         {"role": "user", "content": "and in months?"},
     ]
-    created_b = client.post(
-        "/traces",
-        json=_payload(agent_id, mid_b, conversation_id="conv-b", input=openai_extras),
-        headers=h,
-    ).json()
+    created_b = _post_trace(
+        client,
+        h,
+        _payload(agent_id, mid_b, conversation_id="conv-b", input=openai_extras),
+    )
 
     listed = client.get("/traces", headers=h)
     assert listed.status_code == 200
@@ -376,6 +395,10 @@ def test_list_and_detail_roundtrip(client):
     summary_b = body["items"][0]
     assert summary_b["turn_count"] == 4
     assert summary_b["tool_call_count"] == 1
+    assert summary_b["tool_names"] == ["get_schedule"]
+    assert summary_b["tool_calls"] == [
+        {"tool": "get_schedule", "arguments": {"child_age_weeks": 14}}
+    ]
     assert summary_b["metadata_count"] == 1
     assert summary_b["input_preview"] == "and in months?"
     assert summary_b["response_preview"].startswith("Aapki beti")
@@ -426,49 +449,25 @@ def test_output_with_multiple_tool_calls_roundtrips(client):
             },
         ],
     }
-    created = client.post(
-        "/traces", json=_payload(agent_id, mid, output=output), headers=h
+    created = _post_trace(
+        client, h, _payload(agent_id, mid, output=output)
     )
-    assert created.status_code == 200, created.text
-    assert created.json()["created"] is True
 
     summary = client.get("/traces", headers=h).json()["items"][0]
     assert summary["tool_call_count"] == 2
+    assert summary["tool_names"] == ["check_availability", "book_appointment"]
+    assert summary["tool_calls"] == output["tool_calls"]
     assert summary["response_preview"].startswith("You're booked")
 
-    full = client.get(f"/traces/{created.json()['uuid']}", headers=h).json()
+    full = client.get(f"/traces/{created['uuid']}", headers=h).json()
     assert full["output"]["tool_calls"] == output["tool_calls"]
     assert full["output"]["response"] == output["response"]
 
 
-def test_list_search_filter_and_pagination(client):
+def test_list_pagination(client):
     h, agent_id = _signup_with_agent(client)
-    mid_polio = _mid()
-    client.post(
-        "/traces",
-        json=_payload(
-            agent_id,
-            mid_polio,
-            conversation_id="conv-x",
-            input=[{"role": "user", "content": "Tell me about POLIO boosters"}],
-        ),
-        headers=h,
-    )
-    client.post(
-        "/traces", json=_payload(agent_id, _mid(), conversation_id="conv-y"), headers=h
-    )
-    client.post(
-        "/traces", json=_payload(agent_id, _mid(), conversation_id="conv-y"), headers=h
-    )
-
-    hits = client.get("/traces", params={"q": "polio"}, headers=h).json()
-    assert hits["total"] == 1
-    assert hits["items"][0]["message_id"] == mid_polio
-
-    conv = client.get(
-        "/traces", params={"conversation_id": "conv-y"}, headers=h
-    ).json()
-    assert conv["total"] == 2
+    for _ in range(3):
+        _post_trace(client, h, _payload(agent_id, _mid()))
 
     page = client.get(
         "/traces", params={"limit": 1, "offset": 1}, headers=h
@@ -481,54 +480,41 @@ def test_list_search_filter_and_pagination(client):
 def test_bulk_delete_router_contract(client):
     h, agent_id = _signup_with_agent(client)
     mid_keep = _mid()
-    kept = client.post(
-        "/traces",
-        json=_payload(agent_id, mid_keep, conversation_id="conv-keep"),
-        headers=h,
-    ).json()
-    mid_gone = _mid()
-    client.post(
-        "/traces",
-        json=_payload(agent_id, mid_gone, conversation_id="conv-gone"),
-        headers=h,
-    )
-    client.post(
-        "/traces",
-        json=_payload(agent_id, _mid(), conversation_id="conv-gone"),
-        headers=h,
-    )
+    kept = _post_trace(client, h, _payload(agent_id, mid_keep))
+    gone_a = _post_trace(client, h, _payload(agent_id, _mid()))
+    gone_b = _post_trace(client, h, _payload(agent_id, _mid()))
 
-    # Neither ids nor select_all is a 400.
+    # trace_ids is required and must be non-empty.
+    assert client.post("/traces/bulk-delete", json={}, headers=h).status_code == 422
     assert (
-        client.post("/traces/bulk-delete", json={}, headers=h).status_code == 400
+        client.post(
+            "/traces/bulk-delete", json={"trace_ids": []}, headers=h
+        ).status_code
+        == 422
     )
 
-    # select_all with a conversation filter deletes exactly that set.
     filtered = client.post(
         "/traces/bulk-delete",
-        json={"select_all": True, "conversation_id": "conv-gone"},
+        json={"trace_ids": [gone_a["uuid"], gone_b["uuid"]]},
         headers=h,
     )
     assert filtered.status_code == 200
     assert filtered.json() == {"deleted": 2}
     assert client.get("/traces", headers=h).json()["total"] == 1
 
-    # Deleting frees the message_id: the same ID re-ingests as a new trace.
     by_ids = client.post(
         "/traces/bulk-delete", json={"trace_ids": [kept["uuid"]]}, headers=h
     )
     assert by_ids.status_code == 200 and by_ids.json() == {"deleted": 1}
     assert client.get(f"/traces/{kept['uuid']}", headers=h).status_code == 404
 
-    reingested = client.post("/traces", json=_payload(agent_id, mid_keep), headers=h)
-    assert reingested.status_code == 200
-    assert reingested.json()["created"] is True
-    assert reingested.json()["uuid"] != kept["uuid"]
+    reingested = _post_trace(client, h, _payload(agent_id, mid_keep))
+    assert reingested["uuid"] != kept["uuid"]
 
 
 def test_agent_id_is_returned_on_list_and_detail(client):
     h, agent_id = _signup_with_agent(client)
-    created = client.post("/traces", json=_payload(agent_id, _mid()), headers=h).json()
+    created = _post_trace(client, h, _payload(agent_id, _mid()))
 
     assert client.get("/traces", headers=h).json()["items"][0]["agent_id"] == agent_id
 
@@ -567,271 +553,27 @@ def test_list_filters_by_agent_id(client):
         headers=h,
     )
 
+    # `total` counts the filtered set, not every trace in the workspace.
     only_a = client.get("/traces", params={"agent_id": agent_a}, headers=h).json()
     assert only_a["total"] == 2
     assert {item["agent_id"] for item in only_a["items"]} == {agent_a}
+    assert mid_a in {item["message_id"] for item in only_a["items"]}
 
-    # agent_id narrows q and conversation_id rather than replacing them.
-    combined = client.get(
-        "/traces",
-        params={"agent_id": agent_a, "q": "polio", "conversation_id": "conv-a"},
-        headers=h,
-    ).json()
-    assert combined["total"] == 1
-    assert combined["items"][0]["message_id"] == mid_a
+    only_b = client.get("/traces", params={"agent_id": agent_b}, headers=h).json()
+    assert only_b["total"] == 1
+    assert only_b["items"][0]["agent_id"] == agent_b
 
 
-def test_bulk_delete_rejects_an_unknown_filter_key(client):
-    """A misspelled filter must 422, not silently widen select_all to the whole
-    workspace."""
+def test_bulk_delete_rejects_an_unknown_key(client):
+    """A misspelled key must 422 rather than look like it filtered something."""
     h, agent_id = _signup_with_agent(client)
-    client.post(
-        "/traces", json=_payload(agent_id, _mid(), conversation_id="keep"), headers=h
-    )
-    client.post(
-        "/traces", json=_payload(agent_id, _mid(), conversation_id="other"), headers=h
-    )
+    kept = _post_trace(client, h, _payload(agent_id, _mid()))
+    _post_trace(client, h, _payload(agent_id, _mid()))
 
     res = client.post(
         "/traces/bulk-delete",
-        json={"select_all": True, "conversation_ids": "keep"},
+        json={"trace_ids": [kept["uuid"]], "select_all": True},
         headers=h,
     )
     assert res.status_code == 422, res.text
     assert client.get("/traces", headers=h).json()["total"] == 2
-
-
-def test_bulk_delete_select_all_scopes_to_one_agent(client):
-    h, agent_a = _signup_with_agent(client)
-    agent_b = _create_agent(client, h)["uuid"]
-    client.post("/traces", json=_payload(agent_a, _mid()), headers=h)
-    client.post("/traces", json=_payload(agent_a, _mid()), headers=h)
-    mid_b = _mid()
-    client.post("/traces", json=_payload(agent_b, mid_b), headers=h)
-
-    res = client.post(
-        "/traces/bulk-delete",
-        json={"select_all": True, "agent_id": agent_a},
-        headers=h,
-    )
-    assert res.status_code == 200, res.text
-    assert res.json() == {"deleted": 2}
-
-    remaining = client.get("/traces", headers=h).json()
-    assert remaining["total"] == 1
-    assert remaining["items"][0]["message_id"] == mid_b
-    assert remaining["items"][0]["agent_id"] == agent_b
-
-
-# ---------------------------------------------------------------------------
-# Convert traces -> tests (Phase 3)
-# ---------------------------------------------------------------------------
-
-
-def _create_llm_evaluator(client, h):
-    """Create an llm evaluator (36-char uuid); returns its uuid."""
-    created = client.post(
-        "/evaluators",
-        json={
-            "name": f"ev-{uuid.uuid4()}",
-            "description": "d",
-            "evaluator_type": "llm",
-            "data_type": "text",
-            "kind": "single",
-            "output_type": "binary",
-            "version": {
-                "judge_model": "openai/gpt-4",
-                "system_prompt": "Judge {{criteria}}",
-                "variables": [{"name": "criteria"}],
-            },
-        },
-        headers=h,
-    )
-    assert created.status_code == 200, created.text
-    return created.json()["uuid"]
-
-
-def test_convert_requires_scope(client):
-    h = _signup(client)
-    res = client.post("/traces/convert-to-tests", json={"type": "response"}, headers=h)
-    assert res.status_code == 400
-
-
-def test_convert_is_jwt_only(client):
-    h = _signup(client)
-    key_headers = _api_key_headers(client, h)
-    res = client.post(
-        "/traces/convert-to-tests",
-        json={"trace_ids": ["x"], "type": "response"},
-        headers=key_headers,
-    )
-    assert res.status_code in (401, 403)
-
-
-def test_convert_response_requires_evaluator(client):
-    h, agent_id = _signup_with_agent(client)
-    mid = _mid()
-    trace = client.post("/traces", json=_payload(agent_id, mid), headers=h).json()
-    res = client.post(
-        "/traces/convert-to-tests",
-        json={"trace_ids": [trace["uuid"]], "type": "response"},
-        headers=h,
-    )
-    assert res.status_code == 400
-
-
-def test_convert_response_creates_tests_links_evaluator_and_agent(client):
-    h, agent_id = _signup_with_agent(client)
-    ev_uuid = _create_llm_evaluator(client, h)
-    agent = _create_agent(client, h)
-
-    mid = _mid()
-    trace = client.post("/traces", json=_payload(agent_id, mid), headers=h).json()
-
-    res = client.post(
-        "/traces/convert-to-tests",
-        json={
-            "trace_ids": [trace["uuid"]],
-            "type": "response",
-            "evaluators": [
-                {"evaluator_uuid": ev_uuid, "variable_values": {"criteria": "be nice"}}
-            ],
-            "agent_uuids": [agent["uuid"]],
-        },
-        headers=h,
-    )
-    assert res.status_code == 200, res.text
-    body = res.json()
-    assert body["created"] == 1
-    test_uuid = body["test_uuids"][0]
-
-    # The created test: type response, history copied verbatim from trace input,
-    # output discarded (no tool_calls in evaluation), evaluator linked.
-    detail = client.get(f"/tests/{test_uuid}", headers=h).json()
-    assert detail["type"] == "response"
-    assert detail["name"] == mid
-    assert detail["config"]["history"] == _payload(agent_id, mid)["input"]
-    assert detail["config"]["evaluation"] == {"type": "response"}
-    assert [e["uuid"] for e in detail["evaluators"]] == [ev_uuid]
-
-    # Linked to the agent.
-    linked = client.get(f"/agent-tests/agent/{agent['uuid']}/tests", headers=h).json()
-    linked_uuids = [t["uuid"] for t in linked["items"]]
-    assert test_uuid in linked_uuids
-
-
-def test_convert_tool_call_copies_recorded_calls(client):
-    h, agent_id = _signup_with_agent(client)
-    mid = _mid()
-    trace = client.post("/traces", json=_payload(agent_id, mid), headers=h).json()
-
-    res = client.post(
-        "/traces/convert-to-tests",
-        json={
-            "trace_ids": [trace["uuid"]],
-            "type": "tool_call",
-            "accept_any_arguments": False,
-        },
-        headers=h,
-    )
-    assert res.status_code == 200, res.text
-    test_uuid = res.json()["test_uuids"][0]
-
-    detail = client.get(f"/tests/{test_uuid}", headers=h).json()
-    assert detail["type"] == "tool_call"
-    tool_calls = detail["config"]["evaluation"]["tool_calls"]
-    # The recorded {tool, arguments} become the expected assertion; the raw
-    # argument values pass straight through (legacy exact match).
-    assert tool_calls == [
-        {
-            "tool": "get_schedule",
-            "arguments": {"child_age_weeks": 14},
-            "accept_any_arguments": False,
-        }
-    ]
-
-
-def test_convert_tool_call_rejects_traces_without_tool_calls(client):
-    h, agent_id = _signup_with_agent(client)
-    mid = _mid()
-    # Response-only trace: no tool_calls to assert.
-    trace = client.post(
-        "/traces",
-        json=_payload(
-            agent_id, mid, output={"response": "just text", "tool_calls": None}
-        ),
-        headers=h,
-    ).json()
-    res = client.post(
-        "/traces/convert-to-tests",
-        json={"trace_ids": [trace["uuid"]], "type": "tool_call"},
-        headers=h,
-    )
-    assert res.status_code == 400
-    assert mid in res.json()["detail"]["message_ids"]
-
-
-def test_convert_select_all_with_conversation_filter(client):
-    h, agent_id = _signup_with_agent(client)
-    ev_uuid = _create_llm_evaluator(client, h)
-    conv = f"cc-{uuid.uuid4().hex[:8]}"
-    client.post(
-        "/traces", json=_payload(agent_id, _mid(), conversation_id=conv), headers=h
-    )
-    client.post(
-        "/traces", json=_payload(agent_id, _mid(), conversation_id=conv), headers=h
-    )
-    client.post(
-        "/traces", json=_payload(agent_id, _mid(), conversation_id="other"), headers=h
-    )
-
-    res = client.post(
-        "/traces/convert-to-tests",
-        json={
-            "select_all": True,
-            "conversation_id": conv,
-            "type": "response",
-            "evaluators": [{"evaluator_uuid": ev_uuid}],
-        },
-        headers=h,
-    )
-    assert res.status_code == 200, res.text
-    assert res.json()["created"] == 2
-
-
-def test_convert_dedupes_names_on_repeat(client):
-    h, agent_id = _signup_with_agent(client)
-    ev_uuid = _create_llm_evaluator(client, h)
-    mid = _mid()
-    trace = client.post("/traces", json=_payload(agent_id, mid), headers=h).json()
-    body = {
-        "trace_ids": [trace["uuid"]],
-        "type": "response",
-        "evaluators": [{"evaluator_uuid": ev_uuid}],
-    }
-    first = client.post("/traces/convert-to-tests", json=body, headers=h)
-    second = client.post("/traces/convert-to-tests", json=body, headers=h)
-    assert first.status_code == 200 and second.status_code == 200
-
-    first_detail = client.get(f"/tests/{first.json()['test_uuids'][0]}", headers=h).json()
-    second_detail = client.get(
-        f"/tests/{second.json()['test_uuids'][0]}", headers=h
-    ).json()
-    assert first_detail["name"] == mid
-    # Re-converting the same trace does not 400 on the name clash; it suffixes.
-    assert second_detail["name"] == f"{mid} (2)"
-
-
-def test_convert_no_matching_traces_404(client):
-    h = _signup(client)
-    ev_uuid = _create_llm_evaluator(client, h)
-    res = client.post(
-        "/traces/convert-to-tests",
-        json={
-            "trace_ids": ["00000000-0000-4000-8000-000000000009"],
-            "type": "response",
-            "evaluators": [{"evaluator_uuid": ev_uuid}],
-        },
-        headers=h,
-    )
-    assert res.status_code == 404
