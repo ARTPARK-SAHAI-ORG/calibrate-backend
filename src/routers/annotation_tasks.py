@@ -281,7 +281,7 @@ _AnnotationTaskSearch = make_search_params(searchable=["name"])
 # Per-endpoint sort/search allowlists for the summary view. Built at module
 # load time so FastAPI's dependency-graph introspection sees stable types.
 _SummarySort = make_sort_params(
-    sortable=["created_at", "updated_at"],
+    sortable=["created_at", "updated_at", "labelled_by"],
     default="created_at",
     default_order="desc",
 )
@@ -2616,13 +2616,26 @@ def task_summary(
         False,
         description="When true, keep only rows where the evaluator disagreed with at least one annotator",
     ),
+    annotator_ids: Optional[str] = Query(
+        None,
+        description="Comma separated annotator ids. Keep only items that at least one of these annotators has labelled. Ids that do not belong to this task simply match nothing",
+    ),
+    labelled_only: bool = Query(
+        False,
+        description="When true, keep only items that at least one annotator has labelled",
+    ),
     ctx: OrgContext = Depends(get_org_jwt_or_api_key),
     search: _SummarySearch = Depends(),
     sort: _SummarySort = Depends(),
     pagination: PaginationParams = Depends(),
     projection: _SummaryProjection = Depends(),
 ):
-    """Get a paginated summary table of items, evaluator runs, and human annotations for a task"""
+    """Get a paginated summary table of items, evaluator runs, and human annotations for a task.
+
+    `annotator_ids` and `labelled_only` narrow the items to those someone has
+    labelled. `sort_by=labelled_by` orders items by how many annotators
+    labelled them. The task-wide `annotators` list is unaffected by either.
+    """
     task = _ensure_owned_task(task_uuid, ctx.org_uuid)
     items = get_annotation_items_for_task(task_uuid)
     evaluators = get_evaluators_for_annotation_task(task_uuid)
@@ -2649,6 +2662,60 @@ def task_summary(
     # Mechanics live in `pagination.make_search_params`.
     items = search.apply(items)
 
+    # Who labelled each item. An annotation only counts as a label when it
+    # scores an evaluator and carries a value — row-level comments have no
+    # evaluator, so they never make an item "labelled".
+    #
+    # Latest answer wins per (item, evaluator, annotator), the same rule the
+    # response rows use below, so this can never disagree with the "Labelled
+    # by" column the user is looking at. One annotator can hold two rows for
+    # the same slot (one per job); someone who answered in one job and left
+    # it blank in a later one is not a labeller. `annotations` arrives
+    # ordered by updated_at ascending, so plain overwrite gives latest-wins.
+    # Only labels the table itself can show count. An answer left behind by
+    # an evaluator since unlinked from the task, or by an annotator since
+    # deleted, has no column to appear in, so it must not make an item look
+    # labelled either.
+    linked_evaluator_ids = {ev["uuid"] for ev in evaluators}
+    latest_label_value: Dict[tuple, Any] = {}
+    for a in annotations:
+        ev_id = a.get("evaluator_id")
+        a_item_id = a.get("item_id")
+        annotator_id = a.get("annotator_id")
+        if not a_item_id or not annotator_id:
+            continue
+        if ev_id not in linked_evaluator_ids:
+            continue
+        value = a.get("value")
+        # Answers are stored bare or as {"value": ..., "reasoning": ...}.
+        latest_label_value[(a_item_id, ev_id, annotator_id)] = (
+            value.get("value") if isinstance(value, dict) else value
+        )
+    live_labeller_ids = set(
+        get_annotators_by_uuids(
+            [key[2] for key, value in latest_label_value.items() if value is not None]
+        )
+    )
+    labellers_by_item: Dict[str, set] = {}
+    for (a_item_id, _ev_id, annotator_id), value in latest_label_value.items():
+        if value is not None and annotator_id in live_labeller_ids:
+            labellers_by_item.setdefault(a_item_id, set()).add(annotator_id)
+
+    # "Labelled by" filters, applied alongside `q` so the per-evaluator run
+    # counts, the annotator union and `pagination.total` all see the same
+    # item set.
+    wanted_annotators = {
+        p.strip() for p in (annotator_ids or "").split(",") if p.strip()
+    }
+    if wanted_annotators:
+        items = [
+            it
+            for it in items
+            if labellers_by_item.get(it["uuid"], set()) & wanted_annotators
+        ]
+    if labelled_only:
+        items = [it for it in items if labellers_by_item.get(it["uuid"])]
+
     # `items` is the full in-scope set (task-wide or filtered by item_id/q).
     # scoped_item_ids / the annotator union / run_count read from it so the
     # top-level evaluators[] and annotators[] column headers stay stable across
@@ -2665,7 +2732,20 @@ def task_summary(
     # shuffle the batch into arbitrary order; `id` preserves insertion order,
     # which matches `get_annotation_items_for_task`'s historical
     # `ORDER BY id DESC` and is what users actually expect after a bulk add.
-    items = sort.apply(items, secondary_key="id")
+    #
+    # `labelled_by` is a count derived above, not a column on the item, so it
+    # cannot go through `sort.apply`; same `id` tiebreaker either way.
+    if sort.sort_by == "labelled_by":
+        items = sorted(
+            items,
+            key=lambda it: (
+                len(labellers_by_item.get(it["uuid"], ())),
+                it.get("id") or 0,
+            ),
+            reverse=sort.order == "desc",
+        )
+    else:
+        items = sort.apply(items, secondary_key="id")
 
     # Latest evaluator_run per (item, evaluator, version). One row in the
     # response per distinct version that has run, so re-running on a new
@@ -2760,11 +2840,11 @@ def task_summary(
     # `item_id` is set, matching the docstring contract. Stable ordering by
     # name then uuid. Single bulk lookup replaces the per-annotator
     # `get_annotator(aid)` round-trips.
-    annotator_ids = list(
+    union_annotator_ids = list(
         {key[2] for key in latest_ann.keys()}
         | {aid for cells in all_item_comments.values() for aid in cells.keys()}
     )
-    annotator_rows = get_annotators_by_uuids(annotator_ids)
+    annotator_rows = get_annotators_by_uuids(union_annotator_ids)
     annotators: List[Dict[str, Any]] = [
         {"uuid": a["uuid"], "name": a.get("name")}
         for a in annotator_rows.values()

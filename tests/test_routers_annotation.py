@@ -2329,6 +2329,220 @@ def test_annotation_task_summary_sort(client):
     )
 
 
+def test_annotation_task_summary_labelled_by(client):
+    """`?annotator_ids=` / `?labelled_only=` narrow items to the ones annotators
+    labelled, and `sort_by=labelled_by` orders items by how many annotators
+    labelled them. A free-text comment is not a label. The task-wide
+    `annotators` list does not shrink while a filter is on."""
+    auth = _signup(client)
+    h = auth["headers"]
+    llm_ev = _llm_evaluator(client, h)
+    task_uuid = client.post(
+        "/annotation-tasks",
+        json={
+            "name": f"t-{uuid.uuid4().hex[:6]}",
+            "type": "llm",
+            "evaluator_ids": [llm_ev["uuid"]],
+        },
+        headers=h,
+    ).json()["uuid"]
+    item_ids = client.post(
+        f"/annotation-tasks/{task_uuid}/items",
+        json={"items": [{"payload": {"name": f"i{i}"}} for i in range(4)]},
+        headers=h,
+    ).json()["item_ids"]
+    i0, i1, i2, i3 = item_ids
+
+    ann_a = client.post("/annotators", json={"name": "a"}, headers=h).json()
+    ann_b = client.post("/annotators", json={"name": "b"}, headers=h).json()
+    jobs = client.post(
+        f"/annotation-tasks/{task_uuid}/jobs",
+        json={
+            "annotator_ids": [ann_a["uuid"], ann_b["uuid"]],
+            "item_ids": item_ids,
+        },
+        headers=h,
+    ).json()["jobs"]
+    job_a = next(j for j in jobs if j["annotator_id"] == ann_a["uuid"])["uuid"]
+    job_b = next(j for j in jobs if j["annotator_id"] == ann_b["uuid"])["uuid"]
+
+    # a labels i0 + i1; b labels i1 + i2. i3 gets only a comment from b, so it
+    # counts as unlabelled.
+    for job_id, it in ((job_a, i0), (job_a, i1), (job_b, i1), (job_b, i2)):
+        assert (
+            client.post(
+                f"/annotation-tasks/{task_uuid}/annotations",
+                json={
+                    "job_id": job_id,
+                    "item_id": it,
+                    "evaluator_id": llm_ev["uuid"],
+                    "value": {"value": True},
+                },
+                headers=h,
+            ).status_code
+            == 200
+        )
+    assert (
+        client.post(
+            f"/annotation-tasks/{task_uuid}/annotations",
+            json={"job_id": job_b, "item_id": i3, "value": {"comment": "just a note"}},
+            headers=h,
+        ).status_code
+        == 200
+    )
+
+    def _items(query):
+        body = client.get(
+            f"/annotation-tasks/{task_uuid}/summary?{query}", headers=h
+        ).json()
+        # One evaluator, so one row per item; keep first-seen order.
+        seen = []
+        for row in body["rows"]:
+            if row["item_id"] not in seen:
+                seen.append(row["item_id"])
+        return body, seen
+
+    # One annotator.
+    body, seen = _items(f"annotator_ids={ann_a['uuid']}")
+    assert set(seen) == {i0, i1}
+    assert body["pagination"]["total"] == 2
+    # The annotator column headers stay task-wide while the filter is on.
+    assert {a["uuid"] for a in body["annotators"]} == {ann_a["uuid"], ann_b["uuid"]}
+
+    # Two annotators — union, not intersection.
+    body, seen = _items(f"annotator_ids={ann_a['uuid']},{ann_b['uuid']}")
+    assert set(seen) == {i0, i1, i2}
+    assert body["pagination"]["total"] == 3
+
+    # Unknown id matches nothing; blank is a no-op.
+    body, seen = _items(f"annotator_ids={uuid.uuid4()}")
+    assert seen == [] and body["pagination"]["total"] == 0
+    body, _ = _items("annotator_ids=%20%20")
+    assert body["pagination"]["total"] == 4
+
+    # labelled_only — i3 (comment only) is dropped.
+    body, seen = _items("labelled_only=true")
+    assert set(seen) == {i0, i1, i2}
+    assert body["pagination"]["total"] == 3
+
+    # sort_by=labelled_by — i1 has two annotators, i0/i2 one, i3 none.
+    _, desc = _items("sort_by=labelled_by&order=desc")
+    assert desc[0] == i1 and desc[-1] == i3
+    _, asc = _items("sort_by=labelled_by&order=asc")
+    assert asc[0] == i3 and asc[-1] == i1
+
+    # Sorting composes with the filters and stays stable across pages.
+    _, full = _items("sort_by=labelled_by&order=desc&labelled_only=true")
+    _, p1 = _items("sort_by=labelled_by&order=desc&labelled_only=true&limit=2&offset=0")
+    _, p2 = _items("sort_by=labelled_by&order=desc&labelled_only=true&limit=2&offset=2")
+    assert full == p1 + p2
+
+    # Clearing an answer removes that annotator's label, matching what the
+    # "Labelled by" column shows. a clears i0, which nobody else labelled, so
+    # i0 drops out of both filters.
+    assert (
+        client.post(
+            f"/annotation-tasks/{task_uuid}/annotations",
+            json={
+                "job_id": job_a,
+                "item_id": i0,
+                "evaluator_id": llm_ev["uuid"],
+                "value": None,
+            },
+            headers=h,
+        ).status_code
+        == 200
+    )
+    body, seen = _items(f"annotator_ids={ann_a['uuid']}")
+    assert set(seen) == {i1}
+    assert body["pagination"]["total"] == 1
+    body, seen = _items("labelled_only=true")
+    assert set(seen) == {i1, i2}
+
+    # A deleted annotator's answers leave the table, so they stop counting as
+    # labels. b labelled i1 and i2; i1 keeps a's label, i2 has nothing left.
+    assert client.delete(f"/annotators/{ann_b['uuid']}", headers=h).status_code == 200
+    body, seen = _items("labelled_only=true")
+    assert set(seen) == {i1}
+    body, seen = _items(f"annotator_ids={ann_b['uuid']}")
+    assert seen == [] and body["pagination"]["total"] == 0
+
+
+def test_annotation_task_summary_labelled_by_ignores_unlinked_evaluator(client):
+    """An answer given under an evaluator that has since been unlinked from the
+    task has no column left in the table, so it must not make the item look
+    labelled."""
+    auth = _signup(client)
+    h = auth["headers"]
+    ev_a = _llm_evaluator(client, h)
+    ev_b = client.post(
+        "/evaluators",
+        json={
+            "name": f"e-{uuid.uuid4().hex[:6]}",
+            "evaluator_type": "llm",
+            "data_type": "text",
+            "kind": "single",
+            "output_type": "binary",
+            "version": {
+                "judge_model": "openai/gpt-4",
+                "system_prompt": "p",
+                "variables": [],
+            },
+        },
+        headers=h,
+    ).json()
+    task_uuid = client.post(
+        "/annotation-tasks",
+        json={
+            "name": f"t-{uuid.uuid4().hex[:6]}",
+            "type": "llm",
+            "evaluator_ids": [ev_a["uuid"], ev_b["uuid"]],
+        },
+        headers=h,
+    ).json()["uuid"]
+    item_ids = client.post(
+        f"/annotation-tasks/{task_uuid}/items",
+        json={"items": [{"payload": {"name": f"i{i}"}} for i in range(2)]},
+        headers=h,
+    ).json()["item_ids"]
+    ann = client.post("/annotators", json={"name": "a"}, headers=h).json()
+    job = client.post(
+        f"/annotation-tasks/{task_uuid}/jobs",
+        json={"annotator_ids": [ann["uuid"]], "item_ids": item_ids},
+        headers=h,
+    ).json()["jobs"][0]["uuid"]
+    # The only answer on item 0 is under evaluator b.
+    assert (
+        client.post(
+            f"/annotation-tasks/{task_uuid}/annotations",
+            json={
+                "job_id": job,
+                "item_id": item_ids[0],
+                "evaluator_id": ev_b["uuid"],
+                "value": {"value": True},
+            },
+            headers=h,
+        ).status_code
+        == 200
+    )
+    body = client.get(
+        f"/annotation-tasks/{task_uuid}/summary?labelled_only=true", headers=h
+    ).json()
+    assert {r["item_id"] for r in body["rows"]} == {item_ids[0]}
+
+    assert (
+        client.delete(
+            f"/annotation-tasks/{task_uuid}/evaluators/{ev_b['uuid']}", headers=h
+        ).status_code
+        == 200
+    )
+    body = client.get(
+        f"/annotation-tasks/{task_uuid}/summary?labelled_only=true", headers=h
+    ).json()
+    assert body["rows"] == []
+    assert body["pagination"]["total"] == 0
+
+
 def test_summary_item_comments_scoped_to_page(client):
     """`item_comments` ships only entries for items on the current page (same
     set as `rows`). Off-page items' comments are not included, so the FE
