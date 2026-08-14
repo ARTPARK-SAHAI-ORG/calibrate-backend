@@ -281,7 +281,7 @@ _AnnotationTaskSearch = make_search_params(searchable=["name"])
 # Per-endpoint sort/search allowlists for the summary view. Built at module
 # load time so FastAPI's dependency-graph introspection sees stable types.
 _SummarySort = make_sort_params(
-    sortable=["created_at", "updated_at"],
+    sortable=["created_at", "updated_at", "labelled_by"],
     default="created_at",
     default_order="desc",
 )
@@ -2616,6 +2616,15 @@ def task_summary(
         False,
         description="When true, keep only rows where the evaluator disagreed with at least one annotator",
     ),
+    annotator_ids: Optional[str] = Query(
+        None,
+        description="Comma-separated annotator ids. Keeps items labelled by at least one of them. The full task-wide annotator union is still returned in `annotators`",
+        examples=["f47ac10b-58cc-4372-a567-0e02b2c3d479,9b1deb4d-3b7d-4bad-9bdd-2b0d7b3dcb6d"],
+    ),
+    labelled_only: bool = Query(
+        False,
+        description="When true, keep only items that at least one annotator has labelled",
+    ),
     ctx: OrgContext = Depends(get_org_jwt_or_api_key),
     search: _SummarySearch = Depends(),
     sort: _SummarySort = Depends(),
@@ -2649,7 +2658,33 @@ def task_summary(
     # Mechanics live in `pagination.make_search_params`.
     items = search.apply(items)
 
-    # `items` is the full in-scope set (task-wide or filtered by item_id/q).
+    # Who labelled each item: an annotator counts once they have an annotation
+    # against an evaluator on that item. Row-level rows (evaluator_id NULL)
+    # only carry a free-text comment, so they are not a label.
+    labellers_by_item: Dict[str, set] = {}
+    for a in annotations:
+        if a.get("evaluator_id") is None:
+            continue
+        a_item_id = a.get("item_id")
+        annotator_id = a.get("annotator_id")
+        if a_item_id and annotator_id:
+            labellers_by_item.setdefault(a_item_id, set()).add(annotator_id)
+
+    # Applied after the name search and before paging, so the total, the pages
+    # and each evaluator's `run_count` all reflect the same filtered set.
+    if annotator_ids is not None:
+        wanted = {a.strip() for a in annotator_ids.split(",") if a.strip()}
+        if wanted:
+            items = [
+                it
+                for it in items
+                if labellers_by_item.get(it["uuid"], set()) & wanted
+            ]
+    if labelled_only:
+        items = [it for it in items if labellers_by_item.get(it["uuid"])]
+
+    # `items` is the full in-scope set (task-wide or filtered by
+    # item_id/q/annotator_ids/labelled_only).
     # scoped_item_ids / the annotator union / run_count read from it so the
     # top-level evaluators[] and annotators[] column headers stay stable across
     # pages. `total_items` and the slice are taken after the disagreement filter
@@ -2665,7 +2700,20 @@ def task_summary(
     # shuffle the batch into arbitrary order; `id` preserves insertion order,
     # which matches `get_annotation_items_for_task`'s historical
     # `ORDER BY id DESC` and is what users actually expect after a bulk add.
-    items = sort.apply(items, secondary_key="id")
+    if sort.sort_by == "labelled_by":
+        # Count of people who labelled the item. Not a column on the item, so
+        # it is sorted here; ties keep insertion order (`id` ascending) in both
+        # directions, which `sort.apply`'s single reverse flag cannot do.
+        flip = -1 if sort.order == "desc" else 1
+        items = sorted(
+            items,
+            key=lambda it: (
+                flip * len(labellers_by_item.get(it["uuid"], ())),
+                it.get("id") or 0,
+            ),
+        )
+    else:
+        items = sort.apply(items, secondary_key="id")
 
     # Latest evaluator_run per (item, evaluator, version). One row in the
     # response per distinct version that has run, so re-running on a new

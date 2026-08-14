@@ -2632,6 +2632,249 @@ def test_summary_disagreement_only_survives_pagination(client):
     assert page2["rows"] == []
 
 
+def _seed_summary_with_labellers(client, h, user_uuid):
+    """Seed a task with three items and two annotators: `rater-a` labels items
+    0 and 1, `rater-b` labels item 1, and item 2 only ever gets a free-text
+    comment (a comment is not a label). Also seeds one evaluator run per item
+    so `run_count` can be checked against the filtered scope. Returns
+    (task_uuid, item_ids, annotator_a_uuid, annotator_b_uuid, evaluator_uuid)."""
+    import db as db_mod
+    from annotation_eval_runner import ANNOTATION_EVAL_JOB_TYPE
+
+    llm_ev = _llm_evaluator(client, h)
+    task_uuid = client.post(
+        "/annotation-tasks",
+        json={
+            "name": f"t-{uuid.uuid4().hex[:6]}",
+            "type": "llm",
+            "evaluator_ids": [llm_ev["uuid"]],
+        },
+        headers=h,
+    ).json()["uuid"]
+    item_ids = client.post(
+        f"/annotation-tasks/{task_uuid}/items",
+        json={"items": [{"payload": {"name": f"i{i}"}} for i in range(3)]},
+        headers=h,
+    ).json()["item_ids"]
+
+    def _job_for(name):
+        annotator = client.post("/annotators", json={"name": name}, headers=h).json()
+        job = client.post(
+            f"/annotation-tasks/{task_uuid}/jobs",
+            json={"annotator_ids": [annotator["uuid"]], "item_ids": item_ids},
+            headers=h,
+        ).json()["jobs"][0]
+        return annotator["uuid"], job["uuid"]
+
+    ann_a, job_a = _job_for("rater-a")
+    ann_b, job_b = _job_for("rater-b")
+
+    def _label(job_id, item_id, value):
+        assert (
+            client.post(
+                f"/annotation-tasks/{task_uuid}/annotations",
+                json={
+                    "job_id": job_id,
+                    "item_id": item_id,
+                    "evaluator_id": llm_ev["uuid"],
+                    "value": {"value": value, "reasoning": "r"},
+                },
+                headers=h,
+            ).status_code
+            == 200
+        )
+
+    _label(job_a, item_ids[0], True)
+    _label(job_a, item_ids[1], True)
+    _label(job_b, item_ids[1], True)
+    # Comment only on the third item — not a label.
+    assert (
+        client.post(
+            f"/annotation-tasks/{task_uuid}/annotations",
+            json={
+                "job_id": job_a,
+                "item_id": item_ids[2],
+                "value": {"comment": "just a note"},
+            },
+            headers=h,
+        ).status_code
+        == 200
+    )
+
+    eval_job = db_mod.create_job(
+        job_type=ANNOTATION_EVAL_JOB_TYPE,
+        org_uuid=db_mod.get_personal_org_for_user(user_uuid)["uuid"],
+        user_id=user_uuid,
+        status="done",
+        details={"task_id": task_uuid},
+    )
+    db_mod.create_evaluator_runs(
+        [
+            {
+                "job_id": eval_job,
+                "item_id": it,
+                "evaluator_id": llm_ev["uuid"],
+                "evaluator_version_id": llm_ev["live_version_id"],
+                "status": "completed",
+                "value": {"value": True, "reasoning": "eval"},
+            }
+            for it in item_ids
+        ]
+    )
+    return task_uuid, item_ids, ann_a, ann_b, llm_ev["uuid"]
+
+
+def test_summary_annotator_ids_filter(client):
+    """`?annotator_ids=` keeps items labelled by at least one of those people,
+    narrows the total, the pages and each evaluator's `run_count`, and leaves
+    the task-wide `annotators` list untouched so the dropdown does not shrink."""
+    auth = _signup(client)
+    h = auth["headers"]
+    task_uuid, item_ids, ann_a, ann_b, _ = _seed_summary_with_labellers(
+        client, h, auth["user_uuid"]
+    )
+
+    both = client.get(f"/annotation-tasks/{task_uuid}/summary", headers=h).json()
+    assert both["pagination"]["total"] == 3
+    assert both["evaluators"][0]["run_count"] == 3
+    all_annotators = [a["uuid"] for a in both["annotators"]]
+
+    only_a = client.get(
+        f"/annotation-tasks/{task_uuid}/summary?annotator_ids={ann_a}", headers=h
+    ).json()
+    assert {r["item_id"] for r in only_a["rows"]} == {item_ids[0], item_ids[1]}
+    assert only_a["pagination"]["total"] == 2
+    # Run count follows the filtered scope, not the whole task.
+    assert only_a["evaluators"][0]["run_count"] == 2
+    # Column headers stay task-wide.
+    assert [a["uuid"] for a in only_a["annotators"]] == all_annotators
+
+    only_b = client.get(
+        f"/annotation-tasks/{task_uuid}/summary?annotator_ids={ann_b}", headers=h
+    ).json()
+    assert {r["item_id"] for r in only_b["rows"]} == {item_ids[1]}
+    assert only_b["pagination"]["total"] == 1
+
+    # Union across the list, with whitespace tolerated.
+    union = client.get(
+        f"/annotation-tasks/{task_uuid}/summary?annotator_ids={ann_a},%20{ann_b}",
+        headers=h,
+    ).json()
+    assert union["pagination"]["total"] == 2
+
+    # Composes with the name search.
+    with_q = client.get(
+        f"/annotation-tasks/{task_uuid}/summary?annotator_ids={ann_a}&q=i1",
+        headers=h,
+    ).json()
+    assert {r["item_id"] for r in with_q["rows"]} == {item_ids[1]}
+
+    # Unknown annotator matches nothing; blank value is a no-op.
+    unknown = client.get(
+        f"/annotation-tasks/{task_uuid}/summary?annotator_ids={uuid.uuid4()}",
+        headers=h,
+    ).json()
+    assert unknown["pagination"]["total"] == 0 and unknown["rows"] == []
+    blank = client.get(
+        f"/annotation-tasks/{task_uuid}/summary?annotator_ids=", headers=h
+    ).json()
+    assert blank["pagination"]["total"] == 3
+
+
+def test_summary_labelled_only(client):
+    """`?labelled_only=true` keeps items anyone has labelled. An item that only
+    has a free-text comment is not labelled."""
+    auth = _signup(client)
+    h = auth["headers"]
+    task_uuid, item_ids, _, _, _ = _seed_summary_with_labellers(
+        client, h, auth["user_uuid"]
+    )
+
+    body = client.get(
+        f"/annotation-tasks/{task_uuid}/summary?labelled_only=true", headers=h
+    ).json()
+    assert {r["item_id"] for r in body["rows"]} == {item_ids[0], item_ids[1]}
+    assert body["pagination"]["total"] == 2
+    assert body["evaluators"][0]["run_count"] == 2
+
+    # Filter runs before paging, so a match on a later page is not lost.
+    p1 = client.get(
+        f"/annotation-tasks/{task_uuid}/summary?labelled_only=true&limit=1&offset=0",
+        headers=h,
+    ).json()
+    p2 = client.get(
+        f"/annotation-tasks/{task_uuid}/summary?labelled_only=true&limit=1&offset=1",
+        headers=h,
+    ).json()
+    assert p1["pagination"]["total"] == 2 and len(p1["rows"]) == 1
+    assert {p1["rows"][0]["item_id"], p2["rows"][0]["item_id"]} == {
+        item_ids[0],
+        item_ids[1],
+    }
+
+    # Default (flag omitted) still returns every item.
+    assert (
+        client.get(f"/annotation-tasks/{task_uuid}/summary", headers=h).json()[
+            "pagination"
+        ]["total"]
+        == 3
+    )
+
+
+def test_summary_sort_by_labelled_by(client):
+    """`?sort_by=labelled_by` orders items by how many people labelled them.
+    Ties keep insertion order in both directions."""
+    auth = _signup(client)
+    h = auth["headers"]
+    task_uuid, item_ids, _, _, _ = _seed_summary_with_labellers(
+        client, h, auth["user_uuid"]
+    )
+    # Label counts: i0 = 1, i1 = 2, i2 = 0.
+
+    desc = client.get(
+        f"/annotation-tasks/{task_uuid}/summary?sort_by=labelled_by&order=desc",
+        headers=h,
+    ).json()
+    assert [r["item_id"] for r in desc["rows"]] == [
+        item_ids[1],
+        item_ids[0],
+        item_ids[2],
+    ]
+
+    asc = client.get(
+        f"/annotation-tasks/{task_uuid}/summary?sort_by=labelled_by&order=asc",
+        headers=h,
+    ).json()
+    assert [r["item_id"] for r in asc["rows"]] == [
+        item_ids[2],
+        item_ids[0],
+        item_ids[1],
+    ]
+
+    # Ties keep insertion order, not reverse insertion order, in both
+    # directions: i0 and i2 both sit at 1 label once i2 is labelled too.
+    tie_ids = client.post(
+        f"/annotation-tasks/{task_uuid}/items",
+        json={"items": [{"payload": {"name": f"t{i}"}} for i in range(2)]},
+        headers=h,
+    ).json()["item_ids"]
+    tie_desc = [
+        r["item_id"]
+        for r in client.get(
+            f"/annotation-tasks/{task_uuid}/summary?sort_by=labelled_by&order=desc",
+            headers=h,
+        ).json()["rows"]
+    ]
+    assert tie_desc.index(tie_ids[0]) < tie_desc.index(tie_ids[1])
+
+    # Sorting composes with pagination.
+    page = client.get(
+        f"/annotation-tasks/{task_uuid}/summary?sort_by=labelled_by&order=desc&limit=1",
+        headers=h,
+    ).json()
+    assert [r["item_id"] for r in page["rows"]] == [item_ids[1]]
+
+
 def test_annotation_task_set_evaluators(client):
     """PUT /annotation-tasks/{uuid}/evaluators reconciles membership AND order
     in one call — linking, unlinking, and reordering."""
