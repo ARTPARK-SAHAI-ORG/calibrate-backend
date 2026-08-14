@@ -5,7 +5,7 @@ import uuid
 from os.path import join
 import os
 from pathlib import Path
-from typing import Optional, List, Dict, Any, TYPE_CHECKING
+from typing import Optional, List, Dict, Any, Tuple, TYPE_CHECKING
 from contextlib import contextmanager
 
 if TYPE_CHECKING:
@@ -27,6 +27,12 @@ def get_db_connection():
     """Context manager for database connections."""
     conn = sqlite3.connect(str(DB_PATH))
     conn.row_factory = sqlite3.Row
+    # WAL lets readers run while a writer holds the lock, and busy_timeout makes
+    # a second writer wait instead of failing instantly with "database is
+    # locked". Both matter now that machine-paced trace ingest shares this file.
+    conn.execute("PRAGMA journal_mode=WAL")
+    conn.execute("PRAGMA busy_timeout=5000")
+    conn.execute("PRAGMA synchronous=NORMAL")
     try:
         yield conn
     finally:
@@ -1457,6 +1463,42 @@ def init_db():
                 # owner's confirmation; keep the guard for re-init safety.
                 pass
 
+        conn.commit()
+
+        # ============ traces ============
+        # Production agent turns, ingested machine-to-machine. `input`/`output`/
+        # `metadata` are JSON text, same convention as every other config column.
+        cursor.execute(
+            """
+            CREATE TABLE IF NOT EXISTS traces (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                uuid TEXT NOT NULL UNIQUE,
+                org_uuid TEXT NOT NULL,
+                agent_id TEXT NOT NULL,
+                message_id TEXT NOT NULL,
+                conversation_id TEXT NOT NULL,
+                input TEXT NOT NULL,
+                output TEXT NOT NULL,
+                metadata TEXT DEFAULT NULL,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                deleted_at TIMESTAMP DEFAULT NULL,
+                FOREIGN KEY (org_uuid) REFERENCES organizations(uuid),
+                FOREIGN KEY (agent_id) REFERENCES agents(uuid)
+            )
+            """
+        )
+        for stmt in (
+            # The idempotency key. Partial on live rows, so soft-deleting a
+            # trace frees its message_id for re-ingestion.
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_traces_org_message_active "
+            "ON traces(org_uuid, message_id) WHERE deleted_at IS NULL",
+            "CREATE INDEX IF NOT EXISTS idx_traces_org_agent_active "
+            "ON traces(org_uuid, agent_id, deleted_at)",
+            "CREATE INDEX IF NOT EXISTS idx_traces_org_conversation "
+            "ON traces(org_uuid, conversation_id)",
+        ):
+            cursor.execute(stmt)
         conn.commit()
 
         # ============ org_limits (renamed from user_limits) ============
@@ -9507,3 +9549,242 @@ def get_evaluators_for_annotation_tasks(
             tid = d.pop("task_id")
             result.setdefault(tid, []).append(d)
     return result
+
+
+# ============================================================================
+# Traces
+# ============================================================================
+# Production agent turns, one row per turn. Ingest is machine-paced, so unlike
+# most tables here the search/filter/count run in SQL rather than post-fetch in
+# Python — the row count outgrows in-memory filtering fast.
+
+
+def _trace_row(row: sqlite3.Row) -> Dict[str, Any]:
+    return {
+        "uuid": row["uuid"],
+        "org_uuid": row["org_uuid"],
+        "agent_id": row["agent_id"],
+        "message_id": row["message_id"],
+        "conversation_id": row["conversation_id"],
+        "input": json.loads(row["input"]),
+        "output": json.loads(row["output"]),
+        "metadata": json.loads(row["metadata"]) if row["metadata"] else None,
+        "created_at": _trace_iso(row["created_at"]),
+        "updated_at": _trace_iso(row["updated_at"]),
+    }
+
+
+def _trace_iso(ts: Optional[str]) -> Optional[str]:
+    """Normalize SQLite's naive-UTC timestamp to explicit ISO-8601 UTC, so a
+    browser cannot parse it as local time."""
+    if not ts:
+        return ts
+    s = str(ts).strip().replace(" ", "T")
+    return s if s.endswith("Z") else s + "Z"
+
+
+def _trace_filters(
+    org_uuid: str,
+    q: Optional[str] = None,
+    conversation_id: Optional[str] = None,
+    agent_id: Optional[str] = None,
+) -> Tuple[str, List[Any]]:
+    """Build the shared WHERE clause for every live-trace query."""
+    where = ["org_uuid = ?", "deleted_at IS NULL"]
+    params: List[Any] = [org_uuid]
+    if agent_id:
+        where.append("agent_id = ?")
+        params.append(agent_id)
+    if conversation_id:
+        where.append("conversation_id = ?")
+        params.append(conversation_id)
+    if q and q.strip():
+        needle = (
+            q.strip()
+            .lower()
+            .replace("\\", "\\\\")
+            .replace("%", "\\%")
+            .replace("_", "\\_")
+        )
+        needle = f"%{needle}%"
+        # Matching the raw JSON text of input/output is a documented
+        # approximation: it also matches keys and quoting artifacts.
+        where.append(
+            "(LOWER(message_id) LIKE ? ESCAPE '\\' "
+            "OR LOWER(conversation_id) LIKE ? ESCAPE '\\' "
+            "OR LOWER(input) LIKE ? ESCAPE '\\' "
+            "OR LOWER(output) LIKE ? ESCAPE '\\')"
+        )
+        params.extend([needle] * 4)
+    return " AND ".join(where), params
+
+
+def get_trace_by_message_id(org_uuid: str, message_id: str) -> Optional[Dict[str, Any]]:
+    with get_db_connection() as conn:
+        row = conn.execute(
+            "SELECT * FROM traces WHERE org_uuid = ? AND message_id = ? "
+            "AND deleted_at IS NULL",
+            (org_uuid, message_id),
+        ).fetchone()
+        return _trace_row(row) if row else None
+
+
+def get_trace(org_uuid: str, trace_uuid: str) -> Optional[Dict[str, Any]]:
+    with get_db_connection() as conn:
+        row = conn.execute(
+            "SELECT * FROM traces WHERE org_uuid = ? AND uuid = ? "
+            "AND deleted_at IS NULL",
+            (org_uuid, trace_uuid),
+        ).fetchone()
+        return _trace_row(row) if row else None
+
+
+def count_live_traces(org_uuid: str) -> int:
+    """Live trace count for the workspace cap. Deliberately not agent-scoped."""
+    with get_db_connection() as conn:
+        return conn.execute(
+            "SELECT COUNT(*) FROM traces WHERE org_uuid = ? AND deleted_at IS NULL",
+            (org_uuid,),
+        ).fetchone()[0]
+
+
+def create_trace(
+    org_uuid: str,
+    agent_id: str,
+    message_id: str,
+    conversation_id: str,
+    input: Any,
+    output: Any,
+    metadata: Optional[Any] = None,
+) -> Tuple[Dict[str, Any], bool]:
+    """Insert a trace, returning `(row, created)`.
+
+    Idempotent on (org_uuid, message_id): a duplicate returns the existing live
+    row with created=False. The IntegrityError fallback closes the race the
+    SELECT alone leaves open; the partial unique index is what makes it safe.
+    """
+    existing = get_trace_by_message_id(org_uuid, message_id)
+    if existing:
+        return existing, False
+    trace_uuid = str(uuid.uuid4())
+    try:
+        with get_db_connection() as conn:
+            conn.execute(
+                """
+                INSERT INTO traces
+                    (uuid, org_uuid, agent_id, message_id, conversation_id,
+                     input, output, metadata)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    trace_uuid,
+                    org_uuid,
+                    agent_id,
+                    message_id,
+                    conversation_id,
+                    json.dumps(input),
+                    json.dumps(output),
+                    json.dumps(metadata) if metadata is not None else None,
+                ),
+            )
+            conn.commit()
+    except sqlite3.IntegrityError:
+        existing = get_trace_by_message_id(org_uuid, message_id)
+        if existing:
+            return existing, False
+        raise
+    return get_trace(org_uuid, trace_uuid), True
+
+
+def list_traces(
+    org_uuid: str,
+    *,
+    limit: int,
+    offset: int,
+    q: Optional[str] = None,
+    conversation_id: Optional[str] = None,
+    agent_id: Optional[str] = None,
+) -> Tuple[List[Dict[str, Any]], int]:
+    """Return `(page, total)` newest-first; filters and count run in SQL."""
+    where, params = _trace_filters(org_uuid, q, conversation_id, agent_id)
+    with get_db_connection() as conn:
+        total = conn.execute(
+            f"SELECT COUNT(*) FROM traces WHERE {where}", params
+        ).fetchone()[0]
+        rows = conn.execute(
+            f"SELECT * FROM traces WHERE {where} "
+            "ORDER BY created_at DESC, id DESC LIMIT ? OFFSET ?",
+            params + [limit, offset],
+        ).fetchall()
+        return [_trace_row(r) for r in rows], total
+
+
+def select_traces(
+    org_uuid: str,
+    *,
+    trace_ids: Optional[List[str]] = None,
+    select_all: bool = False,
+    q: Optional[str] = None,
+    conversation_id: Optional[str] = None,
+    agent_id: Optional[str] = None,
+    limit: Optional[int] = None,
+) -> List[Dict[str, Any]]:
+    """Return the full trace dicts a bulk action targets (same selection contract
+    as `soft_delete_traces`), for callers that need the bodies rather than just a
+    delete count (e.g. converting traces to tests).
+
+    `select_all=True` returns every live trace matching `q`/`conversation_id`/
+    `agent_id` newest-first (pass `limit` to bound a large match); otherwise the
+    given `trace_ids` in request order (missing/foreign ids skipped).
+    """
+    with get_db_connection() as conn:
+        if select_all:
+            where, params = _trace_filters(org_uuid, q, conversation_id, agent_id)
+            sql = f"SELECT * FROM traces WHERE {where} ORDER BY created_at DESC, id DESC"
+            if limit is not None:
+                sql += " LIMIT ?"
+                params = params + [limit]
+            return [_trace_row(r) for r in conn.execute(sql, params).fetchall()]
+        if not trace_ids:
+            return []
+        placeholders = ",".join("?" * len(trace_ids))
+        rows = conn.execute(
+            f"SELECT * FROM traces WHERE org_uuid = ? AND deleted_at IS NULL "
+            f"AND uuid IN ({placeholders})",
+            [org_uuid] + list(trace_ids),
+        ).fetchall()
+        by_uuid = {r["uuid"]: r for r in rows}
+        return [_trace_row(by_uuid[tid]) for tid in trace_ids if tid in by_uuid]
+
+
+def soft_delete_traces(
+    org_uuid: str,
+    *,
+    trace_ids: Optional[List[str]] = None,
+    select_all: bool = False,
+    q: Optional[str] = None,
+    conversation_id: Optional[str] = None,
+    agent_id: Optional[str] = None,
+) -> int:
+    """Soft-delete traces, returning the number of rows flipped.
+
+    Mirrors the annotation-task bulk contract: select_all=True targets every live
+    trace matching q/conversation_id/agent_id and ignores trace_ids; otherwise
+    only the given trace_ids are deleted (empty list deletes nothing).
+    """
+    if select_all:
+        where, params = _trace_filters(org_uuid, q, conversation_id, agent_id)
+    else:
+        if not trace_ids:
+            return 0
+        placeholders = ",".join("?" * len(trace_ids))
+        where = f"org_uuid = ? AND deleted_at IS NULL AND uuid IN ({placeholders})"
+        params = [org_uuid] + list(trace_ids)
+    with get_db_connection() as conn:
+        cursor = conn.execute(
+            f"UPDATE traces SET deleted_at = CURRENT_TIMESTAMP, "
+            f"updated_at = CURRENT_TIMESTAMP WHERE {where}",
+            params,
+        )
+        conn.commit()
+        return cursor.rowcount or 0

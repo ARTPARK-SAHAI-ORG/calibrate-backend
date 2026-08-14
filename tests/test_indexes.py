@@ -20,6 +20,9 @@ EXPECTED_INDEXES = [
     "idx_simulation_jobs_share",
     "idx_annotation_jobs_task",
     "idx_annotation_jobs_annotator",
+    "idx_traces_org_message_active",
+    "idx_traces_org_agent_active",
+    "idx_traces_org_conversation",
 ]
 
 
@@ -113,3 +116,21 @@ def test_annotation_jobs_by_annotator_uses_index():
         (1,),
     )
     assert "idx_annotation_jobs_annotator" in plan, plan
+
+
+def test_traces_by_agent_uses_index():
+    plan = _query_plan(
+        "SELECT * FROM traces WHERE org_uuid = ? AND agent_id = ? "
+        "AND deleted_at IS NULL ORDER BY created_at DESC, id DESC",
+        ("org", "agent"),
+    )
+    assert "idx_traces_org_agent_active" in plan, plan
+
+
+def test_traces_by_message_id_uses_index():
+    plan = _query_plan(
+        "SELECT * FROM traces WHERE org_uuid = ? AND message_id = ? "
+        "AND deleted_at IS NULL",
+        ("org", "m-1"),
+    )
+    assert "idx_traces_org_message_active" in plan, plan

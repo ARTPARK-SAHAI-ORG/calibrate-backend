@@ -41,7 +41,6 @@ if _SRC not in sys.path:
 import pytest  # noqa: E402
 
 import db  # noqa: E402
-from traces.migrate import run_traces_migrations  # noqa: E402
 
 
 @pytest.fixture(scope="session", autouse=True)
@@ -52,7 +51,6 @@ def initialized_db():
     UUIDs so there's no cross-test contamination via row collisions.
     """
     db.init_db()
-    run_traces_migrations()
     yield
 
 

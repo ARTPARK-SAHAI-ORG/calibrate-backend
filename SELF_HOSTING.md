@@ -108,8 +108,6 @@ PORT=80
 # Persistence
 APP_FOLDER_PATH=/appdata
 DB_ROOT_DIR=/appdata
-# Traces store DSN; leave empty to use sqlite:///$DB_ROOT_DIR/traces.db
-TRACES_DATABASE_URL=
 
 # Auth — generate fresh, do NOT reuse from any other tenant
 JWT_SECRET_KEY=PASTE_OUTPUT_OF_openssl_rand_-base64_32
@@ -394,8 +392,6 @@ PORT=80
 # Persistence
 APP_FOLDER_PATH=/appdata
 DB_ROOT_DIR=/appdata
-# Traces store DSN; leave empty to use sqlite:///$DB_ROOT_DIR/traces.db
-TRACES_DATABASE_URL=
 
 # Auth — generate fresh, do NOT reuse from any other tenant
 JWT_SECRET_KEY=PASTE_OUTPUT_OF_openssl_rand_-base64_32

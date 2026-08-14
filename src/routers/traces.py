@@ -1,8 +1,8 @@
 """Production trace ingestion and curation.
 
 Customer backends POST one trace per agent turn: the conversation history as
-`input` plus the produced `output`. Rows persist in the dedicated traces store
-(src/traces/), not pense.db. The contract deliberately mirrors test creation:
+`input` plus the produced `output`. Rows persist as a normal `traces` table in
+pense.db. The contract deliberately mirrors test creation:
 `input` is `tests.config.history` verbatim, and `output.tool_calls` matches
 the expected-tool-call shape, so curated traces convert to tests without
 transformation. New contract needs go into `metadata` keys, not new top-level
@@ -20,17 +20,24 @@ from auth_utils import OrgContext, get_current_org, get_org_jwt_or_api_key
 from db import (
     add_test_to_agent,
     bulk_create_tests,
+    count_live_traces,
+    create_trace,
     get_agent,
     get_all_tests_summary,
+    get_trace,
+    get_trace_by_message_id,
+    list_traces,
+    select_traces,
     set_test_evaluators,
+    soft_delete_traces,
 )
+from org_scope import ensure_owned_agent
 from pagination import PaginatedResponse, PaginationParams, page_envelope
 from routers.org_limits import get_max_traces_for_org
 
 # Reuse the test router's evaluator ref + validation so converted tests accept
 # exactly what POST /tests does (workspace-visible, evaluator_type matches).
 from routers.tests import EvaluatorRef, _validate_evaluators
-from traces import store as traces_store
 from utils import EXAMPLE_TEST_UUID
 
 logger = logging.getLogger(__name__)
@@ -48,6 +55,8 @@ MAX_CONVERT_BATCH = 500
 _EXAMPLE_TRACE_UUID = "f47ac10b-58cc-4372-a567-0e02b2c3d479"
 
 _TRACE_UUID_DESCRIPTION = "Unique ID for the trace"
+
+_AGENT_ID_DESCRIPTION = "ID of the agent that produced the turn"
 
 _Q_DESCRIPTION = (
     "Case-insensitive substring search on `message_id`, `conversation_id`, "
@@ -124,10 +133,15 @@ class TraceMetadataEntry(BaseModel):
 class TraceIngest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
+    agent_id: str = Field(
+        min_length=1,
+        max_length=36,
+        description=_AGENT_ID_DESCRIPTION + ". Must be an agent in your workspace",
+    )
     message_id: str = Field(
         min_length=1,
         max_length=255,
-        description="Your ID for the last user message in `input`, unique within your workspace. Sending the same ID again returns the stored trace instead of creating a duplicate",
+        description="Your ID for the last user message in `input`, unique within your workspace across all agents. Sending the same ID again returns the stored trace instead of creating a duplicate",
     )
     conversation_id: str = Field(
         min_length=1,
@@ -171,6 +185,7 @@ class TraceSummary(BaseModel):
         description=_TRACE_UUID_DESCRIPTION,
         examples=[_EXAMPLE_TRACE_UUID],
     )
+    agent_id: str = Field(description=_AGENT_ID_DESCRIPTION)
     message_id: str = Field(description="Your ID for the trace's last user message")
     conversation_id: str = Field(
         description="Your ID for the conversation the trace belongs to"
@@ -200,6 +215,7 @@ class TraceResponse(BaseModel):
         description=_TRACE_UUID_DESCRIPTION,
         examples=[_EXAMPLE_TRACE_UUID],
     )
+    agent_id: str = Field(description=_AGENT_ID_DESCRIPTION)
     message_id: str = Field(description="Your ID for the trace's last user message")
     conversation_id: str = Field(
         description="Your ID for the conversation the trace belongs to"
@@ -234,6 +250,10 @@ class BulkDeleteTracesRequest(BaseModel):
         None,
         description="Limit `select_all` to traces from this conversation",
     )
+    agent_id: Optional[str] = Field(
+        None,
+        description="Limit `select_all` to traces from this agent",
+    )
 
 
 class BulkDeleteTracesResponse(BaseModel):
@@ -263,6 +283,7 @@ def _to_summary(row: Dict[str, Any]) -> Dict[str, Any]:
     output = row.get("output") or {}
     return {
         "uuid": row["uuid"],
+        "agent_id": row["agent_id"],
         "message_id": row["message_id"],
         "conversation_id": row["conversation_id"],
         "input_preview": _preview(_last_user_content(row.get("input") or [])),
@@ -289,14 +310,15 @@ async def ingest_trace(
     payload: TraceIngest, ctx: OrgContext = Depends(get_org_jwt_or_api_key)
 ):
     """Store a production agent turn and its conversation history for later curation"""
+    ensure_owned_agent(payload.agent_id, ctx.org_uuid)
     # Idempotency outranks the cap: a retry of an already-stored message_id
     # must succeed even when the workspace is at its limit.
-    existing = traces_store.get_trace_by_message_id(ctx.org_uuid, payload.message_id)
+    existing = get_trace_by_message_id(ctx.org_uuid, payload.message_id)
     if existing:
         return _ingest_response(existing, created=False)
 
     cap = get_max_traces_for_org(ctx.org_uuid)
-    current = traces_store.count_live_traces(ctx.org_uuid)
+    current = count_live_traces(ctx.org_uuid)
     if current >= cap:
         raise HTTPException(
             status_code=429,
@@ -308,8 +330,9 @@ async def ingest_trace(
             },
         )
 
-    row, created = traces_store.create_trace(
+    row, created = create_trace(
         org_uuid=ctx.org_uuid,
+        agent_id=payload.agent_id,
         message_id=payload.message_id,
         conversation_id=payload.conversation_id,
         input=[turn.model_dump(exclude_none=True) for turn in payload.input],
@@ -331,18 +354,22 @@ async def list_traces_endpoint(
     conversation_id: Optional[str] = Query(
         None, description="Return only traces from this conversation"
     ),
+    agent_id: Optional[str] = Query(
+        None, description="Return only traces from this agent"
+    ),
 ):
     """List ingested traces, newest first"""
-    # Search/filter/count run in SQL (traces.store), not the post-fetch
+    # Search/filter/count run in SQL (db.list_traces), not the post-fetch
     # pagination helpers, and paging uses the bounded PaginationParams rather
     # than the unbounded OptionalPaginationParams: traces are machine-written
     # and outgrow in-memory filtering fast.
-    rows, total = traces_store.list_traces(
+    rows, total = list_traces(
         ctx.org_uuid,
         limit=pagination.limit,
         offset=pagination.offset,
         q=q,
         conversation_id=conversation_id,
+        agent_id=agent_id,
     )
     return page_envelope([_to_summary(row) for row in rows], total, pagination)
 
@@ -361,12 +388,13 @@ async def bulk_delete_traces(
             status_code=400,
             detail="trace_ids must be non-empty when select_all is false",
         )
-    deleted = traces_store.soft_delete_traces(
+    deleted = soft_delete_traces(
         ctx.org_uuid,
         trace_ids=payload.trace_ids,
         select_all=payload.select_all,
         q=payload.q,
         conversation_id=payload.conversation_id,
+        agent_id=payload.agent_id,
     )
     return {"deleted": deleted}
 
@@ -396,6 +424,10 @@ class ConvertTracesToTestsRequest(BaseModel):
     conversation_id: Optional[str] = Field(
         None,
         description="Limit `select_all` to traces from this conversation",
+    )
+    agent_id: Optional[str] = Field(
+        None,
+        description="Limit `select_all` to traces from this agent",
     )
     type: Literal["response", "tool_call"] = Field(description=_CONVERT_TYPE_DESCRIPTION)
     evaluators: Optional[List[EvaluatorRef]] = Field(
@@ -472,12 +504,13 @@ async def convert_traces_to_tests(
             payload.evaluators, ctx.org_uuid, "response"
         )
 
-    traces = traces_store.select_traces(
+    traces = select_traces(
         ctx.org_uuid,
         trace_ids=payload.trace_ids,
         select_all=payload.select_all,
         q=payload.q,
         conversation_id=payload.conversation_id,
+        agent_id=payload.agent_id,
         limit=MAX_CONVERT_BATCH + 1 if payload.select_all else None,
     )
     if not traces:
@@ -566,7 +599,7 @@ async def get_trace_endpoint(
     ctx: OrgContext = Depends(get_current_org),
 ):
     """Get one trace by its ID"""
-    row = traces_store.get_trace(ctx.org_uuid, trace_uuid)
+    row = get_trace(ctx.org_uuid, trace_uuid)
     if not row:
         raise HTTPException(status_code=404, detail="Trace not found")
     return row

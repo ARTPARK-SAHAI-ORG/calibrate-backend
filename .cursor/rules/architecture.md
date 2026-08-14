@@ -46,13 +46,6 @@ calibrate-backend/
 │   ├── utils.py             # Shared utilities (S3 client/upload helpers, STT/TTS evaluator run pairing, tool config building)
 │   ├── dataset_utils.py     # Dataset resolution helpers for STT/TTS evaluations
 │   ├── job_recovery.py      # Restart in-progress jobs on app startup
-│   ├── traces/              # Traces store: OWN database (SQLAlchemy 2 + Alembic), never pense.db
-│   │   ├── engine.py        #   DSN resolution (TRACES_DATABASE_URL), engine, sessions, SQLite pragmas
-│   │   ├── models.py        #   Trace model + indexes (partial unique idempotency index)
-│   │   ├── store.py         #   Plain-dict CRUD; search/filter/count run in SQL
-│   │   ├── migrate.py       #   run_traces_migrations() — startup Alembic upgrade
-│   │   ├── alembic.ini      #   CLI config for authoring migrations (autogenerate)
-│   │   └── migrations/      #   Alembic env + versions (version table: alembic_version_traces)
 │   └── routers/
 │       ├── auth.py          # Authentication (Google OAuth, username/password signup & login)
 │       ├── users.py         # User management endpoints
@@ -74,7 +67,7 @@ calibrate-backend/
 │       ├── annotators.py    # Annotator CRUD (human labelers)
 │       ├── annotation_tasks.py  # Annotation tasks, items, jobs, evaluator links, agreement runs
 │       ├── annotation_agreement.py  # Inter-annotator / human-vs-evaluator agreement metrics
-│       ├── traces.py        # Production trace ingestion (API key) + curation (JWT) — backed by src/traces/
+│       ├── traces.py        # Production trace ingestion (API key) + curation (JWT)
 │       └── user_limits.py   # Per-user limits CRUD and limit queries
 ├── tests/                   # Pytest suite (repo root); imports match runtime (`from llm_judge import …`) via configured pythonpath
 ├── .githooks/               # Git hooks (opt-in): `pre-commit` runs pytest on `main` only — enable with `git config core.hooksPath .githooks`
@@ -225,22 +218,20 @@ The `users` table supports two authentication methods. Columns:
 
 ---
 
-## Traces Store (separate database)
+## Traces
 
-Production traces are the platform's one **machine-paced** write path (customer backends POST one trace per agent turn), so they deliberately do **not** live in `pense.db` — SQLite serializes all writers on one file-level lock, and a trace stream sharing it would degrade every interactive endpoint. `src/traces/` owns a second database behind **SQLAlchemy 2 + Alembic**:
+Production traces are the platform's one **machine-paced** write path (customer backends POST one trace per agent turn). They live in `pense.db` like every other table: `traces` is created in `init_db()` and its storage functions (`create_trace`, `get_trace`, `get_trace_by_message_id`, `count_live_traces`, `list_traces`, `select_traces`, `soft_delete_traces`) sit at the end of `db.py`. Write contention is handled by `get_db_connection()` setting `PRAGMA journal_mode=WAL`, `busy_timeout=5000` and `synchronous=NORMAL`, which benefits every endpoint, not just traces. If traces ever outgrow SQLite, the whole database moves to Postgres together, not traces alone.
 
-- **DSN**: `TRACES_DATABASE_URL`, defaulting to `sqlite:///$DB_ROOT_DIR/traces.db`. Moving traces to Postgres is intended to be a DSN swap plus driver install — everything in the package must stay **dialect-portable**: `JSON().with_variant(JSONB, "postgresql")` columns, the partial unique index declared with both `sqlite_where` and `postgresql_where`, SELECT-then-INSERT idempotency (no dialect-specific upsert), and SQLite-only WAL/`busy_timeout`/`synchronous=NORMAL` pragmas applied via a dialect-gated `connect` event.
-- **Schema** (`traces`): `id`, `uuid`, `org_uuid`, `message_id`, `conversation_id`, `input` JSON (OpenAI-format history, extra keys preserved verbatim), `output` JSON (`{response?, tool_calls?: [{tool, arguments}]}`), `metadata` JSON (`[{key, value}]`), `created_at`/`updated_at`/`deleted_at` (naive UTC, matching the house convention). Indexes: unique `uuid`; **partial unique `(org_uuid, message_id) WHERE deleted_at IS NULL`** — the idempotency key, meaning soft-deleting a trace frees its `message_id` for re-ingestion; `(org_uuid, deleted_at)` for cap counts and lists; `(org_uuid, conversation_id)` for the conversation filter. The ORM attribute for the `metadata` column is `meta` (`metadata` is reserved on declarative classes).
-- **Migrations**: `traces.migrate.run_traces_migrations()` runs `alembic upgrade head` at app startup (called in the lifespan right after `init_db()`) and in the test-session fixture. Author new migrations with `uv run alembic -c src/traces/alembic.ini revision --autogenerate -m "..."`. The env uses `render_as_batch=True` (SQLite can't ALTER in place) and its own version table `alembic_version_traces` so the store can later share a Postgres database without collisions. Never point this Alembic at `pense.db`, and never add traces tables to `db.py` — the two persistence layers are deliberately separate.
-- **Store API** (`traces/store.py`): plain functions returning dicts (mirroring `db.py` ergonomics); sessions and ORM instances never leave the package. Unlike every other table, **search/filter/count run in SQL** — `q` is a case-insensitive substring match (LIKE, wildcards escaped) over `message_id`, `conversation_id`, and the raw `input`/`output` JSON text (a documented approximation).
+- **Schema** (`traces`): `id`, `uuid`, `org_uuid`, `agent_id` (required; the agent that produced the turn, validated at ingest), `message_id`, `conversation_id`, `input` JSON (OpenAI-format history, extra keys preserved verbatim), `output` JSON (`{response?, tool_calls?: [{tool, arguments}]}`), `metadata` JSON (`[{key, value}]`), `created_at`/`updated_at`/`deleted_at` (naive UTC, matching the house convention). `input`/`output`/`metadata` are JSON stored as TEXT, the same convention as every other config column in `db.py`. Indexes: **unique `idx_traces_org_message_active` on `(org_uuid, message_id)`, partial on `WHERE deleted_at IS NULL`**, the idempotency key, so soft-deleting a trace frees its `message_id` for re-ingestion; `idx_traces_org_agent_active` on `(org_uuid, agent_id, deleted_at)` for the agent filter; `idx_traces_org_conversation` on `(org_uuid, conversation_id)` for the conversation filter.
+- **Search/filter/count run in SQL**, unlike every other list endpoint: trace volume outgrows in-memory filtering. `q` is a case-insensitive substring match (LIKE, wildcards escaped) over `message_id`, `conversation_id`, and the raw `input`/`output` JSON text (a documented approximation).
 - **Contract mirrors test creation** (see `routers/traces.py`): `input` is `tests.config.history` verbatim, and `output.tool_calls` uses the flat `{tool, arguments}` expected-tool-call shape (not OpenAI's nested `function` form) so curated traces can later convert to `response`/`tool_call` tests without transformation.
-- **Cap**: `POST /traces` rejects new rows with **429** (body carries current count, cap, remediation) once the org's live count reaches `max_traces` (`org_limits`, `DEFAULT_MAX_TRACES` fallback, member-readable via `GET /org-limits/me/max-traces`). The idempotency lookup runs **before** the cap check so production retries never 429 at the limit. Cross-database note: the cap reads limits from `pense.db` and counts in the traces store — not transactional, by design (the cap is a guardrail, not an invariant).
+- **Cap**: `POST /traces` rejects new rows with **429** (body carries current count, cap, remediation) once the org's live count reaches `max_traces` (`org_limits`, `DEFAULT_MAX_TRACES` fallback, member-readable via `GET /org-limits/me/max-traces`). The idempotency lookup runs **before** the cap check so production retries never 429 at the limit.
 
 ### Convert traces to tests
 
-`POST /traces/convert-to-tests` (JWT only, `routers/traces.py`) is the curation payoff: selected traces become `tests` rows that plug into the existing run/benchmark machinery unchanged (and, as with any test, run results can then be sent for human labelling). It's the second cross-database operation (reads the traces store, writes `pense.db`) and, like the cap, is not transactional — it's re-runnable by design (see name dedup below).
+`POST /traces/convert-to-tests` (JWT only, `routers/traces.py`) is the curation payoff: selected traces become `tests` rows that plug into the existing run/benchmark machinery unchanged (and, as with any test, run results can then be sent for human labelling). It is re-runnable by design (see name dedup below).
 
-- **Selection** reuses the annotation-style bulk contract via `traces_store.select_traces(...)` (the read-bodies sibling of `soft_delete_traces`): `{trace_ids}` in request order, or `{select_all, q?, conversation_id?}`. `select_all` is bounded — the store fetches `MAX_CONVERT_BATCH + 1` (500) and the router 400s a wider match with a "narrow the filter" hint rather than mass-creating; an empty match is 404.
+- **Selection** reuses the annotation-style bulk contract via `select_traces(...)` (the read-bodies sibling of `soft_delete_traces`): `{trace_ids}` in request order, or `{select_all, q?, conversation_id?, agent_id?}`. `select_all` is bounded — the store fetches `MAX_CONVERT_BATCH + 1` (500) and the router 400s a wider match with a "narrow the filter" hint rather than mass-creating; an empty match is 404.
 - **Assembly mirrors `bulk_upload_tests`** (`evaluation` dict → `config` → `bulk_create_tests` → `set_test_evaluators` → `add_test_to_agent`), but is its **own** endpoint, not a client call to `POST /tests/bulk`: the bulk `ChatMessage` model rejects `system` turns (trace `input` routinely has them), `select_all` covers traces the client never fetched, and it's JWT-only. Per created test: `config.history = trace.input` **verbatim** (no transform — the ingest contract already stores OpenAI history).
 - **`type="response"`**: `evaluation = {"type": "response"}`; the recorded `output` is **discarded** (the test re-runs the agent). **Requires ≥1 evaluator** (400 otherwise) validated by the reused `routers/tests._validate_evaluators` (workspace-visible, `evaluator_type=llm`) — a converted response test has no legacy `criteria` fallback judge. Evaluators are linked live (unpinned) via `set_test_evaluators`, same as `POST /tests`.
 - **`type="tool_call"`**: `evaluation = {"type": "tool_call", "tool_calls": [{tool, arguments, accept_any_arguments}]}` copied straight from `output.tool_calls` — the recorded raw `arguments` pass through as **legacy exact-match** assertions (calibrate/the FE treat a plain literal arg value as `{match_type: exact}`; see `AddTestDialog.parseArgMatch`). **Semantics flip**: the production call becomes the expected assertion, so only convert curated-good traces. Every selected trace must carry non-empty `output.tool_calls` or the whole request 400s listing the offending `message_ids`. `accept_any_arguments` (name-only match) applies to all created tests. No evaluators.
@@ -297,13 +288,11 @@ The JWT token contains the user's UUID and is validated on every protected endpo
 
 #### Traces
 
-- `POST /traces` - Ingest one production agent turn (`message_id`, `conversation_id`, `input` history, `output`, optional `metadata`). Auth: `get_org_jwt_or_api_key` (workspace API key or JWT) — machine-to-machine, but deliberately **not** tagged `Public API` until that exposure is explicitly decided. Idempotent on `(org, message_id)`: retries return the stored row with `created: false`. 429 past the `max_traces` cap.
-- `GET /traces?limit=&offset=&q=&conversation_id=` - Paginated slim `TraceSummary` list in the shared `PaginatedResponse` envelope. JWT only. Search/filter/count run in SQL in the traces store — never route this through `pagination.py`'s post-fetch `.apply()` helpers.
+- `POST /traces` - Ingest one production agent turn (`agent_id`, `message_id`, `conversation_id`, `input` history, `output`, optional `metadata`). `agent_id` is required and guarded by `ensure_owned_agent` (404 on unknown or cross-org), checked **before** both the idempotency lookup and the cap. Auth: `get_org_jwt_or_api_key` (workspace API key or JWT) — machine-to-machine, but deliberately **not** tagged `Public API` until that exposure is explicitly decided. Idempotent on `(org, message_id)`: retries return the stored row with `created: false`. 429 past the `max_traces` cap.
+- `GET /traces?limit=&offset=&q=&conversation_id=&agent_id=` - Paginated slim `TraceSummary` list in the shared `PaginatedResponse` envelope. JWT only. Search/filter/count run in SQL — never route this through `pagination.py`'s post-fetch `.apply()` helpers.
 - `GET /traces/{trace_uuid}` - Full `input`/`output`/`metadata`. JWT only.
-- `POST /traces/bulk-delete` - `{trace_ids | select_all, q?, conversation_id?}` (annotation-style bulk contract). Soft delete; frees capacity and message IDs. JWT only — destructive, must never join the key-authed surface.
-- `POST /traces/convert-to-tests` - Create `tests` rows from selected traces (`{trace_ids | select_all, q?, conversation_id?, type, evaluators?, agent_uuids?, accept_any_arguments?}`). JWT only, not tagged `Public API`. See **Convert traces to tests** below.
-
-See **Traces Store (separate database)** above for storage, migrations, and portability rules.
+- `POST /traces/bulk-delete` - `{trace_ids | select_all, q?, conversation_id?, agent_id?}` (annotation-style bulk contract). `agent_id` narrows `select_all`, so one agent's delete can never reach another's traces. Soft delete; frees capacity and message IDs. JWT only — destructive, must never join the key-authed surface.
+- `POST /traces/convert-to-tests` - Create `tests` rows from selected traces (`{trace_ids | select_all, q?, conversation_id?, agent_id?, type, evaluators?, agent_uuids?, accept_any_arguments?}`). JWT only, not tagged `Public API`. See **Convert traces to tests** above.
 
 #### Relationship Management
 
