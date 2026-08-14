@@ -189,6 +189,50 @@ def test_same_message_id_on_two_agents_is_two_rows():
     assert db.count_live_traces(org) == 2
 
 
+def test_get_by_uuids_keeps_caller_order_and_dedupes():
+    org = _org()
+    a = _ingest(org, "m-a")
+    b = _ingest(org, "m-b")
+    c = _ingest(org, "m-c")
+
+    asked = [c["uuid"], a["uuid"], b["uuid"], a["uuid"]]
+    rows = db.get_traces_by_uuids(org, asked)
+    assert [r["uuid"] for r in rows] == [c["uuid"], a["uuid"], b["uuid"]]
+
+
+def test_get_by_uuids_omits_unknown_deleted_and_foreign():
+    org, other = _org(), _org()
+    live = _ingest(org, "m-live")
+    gone = _ingest(org, "m-gone")
+    assert db.soft_delete_traces(org, trace_ids=[gone["uuid"]]) == 1
+    foreign = _ingest(other, "m-foreign")
+
+    rows = db.get_traces_by_uuids(
+        org, [live["uuid"], gone["uuid"], foreign["uuid"], str(uuid.uuid4())]
+    )
+    assert [r["uuid"] for r in rows] == [live["uuid"]]
+
+
+def test_get_by_uuids_empty_skips_the_database(monkeypatch):
+    def _boom():
+        raise AssertionError("empty uuid list must not open a connection")
+
+    monkeypatch.setattr(db, "get_db_connection", _boom)
+    assert db.get_traces_by_uuids(_org(), []) == []
+
+
+def test_get_by_uuids_returns_parsed_rows():
+    org = _org()
+    row = _ingest(org, "m-shape")
+
+    fetched = db.get_traces_by_uuids(org, [row["uuid"]])[0]
+    assert fetched == db.get_trace(org, row["uuid"])
+    assert fetched["input"][0]["role"] == "system"
+    assert fetched["output"]["tool_calls"][0]["tool"] == "get_schedule"
+    assert fetched["metadata"][0]["key"] == "gen_ai.request.model"
+    assert fetched["created_at"].endswith("Z") and "T" in fetched["created_at"]
+
+
 def _label_notnull() -> dict:
     with db.get_db_connection() as conn:
         return {
