@@ -1174,7 +1174,7 @@ def _run_job(
     silently skipped here so a recovered run after a delete still progresses.
     """
     logger.info(f"[annotation-eval] starting job {job_uuid} for task {task_uuid}")
-    output_dir_for_partial: Optional[Path] = None
+    partial_prefix: Optional[str] = None
     try:
         task = get_annotation_task(task_uuid)
         if not task:
@@ -1225,101 +1225,108 @@ def _run_job(
             input_dir.mkdir()
             output_dir = tmp / "output"
             output_dir.mkdir()
-            output_dir_for_partial = output_dir
 
-            # 1. Dataset. TTS --eval-only reads a run directory (results.csv +
-            # local audio), not a JSON file — materialize that layout here.
-            if task_type == "tts":
-                dataset_path = _prepare_tts_eval_run_dir(input_dir, items)
-            else:
-                dataset = build_dataset_for_task_type(
-                    task_type, items, evaluators_resolved
+            try:
+                # 1. Dataset. TTS --eval-only reads a run directory (results.csv +
+                # local audio), not a JSON file — materialize that layout here.
+                if task_type == "tts":
+                    dataset_path = _prepare_tts_eval_run_dir(input_dir, items)
+                else:
+                    dataset = build_dataset_for_task_type(
+                        task_type, items, evaluators_resolved
+                    )
+                    dataset_path = input_dir / "dataset.json"
+                    with open(dataset_path, "w", encoding="utf-8") as f:
+                        json.dump(dataset, f, ensure_ascii=False)
+
+                # 2. Config (evaluators only). For LLM + llm-general tasks, leave
+                # {{variable}} placeholders unrendered so calibrate substitutes them
+                # per row from each item's `evaluator_variables` (llm → per-test
+                # `criteria[].arguments`; general → a per-row `arguments` object
+                # keyed by evaluator name).
+                # STT/simulation flows have no per-row arguments mechanism, so we
+                # pre-render the evaluator's own `variable_values` (typically empty
+                # in the annotation flow).
+                if task_type in ("llm", "llm-general"):
+                    evaluator_payload = build_evaluator_cli_payload_unrendered(
+                        evaluators_resolved
+                    )
+                else:
+                    evaluator_payload = build_evaluator_cli_payload(
+                        evaluators_resolved
+                    )
+                config_path = input_dir / "config.json"
+                with open(config_path, "w", encoding="utf-8") as f:
+                    json.dump({"evaluators": evaluator_payload}, f, ensure_ascii=False)
+
+                # 3. Spawn the right calibrate subcommand for this task type.
+                cmd = calibrate_command_for_task_type(
+                    task_type, dataset_path, output_dir, config_path
                 )
-                dataset_path = input_dir / "dataset.json"
-                with open(dataset_path, "w", encoding="utf-8") as f:
-                    json.dump(dataset, f, ensure_ascii=False)
+                logger.info(f"[annotation-eval] spawning: {' '.join(cmd)}")
 
-            # 2. Config (evaluators only). For LLM + llm-general tasks, leave
-            # {{variable}} placeholders unrendered so calibrate substitutes them
-            # per row from each item's `evaluator_variables` (llm → per-test
-            # `criteria[].arguments`; general → a per-row `arguments` object
-            # keyed by evaluator name).
-            # STT/simulation flows have no per-row arguments mechanism, so we
-            # pre-render the evaluator's own `variable_values` (typically empty
-            # in the annotation flow).
-            if task_type in ("llm", "llm-general"):
-                evaluator_payload = build_evaluator_cli_payload_unrendered(
-                    evaluators_resolved
+                rc, proc_stdout, proc_stderr = _run_calibrate_eval_only(
+                    cmd,
+                    cwd=tmp,
+                    log_dir=output_dir,
+                    on_started=lambda pid: _persist_pgid(job_uuid, pid),
+                    job_uuid=job_uuid,
                 )
-            else:
-                evaluator_payload = build_evaluator_cli_payload(
-                    evaluators_resolved
-                )
-            config_path = input_dir / "config.json"
-            with open(config_path, "w", encoding="utf-8") as f:
-                json.dump({"evaluators": evaluator_payload}, f, ensure_ascii=False)
-
-            # 3. Spawn the right calibrate subcommand for this task type.
-            cmd = calibrate_command_for_task_type(
-                task_type, dataset_path, output_dir, config_path
-            )
-            logger.info(f"[annotation-eval] spawning: {' '.join(cmd)}")
-
-            rc, proc_stdout, proc_stderr = _run_calibrate_eval_only(
-                cmd,
-                cwd=tmp,
-                log_dir=output_dir,
-                on_started=lambda pid: _persist_pgid(job_uuid, pid),
-                job_uuid=job_uuid,
-            )
-            if rc != 0:
-                logger.error(
-                    f"[annotation-eval] calibrate exited rc={rc}\nstderr:\n{proc_stderr}"
-                )
-                raise subprocess.CalledProcessError(
-                    rc, cmd, output=proc_stdout, stderr=proc_stderr
-                )
-
-            # 4. Parse outputs (per task type) into evaluator_runs rows. The
-            # mapping name → evaluator_id is verified against the CLI's
-            # `config.json` evaluators_map so the stored evaluator_id is
-            # authoritative — name/description on the evaluator can change
-            # later and the runs still resolve correctly.
-            runs_to_insert = parse_results_for_task_type(
-                task_type, output_dir, evaluators_resolved, job_uuid, items=items
-            )
-            metrics = _read_metrics_json(output_dir)
-            if runs_to_insert:
-                create_evaluator_runs(runs_to_insert)
-
-            # 6. Upload all artifacts to S3 (mirrors normal STT eval layout).
-            s3_bucket = get_s3_output_config()
-            s3_prefix = (
-                f"annotation-tasks/{task_uuid}/evaluator-runs/{job_uuid}/outputs"
-            )
-            s3 = get_s3_client()
-            for root, _dirs, files in os.walk(output_dir):
-                for fname in files:
-                    local_path = Path(root) / fname
-                    rel = local_path.relative_to(output_dir)
-                    upload_file_to_s3(
-                        s3, local_path, s3_bucket, f"{s3_prefix}/{rel}"
+                if rc != 0:
+                    logger.error(
+                        f"[annotation-eval] calibrate exited rc={rc}\nstderr:\n{proc_stderr}"
+                    )
+                    raise subprocess.CalledProcessError(
+                        rc, cmd, output=proc_stdout, stderr=proc_stderr
                     )
 
-            # 7. Mark job completed (status + completed_at on the generic
-            # jobs table; metrics + s3_prefix go into details so polling
-            # endpoints can surface them).
-            update_job(
-                job_uuid,
-                status=TaskStatus.DONE.value,
-                details={
-                    "s3_prefix": s3_prefix,
-                    "metrics": metrics,
-                    "item_count": len(items),
-                    "completed_at": _utcnow_str(),
-                },
-            )
-            logger.info(f"[annotation-eval] job {job_uuid} completed")
+                # 4. Parse outputs (per task type) into evaluator_runs rows. The
+                # mapping name → evaluator_id is verified against the CLI's
+                # `config.json` evaluators_map so the stored evaluator_id is
+                # authoritative — name/description on the evaluator can change
+                # later and the runs still resolve correctly.
+                runs_to_insert = parse_results_for_task_type(
+                    task_type, output_dir, evaluators_resolved, job_uuid, items=items
+                )
+                metrics = _read_metrics_json(output_dir)
+                if runs_to_insert:
+                    create_evaluator_runs(runs_to_insert)
+
+                # 6. Upload all artifacts to S3 (mirrors normal STT eval layout).
+                s3_bucket = get_s3_output_config()
+                s3_prefix = (
+                    f"annotation-tasks/{task_uuid}/evaluator-runs/{job_uuid}/outputs"
+                )
+                s3 = get_s3_client()
+                for root, _dirs, files in os.walk(output_dir):
+                    for fname in files:
+                        local_path = Path(root) / fname
+                        rel = local_path.relative_to(output_dir)
+                        upload_file_to_s3(
+                            s3, local_path, s3_bucket, f"{s3_prefix}/{rel}"
+                        )
+
+                # 7. Mark job completed (status + completed_at on the generic
+                # jobs table; metrics + s3_prefix go into details so polling
+                # endpoints can surface them).
+                update_job(
+                    job_uuid,
+                    status=TaskStatus.DONE.value,
+                    details={
+                        "s3_prefix": s3_prefix,
+                        "metrics": metrics,
+                        "item_count": len(items),
+                        "completed_at": _utcnow_str(),
+                    },
+                )
+                logger.info(f"[annotation-eval] job {job_uuid} completed")
+            except Exception:
+                # The temp dir vanishes when this `with` exits, so partial
+                # artifacts have to go up here, before the handlers below run.
+                partial_prefix = _try_upload_partial_outputs(
+                    output_dir, task_uuid, job_uuid
+                )
+                raise
     except subprocess.CalledProcessError as e:
         # The calibrate CLI exited non-zero. Surface the actual stderr (or the
         # structured `{"status":"error","error":"..."}` blob if present) so the
@@ -1329,12 +1336,9 @@ def _run_job(
         cli_err = _extract_calibrate_error(
             getattr(e, "stdout", "") or "", getattr(e, "stderr", "") or ""
         )
-        s3_prefix = _try_upload_partial_outputs(
-            output_dir_for_partial, task_uuid, job_uuid
-        )
         details_patch = {"completed_at": _utcnow_str()}
-        if s3_prefix:
-            details_patch["s3_prefix"] = s3_prefix
+        if partial_prefix:
+            details_patch["s3_prefix"] = partial_prefix
         update_job(
             job_uuid,
             status=TaskStatus.FAILED.value,
@@ -1345,12 +1349,9 @@ def _run_job(
         traceback.print_exc()
         logger.exception(f"[annotation-eval] job {job_uuid} failed: {e}")
         capture_exception_to_sentry(e)
-        s3_prefix = _try_upload_partial_outputs(
-            output_dir_for_partial, task_uuid, job_uuid
-        )
         details_patch = {"completed_at": _utcnow_str()}
-        if s3_prefix:
-            details_patch["s3_prefix"] = s3_prefix
+        if partial_prefix:
+            details_patch["s3_prefix"] = partial_prefix
         update_job(
             job_uuid,
             status=TaskStatus.FAILED.value,

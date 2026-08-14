@@ -313,3 +313,64 @@ def test_run_calibrate_eval_only_on_started_raises(tmp_path):
             heartbeat_seconds=0,
         )
     assert rc == 0
+
+
+def test_run_job_failure_uploads_before_temp_dir_is_removed():
+    """CLI fails → partial artifacts upload while the temp dir still exists."""
+    from annotation_eval_runner import _run_job
+
+    items = [
+        {
+            "uuid": "i1",
+            "payload": {
+                "predicted_transcript": "pred",
+                "reference_transcript": "ref",
+            },
+        }
+    ]
+
+    class FakeProcess:
+        def __init__(self):
+            self.returncode = 1
+            self.pid = 7
+            self._poll_results = [None, 1]
+
+        def poll(self):
+            if self._poll_results:
+                return self._poll_results.pop(0)
+            return self.returncode
+
+        def wait(self, timeout=None):
+            return self.returncode
+
+    seen = {}
+
+    def fake_upload(output_dir, task_uuid, job_uuid):
+        seen["exists"] = output_dir is not None and output_dir.exists()
+        return "some/prefix"
+
+    with patch(
+        "annotation_eval_runner.get_annotation_task", return_value={"type": "stt"}
+    ), patch(
+        "annotation_eval_runner.get_eval_job_items", return_value=items
+    ), patch(
+        "annotation_eval_runner.subprocess.Popen", return_value=FakeProcess()
+    ), patch(
+        "annotation_eval_runner.update_job"
+    ) as mock_update, patch(
+        "annotation_eval_runner.try_start_queued_job"
+    ), patch(
+        "annotation_eval_runner.time.sleep"
+    ), patch(
+        "annotation_eval_runner.get_job",
+        return_value={"updated_at": "2099-01-01 00:00:00"},
+    ), patch(
+        "annotation_eval_runner._persist_pgid"
+    ), patch(
+        "annotation_eval_runner._try_upload_partial_outputs", side_effect=fake_upload
+    ):
+        _run_job("j-1", "task", "u-1", [_resolved()], item_ids=None)
+
+    assert seen.get("exists") is True
+    final = mock_update.call_args
+    assert final.kwargs["details"]["s3_prefix"] == "some/prefix"
