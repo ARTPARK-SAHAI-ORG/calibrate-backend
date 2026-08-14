@@ -678,6 +678,30 @@ def test_list_searches_every_stored_text_field(client):
     )
 
 
+def test_list_searches_non_english_and_accented_text(client):
+    """Non-ASCII text is stored escaped inside the JSON columns, and SQLite's own
+    LOWER folds only ASCII."""
+    h, agent_id = _signup_with_agent(client)
+    hindi = _post_trace(
+        client,
+        h,
+        _payload(
+            agent_id,
+            _mid(),
+            input=[{"role": "user", "content": "टीका कब है"}],
+        ),
+    )
+    accented = _post_trace(client, h, _payload(agent_id, "CAFÉ-12"))
+
+    hits = client.get("/traces", params={"q": "टीका"}, headers=h).json()
+    assert hits["total"] == 1
+    assert hits["items"][0]["uuid"] == hindi["uuid"]
+
+    hits = client.get("/traces", params={"q": "café"}, headers=h).json()
+    assert hits["total"] == 1
+    assert hits["items"][0]["uuid"] == accented["uuid"]
+
+
 def test_bulk_delete_ignores_another_workspaces_traces(client):
     h, agent_id = _signup_with_agent(client)
     mine = _post_trace(client, h, _payload(agent_id, _mid()))

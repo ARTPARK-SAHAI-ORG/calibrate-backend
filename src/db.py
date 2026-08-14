@@ -34,6 +34,9 @@ def get_db_connection():
     # file itself and is set once in init_db().
     conn.execute("PRAGMA busy_timeout=5000")
     conn.execute("PRAGMA synchronous=NORMAL")
+    # SQLite's own LOWER only folds ASCII, so an accented or non-Latin word
+    # would never match a case-insensitive search.
+    conn.create_function("PY_LOWER", 1, lambda s: s.lower() if s else s)
     try:
         yield conn
     finally:
@@ -9587,6 +9590,11 @@ def _trace_iso(ts: Optional[str]) -> Optional[str]:
     return s if s.endswith("Z") else s + "Z"
 
 
+def _like_escape(text: str) -> str:
+    """Make `text` a literal inside a LIKE pattern using ESCAPE '\\'."""
+    return text.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+
+
 def _trace_filters(
     org_uuid: str, agent_id: Optional[str] = None, q: Optional[str] = None
 ) -> Tuple[str, List[Any]]:
@@ -9597,24 +9605,19 @@ def _trace_filters(
         where.append("agent_id = ?")
         params.append(agent_id)
     if q and q.strip():
-        needle = (
-            q.strip()
-            .lower()
-            .replace("\\", "\\\\")
-            .replace("%", "\\%")
-            .replace("_", "\\_")
-        )
-        needle = f"%{needle}%"
-        # Matching the raw JSON text of input/output/metadata is a documented
-        # approximation: it also matches keys and quoting artifacts.
-        where.append(
-            "(LOWER(message_id) LIKE ? ESCAPE '\\' "
-            "OR LOWER(conversation_id) LIKE ? ESCAPE '\\' "
-            "OR LOWER(input) LIKE ? ESCAPE '\\' "
-            "OR LOWER(output) LIKE ? ESCAPE '\\' "
-            "OR LOWER(metadata) LIKE ? ESCAPE '\\')"
-        )
-        params.extend([needle] * 5)
+        lowered = q.strip().lower()
+        # json.dumps escapes non-ASCII, so a Hindi word sits in the JSON columns
+        # as \uXXXX and the typed word alone would never find it.
+        escaped = json.dumps(lowered)[1:-1]
+        forms = [lowered] if escaped == lowered else [lowered, escaped]
+        clauses: List[str] = []
+        for column in ("message_id", "conversation_id", "input", "output", "metadata"):
+            # Matching the raw JSON text of input/output/metadata is a documented
+            # approximation: it also matches keys and quoting artifacts.
+            for form in forms if column in ("input", "output", "metadata") else [lowered]:
+                clauses.append(f"PY_LOWER({column}) LIKE ? ESCAPE '\\'")
+                params.append(f"%{_like_escape(form)}%")
+        where.append("(" + " OR ".join(clauses) + ")")
     return " AND ".join(where), params
 
 
