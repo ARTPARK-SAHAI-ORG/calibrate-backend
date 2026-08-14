@@ -371,6 +371,10 @@ async def list_traces_endpoint(
     agent_id: Optional[str] = Query(
         None, description="Return only traces from this agent"
     ),
+    q: Optional[str] = Query(
+        None,
+        description="Return only traces containing this text in their message ID, conversation ID, conversation history, output, or metadata",
+    ),
 ):
     """List ingested traces, newest first"""
     if pagination.limit > MAX_LIST_LIMIT:
@@ -386,6 +390,7 @@ async def list_traces_endpoint(
         limit=pagination.limit,
         offset=pagination.offset,
         agent_id=agent_id,
+        q=q,
     )
     return page_envelope([_to_summary(row) for row in rows], total, pagination)
 
