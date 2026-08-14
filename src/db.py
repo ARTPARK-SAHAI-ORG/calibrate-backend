@@ -9607,6 +9607,24 @@ def get_trace(org_uuid: str, trace_uuid: str) -> Optional[Dict[str, Any]]:
         return _trace_row(row) if row else None
 
 
+def get_traces_by_uuids(org_uuid: str, trace_uuids: List[str]) -> List[Dict[str, Any]]:
+    """Live traces for the given UUIDs, in the caller's order. Unknown, deleted,
+    and other-workspace UUIDs are omitted, so the caller can diff the result
+    against what it asked for."""
+    if not trace_uuids:
+        return []
+    unique = list(dict.fromkeys(trace_uuids))
+    placeholders = ",".join("?" * len(unique))
+    with get_db_connection() as conn:
+        rows = conn.execute(
+            f"SELECT * FROM traces WHERE org_uuid = ? AND deleted_at IS NULL "
+            f"AND uuid IN ({placeholders})",
+            [org_uuid] + unique,
+        ).fetchall()
+    by_uuid = {row["uuid"]: _trace_row(row) for row in rows}
+    return [by_uuid[u] for u in unique if u in by_uuid]
+
+
 def count_live_traces(org_uuid: str) -> int:
     """Live trace count for the workspace cap. Deliberately not agent-scoped."""
     with get_db_connection() as conn:

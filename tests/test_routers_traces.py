@@ -690,3 +690,595 @@ def test_bulk_delete_rejects_an_unknown_key(client):
     )
     assert res.status_code == 422, res.text
     assert client.get("/traces", headers=h).json()["total"] == 2
+
+
+# ---------------------------------------------------------------------------
+# Convert to tests (JWT-only)
+# ---------------------------------------------------------------------------
+
+
+def _create_evaluator(client, h, evaluator_type="llm", variables=None):
+    name = f"ev-{uuid.uuid4().hex[:6]}"
+    version = {
+        "judge_model": "openai/gpt-4.1",
+        "system_prompt": "Judge the reply.",
+    }
+    if variables:
+        version["system_prompt"] = "Judge the reply against {{criteria}}."
+        version["variables"] = variables
+    res = client.post(
+        "/evaluators",
+        json={
+            "name": name,
+            "evaluator_type": evaluator_type,
+            "output_type": "binary",
+            "version": version,
+        },
+        headers=h,
+    )
+    assert res.status_code == 200, res.text
+    return {**res.json(), "name": name}
+
+
+def _test_names(client, h):
+    return [t["name"] for t in client.get("/tests", headers=h).json()["items"]]
+
+
+def _convert(client, h, **body):
+    return client.post("/traces/convert-to-tests", json=body, headers=h)
+
+
+def test_convert_is_jwt_only(client):
+    h, agent_id = _signup_with_agent(client)
+    key_headers = _api_key_headers(client, h)
+    trace = _post_trace(client, h, _payload(agent_id, _mid()))
+
+    assert (
+        client.post(
+            "/traces/convert-to-tests",
+            json={"trace_ids": [trace["uuid"]], "type": "tool_call"},
+        ).status_code
+        in (401, 403)
+    )
+    assert (
+        client.post(
+            "/traces/convert-to-tests",
+            json={"trace_ids": [trace["uuid"]], "type": "tool_call"},
+            headers=key_headers,
+        ).status_code
+        in (401, 403)
+    )
+    assert client.get("/tests", headers=h).json()["total"] == 0
+
+
+def test_convert_response_creates_and_links_tests(client):
+    from db import get_evaluators_for_test, get_tests_for_agent
+
+    h, agent_id = _signup_with_agent(client)
+    evaluator = _create_evaluator(client, h)
+    mid_a, mid_b = _mid(), _mid()
+    trace_a = _post_trace(client, h, _payload(agent_id, mid_a))
+    trace_b = _post_trace(client, h, _payload(agent_id, mid_b))
+
+    res = _convert(
+        client,
+        h,
+        trace_ids=[trace_b["uuid"], trace_a["uuid"]],
+        type="response",
+        evaluators=[evaluator["uuid"]],
+    )
+    assert res.status_code == 200, res.text
+    body = res.json()
+    assert body["created"] == 2
+    assert len(body["test_uuids"]) == 2
+
+    # Order follows the requested trace order.
+    names = [
+        client.get(f"/tests/{test_uuid}", headers=h).json()["name"]
+        for test_uuid in body["test_uuids"]
+    ]
+    assert names == [mid_b, mid_a]
+
+    first = client.get(f"/tests/{body['test_uuids'][0]}", headers=h).json()
+    assert first["type"] == "response"
+    assert first["config"]["evaluation"] == {"type": "response"}
+    # config.history is the trace's `input` verbatim.
+    assert first["config"]["history"] == _payload(agent_id, mid_b)["input"]
+
+    # Every created test carries the evaluator, not just the first.
+    for test_uuid in body["test_uuids"]:
+        linked = get_evaluators_for_test(test_uuid)
+        assert [e["uuid"] for e in linked] == [evaluator["uuid"]], test_uuid
+
+    # Each test is linked to the agent that produced its trace.
+    agent_test_uuids = {t["uuid"] for t in get_tests_for_agent(agent_id)}
+    assert agent_test_uuids == set(body["test_uuids"])
+
+    # Everything wired up, so there is nothing to warn about.
+    assert body.get("warnings") is None
+
+
+def test_convert_tool_call_captures_recorded_calls(client):
+    h, agent_id = _signup_with_agent(client)
+    payload = _payload(agent_id, _mid())
+    trace = _post_trace(client, h, payload)
+
+    res = _convert(client, h, trace_ids=[trace["uuid"]], type="tool_call")
+    assert res.status_code == 200, res.text
+    created = client.get(f"/tests/{res.json()['test_uuids'][0]}", headers=h).json()
+    assert created["type"] == "tool_call"
+    # config.history is the trace's `input` verbatim.
+    assert created["config"]["history"] == payload["input"]
+    assert created["config"]["evaluation"] == {
+        "type": "tool_call",
+        "tool_calls": [
+            {
+                "tool": "get_schedule",
+                "arguments": {"child_age_weeks": 14},
+                "accept_any_arguments": False,
+            }
+        ],
+    }
+    # No evaluators are needed or linked for a tool_call conversion.
+    assert created["evaluators"] == []
+
+
+def test_convert_tool_call_with_accept_any_arguments(client):
+    h, agent_id = _signup_with_agent(client)
+    trace = _post_trace(client, h, _payload(agent_id, _mid()))
+
+    res = _convert(
+        client,
+        h,
+        trace_ids=[trace["uuid"]],
+        type="tool_call",
+        accept_any_arguments=True,
+    )
+    assert res.status_code == 200, res.text
+    created = client.get(f"/tests/{res.json()['test_uuids'][0]}", headers=h).json()
+    call = created["config"]["evaluation"]["tool_calls"][0]
+    assert call["accept_any_arguments"] is True
+    assert call["arguments"] == {"child_age_weeks": 14}
+
+
+def test_convert_names_a_trace_without_a_message_id_by_its_uuid(client):
+    h, agent_id = _signup_with_agent(client)
+    body = _payload(agent_id, _mid())
+    del body["message_id"]
+    trace = _post_trace(client, h, body)
+
+    res = _convert(client, h, trace_ids=[trace["uuid"]], type="tool_call")
+    assert res.status_code == 200, res.text
+    created = client.get(f"/tests/{res.json()['test_uuids'][0]}", headers=h).json()
+    assert created["name"] == trace["uuid"]
+
+
+def test_convert_suffixes_colliding_test_names(client):
+    h, agent_id = _signup_with_agent(client)
+    mid = _mid()
+    trace = _post_trace(client, h, _payload(agent_id, mid))
+    existing = client.post(
+        "/tests", json={"name": mid, "type": "response", "config": {}}, headers=h
+    )
+    assert existing.status_code == 200, existing.text
+
+    for expected in (f"{mid} (2)", f"{mid} (3)"):
+        res = _convert(client, h, trace_ids=[trace["uuid"]], type="tool_call")
+        assert res.status_code == 200, res.text
+        created = client.get(f"/tests/{res.json()['test_uuids'][0]}", headers=h).json()
+        assert created["name"] == expected
+
+    assert sorted(_test_names(client, h)) == sorted(
+        [mid, f"{mid} (2)", f"{mid} (3)"]
+    )
+
+
+def test_convert_suffixes_collisions_within_one_batch(client):
+    h, agent_id = _signup_with_agent(client)
+    mid = _mid()
+    first = _post_trace(client, h, _payload(agent_id, mid))
+    second = _post_trace(client, h, _payload(agent_id, mid))
+
+    res = _convert(
+        client, h, trace_ids=[first["uuid"], second["uuid"]], type="tool_call"
+    )
+    assert res.status_code == 200, res.text
+    assert sorted(_test_names(client, h)) == sorted([mid, f"{mid} (2)"])
+
+
+def test_convert_response_requires_evaluators(client):
+    h, agent_id = _signup_with_agent(client)
+    trace = _post_trace(client, h, _payload(agent_id, _mid()))
+
+    for body in (
+        {"trace_ids": [trace["uuid"]], "type": "response"},
+        {"trace_ids": [trace["uuid"]], "type": "response", "evaluators": []},
+    ):
+        res = client.post("/traces/convert-to-tests", json=body, headers=h)
+        assert res.status_code == 400, res.text
+        assert "evaluator" in res.json()["detail"]
+    assert client.get("/tests", headers=h).json()["total"] == 0
+
+
+def test_convert_rejects_an_evaluator_with_variables(client):
+    h, agent_id = _signup_with_agent(client)
+    evaluator = _create_evaluator(
+        client, h, variables=[{"name": "criteria", "description": "What to judge"}]
+    )
+    trace = _post_trace(client, h, _payload(agent_id, _mid()))
+
+    res = _convert(
+        client,
+        h,
+        trace_ids=[trace["uuid"]],
+        type="response",
+        evaluators=[evaluator["uuid"]],
+    )
+    assert res.status_code == 400, res.text
+    detail = res.json()["detail"]
+    assert set(detail) == {"error", "evaluators"}
+    assert len(detail["evaluators"]) == 1
+    message = detail["evaluators"][0]
+    # The parenthesised list names the actual variable, and the static tail
+    # also contains the word "criteria", so match the parenthesised form.
+    assert evaluator["name"] in message and "(criteria)" in message
+    assert client.get("/tests", headers=h).json()["total"] == 0
+
+
+def test_convert_rejects_an_evaluator_the_workspace_cannot_see(client):
+    h, agent_id = _signup_with_agent(client)
+    other = _signup(client)
+    theirs = _create_evaluator(client, other)
+    trace = _post_trace(client, h, _payload(agent_id, _mid()))
+
+    res = _convert(
+        client,
+        h,
+        trace_ids=[trace["uuid"]],
+        type="response",
+        evaluators=[theirs["uuid"]],
+    )
+    assert res.status_code == 404, res.text
+    # The 404 names the evaluator, so a trace-not-found 404 cannot pass instead.
+    assert res.json()["detail"] == f"Evaluator {theirs['uuid']} not found"
+    assert client.get("/tests", headers=h).json()["total"] == 0
+
+
+def test_convert_rejects_a_non_llm_evaluator(client):
+    h, agent_id = _signup_with_agent(client)
+    evaluator = _create_evaluator(client, h, evaluator_type="conversation")
+    trace = _post_trace(client, h, _payload(agent_id, _mid()))
+
+    res = _convert(
+        client,
+        h,
+        trace_ids=[trace["uuid"]],
+        type="response",
+        evaluators=[evaluator["uuid"]],
+    )
+    assert res.status_code == 400, res.text
+    assert res.json()["detail"] == (
+        f"Evaluator {evaluator['uuid']} has evaluator_type='conversation'. "
+        "Tests of type 'response' only accept 'llm' evaluators."
+    )
+    assert client.get("/tests", headers=h).json()["total"] == 0
+
+
+def test_convert_reports_traces_it_could_not_find(client):
+    h, agent_id = _signup_with_agent(client)
+    live = _post_trace(client, h, _payload(agent_id, _mid()))
+    deleted = _post_trace(client, h, _payload(agent_id, _mid()))
+    client.post(
+        "/traces/bulk-delete", json={"trace_ids": [deleted["uuid"]]}, headers=h
+    )
+    unknown = "00000000-0000-4000-8000-000000000009"
+    other_h, other_agent_id = _signup_with_agent(client)
+    theirs = _post_trace(client, other_h, _payload(other_agent_id, _mid()))
+
+    res = _convert(
+        client,
+        h,
+        trace_ids=[live["uuid"], deleted["uuid"], unknown, theirs["uuid"]],
+        type="tool_call",
+    )
+    assert res.status_code == 404, res.text
+    detail = res.json()["detail"]
+    assert set(detail) == {"error", "trace_ids"}
+    assert detail["trace_ids"] == [deleted["uuid"], unknown, theirs["uuid"]]
+    assert client.get("/tests", headers=h).json()["total"] == 0
+
+
+def test_convert_rejects_another_workspaces_traces(client):
+    h, agent_id = _signup_with_agent(client)
+    mine = _post_trace(client, h, _payload(agent_id, _mid()))
+    other = _signup(client)
+
+    res = _convert(client, other, trace_ids=[mine["uuid"]], type="tool_call")
+    assert res.status_code == 404, res.text
+    assert res.json()["detail"]["trace_ids"] == [mine["uuid"]]
+    assert client.get("/tests", headers=other).json()["total"] == 0
+    assert client.get("/tests", headers=h).json()["total"] == 0
+
+
+def test_convert_tool_call_requires_recorded_tool_calls(client):
+    h, agent_id = _signup_with_agent(client)
+    with_calls = _post_trace(client, h, _payload(agent_id, _mid()))
+    without = _post_trace(
+        client, h, _payload(agent_id, _mid(), output={"response": "just text"})
+    )
+
+    res = _convert(
+        client, h, trace_ids=[with_calls["uuid"], without["uuid"]], type="tool_call"
+    )
+    assert res.status_code == 400, res.text
+    detail = res.json()["detail"]
+    assert set(detail) == {"error", "trace_ids"}
+    assert detail["trace_ids"] == [without["uuid"]]
+    assert client.get("/tests", headers=h).json()["total"] == 0
+
+
+def test_convert_dedupes_repeated_trace_ids(client):
+    h, agent_id = _signup_with_agent(client)
+    trace = _post_trace(client, h, _payload(agent_id, _mid()))
+
+    res = _convert(
+        client, h, trace_ids=[trace["uuid"], trace["uuid"]], type="tool_call"
+    )
+    assert res.status_code == 200, res.text
+    assert res.json()["created"] == 1
+    assert client.get("/tests", headers=h).json()["total"] == 1
+
+
+def test_convert_rejects_too_many_traces(client):
+    from routers.traces import MAX_CONVERT_TRACES
+
+    h, agent_id = _signup_with_agent(client)
+    trace = _post_trace(client, h, _payload(agent_id, _mid()))
+
+    over = _convert(
+        client,
+        h,
+        trace_ids=[trace["uuid"]] * (MAX_CONVERT_TRACES + 1),
+        type="tool_call",
+    )
+    assert over.status_code == 422, over.text
+    assert client.post(
+        "/traces/convert-to-tests", json={"trace_ids": [], "type": "tool_call"},
+        headers=h,
+    ).status_code == 422
+    assert client.get("/tests", headers=h).json()["total"] == 0
+
+
+def test_convert_rejects_an_unknown_key(client):
+    h, agent_id = _signup_with_agent(client)
+    trace = _post_trace(client, h, _payload(agent_id, _mid()))
+
+    res = client.post(
+        "/traces/convert-to-tests",
+        json={"trace_ids": [trace["uuid"]], "type": "tool_call", "evaluator": []},
+        headers=h,
+    )
+    assert res.status_code == 422, res.text
+    assert client.get("/tests", headers=h).json()["total"] == 0
+
+
+def test_convert_still_creates_the_test_when_the_agent_is_gone(client):
+    from db import get_tests_for_agent
+
+    h, agent_id = _signup_with_agent(client)
+    trace = _post_trace(client, h, _payload(agent_id, _mid()))
+    assert client.delete(f"/agents/{agent_id}", headers=h).status_code == 200
+
+    res = _convert(client, h, trace_ids=[trace["uuid"]], type="tool_call")
+    assert res.status_code == 200, res.text
+    body = res.json()
+    assert body["created"] == 1
+    assert client.get(f"/tests/{body['test_uuids'][0]}", headers=h).status_code == 200
+    assert get_tests_for_agent(agent_id) == []
+    # The response says what was created but not wired up.
+    assert body["warnings"] == [
+        "1 of 1 tests were not linked to an agent, "
+        "so they will not appear on any agent's test list"
+    ]
+
+
+def test_convert_rejects_a_malformed_evaluator_id(client):
+    h, agent_id = _signup_with_agent(client)
+    trace = _post_trace(client, h, _payload(agent_id, _mid()))
+
+    res = _convert(
+        client, h, trace_ids=[trace["uuid"]], type="response", evaluators=["nope"]
+    )
+    assert res.status_code == 422, res.text
+    assert client.get("/tests", headers=h).json()["total"] == 0
+
+
+def test_convert_tool_call_rejects_evaluators(client):
+    """A tool_call run only diffs the recorded calls, so a linked evaluator would
+    never judge anything. Refuse it instead of storing a judge that never runs."""
+    h, agent_id = _signup_with_agent(client)
+    evaluator = _create_evaluator(client, h)
+    trace = _post_trace(client, h, _payload(agent_id, _mid()))
+
+    res = _convert(
+        client,
+        h,
+        trace_ids=[trace["uuid"]],
+        type="tool_call",
+        evaluators=[evaluator["uuid"]],
+    )
+    assert res.status_code == 400, res.text
+    assert res.json()["detail"] == (
+        "tool_call tests compare the recorded tool calls and cannot take evaluators"
+    )
+    assert client.get("/tests", headers=h).json()["total"] == 0
+
+
+def test_convert_rejects_an_evaluator_with_no_live_version(client):
+    from db import get_db_connection
+
+    h, agent_id = _signup_with_agent(client)
+    evaluator = _create_evaluator(client, h)
+    with get_db_connection() as conn:
+        conn.execute(
+            "UPDATE evaluators SET live_version_id = NULL WHERE uuid = ?",
+            (evaluator["uuid"],),
+        )
+        conn.commit()
+    trace = _post_trace(client, h, _payload(agent_id, _mid()))
+
+    res = _convert(
+        client,
+        h,
+        trace_ids=[trace["uuid"]],
+        type="response",
+        evaluators=[evaluator["uuid"]],
+    )
+    assert res.status_code == 400, res.text
+    problems = res.json()["detail"]["evaluators"]
+    assert problems == [f'Evaluator "{evaluator["name"]}" has no live version to run.']
+    assert client.get("/tests", headers=h).json()["total"] == 0
+
+
+def test_convert_dedupes_repeated_evaluator_ids(client):
+    from db import get_evaluators_for_test
+
+    h, agent_id = _signup_with_agent(client)
+    evaluator = _create_evaluator(client, h)
+    trace = _post_trace(client, h, _payload(agent_id, _mid()))
+
+    res = _convert(
+        client,
+        h,
+        trace_ids=[trace["uuid"]],
+        type="response",
+        evaluators=[evaluator["uuid"], evaluator["uuid"]],
+    )
+    assert res.status_code == 200, res.text
+    linked = get_evaluators_for_test(res.json()["test_uuids"][0])
+    assert [e["uuid"] for e in linked] == [evaluator["uuid"]]
+
+
+def test_convert_links_each_test_to_its_own_traces_agent(client):
+    from db import get_tests_for_agent
+
+    h, agent_a = _signup_with_agent(client)
+    agent_b = _create_agent(client, h)["uuid"]
+    mid_a, mid_b = _mid(), _mid()
+    trace_a = _post_trace(client, h, _payload(agent_a, mid_a))
+    trace_b = _post_trace(client, h, _payload(agent_b, mid_b))
+
+    res = _convert(
+        client, h, trace_ids=[trace_a["uuid"], trace_b["uuid"]], type="tool_call"
+    )
+    assert res.status_code == 200, res.text
+    body = res.json()
+    assert body["created"] == 2
+    assert body.get("warnings") is None
+
+    names = {
+        client.get(f"/tests/{test_uuid}", headers=h).json()["name"]: test_uuid
+        for test_uuid in body["test_uuids"]
+    }
+    assert set(names) == {mid_a, mid_b}
+    assert [t["uuid"] for t in get_tests_for_agent(agent_a)] == [names[mid_a]]
+    assert [t["uuid"] for t in get_tests_for_agent(agent_b)] == [names[mid_b]]
+
+
+def test_convert_tool_call_captures_every_recorded_call(client):
+    """A turn can record several calls, and one may have carried no arguments."""
+    h, agent_id = _signup_with_agent(client)
+    tool_calls = [
+        {"tool": "check_availability", "arguments": {"date": "Thursday"}},
+        {"tool": "list_clinics"},
+        {"tool": "book_appointment", "arguments": {"time_slot": "4:30 PM"}},
+    ]
+    trace = _post_trace(
+        client,
+        h,
+        _payload(agent_id, _mid(), output={"response": "Booked.", "tool_calls": tool_calls}),
+    )
+
+    res = _convert(client, h, trace_ids=[trace["uuid"]], type="tool_call")
+    assert res.status_code == 200, res.text
+    created = client.get(f"/tests/{res.json()['test_uuids'][0]}", headers=h).json()
+    assert created["config"]["evaluation"] == {
+        "type": "tool_call",
+        "tool_calls": [
+            {
+                "tool": "check_availability",
+                "arguments": {"date": "Thursday"},
+                "accept_any_arguments": False,
+            },
+            {
+                "tool": "list_clinics",
+                "arguments": None,
+                "accept_any_arguments": False,
+            },
+            {
+                "tool": "book_appointment",
+                "arguments": {"time_slot": "4:30 PM"},
+                "accept_any_arguments": False,
+            },
+        ],
+    }
+
+
+def test_convert_warns_when_evaluators_could_not_be_linked(client, monkeypatch):
+    """The tests are already committed, so a failed evaluator link must warn
+    rather than 500 and lose them."""
+    from db import get_evaluators_for_test, get_tests_for_agent
+    from routers import traces as traces_mod
+
+    h, agent_id = _signup_with_agent(client)
+    evaluator = _create_evaluator(client, h)
+    trace_a = _post_trace(client, h, _payload(agent_id, _mid()))
+    trace_b = _post_trace(client, h, _payload(agent_id, _mid()))
+
+    def _boom(*args, **kwargs):
+        raise RuntimeError("link failed")
+
+    monkeypatch.setattr(traces_mod, "set_test_evaluators", _boom)
+    # Deleting the agent makes the agent link fail too, so both warnings appear.
+    assert client.delete(f"/agents/{agent_id}", headers=h).status_code == 200
+
+    res = _convert(
+        client,
+        h,
+        trace_ids=[trace_a["uuid"], trace_b["uuid"]],
+        type="response",
+        evaluators=[evaluator["uuid"]],
+    )
+    assert res.status_code == 200, res.text
+    body = res.json()
+    assert body["created"] == 2
+    for test_uuid in body["test_uuids"]:
+        assert client.get(f"/tests/{test_uuid}", headers=h).status_code == 200
+        assert get_evaluators_for_test(test_uuid) == []
+    assert get_tests_for_agent(agent_id) == []
+    assert body["warnings"] == [
+        "2 of 2 tests were created without evaluators "
+        "and will not run until you attach one",
+        "2 of 2 tests were not linked to an agent, "
+        "so they will not appear on any agent's test list",
+    ]
+
+
+def test_convert_response_accepts_a_trace_with_no_tool_calls(client):
+    h, agent_id = _signup_with_agent(client)
+    evaluator = _create_evaluator(client, h)
+    payload = _payload(agent_id, _mid(), output={"response": "just text"})
+    trace = _post_trace(client, h, payload)
+
+    res = _convert(
+        client,
+        h,
+        trace_ids=[trace["uuid"]],
+        type="response",
+        evaluators=[evaluator["uuid"]],
+    )
+    assert res.status_code == 200, res.text
+    created = client.get(f"/tests/{res.json()['test_uuids'][0]}", headers=h).json()
+    assert created["type"] == "response"
+    assert created["config"]["evaluation"] == {"type": "response"}
+    assert created["config"]["history"] == payload["input"]

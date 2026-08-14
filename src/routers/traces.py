@@ -1,4 +1,4 @@
-"""Production trace ingestion.
+"""Production trace ingestion and curation into tests.
 
 Customer backends POST one trace per agent turn: the conversation history as
 `input` plus the produced `output`. Rows persist as a normal `traces` table in
@@ -6,31 +6,46 @@ pense.db.
 
 The stored shape deliberately mirrors test creation. `input` is
 `tests.config.history` verbatim, and `output.tool_calls` matches the
-expected-tool-call shape, so the deferred "turn traces into tests" step will
-need no transformation. That endpoint is not here yet. It is parked on branch
-`traces-convert-to-tests-parked`.
+expected-tool-call shape, so `POST /traces/convert-to-tests` needs no
+transformation.
 
 New contract needs go into `metadata` keys, not new top-level fields.
 Customers integrate against this shape, and every field deepens the eventual
 OTel-gateway migration.
 """
 
+import logging
 import os
-from typing import Annotated, Any, Dict, List, Optional
+from typing import Annotated, Any, Dict, List, Literal, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Path, Query
 from pydantic import BaseModel, ConfigDict, Field, StringConstraints, model_validator
 
 from auth_utils import OrgContext, get_current_org, get_org_jwt_or_api_key
 from db import (
+    add_test_to_agent,
+    bulk_create_tests,
     count_live_traces,
     create_trace,
+    get_agent,
+    get_all_tests_summary,
+    get_evaluator_versions_by_uuids,
+    get_evaluators_by_uuids,
     get_trace,
+    get_traces_by_uuids,
     list_traces,
+    set_test_evaluators,
     soft_delete_traces,
 )
 from org_scope import ensure_owned_agent
 from pagination import PaginatedResponse, PaginationParams, page_envelope
+
+# Reuse the tests router's validation so a converted test accepts exactly what
+# POST /tests does (evaluator visible to the workspace, evaluator_type matches).
+from routers.tests import EvaluatorRef, _validate_evaluators
+from utils import EXAMPLE_TEST_UUID, EvaluatorUuid
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/traces", tags=["traces"])
 
@@ -47,6 +62,10 @@ MAX_DELETE_IDS = 50_000
 # previews, so pages stay small. The shared PaginationParams allows a million,
 # which would load every trace in a full workspace into memory at once.
 MAX_LIST_LIMIT = 200
+
+# How many traces one conversion accepts. Each becomes a test row plus its
+# evaluator and agent links, all in one request.
+MAX_CONVERT_TRACES = 500
 
 MAX_INPUT_TURNS = 500
 MAX_TURN_CONTENT_CHARS = 50_000
@@ -382,6 +401,243 @@ async def bulk_delete_traces(
     """Soft-delete traces, freeing their capacity"""
     deleted = soft_delete_traces(ctx.org_uuid, trace_ids=payload.trace_ids)
     return {"deleted": deleted}
+
+
+_CONVERT_TYPE_DESCRIPTION = (
+    "What the created tests judge:\n\n"
+    "- `response`: re-run the agent on the trace's history and judge the fresh reply against the linked evaluators\n"
+    "- `tool_call`: re-run the agent and diff its tool calls against the ones the trace recorded"
+)
+
+
+class ConvertTracesToTestsRequest(BaseModel):
+    # Unknown keys must not be silently dropped: a misspelled `evaluators` would
+    # look like it linked judges when it linked none.
+    model_config = ConfigDict(extra="forbid")
+
+    trace_ids: List[TraceUuid] = Field(
+        min_length=1,
+        max_length=MAX_CONVERT_TRACES,
+        description="IDs of the traces to convert, one test per trace",
+    )
+    type: Literal["response", "tool_call"] = Field(
+        description=_CONVERT_TYPE_DESCRIPTION
+    )
+    evaluators: Optional[List[EvaluatorUuid]] = Field(
+        None,
+        description="IDs of the evaluators to link to every created test. **Required for `response`**, rejected for `tool_call`, which compares the recorded calls instead of judging. Each evaluator must judge on its prompt alone, with no `{{placeholder}}` variables to fill in",
+    )
+    accept_any_arguments: bool = Field(
+        False,
+        description="For `tool_call`, match only the tool name and ignore the arguments the trace recorded",
+    )
+
+
+class ConvertTracesToTestsResponse(BaseModel):
+    created: int = Field(description="Number of tests created")
+    test_uuids: List[str] = Field(
+        description="IDs of the created tests, in the order their traces were given",
+        examples=[[EXAMPLE_TEST_UUID]],
+    )
+    warnings: Optional[List[str]] = Field(
+        None,
+        description="What was created but not fully wired up, such as a test whose agent no longer exists",
+    )
+
+
+def _resolve_evaluators(
+    evaluator_uuids: List[str], org_uuid: str
+) -> List[Dict[str, Any]]:
+    """Validate as POST /tests does, then reject any evaluator whose prompt needs
+    variables filled in. A conversion has no per-test place to supply them, and a
+    half-rendered prompt would reach the judge with `{{placeholders}}` intact."""
+    refs = _validate_evaluators(
+        [EvaluatorRef(evaluator_uuid=u) for u in evaluator_uuids], org_uuid, "response"
+    )
+    evaluators = get_evaluators_by_uuids(evaluator_uuids)
+    live_ids = {
+        u: (evaluators.get(u) or {}).get("live_version_id") for u in evaluator_uuids
+    }
+    versions = get_evaluator_versions_by_uuids([v for v in live_ids.values() if v])
+
+    problems: List[str] = []
+    for evaluator_uuid in evaluator_uuids:
+        # Deleted between the two reads: report it rather than raising KeyError.
+        name = (evaluators.get(evaluator_uuid) or {}).get("name", evaluator_uuid)
+        version = versions.get(live_ids[evaluator_uuid] or "")
+        if not version:
+            problems.append(f'Evaluator "{name}" has no live version to run.')
+            continue
+        variables = version.get("variables") or []
+        if variables:
+            declared = ", ".join(v["name"] for v in variables)
+            problems.append(
+                f'Evaluator "{name}" defines variables ({declared}). Converting '
+                "traces cannot fill them in. Use an evaluator with no variables, "
+                "or add a version with the criteria written into the prompt."
+            )
+    if problems:
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "error": "Some evaluators cannot be used for converted tests",
+                "evaluators": problems,
+            },
+        )
+    return refs
+
+
+def _dedupe_test_names(candidates: List[str], taken: set) -> List[str]:
+    """Make each candidate unique against `taken` (the workspace's existing test
+    names, mutated as names are claimed) by appending ` (2)`, ` (3)`, … so
+    converting the same traces twice creates new tests instead of failing."""
+    out: List[str] = []
+    for base in candidates:
+        name = base
+        n = 2
+        while name in taken:
+            name = f"{base} ({n})"
+            n += 1
+        taken.add(name)
+        out.append(name)
+    return out
+
+
+@router.post(
+    "/convert-to-tests",
+    response_model=ConvertTracesToTestsResponse,
+    summary="Convert traces to tests",
+)
+def convert_traces_to_tests(
+    payload: ConvertTracesToTestsRequest, ctx: OrgContext = Depends(get_current_org)
+):
+    """Turn production traces into regression tests you can run and benchmark"""
+    # A converted response test re-runs the agent and judges the fresh reply, so
+    # it has no fallback judge. A tool_call run only diffs the recorded calls
+    # (see the row-type skip in agent_tests._build_calibrate_config), so an
+    # evaluator attached here would never judge anything: refuse it rather than
+    # store a judge the user never sees run.
+    if payload.type == "response" and not payload.evaluators:
+        raise HTTPException(
+            status_code=400,
+            detail="response tests require at least one evaluator",
+        )
+    if payload.type == "tool_call" and payload.evaluators:
+        raise HTTPException(
+            status_code=400,
+            detail="tool_call tests compare the recorded tool calls and cannot take evaluators",
+        )
+    resolved_refs: List[Dict[str, Any]] = []
+    if payload.evaluators:
+        resolved_refs = _resolve_evaluators(
+            list(dict.fromkeys(payload.evaluators)), ctx.org_uuid
+        )
+
+    requested = list(dict.fromkeys(payload.trace_ids))
+    traces = get_traces_by_uuids(ctx.org_uuid, requested)
+    found = {trace["uuid"] for trace in traces}
+    missing = [trace_uuid for trace_uuid in requested if trace_uuid not in found]
+    if missing:
+        raise HTTPException(
+            status_code=404,
+            detail={"error": "Some traces were not found", "trace_ids": missing},
+        )
+
+    if payload.type == "tool_call":
+        no_calls = [
+            trace["uuid"]
+            for trace in traces
+            if not (trace["output"] or {}).get("tool_calls")
+        ]
+        if no_calls:
+            raise HTTPException(
+                status_code=400,
+                detail={
+                    "error": "Some traces recorded no tool calls to assert",
+                    "trace_ids": no_calls,
+                },
+            )
+
+    existing_names = {t["name"] for t in get_all_tests_summary(org_uuid=ctx.org_uuid)}
+    names = _dedupe_test_names(
+        [trace["message_id"] or trace["uuid"] for trace in traces], existing_names
+    )
+
+    db_tests: List[Dict[str, Any]] = []
+    for trace, name in zip(traces, names):
+        evaluation: Dict[str, Any] = {"type": payload.type}
+        if payload.type == "tool_call":
+            evaluation["tool_calls"] = [
+                {
+                    "tool": call["tool"],
+                    "arguments": call.get("arguments"),
+                    "accept_any_arguments": payload.accept_any_arguments,
+                }
+                for call in trace["output"]["tool_calls"]
+            ]
+        # `input` is already OpenAI history. The recorded reply is dropped for a
+        # response test (the agent is re-run) and captured as the assertion for
+        # a tool_call test above.
+        db_tests.append(
+            {
+                "name": name,
+                "type": payload.type,
+                "config": {"history": trace["input"], "evaluation": evaluation},
+            }
+        )
+
+    try:
+        test_uuids = bulk_create_tests(
+            tests=db_tests, org_uuid=ctx.org_uuid, user_id=ctx.user_id
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+    # The tests are already committed, so a failure here must not 500 and lose
+    # them: report what did not get wired up and let the user fix it in place.
+    warnings: List[str] = []
+    unjudged = 0
+    if resolved_refs:
+        for test_uuid in test_uuids:
+            try:
+                set_test_evaluators(test_uuid, resolved_refs)
+            except Exception as e:
+                unjudged += 1
+                logger.warning(f"Failed to link evaluators to test {test_uuid}: {e}")
+    if unjudged:
+        warnings.append(
+            f"{unjudged} of {len(test_uuids)} tests were created without evaluators "
+            "and will not run until you attach one"
+        )
+
+    # Each test links to the agent that produced its trace. One agent deleted
+    # since ingest must not fail a batch the user cannot retry.
+    linkable: Dict[str, bool] = {}
+    unlinked = 0
+    for trace, test_uuid in zip(traces, test_uuids):
+        agent_id = trace["agent_id"]
+        if agent_id not in linkable:
+            agent = get_agent(agent_id)
+            linkable[agent_id] = bool(agent and agent["org_uuid"] == ctx.org_uuid)
+        if not linkable[agent_id]:
+            unlinked += 1
+            continue
+        try:
+            add_test_to_agent(agent_id, test_uuid)
+        except Exception as e:
+            unlinked += 1
+            logger.warning(f"Failed to link test {test_uuid} to agent {agent_id}: {e}")
+    if unlinked:
+        warnings.append(
+            f"{unlinked} of {len(test_uuids)} tests were not linked to an agent, "
+            "so they will not appear on any agent's test list"
+        )
+
+    return {
+        "created": len(test_uuids),
+        "test_uuids": test_uuids,
+        "warnings": warnings or None,
+    }
 
 
 @router.get("/{trace_uuid}", response_model=TraceResponse, summary="Get trace")
