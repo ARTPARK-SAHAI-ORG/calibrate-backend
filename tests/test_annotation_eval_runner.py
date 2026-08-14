@@ -928,3 +928,137 @@ def test_resume_annotation_eval_job_clears_runs():
             }
         )
         sj.assert_called_once()
+
+
+# ---------------------------------------------------------------------------
+# Streaming: results are stored as calibrate writes them
+# ---------------------------------------------------------------------------
+
+
+def test_read_results_csv_drops_truncated_tail_row(tmp_path):
+    """A read that lands mid-append must not yield a half-written row."""
+    (tmp_path / "results.csv").write_text(
+        "id,gt,pred,Safety,Safety_reasoning\n"
+        "i1,a,a,1,ok\n"
+        "i2,b,b,0"  # no trailing newline: still being written
+    )
+    rows = runner._read_results_csv(tmp_path)
+    assert [r["id"] for r in rows] == ["i1"]
+
+
+def test_read_results_csv_keeps_blank_cells(tmp_path):
+    """A complete row with empty cells is not mistaken for a truncated one."""
+    (tmp_path / "results.csv").write_text(
+        "id,gt,pred,Safety,Safety_reasoning\ni1,a,a,,\n"
+    )
+    rows = runner._read_results_csv(tmp_path)
+    assert len(rows) == 1 and rows[0]["Safety"] == ""
+
+
+def test_parse_results_simulation_drops_truncated_tail_row(tmp_path):
+    (tmp_path / "dataset_map.json").write_text(
+        json.dumps({"row_1": {"index": 0}})
+    )
+    d = tmp_path / "row_1"
+    d.mkdir()
+    (d / "evaluation_results.csv").write_text(
+        "name,type,value,reasoning\nSafety,binary,1,ok\nSafety,binary,0"
+    )
+    runs = runner._parse_results_simulation(
+        tmp_path, [_ev_resolved()], "job-1", items=[{"uuid": "i1"}]
+    )
+    assert len(runs) == 1 and runs[0]["value"]["value"] is True
+
+
+def _run_row(item_id, evaluator_id="ev-1", status="completed"):
+    return {
+        "job_id": "job-1",
+        "item_id": item_id,
+        "evaluator_id": evaluator_id,
+        "evaluator_version_id": "ver-1",
+        "value": {"value": True} if status == "completed" else None,
+        "status": status,
+    }
+
+
+def test_store_scored_runs_skips_already_stored():
+    seen = set()
+    with patch.object(runner, "create_evaluator_runs") as ins:
+        assert runner._store_scored_runs([_run_row("i1"), _run_row("i2")], seen) == 2
+        # Same parse again (next tick) stores nothing.
+        assert runner._store_scored_runs([_run_row("i1"), _run_row("i2")], seen) == 0
+        assert ins.call_count == 1
+    assert seen == {("i1", "ev-1"), ("i2", "ev-1")}
+
+
+def test_store_scored_runs_dedupes_within_one_batch():
+    seen = set()
+    with patch.object(runner, "create_evaluator_runs") as ins:
+        assert runner._store_scored_runs([_run_row("i1"), _run_row("i1")], seen) == 1
+        assert len(ins.call_args[0][0]) == 1
+
+
+def test_store_scored_runs_holds_back_unscored_rows():
+    """Mid-run an unscored cell means 'not judged yet', not 'judge failed'."""
+    seen = set()
+    with patch.object(runner, "create_evaluator_runs") as ins:
+        assert (
+            runner._store_scored_runs(
+                [_run_row("i1"), _run_row("i2", status="failed")], seen
+            )
+            == 1
+        )
+        assert [r["item_id"] for r in ins.call_args[0][0]] == ["i1"]
+    assert ("i2", "ev-1") not in seen
+
+
+def test_store_scored_runs_retries_after_a_failed_write():
+    """A write that blew up must not leave its rows marked as stored."""
+    seen = set()
+    with patch.object(runner, "create_evaluator_runs", side_effect=RuntimeError("db")):
+        with pytest.raises(RuntimeError):
+            runner._store_scored_runs([_run_row("i1")], seen)
+    assert seen == set()
+    with patch.object(runner, "create_evaluator_runs") as ins:
+        assert runner._store_scored_runs([_run_row("i1")], seen) == 1
+        assert ins.call_count == 1
+
+
+def test_discard_partial_runs_swallows_db_errors():
+    with patch.object(
+        runner, "clear_evaluator_runs_for_job", side_effect=RuntimeError("db")
+    ):
+        runner._discard_partial_runs("job-1")  # must not raise
+
+
+def test_run_calibrate_eval_only_flushes_on_disk_growth(tmp_path):
+    """The polling loop calls back whenever calibrate wrote new bytes."""
+    calls = []
+    with patch.object(runner, "update_job"), patch.object(
+        runner, "get_job", return_value={"updated_at": None}
+    ):
+        rc, _, _ = runner._run_calibrate_eval_only(
+            ["python3", "-c", "import time; open('grew.txt','w').write('x'); time.sleep(0.3)"],
+            cwd=tmp_path,
+            log_dir=tmp_path,
+            on_progress=lambda: calls.append(1),
+            heartbeat_seconds=0.1,
+            job_uuid="job-1",
+        )
+    assert rc == 0
+    assert calls
+
+
+def test_run_calibrate_eval_only_survives_a_failing_flush(tmp_path):
+    with patch.object(runner, "update_job"), patch.object(
+        runner, "get_job", return_value={"updated_at": None}
+    ):
+        rc, _, _ = runner._run_calibrate_eval_only(
+            ["python3", "-c", "import time; open('grew.txt','w').write('x'); time.sleep(0.3)"],
+            cwd=tmp_path,
+            log_dir=tmp_path,
+            on_progress=MagicMock(side_effect=RuntimeError("boom")),
+            heartbeat_seconds=0.1,
+            job_uuid="job-1",
+        )
+    assert rc == 0

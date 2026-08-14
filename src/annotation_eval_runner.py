@@ -31,6 +31,7 @@ def _utcnow_str() -> str:
     return datetime.datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
 
 from db import (
+    clear_evaluator_runs_for_job,
     create_evaluator_runs,
     get_annotation_items_for_task,
     get_annotation_task,
@@ -122,16 +123,27 @@ logger = logging.getLogger(__name__)
 
 
 def _read_results_csv(output_dir: Path) -> Optional[List[dict]]:
-    """One row per dataset entry: id, gt, pred, wer, <evaluator>, <evaluator>_reasoning, ..."""
+    """One row per dataset entry: id, gt, pred, wer, <evaluator>, <evaluator>_reasoning, ...
+
+    calibrate appends to this file while the run is in flight, so a read can
+    land mid-line. A cut that drops whole fields leaves them `None` (a
+    present-but-empty field is `""`) and only the last row can be cut, so
+    that row is dropped. A cut *inside* the last column still reads as a
+    complete row with truncated text — mid-run output is provisional, which
+    is why `_run_job` rewrites the job's rows once the file is finished.
+    """
     p = output_dir / "results.csv"
     if not p.exists():
         return None
     try:
         with open(p, "r", encoding="utf-8") as f:
-            return [dict(row) for row in csv.DictReader(f)]
+            rows = [dict(row) for row in csv.DictReader(f)]
     except Exception as e:
         logger.warning(f"Failed to parse {p}: {e}")
         return None
+    if rows and any(v is None for v in rows[-1].values()):
+        rows.pop()
+    return rows
 
 
 def _read_metrics_json(output_dir: Path) -> Optional[dict]:
@@ -914,8 +926,12 @@ def _parse_results_simulation(
             continue
         try:
             with open(csv_path, "r", encoding="utf-8") as f:
-                reader = csv.DictReader(f)
-                for row in reader:
+                csv_rows = [dict(r) for r in csv.DictReader(f)]
+                # A final row missing fields was caught mid-append. See
+                # `_read_results_csv`.
+                if csv_rows and any(v is None for v in csv_rows[-1].values()):
+                    csv_rows.pop()
+                for row in csv_rows:
                     ev_name = row.get("name") or ""
                     ev = by_name.get(ev_name)
                     if not ev:
@@ -987,6 +1003,55 @@ def parse_results_for_task_type(
 # ---------------------------------------------------------------------------
 
 
+def _store_scored_runs(runs: List[Dict[str, Any]], seen: set) -> int:
+    """Store this job's scored runs that aren't stored yet, keyed by
+    `(item_id, evaluator_id)`. Returns how many were stored.
+
+    In-flight only. `evaluator_runs` has no uniqueness constraint and every
+    tick re-parses the whole file, so `seen` is all that stops one score
+    being stored once per tick; keys go in only after the write lands, so a
+    failed write retries next tick. Unscored rows are held back — mid-run an
+    empty cell means "not judged yet", not "the judge failed".
+    """
+    fresh: List[Dict[str, Any]] = []
+    batch: set = set()
+    for r in runs:
+        if r.get("status") != "completed":
+            continue
+        key = (r["item_id"], r["evaluator_id"])
+        if key in seen or key in batch:
+            continue
+        batch.add(key)
+        fresh.append(r)
+    if not fresh:
+        return 0
+    create_evaluator_runs(fresh)
+    seen.update((r["item_id"], r["evaluator_id"]) for r in fresh)
+    return len(fresh)
+
+
+def _discard_partial_runs(job_uuid: str) -> None:
+    """Drop whatever a failed run stored while it was in flight. Never raises
+    — the caller is already handling a failure.
+
+    The task-wide readers (`/summary` counts, agreement, the agreement trend)
+    do not filter on job status, so leaving these rows would fold a crashed
+    run's first N items into the task's numbers as a real result.
+    """
+    try:
+        dropped = clear_evaluator_runs_for_job(job_uuid)
+        if dropped:
+            logger.info(
+                f"[annotation-eval] job {job_uuid}: discarded {dropped} "
+                "in-flight result(s) after failure"
+            )
+    except Exception as e:
+        logger.warning(
+            f"[annotation-eval] could not discard in-flight results for "
+            f"{job_uuid}: {e}"
+        )
+
+
 class AnnotationEvalTimeoutError(RuntimeError):
     """Raised when the polling loop's `updated_at` watchdog fires. The outer
     handler treats this like any other failure (mark job FAILED, drain queue,
@@ -998,12 +1063,17 @@ def _run_calibrate_eval_only(
     cwd: Path,
     log_dir: Path,
     on_started: Optional[Any] = None,
+    on_progress: Optional[Any] = None,
     heartbeat_seconds: int = 2,
     job_uuid: Optional[str] = None,
     timeout_seconds: int = ANNOTATION_EVAL_TIMEOUT_SECONDS,
 ) -> Tuple[int, str, str]:
     """Spawn the calibrate subprocess; redirect stdout/stderr to disk to avoid
     pipe-buffer deadlocks; poll until done; return (returncode, stdout, stderr).
+
+    `on_progress` (if given) is called on every tick where the output dir
+    grew, so the caller can persist whatever results calibrate has written so
+    far. It must never raise; a failure there is logged and the run continues.
 
     If `job_uuid` is provided, each tick:
       1. Snapshots `log_dir` (the calibrate output dir) — file count and
@@ -1038,8 +1108,6 @@ def _run_calibrate_eval_only(
         last_snapshot: Tuple[int, int] = _output_dir_snapshot(log_dir)
         while proc.poll() is None:
             time.sleep(heartbeat_seconds)
-            if job_uuid is None:
-                continue
             # Heartbeat ONLY when calibrate has written new bytes since the
             # last tick. A subprocess that's hung (no disk activity) lets
             # `updated_at` age until the timeout window below kills it.
@@ -1047,15 +1115,25 @@ def _run_calibrate_eval_only(
                 current_snapshot = _output_dir_snapshot(log_dir)
                 if current_snapshot != last_snapshot:
                     last_snapshot = current_snapshot
-                    try:
-                        update_job(job_uuid)
-                    except Exception as e:
-                        # DB blip — log but don't fail the run; the timeout
-                        # check below catches sustained DB issues.
-                        logger.warning(
-                            f"[annotation-eval] heartbeat update_job failed "
-                            f"for {job_uuid}: {e}"
-                        )
+                    if on_progress is not None:
+                        try:
+                            on_progress()
+                        except Exception as e:
+                            logger.warning(
+                                f"[annotation-eval] progress flush failed: {e}"
+                            )
+                    if job_uuid is not None:
+                        try:
+                            update_job(job_uuid)
+                        except Exception as e:
+                            # DB blip — log but don't fail the run; the timeout
+                            # check below catches sustained DB issues.
+                            logger.warning(
+                                f"[annotation-eval] heartbeat update_job failed "
+                                f"for {job_uuid}: {e}"
+                            )
+            if job_uuid is None:
+                continue
             job = get_job(job_uuid)
             updated_at = job.get("updated_at") if job else None
             if updated_at and is_job_timed_out(
@@ -1265,11 +1343,40 @@ def _run_job(
                 )
                 logger.info(f"[annotation-eval] spawning: {' '.join(cmd)}")
 
+                # Store scores as calibrate writes them, so polling the run
+                # endpoint shows finished items while the rest are still
+                # judging.
+                stored_keys: set = set()
+
+                def _flush_partial_runs() -> None:
+                    # calibrate's config.json carries the authoritative column
+                    # name → evaluator uuid map; without it the parsers fall
+                    # back to matching on display name and can bind a score to
+                    # the wrong evaluator. Wait for it rather than store a guess.
+                    if not (output_dir / "config.json").exists():
+                        return
+                    fresh = _store_scored_runs(
+                        parse_results_for_task_type(
+                            task_type,
+                            output_dir,
+                            evaluators_resolved,
+                            job_uuid,
+                            items=items,
+                        ),
+                        stored_keys,
+                    )
+                    if fresh:
+                        logger.info(
+                            f"[annotation-eval] job {job_uuid}: stored {fresh} "
+                            "in-flight result(s)"
+                        )
+
                 rc, proc_stdout, proc_stderr = _run_calibrate_eval_only(
                     cmd,
                     cwd=tmp,
                     log_dir=output_dir,
                     on_started=lambda pid: _persist_pgid(job_uuid, pid),
+                    on_progress=_flush_partial_runs,
                     job_uuid=job_uuid,
                 )
                 if rc != 0:
@@ -1289,6 +1396,11 @@ def _run_job(
                     task_type, output_dir, evaluators_resolved, job_uuid, items=items
                 )
                 metrics = _read_metrics_json(output_dir)
+                # The finished files are the authority: anything stored in
+                # flight was read while calibrate was still appending, so its
+                # reasoning text may have been cut mid-write. Rewriting also
+                # picks up the unscored rows the in-flight path held back.
+                clear_evaluator_runs_for_job(job_uuid)
                 if runs_to_insert:
                     create_evaluator_runs(runs_to_insert)
 
@@ -1336,6 +1448,7 @@ def _run_job(
         cli_err = _extract_calibrate_error(
             getattr(e, "stdout", "") or "", getattr(e, "stderr", "") or ""
         )
+        _discard_partial_runs(job_uuid)
         details_patch = {"completed_at": _utcnow_str()}
         if partial_prefix:
             details_patch["s3_prefix"] = partial_prefix
@@ -1349,6 +1462,7 @@ def _run_job(
         traceback.print_exc()
         logger.exception(f"[annotation-eval] job {job_uuid} failed: {e}")
         capture_exception_to_sentry(e)
+        _discard_partial_runs(job_uuid)
         details_patch = {"completed_at": _utcnow_str()}
         if partial_prefix:
             details_patch["s3_prefix"] = partial_prefix
@@ -1433,8 +1547,6 @@ def resume_annotation_eval_job(job_row: Dict[str, Any]) -> None:
     to avoid duplicates, then dispatches via the standard queue starter so
     capacity rules are respected on resume.
     """
-    from db import clear_evaluator_runs_for_job
-
     job_uuid = job_row["uuid"]
     cleared = clear_evaluator_runs_for_job(job_uuid)
     if cleared:
