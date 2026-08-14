@@ -11,6 +11,7 @@ eventual OTel-gateway migration.
 """
 
 import logging
+import uuid
 from typing import Any, Dict, List, Literal, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Path, Query
@@ -138,15 +139,17 @@ class TraceIngest(BaseModel):
         max_length=36,
         description=_AGENT_ID_DESCRIPTION + ". Must be an agent in your workspace",
     )
-    message_id: str = Field(
+    message_id: Optional[str] = Field(
+        None,
         min_length=1,
         max_length=255,
-        description="Your ID for the last user message in `input`, unique within your workspace across all agents. Sending the same ID again returns the stored trace instead of creating a duplicate",
+        description="Your ID for the last user message in `input`, unique within your workspace across all agents. Sending the same ID again returns the stored trace instead of creating a duplicate. Omit to have one generated, which stores every call as a new trace",
     )
-    conversation_id: str = Field(
+    conversation_id: Optional[str] = Field(
+        None,
         min_length=1,
         max_length=255,
-        description="Your ID for the conversation this turn belongs to. Reuse `message_id` when there is no conversation to group by",
+        description="Your ID for the conversation this turn belongs to. Omit for a turn that stands alone, and it becomes its own conversation",
     )
     input: List[TraceTurn] = Field(
         min_length=1,
@@ -316,10 +319,13 @@ async def ingest_trace(
     """Store a production agent turn and its conversation history for later curation"""
     ensure_owned_agent(payload.agent_id, ctx.org_uuid)
     # Idempotency outranks the cap: a retry of an already-stored message_id
-    # must succeed even when the workspace is at its limit.
-    existing = get_trace_by_message_id(ctx.org_uuid, payload.message_id)
-    if existing:
-        return _ingest_response(existing, created=False)
+    # must succeed even when the workspace is at its limit. A caller that sends
+    # no message_id gets a generated one, so there is nothing to match against
+    # and every call stores a new trace.
+    if payload.message_id:
+        existing = get_trace_by_message_id(ctx.org_uuid, payload.message_id)
+        if existing:
+            return _ingest_response(existing, created=False)
 
     cap = get_max_traces_for_org(ctx.org_uuid)
     current = count_live_traces(ctx.org_uuid)
@@ -334,11 +340,16 @@ async def ingest_trace(
             },
         )
 
+    # A standalone turn is its own conversation, so the generated pair stays
+    # groupable by conversation_id like every other trace.
+    message_id = payload.message_id or str(uuid.uuid4())
+    conversation_id = payload.conversation_id or message_id
+
     row, created = create_trace(
         org_uuid=ctx.org_uuid,
         agent_id=payload.agent_id,
-        message_id=payload.message_id,
-        conversation_id=payload.conversation_id,
+        message_id=message_id,
+        conversation_id=conversation_id,
         input=[turn.model_dump(exclude_none=True) for turn in payload.input],
         output=payload.output.model_dump(exclude_none=True),
         metadata=(

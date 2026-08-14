@@ -226,6 +226,40 @@ def test_ingest_cap_returns_429_but_keeps_retries_idempotent(client, monkeypatch
     assert retry.json()["created"] is False
 
 
+def test_ingest_without_ids_generates_them(client):
+    """message_id and conversation_id are optional: one is generated, and a
+    standalone turn becomes its own conversation."""
+    h, agent_id = _signup_with_agent(client)
+    body = _payload(agent_id, _mid())
+    del body["message_id"]
+    del body["conversation_id"]
+
+    res = client.post("/traces", json=body, headers=h)
+    assert res.status_code == 200, res.text
+    first = res.json()
+    assert first["created"] is True
+    assert len(first["message_id"]) == 36
+    assert first["conversation_id"] == first["message_id"]
+
+    # Nothing to match on, so an identical call stores a second trace.
+    second = client.post("/traces", json=body, headers=h).json()
+    assert second["created"] is True
+    assert second["message_id"] != first["message_id"]
+    assert client.get("/traces", headers=h).json()["total"] == 2
+
+
+def test_ingest_accepts_a_message_id_without_a_conversation_id(client):
+    h, agent_id = _signup_with_agent(client)
+    mid = _mid()
+    body = _payload(agent_id, mid)
+    del body["conversation_id"]
+
+    created = client.post("/traces", json=body, headers=h).json()
+    assert created["conversation_id"] == mid
+    # An explicit message_id still de-dupes.
+    assert client.post("/traces", json=body, headers=h).json()["created"] is False
+
+
 def test_ingest_requires_a_known_agent(client):
     h, agent_id = _signup_with_agent(client)
 
