@@ -9587,13 +9587,34 @@ def _trace_iso(ts: Optional[str]) -> Optional[str]:
     return s if s.endswith("Z") else s + "Z"
 
 
-def _trace_filters(org_uuid: str, agent_id: Optional[str] = None) -> Tuple[str, List[Any]]:
+def _trace_filters(
+    org_uuid: str, agent_id: Optional[str] = None, q: Optional[str] = None
+) -> Tuple[str, List[Any]]:
     """Build the shared WHERE clause for every live-trace query."""
     where = ["org_uuid = ?", "deleted_at IS NULL"]
     params: List[Any] = [org_uuid]
     if agent_id:
         where.append("agent_id = ?")
         params.append(agent_id)
+    if q and q.strip():
+        needle = (
+            q.strip()
+            .lower()
+            .replace("\\", "\\\\")
+            .replace("%", "\\%")
+            .replace("_", "\\_")
+        )
+        needle = f"%{needle}%"
+        # Matching the raw JSON text of input/output/metadata is a documented
+        # approximation: it also matches keys and quoting artifacts.
+        where.append(
+            "(LOWER(message_id) LIKE ? ESCAPE '\\' "
+            "OR LOWER(conversation_id) LIKE ? ESCAPE '\\' "
+            "OR LOWER(input) LIKE ? ESCAPE '\\' "
+            "OR LOWER(output) LIKE ? ESCAPE '\\' "
+            "OR LOWER(metadata) LIKE ? ESCAPE '\\')"
+        )
+        params.extend([needle] * 5)
     return " AND ".join(where), params
 
 
@@ -9681,9 +9702,10 @@ def list_traces(
     limit: int,
     offset: int,
     agent_id: Optional[str] = None,
+    q: Optional[str] = None,
 ) -> Tuple[List[Dict[str, Any]], int]:
     """Return `(page, total)` newest-first; filters and count run in SQL."""
-    where, params = _trace_filters(org_uuid, agent_id)
+    where, params = _trace_filters(org_uuid, agent_id, q)
     with get_db_connection() as conn:
         total = conn.execute(
             f"SELECT COUNT(*) FROM traces WHERE {where}", params

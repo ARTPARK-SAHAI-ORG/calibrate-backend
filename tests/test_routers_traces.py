@@ -626,6 +626,58 @@ def test_list_filters_by_agent_id(client):
     assert only_b["items"][0]["agent_id"] == agent_b
 
 
+def test_list_searches_every_stored_text_field(client):
+    h, agent_id = _signup_with_agent(client)
+    target = _post_trace(
+        client,
+        h,
+        _payload(
+            agent_id,
+            "m-needle-id",
+            conversation_id="conv-needle",
+            input=[{"role": "user", "content": "Where is the NEEDLE?"}],
+            output={"response": "needle in the reply"},
+            metadata=[{"key": "region", "value": "needle-district"}],
+        ),
+    )
+    _post_trace(client, h, _payload(agent_id, _mid()))
+
+    for term in [
+        "needle-id",
+        "conv-NEEDLE",
+        "where is the needle",
+        "in the reply",
+        "needle-district",
+    ]:
+        found = client.get("/traces", params={"q": term}, headers=h).json()
+        assert found["total"] == 1, term
+        assert found["items"][0]["uuid"] == target["uuid"], term
+
+    assert client.get("/traces", params={"q": "nothing here"}, headers=h).json()[
+        "total"
+    ] == 0
+    # A blank query is a no-op, and `%`/`_` are literal, not wildcards.
+    assert client.get("/traces", params={"q": "  "}, headers=h).json()["total"] == 2
+    assert client.get("/traces", params={"q": "%"}, headers=h).json()["total"] == 0
+    # Search narrows within the agent filter, not across it.
+    other_agent = _create_agent(client, h)["uuid"]
+    _post_trace(
+        client,
+        h,
+        _payload(
+            other_agent,
+            _mid(),
+            input=[{"role": "user", "content": "another NEEDLE"}],
+        ),
+    )
+    assert (
+        client.get(
+            "/traces", params={"q": "needle", "agent_id": other_agent}, headers=h
+        ).json()["total"]
+        == 1
+    )
+
+
 def test_bulk_delete_ignores_another_workspaces_traces(client):
     h, agent_id = _signup_with_agent(client)
     mine = _post_trace(client, h, _payload(agent_id, _mid()))
