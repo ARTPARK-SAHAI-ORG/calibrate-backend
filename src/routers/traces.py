@@ -38,6 +38,11 @@ router = APIRouter(prefix="/traces", tags=["traces"])
 # customer actually needs a different one.
 MAX_TRACES_PER_WORKSPACE = int(os.getenv("DEFAULT_MAX_TRACES", "50000"))
 
+# How many traces one delete call accepts. Independent of the storage cap:
+# lowering that must not shrink a user's ability to delete their way back
+# under it.
+MAX_DELETE_IDS = 50_000
+
 MAX_INPUT_TURNS = 500
 MAX_TURN_CONTENT_CHARS = 50_000
 MAX_TOOL_CALLS = 50
@@ -236,6 +241,7 @@ class BulkDeleteTracesRequest(BaseModel):
 
     trace_ids: List[str] = Field(
         min_length=1,
+        max_length=MAX_DELETE_IDS,
         description="IDs of the traces to delete",
     )
 

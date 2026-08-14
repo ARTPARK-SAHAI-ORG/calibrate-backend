@@ -115,6 +115,18 @@ def test_bulk_delete_contract():
     assert db.soft_delete_traces(org, trace_ids=[a["uuid"]]) == 0
 
 
+def test_bulk_delete_splits_large_id_lists():
+    """SQLite caps bound values per statement, so the delete chunks. Without
+    that, a big enough list raises "too many SQL variables"."""
+    org = _org()
+    ids = [_ingest(org, f"m-{i}")["uuid"] for i in range(3)]
+    # More IDs than SQLite allows in one statement, mostly unknown ones.
+    padded = ids + [str(uuid.uuid4()) for _ in range(33_000)]
+
+    assert db.soft_delete_traces(org, trace_ids=padded) == 3
+    assert db.list_traces(org, limit=10, offset=0)[1] == 0
+
+
 def test_org_isolation():
     org_a, org_b = _org(), _org()
     row_a = _ingest(org_a, "m-shared")

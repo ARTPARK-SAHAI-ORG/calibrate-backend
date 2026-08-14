@@ -9738,17 +9738,26 @@ def list_traces(
         return [_trace_row(r) for r in rows], total
 
 
+# SQLite caps a statement at 32,766 bound values, so a delete of every trace in
+# a full workspace has to be split. 500 keeps each statement small.
+_TRACE_DELETE_CHUNK = 500
+
+
 def soft_delete_traces(org_uuid: str, *, trace_ids: List[str]) -> int:
     """Soft-delete the given traces, returning the number of rows flipped."""
     if not trace_ids:
         return 0
-    placeholders = ",".join("?" * len(trace_ids))
+    deleted = 0
     with get_db_connection() as conn:
-        cursor = conn.execute(
-            f"UPDATE traces SET deleted_at = CURRENT_TIMESTAMP, "
-            f"updated_at = CURRENT_TIMESTAMP WHERE org_uuid = ? "
-            f"AND deleted_at IS NULL AND uuid IN ({placeholders})",
-            [org_uuid] + list(trace_ids),
-        )
+        for start in range(0, len(trace_ids), _TRACE_DELETE_CHUNK):
+            chunk = trace_ids[start : start + _TRACE_DELETE_CHUNK]
+            placeholders = ",".join("?" * len(chunk))
+            cursor = conn.execute(
+                f"UPDATE traces SET deleted_at = CURRENT_TIMESTAMP, "
+                f"updated_at = CURRENT_TIMESTAMP WHERE org_uuid = ? "
+                f"AND deleted_at IS NULL AND uuid IN ({placeholders})",
+                [org_uuid] + list(chunk),
+            )
+            deleted += cursor.rowcount or 0
         conn.commit()
-        return cursor.rowcount or 0
+    return deleted
