@@ -142,13 +142,6 @@ _ITEM_PAYLOAD_EXAMPLES = [
 ]
 
 
-class EvaluatorLinkResponse(BaseModel):
-    message: str = Field(
-        description="Confirmation that the evaluator was linked",
-        examples=["Evaluator linked to annotation task"],
-    )
-
-
 class BulkCreateItemsResponse(BaseModel):
     item_ids: List[str] = Field(
         description="IDs of every item the request resolved to, in request order",
@@ -434,19 +427,6 @@ class AnnotationTaskCreateResponse(BaseModel):
     message: str = Field(description="Confirmation that the task was created")
 
 
-class EvaluatorLinkRequest(BaseModel):
-    evaluator_id: str = Field(
-        min_length=36,
-        max_length=36,
-        description="The evaluator to link. Must be one you created or a built-in default",
-        examples=[_EXAMPLE_ID],
-    )
-    is_optional: bool = Field(
-        False,
-        description="Whether annotators may leave this evaluator blank. Optional evaluators do not hold a labelling job back from completing",
-    )
-
-
 class EvaluatorOrderRequest(BaseModel):
     evaluator_ids: List[str] = Field(
         description="Full ordered list of the evaluator IDs currently linked to the task. **Must match the active linked set exactly.** This endpoint reorders, it does not link/unlink. Send `[]` only when the task has no linked evaluators"
@@ -719,24 +699,6 @@ def list_task_evaluators(
             )
         )
     return out
-
-
-@router.post("/{task_uuid}/evaluators", response_model=EvaluatorLinkResponse, summary="Link evaluator to task")
-def link_evaluator_to_task(
-    task_uuid: str = Path(
-        description="Annotation task to act on",
-        examples=["f47ac10b-58cc-4372-a567-0e02b2c3d479"],
-    ),
-    payload: EvaluatorLinkRequest = ...,
-    ctx: OrgContext = Depends(get_current_org),
-):
-    """Link an evaluator to a task, appending it to the display order"""
-    _ensure_owned_task(task_uuid, ctx.org_uuid)
-    ensure_owned_evaluator(payload.evaluator_id, ctx.org_uuid)
-    add_evaluator_to_annotation_task(
-        task_uuid, payload.evaluator_id, payload.is_optional
-    )
-    return {"message": "Evaluator linked to annotation task"}
 
 
 @router.put("/{task_uuid}/evaluators/order", summary="Reorder task evaluators")
@@ -1019,7 +981,7 @@ def bulk_create_items(
                     status_code=400,
                     detail=(
                         f"Evaluator(s) not linked to this task: {unknown}. "
-                        f"Link them via POST /annotation-tasks/{task_uuid}/evaluators "
+                        f"Link them via PUT /annotation-tasks/{task_uuid}/evaluators "
                         f"before seeding annotations."
                     ),
                 )
