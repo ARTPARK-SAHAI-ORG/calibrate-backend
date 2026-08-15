@@ -291,6 +291,10 @@ def _cmd_llm(opts: Dict[str, List[str]]) -> None:
         models = ["default"]
 
     output_dir.mkdir(parents=True, exist_ok=True)
+    # Written before any results file: the real CLI does the same, and
+    # `annotation_eval_runner` waits for this file before it reads a
+    # results file that is still being appended to.
+    _write_config_json(output_dir, evaluators)
     safe_models: List[str] = []
     for model in models:
         safe = _safe_model(model) if model != "default" else "default"
@@ -301,7 +305,6 @@ def _cmd_llm(opts: Dict[str, List[str]]) -> None:
     if _many(opts, "-m", "--model", "--models"):
         _write_leaderboard(output_dir, safe_models, evaluators)
 
-    _write_config_json(output_dir, evaluators)
 
 
 # --- Subcommand: stt --------------------------------------------------------
@@ -361,6 +364,10 @@ def _cmd_stt(opts: Dict[str, List[str]]) -> None:
     output_dir.mkdir(parents=True, exist_ok=True)
     providers = _many(opts, "-p", "--provider", "--providers") or ["openai"]
     evaluators = _evaluators_from_config(_load_json(_first(opts, "--config")))
+    # Written before any results file: the real CLI does the same, and
+    # `annotation_eval_runner` waits for this file before it reads a
+    # results file that is still being appended to.
+    _write_config_json(output_dir, evaluators)
     sarvam = "--skip-llm-judges" not in opts
 
     input_dir = _first(opts, "-i", "--input")
@@ -387,7 +394,6 @@ def _cmd_stt(opts: Dict[str, List[str]]) -> None:
         with open(sub / "metrics.json", "w", encoding="utf-8") as f:
             json.dump(_stt_metrics(evaluators, sarvam), f)
 
-    _write_config_json(output_dir, evaluators)
 
 
 # --- Subcommand: tts --------------------------------------------------------
@@ -405,6 +411,10 @@ def _cmd_tts(opts: Dict[str, List[str]]) -> None:
     output_dir.mkdir(parents=True, exist_ok=True)
     providers = _many(opts, "-p", "--provider", "--providers") or ["openai"]
     evaluators = _evaluators_from_config(_load_json(_first(opts, "--config")))
+    # Written before any results file: the real CLI does the same, and
+    # `annotation_eval_runner` waits for this file before it reads a
+    # results file that is still being appended to.
+    _write_config_json(output_dir, evaluators)
 
     input_file = _first(opts, "-i", "--input")
     rows = _read_id_text_csv(Path(input_file)) if input_file else []
@@ -432,7 +442,6 @@ def _cmd_tts(opts: Dict[str, List[str]]) -> None:
         with open(sub / "metrics.json", "w", encoding="utf-8") as f:
             json.dump(_tts_metrics(evaluators), f)
 
-    _write_config_json(output_dir, evaluators)
 
 
 # --- Subcommand: simulations (normal run) -----------------------------------
@@ -492,6 +501,10 @@ def _cmd_annotation_tts(opts: Dict[str, List[str]]) -> None:
     output_dir.mkdir(parents=True, exist_ok=True)
     run_dir = Path(_first(opts, "--dataset"))
     evaluators = _evaluators_from_config(_load_json(_first(opts, "-c", "--config")))
+    # Written before any results file: the real CLI does the same, and
+    # `annotation_eval_runner` waits for this file before it reads a
+    # results file that is still being appended to.
+    _write_config_json(output_dir, evaluators)
 
     csv_path = run_dir / "results.csv"
     rows: List[Dict[str, Any]] = []
@@ -511,7 +524,6 @@ def _cmd_annotation_tts(opts: Dict[str, List[str]]) -> None:
 
     with open(output_dir / "metrics.json", "w", encoding="utf-8") as f:
         json.dump(_tts_metrics(evaluators), f)
-    _write_config_json(output_dir, evaluators)
 
 
 def _cmd_annotation_stt_or_general(opts: Dict[str, List[str]]) -> None:
@@ -520,6 +532,10 @@ def _cmd_annotation_stt_or_general(opts: Dict[str, List[str]]) -> None:
     output_dir = Path(_first(opts, "-o", "--output"))
     output_dir.mkdir(parents=True, exist_ok=True)
     evaluators = _evaluators_from_config(_load_json(_first(opts, "-c", "--config")))
+    # Written before any results file: the real CLI does the same, and
+    # `annotation_eval_runner` waits for this file before it reads a
+    # results file that is still being appended to.
+    _write_config_json(output_dir, evaluators)
     dataset = _load_json(_first(opts, "--dataset")) or []
 
     ev_cols, ev_values = _evaluator_row_cols(evaluators)
@@ -539,7 +555,6 @@ def _cmd_annotation_stt_or_general(opts: Dict[str, List[str]]) -> None:
         # Sarvam judges are an STT-eval-only feature; the annotation eval-only
         # and `general` flows never include the Sarvam bundle.
         json.dump(_stt_metrics(evaluators, sarvam=False), f)
-    _write_config_json(output_dir, evaluators)
 
 
 def _cmd_annotation_llm(opts: Dict[str, List[str]]) -> None:
@@ -548,6 +563,10 @@ def _cmd_annotation_llm(opts: Dict[str, List[str]]) -> None:
     output_dir = Path(_first(opts, "-o", "--output"))
     output_dir.mkdir(parents=True, exist_ok=True)
     evaluators = _evaluators_from_config(_load_json(_first(opts, "-c", "--config")))
+    # Written before any results file: the real CLI does the same, and
+    # `annotation_eval_runner` waits for this file before it reads a
+    # results file that is still being appended to.
+    _write_config_json(output_dir, evaluators)
     ev_by_name = {ev.get("name"): ev for ev in evaluators if ev.get("name")}
     dataset = _load_json(_first(opts, "--dataset")) or []
 
@@ -576,7 +595,6 @@ def _cmd_annotation_llm(opts: Dict[str, List[str]]) -> None:
         json.dump(results, f)
     with open(output_dir / "metrics.json", "w", encoding="utf-8") as f:
         json.dump({"total": len(results), "passed": len(results)}, f)
-    _write_config_json(output_dir, evaluators)
 
 
 def _cmd_annotation_simulation(opts: Dict[str, List[str]]) -> None:
@@ -585,6 +603,10 @@ def _cmd_annotation_simulation(opts: Dict[str, List[str]]) -> None:
     output_dir = Path(_first(opts, "-o", "--output"))
     output_dir.mkdir(parents=True, exist_ok=True)
     evaluators = _evaluators_from_config(_load_json(_first(opts, "-c", "--config")))
+    # Written before any results file: the real CLI does the same, and
+    # `annotation_eval_runner` waits for this file before it reads a
+    # results file that is still being appended to.
+    _write_config_json(output_dir, evaluators)
     dataset = _load_json(_first(opts, "--dataset")) or []
 
     dataset_map: Dict[str, Any] = {}
@@ -604,7 +626,6 @@ def _cmd_annotation_simulation(opts: Dict[str, List[str]]) -> None:
         json.dump(dataset_map, f)
     with open(output_dir / "metrics.json", "w", encoding="utf-8") as f:
         json.dump({"total": len(dataset_map)}, f)
-    _write_config_json(output_dir, evaluators)
 
 
 # --- status (provider health) -----------------------------------------------
