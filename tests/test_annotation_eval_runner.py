@@ -1062,3 +1062,36 @@ def test_run_calibrate_eval_only_survives_a_failing_flush(tmp_path):
             job_uuid="job-1",
         )
     assert rc == 0
+
+
+def test_growing_results_csv_is_stored_across_ticks(tmp_path):
+    """End to end over a results.csv that grows the way calibrate 0.0.70
+    writes it: one flushed row per judged item, so a tick can land mid-line."""
+    (tmp_path / "config.json").write_text(
+        json.dumps({"evaluators_map": {"ev-1": "Safety"}})
+    )
+    results = tmp_path / "results.csv"
+    header = "id,gt,pred,Safety,Safety_reasoning\n"
+    seen: set = set()
+    stored: list = []
+
+    def tick():
+        with patch.object(
+            runner, "create_evaluator_runs", side_effect=lambda rs: stored.extend(rs)
+        ):
+            runner._store_scored_runs(
+                runner._parse_results_stt(tmp_path, [_ev_resolved()], "job-1"), seen
+            )
+
+    # One judged row, plus one caught mid-write with its score already on
+    # disk and its reasoning not. Without the tail drop that row reads as
+    # complete-but-unexplained, gets stored, and is never revisited.
+    results.write_text(header + "i1,a,a,1,ok\ni2,b,b,0")
+    tick()
+    assert [r["item_id"] for r in stored] == ["i1"]
+
+    # The cut row completes and another lands. i1 is not stored twice.
+    results.write_text(header + "i1,a,a,1,ok\ni2,b,b,0,no\ni3,c,c,1,ok\n")
+    tick()
+    assert [r["item_id"] for r in stored] == ["i1", "i2", "i3"]
+    assert stored[1]["value"] == {"value": False, "reasoning": "no"}
