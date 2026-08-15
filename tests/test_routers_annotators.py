@@ -74,10 +74,13 @@ def test_annotators_are_org_scoped_for_api_keys(client):
     assert created["uuid"] not in {
         a["uuid"] for a in client.get("/annotators", headers={"X-API-Key": raw_b}).json()
     }
+    # The annotator exists in the other org, so the answer is 403 — and a key is
+    # bound to one org, so the owning org is not named.
     cross = client.put(
         f"/annotators/{created['uuid']}", json={"name": "x"}, headers={"X-API-Key": raw_b}
     )
-    assert cross.status_code == 404
+    assert cross.status_code == 403
+    assert "organization_uuid" not in cross.json()
 
 
 def test_annotators_reject_invalid_api_key(client):

@@ -931,14 +931,14 @@ def test_run_agent_test_validation(client, monkeypatch):
     )
     assert bad.status_code == 404
 
-    # Another org's user cannot run tests on this agent → 404 (existence parity)
+    # Someone in another workspace cannot run tests on this agent → refused (403)
     other = _signup(client)
     cross = client.post(
         f"/agent-tests/agent/{agent['uuid']}/run",
         json={},
         headers=other["headers"],
     )
-    assert cross.status_code == 404
+    assert cross.status_code == 403
 
 
 def test_run_agent_test_rejects_cross_org_test_uuid(client):
@@ -989,13 +989,13 @@ def test_run_agent_test_queued_path(client, monkeypatch):
     # response (the frontend doesn't read it either).
     assert "results_s3_prefix" not in got.json()
 
-    # Another org's user cannot poll this run → 404
+    # Someone in another workspace cannot poll this run → refused (403)
     other_poll = _signup(client)
     assert (
         client.get(
             f"/agent-tests/run/{task_id}", headers=other_poll["headers"]
         ).status_code
-        == 404
+        == 403
     )
 
     # 404 unknown run
@@ -1014,6 +1014,7 @@ def test_run_agent_test_queued_path(client, monkeypatch):
         headers=h,
     )
     assert off.status_code == 200
+    # Someone in another workspace cannot change sharing on this run → refused (403)
     other = _signup(client)
     assert (
         client.patch(
@@ -1021,7 +1022,7 @@ def test_run_agent_test_queued_path(client, monkeypatch):
             json={"is_public": True},
             headers=other["headers"],
         ).status_code
-        == 404
+        == 403
     )
     assert (
         client.patch(
@@ -1455,13 +1456,13 @@ def test_run_agent_benchmark_queued_path(client, monkeypatch):
     # at least present (may be empty for a queued/never-run job).
     assert "evaluators" in got.json()
 
-    # Another org's user cannot poll this benchmark → 404
+    # Someone in another workspace cannot poll this benchmark → refused (403)
     other_poll = _signup(client)
     assert (
         client.get(
             f"/agent-tests/benchmark/{task_id}", headers=other_poll["headers"]
         ).status_code
-        == 404
+        == 403
     )
     assert (
         client.get("/agent-tests/benchmark/missing", headers=h).status_code == 404
@@ -1933,8 +1934,9 @@ def test_agent_runs_list_filters_and_pagination_with_heavy_jobs(client):
 def test_agent_tests_link_and_reads_are_org_scoped(client):
     """POST /agent-tests and the two agent-scoped read endpoints
     (GET /agent-tests/agent/{uuid}/{tests,runs}) require auth and only see the
-    caller's own org — a foreign org gets 404 (existence parity), and an
-    unauthenticated link 403s."""
+    caller's own org. Reading another workspace's agent is refused (403); the
+    link call sends the agent id in the body instead of the address, so it stays
+    404. An unauthenticated link 403s."""
     a = _signup(client)
     b = _signup(client)
     a_agent = _create_agent(client, a["headers"])
@@ -1948,7 +1950,8 @@ def test_agent_tests_link_and_reads_are_org_scoped(client):
     )
     assert linked.status_code == 200
 
-    # User B cannot link against A's agent → 404 (existence parity).
+    # User B cannot link against A's agent. The agent id travels in the body, so
+    # this stays a plain 404 with no workspace hint.
     foreign_link = client.post(
         "/agent-tests",
         json={"agent_uuid": a_agent["uuid"], "test_uuids": [a_test["uuid"]]},
@@ -1956,18 +1959,18 @@ def test_agent_tests_link_and_reads_are_org_scoped(client):
     )
     assert foreign_link.status_code == 404
 
-    # User B cannot read A's agent tests or runs → 404.
+    # User B cannot read A's agent tests or runs → refused (403).
     assert (
         client.get(
             f"/agent-tests/agent/{a_agent['uuid']}/tests", headers=b["headers"]
         ).status_code
-        == 404
+        == 403
     )
     assert (
         client.get(
             f"/agent-tests/agent/{a_agent['uuid']}/runs", headers=b["headers"]
         ).status_code
-        == 404
+        == 403
     )
 
     # Unauthenticated link → 403 (HTTPBearer rejects the missing header).

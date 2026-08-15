@@ -274,7 +274,7 @@ def hash_api_key(raw_key: str) -> str:
     return bcrypt.hashpw(raw_key.encode("utf-8"), bcrypt.gensalt()).decode("utf-8")
 
 
-def _resolve_api_key(raw_key: str) -> Optional[OrgContext]:
+def resolve_api_key(raw_key: str) -> Optional[OrgContext]:
     """Validate a presented raw key → OrgContext, or None if it doesn't match.
 
     API keys grant owner-level access within the org they're scoped to (they can
@@ -322,7 +322,7 @@ async def get_org_jwt_or_api_key(
         raw_key = credentials.credentials.strip()
 
     if raw_key:
-        ctx = _resolve_api_key(raw_key)
+        ctx = resolve_api_key(raw_key)
         if ctx is None:
             raise HTTPException(
                 status_code=401,

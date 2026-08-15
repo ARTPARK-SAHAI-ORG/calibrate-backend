@@ -386,14 +386,19 @@ def test_create_test_invalid_api_key(client):
 
 
 def test_get_test_wrong_org_api_key(client):
-    """A key from another org must not read a test — 404 (existence-leak parity)."""
+    """A key from another org must not read a test — 403, with no owning org named.
+
+    A key is bound to one org, so there is no workspace for its holder to switch
+    to; the response must not carry organization_uuid.
+    """
     jwt_a = _signup(client)
     t_uuid = _create_test(client, jwt_a)
 
     jwt_b = _signup(client)
     key_b = _raw_key(client, jwt_b)
     r = client.get(f"/tests/{t_uuid}", headers={"X-API-Key": key_b})
-    assert r.status_code == 404
+    assert r.status_code == 403
+    assert "organization_uuid" not in r.json()
 
 
 def test_create_test_bearer_sk_key(client):

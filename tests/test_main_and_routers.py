@@ -57,6 +57,15 @@ def _auth(client: TestClient) -> Dict[str, str]:
     }
 
 
+def _assert_other_workspace(resp) -> None:
+    """A resource that exists but belongs to someone else's workspace."""
+    assert resp.status_code == 403, resp.text
+    body = resp.json()
+    assert body["detail"] == "This resource belongs to a different workspace"
+    # The caller is not a member of the owning workspace, so it is not named.
+    assert "organization_uuid" not in body
+
+
 # ---------------------------------------------------------------------------
 # Root + health
 # ---------------------------------------------------------------------------
@@ -587,16 +596,15 @@ def test_personas_crud(client):
         == 404
     )
 
-    # Other-org access returns 404 (existence-leak parity, per CLAUDE.md).
+    # Someone else's workspace owns it → denied, not "missing".
     other = _auth(client)
-    forbidden = client.get(f"/personas/{p_uuid}", headers=other["headers"])
-    assert forbidden.status_code == 404
-    forbidden_put = client.put(
-        f"/personas/{p_uuid}", json={"name": "x"}, headers=other["headers"]
+    _assert_other_workspace(client.get(f"/personas/{p_uuid}", headers=other["headers"]))
+    _assert_other_workspace(
+        client.put(f"/personas/{p_uuid}", json={"name": "x"}, headers=other["headers"])
     )
-    assert forbidden_put.status_code == 404
-    forbidden_del = client.delete(f"/personas/{p_uuid}", headers=other["headers"])
-    assert forbidden_del.status_code == 404
+    _assert_other_workspace(
+        client.delete(f"/personas/{p_uuid}", headers=other["headers"])
+    )
 
     delete = client.delete(f"/personas/{p_uuid}", headers=h)
     assert delete.status_code == 200
@@ -632,14 +640,15 @@ def test_scenarios_crud(client):
     )
 
     other = _auth(client)
-    assert client.get(f"/scenarios/{s_uuid}", headers=other["headers"]).status_code == 404
-    assert (
-        client.put(
-            f"/scenarios/{s_uuid}", json={"name": "x"}, headers=other["headers"]
-        ).status_code
-        == 404
+    _assert_other_workspace(
+        client.get(f"/scenarios/{s_uuid}", headers=other["headers"])
     )
-    assert client.delete(f"/scenarios/{s_uuid}", headers=other["headers"]).status_code == 404
+    _assert_other_workspace(
+        client.put(f"/scenarios/{s_uuid}", json={"name": "x"}, headers=other["headers"])
+    )
+    _assert_other_workspace(
+        client.delete(f"/scenarios/{s_uuid}", headers=other["headers"])
+    )
 
     assert client.delete(f"/scenarios/{s_uuid}", headers=h).status_code == 200
     assert client.delete(f"/scenarios/{s_uuid}", headers=h).status_code == 404
@@ -687,14 +696,13 @@ def test_tools_crud(client):
         client.put("/tools/missing", json={"name": "x"}, headers=h).status_code == 404
     )
     other = _auth(client)
-    assert client.get(f"/tools/{t_uuid}", headers=other["headers"]).status_code == 404
-    assert (
-        client.put(
-            f"/tools/{t_uuid}", json={"name": "x"}, headers=other["headers"]
-        ).status_code
-        == 404
+    _assert_other_workspace(client.get(f"/tools/{t_uuid}", headers=other["headers"]))
+    _assert_other_workspace(
+        client.put(f"/tools/{t_uuid}", json={"name": "x"}, headers=other["headers"])
     )
-    assert client.delete(f"/tools/{t_uuid}", headers=other["headers"]).status_code == 404
+    _assert_other_workspace(
+        client.delete(f"/tools/{t_uuid}", headers=other["headers"])
+    )
     assert client.delete(f"/tools/{t_uuid}", headers=h).status_code == 200
     assert client.delete(f"/tools/{t_uuid}", headers=h).status_code == 404
 
@@ -886,9 +894,9 @@ def test_tests_router_crud(client):
     assert client.get(f"/tests/{t_uuid}", headers=h).status_code == 200
     assert client.get("/tests/missing", headers=h).status_code == 404
 
-    # Other-org access returns 404 (existence-leak parity).
+    # Someone else's workspace owns it → denied, not "missing".
     other = _auth(client)
-    assert client.get(f"/tests/{t_uuid}", headers=other["headers"]).status_code == 404
+    _assert_other_workspace(client.get(f"/tests/{t_uuid}", headers=other["headers"]))
 
     # Update
     upd = client.put(
@@ -902,12 +910,9 @@ def test_tests_router_crud(client):
     assert (
         client.put("/tests/missing", json={"name": "x"}, headers=h).status_code == 404
     )
-    # Other-org PUT returns 404 (existence-leak parity).
-    assert (
-        client.put(
-            f"/tests/{t_uuid}", json={"name": "x"}, headers=other["headers"]
-        ).status_code
-        == 404
+    # Someone else's workspace owns it → denied, not "missing".
+    _assert_other_workspace(
+        client.put(f"/tests/{t_uuid}", json={"name": "x"}, headers=other["headers"])
     )
 
     # Bulk-delete validation
@@ -1118,15 +1123,19 @@ def test_annotators_router_crud(client):
     )
     assert empty_upd.status_code == 400
 
-    # Other user denied (404)
+    # Someone else's workspace owns it → denied, not "missing".
     other = _auth(client)
-    assert client.get(f"/annotators/{a_uuid}", headers=other["headers"]).status_code == 404
-    assert client.put(
-        f"/annotators/{a_uuid}", json={"name": "x"}, headers=other["headers"]
-    ).status_code == 404
-    assert client.delete(
-        f"/annotators/{a_uuid}", headers=other["headers"]
-    ).status_code == 404
+    _assert_other_workspace(
+        client.get(f"/annotators/{a_uuid}", headers=other["headers"])
+    )
+    _assert_other_workspace(
+        client.put(
+            f"/annotators/{a_uuid}", json={"name": "x"}, headers=other["headers"]
+        )
+    )
+    _assert_other_workspace(
+        client.delete(f"/annotators/{a_uuid}", headers=other["headers"])
+    )
 
     # Delete
     deleted = client.delete(f"/annotators/{a_uuid}", headers=h)
@@ -1460,15 +1469,14 @@ def test_agent_verify_and_duplicate(client):
         == 404
     )
 
-    # Other-org duplicate returns 404 (existence-leak parity).
+    # Someone else's workspace owns it → denied, not "missing".
     other = _auth(client)
-    assert (
+    _assert_other_workspace(
         client.post(
             f"/agents/{a_uuid}/duplicate",
             json={"name": "x"},
             headers=other["headers"],
-        ).status_code
-        == 404
+        )
     )
 
     # PUT with no-op (just-name) → 200
@@ -1480,16 +1488,12 @@ def test_agent_verify_and_duplicate(client):
     assert (
         client.put("/agents/missing", json={"name": "x"}, headers=h).status_code == 404
     )
-    # other-org PUT returns 404 (existence-leak parity).
-    assert (
-        client.put(
-            f"/agents/{a_uuid}", json={"name": "x"}, headers=other["headers"]
-        ).status_code
-        == 404
+    # Someone else's workspace owns it → denied, not "missing".
+    _assert_other_workspace(
+        client.put(f"/agents/{a_uuid}", json={"name": "x"}, headers=other["headers"])
     )
-    # other-org DELETE returns 404 (existence-leak parity).
-    assert (
-        client.delete(f"/agents/{a_uuid}", headers=other["headers"]).status_code == 404
+    _assert_other_workspace(
+        client.delete(f"/agents/{a_uuid}", headers=other["headers"])
     )
 
 

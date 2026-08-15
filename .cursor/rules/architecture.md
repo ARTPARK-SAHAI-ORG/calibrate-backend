@@ -1547,7 +1547,7 @@ async def get_job_status(task_id: str, user_id: str = Depends(get_current_user_i
     return JobStatusResponse(...)
 ```
 
-**Security note**: Return 404 (not 403) when access is denied to prevent information leakage about whether a resource exists.
+**Security note**: Raise 404 (not 403) when access is denied, to prevent information leakage about whether a resource exists. When the caller is in fact a member of the owning workspace, `_not_found_handler` in `src/main.py` rewrites that 404 into a 403 carrying the owning `organization_uuid`. Do not do this per-router.
 
 ### Background Task Pattern (with Queueing)
 

@@ -120,13 +120,13 @@ def test_annotation_task_crud(client):
         == 404
     )
 
-    # other user denied (404)
+    # other workspace denied (403 — task uuid is in the path)
     other = _signup(client)
     assert (
         client.get(
             f"/annotation-tasks/{task_uuid}", headers=other["headers"]
         ).status_code
-        == 404
+        == 403
     )
 
     # list task evaluators — must mirror GET /evaluators/{uuid} detail shape
@@ -433,14 +433,14 @@ def test_annotation_task_evaluator_ordering(client):
     )
     assert bad.status_code == 400
 
-    # Other user → 404 (existence not leaked).
+    # Other workspace → 403 (task uuid is in the path).
     other = _signup(client)
     forbidden = client.put(
         f"/annotation-tasks/{task_uuid}/evaluators/order",
         json={"evaluator_ids": [ev_b["uuid"], ev_a["uuid"]]},
         headers=other["headers"],
     )
-    assert forbidden.status_code == 404
+    assert forbidden.status_code == 403
 
     # Newly-linked evaluator appends at the end (does NOT jump to front).
     third = next(
@@ -1142,13 +1142,13 @@ def test_delete_annotation_job(client):
     )
     assert mismatch.status_code == 404
 
-    # 404 when caller doesn't own the task
+    # 403 when the task lives in another workspace (its uuid is in the path)
     other_auth = _signup(client)
     other = client.delete(
         f"/annotation-tasks/{task_uuid}/jobs/{job_a['uuid']}",
         headers=other_auth["headers"],
     )
-    assert other.status_code == 404
+    assert other.status_code == 403
 
     # Happy path
     ok = client.delete(f"/annotation-tasks/{task_uuid}/jobs/{job_a['uuid']}", headers=h)
@@ -1299,7 +1299,7 @@ def test_bulk_delete_annotation_jobs(client):
     assert again.status_code == 200
     assert again.json()["deleted_count"] == 0
 
-    # Non-owner gets 404 on the task scope (not 403).
+    # Caller from another workspace gets 403 on the task scope.
     other_auth = _signup(client)
     forbidden = client.request(
         "DELETE",
@@ -1307,7 +1307,7 @@ def test_bulk_delete_annotation_jobs(client):
         json={"job_uuids": [created[2]["uuid"]]},
         headers=other_auth["headers"],
     )
-    assert forbidden.status_code == 404
+    assert forbidden.status_code == 403
 
 
 def test_annotated_check(client):
@@ -2702,7 +2702,7 @@ def test_annotation_task_set_evaluators(client):
         == 404
     )
 
-    # Other org → 404.
+    # Other org → 403 (task uuid is in the path).
     other = _signup(client)
     assert (
         client.put(
@@ -2710,7 +2710,7 @@ def test_annotation_task_set_evaluators(client):
             json={"evaluator_ids": [a]},
             headers=other["headers"],
         ).status_code
-        == 404
+        == 403
     )
 
 
