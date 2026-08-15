@@ -954,24 +954,35 @@ def upsert_public_annotations(
     if job["status"] == "pending":
         update_annotation_job_status(job["uuid"], "in_progress")
 
-    # Auto-complete: every (item, evaluator) slot in this job must have a row.
-    # We re-check on every save (including post-completion edits) so the
-    # status remains accurate. `completed_at` is preserved on subsequent
+    # Auto-complete: every (item, REQUIRED evaluator) slot in this job must
+    # have a row, and every item must carry at least one judgement. The second
+    # condition is what makes a job whose evaluators are all optional still
+    # require the annotator to visit each item, rather than completing on the
+    # first save. We re-check on every save (including post-completion edits)
+    # so the status remains accurate. `completed_at` is preserved on subsequent
     # edits — it marks the first time the job was fully filled.
     # Both the items AND the evaluator set are read from the job's snapshot
     # so post-creation link/unlink on the parent task can't shift the
     # completion bar under the annotator.
     job_items = get_job_items(job["uuid"])
-    evaluator_ids = get_evaluator_ids_for_job(job["uuid"])
+    required_evaluator_ids = get_evaluator_ids_for_job(
+        job["uuid"], required_only=True
+    )
+    job_annotations = get_annotations_for_job(job["uuid"])
     annotated_pairs = {
         (a["item_id"], a.get("evaluator_id"))
-        for a in get_annotations_for_job(job["uuid"])
+        for a in job_annotations
         if a.get("evaluator_id") is not None
     }
     expected_pairs = {
-        (it["uuid"], ev_id) for it in job_items for ev_id in evaluator_ids
+        (it["uuid"], ev_id) for it in job_items for ev_id in required_evaluator_ids
     }
-    completed = bool(expected_pairs) and expected_pairs.issubset(annotated_pairs)
+    items_touched = {a["item_id"] for a in job_annotations}
+    completed = (
+        bool(job_items)
+        and expected_pairs.issubset(annotated_pairs)
+        and all(it["uuid"] in items_touched for it in job_items)
+    )
     if completed and job["status"] != "completed":
         update_annotation_job_status(
             job["uuid"], "completed", set_completed_at=True
