@@ -176,10 +176,10 @@ def test_annotation_task_crud(client):
         == 404
     )
 
-    # Now link via the dedicated endpoint (after unlink)
-    relink = client.post(
+    # Relink via the set-replace endpoint (after unlink)
+    relink = client.put(
         f"/annotation-tasks/{task_uuid}/evaluators",
-        json={"evaluator_id": llm_ev["uuid"]},
+        json={"evaluator_ids": [llm_ev["uuid"]]},
         headers=h,
     )
     assert relink.status_code == 200
@@ -2715,8 +2715,7 @@ def test_annotation_task_set_evaluators(client):
 
 
 def test_annotation_task_set_evaluators_public_surface(client):
-    """PUT (set) is Public API (accepts an API key); the single-item link POST
-    is now JWT-only, so an API key alone is rejected there."""
+    """PUT (set) is Public API and accepts an API key. One-at-a-time POST is gone."""
     auth = _signup(client)
     h = auth["headers"]
     raw = client.post("/api-keys", json={"name": "ci"}, headers=h).json()["key"]
@@ -2731,7 +2730,6 @@ def test_annotation_task_set_evaluators_public_surface(client):
         headers=h,
     ).json()["uuid"]
 
-    # PUT (set) accepts an API key.
     r = client.put(
         f"/annotation-tasks/{task_uuid}/evaluators",
         json={"evaluator_ids": [ev]},
@@ -2740,13 +2738,12 @@ def test_annotation_task_set_evaluators_public_surface(client):
     assert r.status_code == 200, r.text
     assert r.json()["evaluator_ids"] == [ev]
 
-    # POST (link one) is JWT-only — an API key alone is rejected.
-    r = client.post(
+    gone = client.post(
         f"/annotation-tasks/{task_uuid}/evaluators",
         json={"evaluator_id": ev},
-        headers={"X-API-Key": raw},
+        headers=h,
     )
-    assert r.status_code == 403, r.text
+    assert gone.status_code == 405, gone.text
 
 
 def _two_llm_evaluators(client, h):
@@ -2836,19 +2833,22 @@ def test_optional_evaluator_flag_round_trips(client):
             ] == [ev_a["uuid"], ev_b["uuid"]]
 
 
-def test_link_endpoint_marks_optional_and_relink_resets_it(client):
-    """POST link carries `is_optional`; unlinking then relinking resets it."""
+def test_relink_via_set_resets_optional_flag(client):
+    """Unlinking then relinking via PUT resets `is_optional` rather than restoring it."""
     h = _signup(client)["headers"]
-    ev_a, ev_b = _two_llm_evaluators(client, h)
+    ev_a, _ = _two_llm_evaluators(client, h)
     task_uuid = client.post(
         "/annotation-tasks",
         json={"name": f"link-{uuid.uuid4().hex[:6]}", "type": "llm"},
         headers=h,
     ).json()["uuid"]
 
-    client.post(
+    client.put(
         f"/annotation-tasks/{task_uuid}/evaluators",
-        json={"evaluator_id": ev_a["uuid"], "is_optional": True},
+        json={
+            "evaluator_ids": [ev_a["uuid"]],
+            "optional_evaluator_ids": [ev_a["uuid"]],
+        },
         headers=h,
     )
     detail = client.get(f"/annotation-tasks/{task_uuid}", headers=h).json()
@@ -2857,9 +2857,9 @@ def test_link_endpoint_marks_optional_and_relink_resets_it(client):
     client.delete(
         f"/annotation-tasks/{task_uuid}/evaluators/{ev_a['uuid']}", headers=h
     )
-    client.post(
+    client.put(
         f"/annotation-tasks/{task_uuid}/evaluators",
-        json={"evaluator_id": ev_a["uuid"]},
+        json={"evaluator_ids": [ev_a["uuid"]]},
         headers=h,
     )
     detail = client.get(f"/annotation-tasks/{task_uuid}", headers=h).json()
