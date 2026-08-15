@@ -447,9 +447,9 @@ def test_annotation_task_evaluator_ordering(client):
         e for e in llm_evs if e["uuid"] not in {ev_a["uuid"], ev_b["uuid"]}
     ) if len(llm_evs) >= 3 else None
     if third is not None:
-        link = client.post(
+        link = client.put(
             f"/annotation-tasks/{task_uuid}/evaluators",
-            json={"evaluator_id": third["uuid"]},
+            json={"evaluator_ids": [ev_b["uuid"], ev_a["uuid"], third["uuid"]]},
             headers=h,
         )
         assert link.status_code == 200
