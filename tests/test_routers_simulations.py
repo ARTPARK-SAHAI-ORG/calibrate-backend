@@ -106,12 +106,11 @@ def test_create_simulation_with_all_links(client):
     assert listing.status_code == 200
     assert any(s["uuid"] == sim_uuid for s in listing.json())
 
-    # Get other-user denied
+    # Get other-user denied: the simulation exists, but in another workspace
     other = _signup(client)
-    assert (
-        client.get(f"/simulations/{sim_uuid}", headers=other["headers"]).status_code
-        == 404
-    )
+    denied = client.get(f"/simulations/{sim_uuid}", headers=other["headers"])
+    assert denied.status_code == 403
+    assert denied.json()["detail"] == "This resource belongs to a different workspace"
 
 
 def test_list_simulations_batched_agent_hydration(client):
@@ -279,7 +278,7 @@ def test_update_simulation_basic(client):
             json={"name": "x"},
             headers=other["headers"],
         ).status_code
-        == 404
+        == 403
     )
     assert (
         client.put(
@@ -311,7 +310,7 @@ def test_simulation_runs_listing(client):
         client.get(
             f"/simulations/{sim_uuid}/runs", headers=other["headers"]
         ).status_code
-        == 404
+        == 403
     )
 
     # delete
@@ -328,7 +327,7 @@ def test_simulation_runs_listing(client):
         client.delete(
             f"/simulations/{create2['uuid']}", headers=other["headers"]
         ).status_code
-        == 404
+        == 403
     )
 
 
@@ -368,7 +367,7 @@ def test_run_simulation_validation_errors(client, monkeypatch):
             json={"type": "text"},
             headers=other["headers"],
         ).status_code
-        == 404
+        == 403
     )
 
     # Wire up an agent + verify "no personas" branch

@@ -359,14 +359,19 @@ def test_create_agent_invalid_api_key(client):
 
 
 def test_get_agent_wrong_org_api_key(client):
-    """A key from another org must not read an agent — 404 (existence-leak parity)."""
+    """A key from another org must not read an agent — 403, with no owning org named.
+
+    A key is bound to one org, so there is no workspace for its holder to switch
+    to; the response must not carry organization_uuid.
+    """
     ha = _signup(client)
     agent = _create_agent(client, ha, f"other-org-{uuid.uuid4().hex[:6]}")
 
     hb = _signup(client)
     raw_b = _raw_key(client, hb)
     r = client.get(f"/agents/{agent['uuid']}", headers={"X-API-Key": raw_b})
-    assert r.status_code == 404
+    assert r.status_code == 403
+    assert "organization_uuid" not in r.json()
 
 
 def test_create_agent_with_api_key_cannot_self_attest_verification(client):
@@ -640,19 +645,22 @@ def test_link_evaluator_from_another_org_is_404(client):
     assert r.status_code == 404, r.text
 
 
-def test_link_evaluator_to_other_org_agent_is_404(client):
+def test_link_evaluator_to_other_org_agent_is_denied(client):
     h1 = _signup(client)
     h2 = _signup(client)
     agent = _create_agent(client, h1, f"ev-agent-{uuid.uuid4().hex[:6]}")
     ev = _create_evaluator(client, h2)
 
-    # org 2 cannot see org 1's agent.
+    # org 2 cannot reach org 1's agent. It exists, so the answer is 403 — and
+    # user 2 is not a member of org 1, so the owning org is not named.
     r = client.post(
         f"/agents/{agent['uuid']}/evaluators", json={"evaluator_ids": [ev]}, headers=h2
     )
-    assert r.status_code == 404, r.text
+    assert r.status_code == 403, r.text
+    assert "organization_uuid" not in r.json()
     r = client.get(f"/agents/{agent['uuid']}/evaluators", headers=h2)
-    assert r.status_code == 404, r.text
+    assert r.status_code == 403, r.text
+    assert "organization_uuid" not in r.json()
 
 
 def test_evaluator_public_surface_with_api_key(client):

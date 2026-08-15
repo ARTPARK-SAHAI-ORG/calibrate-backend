@@ -3557,33 +3557,38 @@ _RESOURCE_ORG_SELECTS = tuple(
 )
 
 
-def find_member_org_for_resource(resource_uuid: str, user_id: str) -> Optional[str]:
-    """Return the org owning `resource_uuid`, but only if `user_id` is a member.
+def find_org_for_resource(
+    resource_uuid: str, user_id: Optional[str] = None
+) -> Optional[Tuple[str, bool]]:
+    """Return `(owning org uuid, caller is a member of it)`, or None if nothing live has that uuid.
 
-    The membership join lives inside the SQL so a resource in an org the
-    caller cannot see can never be reported back — this feeds the
-    `organization_uuid` hint on 404 responses, which must not leak existence.
+    Membership is resolved in the same statement so the caller never has to
+    query it separately. It decides whether the org uuid may be handed back to
+    the caller: a resource in an org they do not belong to still answers 403,
+    but without naming the org.
     """
     union = " UNION ALL ".join(_RESOURCE_ORG_SELECTS)
     with get_db_connection() as conn:
         cursor = conn.cursor()
         cursor.execute(
             f"""
-            SELECT owner.org_uuid AS org_uuid
+            SELECT owner.org_uuid AS org_uuid,
+                   EXISTS(
+                       SELECT 1 FROM organization_members m
+                        WHERE m.org_uuid = owner.org_uuid
+                          AND m.user_id = ?
+                          AND m.deleted_at IS NULL
+                   ) AS is_member
               FROM ({union}) AS owner
-              JOIN organization_members m
-                ON m.org_uuid = owner.org_uuid
-               AND m.user_id = ?
-               AND m.deleted_at IS NULL
               JOIN organizations o
                 ON o.uuid = owner.org_uuid
                AND o.deleted_at IS NULL
              LIMIT 1
             """,
-            (resource_uuid,) * len(_RESOURCE_ORG_SELECTS) + (user_id,),
+            (user_id or "",) + (resource_uuid,) * len(_RESOURCE_ORG_SELECTS),
         )
         row = cursor.fetchone()
-        return row["org_uuid"] if row else None
+        return (row["org_uuid"], bool(row["is_member"])) if row else None
 
 
 def create_api_key(

@@ -453,11 +453,11 @@ def test_list_and_detail_roundtrip(client):
         ).status_code
         == 404
     )
-    # Another workspace can't read this trace.
+    # Another workspace can't read this trace: it exists, so 403 not 404.
     other = _signup(client)
-    assert (
-        client.get(f"/traces/{created_b['uuid']}", headers=other).status_code == 404
-    )
+    denied = client.get(f"/traces/{created_b['uuid']}", headers=other)
+    assert denied.status_code == 403
+    assert denied.json()["detail"] == "This resource belongs to a different workspace"
 
 
 def test_output_with_multiple_tool_calls_roundtrips(client):

@@ -238,19 +238,22 @@ def test_api_key_cannot_cross_org(client):
     ha = _signup(client)
     a_key = _raw_key(client, ha)
 
-    # A's key cannot trigger a run on B's agent…
+    # A's key cannot trigger a run on B's agent. The agent exists, so the answer
+    # is 403 — and a key is bound to one org, so the owning org is not named.
     blocked = client.post(
         f"/agent-tests/agent/{agent_b['uuid']}/run",
         json={},
         headers={"X-API-Key": a_key},
     )
-    assert blocked.status_code == 404
+    assert blocked.status_code == 403
+    assert "organization_uuid" not in blocked.json()
 
-    # …nor read B's run.
+    # …nor read B's run, which exists in B's workspace and so is also a 403.
     blocked_read = client.get(
         f"/agent-tests/run/{task_b}", headers={"X-API-Key": a_key}
     )
-    assert blocked_read.status_code == 404
+    assert blocked_read.status_code == 403
+    assert "organization_uuid" not in blocked_read.json()
 
     # Clean up B's queued job (see note in test_run_with_api_key_*).
     client.delete(f"/agent-tests/job/{task_b}", headers=hb)

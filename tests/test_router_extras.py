@@ -202,11 +202,11 @@ def test_evaluators_full_lifecycle(client):
     )
     assert cannot_version.status_code == 403
 
-    # Cross-user fetch / unknown → 404
+    # Someone in another workspace is refused (403), an unknown id is still 404.
     other = _signup(client)
     assert (
         client.get(f"/evaluators/{ev_uuid}", headers=other["headers"]).status_code
-        == 404
+        == 403
     )
     assert (
         client.get("/evaluators/missing", headers=h).status_code == 404

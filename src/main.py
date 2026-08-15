@@ -3,7 +3,7 @@ import copy
 import uuid
 import asyncio
 import logging
-from typing import Literal, List, Optional, Dict, Any
+from typing import Literal, List, Optional, Dict, Any, Tuple
 from contextlib import asynccontextmanager
 
 import httpx
@@ -39,10 +39,15 @@ from fastapi.middleware.cors import CORSMiddleware
 from db import (
     init_db,
     NameAlreadyExistsError,
-    find_member_org_for_resource,
+    find_org_for_resource,
     get_personal_org_for_user,
 )
-from auth_utils import get_current_user_id, decode_token
+from auth_utils import (
+    API_KEY_PREFIX,
+    resolve_api_key,
+    get_current_user_id,
+    decode_token,
+)
 from routers.auth import router as auth_router
 from routers.agents import router as agents_router
 from routers.tools import router as tools_router
@@ -140,58 +145,79 @@ async def _name_already_exists_handler(_: Request, exc: NameAlreadyExistsError):
     )
 
 
-def _resource_org_hint(request: Request) -> Optional[str]:
-    """Return the org owning a uuid in the request path, if the caller belongs to it.
+def _caller_identity(request: Request) -> Optional[Tuple[Optional[str], str]]:
+    """Return `(user id or None, active org uuid)` for the request's credentials.
 
-    Only JWT callers get a hint: an API key is bound to a single org, so
-    "the resource lives in another workspace" cannot apply to it.
+    An API key is bound to one org and belongs to no user for this purpose, so
+    it resolves to `(None, its org)`. Unauthenticated requests return None.
     """
     auth = request.headers.get("authorization", "")
-    token = auth[7:].strip() if auth[:7].lower() == "bearer " else ""
-    user_id = (decode_token(token) or {}).get("sub") if token else None
+    bearer = auth[7:].strip() if auth[:7].lower() == "bearer " else ""
+    raw_key = request.headers.get("x-api-key", "").strip()
+    if not raw_key and bearer.startswith(API_KEY_PREFIX):
+        raw_key = bearer
+    if raw_key:
+        ctx = resolve_api_key(raw_key)
+        return (None, ctx.org_uuid) if ctx else None
+
+    user_id = (decode_token(bearer) or {}).get("sub") if bearer else None
     if not user_id:
         return None
-
     active_org = request.headers.get("x-org-uuid")
     if not active_org:
         personal = get_personal_org_for_user(user_id)
         active_org = personal["uuid"] if personal else ""
+    return user_id, active_org
+
+
+def _resource_in_another_org(request: Request) -> Optional[Tuple[str, bool]]:
+    """Return `(owning org uuid, caller is a member)` for a uuid in the request
+    path that lives outside the caller's active org, or None."""
+    identity = _caller_identity(request)
+    if identity is None:
+        return None
+    user_id, active_org = identity
 
     for segment in request.url.path.split("/"):
         if len(segment) == 36:
-            org_uuid = find_member_org_for_resource(segment, user_id)
+            owner = find_org_for_resource(segment, user_id)
             # A parent uuid in the path usually resolves to the org the caller
-            # is already in; hinting it would send the frontend on a
-            # switch-and-retry loop that hides the real cause of the 404.
-            if org_uuid and org_uuid != active_org:
-                return org_uuid
+            # is already in; answering 403 for it would hide the real cause of
+            # the 404 and, for a member, loop the frontend on switch-and-retry.
+            if owner and owner[0] != active_org:
+                return owner
     return None
 
 
 @app.exception_handler(StarletteHTTPException)
 async def _not_found_handler(request: Request, exc: StarletteHTTPException):
-    """Tell the caller which of their workspaces a 404'd resource lives in.
+    """Turn a 404 into a 403 when the resource lives in another workspace.
 
-    A shared link opens with whatever workspace the recipient had active, so
-    a resource they can see still 404s under the wrong `X-Org-UUID`. The
-    `organization_uuid` hint lets the frontend switch and retry instead of
-    showing a dead end. It is added only when the caller is a member of the
-    owning workspace, so it never reveals someone else's resource.
+    A missing resource and one the caller may not touch are different answers:
+    the second is 403. Members of the owning workspace also get its
+    `organization_uuid` back, so the frontend can switch workspace and retry
+    instead of showing a dead end — a shared link opens with whatever workspace
+    the recipient had active. Everyone else is told nothing about which
+    workspace owns it.
     """
     if exc.status_code == 404:
         # An exception raised inside an exception handler bypasses Starlette's
-        # error middleware and becomes a bare 500, so a hint that cannot be
-        # resolved must degrade to the plain 404.
+        # error middleware and becomes a bare 500, so a lookup that fails must
+        # degrade to the plain 404.
         try:
-            org_uuid = await run_in_threadpool(_resource_org_hint, request)
+            owner = await run_in_threadpool(_resource_in_another_org, request)
         except Exception:
-            logger.exception("Failed to resolve the workspace hint for a 404")
-            org_uuid = None
-        if org_uuid:
+            logger.exception("Failed to resolve the owning workspace for a 404")
+            owner = None
+        if owner:
+            org_uuid, is_member = owner
+            content: Dict[str, Any] = {
+                "detail": "This resource belongs to a different workspace"
+            }
+            if is_member:
+                content["organization_uuid"] = org_uuid
             return JSONResponse(
-                status_code=404,
-                content={"detail": exc.detail, "organization_uuid": org_uuid},
-                headers=exc.headers,
+                status_code=403, content=content, headers=exc.headers
             )
     return await http_exception_handler(request, exc)
 
