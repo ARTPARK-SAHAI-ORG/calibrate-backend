@@ -5,7 +5,7 @@ import uuid
 from os.path import join
 import os
 from pathlib import Path
-from typing import Optional, List, Dict, Any, Tuple, TYPE_CHECKING
+from typing import Optional, List, Dict, Any, Set, Tuple, TYPE_CHECKING
 from contextlib import contextmanager
 
 if TYPE_CHECKING:
@@ -908,6 +908,9 @@ def init_db():
                 -- `reorder_evaluators_for_annotation_task` /
                 -- `PUT /annotation-tasks/{uuid}/evaluators/order`.
                 position INTEGER DEFAULT NULL,
+                -- Annotators may leave an optional evaluator blank; a job is
+                -- only auto-completed once every REQUIRED slot has a row.
+                is_optional INTEGER NOT NULL DEFAULT 0,
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                 deleted_at TIMESTAMP DEFAULT NULL,
                 UNIQUE(task_id, evaluator_id),
@@ -1004,6 +1007,9 @@ def init_db():
                 -- the annotator's job view; later reordering on the task does
                 -- NOT propagate to existing job snapshots.
                 position INTEGER DEFAULT NULL,
+                -- Snapshotted alongside `position`. Marking an evaluator
+                -- optional on the task later does NOT reach existing jobs.
+                is_optional INTEGER NOT NULL DEFAULT 0,
                 UNIQUE(job_id, evaluator_id),
                 FOREIGN KEY (job_id) REFERENCES annotation_jobs(uuid),
                 FOREIGN KEY (evaluator_id) REFERENCES evaluators(uuid)
@@ -1052,6 +1058,10 @@ def init_db():
             # for the read-side ORDER BY.
             "ALTER TABLE annotation_task_evaluators ADD COLUMN position INTEGER DEFAULT NULL",
             "ALTER TABLE annotation_job_evaluators ADD COLUMN position INTEGER DEFAULT NULL",
+            # Optional evaluators may be left blank by the annotator. Legacy
+            # rows land 0 (required), preserving the previous behavior.
+            "ALTER TABLE annotation_task_evaluators ADD COLUMN is_optional INTEGER NOT NULL DEFAULT 0",
+            "ALTER TABLE annotation_job_evaluators ADD COLUMN is_optional INTEGER NOT NULL DEFAULT 0",
             # Denormalized STT/TTS list-header fields, promoted out of the heavy
             # `details` JSON blob so the jobs-list query never has to read or
             # parse it. Written at create time by `create_job`; legacy rows
@@ -8025,6 +8035,17 @@ def delete_annotation_task(task_uuid: str) -> bool:
 # ============ Annotation Task Evaluators ============
 
 
+def _with_bool_is_optional(row: sqlite3.Row) -> Dict[str, Any]:
+    """Row to dict, with the pivot's 0/1 `is_optional` as a real bool.
+
+    The column reaches API responses verbatim, and JSON `0` reads as a number
+    rather than a flag.
+    """
+    d = dict(row)
+    d["is_optional"] = bool(d.get("is_optional"))
+    return d
+
+
 def _next_evaluator_position(cursor: sqlite3.Cursor, task_id: str) -> int:
     """Return MAX(position)+1 among active links for this task, or 1 if none.
 
@@ -8068,12 +8089,18 @@ def _visible_evaluator_ids_for_task(cursor: sqlite3.Cursor, task_id: str) -> set
 
 
 def _relink_or_insert_evaluator(
-    cursor: sqlite3.Cursor, task_id: str, evaluator_id: str, position: Optional[int]
+    cursor: sqlite3.Cursor,
+    task_id: str,
+    evaluator_id: str,
+    position: Optional[int],
+    is_optional: bool = False,
 ) -> int:
     """Restore a soft-deleted (task, evaluator) pivot row or insert a fresh one.
 
     Sets the row's `position` to the given value (pass `None` when the caller
-    renumbers the whole set afterward). Returns the pivot row id.
+    renumbers the whole set afterward). A restored row is reset to the given
+    `is_optional` rather than keeping what it carried before it was unlinked.
+    Returns the pivot row id.
     """
     cursor.execute(
         "SELECT id FROM annotation_task_evaluators "
@@ -8084,32 +8111,54 @@ def _relink_or_insert_evaluator(
     if existing:
         cursor.execute(
             "UPDATE annotation_task_evaluators "
-            "SET deleted_at = NULL, created_at = CURRENT_TIMESTAMP, position = ? "
+            "SET deleted_at = NULL, created_at = CURRENT_TIMESTAMP, position = ?, "
+            "    is_optional = ? "
             "WHERE id = ?",
-            (position, existing["id"]),
+            (position, int(is_optional), existing["id"]),
         )
         return existing["id"]
     cursor.execute(
-        "INSERT INTO annotation_task_evaluators (task_id, evaluator_id, position) "
-        "VALUES (?, ?, ?)",
-        (task_id, evaluator_id, position),
+        "INSERT INTO annotation_task_evaluators "
+        "(task_id, evaluator_id, position, is_optional) VALUES (?, ?, ?, ?)",
+        (task_id, evaluator_id, position, int(is_optional)),
     )
     return cursor.lastrowid
 
 
 def _renumber_evaluator_positions(
-    cursor: sqlite3.Cursor, task_id: str, ordered_evaluator_ids: List[str]
+    cursor: sqlite3.Cursor,
+    task_id: str,
+    ordered_evaluator_ids: List[str],
+    optional_evaluator_ids: Optional[Set[str]] = None,
 ) -> None:
-    """Assign `position` 1..N to the task's active links in the given order."""
+    """Assign `position` 1..N to the task's active links in the given order.
+
+    When `optional_evaluator_ids` is given, each link's `is_optional` is set to
+    match it — so an id absent from that set is reset to required.
+    """
     for idx, evaluator_id in enumerate(ordered_evaluator_ids, start=1):
-        cursor.execute(
-            "UPDATE annotation_task_evaluators SET position = ? "
-            "WHERE task_id = ? AND evaluator_id = ? AND deleted_at IS NULL",
-            (idx, task_id, evaluator_id),
-        )
+        if optional_evaluator_ids is None:
+            cursor.execute(
+                "UPDATE annotation_task_evaluators SET position = ? "
+                "WHERE task_id = ? AND evaluator_id = ? AND deleted_at IS NULL",
+                (idx, task_id, evaluator_id),
+            )
+        else:
+            cursor.execute(
+                "UPDATE annotation_task_evaluators SET position = ?, is_optional = ? "
+                "WHERE task_id = ? AND evaluator_id = ? AND deleted_at IS NULL",
+                (
+                    idx,
+                    int(evaluator_id in optional_evaluator_ids),
+                    task_id,
+                    evaluator_id,
+                ),
+            )
 
 
-def add_evaluator_to_annotation_task(task_id: str, evaluator_id: str) -> int:
+def add_evaluator_to_annotation_task(
+    task_id: str, evaluator_id: str, is_optional: bool = False
+) -> int:
     """Link an evaluator to an annotation task. Restores soft-deleted links if present.
 
     New (or restored) links are appended to the task's display order via the
@@ -8118,7 +8167,9 @@ def add_evaluator_to_annotation_task(task_id: str, evaluator_id: str) -> int:
     with get_db_connection() as conn:
         cursor = conn.cursor()
         next_pos = _next_evaluator_position(cursor, task_id)
-        link_id = _relink_or_insert_evaluator(cursor, task_id, evaluator_id, next_pos)
+        link_id = _relink_or_insert_evaluator(
+            cursor, task_id, evaluator_id, next_pos, is_optional
+        )
         conn.commit()
         return link_id
 
@@ -8173,10 +8224,16 @@ def reorder_evaluators_for_annotation_task(
 
 
 def set_evaluators_for_annotation_task(
-    task_id: str, ordered_evaluator_ids: List[str]
+    task_id: str,
+    ordered_evaluator_ids: List[str],
+    optional_evaluator_ids: Optional[List[str]] = None,
 ) -> Dict[str, List[str]]:
     """Reconcile a task's linked evaluators to exactly `ordered_evaluator_ids`,
     in that display order — one atomic call that links, unlinks, and reorders.
+
+    `optional_evaluator_ids` sets which of them annotators may leave blank; it
+    is applied as a whole set, so omitting an id that is currently optional
+    makes it required again. Pass `None` to leave every link's flag untouched.
 
     Links ids not currently linked (restoring a soft-deleted row if present),
     unlinks currently-linked ids absent from the target, then renumbers
@@ -8205,10 +8262,16 @@ def set_evaluators_for_annotation_task(
                 "WHERE task_id = ? AND evaluator_id = ? AND deleted_at IS NULL",
                 (task_id, ev),
             )
+        optional_set = (
+            None if optional_evaluator_ids is None else set(optional_evaluator_ids)
+        )
         for ev in to_add:
-            # Position is left NULL here; the renumber below assigns final order.
+            # Position is left NULL and `is_optional` defaults to required; the
+            # renumber below assigns the final order and flag for the whole set.
             _relink_or_insert_evaluator(cursor, task_id, ev, None)
-        _renumber_evaluator_positions(cursor, task_id, ordered_evaluator_ids)
+        _renumber_evaluator_positions(
+            cursor, task_id, ordered_evaluator_ids, optional_set
+        )
         conn.commit()
         if to_add or to_remove:
             logger.info(
@@ -8579,7 +8642,8 @@ def create_annotation_job(
         # propagate to existing jobs.
         cursor.execute(
             """
-            SELECT evaluator_id, position FROM annotation_task_evaluators
+            SELECT evaluator_id, position, is_optional
+              FROM annotation_task_evaluators
              WHERE task_id = ? AND deleted_at IS NULL
              ORDER BY position ASC, id ASC
             """,
@@ -8595,9 +8659,9 @@ def create_annotation_job(
         if snapshot_rows:
             cursor.executemany(
                 "INSERT INTO annotation_job_evaluators "
-                "(job_id, evaluator_id, position) VALUES (?, ?, ?)",
+                "(job_id, evaluator_id, position, is_optional) VALUES (?, ?, ?, ?)",
                 [
-                    (job_uuid, r["evaluator_id"], idx)
+                    (job_uuid, r["evaluator_id"], idx, r["is_optional"])
                     for idx, r in enumerate(snapshot_rows, start=1)
                 ],
             )
@@ -8605,14 +8669,22 @@ def create_annotation_job(
     return job_uuid
 
 
-def get_evaluator_ids_for_job(job_uuid: str) -> List[str]:
-    """Return the snapshotted evaluator UUIDs for a job. This is what the
-    auto-completion check reads, NOT the live linked set on the parent task."""
+def get_evaluator_ids_for_job(
+    job_uuid: str, required_only: bool = False
+) -> List[str]:
+    """Return the snapshotted evaluator UUIDs for a job, NOT the live linked
+    set on the parent task.
+
+    `required_only=True` drops the ones annotators may leave blank — that is
+    the set the auto-completion check measures against.
+    """
     with get_db_connection() as conn:
         cursor = conn.cursor()
         cursor.execute(
             "SELECT evaluator_id FROM annotation_job_evaluators "
-            "WHERE job_id = ? ORDER BY position ASC, id ASC",
+            "WHERE job_id = ? "
+            + ("AND is_optional = 0 " if required_only else "")
+            + "ORDER BY position ASC, id ASC",
             (job_uuid,),
         )
         return [r["evaluator_id"] for r in cursor.fetchall()]
@@ -8641,7 +8713,8 @@ def get_evaluators_for_job(job_uuid: str) -> List[Dict[str, Any]]:
                 e.output_type AS output_type,
                 e.owner_user_id AS owner_user_id,
                 e.slug AS slug,
-                e.live_version_id AS live_version_id
+                e.live_version_id AS live_version_id,
+                je.is_optional AS is_optional
               FROM annotation_job_evaluators je
               JOIN evaluators e ON e.uuid = je.evaluator_id
              WHERE je.job_id = ?
@@ -8652,7 +8725,7 @@ def get_evaluators_for_job(job_uuid: str) -> List[Dict[str, Any]]:
             """,
             (job_uuid,),
         )
-        return [dict(r) for r in cursor.fetchall()]
+        return [_with_bool_is_optional(r) for r in cursor.fetchall()]
 
 
 def get_annotation_job(job_uuid: str) -> Optional[Dict[str, Any]]:
@@ -9494,7 +9567,8 @@ def get_evaluators_for_annotation_task(task_id: str) -> List[Dict[str, Any]]:
                 e.slug AS slug,
                 e.live_version_id AS live_version_id,
                 ate.created_at AS linked_at,
-                ate.position AS position
+                ate.position AS position,
+                ate.is_optional AS is_optional
               FROM annotation_task_evaluators ate
               JOIN evaluators e ON e.uuid = ate.evaluator_id
              WHERE ate.task_id = ?
@@ -9507,7 +9581,7 @@ def get_evaluators_for_annotation_task(task_id: str) -> List[Dict[str, Any]]:
             """,
             (task_id,),
         )
-        return [dict(r) for r in cursor.fetchall()]
+        return [_with_bool_is_optional(r) for r in cursor.fetchall()]
 
 
 def get_evaluators_for_annotation_tasks(
@@ -9544,7 +9618,8 @@ def get_evaluators_for_annotation_tasks(
                 e.slug AS slug,
                 e.live_version_id AS live_version_id,
                 ate.created_at AS linked_at,
-                ate.position AS position
+                ate.position AS position,
+                ate.is_optional AS is_optional
               FROM annotation_task_evaluators ate
               JOIN evaluators e ON e.uuid = ate.evaluator_id
              WHERE ate.task_id IN ({placeholders})
@@ -9555,7 +9630,7 @@ def get_evaluators_for_annotation_tasks(
             tuple(task_ids),
         )
         for r in cursor.fetchall():
-            d = dict(r)
+            d = _with_bool_is_optional(r)
             # `task_id` is only the bucketing key; drop it so each evaluator dict
             # is byte-for-byte identical to the single-task helper's rows.
             tid = d.pop("task_id")

@@ -441,6 +441,10 @@ class EvaluatorLinkRequest(BaseModel):
         description="The evaluator to link. Must be one you created or a built-in default",
         examples=[_EXAMPLE_ID],
     )
+    is_optional: bool = Field(
+        False,
+        description="Whether annotators may leave this evaluator blank. Optional evaluators do not hold a labelling job back from completing",
+    )
 
 
 class EvaluatorOrderRequest(BaseModel):
@@ -452,6 +456,11 @@ class EvaluatorOrderRequest(BaseModel):
 class EvaluatorSetRequest(BaseModel):
     evaluator_ids: List[str] = Field(
         description="The full ordered set of evaluators the task should end up linked to, in display order. Missing ones are unlinked, new ones are linked, and the order sets their position. Send an empty list to unlink all. Each must be one you created or a built-in default",
+        examples=[["f47ac10b-58cc-4372-a567-0e02b2c3d479"]],
+    )
+    optional_evaluator_ids: Optional[List[str]] = Field(
+        None,
+        description="Which of `evaluator_ids` annotators may leave blank. Applied as a whole set, so an ID left out becomes required again. Optional evaluators do not hold a labelling job back from completing. Omit to leave every evaluator as it is",
         examples=[["f47ac10b-58cc-4372-a567-0e02b2c3d479"]],
     )
 
@@ -724,7 +733,9 @@ def link_evaluator_to_task(
     """Link an evaluator to a task, appending it to the display order"""
     _ensure_owned_task(task_uuid, ctx.org_uuid)
     ensure_owned_evaluator(payload.evaluator_id, ctx.org_uuid)
-    add_evaluator_to_annotation_task(task_uuid, payload.evaluator_id)
+    add_evaluator_to_annotation_task(
+        task_uuid, payload.evaluator_id, payload.is_optional
+    )
     return {"message": "Evaluator linked to annotation task"}
 
 
@@ -771,10 +782,21 @@ def set_task_evaluators(
         raise HTTPException(
             status_code=400, detail="evaluator_ids contains duplicates"
         )
+    if payload.optional_evaluator_ids:
+        unknown = sorted(
+            set(payload.optional_evaluator_ids) - set(payload.evaluator_ids)
+        )
+        if unknown:
+            raise HTTPException(
+                status_code=400,
+                detail=f"optional_evaluator_ids must be a subset of evaluator_ids: {unknown}",
+            )
     # Validate the whole set up front so a bad id links/unlinks nothing.
     for evaluator_id in payload.evaluator_ids:
         ensure_owned_evaluator(evaluator_id, ctx.org_uuid)
-    changed = set_evaluators_for_annotation_task(task_uuid, payload.evaluator_ids)
+    changed = set_evaluators_for_annotation_task(
+        task_uuid, payload.evaluator_ids, payload.optional_evaluator_ids
+    )
     current_ids = [e["uuid"] for e in get_evaluators_for_annotation_task(task_uuid)]
     return EvaluatorSetResponse(
         message="Task evaluators updated",
@@ -1121,13 +1143,18 @@ def bulk_create_items(
                     evaluator_id=evaluator_id,
                 )
                 any_annotation_written = True
-        # Auto-complete contract: every item × every evaluator IN THE JOB
-        # SNAPSHOT must have a row. Same source of truth as the public-form
-        # auto-complete path (`get_evaluator_ids_for_job`) — see also the
-        # snapshot-mismatch gate above which uses the same set.
+        # Auto-complete contract: every item × every REQUIRED evaluator in the
+        # job snapshot must have a row, and every item must carry at least one
+        # judgement (so a job whose evaluators are all optional still needs the
+        # annotator to visit each item). Same source of truth as the
+        # public-form auto-complete path — see also the snapshot-mismatch gate
+        # above, which measures against the full snapshot instead.
+        required_evaluator_ids = set(
+            get_evaluator_ids_for_job(job_uuid, required_only=True)
+        )
         items_fully_annotated = all(
             it.annotations
-            and snapshot_evaluator_ids.issubset(set(it.annotations.keys()))
+            and required_evaluator_ids.issubset(set(it.annotations.keys()))
             for it in payload.items
         )
         if any_annotation_written and items_fully_annotated:

@@ -2747,3 +2747,258 @@ def test_annotation_task_set_evaluators_public_surface(client):
         headers={"X-API-Key": raw},
     )
     assert r.status_code == 403, r.text
+
+
+def _two_llm_evaluators(client, h):
+    llm_evs = [
+        e
+        for e in client.get("/evaluators", headers=h).json()["items"]
+        if e.get("evaluator_type") == "llm"
+    ]
+    assert len(llm_evs) >= 2, "expected >=2 seeded LLM evaluators"
+    return llm_evs[0], llm_evs[1]
+
+
+def test_optional_evaluator_flag_round_trips(client):
+    """`optional_evaluator_ids` on PUT sets the flag, every read surface carries
+    it, and the whole-set semantics reset an omitted ID back to required."""
+    h = _signup(client)["headers"]
+    ev_a, ev_b = _two_llm_evaluators(client, h)
+    task_uuid = client.post(
+        "/annotation-tasks",
+        json={
+            "name": f"opt-{uuid.uuid4().hex[:6]}",
+            "type": "llm",
+            "evaluator_ids": [ev_a["uuid"], ev_b["uuid"]],
+        },
+        headers=h,
+    ).json()["uuid"]
+
+    # Linking on create leaves everything required.
+    detail = client.get(f"/annotation-tasks/{task_uuid}", headers=h).json()
+    assert [e["is_optional"] for e in detail["evaluators"]] == [False, False]
+
+    r = client.put(
+        f"/annotation-tasks/{task_uuid}/evaluators",
+        json={
+            "evaluator_ids": [ev_a["uuid"], ev_b["uuid"]],
+            "optional_evaluator_ids": [ev_b["uuid"]],
+        },
+        headers=h,
+    )
+    assert r.status_code == 200, r.text
+    detail = client.get(f"/annotation-tasks/{task_uuid}", headers=h).json()
+    assert {e["uuid"]: e["is_optional"] for e in detail["evaluators"]} == {
+        ev_a["uuid"]: False,
+        ev_b["uuid"]: True,
+    }
+    # The list endpoint reads through the batched query — same flag.
+    listed = client.get("/annotation-tasks", headers=h).json()["items"]
+    task_row = next(t for t in listed if t["uuid"] == task_uuid)
+    assert {e["uuid"]: e["is_optional"] for e in task_row["evaluators"]} == {
+        ev_a["uuid"]: False,
+        ev_b["uuid"]: True,
+    }
+
+    # Omitting the field entirely leaves the flags alone.
+    client.put(
+        f"/annotation-tasks/{task_uuid}/evaluators",
+        json={"evaluator_ids": [ev_a["uuid"], ev_b["uuid"]]},
+        headers=h,
+    )
+    detail = client.get(f"/annotation-tasks/{task_uuid}", headers=h).json()
+    assert [e["is_optional"] for e in detail["evaluators"]] == [False, True]
+
+    # An empty list means "none optional" — ev_b goes back to required.
+    client.put(
+        f"/annotation-tasks/{task_uuid}/evaluators",
+        json={
+            "evaluator_ids": [ev_a["uuid"], ev_b["uuid"]],
+            "optional_evaluator_ids": [],
+        },
+        headers=h,
+    )
+    detail = client.get(f"/annotation-tasks/{task_uuid}", headers=h).json()
+    assert [e["is_optional"] for e in detail["evaluators"]] == [False, False]
+
+    # An ID outside `evaluator_ids` is rejected before anything is written.
+    bad = client.put(
+        f"/annotation-tasks/{task_uuid}/evaluators",
+        json={
+            "evaluator_ids": [ev_a["uuid"]],
+            "optional_evaluator_ids": [ev_b["uuid"]],
+        },
+        headers=h,
+    )
+    assert bad.status_code == 400
+    assert [e["uuid"] for e in
+            client.get(f"/annotation-tasks/{task_uuid}", headers=h).json()["evaluators"]
+            ] == [ev_a["uuid"], ev_b["uuid"]]
+
+
+def test_link_endpoint_marks_optional_and_relink_resets_it(client):
+    """POST link carries `is_optional`; unlinking then relinking resets it."""
+    h = _signup(client)["headers"]
+    ev_a, ev_b = _two_llm_evaluators(client, h)
+    task_uuid = client.post(
+        "/annotation-tasks",
+        json={"name": f"link-{uuid.uuid4().hex[:6]}", "type": "llm"},
+        headers=h,
+    ).json()["uuid"]
+
+    client.post(
+        f"/annotation-tasks/{task_uuid}/evaluators",
+        json={"evaluator_id": ev_a["uuid"], "is_optional": True},
+        headers=h,
+    )
+    detail = client.get(f"/annotation-tasks/{task_uuid}", headers=h).json()
+    assert detail["evaluators"][0]["is_optional"] is True
+
+    client.delete(
+        f"/annotation-tasks/{task_uuid}/evaluators/{ev_a['uuid']}", headers=h
+    )
+    client.post(
+        f"/annotation-tasks/{task_uuid}/evaluators",
+        json={"evaluator_id": ev_a["uuid"]},
+        headers=h,
+    )
+    detail = client.get(f"/annotation-tasks/{task_uuid}", headers=h).json()
+    assert detail["evaluators"][0]["is_optional"] is False
+
+
+def test_labelling_job_completes_with_optional_evaluator_left_blank(client):
+    """A job completes once every REQUIRED slot is filled; the optional
+    evaluator may be left blank. The flag is frozen into the job snapshot."""
+    h = _signup(client)["headers"]
+    ev_a, ev_b = _two_llm_evaluators(client, h)
+    task_uuid = client.post(
+        "/annotation-tasks",
+        json={
+            "name": f"job-{uuid.uuid4().hex[:6]}",
+            "type": "llm",
+            "evaluator_ids": [ev_a["uuid"], ev_b["uuid"]],
+        },
+        headers=h,
+    ).json()["uuid"]
+    client.put(
+        f"/annotation-tasks/{task_uuid}/evaluators",
+        json={
+            "evaluator_ids": [ev_a["uuid"], ev_b["uuid"]],
+            "optional_evaluator_ids": [ev_b["uuid"]],
+        },
+        headers=h,
+    )
+    items = client.post(
+        f"/annotation-tasks/{task_uuid}/items",
+        json={"items": [{"payload": {"name": "i1"}}, {"payload": {"name": "i2"}}]},
+        headers=h,
+    ).json()["item_ids"]
+    annotator = client.post(
+        "/annotators", json={"name": f"ann-{uuid.uuid4().hex[:6]}"}, headers=h
+    ).json()
+    job = client.post(
+        f"/annotation-tasks/{task_uuid}/jobs",
+        json={"annotator_ids": [annotator["uuid"]], "item_ids": items},
+        headers=h,
+    ).json()["jobs"][0]
+    token = job["public_token"]
+
+    # The labelling form carries the snapshotted flag.
+    form = client.get(f"/public/annotation-jobs/{token}").json()
+    assert {e["uuid"]: e["is_optional"] for e in form["evaluators"]} == {
+        ev_a["uuid"]: False,
+        ev_b["uuid"]: True,
+    }
+
+    # Marking ev_b required again on the task must NOT reach the live job.
+    client.put(
+        f"/annotation-tasks/{task_uuid}/evaluators",
+        json={
+            "evaluator_ids": [ev_a["uuid"], ev_b["uuid"]],
+            "optional_evaluator_ids": [],
+        },
+        headers=h,
+    )
+    form = client.get(f"/public/annotation-jobs/{token}").json()
+    assert {e["uuid"]: e["is_optional"] for e in form["evaluators"]} == {
+        ev_a["uuid"]: False,
+        ev_b["uuid"]: True,
+    }
+
+    # First item: only the required evaluator. One item still untouched.
+    first = client.post(
+        f"/public/annotation-jobs/{token}/annotations",
+        json={
+            "item_id": items[0],
+            "annotations": [{"evaluator_id": ev_a["uuid"], "value": {"value": True}}],
+        },
+    )
+    assert first.status_code == 200, first.text
+    assert first.json()["status"] == "in_progress"
+
+    # Second item: required slot filled, optional left blank → job completes.
+    second = client.post(
+        f"/public/annotation-jobs/{token}/annotations",
+        json={
+            "item_id": items[1],
+            "annotations": [{"evaluator_id": ev_a["uuid"], "value": {"value": False}}],
+        },
+    )
+    assert second.status_code == 200, second.text
+    assert second.json()["status"] == "completed"
+
+
+def test_all_optional_job_still_needs_every_item_touched(client):
+    """With every evaluator optional, completion falls back to 'the annotator
+    visited each item' rather than completing on the first save."""
+    h = _signup(client)["headers"]
+    ev_a, _ = _two_llm_evaluators(client, h)
+    task_uuid = client.post(
+        "/annotation-tasks",
+        json={
+            "name": f"allopt-{uuid.uuid4().hex[:6]}",
+            "type": "llm",
+            "evaluator_ids": [ev_a["uuid"]],
+        },
+        headers=h,
+    ).json()["uuid"]
+    client.put(
+        f"/annotation-tasks/{task_uuid}/evaluators",
+        json={
+            "evaluator_ids": [ev_a["uuid"]],
+            "optional_evaluator_ids": [ev_a["uuid"]],
+        },
+        headers=h,
+    )
+    items = client.post(
+        f"/annotation-tasks/{task_uuid}/items",
+        json={"items": [{"payload": {"name": "i1"}}, {"payload": {"name": "i2"}}]},
+        headers=h,
+    ).json()["item_ids"]
+    annotator = client.post(
+        "/annotators", json={"name": f"ann-{uuid.uuid4().hex[:6]}"}, headers=h
+    ).json()
+    token = client.post(
+        f"/annotation-tasks/{task_uuid}/jobs",
+        json={"annotator_ids": [annotator["uuid"]], "item_ids": items},
+        headers=h,
+    ).json()["jobs"][0]["public_token"]
+
+    first = client.post(
+        f"/public/annotation-jobs/{token}/annotations",
+        json={
+            "item_id": items[0],
+            "annotations": [{"evaluator_id": ev_a["uuid"], "value": {"value": True}}],
+        },
+    )
+    assert first.json()["status"] == "in_progress"
+
+    # A blank judgement still counts as visiting the item.
+    second = client.post(
+        f"/public/annotation-jobs/{token}/annotations",
+        json={
+            "item_id": items[1],
+            "annotations": [{"evaluator_id": ev_a["uuid"], "value": None}],
+        },
+    )
+    assert second.json()["status"] == "completed"
