@@ -323,7 +323,12 @@ def _to_summary(row: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 
-@router.post("", response_model=TraceIngestResponse, summary="Create trace")
+@router.post(
+    "",
+    response_model=TraceIngestResponse,
+    summary="Create trace",
+    tags=["Public API"],
+)
 async def ingest_trace(
     payload: TraceIngest, ctx: OrgContext = Depends(get_org_jwt_or_api_key)
 ):
