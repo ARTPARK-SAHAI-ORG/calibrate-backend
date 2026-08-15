@@ -374,3 +374,89 @@ def test_run_job_failure_uploads_before_temp_dir_is_removed():
     assert seen.get("exists") is True
     final = mock_update.call_args
     assert final.kwargs["details"]["s3_prefix"] == "some/prefix"
+
+
+class _FinishedProcess:
+    """Popen stand-in that has already exited cleanly."""
+
+    def __init__(self, returncode=0):
+        self.returncode = returncode
+        self.pid = 1
+
+    def poll(self):
+        return self.returncode
+
+    def wait(self, timeout=None):
+        return self.returncode
+
+
+def _run_job_with(returncode, parsed_rows):
+    """Drive _run_job over a stubbed subprocess + parser. Returns the patched
+    (clear, create) mocks plus the ordered call log."""
+    from annotation_eval_runner import _run_job
+
+    items = [{"uuid": "i1", "payload": {
+        "predicted_transcript": "p", "reference_transcript": "r"}}]
+    order = []
+    clear = MagicMock(side_effect=lambda *a: order.append("clear") or 1)
+    create = MagicMock(side_effect=lambda *a: order.append("create"))
+
+    with patch(
+        "annotation_eval_runner.get_annotation_task", return_value={"type": "stt"}
+    ), patch(
+        "annotation_eval_runner.get_eval_job_items", return_value=items
+    ), patch(
+        "annotation_eval_runner.subprocess.Popen",
+        return_value=_FinishedProcess(returncode),
+    ), patch(
+        "annotation_eval_runner.parse_results_for_task_type",
+        return_value=parsed_rows,
+    ), patch(
+        "annotation_eval_runner.clear_evaluator_runs_for_job", clear
+    ), patch(
+        "annotation_eval_runner.create_evaluator_runs", create
+    ), patch(
+        "annotation_eval_runner.update_job"
+    ), patch(
+        "annotation_eval_runner.try_start_queued_job"
+    ), patch(
+        "annotation_eval_runner._persist_pgid"
+    ), patch(
+        "annotation_eval_runner.capture_exception_to_sentry"
+    ), patch(
+        "annotation_eval_runner._try_upload_partial_outputs", return_value=None
+    ), patch(
+        "annotation_eval_runner.get_s3_client", return_value=MagicMock()
+    ), patch(
+        "annotation_eval_runner.get_s3_output_config", return_value="bucket"
+    ), patch(
+        "annotation_eval_runner.upload_file_to_s3"
+    ):
+        _run_job("j-1", "task", "u-1", [_resolved()], item_ids=None)
+    return clear, create, order
+
+
+def _row(item_id="i1"):
+    return {
+        "job_id": "j-1",
+        "item_id": item_id,
+        "evaluator_id": "ev-1",
+        "evaluator_version_id": "ver-1",
+        "value": {"value": True},
+        "status": "completed",
+    }
+
+
+def test_run_job_rewrites_rows_from_the_finished_files():
+    """Anything stored while calibrate was still writing is provisional — a
+    successful run replaces it with what the complete files say."""
+    clear, create, order = _run_job_with(0, [_row()])
+    assert order == ["clear", "create"]
+    assert create.call_args[0][0] == [_row()]
+
+
+def test_run_job_discards_in_flight_rows_when_calibrate_fails():
+    """A failed run contributes nothing to the task's scores."""
+    clear, create, _ = _run_job_with(1, [_row()])
+    clear.assert_called_once_with("j-1")
+    create.assert_not_called()
