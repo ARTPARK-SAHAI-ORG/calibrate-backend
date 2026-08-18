@@ -886,8 +886,8 @@ def get_simulation_run_status(
 
     # If this is a voice simulation, handle presigned URLs based on status
     if job.get("type") == "voice" and simulation_results:
-        if status == TaskStatus.DONE.value:
-            # For done status: generate presigned URLs on-the-fly from S3 paths
+        if status in (TaskStatus.DONE.value, TaskStatus.CANCELLED.value):
+            # For finished runs: generate presigned URLs on-the-fly from S3 paths
             # Don't cache them in the database
             try:
                 s3_bucket = get_s3_output_config()
@@ -2572,10 +2572,10 @@ def abort_simulation_run(
 
     results["simulation_results"] = simulation_results
 
-    # Mark as aborted in details and save with done status
+    # Mark as aborted in details and save with cancelled status
     update_simulation_job(
         job_uuid,
-        status=TaskStatus.DONE.value,
+        status=TaskStatus.CANCELLED.value,
         results=results,
         details={"aborted": True},
     )
@@ -2606,7 +2606,7 @@ def abort_simulation_run(
     return SimulationRunStatusResponse(
         task_id=job_uuid,
         name=run_name,
-        status=TaskStatus.DONE.value,
+        status=TaskStatus.CANCELLED.value,
         type=simulation_job["type"],
         updated_at=updated_at,
         total_simulations=results.get("total_simulations"),
