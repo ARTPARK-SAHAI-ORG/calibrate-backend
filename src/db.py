@@ -944,6 +944,8 @@ def init_db():
                 annotator_id TEXT NOT NULL,
                 public_token TEXT NOT NULL UNIQUE,
                 status TEXT NOT NULL DEFAULT 'pending',
+                comments_enabled INTEGER NOT NULL DEFAULT 1,
+                reasoning_mode TEXT NOT NULL DEFAULT 'optional',
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                 completed_at TIMESTAMP,
                 deleted_at TIMESTAMP DEFAULT NULL,
@@ -1234,6 +1236,20 @@ def init_db():
             )
         except sqlite3.OperationalError:
             pass
+
+        # Per-job labelling-form settings, frozen at job creation like the
+        # item and evaluator snapshots: changing a task afterwards must not
+        # move the form under an annotator who is mid-way through it.
+        for _job_form_setting in (
+            "comments_enabled INTEGER NOT NULL DEFAULT 1",
+            "reasoning_mode TEXT NOT NULL DEFAULT 'optional'",
+        ):
+            try:
+                cursor.execute(
+                    f"ALTER TABLE annotation_jobs ADD COLUMN {_job_form_setting}"
+                )
+            except sqlite3.OperationalError:
+                pass
 
         # Per-org unique-name partial indexes are created BELOW, after the
         # `ALTER TABLE ... ADD COLUMN org_uuid` migration runs. Creating them
@@ -8578,6 +8594,8 @@ def create_annotation_job(
     public_token: str,
     status: str = "pending",
     evaluator_ids: Optional[List[str]] = None,
+    comments_enabled: bool = True,
+    reasoning_mode: str = "optional",
 ) -> str:
     """Create one job (annotator × N rows). Items AND linked evaluators are
     SNAPSHOTTED at creation time — subsequent edits/soft-deletes on the
@@ -8592,7 +8610,10 @@ def create_annotation_job(
     linked evaluator is snapshotted. The parent task's display order
     (`position`) is preserved among whichever evaluators are snapshotted; any
     id in `evaluator_ids` that isn't a live link on the task is silently
-    dropped (callers validate up front for a clean error)."""
+    dropped (callers validate up front for a clean error).
+
+    `comments_enabled` and `reasoning_mode` are the labelling form's own
+    settings and are likewise frozen per job."""
     if not item_uuids:
         raise ValueError("item_uuids must be non-empty")
     if len(item_uuids) != len(set(item_uuids)):
@@ -8623,10 +8644,21 @@ def create_annotation_job(
 
         cursor.execute(
             """
-            INSERT INTO annotation_jobs (uuid, task_id, annotator_id, public_token, status)
-            VALUES (?, ?, ?, ?, ?)
+            INSERT INTO annotation_jobs (
+                uuid, task_id, annotator_id, public_token, status,
+                comments_enabled, reasoning_mode
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?)
             """,
-            (job_uuid, task_id, annotator_id, public_token, status),
+            (
+                job_uuid,
+                task_id,
+                annotator_id,
+                public_token,
+                status,
+                int(comments_enabled),
+                reasoning_mode,
+            ),
         )
         cursor.executemany(
             "INSERT INTO annotation_job_items (job_id, item_id, payload) "

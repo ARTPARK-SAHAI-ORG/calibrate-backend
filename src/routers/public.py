@@ -837,6 +837,8 @@ def _build_annotation_job_payload(
             "status": job["status"],
             "created_at": job["created_at"],
             "completed_at": job.get("completed_at"),
+            "comments_enabled": bool(job.get("comments_enabled", 1)),
+            "reasoning_mode": job.get("reasoning_mode") or "optional",
         },
         "annotator": {
             "uuid": annotator["uuid"] if annotator else None,

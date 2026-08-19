@@ -1393,6 +1393,14 @@ class CreateJobsRequest(BaseModel):
         description="Subset of the task's linked evaluators to show in these jobs. Must be a subset of the current links, an empty list gives a 400. Applies to every annotator's job. Omit (`None`) to snapshot every linked evaluator",
         examples=[[_EXAMPLE_ID]],
     )
+    comments_enabled: bool = Field(
+        True,
+        description="When `true`, the labelling form lets the annotator leave a comment on each item",
+    )
+    reasoning_mode: Literal["optional", "required", "hidden"] = Field(
+        "optional",
+        description="How the labelling form treats the reasoning box on each judgement. `optional` shows it, `required` shows it and asks the annotator to fill it in, `hidden` leaves it out",
+    )
 
 
 @router.get("/{task_uuid}/jobs", summary="List labelling jobs")
@@ -1544,6 +1552,8 @@ def create_jobs(
             item_uuids=target_ids,
             public_token=public_token,
             evaluator_ids=evaluator_ids,
+            comments_enabled=payload.comments_enabled,
+            reasoning_mode=payload.reasoning_mode,
         )
         jobs_created.append(
             {
