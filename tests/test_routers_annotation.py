@@ -3051,3 +3051,64 @@ def test_all_optional_job_still_needs_every_item_touched(client):
         },
     )
     assert second.json()["status"] == "completed"
+
+
+def test_job_form_settings_round_trip(client):
+    """comments_enabled / reasoning_mode are stored per job and returned on the
+    annotator's public labelling payload; defaults apply when omitted."""
+    auth = _signup(client)
+    h = auth["headers"]
+    llm_ev = _llm_evaluator(client, h)
+    task_uuid = client.post(
+        "/annotation-tasks",
+        json={
+            "name": f"t-{uuid.uuid4().hex[:6]}",
+            "type": "llm",
+            "evaluator_ids": [llm_ev["uuid"]],
+        },
+        headers=h,
+    ).json()["uuid"]
+    items = client.post(
+        f"/annotation-tasks/{task_uuid}/items",
+        json={"items": [{"payload": {"name": "i1"}}]},
+        headers=h,
+    ).json()["item_ids"]
+    annotator = client.post(
+        "/annotators", json={"name": f"ann-{uuid.uuid4().hex[:6]}"}, headers=h
+    ).json()
+
+    def _create(extra):
+        r = client.post(
+            f"/annotation-tasks/{task_uuid}/jobs",
+            json={
+                "annotator_ids": [annotator["uuid"]],
+                "item_ids": items,
+                **extra,
+            },
+            headers=h,
+        )
+        assert r.status_code == 200, r.text
+        return r.json()["jobs"][0]["public_token"]
+
+    default_job = client.get(
+        f"/public/annotation-jobs/{_create({})}"
+    ).json()["job"]
+    assert default_job["comments_enabled"] is True
+    assert default_job["reasoning_mode"] == "optional"
+
+    token = _create({"comments_enabled": False, "reasoning_mode": "required"})
+    custom_job = client.get(f"/public/annotation-jobs/{token}").json()["job"]
+    assert custom_job["comments_enabled"] is False
+    assert custom_job["reasoning_mode"] == "required"
+
+    # Unknown reasoning_mode is rejected at the schema layer.
+    bad = client.post(
+        f"/annotation-tasks/{task_uuid}/jobs",
+        json={
+            "annotator_ids": [annotator["uuid"]],
+            "item_ids": items,
+            "reasoning_mode": "mandatory",
+        },
+        headers=h,
+    )
+    assert bad.status_code == 422
