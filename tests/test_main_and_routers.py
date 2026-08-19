@@ -119,7 +119,8 @@ def test_public_api_docs_are_unauthenticated_and_filtered(client, monkeypatch):
     assert "post" in paths.get("/tests/bulk", {})
     assert "post" in paths.get("/evaluators", {})
     assert "post" in paths.get("/evaluators/{evaluator_uuid}/versions", {})
-    # Annotation is trimmed to the automated evaluator-run loop (10 routes).
+    # Annotation is trimmed to the automated evaluator-run loop plus labelling-job
+    # creation (11 routes).
     assert "post" in paths.get("/annotation-tasks", {})
     assert "post" in paths.get("/annotation-tasks/{task_uuid}/evaluator-runs", {})
     assert "get" in paths.get("/annotation-tasks/{task_uuid}/summary", {})
@@ -167,7 +168,9 @@ def test_public_api_docs_are_unauthenticated_and_filtered(client, monkeypatch):
     assert set(paths["/annotators/{annotator_uuid}"]) == {"put"}
     assert not any(p.startswith("/annotation-agreement") for p in paths)
     assert "put" not in paths.get("/annotation-tasks/{task_uuid}", {})  # task update stays JWT-only
-    assert "/annotation-tasks/{task_uuid}/jobs" not in paths  # human labelling jobs
+    # Creating labelling jobs is public (it mints the annotator's link); listing
+    # them stays JWT-only.
+    assert set(paths["/annotation-tasks/{task_uuid}/jobs"]) == {"post"}
     assert "/annotation-tasks/{task_uuid}/annotations" not in paths
     assert "/annotation-tasks/{task_uuid}/items/{item_uuid}" not in paths
     assert "get" not in paths.get("/agent-tests", {})  # plain link-list stays JWT-only
