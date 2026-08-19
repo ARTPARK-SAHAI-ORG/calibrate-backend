@@ -125,6 +125,10 @@ paths:
     put:
       x-fern-sdk-group-name: annotation_tasks
       x-fern-sdk-method-name: update_items
+  /annotation-tasks/{task_uuid}/jobs:
+    post:
+      x-fern-sdk-group-name: annotation_tasks
+      x-fern-sdk-method-name: create_labelling_jobs
   /annotation-tasks/{task_uuid}/evaluator-runs:
     post:
       x-fern-sdk-group-name: annotation_tasks

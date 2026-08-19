@@ -822,6 +822,55 @@ def test_annotation_jobs_crud(client):
     assert upsert.status_code == 200
 
 
+def test_create_jobs_public_surface(client):
+    """POST /jobs is Public API: an API key can mint an annotator's labelling link."""
+    auth = _signup(client)
+    h = auth["headers"]
+    raw = client.post("/api-keys", json={"name": "ci"}, headers=h).json()["key"]
+    llm_ev = _llm_evaluator(client, h)
+    task_uuid = client.post(
+        "/annotation-tasks",
+        json={
+            "name": f"t-{uuid.uuid4().hex[:6]}",
+            "type": "llm",
+            "evaluator_ids": [llm_ev["uuid"]],
+        },
+        headers=h,
+    ).json()["uuid"]
+    items = client.post(
+        f"/annotation-tasks/{task_uuid}/items",
+        json={"items": [{"payload": {"name": "i1"}}]},
+        headers=h,
+    ).json()["item_ids"]
+    annotator = client.post(
+        "/annotators", json={"name": f"ann-{uuid.uuid4().hex[:6]}"}, headers=h
+    ).json()
+
+    r = client.post(
+        f"/annotation-tasks/{task_uuid}/jobs",
+        json={"annotator_ids": [annotator["uuid"]], "item_ids": items},
+        headers={"X-API-Key": raw},
+    )
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["count"] == 1
+    job = body["jobs"][0]
+    assert job["status"] == "pending"
+    assert job["item_ids"] == items
+    assert job["evaluator_ids"] == [llm_ev["uuid"]]
+
+    # The token opens the annotator's labelling page with no auth at all.
+    public = client.get(f"/public/annotation-jobs/{job['public_token']}")
+    assert public.status_code == 200, public.text
+
+    bad = client.post(
+        f"/annotation-tasks/{task_uuid}/jobs",
+        json={"annotator_ids": [annotator["uuid"]], "item_ids": items},
+        headers={"X-API-Key": "sk_not-a-real-key"},
+    )
+    assert bad.status_code == 401, bad.text
+
+
 def test_create_jobs_select_all(client):
     """`select_all=True` on POST /jobs expands the assignment target to every
     matching item; `q` narrows the set the same way the FE search field

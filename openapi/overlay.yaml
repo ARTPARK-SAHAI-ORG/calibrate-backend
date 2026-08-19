@@ -457,6 +457,20 @@ actions:
         idempotentHint: true
         description: |
           Bulk-update item payloads in an annotation task.
+  - target: $.paths['/annotation-tasks/{task_uuid}/jobs'].post
+    update:
+      x-speakeasy-group: annotation_tasks
+      x-speakeasy-name-override: create_labelling_jobs
+      x-speakeasy-mcp:
+        name: create-labelling-jobs
+        title: Create labelling jobs
+        scopes: [write]
+        readOnlyHint: false
+        destructiveHint: false
+        openWorldHint: true
+        idempotentHint: false
+        description: |
+          Assign items to annotators, creating one labelling job per annotator. Each job comes back with a public_token for the annotator's labelling link.
   - target: $.paths['/annotation-tasks/{task_uuid}/evaluator-runs'].post
     update:
       x-speakeasy-group: annotation_tasks

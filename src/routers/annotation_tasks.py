@@ -1408,14 +1408,47 @@ def list_task_jobs(
     return get_jobs_for_task(task_uuid)
 
 
-@router.post("/{task_uuid}/jobs", summary="Create labelling jobs")
+class LabellingJobCreated(BaseModel):
+    uuid: str = Field(
+        description="ID of the labelling job",
+        examples=[_EXAMPLE_ID],
+    )
+    public_token: str = Field(
+        description="Token that opens the annotator's labelling page without signing in",
+        examples=["kO3n1xPq7sVbYcT2mA9eR4wZ1jD5hL8f"],
+    )
+    annotator_id: str = Field(
+        description="ID of the annotator the job is assigned to",
+        examples=[_EXAMPLE_ID],
+    )
+    annotator_name: str = Field(description="Name of the annotator the job is assigned to")
+    item_ids: List[str] = Field(
+        description="IDs of the items assigned to the annotator",
+        examples=[[_EXAMPLE_ID]],
+    )
+    item_count: int = Field(description="How many items the annotator has to label")
+    evaluator_ids: List[str] = Field(
+        description="IDs of the evaluators the annotator scores each item on, in the order they are shown",
+        examples=[[_EXAMPLE_ID]],
+    )
+    status: Literal["pending"] = Field(
+        description="Status of the job right after you create it"
+    )
+
+
+class CreateJobsResponse(BaseModel):
+    jobs: List[LabellingJobCreated] = Field(description="The jobs created, one for each annotator")
+    count: int = Field(description="How many jobs were created")
+
+
+@router.post("/{task_uuid}/jobs", response_model=CreateJobsResponse, summary="Create labelling jobs", tags=["Public API"])
 def create_jobs(
     task_uuid: str = Path(
         description="Annotation task to act on",
         examples=["f47ac10b-58cc-4372-a567-0e02b2c3d479"],
     ),
     payload: CreateJobsRequest = ...,
-    ctx: OrgContext = Depends(get_current_org),
+    ctx: OrgContext = Depends(get_org_jwt_or_api_key),
 ):
     """Assign items to annotators, creating one labelling job per annotator"""
     _ensure_owned_task(task_uuid, ctx.org_uuid)
