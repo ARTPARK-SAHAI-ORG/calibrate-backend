@@ -18,6 +18,7 @@ from annotation_metrics import (
     evaluator_result_summary,
     filter_runs_to_live_versions,
     has_any_comparable_pair,
+    human_result_summary,
     per_item_agreement,
     trend_series,
     trend_series_evaluator_breakdown,
@@ -429,3 +430,34 @@ def test_trend_series_evaluator_breakdown():
     )
     assert "v1" in out["by_version"]
     assert "t1" in out["by_task"]
+
+
+def test_human_result_summary():
+    assert human_result_summary([], "e1") is None
+
+    binary = [
+        {"item_id": "i1", "evaluator_id": "e1", "annotator_id": "a1", "value": {"value": True}},
+        {"item_id": "i1", "evaluator_id": "e1", "annotator_id": "a2", "value": {"value": False}},
+        # Later label from the same annotator on the same item replaces the first
+        {"item_id": "i2", "evaluator_id": "e1", "annotator_id": "a1", "value": {"value": False}},
+        {"item_id": "i2", "evaluator_id": "e1", "annotator_id": "a1", "value": {"value": True}},
+        # Other evaluator, no annotator, and an empty value are all ignored
+        {"item_id": "i3", "evaluator_id": "e2", "annotator_id": "a1", "value": {"value": True}},
+        {"item_id": "i4", "evaluator_id": "e1", "annotator_id": None, "value": {"value": True}},
+        {"item_id": "i5", "evaluator_id": "e1", "annotator_id": "a1", "value": None},
+    ]
+    assert human_result_summary(binary, "e1") == {
+        "count": 3,
+        "true_count": 2,
+        "mean": None,
+    }
+
+    rating = [
+        {"item_id": "i1", "evaluator_id": "e1", "annotator_id": "a1", "value": {"value": 2}},
+        {"item_id": "i1", "evaluator_id": "e1", "annotator_id": "a2", "value": {"value": 5}},
+    ]
+    assert human_result_summary(rating, "e1") == {
+        "count": 2,
+        "true_count": None,
+        "mean": 3.5,
+    }

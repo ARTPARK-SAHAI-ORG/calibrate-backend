@@ -264,6 +264,41 @@ def evaluator_result_summary(
     }
 
 
+def human_result_summary(
+    annotations: Iterable[Dict[str, Any]],
+    evaluator_id: str,
+) -> Optional[Dict[str, Any]]:
+    """Roll the human labels for one evaluator up into `{count, true_count, mean}`.
+
+    Same shape as `evaluator_result_summary`, so the two numbers sit side by
+    side. Every label counts once, so an item labelled by three annotators
+    weighs three times as much as one labelled by one. Returns None when
+    nobody has labelled for this evaluator.
+    """
+    by_pair: Dict[Tuple[str, Any], Any] = {}
+    for a in annotations:
+        if a.get("evaluator_id") != evaluator_id:
+            continue
+        annotator = a.get("annotator_id")
+        if annotator is None:
+            continue
+        scalar = _scalar(a.get("value"))
+        if scalar is None:
+            continue
+        by_pair[(a["item_id"], annotator)] = scalar
+
+    values = list(by_pair.values())
+    if not values:
+        return None
+    bools = [v for v in values if isinstance(v, bool)]
+    numbers = [v for v in values if isinstance(v, (int, float)) and not isinstance(v, bool)]
+    return {
+        "count": len(values),
+        "true_count": sum(1 for v in bools if v) if bools else None,
+        "mean": _round_agreement(sum(numbers) / len(numbers)) if numbers else None,
+    }
+
+
 def evaluator_human_pair_agreement(
     eval_value: Any,
     human_values: Iterable[Any],
