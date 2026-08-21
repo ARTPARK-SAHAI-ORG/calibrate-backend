@@ -537,6 +537,7 @@ class AgentTestRunListItem(BaseModel):
             "- `llm-benchmark`: a multi-model comparison"
         )
     )
+    created_at: str = Field(description="When the run was created (ISO 8601 UTC)")
     updated_at: str = Field(description="When the run was last updated (ISO 8601 UTC)")
     total_tests: Optional[int] = Field(
         None,
@@ -729,6 +730,7 @@ def _build_agent_test_run_item_fields(job: Dict[str, Any], name: str) -> Dict[st
         "name": name,
         "status": job["status"],
         "type": job.get("type", ""),
+        "created_at": job.get("created_at", ""),
         "updated_at": job.get("updated_at", job.get("created_at", "")),
         # Unit test results
         "total_tests": job_results.get("total_tests"),
