@@ -725,6 +725,87 @@ def test_backfill_agent_evaluator_links_retries_after_crash_mid_migration(user):
 
 
 # ---------------------------------------------------------------------------
+# Default correctness evaluator auto-linked on agent creation
+# ---------------------------------------------------------------------------
+
+
+def test_create_agent_links_default_correctness_evaluator(user):
+    agent_uuid = db.create_agent(
+        name=_u("a-correctness"), user_id=user["uuid"], org_uuid=user["org_uuid"]
+    )
+    linked = db.get_evaluators_for_agent(agent_uuid)
+    assert len(linked) == 1
+    assert linked[0]["source_default_slug"] == db.CORRECTNESS_EVALUATOR_SLUG
+    assert linked[0]["org_uuid"] == user["org_uuid"]
+
+
+def test_create_agent_forks_correctness_evaluator_if_org_has_none_yet(user):
+    # Simulate a pre-feature org: no receipt/fork for the correctness default.
+    with db.get_db_connection() as conn:
+        fork = conn.execute(
+            "SELECT evaluator_uuid FROM org_default_evaluators "
+            "WHERE org_uuid = ? AND source_default_slug = ?",
+            (user["org_uuid"], db.CORRECTNESS_EVALUATOR_SLUG),
+        ).fetchone()
+        conn.execute("DELETE FROM evaluators WHERE uuid = ?", (fork["evaluator_uuid"],))
+        conn.execute(
+            "DELETE FROM org_default_evaluators WHERE org_uuid = ? AND source_default_slug = ?",
+            (user["org_uuid"], db.CORRECTNESS_EVALUATOR_SLUG),
+        )
+        conn.commit()
+
+    agent_uuid = db.create_agent(
+        name=_u("a-correctness-fork"), user_id=user["uuid"], org_uuid=user["org_uuid"]
+    )
+    linked = db.get_evaluators_for_agent(agent_uuid)
+    assert len(linked) == 1
+    assert linked[0]["source_default_slug"] == db.CORRECTNESS_EVALUATOR_SLUG
+    assert linked[0]["org_uuid"] == user["org_uuid"]
+
+
+def test_backfill_links_correctness_evaluator_only_onto_agents_with_none(user):
+    bare_agent = db.create_agent(
+        name=_u("a-bare"), user_id=user["uuid"], org_uuid=user["org_uuid"]
+    )
+    other = db.get_evaluator_by_slug("default-safety")
+    already_linked_agent = db.create_agent(
+        name=_u("a-has-one"), user_id=user["uuid"], org_uuid=user["org_uuid"]
+    )
+    # Give this agent a non-correctness evaluator so the backfill must leave it alone.
+    db.remove_evaluator_from_agent(
+        already_linked_agent,
+        db.get_evaluators_for_agent(already_linked_agent)[0]["uuid"],
+    )
+    db.add_evaluator_to_agent(already_linked_agent, other["uuid"])
+
+    # Simulate a pre-feature DB: both agents lost their evaluator link and the
+    # migration hasn't run yet.
+    db.remove_evaluator_from_agent(
+        bare_agent, db.get_evaluators_for_agent(bare_agent)[0]["uuid"]
+    )
+    with db.get_db_connection() as conn:
+        conn.execute(
+            "DELETE FROM _schema_migrations WHERE name = ?",
+            (db.LINK_DEFAULT_CORRECTNESS_EVALUATOR_MIGRATION,),
+        )
+        conn.commit()
+
+    db.init_db()
+
+    bare_linked = db.get_evaluators_for_agent(bare_agent)
+    assert len(bare_linked) == 1
+    assert bare_linked[0]["source_default_slug"] == db.CORRECTNESS_EVALUATOR_SLUG
+
+    has_one_linked = {e["uuid"] for e in db.get_evaluators_for_agent(already_linked_agent)}
+    assert has_one_linked == {other["uuid"]}  # untouched, not overwritten
+
+    # Migration flag is set — a later init_db() does not re-link a removed evaluator.
+    db.remove_evaluator_from_agent(bare_agent, bare_linked[0]["uuid"])
+    db.init_db()
+    assert db.get_evaluators_for_agent(bare_agent) == []
+
+
+# ---------------------------------------------------------------------------
 # Per-org default-evaluator provisioning (fork-on-provision)
 # ---------------------------------------------------------------------------
 
@@ -955,13 +1036,19 @@ def test_repoint_relinks_agent_template_link_to_fork():
     _run_repoint()
 
     fork = _forks_by_slug(org_uuid)["default-helpfulness"]
+    correctness_fork = _forks_by_slug(org_uuid)[db.CORRECTNESS_EVALUATOR_SLUG]
     with db.get_db_connection() as conn:
-        row = conn.execute(
+        rows = conn.execute(
             "SELECT evaluator_id FROM agent_evaluators "
             "WHERE agent_id = ? AND deleted_at IS NULL",
             (agent_uuid,),
-        ).fetchone()
-    assert row["evaluator_id"] == fork["uuid"]
+        ).fetchall()
+    # Agent creation also auto-links a fork of the correctness evaluator; the
+    # explicitly-linked template's link must have MOVED to its fork, not just
+    # gained a fork link alongside a surviving template link.
+    linked = {r["evaluator_id"] for r in rows}
+    assert linked == {fork["uuid"], correctness_fork["uuid"]}
+    assert tmpl["uuid"] not in linked
 
 
 def test_repoint_soft_deletes_redundant_template_link_on_collision():
@@ -1019,13 +1106,19 @@ def test_repoint_default_links_runs_via_init_db_and_is_flag_gated():
     db.init_db()
 
     fork = _forks_by_slug(org_uuid)["default-instruction-following"]
+    correctness_fork = _forks_by_slug(org_uuid)[db.CORRECTNESS_EVALUATOR_SLUG]
     with db.get_db_connection() as conn:
-        row = conn.execute(
+        rows = conn.execute(
             "SELECT evaluator_id FROM agent_evaluators "
             "WHERE agent_id = ? AND deleted_at IS NULL",
             (agent_uuid,),
-        ).fetchone()
-    assert row["evaluator_id"] == fork["uuid"]
+        ).fetchall()
+    # Agent creation also auto-links a fork of the correctness evaluator; the
+    # explicitly-linked template's link must have MOVED to its fork, not just
+    # gained a fork link alongside a surviving template link.
+    linked = {r["evaluator_id"] for r in rows}
+    assert linked == {fork["uuid"], correctness_fork["uuid"]}
+    assert tmpl["uuid"] not in linked
 
 
 # ---------------------------------------------------------------------------

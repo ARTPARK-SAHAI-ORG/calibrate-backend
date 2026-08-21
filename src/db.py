@@ -1690,6 +1690,24 @@ def init_db():
                     "from default templates to org forks"
                 )
 
+        # Link the default correctness evaluator onto every agent that has no
+        # evaluator linked (one-time). Runs after the fork backfill so each org
+        # has a correctness fork to link, or one gets forked here for orgs the
+        # fork backfill missed (e.g. orgs created between backfills).
+        if not _schema_migration_applied(
+            cursor, LINK_DEFAULT_CORRECTNESS_EVALUATOR_MIGRATION
+        ):
+            linked = _backfill_link_default_correctness_evaluator(cursor)
+            _mark_schema_migration_applied(
+                cursor, LINK_DEFAULT_CORRECTNESS_EVALUATOR_MIGRATION
+            )
+            conn.commit()
+            if linked:
+                logger.info(
+                    f"Linked the default correctness evaluator onto {linked} "
+                    "agent(s) with no evaluators"
+                )
+
         conn.commit()
         logger.info("Database initialized successfully")
 
@@ -2955,6 +2973,83 @@ def _backfill_fork_default_evaluators(cursor: sqlite3.Cursor) -> int:
     return total
 
 
+CORRECTNESS_EVALUATOR_SLUG = "default-llm-next-reply"
+
+
+def _link_default_correctness_evaluator(
+    cursor: sqlite3.Cursor, agent_uuid: str, org_uuid: str
+) -> None:
+    """Fork the org's copy of the correctness evaluator if it doesn't have one
+    yet, then link it to `agent_uuid`. Runs on the caller's cursor and does not
+    commit — callers own the transaction."""
+    cursor.execute(
+        "SELECT evaluator_uuid FROM org_default_evaluators "
+        "WHERE org_uuid = ? AND source_default_slug = ?",
+        (org_uuid, CORRECTNESS_EVALUATOR_SLUG),
+    )
+    row = cursor.fetchone()
+    if row is None:
+        # No receipt yet for this org — fork every default (same path a new
+        # org uses), not just this one, so agent creation never leaves the
+        # org half-provisioned. A no-op once the org already has its forks.
+        _provision_default_evaluators_for_org(cursor, org_uuid)
+        cursor.execute(
+            "SELECT evaluator_uuid FROM org_default_evaluators "
+            "WHERE org_uuid = ? AND source_default_slug = ?",
+            (org_uuid, CORRECTNESS_EVALUATOR_SLUG),
+        )
+        row = cursor.fetchone()
+    evaluator_uuid = row["evaluator_uuid"] if row else None
+    if not evaluator_uuid:
+        return  # name collision skipped the fork (see _provision_default_evaluators_for_org)
+    cursor.execute(
+        """
+        INSERT INTO agent_evaluators (agent_id, evaluator_id) VALUES (?, ?)
+        ON CONFLICT(agent_id, evaluator_id)
+        DO UPDATE SET deleted_at = NULL, created_at = CURRENT_TIMESTAMP
+        """,
+        (agent_uuid, evaluator_uuid),
+    )
+
+
+LINK_DEFAULT_CORRECTNESS_EVALUATOR_MIGRATION = (
+    "link_default_correctness_evaluator_to_agents_v1"
+)
+
+
+def _backfill_link_default_correctness_evaluator(cursor: sqlite3.Cursor) -> int:
+    """One-time migration: for every agent with zero active evaluators linked,
+    link its org's fork of the correctness evaluator (forking one per org first
+    if missing). Caller commits and records
+    `LINK_DEFAULT_CORRECTNESS_EVALUATOR_MIGRATION` in the same transaction so a
+    crash mid-migration retries on next init_db."""
+    cursor.execute("SELECT DISTINCT org_uuid FROM agents WHERE deleted_at IS NULL")
+    for row in cursor.fetchall():
+        _provision_default_evaluators_for_org(cursor, row["org_uuid"])
+
+    cursor.execute(
+        """
+        INSERT INTO agent_evaluators (agent_id, evaluator_id)
+        SELECT a.uuid, fork.evaluator_uuid
+          FROM agents a
+          JOIN org_default_evaluators fork
+            ON fork.org_uuid = a.org_uuid AND fork.source_default_slug = ?
+         WHERE a.deleted_at IS NULL
+           AND fork.evaluator_uuid IS NOT NULL
+           AND NOT EXISTS (
+                SELECT 1 FROM agent_evaluators ae
+                 WHERE ae.agent_id = a.uuid AND ae.deleted_at IS NULL
+           )
+        ON CONFLICT(agent_id, evaluator_id)
+        DO UPDATE SET deleted_at = NULL, created_at = CURRENT_TIMESTAMP
+        """,
+        (CORRECTNESS_EVALUATOR_SLUG,),
+    )
+    cursor.execute("SELECT changes()")
+    row = cursor.fetchone()
+    return int(row[0]) if row else 0
+
+
 def _template_and_fork_maps(cursor: sqlite3.Cursor):
     """Shared lookups for the two default-re-point migrations:
     - `slug_by_template`: template evaluator uuid -> its slug (empty => nothing
@@ -3909,6 +4004,7 @@ def create_agent(
             """,
             (agent_uuid, name, agent_type, config_json, user_id, org_uuid),
         )
+        _link_default_correctness_evaluator(cursor, agent_uuid, org_uuid)
         conn.commit()
         logger.info(f"Created agent with UUID: {agent_uuid}")
         return agent_uuid

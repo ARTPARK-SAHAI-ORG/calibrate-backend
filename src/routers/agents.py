@@ -956,8 +956,16 @@ def duplicate_agent_endpoint(
                 f"Failed to link test {test['uuid']} to duplicated agent: {e}"
             )
 
-    # Copy all linked evaluators
+    # create_agent auto-links the org's default correctness evaluator, which
+    # the original agent may not have (e.g. the user unlinked it) — remove it
+    # from the duplicate first so the copy below is a faithful match.
     linked_evaluators = get_evaluators_for_agent(agent_uuid)
+    original_evaluator_ids = {e["uuid"] for e in linked_evaluators}
+    for extra in get_evaluators_for_agent(new_agent_uuid):
+        if extra["uuid"] not in original_evaluator_ids:
+            remove_evaluator_from_agent(new_agent_uuid, extra["uuid"])
+
+    # Copy all linked evaluators
     for evaluator in linked_evaluators:
         try:
             add_evaluator_to_agent(new_agent_uuid, evaluator["uuid"])
