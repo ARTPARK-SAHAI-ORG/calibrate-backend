@@ -338,3 +338,78 @@ def test_public_annotation_job_upsert_flow(client):
     view = client.get(f"/public/annotation-jobs/view/{view_token}")
     assert view.status_code == 200
     assert view.json()["read_only"] is True
+
+
+def test_llm_tool_call_verdict_flow(client):
+    """A person labels a tool-call item: mark correct/wrong, and when wrong
+    supply the tool calls that should have run. The verdict is stored as the
+    item's row-level annotation (evaluator_id=None) with an opaque JSON value —
+    no evaluator, no schema change. A job with zero evaluators still completes
+    once every item carries that annotation, and the GET returns it to seed."""
+    auth = _signup(client)
+    h = auth["headers"]
+
+    task_uuid = client.post(
+        "/annotation-tasks",
+        json={"name": f"tc-{uuid.uuid4().hex[:6]}", "type": "llm-tool-call"},
+        headers=h,
+    ).json()["uuid"]
+
+    item_id = client.post(
+        f"/annotation-tasks/{task_uuid}/items",
+        json={
+            "items": [
+                {
+                    "payload": {
+                        "name": "call-1",
+                        "chat_history": [{"role": "user", "content": "weather in Paris?"}],
+                        "expected_tool_calls": [
+                            {"tool": "get_weather", "arguments": {"city": "Paris"}}
+                        ],
+                        "actual_tool_calls": [
+                            {"tool": "get_weather", "arguments": {"city": "London"}}
+                        ],
+                    }
+                }
+            ]
+        },
+        headers=h,
+    ).json()["item_ids"][0]
+
+    annotator = _create_annotator(client, h)
+    jobs = client.post(
+        f"/annotation-tasks/{task_uuid}/jobs",
+        json={"annotator_ids": [annotator["uuid"]], "item_ids": [item_id]},
+        headers=h,
+    ).json()["jobs"]
+    token = jobs[0]["public_token"]
+
+    # Zero evaluators is fine — the form carries none.
+    assert client.get(f"/public/annotation-jobs/{token}").json()["evaluators"] == []
+
+    verdict = {
+        "correct": False,
+        "expected_tool_calls": [
+            {"tool": "get_weather", "arguments": {"city": "Paris"}}
+        ],
+    }
+    saved = client.post(
+        f"/public/annotation-jobs/{token}/annotations",
+        json={"item_id": item_id, "annotations": [{"evaluator_id": None, "value": verdict}]},
+    )
+    assert saved.status_code == 200
+    # Single item, single verdict → job auto-completes.
+    assert saved.json()["status"] == "completed"
+
+    # Re-save updates in place (no duplicate row-level annotation).
+    again = client.post(
+        f"/public/annotation-jobs/{token}/annotations",
+        json={"item_id": item_id, "annotations": [{"evaluator_id": None, "value": {"correct": True}}]},
+    )
+    assert again.status_code == 200
+
+    # GET returns exactly one row-level annotation, carrying the verdict.
+    anns = client.get(f"/public/annotation-jobs/{token}").json()["annotations"]
+    row_level = [a for a in anns if a.get("evaluator_id") is None]
+    assert len(row_level) == 1
+    assert row_level[0]["value"] == {"correct": True}

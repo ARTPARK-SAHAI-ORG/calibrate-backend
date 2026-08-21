@@ -110,7 +110,8 @@ _ITEM_PAYLOAD_DESCRIPTION = (
     "`agent_response` (the reply to judge), optional `evaluator_variables`\n"
     "- `llm-general`: `name`, `input`, `output`, optional `evaluator_variables`\n"
     "- `llm-tool-call`: `name`, `chat_history` (list of `{role, content}` turns ending at the user turn), "
-    "`tool_calls` (list of `{tool, arguments}` the agent produced)\n"
+    "`expected_tool_calls` and `actual_tool_calls` (each a list of `{tool, arguments}`). A person's verdict is "
+    "stored as the item's row-level annotation, not against an evaluator\n"
     "- `conversation`: `name`, `transcript` (list of `{role, content}` turns), optional `evaluator_variables`\n\n"
     "`evaluator_variables` maps an evaluator ID to that evaluator's `{{variable}}` values for this item"
 )
@@ -139,8 +140,11 @@ _ITEM_PAYLOAD_EXAMPLES = [
         "chat_history": [
             {"role": "user", "content": "What's the weather in Paris?"},
         ],
-        "tool_calls": [
+        "expected_tool_calls": [
             {"tool": "get_weather", "arguments": {"city": "Paris"}},
+        ],
+        "actual_tool_calls": [
+            {"tool": "get_weather", "arguments": {"city": "London"}},
         ],
     },
     {
