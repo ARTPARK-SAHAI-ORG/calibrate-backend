@@ -1193,6 +1193,13 @@ def init_db():
         except sqlite3.OperationalError:
             pass
 
+        try:
+            cursor.execute(
+                "ALTER TABLE agents ADD COLUMN interaction_type TEXT NOT NULL DEFAULT 'conversation'"
+            )
+        except sqlite3.OperationalError:
+            pass
+
         # Add is_public and share_token columns for public sharing feature
         for table in ("jobs", "agent_test_jobs", "simulation_jobs"):
             try:
@@ -3976,6 +3983,7 @@ def create_agent(
     name: str,
     org_uuid: str,
     agent_type: str = "agent",
+    interaction_type: str = "conversation",
     config: Optional[Dict[str, Any]] = None,
     user_id: Optional[str] = None,
     link_default_evaluator: bool = True,
@@ -3986,6 +3994,7 @@ def create_agent(
         name: Name of the agent
         org_uuid: UUID of the org this agent belongs to (access key — required)
         agent_type: Type of agent — 'agent' or 'connection'
+        interaction_type: What kind of task the agent handles — 'conversation' or 'general'
         config: Optional configuration dict
         user_id: UUID of the user creating this agent (audit / created-by)
         link_default_evaluator: Auto-link the org's correctness evaluator fork.
@@ -4003,10 +4012,18 @@ def create_agent(
         config_json = json.dumps(config) if config is not None else None
         cursor.execute(
             """
-            INSERT INTO agents (uuid, name, type, config, user_id, org_uuid)
-            VALUES (?, ?, ?, ?, ?, ?)
+            INSERT INTO agents (uuid, name, type, interaction_type, config, user_id, org_uuid)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
             """,
-            (agent_uuid, name, agent_type, config_json, user_id, org_uuid),
+            (
+                agent_uuid,
+                name,
+                agent_type,
+                interaction_type,
+                config_json,
+                user_id,
+                org_uuid,
+            ),
         )
         if link_default_evaluator:
             _link_default_correctness_evaluator(cursor, agent_uuid, org_uuid)
@@ -4077,6 +4094,7 @@ def update_agent(
     agent_uuid: str,
     name: Optional[str] = None,
     config: Optional[Dict[str, Any]] = None,
+    interaction_type: Optional[str] = None,
 ) -> bool:
     """Update an agent. Returns True if the agent was found and updated."""
     # Build dynamic update query
@@ -4090,6 +4108,9 @@ def update_agent(
         updates.append("config = ?")
         # Serialize config to JSON string for storage
         params.append(json.dumps(config))
+    if interaction_type is not None:
+        updates.append("interaction_type = ?")
+        params.append(interaction_type)
 
     if not updates:
         return False

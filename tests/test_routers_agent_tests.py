@@ -81,6 +81,41 @@ def _create_simulation_evaluator(client, h, name=None):
     ).json()
 
 
+def _create_general_evaluator(client, h, name=None):
+    """Create an llm-general-type evaluator (no default is seeded for this type)."""
+    return client.post(
+        "/evaluators",
+        json={
+            "name": name or f"gen-ev-{uuid.uuid4().hex[:6]}",
+            "evaluator_type": "llm-general",
+            "output_type": "binary",
+            "version": {
+                "judge_model": "openai/gpt-4.1",
+                "system_prompt": "Judge the input/output pair.",
+            },
+        },
+        headers=h,
+    ).json()
+
+
+def _create_general_test(client, h, name=None, gen_ev_uuid=None):
+    if gen_ev_uuid is None:
+        gen_ev_uuid = _create_general_evaluator(client, h)["uuid"]
+    return client.post(
+        "/tests",
+        json={
+            "name": name or f"gen-{uuid.uuid4().hex[:6]}",
+            "type": "general",
+            "config": {
+                "input": "Summarize this article: ...",
+                "evaluation": {"type": "general"},
+            },
+            "evaluators": [{"evaluator_uuid": gen_ev_uuid}],
+        },
+        headers=h,
+    ).json()
+
+
 def _create_conversation_test(client, h, name=None, sim_ev_uuid=None):
     if sim_ev_uuid is None:
         sim_ev_uuid = _create_simulation_evaluator(client, h)["uuid"]
@@ -2259,3 +2294,119 @@ def test_agent_tests_link_and_reads_are_org_scoped(client):
         ).status_code
         == 403
     )
+
+
+# ---------------------------------------------------------------------------
+# Linking validates test type against agent interaction_type
+# ---------------------------------------------------------------------------
+
+
+def test_link_general_test_to_general_agent_succeeds(client):
+    auth = _signup(client)
+    h = auth["headers"]
+    agent = client.post(
+        "/agents",
+        json={"name": f"a-{uuid.uuid4().hex[:6]}", "type": "agent", "interaction_type": "general"},
+        headers=h,
+    ).json()
+    gen_test = _create_general_test(client, h)
+
+    link = client.post(
+        "/agent-tests",
+        json={"agent_uuid": agent["uuid"], "test_uuids": [gen_test["uuid"]]},
+        headers=h,
+    )
+    assert link.status_code == 200
+    assert link.json()["ids"]
+
+    linked_tests = client.get(f"/agent-tests/agent/{agent['uuid']}/tests", headers=h).json()
+    assert gen_test["uuid"] in {t["uuid"] for t in linked_tests["items"]}
+
+
+def test_link_general_test_to_conversation_agent_fails(client):
+    auth = _signup(client)
+    h = auth["headers"]
+    agent = _create_agent(client, h)  # default interaction_type="conversation"
+    gen_test = _create_general_test(client, h)
+
+    link = client.post(
+        "/agent-tests",
+        json={"agent_uuid": agent["uuid"], "test_uuids": [gen_test["uuid"]]},
+        headers=h,
+    )
+    assert link.status_code == 400
+    assert gen_test["uuid"] in link.json()["detail"]
+
+    linked_tests = client.get(f"/agent-tests/agent/{agent['uuid']}/tests", headers=h).json()
+    assert gen_test["uuid"] not in {t["uuid"] for t in linked_tests["items"]}
+
+
+def test_link_conversation_test_to_general_agent_fails(client):
+    auth = _signup(client)
+    h = auth["headers"]
+    agent = client.post(
+        "/agents",
+        json={"name": f"a-{uuid.uuid4().hex[:6]}", "type": "agent", "interaction_type": "general"},
+        headers=h,
+    ).json()
+
+    response_test = _create_test(client, h)
+    conv_test = _create_conversation_test(client, h)
+
+    for t in (response_test, conv_test):
+        link = client.post(
+            "/agent-tests",
+            json={"agent_uuid": agent["uuid"], "test_uuids": [t["uuid"]]},
+            headers=h,
+        )
+        assert link.status_code == 400
+        assert t["uuid"] in link.json()["detail"]
+
+    linked_tests = client.get(f"/agent-tests/agent/{agent['uuid']}/tests", headers=h).json()
+    linked_uuids = {t["uuid"] for t in linked_tests["items"]}
+    assert response_test["uuid"] not in linked_uuids
+    assert conv_test["uuid"] not in linked_uuids
+
+
+def test_link_batch_with_one_mismatch_rejects_whole_request(client):
+    auth = _signup(client)
+    h = auth["headers"]
+    agent = _create_agent(client, h)  # default interaction_type="conversation"
+
+    valid_test = _create_test(client, h)
+    mismatched_test = _create_general_test(client, h)
+
+    link = client.post(
+        "/agent-tests",
+        json={
+            "agent_uuid": agent["uuid"],
+            "test_uuids": [valid_test["uuid"], mismatched_test["uuid"]],
+        },
+        headers=h,
+    )
+    assert link.status_code == 400
+    assert mismatched_test["uuid"] in link.json()["detail"]
+
+    linked_tests = client.get(f"/agent-tests/agent/{agent['uuid']}/tests", headers=h).json()
+    linked_uuids = {t["uuid"] for t in linked_tests["items"]}
+    assert valid_test["uuid"] not in linked_uuids
+    assert mismatched_test["uuid"] not in linked_uuids
+
+
+def test_link_response_test_to_conversation_agent_succeeds(client):
+    """Regression check: the default agent/test combo still links fine."""
+    auth = _signup(client)
+    h = auth["headers"]
+    agent = _create_agent(client, h)  # default interaction_type="conversation"
+    response_test = _create_test(client, h)
+
+    link = client.post(
+        "/agent-tests",
+        json={"agent_uuid": agent["uuid"], "test_uuids": [response_test["uuid"]]},
+        headers=h,
+    )
+    assert link.status_code == 200
+    assert link.json()["ids"]
+
+    linked_tests = client.get(f"/agent-tests/agent/{agent['uuid']}/tests", headers=h).json()
+    assert response_test["uuid"] in {t["uuid"] for t in linked_tests["items"]}

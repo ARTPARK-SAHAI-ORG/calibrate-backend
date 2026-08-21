@@ -195,6 +195,7 @@ def test_list_agents_returns_trimmed_summary(client):
         "uuid",
         "name",
         "type",
+        "interaction_type",
         "created_at",
         "updated_at",
         "connection_verified",
@@ -786,3 +787,120 @@ def test_public_spec_preserves_create_agent_code_samples(app):
 
     op = main._build_public_openapi()["paths"]["/agents"]["post"]
     assert len(op["x-codeSamples"]) == 2
+
+
+# ============ interaction_type ============
+
+
+def test_create_agent_defaults_interaction_type_to_conversation(client):
+    h = _signup(client)
+    agent = _create_agent(client, h, f"it-default-{uuid.uuid4().hex[:6]}")
+
+    r = client.get(f"/agents/{agent['uuid']}", headers=h)
+    assert r.status_code == 200, r.text
+    assert r.json()["interaction_type"] == "conversation"
+
+
+def test_create_agent_with_interaction_type_general(client):
+    h = _signup(client)
+    r = client.post(
+        "/agents",
+        json={
+            "name": f"it-general-{uuid.uuid4().hex[:6]}",
+            "type": "agent",
+            "interaction_type": "general",
+        },
+        headers=h,
+    )
+    assert r.status_code == 200, r.text
+    agent_uuid = r.json()["uuid"]
+
+    r = client.get(f"/agents/{agent_uuid}", headers=h)
+    assert r.status_code == 200, r.text
+    assert r.json()["interaction_type"] == "general"
+
+
+def test_update_agent_interaction_type_is_mutable(client):
+    """Unlike `type`, `interaction_type` can be changed after creation."""
+    h = _signup(client)
+    agent = _create_agent(client, h, f"it-mutable-{uuid.uuid4().hex[:6]}")
+    assert client.get(f"/agents/{agent['uuid']}", headers=h).json()["interaction_type"] == "conversation"
+
+    r = client.put(
+        f"/agents/{agent['uuid']}",
+        json={"interaction_type": "general"},
+        headers=h,
+    )
+    assert r.status_code == 200, r.text
+    assert r.json()["interaction_type"] == "general"
+
+    r = client.put(
+        f"/agents/{agent['uuid']}",
+        json={"interaction_type": "conversation"},
+        headers=h,
+    )
+    assert r.status_code == 200, r.text
+    assert r.json()["interaction_type"] == "conversation"
+
+
+def test_update_agent_omitting_interaction_type_leaves_it_unchanged(client):
+    h = _signup(client)
+    r = client.post(
+        "/agents",
+        json={
+            "name": f"it-noop-{uuid.uuid4().hex[:6]}",
+            "type": "agent",
+            "interaction_type": "general",
+        },
+        headers=h,
+    )
+    agent_uuid = r.json()["uuid"]
+
+    # Update a different field only; interaction_type must stay "general".
+    r = client.put(
+        f"/agents/{agent_uuid}",
+        json={"name": f"it-noop-renamed-{uuid.uuid4().hex[:6]}"},
+        headers=h,
+    )
+    assert r.status_code == 200, r.text
+    assert r.json()["interaction_type"] == "general"
+
+
+def test_duplicate_agent_copies_interaction_type(client):
+    h = _signup(client)
+    r = client.post(
+        "/agents",
+        json={
+            "name": f"it-dup-{uuid.uuid4().hex[:6]}",
+            "type": "agent",
+            "interaction_type": "general",
+        },
+        headers=h,
+    )
+    agent_uuid = r.json()["uuid"]
+
+    dup = client.post(
+        f"/agents/{agent_uuid}/duplicate",
+        json={"name": f"it-dup-copy-{uuid.uuid4().hex[:6]}"},
+        headers=h,
+    )
+    assert dup.status_code == 200, dup.text
+    dup_uuid = dup.json()["uuid"]
+
+    r = client.get(f"/agents/{dup_uuid}", headers=h)
+    assert r.status_code == 200, r.text
+    assert r.json()["interaction_type"] == "general"
+
+
+def test_list_and_get_agents_include_interaction_type(client):
+    h = _signup(client)
+    agent = _create_agent(client, h, f"it-surface-{uuid.uuid4().hex[:6]}")
+
+    r = client.get(f"/agents/{agent['uuid']}", headers=h)
+    assert r.status_code == 200, r.text
+    assert r.json()["interaction_type"] == "conversation"
+
+    r = client.get("/agents", headers=h)
+    assert r.status_code == 200, r.text
+    item = next(a for a in r.json()["items"] if a["uuid"] == agent["uuid"])
+    assert item["interaction_type"] == "conversation"
