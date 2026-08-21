@@ -41,7 +41,7 @@ def _signup(client):
 
 
 # ---------------------------------------------------------------------------
-# Evaluators — create, version, set live, preview prompt, duplicate, delete
+# Evaluators — create, version, set live, duplicate, delete
 # ---------------------------------------------------------------------------
 
 
@@ -138,31 +138,6 @@ def test_evaluators_full_lifecycle(client):
         headers=h,
     )
     assert bad_live.status_code == 404
-
-    # Preview prompt
-    preview = client.post(
-        f"/evaluators/{ev_uuid}/preview-prompt",
-        json={"variables": {"x": "hello"}},
-        headers=h,
-    )
-    assert preview.status_code == 200
-    assert "hello" in preview.json()["rendered_system_prompt"]
-
-    # Preview with specific version
-    preview_v2 = client.post(
-        f"/evaluators/{ev_uuid}/preview-prompt",
-        json={"version_uuid": v2_uuid, "variables": {"x": "world"}},
-        headers=h,
-    )
-    assert preview_v2.status_code == 200
-
-    # Preview missing version
-    bad_preview = client.post(
-        f"/evaluators/{ev_uuid}/preview-prompt",
-        json={"version_uuid": "00000000-0000-4000-8000-000000000001"},
-        headers=h,
-    )
-    assert bad_preview.status_code == 404
 
     # Update
     upd = client.put(

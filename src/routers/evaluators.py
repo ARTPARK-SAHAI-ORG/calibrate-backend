@@ -44,10 +44,10 @@ from db import (
     get_evaluator_version,
     get_evaluator_versions,
     get_evaluator_versions_by_uuids,
+    soft_delete_evaluator_version,
     set_evaluator_live_version,
     update_evaluator,
 )
-from llm_judge import render_template
 from utils import (
     EvaluatorTypeLiteral,
     DataTypeLiteral,
@@ -811,6 +811,32 @@ def create_version(
     )
 
 
+@router.delete("/{evaluator_uuid}/versions/{version_uuid}", summary="Delete evaluator version")
+def delete_version(
+    evaluator_uuid: str = Path(
+        description="Evaluator whose version to delete",
+        examples=["f47ac10b-58cc-4372-a567-0e02b2c3d479"],
+    ),
+    version_uuid: str = Path(
+        description="Version to delete. Cannot be the live version",
+        examples=[_EXAMPLE_VERSION_UUID],
+    ),
+    ctx: OrgContext = Depends(get_current_org),
+):
+    """Delete one version of an evaluator you created"""
+    existing = _visible_or_404(get_evaluator(evaluator_uuid), ctx.org_uuid)
+    _owner_check(existing, ctx.org_uuid)
+    outcome = soft_delete_evaluator_version(evaluator_uuid, version_uuid)
+    if outcome == "not_found":
+        raise HTTPException(status_code=404, detail="Version not found")
+    if outcome == "live":
+        raise HTTPException(
+            status_code=400,
+            detail="Cannot delete the live version. Set another version live first",
+        )
+    return {"message": "Version deleted"}
+
+
 @router.post("/{evaluator_uuid}/versions/live", summary="Set live version")
 def mark_live(
     payload: SetLiveVersionRequest,
@@ -829,38 +855,3 @@ def mark_live(
     return {"message": "Live version updated"}
 
 
-# ============ Prompt preview (authenticated) ============
-
-
-class PromptPreviewRequest(BaseModel):
-    version_uuid: Optional[str] = Field(
-        None,
-        min_length=36,
-        max_length=36,
-        description="Version to render. Omit to use the evaluator's live version",
-        examples=[_EXAMPLE_VERSION_UUID],
-    )
-    variables: Optional[Dict[str, Any]] = Field(
-        None, description="Values substituted into `{{placeholders}}`. Omit to render with none"
-    )
-
-
-@router.post("/{evaluator_uuid}/preview-prompt", summary="Preview evaluator prompt")
-def preview_prompt(
-    payload: PromptPreviewRequest,
-    evaluator_uuid: str = Path(
-        description="Evaluator whose prompt to preview",
-        examples=["f47ac10b-58cc-4372-a567-0e02b2c3d479"],
-    ),
-    ctx: OrgContext = Depends(get_current_org),
-):
-    """Render a version's system prompt with the supplied variables and return the resolved text"""
-    evaluator = _visible_or_404(get_evaluator(evaluator_uuid), ctx.org_uuid)
-    version_uuid = payload.version_uuid or evaluator.get("live_version_id")
-    if not version_uuid:
-        raise HTTPException(status_code=400, detail="Evaluator has no live version")
-    version = get_evaluator_version(version_uuid)
-    if not version or version["evaluator_id"] != evaluator_uuid:
-        raise HTTPException(status_code=404, detail="Version not found")
-    rendered = render_template(version["system_prompt"], payload.variables or {})
-    return {"rendered_system_prompt": rendered}

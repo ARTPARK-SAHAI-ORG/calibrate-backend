@@ -157,7 +157,6 @@ def test_public_api_docs_are_unauthenticated_and_filtered(client, monkeypatch):
     assert not any(p.startswith("/scenarios") for p in paths)
     # evaluators are trimmed to the minimum write+read set; helpers stay JWT-only.
     assert "/evaluators/default-prompt" not in paths
-    assert "/evaluators/{evaluator_uuid}/preview-prompt" not in paths
     assert "/evaluators/{evaluator_uuid}/versions/live" not in paths
     assert "put" not in paths.get("/evaluators/{evaluator_uuid}", {})  # update stays JWT-only
     assert "get" not in paths.get("/evaluators/{evaluator_uuid}/versions", {})  # list-versions redundant with detail

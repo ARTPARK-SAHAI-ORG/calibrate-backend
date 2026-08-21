@@ -303,3 +303,94 @@ def test_add_version_rejects_duplicate_scale_labels(client):
         headers=h,
     )
     assert resp.status_code == 422, resp.text
+
+
+def _add_version(client, headers, ev_uuid, make_live=False):
+    resp = client.post(
+        f"/evaluators/{ev_uuid}/versions",
+        json={
+            "judge_model": "openai/gpt-4",
+            "system_prompt": "Judge {{criteria}} again",
+            "variables": [{"name": "criteria"}],
+            "output_config": {
+                "scale": [
+                    {"value": 1, "name": "Bad"},
+                    {"value": 2, "name": "Good"},
+                ]
+            },
+            "make_live": make_live,
+        },
+        headers=headers,
+    )
+    assert resp.status_code == 200, resp.text
+    return resp.json()["version_uuid"]
+
+
+def test_delete_version_hides_it_from_reads(client):
+    h = _signup(client)
+    _, ev_uuid, _ = _create_rating_evaluator(client, h)
+    v2 = _add_version(client, h, ev_uuid, make_live=True)
+    v1 = client.get(f"/evaluators/{ev_uuid}/versions", headers=h).json()
+    v1_uuid = next(v["uuid"] for v in v1 if v["uuid"] != v2)
+
+    resp = client.delete(f"/evaluators/{ev_uuid}/versions/{v1_uuid}", headers=h)
+    assert resp.status_code == 200, resp.text
+
+    listed = client.get(f"/evaluators/{ev_uuid}/versions", headers=h).json()
+    assert [v["uuid"] for v in listed] == [v2]
+    detail = client.get(f"/evaluators/{ev_uuid}", headers=h).json()
+    assert [v["uuid"] for v in detail["versions"]] == [v2]
+    assert detail["live_version_index"] == 0
+
+
+def test_delete_version_rejects_the_live_version(client):
+    h = _signup(client)
+    _, ev_uuid, v1_uuid = _create_rating_evaluator(client, h)
+
+    resp = client.delete(f"/evaluators/{ev_uuid}/versions/{v1_uuid}", headers=h)
+    assert resp.status_code == 400, resp.text
+    assert "live version" in resp.json()["detail"]
+
+    _add_version(client, h, ev_uuid, make_live=True)
+    assert client.delete(f"/evaluators/{ev_uuid}/versions/{v1_uuid}", headers=h).status_code == 200
+
+    from db import set_evaluator_live_version
+
+    assert set_evaluator_live_version(ev_uuid, v1_uuid) is False
+
+
+def test_deleted_version_still_resolves_for_historical_reads(client):
+    """A finished run stores an `evaluator_version_id`; deleting the version must
+    not stop that id resolving to its number and prompt."""
+    from db import get_evaluator_version, get_evaluator_versions, get_evaluator_versions_by_uuids
+
+    h = _signup(client)
+    _, ev_uuid, v1_uuid = _create_rating_evaluator(client, h)
+    _add_version(client, h, ev_uuid, make_live=True)
+    assert client.delete(f"/evaluators/{ev_uuid}/versions/{v1_uuid}", headers=h).status_code == 200
+
+    stored = get_evaluator_version(v1_uuid)
+    assert stored is not None and stored["version_number"] == 1
+    assert stored["system_prompt"]
+    assert v1_uuid in get_evaluator_versions_by_uuids([v1_uuid])
+    assert v1_uuid not in [v["uuid"] for v in get_evaluator_versions(ev_uuid)]
+    assert v1_uuid in [
+        v["uuid"] for v in get_evaluator_versions(ev_uuid, include_deleted=True)
+    ]
+
+
+def test_delete_version_404s_on_unknown_repeat_and_other_org(client):
+    h = _signup(client)
+    _, ev_uuid, v1_uuid = _create_rating_evaluator(client, h)
+    v2 = _add_version(client, h, ev_uuid, make_live=True)
+
+    assert client.delete(
+        f"/evaluators/{ev_uuid}/versions/{uuid.uuid4()}", headers=h
+    ).status_code == 404
+    assert client.delete(f"/evaluators/{ev_uuid}/versions/{v1_uuid}", headers=h).status_code == 200
+    assert client.delete(f"/evaluators/{ev_uuid}/versions/{v1_uuid}", headers=h).status_code == 404
+
+    # Cross-workspace answers 403 with the switch-workspace hint, same as
+    # deleting the whole evaluator does.
+    other = _signup(client)
+    assert client.delete(f"/evaluators/{ev_uuid}/versions/{v2}", headers=other).status_code == 403
