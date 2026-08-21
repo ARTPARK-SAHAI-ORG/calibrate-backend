@@ -528,6 +528,13 @@ def test_agent_runs_list_filters_and_pagination(client):
     assert around_bench["offset"] == 0  # index 1 falls in the first page of 2
     assert failing in {x["uuid"] for x in around_bench["items"]}
 
+    # `around` without `limit` stays unbounded, same as a plain unbounded list
+    # (no `limit` means "no limit" everywhere else in this API too).
+    around_unbounded = _get(around=clean).json()
+    assert around_unbounded["limit"] is None
+    assert len(around_unbounded["items"]) == 3
+    assert clean in {x["uuid"] for x in around_unbounded["items"]}
+
     # A run excluded by a filter (or unknown) is not in the filtered results.
     r = client.get(
         f"/agent-tests/agent/{au}/runs",

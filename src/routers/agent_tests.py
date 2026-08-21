@@ -795,7 +795,7 @@ def get_agent_test_runs(
     ),
     around: Optional[str] = Query(
         None,
-        description="Uuid of a run to jump to, returning the page that contains it instead of the page at `offset`",
+        description="ID of a run to jump to, returning the page that contains it instead of the page at `offset`",
     ),
     pagination: OptionalPaginationParams = Depends(),
 ):
@@ -876,7 +876,7 @@ def get_all_test_runs_for_user(
     ),
     around: Optional[str] = Query(
         None,
-        description="Uuid of a run to jump to, returning the page that contains it instead of the page at `offset`",
+        description="ID of a run to jump to, returning the page that contains it instead of the page at `offset`",
     ),
     pagination: OptionalPaginationParams = Depends(),
 ):

@@ -172,10 +172,11 @@ def paginate_around(
     key: Any = lambda it: it.uuid,
 ) -> Dict[str, Any]:
     """Like `paginate`, but when `around_id` is given, returns the page that
-    contains the matching item instead of the page at `pagination.offset` —
+    contains the matching item instead of the page at `pagination.offset`,
     so a client that navigated away from a specific row (e.g. into a detail
-    view) can reopen the list already scrolled to it. `pagination.limit`
-    (falling back to `DEFAULT_LIMIT` when unset) sets the page size; `key`
+    view) can reopen the list already scrolled to it. Unbounded `limit`
+    (`None`) is honored the same as plain `paginate` — the whole list comes
+    back, since there's no page to compute a bounded offset into. `key`
     extracts the comparable id from each item (default: `.uuid` attribute).
 
     Raises `HTTPException(404)` if no item matches `around_id`. Falls back to
@@ -183,19 +184,17 @@ def paginate_around(
     """
     if around_id is None:
         return paginate(items, pagination)
-    limit = pagination.limit or DEFAULT_LIMIT
     index = next((i for i, it in enumerate(items) if key(it) == around_id), None)
     if index is None:
         raise HTTPException(
             status_code=404, detail=f"{around_id} not found in the current results"
         )
-    offset = (index // limit) * limit
-    return {
-        "items": items[offset : offset + limit],
-        "total": len(items),
-        "limit": limit,
-        "offset": offset,
-    }
+    pagination.offset = (
+        (index // pagination.limit) * pagination.limit
+        if pagination.limit is not None
+        else 0
+    )
+    return paginate(items, pagination)
 
 
 def make_sort_params(
