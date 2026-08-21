@@ -152,11 +152,13 @@ def required_agent_interaction_type(
     agent generated, which a one-shot agent produces just as well as a
     conversational one. Its config shape decides which: `input` (a standalone
     prompt, the same field a `general` test carries) means a `general` agent,
-    `history` means a conversational one.
+    `history` means a conversational one. A config carrying both is read as
+    conversational, matching which of the two `_build_calibrate_config` sends.
     """
     if (
         test_type == "tool_call"
         and isinstance(config, dict)
+        and config.get("history") is None
         and config.get("input") is not None
     ):
         return "general"

@@ -2527,3 +2527,70 @@ def test_build_calibrate_config_widens_tool_call_input_to_one_user_turn(client):
     assert case["evaluation"]["tool_calls"] == [
         {"tool": "search", "arguments": {"q": "x"}}
     ]
+
+
+def test_tool_call_test_with_both_input_and_history_reads_as_conversational(client):
+    """The link gate and the calibrate handoff must agree on which one is sent."""
+    from routers.agent_tests import _build_calibrate_config
+    from routers.tests import required_agent_interaction_type
+    from db import get_agent as _get_agent, get_test as _get_test
+
+    h = _signup(client)["headers"]
+    history = [{"role": "user", "content": "what is the weather"}]
+    test = _create_tool_call_test(client, h, history=history)
+    # A config can carry both only when hand-written: POST /tests stores it verbatim.
+    client.put(
+        f"/tests/{test['uuid']}",
+        json={
+            "config": {
+                "input": "find weather",
+                "history": history,
+                "evaluation": {
+                    "type": "tool_call",
+                    "tool_calls": [{"tool": "search", "arguments": {"q": "x"}}],
+                },
+            }
+        },
+        headers=h,
+    )
+    stored = _get_test(test["uuid"])
+    assert required_agent_interaction_type("tool_call", stored["config"]) == "conversation"
+
+    general_agent = _create_general_agent(client, h)
+    link = client.post(
+        "/agent-tests",
+        json={"agent_uuid": general_agent["uuid"], "test_uuids": [test["uuid"]]},
+        headers=h,
+    )
+    assert link.status_code == 400
+
+    conv_agent = _create_agent(client, h)
+    config, _ = _build_calibrate_config(_get_agent(conv_agent["uuid"]), [stored], "b")
+    assert config["test_cases"][0]["history"] == history
+
+
+def test_build_calibrate_config_tolerates_expected_tool_call_without_arguments(client):
+    from routers.agent_tests import _build_calibrate_config
+    from db import get_agent as _get_agent, get_test as _get_test
+
+    h = _signup(client)["headers"]
+    agent = _create_agent(client, h)
+    test = client.post(
+        "/tests",
+        json={
+            "name": f"tc-{uuid.uuid4().hex[:6]}",
+            "type": "tool_call",
+            "config": {
+                "history": [{"role": "user", "content": "find x"}],
+                "evaluation": {"type": "tool_call", "tool_calls": [{"tool": "search"}]},
+            },
+        },
+        headers=h,
+    ).json()
+
+    config, _ = _build_calibrate_config(
+        _get_agent(agent["uuid"]), [_get_test(test["uuid"])], "bucket"
+    )
+    assert config["test_cases"][0]["evaluation"]["tool_calls"] == [
+        {"tool": "search", "arguments": None}
+    ]
