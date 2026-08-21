@@ -5,6 +5,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ## Workflow
 
 - **Start every new task in a fresh worktree when you're on `main`.** Before touching anything, check the current branch. If it's `main`, do NOT work on it directly — create a new git worktree on its own branch for the task and do all the work there. Only skip this if the user has already put you on a task branch/worktree or explicitly says to work on the current branch.
+- **On a non-`main` branch, push each commit before testing/running it locally — once past the first iteration.** The first commit that opens the PR still runs local tests first, same as always. After that PR exists, later commits on the same branch: commit, push immediately, and only then run tests/verification locally — don't hold a commit back to test it first. The one exception is a rebase that hit conflicts — resolve those and confirm tests pass locally before pushing, since a bad rebase resolution is a correctness risk, not just a normal iteration.
 - **Before any change or new feature, do this first — every time.** Whenever you're asked to make a change, add a feature, or modify anything:
   1. **Review the existing code thoroughly** for code/functionality that already does (or partly does) what's being asked — don't build on an empty assumption.
   2. **Make a plan** that splits the work into independent subtasks, then run the `parallelize` skill to execute the disjoint ones in parallel (see "Parallel execution" below — the skill is mandatory, not optional).
