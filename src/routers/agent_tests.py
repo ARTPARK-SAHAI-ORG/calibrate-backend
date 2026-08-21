@@ -19,7 +19,7 @@ from pagination import (
     make_projection_params,
     make_search_params,
     page_envelope,
-    paginate,
+    paginate_around,
 )
 
 _AgentTestSearch = make_search_params(searchable=["name"])
@@ -795,6 +795,10 @@ def get_agent_test_runs(
             "clean runs. Omit for both"
         ),
     ),
+    around: Optional[str] = Query(
+        None,
+        description="ID of a run to jump to, returning the page that contains it instead of the page at `offset`",
+    ),
     pagination: OptionalPaginationParams = Depends(),
 ):
     """List an agent's test runs with their results"""
@@ -842,7 +846,7 @@ def get_agent_test_runs(
         runs = [r for r in runs if _run_item_has_failures(r) == has_failures]
 
     # `total` = matches after filtering, before the page slice.
-    return paginate(runs, pagination)
+    return paginate_around(runs, pagination, around, key=lambda r: r.uuid)
 
 
 @router.get(
@@ -871,6 +875,10 @@ def get_all_test_runs_for_user(
             "`true` returns only runs with failures (or errors), `false` only "
             "clean runs. Omit for both"
         ),
+    ),
+    around: Optional[str] = Query(
+        None,
+        description="ID of a run to jump to, returning the page that contains it instead of the page at `offset`",
     ),
     pagination: OptionalPaginationParams = Depends(),
 ):
@@ -916,7 +924,7 @@ def get_all_test_runs_for_user(
         runs = [r for r in runs if _run_item_has_failures(r) == has_failures]
 
     # `total` = matches after filtering, before the page slice.
-    return paginate(runs, pagination)
+    return paginate_around(runs, pagination, around, key=lambda r: r.uuid)
 
 
 @router.get(

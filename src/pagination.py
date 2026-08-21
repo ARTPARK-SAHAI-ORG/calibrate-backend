@@ -164,6 +164,42 @@ def paginate(
     return page_envelope(page, total, pagination)
 
 
+def paginate_around(
+    items: List[Any],
+    pagination: "OptionalPaginationParams",
+    around_id: Optional[str],
+    *,
+    key: Any,
+) -> Dict[str, Any]:
+    """Like `paginate`, but when `around_id` is given, returns the page that
+    contains the matching item instead of the page at `pagination.offset`,
+    so a client that navigated away from a specific row (e.g. into a detail
+    view) can reopen the list already scrolled to it. Unbounded `limit`
+    (`None`) is honored the same as plain `paginate`: the whole list comes
+    back, since there's no page to compute a bounded offset into. `key`
+    extracts the comparable id from each item — no default, since most of
+    this file's items are dicts (read with `it["uuid"]`) while these callers
+    pass Pydantic model instances (read with `it.uuid`); pick one explicitly
+    at each call site instead of relying on a shape that happens to match today.
+
+    Raises `HTTPException(404)` if no item matches `around_id`. Falls back to
+    plain `paginate` when `around_id` is `None`.
+    """
+    if around_id is None:
+        return paginate(items, pagination)
+    index = next((i for i, it in enumerate(items) if key(it) == around_id), None)
+    if index is None:
+        raise HTTPException(
+            status_code=404, detail=f"{around_id} not found in the current results"
+        )
+    pagination.offset = (
+        (index // pagination.limit) * pagination.limit
+        if pagination.limit is not None
+        else 0
+    )
+    return paginate(items, pagination)
+
+
 def make_sort_params(
     *,
     sortable: List[str],
@@ -400,4 +436,5 @@ __all__ = [
     "make_sort_params",
     "make_search_params",
     "make_projection_params",
+    "paginate_around",
 ]
