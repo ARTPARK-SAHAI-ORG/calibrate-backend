@@ -48,7 +48,6 @@ from db import (
     set_evaluator_live_version,
     update_evaluator,
 )
-from llm_judge import render_template
 from utils import (
     EvaluatorTypeLiteral,
     DataTypeLiteral,
@@ -856,38 +855,3 @@ def mark_live(
     return {"message": "Live version updated"}
 
 
-# ============ Prompt preview (authenticated) ============
-
-
-class PromptPreviewRequest(BaseModel):
-    version_uuid: Optional[str] = Field(
-        None,
-        min_length=36,
-        max_length=36,
-        description="Version to render. Omit to use the evaluator's live version",
-        examples=[_EXAMPLE_VERSION_UUID],
-    )
-    variables: Optional[Dict[str, Any]] = Field(
-        None, description="Values substituted into `{{placeholders}}`. Omit to render with none"
-    )
-
-
-@router.post("/{evaluator_uuid}/preview-prompt", summary="Preview evaluator prompt")
-def preview_prompt(
-    payload: PromptPreviewRequest,
-    evaluator_uuid: str = Path(
-        description="Evaluator whose prompt to preview",
-        examples=["f47ac10b-58cc-4372-a567-0e02b2c3d479"],
-    ),
-    ctx: OrgContext = Depends(get_current_org),
-):
-    """Render a version's system prompt with the supplied variables and return the resolved text"""
-    evaluator = _visible_or_404(get_evaluator(evaluator_uuid), ctx.org_uuid)
-    version_uuid = payload.version_uuid or evaluator.get("live_version_id")
-    if not version_uuid:
-        raise HTTPException(status_code=400, detail="Evaluator has no live version")
-    version = get_evaluator_version(version_uuid)
-    if not version or version["evaluator_id"] != evaluator_uuid:
-        raise HTTPException(status_code=404, detail="Version not found")
-    rendered = render_template(version["system_prompt"], payload.variables or {})
-    return {"rendered_system_prompt": rendered}
