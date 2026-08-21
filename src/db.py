@@ -690,6 +690,7 @@ def init_db():
                 output_config TEXT DEFAULT NULL,
                 variables TEXT DEFAULT NULL,
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                deleted_at TIMESTAMP DEFAULT NULL,
                 UNIQUE(evaluator_id, version_number),
                 FOREIGN KEY (evaluator_id) REFERENCES evaluators(uuid)
             )
@@ -702,6 +703,7 @@ def init_db():
             "ALTER TABLE evaluators ADD COLUMN output_type TEXT NOT NULL DEFAULT 'binary'",
             # add output_config to versions; old schema had it on evaluators, now on versions.
             "ALTER TABLE evaluator_versions ADD COLUMN output_config TEXT DEFAULT NULL",
+            "ALTER TABLE evaluator_versions ADD COLUMN deleted_at TIMESTAMP DEFAULT NULL",
             # Historical: an intermediate schema renamed `data_type` -> `evaluator_type`.
             # On a DB that's still on the old schema, this rename runs first so
             # `evaluator_type` exists; `data_type` is then re-added (with the old text|audio
@@ -5579,12 +5581,20 @@ def get_evaluator_version(version_uuid: str) -> Optional[Dict[str, Any]]:
         return _parse_evaluator_version_row(row) if row else None
 
 
-def get_evaluator_versions(evaluator_uuid: str) -> List[Dict[str, Any]]:
-    """Fetch all versions for an evaluator, newest first."""
+def get_evaluator_versions(
+    evaluator_uuid: str, include_deleted: bool = False
+) -> List[Dict[str, Any]]:
+    """Fetch an evaluator's live versions, newest first.
+
+    `include_deleted=True` also returns soft-deleted versions — for historical
+    reads that resolve a stored `evaluator_version_id` back to its number.
+    """
     with get_db_connection() as conn:
         cursor = conn.cursor()
         cursor.execute(
-            "SELECT * FROM evaluator_versions WHERE evaluator_id = ? ORDER BY version_number DESC",
+            "SELECT * FROM evaluator_versions WHERE evaluator_id = ? "
+            + ("" if include_deleted else "AND deleted_at IS NULL ")
+            + "ORDER BY version_number DESC",
             (evaluator_uuid,),
         )
         return [_parse_evaluator_version_row(r) for r in cursor.fetchall()]
@@ -5630,7 +5640,7 @@ def get_evaluator_versions_for_evaluators(
         cursor = conn.cursor()
         cursor.execute(
             f"SELECT * FROM evaluator_versions "
-            f"WHERE evaluator_id IN ({placeholders}) "
+            f"WHERE evaluator_id IN ({placeholders}) AND deleted_at IS NULL "
             f"ORDER BY version_number DESC",
             unique_uuids,
         )
@@ -5641,12 +5651,56 @@ def get_evaluator_versions_for_evaluators(
     return result
 
 
+def soft_delete_evaluator_version(evaluator_uuid: str, version_uuid: str) -> str:
+    """Soft-delete one version of an evaluator.
+
+    Returns "deleted", or a refusal reason: "not_found" (unknown version, wrong
+    evaluator, or already deleted), "live" (it is the evaluator's live version),
+    "last" (it is the only remaining version). The row is kept so finished runs
+    that pinned this version still resolve its number and prompt.
+    """
+    with get_db_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            "SELECT 1 FROM evaluator_versions WHERE uuid = ? AND evaluator_id = ? "
+            "AND deleted_at IS NULL",
+            (version_uuid, evaluator_uuid),
+        )
+        if not cursor.fetchone():
+            return "not_found"
+        cursor.execute(
+            "SELECT live_version_id FROM evaluators WHERE uuid = ?", (evaluator_uuid,)
+        )
+        parent = cursor.fetchone()
+        if parent and parent["live_version_id"] == version_uuid:
+            return "live"
+        cursor.execute(
+            "SELECT COUNT(*) AS n FROM evaluator_versions "
+            "WHERE evaluator_id = ? AND deleted_at IS NULL",
+            (evaluator_uuid,),
+        )
+        if cursor.fetchone()["n"] <= 1:
+            return "last"
+        cursor.execute(
+            "UPDATE evaluator_versions SET deleted_at = CURRENT_TIMESTAMP WHERE uuid = ?",
+            (version_uuid,),
+        )
+        cursor.execute(
+            "UPDATE evaluators SET updated_at = CURRENT_TIMESTAMP WHERE uuid = ?",
+            (evaluator_uuid,),
+        )
+        conn.commit()
+        logger.info(f"Soft-deleted evaluator version {version_uuid} of {evaluator_uuid}")
+        return "deleted"
+
+
 def set_evaluator_live_version(evaluator_uuid: str, version_uuid: str) -> bool:
     """Mark a specific version as the live version for an evaluator."""
     with get_db_connection() as conn:
         cursor = conn.cursor()
         cursor.execute(
-            "SELECT 1 FROM evaluator_versions WHERE uuid = ? AND evaluator_id = ?",
+            "SELECT 1 FROM evaluator_versions WHERE uuid = ? AND evaluator_id = ? "
+            "AND deleted_at IS NULL",
             (version_uuid, evaluator_uuid),
         )
         if not cursor.fetchone():
@@ -5704,7 +5758,8 @@ def duplicate_evaluator(
             )
         else:
             cursor.execute(
-                "SELECT * FROM evaluator_versions WHERE evaluator_id = ? ORDER BY version_number DESC LIMIT 1",
+                "SELECT * FROM evaluator_versions WHERE evaluator_id = ? "
+                "AND deleted_at IS NULL ORDER BY version_number DESC LIMIT 1",
                 (source_uuid,),
             )
         source_version_row = cursor.fetchone()

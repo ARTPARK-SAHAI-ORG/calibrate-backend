@@ -143,7 +143,7 @@ def evaluator_agreement_trend(
         evaluator_uuid, ctx.org_uuid, task_id=task_id, version_id=version_id
     )
 
-    all_versions = get_evaluator_versions(evaluator_uuid) if runs else []
+    all_versions = get_evaluator_versions(evaluator_uuid, include_deleted=True) if runs else []
     version_number_by_id = {v["uuid"]: v["version_number"] for v in all_versions}
     live_version_id = evaluator.get("live_version_id")
 

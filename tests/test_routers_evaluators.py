@@ -303,3 +303,83 @@ def test_add_version_rejects_duplicate_scale_labels(client):
         headers=h,
     )
     assert resp.status_code == 422, resp.text
+
+
+def _add_version(client, headers, ev_uuid, make_live=False):
+    resp = client.post(
+        f"/evaluators/{ev_uuid}/versions",
+        json={
+            "judge_model": "openai/gpt-4",
+            "system_prompt": "Judge {{criteria}} again",
+            "variables": [{"name": "criteria"}],
+            "output_config": {
+                "scale": [
+                    {"value": 1, "name": "Bad"},
+                    {"value": 2, "name": "Good"},
+                ]
+            },
+            "make_live": make_live,
+        },
+        headers=headers,
+    )
+    assert resp.status_code == 200, resp.text
+    return resp.json()["version_uuid"]
+
+
+def test_delete_version_hides_it_from_reads(client):
+    h = _signup(client)
+    _, ev_uuid, _ = _create_rating_evaluator(client, h)
+    v2 = _add_version(client, h, ev_uuid, make_live=True)
+    v1 = client.get(f"/evaluators/{ev_uuid}/versions", headers=h).json()
+    v1_uuid = next(v["uuid"] for v in v1 if v["uuid"] != v2)
+
+    resp = client.delete(f"/evaluators/{ev_uuid}/versions/{v1_uuid}", headers=h)
+    assert resp.status_code == 200, resp.text
+
+    listed = client.get(f"/evaluators/{ev_uuid}/versions", headers=h).json()
+    assert [v["uuid"] for v in listed] == [v2]
+    detail = client.get(f"/evaluators/{ev_uuid}", headers=h).json()
+    assert [v["uuid"] for v in detail["versions"]] == [v2]
+    assert detail["live_version_index"] == 0
+
+
+def test_delete_version_rejects_live_and_only_version(client):
+    h = _signup(client)
+    _, ev_uuid, v1_uuid = _create_rating_evaluator(client, h)
+
+    resp = client.delete(f"/evaluators/{ev_uuid}/versions/{v1_uuid}", headers=h)
+    assert resp.status_code == 400, resp.text
+    assert "live version" in resp.json()["detail"]
+
+    v2 = _add_version(client, h, ev_uuid, make_live=True)
+    assert client.delete(f"/evaluators/{ev_uuid}/versions/{v1_uuid}", headers=h).status_code == 200
+    # v2 is both live and last; unset live to reach the "only version" branch.
+    from db import set_evaluator_live_version, get_db_connection
+
+    with get_db_connection() as conn:
+        conn.execute(
+            "UPDATE evaluators SET live_version_id = NULL WHERE uuid = ?", (ev_uuid,)
+        )
+        conn.commit()
+    resp = client.delete(f"/evaluators/{ev_uuid}/versions/{v2}", headers=h)
+    assert resp.status_code == 400, resp.text
+    assert "only version" in resp.json()["detail"]
+    # a soft-deleted version cannot be made live again
+    assert set_evaluator_live_version(ev_uuid, v1_uuid) is False
+
+
+def test_delete_version_404s_on_unknown_repeat_and_other_org(client):
+    h = _signup(client)
+    _, ev_uuid, v1_uuid = _create_rating_evaluator(client, h)
+    v2 = _add_version(client, h, ev_uuid, make_live=True)
+
+    assert client.delete(
+        f"/evaluators/{ev_uuid}/versions/{uuid.uuid4()}", headers=h
+    ).status_code == 404
+    assert client.delete(f"/evaluators/{ev_uuid}/versions/{v1_uuid}", headers=h).status_code == 200
+    assert client.delete(f"/evaluators/{ev_uuid}/versions/{v1_uuid}", headers=h).status_code == 404
+
+    # Cross-workspace answers 403 with the switch-workspace hint, same as
+    # deleting the whole evaluator does.
+    other = _signup(client)
+    assert client.delete(f"/evaluators/{ev_uuid}/versions/{v2}", headers=other).status_code == 403

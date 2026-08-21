@@ -44,6 +44,7 @@ from db import (
     get_evaluator_version,
     get_evaluator_versions,
     get_evaluator_versions_by_uuids,
+    soft_delete_evaluator_version,
     set_evaluator_live_version,
     update_evaluator,
 )
@@ -809,6 +810,36 @@ def create_version(
     return VersionCreateResponse(
         version_uuid=version["uuid"], version_number=version["version_number"]
     )
+
+
+@router.delete("/{evaluator_uuid}/versions/{version_uuid}", summary="Delete evaluator version")
+def delete_version(
+    evaluator_uuid: str = Path(
+        description="Evaluator whose version to delete",
+        examples=["f47ac10b-58cc-4372-a567-0e02b2c3d479"],
+    ),
+    version_uuid: str = Path(
+        description="Version to delete. Cannot be the live version or the only version",
+        examples=[_EXAMPLE_VERSION_UUID],
+    ),
+    ctx: OrgContext = Depends(get_current_org),
+):
+    """Delete one version of an evaluator you created"""
+    existing = _visible_or_404(get_evaluator(evaluator_uuid), ctx.org_uuid)
+    _owner_check(existing, ctx.org_uuid)
+    outcome = soft_delete_evaluator_version(evaluator_uuid, version_uuid)
+    if outcome == "not_found":
+        raise HTTPException(status_code=404, detail="Version not found")
+    if outcome == "live":
+        raise HTTPException(
+            status_code=400,
+            detail="Cannot delete the live version. Set another version live first",
+        )
+    if outcome == "last":
+        raise HTTPException(
+            status_code=400, detail="Cannot delete an evaluator's only version"
+        )
+    return {"message": "Version deleted"}
 
 
 @router.post("/{evaluator_uuid}/versions/live", summary="Set live version")
