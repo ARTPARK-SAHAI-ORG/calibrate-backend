@@ -844,7 +844,7 @@ def get_agent_test_runs(
         runs = [r for r in runs if _run_item_has_failures(r) == has_failures]
 
     # `total` = matches after filtering, before the page slice.
-    return paginate_around(runs, pagination, around)
+    return paginate_around(runs, pagination, around, key=lambda r: r.uuid)
 
 
 @router.get(
@@ -922,7 +922,7 @@ def get_all_test_runs_for_user(
         runs = [r for r in runs if _run_item_has_failures(r) == has_failures]
 
     # `total` = matches after filtering, before the page slice.
-    return paginate_around(runs, pagination, around)
+    return paginate_around(runs, pagination, around, key=lambda r: r.uuid)
 
 
 @router.get(

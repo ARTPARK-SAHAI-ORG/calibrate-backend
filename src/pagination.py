@@ -169,7 +169,7 @@ def paginate_around(
     pagination: "OptionalPaginationParams",
     around_id: Optional[str],
     *,
-    key: Any = lambda it: it.uuid,
+    key: Any,
 ) -> Dict[str, Any]:
     """Like `paginate`, but when `around_id` is given, returns the page that
     contains the matching item instead of the page at `pagination.offset`,
@@ -177,7 +177,10 @@ def paginate_around(
     view) can reopen the list already scrolled to it. Unbounded `limit`
     (`None`) is honored the same as plain `paginate`: the whole list comes
     back, since there's no page to compute a bounded offset into. `key`
-    extracts the comparable id from each item (default: `.uuid` attribute).
+    extracts the comparable id from each item — no default, since most of
+    this file's items are dicts (read with `it["uuid"]`) while these callers
+    pass Pydantic model instances (read with `it.uuid`); pick one explicitly
+    at each call site instead of relying on a shape that happens to match today.
 
     Raises `HTTPException(404)` if no item matches `around_id`. Falls back to
     plain `paginate` when `around_id` is `None`.
