@@ -143,6 +143,30 @@ REQUIRED_AGENT_INTERACTION_TYPE_BY_TEST_TYPE: Dict[str, str] = {
 }
 
 
+def required_agent_interaction_type(
+    test_type: Optional[str], config: Optional[Dict[str, Any]]
+) -> str:
+    """Return the agent `interaction_type` a test can be linked to.
+
+    `tool_call` is the one type that spans both: it asserts on the tool calls the
+    agent generated, which a one-shot agent produces just as well as a
+    conversational one. Its config shape decides which: `input` (a standalone
+    prompt, the same field a `general` test carries) means a `general` agent,
+    `history` means a conversational one. A config carrying both is read as
+    conversational, matching which of the two `_build_calibrate_config` sends.
+    """
+    if (
+        test_type == "tool_call"
+        and isinstance(config, dict)
+        and config.get("history") is None
+        and config.get("input") is not None
+    ):
+        return "general"
+    return REQUIRED_AGENT_INTERACTION_TYPE_BY_TEST_TYPE.get(
+        test_type, DEFAULT_AGENT_INTERACTION_TYPE
+    )
+
+
 # Linked evaluators resolve to the live version at run time (not pinned per test).
 class EvaluatorRef(BaseModel):
     model_config = ConfigDict(extra="forbid")
@@ -287,11 +311,11 @@ class BulkTestItem(BaseModel):
     name: str = Field(description=_TEST_NAME_DESCRIPTION + " and within the batch")
     conversation_history: Optional[List[ChatMessage]] = Field(
         None,
-        description="Ordered messages ending at the user turn the agent should answer. **Required for `response`, `tool_call`, and `conversation` batches**, ignored otherwise",
+        description="Ordered messages ending at the user turn the agent should answer. **Required for `response` and `conversation` batches**, and for `tool_call` batches aimed at a conversational agent",
     )
     input: Optional[str] = Field(
         None,
-        description="Plain-text input for this test. **Required for `general` batches**, ignored otherwise",
+        description="Standalone prompt with no conversation around it. **Required for `general` batches**, and for `tool_call` batches aimed at a general agent",
     )
     evaluators: Optional[List[EvaluatorRef]] = Field(
         None,
@@ -351,6 +375,20 @@ class BulkTestUpload(BaseModel):
                     )
                 continue
 
+            if self.type == "tool_call":
+                if not t.tool_calls:
+                    raise ValueError(
+                        f"Test '{t.name}' must have 'tool_calls' for tool_call type"
+                    )
+                # Which one is given decides whether this test can be linked to a
+                # conversational or a general agent, so it cannot be both or neither.
+                if bool(t.input) == bool(t.conversation_history):
+                    raise ValueError(
+                        f"Test '{t.name}' must have exactly one of 'input' or "
+                        "'conversation_history' for tool_call type"
+                    )
+                continue
+
             if not t.conversation_history:
                 raise ValueError(
                     f"Test '{t.name}' must have at least one message in conversation_history"
@@ -359,11 +397,6 @@ class BulkTestUpload(BaseModel):
                 if not t.evaluators:
                     raise ValueError(
                         f"Test '{t.name}' must have at least one evaluator for response type"
-                    )
-            elif self.type == "tool_call":
-                if not t.tool_calls:
-                    raise ValueError(
-                        f"Test '{t.name}' must have 'tool_calls' for tool_call type"
                     )
             elif self.type == "conversation":
                 if not t.evaluators:
@@ -476,30 +509,6 @@ def bulk_upload_tests(
     payload: BulkTestUpload, ctx: OrgContext = Depends(get_org_jwt_or_api_key)
 ):
     """Create many test cases at once and link them to your agents"""
-    # An agent's interaction_type gates which test category can run against it —
-    # `general` tests have no conversation history to feed a conversational agent,
-    # and conversation-style tests have nothing to feed a `general` agent. Check
-    # every agent up front so a mismatch never creates a partial batch.
-    required_interaction_type = REQUIRED_AGENT_INTERACTION_TYPE_BY_TEST_TYPE[payload.type]
-    if payload.agent_uuids:
-        for agent_uuid in payload.agent_uuids:
-            agent = get_agent(agent_uuid)
-            if not agent or agent.get("org_uuid") != ctx.org_uuid:
-                raise HTTPException(
-                    status_code=404, detail=f"Agent {agent_uuid} not found"
-                )
-            agent_interaction_type = agent.get(
-                "interaction_type", DEFAULT_AGENT_INTERACTION_TYPE
-            )
-            if agent_interaction_type != required_interaction_type:
-                raise HTTPException(
-                    status_code=400,
-                    detail=(
-                        f"Agent {agent_uuid} has interaction_type="
-                        f"'{agent_interaction_type}'; cannot link {payload.type} tests to it."
-                    ),
-                )
-
     resolved_evaluator_refs: List[Optional[List[Dict[str, Any]]]] = []
     for t in payload.tests:
         if t.evaluators:
@@ -515,7 +524,7 @@ def bulk_upload_tests(
         if payload.type == "tool_call":
             evaluation["tool_calls"] = [tc.model_dump() for tc in t.tool_calls]
 
-        if payload.type == "general":
+        if payload.type == "general" or (payload.type == "tool_call" and t.input):
             config: Dict[str, Any] = {"input": t.input, "evaluation": evaluation}
         else:
             config = {
@@ -536,6 +545,35 @@ def bulk_upload_tests(
                 "config": config,
             }
         )
+
+    # An agent's interaction_type gates which test category can run against it —
+    # `general` tests have no conversation history to feed a conversational agent,
+    # and conversation-style tests have nothing to feed a `general` agent. Checked
+    # against each built config (a `tool_call` test's shape decides which agent it
+    # fits) and before any write, so a mismatch never creates a partial batch.
+    if payload.agent_uuids:
+        for agent_uuid in payload.agent_uuids:
+            agent = get_agent(agent_uuid)
+            if not agent or agent.get("org_uuid") != ctx.org_uuid:
+                raise HTTPException(
+                    status_code=404, detail=f"Agent {agent_uuid} not found"
+                )
+            agent_interaction_type = agent.get(
+                "interaction_type", DEFAULT_AGENT_INTERACTION_TYPE
+            )
+            for db_test in db_tests:
+                if (
+                    required_agent_interaction_type(payload.type, db_test["config"])
+                    != agent_interaction_type
+                ):
+                    raise HTTPException(
+                        status_code=400,
+                        detail=(
+                            f"Agent {agent_uuid} has interaction_type="
+                            f"'{agent_interaction_type}'; cannot link "
+                            f"{payload.type} test '{db_test['name']}' to it."
+                        ),
+                    )
 
     try:
         uuids = bulk_create_tests(
