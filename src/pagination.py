@@ -164,6 +164,40 @@ def paginate(
     return page_envelope(page, total, pagination)
 
 
+def paginate_around(
+    items: List[Any],
+    pagination: "OptionalPaginationParams",
+    around_id: Optional[str],
+    *,
+    key: Any = lambda it: it.uuid,
+) -> Dict[str, Any]:
+    """Like `paginate`, but when `around_id` is given, returns the page that
+    contains the matching item instead of the page at `pagination.offset` —
+    so a client that navigated away from a specific row (e.g. into a detail
+    view) can reopen the list already scrolled to it. `pagination.limit`
+    (falling back to `DEFAULT_LIMIT` when unset) sets the page size; `key`
+    extracts the comparable id from each item (default: `.uuid` attribute).
+
+    Raises `HTTPException(404)` if no item matches `around_id`. Falls back to
+    plain `paginate` when `around_id` is `None`.
+    """
+    if around_id is None:
+        return paginate(items, pagination)
+    limit = pagination.limit or DEFAULT_LIMIT
+    index = next((i for i, it in enumerate(items) if key(it) == around_id), None)
+    if index is None:
+        raise HTTPException(
+            status_code=404, detail=f"{around_id} not found in the current results"
+        )
+    offset = (index // limit) * limit
+    return {
+        "items": items[offset : offset + limit],
+        "total": len(items),
+        "limit": limit,
+        "offset": offset,
+    }
+
+
 def make_sort_params(
     *,
     sortable: List[str],
@@ -400,4 +434,5 @@ __all__ = [
     "make_sort_params",
     "make_search_params",
     "make_projection_params",
+    "paginate_around",
 ]

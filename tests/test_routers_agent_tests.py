@@ -518,6 +518,30 @@ def test_agent_runs_list_filters_and_pagination(client):
     assert len(b2["items"]) == 1
     assert b1["items"][0]["uuid"] != b2["items"][0]["uuid"]
 
+    # `around` returns the page containing that run instead of `offset`'s page.
+    # Runs are newest-first: bench (0), failing (1), clean (2).
+    around_clean = _get(limit=1, around=clean).json()
+    assert around_clean["offset"] == 2
+    assert [x["uuid"] for x in around_clean["items"]] == [clean]
+
+    around_bench = _get(limit=2, around=failing).json()
+    assert around_bench["offset"] == 0  # index 1 falls in the first page of 2
+    assert failing in {x["uuid"] for x in around_bench["items"]}
+
+    # A run excluded by a filter (or unknown) is not in the filtered results.
+    r = client.get(
+        f"/agent-tests/agent/{au}/runs",
+        params={"status": "in_progress", "around": clean},
+        headers=h,
+    )
+    assert r.status_code == 404
+    r = client.get(
+        f"/agent-tests/agent/{au}/runs",
+        params={"around": "not-a-real-uuid"},
+        headers=h,
+    )
+    assert r.status_code == 404
+
 
 def test_global_runs_list_filters_and_pagination(client):
     """The workspace-wide GET /agent-tests/runs (JWT-only) uses the same
@@ -561,6 +585,14 @@ def test_global_runs_list_filters_and_pagination(client):
 
     assert _mine(type="llm-benchmark") == {bench}
     assert _mine(status="done") == {clean, failing}
+
+    # `around` (same contract as the per-agent endpoint): page containing the
+    # run, 404 when it's filtered out.
+    body = _get(limit=1, around=clean)
+    assert clean in {x["uuid"] for x in body["items"]}
+    assert client.get(
+        "/agent-tests/runs", params={"type": "llm-benchmark", "around": clean}, headers=h
+    ).status_code == 404
     assert _mine(has_failures=True) == {failing}
     assert _mine(has_failures=False, type="llm-unit-test") == {clean}
 
