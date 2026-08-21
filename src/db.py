@@ -7005,14 +7005,19 @@ def get_all_agent_test_jobs(job_type: Optional[str] = None) -> List[Dict[str, An
         return [_parse_agent_test_job_row(row) for row in rows]
 
 
-# Per-row projection for the run-LIST endpoints. Pulls only the header columns
-# plus the scalar aggregates and the two slim per-row arrays out of the heavy
-# `results` blob, and never reads `details` at all — the run-list index needs
-# neither the full `details` nor the bulky `results` sub-trees (agent outputs,
+# Per-row projection for the run-LIST endpoints. Pulls the header columns, the
+# scalar aggregates and the two slim per-row arrays out of the heavy `results`
+# blob, plus two narrow slices of `details` (the evaluator-name snapshot and
+# the has_tool_call_test flag, both snapshotted once at job-creation time by
+# `_agent_test_job_details`) — never the full `details` blob (calibrate
+# config, s3 bucket, etc.) or the bulky `results` sub-trees (agent outputs,
 # judge reasoning, test-case bodies, per-model `test_results`, leaderboard).
 # The slim `test_results`/`model_results` arrays are rebuilt inside SQLite via
-# `json_each` so only the trimmed rows cross into Python. Kept aligned with the
-# fields `_build_agent_test_run_item_fields` reads in routers/agent_tests.py.
+# `json_each` so only the trimmed rows cross into Python. Kept aligned with
+# the fields `_build_agent_test_run_item_fields` reads in
+# routers/agent_tests.py. Jobs created before this snapshot field existed
+# read as `has_tool_call_test = NULL` (→ False), same legacy-empty behavior
+# already accepted for `evaluators_by_test_id`.
 _AGENT_TEST_JOB_SUMMARY_COLUMNS = """
         atj.uuid, atj.type, atj.status, atj.agent_id,
         atj.is_public, atj.share_token, atj.created_at, atj.updated_at, atj.id,
@@ -7039,13 +7044,16 @@ _AGENT_TEST_JOB_SUMMARY_COLUMNS = """
             'failed', json_extract(je.value, '$.failed')
          )) FROM json_each(COALESCE(atj.results, '{}'), '$.model_results') je
          WHERE je.type = 'object'
-        ) AS model_results
+        ) AS model_results,
+        json_extract(atj.details, '$.evaluators_by_test_id') AS evaluators_by_test_id,
+        json_extract(atj.details, '$.has_tool_call_test') AS has_tool_call_test
 """
 
 
 def _row_to_agent_test_job_summary(row: sqlite3.Row) -> Dict[str, Any]:
     """Shape a slim agent-test-job row into the same dict the run-list routers
-    consume: header fields plus a reduced `results` sub-dict (no `details`)."""
+    consume: header fields, a reduced `results` sub-dict, and the two narrow
+    `details` slices (`evaluators_by_test_id`, `has_tool_call_test`)."""
     row = dict(row)
 
     def _loads(value: Any) -> Any:
@@ -7067,6 +7075,8 @@ def _row_to_agent_test_job_summary(row: sqlite3.Row) -> Dict[str, Any]:
         "created_at": row["created_at"],
         "updated_at": row["updated_at"],
         "id": row.get("id"),
+        "evaluators_by_test_id": _loads(row.get("evaluators_by_test_id")),
+        "has_tool_call_test": bool(row.get("has_tool_call_test")),
         "results": {
             "total_tests": row.get("total_tests"),
             "passed": row.get("passed"),
@@ -7085,8 +7095,9 @@ def get_agent_test_jobs_for_agent_summary(
     agent_id: str, job_type: Optional[str] = None
 ) -> List[Dict[str, Any]]:
     """Slim run-list headers for one agent's test jobs (see
-    `_AGENT_TEST_JOB_SUMMARY_COLUMNS`). Never reads `details` nor the heavy
-    `results` sub-trees. Newest-created first (ties broken by `id`)."""
+    `_AGENT_TEST_JOB_SUMMARY_COLUMNS`). Reads only two narrow `details` slices
+    (evaluator names, tool-call flag), never the full `details` blob nor the
+    heavy `results` sub-trees. Newest-created first (ties broken by `id`)."""
     select = (
         f"SELECT {_AGENT_TEST_JOB_SUMMARY_COLUMNS} FROM agent_test_jobs atj "
         "WHERE atj.agent_id = ?"
@@ -7111,8 +7122,10 @@ def get_agent_test_jobs_for_org_summary(
     org_uuid: str, job_type: Optional[str] = None
 ) -> List[Dict[str, Any]]:
     """Slim run-list headers for an org's test jobs across all its agents, with
-    `agent_name`/`agent_id` from the joined agent. Never reads `details` nor the
-    heavy `results` sub-trees. Newest-updated first (ties broken by `id`)."""
+    `agent_name`/`agent_id` from the joined agent. Reads only two narrow
+    `details` slices (evaluator names, tool-call flag), never the full
+    `details` blob nor the heavy `results` sub-trees. Newest-updated first
+    (ties broken by `id`)."""
     select = (
         f"SELECT {_AGENT_TEST_JOB_SUMMARY_COLUMNS}, a.name AS agent_name "
         "FROM agent_test_jobs atj "

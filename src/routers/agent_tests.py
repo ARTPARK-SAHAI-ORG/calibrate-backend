@@ -549,6 +549,14 @@ class AgentTestRunListItem(BaseModel):
     failed: Optional[int] = Field(
         None, description="Number of test cases that failed"
     )
+    evaluators: List[str] = Field(
+        default_factory=list,
+        description=(
+            "Names of the evaluators that judged this run, deduplicated and in "
+            "display order. `Tool call` is appended when any test in the run was "
+            "a tool-call test. Empty when the run had no evaluators"
+        ),
+    )
     results: Optional[List[TestRunCaseSummary]] = Field(
         None,
         description="Flat pass/fail summary for each test case (fetch the run detail for full results)",
@@ -711,7 +719,70 @@ def _slim_model_results(model_results: Any) -> Optional[List[Dict[str, Any]]]:
     return slim or None
 
 
-def _build_agent_test_run_item_fields(job: Dict[str, Any], name: str) -> Dict[str, Any]:
+def _run_evaluator_names(
+    job: Dict[str, Any],
+    evaluator_cache: Optional[Dict[str, Optional[Dict[str, Any]]]] = None,
+) -> List[str]:
+    """Flat, deduped evaluator names for the run-list `evaluators` column, in
+    first-appearance order across the job's `details.evaluators_by_test_id`
+    snapshot. Appends the literal `"Tool call"` when any linked test was a
+    tool-call test (tool-call tests never carry evaluators, so they'd
+    otherwise be invisible in this column).
+
+    Prefers each evaluator's current name over the snapshot (same preference
+    order as `_build_evaluators_block_for_test_run`), via a caller-shared
+    `evaluator_cache` — callers building a whole list should pre-seed it with
+    `_prefetch_evaluator_cache(jobs)` (one batched query) rather than let this
+    function discover each distinct evaluator one at a time. The snapshot name
+    is calibrate's disambiguated name (e.g. `Correctness-a1b2c3d4` when two
+    linked evaluators share a display name) and goes stale on rename — neither
+    is fit for display."""
+    cache: Dict[str, Optional[Dict[str, Any]]] = (
+        evaluator_cache if evaluator_cache is not None else {}
+    )
+    raw_names: List[str] = []
+    for evals in (job.get("evaluators_by_test_id") or {}).values():
+        for ev in evals or []:
+            if not isinstance(ev, dict):
+                continue
+            uid = ev.get("uuid")
+            ev_row = _get_evaluator_cached_for_enrichment(uid, cache) if uid else None
+            name = (ev_row.get("name") if ev_row else None) or ev.get("name")
+            if name:
+                raw_names.append(name)
+    names = list(dict.fromkeys(raw_names))
+    if job.get("has_tool_call_test"):
+        names.append("Tool call")
+    return names
+
+
+def _prefetch_evaluator_cache(
+    jobs: List[Dict[str, Any]],
+) -> Dict[str, Optional[Dict[str, Any]]]:
+    """One batched DB read for every evaluator uuid referenced across `jobs`'
+    `evaluators_by_test_id` snapshots, seeded as the `evaluator_cache` for
+    `_run_evaluator_names`. Without this, each distinct evaluator triggers its
+    own `get_evaluator()` round trip on first sight (N+1 for a run-list
+    referencing many evaluators); missing/deleted uuids are cached as `None`
+    so `_run_evaluator_names` never re-queries them either."""
+    from db import get_evaluators_by_uuids
+
+    all_uuids = {
+        ev["uuid"]
+        for job in jobs
+        for evals in (job.get("evaluators_by_test_id") or {}).values()
+        for ev in evals or []
+        if isinstance(ev, dict) and ev.get("uuid")
+    }
+    found = get_evaluators_by_uuids(list(all_uuids)) if all_uuids else {}
+    return {uid: found.get(uid) for uid in all_uuids}
+
+
+def _build_agent_test_run_item_fields(
+    job: Dict[str, Any],
+    name: str,
+    evaluator_cache: Optional[Dict[str, Optional[Dict[str, Any]]]] = None,
+) -> Dict[str, Any]:
     """Shared field mapping for the run-list item models (``AgentTestRunListItem``
     and its ``GlobalTestRunListItem`` subclass).
 
@@ -721,7 +792,10 @@ def _build_agent_test_run_item_fields(job: Dict[str, Any], name: str) -> Dict[st
     definition, per-model `test_results`, leaderboard, evaluator rubrics). Those
     live on the run-detail endpoints, which every viewer re-fetches by task id.
     Callers spread the result and append any model-specific fields (e.g.
-    ``agent_id``/``agent_name`` for the global view).
+    ``agent_id``/``agent_name`` for the global view). Pass a shared
+    ``evaluator_cache`` when building a whole list so repeated evaluators
+    across runs cost one DB lookup, not one per run (see
+    ``_run_evaluator_names``).
     """
     job_results = job.get("results") or {}
 
@@ -736,6 +810,7 @@ def _build_agent_test_run_item_fields(job: Dict[str, Any], name: str) -> Dict[st
         "total_tests": job_results.get("total_tests"),
         "passed": job_results.get("passed"),
         "failed": job_results.get("failed"),
+        "evaluators": _run_evaluator_names(job, evaluator_cache),
         "latency_ms": job_results.get("latency_ms"),
         "cost": job_results.get("cost"),
         "total_tokens": job_results.get("total_tokens"),
@@ -830,9 +905,12 @@ def get_agent_test_runs(
             name_map[job["uuid"]] = "Job"
 
     runs = []
+    evaluator_cache = _prefetch_evaluator_cache(jobs)
     for job in jobs:  # already newest-first
         name = name_map.get(job["uuid"], "Job")
-        run_item = AgentTestRunListItem(**_build_agent_test_run_item_fields(job, name))
+        run_item = AgentTestRunListItem(
+            **_build_agent_test_run_item_fields(job, name, evaluator_cache)
+        )
         runs.append(run_item)
 
     # Optional filters — each narrows the set an MCP/agent client pages through,
@@ -909,9 +987,12 @@ def get_all_test_runs_for_user(
     # Build every run item FIRST (before status/has_failures filtering) so the
     # "Run N"/"Benchmark N" names stay stable regardless of which filters apply.
     runs = []
+    evaluator_cache = _prefetch_evaluator_cache(jobs)
     for job in jobs:  # already newest-first
         run_item = GlobalTestRunListItem(
-            **_build_agent_test_run_item_fields(job, name_map[job["uuid"]]),
+            **_build_agent_test_run_item_fields(
+                job, name_map[job["uuid"]], evaluator_cache
+            ),
             # Agent identity (global-only fields)
             agent_id=job.get("agent_id", ""),
             agent_name=job.get("agent_name", ""),
@@ -2295,6 +2376,9 @@ def _agent_test_job_details(
         "s3_bucket": s3_bucket,
         "calibrate_config": calibrate_config,
         "evaluators_by_test_id": evaluators_by_test_id,
+        # Snapshot rather than re-deriving per run-list request (a test's type
+        # is immutable, so this is static for the life of the job).
+        "has_tool_call_test": any(t.get("type") == "tool_call" for t in tests),
     }
 
 
