@@ -549,6 +549,14 @@ class AgentTestRunListItem(BaseModel):
     failed: Optional[int] = Field(
         None, description="Number of test cases that failed"
     )
+    evaluators: List[str] = Field(
+        default_factory=list,
+        description=(
+            "Names of the evaluators that judged this run, deduplicated and in "
+            "display order. `Tool call` is appended when any test in the run was "
+            "a tool-call test. Empty when the run had no evaluators"
+        ),
+    )
     results: Optional[List[TestRunCaseSummary]] = Field(
         None,
         description="Flat pass/fail summary for each test case (fetch the run detail for full results)",
@@ -711,6 +719,25 @@ def _slim_model_results(model_results: Any) -> Optional[List[Dict[str, Any]]]:
     return slim or None
 
 
+def _run_evaluator_names(job: Dict[str, Any]) -> List[str]:
+    """Flat, deduped evaluator names for the run-list `evaluators` column, in
+    first-appearance order across the job's `details.evaluators_by_test_id`
+    snapshot. Appends the literal `"Tool call"` when any linked test was a
+    tool-call test (tool-call tests never carry evaluators, so they'd
+    otherwise be invisible in this column)."""
+    names: List[str] = []
+    seen = set()
+    for evals in (job.get("evaluators_by_test_id") or {}).values():
+        for ev in evals or []:
+            name = ev.get("name") if isinstance(ev, dict) else None
+            if name and name not in seen:
+                seen.add(name)
+                names.append(name)
+    if job.get("has_tool_call_test"):
+        names.append("Tool call")
+    return names
+
+
 def _build_agent_test_run_item_fields(job: Dict[str, Any], name: str) -> Dict[str, Any]:
     """Shared field mapping for the run-list item models (``AgentTestRunListItem``
     and its ``GlobalTestRunListItem`` subclass).
@@ -736,6 +763,7 @@ def _build_agent_test_run_item_fields(job: Dict[str, Any], name: str) -> Dict[st
         "total_tests": job_results.get("total_tests"),
         "passed": job_results.get("passed"),
         "failed": job_results.get("failed"),
+        "evaluators": _run_evaluator_names(job),
         "latency_ms": job_results.get("latency_ms"),
         "cost": job_results.get("cost"),
         "total_tokens": job_results.get("total_tokens"),

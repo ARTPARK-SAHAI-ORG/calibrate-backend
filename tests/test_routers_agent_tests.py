@@ -435,9 +435,65 @@ def test_agent_runs_list_slims_benchmark_model_results(client):
             "failed": 0,
         }
     ]
-    # Leaderboard + top-level evaluators are not part of the list item at all.
+    # Leaderboard + the heavy rubric block are not part of the list item at all;
+    # the flat `evaluators` name column is empty since this job has no
+    # `details.evaluators_by_test_id` snapshot.
     assert "leaderboard_summary" not in run
-    assert "evaluators" not in run
+    assert run["evaluators"] == []
+
+
+def test_agent_runs_list_evaluators_column(client):
+    """The `evaluators` column on a run-list item lists the names of the
+    evaluators that judged the run, deduplicated and in first-appearance
+    order, with `Tool call` appended when any linked test was a tool-call
+    test — the tool-call test itself never carries an evaluator, so this is
+    the only signal that it ran."""
+    from db import (
+        create_agent_test_job,
+        create_test,
+        get_personal_org_for_user,
+        update_agent_test_job,
+    )
+
+    auth = _signup(client)
+    h = auth["headers"]
+    agent = _create_agent(client, h)
+    org_uuid = get_personal_org_for_user(auth["user_uuid"])["uuid"]
+
+    tool_test_uuid = create_test(
+        name="uses-tool",
+        type="tool_call",
+        org_uuid=org_uuid,
+        config={
+            "history": [{"role": "user", "content": "hi"}],
+            "evaluation": {
+                "type": "tool_call",
+                "tool_calls": [{"tool": "x", "accept_any_arguments": True}],
+            },
+        },
+    )
+
+    job_id = create_agent_test_job(
+        agent_id=agent["uuid"],
+        job_type="llm-unit-test",
+        details={
+            "test_uuids": ["tc1", "tc2", tool_test_uuid],
+            "evaluators_by_test_id": {
+                "tc1": [
+                    {"uuid": "ev1", "name": "Correctness"},
+                    {"uuid": "ev2", "name": "Script Fidelity"},
+                ],
+                # "Correctness" repeats — must be deduped, not re-listed.
+                "tc2": [{"uuid": "ev1", "name": "Correctness"}],
+            },
+        },
+    )
+    update_agent_test_job(job_id, status="done", results={"total_tests": 3, "passed": 3, "failed": 0})
+
+    resp = client.get(f"/agent-tests/agent/{agent['uuid']}/runs", headers=h)
+    assert resp.status_code == 200
+    run = resp.json()["items"][0]
+    assert run["evaluators"] == ["Correctness", "Script Fidelity", "Tool call"]
 
 
 def test_agent_runs_list_filters_and_pagination(client):
