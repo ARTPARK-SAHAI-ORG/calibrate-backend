@@ -932,6 +932,7 @@ def duplicate_agent_endpoint(
             config=new_config,
             org_uuid=ctx.org_uuid,
             user_id=ctx.user_id,
+            link_default_evaluator=False,  # copied below from the original instead
         )
 
     # Copy all linked tools

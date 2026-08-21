@@ -479,10 +479,10 @@ def test_link_list_and_unlink_evaluator(client):
     agent = _create_agent(client, h, f"ev-agent-{uuid.uuid4().hex[:6]}")
     ev = _create_evaluator(client, h)
 
-    # Initially none linked.
+    # Agent creation auto-links the default correctness evaluator.
     r = client.get(f"/agents/{agent['uuid']}/evaluators", headers=h)
     assert r.status_code == 200, r.text
-    assert r.json()["total"] == 0
+    assert r.json()["total"] == 1
 
     # Link.
     r = client.post(
@@ -493,8 +493,8 @@ def test_link_list_and_unlink_evaluator(client):
     r = client.get(f"/agents/{agent['uuid']}/evaluators", headers=h)
     assert r.status_code == 200
     body = r.json()
-    assert body["total"] == 1
-    assert body["items"][0]["uuid"] == ev
+    assert body["total"] == 2
+    assert ev in [e["uuid"] for e in body["items"]]
     # Slim list shape (mirrors GET /evaluators).
     assert "is_default" in body["items"][0]
     assert "live_version" in body["items"][0]
@@ -502,7 +502,7 @@ def test_link_list_and_unlink_evaluator(client):
     # Unlink.
     r = client.delete(f"/agents/{agent['uuid']}/evaluators/{ev}", headers=h)
     assert r.status_code == 200, r.text
-    assert client.get(f"/agents/{agent['uuid']}/evaluators", headers=h).json()["total"] == 0
+    assert client.get(f"/agents/{agent['uuid']}/evaluators", headers=h).json()["total"] == 1
 
     # Unlinking again is a 404 (link no longer present).
     r = client.delete(f"/agents/{agent['uuid']}/evaluators/{ev}", headers=h)
@@ -566,7 +566,8 @@ def test_link_multiple_evaluators_skips_already_linked(client):
     body = r.json()
     assert sorted(body["linked"]) == sorted([a, b])
     assert body["already_linked"] == []
-    assert client.get(f"/agents/{agent['uuid']}/evaluators", headers=h).json()["total"] == 2
+    # +1 for the default correctness evaluator auto-linked on agent creation.
+    assert client.get(f"/agents/{agent['uuid']}/evaluators", headers=h).json()["total"] == 3
 
     # Link again with one existing + one new: only the new one is linked.
     r = client.post(
@@ -574,7 +575,7 @@ def test_link_multiple_evaluators_skips_already_linked(client):
     ).json()
     assert r["linked"] == [c]
     assert r["already_linked"] == [b]
-    assert client.get(f"/agents/{agent['uuid']}/evaluators", headers=h).json()["total"] == 3
+    assert client.get(f"/agents/{agent['uuid']}/evaluators", headers=h).json()["total"] == 4
 
     # A bad id in the set links nothing (validated up front).
     other_org = _signup(client)
@@ -586,7 +587,7 @@ def test_link_multiple_evaluators_skips_already_linked(client):
         headers=h,
     )
     assert r.status_code == 404, r.text
-    assert client.get(f"/agents/{agent['uuid']}/evaluators", headers=h).json()["total"] == 3
+    assert client.get(f"/agents/{agent['uuid']}/evaluators", headers=h).json()["total"] == 4
 
 
 def test_relink_evaluator_restores_link(client):
@@ -601,7 +602,8 @@ def test_relink_evaluator_restores_link(client):
         f"/agents/{agent['uuid']}/evaluators", json={"evaluator_ids": [ev]}, headers=h
     )
     assert r.status_code == 200, r.text
-    assert client.get(f"/agents/{agent['uuid']}/evaluators", headers=h).json()["total"] == 1
+    # +1 for the default correctness evaluator auto-linked on agent creation.
+    assert client.get(f"/agents/{agent['uuid']}/evaluators", headers=h).json()["total"] == 2
 
 
 def test_link_evaluator_twice_is_idempotent(client):
@@ -617,7 +619,8 @@ def test_link_evaluator_twice_is_idempotent(client):
         f"/agents/{agent['uuid']}/evaluators", json={"evaluator_ids": [ev]}, headers=h
     )
     assert r2.status_code == 200, r2.text
-    assert client.get(f"/agents/{agent['uuid']}/evaluators", headers=h).json()["total"] == 1
+    # +1 for the default correctness evaluator auto-linked on agent creation.
+    assert client.get(f"/agents/{agent['uuid']}/evaluators", headers=h).json()["total"] == 2
 
 
 def test_link_default_evaluator_allowed(client):
@@ -720,6 +723,26 @@ def test_duplicate_agent_copies_evaluator_links(client):
     dup_uuid = dup.json()["uuid"]
     listed = client.get(f"/agents/{dup_uuid}/evaluators", headers=h).json()
     assert ev in [e["uuid"] for e in listed["items"]]
+
+
+def test_duplicate_agent_does_not_resurrect_unlinked_default_evaluator(client):
+    """A user who unlinked the auto-added correctness evaluator gets a
+    duplicate that matches — not one where create_agent's auto-link comes
+    back."""
+    h = _signup(client)
+    agent = _create_agent(client, h, f"ev-agent-{uuid.uuid4().hex[:6]}")
+    default_ev = client.get(f"/agents/{agent['uuid']}/evaluators", headers=h).json()["items"][0]["uuid"]
+    assert client.delete(f"/agents/{agent['uuid']}/evaluators/{default_ev}", headers=h).status_code == 200
+    assert client.get(f"/agents/{agent['uuid']}/evaluators", headers=h).json()["total"] == 0
+
+    dup = client.post(
+        f"/agents/{agent['uuid']}/duplicate",
+        json={"name": f"dup-{uuid.uuid4().hex[:6]}"},
+        headers=h,
+    )
+    assert dup.status_code == 200, dup.text
+    dup_uuid = dup.json()["uuid"]
+    assert client.get(f"/agents/{dup_uuid}/evaluators", headers=h).json()["total"] == 0
 
 
 def test_delete_agent_removes_evaluator_links(client):
