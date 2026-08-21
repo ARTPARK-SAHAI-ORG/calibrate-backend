@@ -387,8 +387,10 @@ def test_llm_tool_call_verdict_flow(client):
     # Zero evaluators is fine — the form carries none.
     assert client.get(f"/public/annotation-jobs/{token}").json()["evaluators"] == []
 
+    # Boolean pass/fail lives under `value` (the universal binary key) so
+    # agreement reads it; the corrected tool calls ride alongside.
     verdict = {
-        "correct": False,
+        "value": False,
         "expected_tool_calls": [
             {"tool": "get_weather", "arguments": {"city": "Paris"}}
         ],
@@ -404,7 +406,7 @@ def test_llm_tool_call_verdict_flow(client):
     # Re-save updates in place (no duplicate row-level annotation).
     again = client.post(
         f"/public/annotation-jobs/{token}/annotations",
-        json={"item_id": item_id, "annotations": [{"evaluator_id": None, "value": {"correct": True}}]},
+        json={"item_id": item_id, "annotations": [{"evaluator_id": None, "value": {"value": True}}]},
     )
     assert again.status_code == 200
 
@@ -412,4 +414,39 @@ def test_llm_tool_call_verdict_flow(client):
     anns = client.get(f"/public/annotation-jobs/{token}").json()["annotations"]
     row_level = [a for a in anns if a.get("evaluator_id") is None]
     assert len(row_level) == 1
-    assert row_level[0]["value"] == {"correct": True}
+    assert row_level[0]["value"] == {"value": True}
+
+
+def test_llm_tool_call_verdict_agreement(client):
+    """Two people labelling the same tool-call item produce human-vs-human
+    pass/fail agreement — the row-level (evaluator_id=None) verdict is its own
+    agreement slot, no evaluator involved."""
+    auth = _signup(client)
+    h = auth["headers"]
+    task_uuid = client.post(
+        "/annotation-tasks",
+        json={"name": f"tc-{uuid.uuid4().hex[:6]}", "type": "llm-tool-call"},
+        headers=h,
+    ).json()["uuid"]
+    item_id = client.post(
+        f"/annotation-tasks/{task_uuid}/items",
+        json={"items": [{"payload": {"name": "call-1"}}]},
+        headers=h,
+    ).json()["item_ids"][0]
+
+    # Two annotators, same item, opposite verdicts → agreement 0.0 over 1 pair.
+    for verdict in (True, False):
+        annotator = _create_annotator(client, h)
+        token = client.post(
+            f"/annotation-tasks/{task_uuid}/jobs",
+            json={"annotator_ids": [annotator["uuid"]], "item_ids": [item_id]},
+            headers=h,
+        ).json()["jobs"][0]["public_token"]
+        client.post(
+            f"/public/annotation-jobs/{token}/annotations",
+            json={"item_id": item_id, "annotations": [{"evaluator_id": None, "value": {"value": verdict}}]},
+        )
+
+    hh = client.get(f"/annotation-tasks/{task_uuid}/agreement", headers=h).json()["human_human"]
+    assert hh["pair_count"] == 1
+    assert hh["current"] == 0.0
