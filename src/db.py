@@ -6907,13 +6907,16 @@ def get_all_agent_test_jobs(job_type: Optional[str] = None) -> List[Dict[str, An
 # Per-row projection for the run-LIST endpoints. Pulls the header columns, the
 # scalar aggregates and the two slim per-row arrays out of the heavy `results`
 # blob, plus two narrow slices of `details` (the evaluator-name snapshot and
-# whether any linked test is a tool-call test) — never the full `details` blob
-# (calibrate config, s3 bucket, etc.) or the bulky `results` sub-trees (agent
-# outputs, judge reasoning, test-case bodies, per-model `test_results`,
-# leaderboard). The slim `test_results`/`model_results` arrays are rebuilt
-# inside SQLite via `json_each` so only the trimmed rows cross into Python.
-# Kept aligned with the fields `_build_agent_test_run_item_fields` reads in
-# routers/agent_tests.py.
+# the has_tool_call_test flag, both snapshotted once at job-creation time by
+# `_agent_test_job_details`) — never the full `details` blob (calibrate
+# config, s3 bucket, etc.) or the bulky `results` sub-trees (agent outputs,
+# judge reasoning, test-case bodies, per-model `test_results`, leaderboard).
+# The slim `test_results`/`model_results` arrays are rebuilt inside SQLite via
+# `json_each` so only the trimmed rows cross into Python. Kept aligned with
+# the fields `_build_agent_test_run_item_fields` reads in
+# routers/agent_tests.py. Jobs created before this snapshot field existed
+# read as `has_tool_call_test = NULL` (→ False), same legacy-empty behavior
+# already accepted for `evaluators_by_test_id`.
 _AGENT_TEST_JOB_SUMMARY_COLUMNS = """
         atj.uuid, atj.type, atj.status, atj.agent_id,
         atj.is_public, atj.share_token, atj.created_at, atj.updated_at, atj.id,
@@ -6942,11 +6945,7 @@ _AGENT_TEST_JOB_SUMMARY_COLUMNS = """
          WHERE je.type = 'object'
         ) AS model_results,
         json_extract(atj.details, '$.evaluators_by_test_id') AS evaluators_by_test_id,
-        EXISTS(
-            SELECT 1 FROM json_each(atj.details, '$.test_uuids') te
-            JOIN tests t ON t.uuid = te.value
-            WHERE t.type = 'tool_call'
-        ) AS has_tool_call_test
+        json_extract(atj.details, '$.has_tool_call_test') AS has_tool_call_test
 """
 
 

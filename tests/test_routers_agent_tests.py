@@ -442,12 +442,32 @@ def test_agent_runs_list_slims_benchmark_model_results(client):
     assert run["evaluators"] == []
 
 
+def _create_llm_evaluator(client, h, name):
+    return client.post(
+        "/evaluators",
+        json={
+            "name": name,
+            "evaluator_type": "llm",
+            "output_type": "binary",
+            "version": {
+                "judge_model": "openai/gpt-4.1",
+                "system_prompt": "Judge the reply.",
+            },
+        },
+        headers=h,
+    ).json()
+
+
 def test_agent_runs_list_evaluators_column(client):
-    """The `evaluators` column on a run-list item lists the names of the
-    evaluators that judged the run, deduplicated and in first-appearance
+    """The `evaluators` column on a run-list item lists the CURRENT name of
+    each evaluator that judged the run (not the frozen submission-time
+    snapshot, which can be stale after a rename or carry calibrate's
+    `-{uuid8}` name-collision suffix), deduplicated and in first-appearance
     order, with `Tool call` appended when any linked test was a tool-call
     test — the tool-call test itself never carries an evaluator, so this is
-    the only signal that it ran."""
+    the only signal that it ran. An evaluator uuid the snapshot references
+    but that no longer resolves (e.g. deleted) falls back to the snapshot
+    name rather than dropping the entry."""
     from db import (
         create_agent_test_job,
         create_test,
@@ -459,6 +479,11 @@ def test_agent_runs_list_evaluators_column(client):
     h = auth["headers"]
     agent = _create_agent(client, h)
     org_uuid = get_personal_org_for_user(auth["user_uuid"])["uuid"]
+
+    live_name_a = f"Live Correctness {uuid.uuid4().hex[:6]}"
+    live_name_b = f"Live Script Fidelity {uuid.uuid4().hex[:6]}"
+    ev_a = _create_llm_evaluator(client, h, live_name_a)
+    ev_b = _create_llm_evaluator(client, h, live_name_b)
 
     tool_test_uuid = create_test(
         name="uses-tool",
@@ -480,12 +505,20 @@ def test_agent_runs_list_evaluators_column(client):
             "test_uuids": ["tc1", "tc2", tool_test_uuid],
             "evaluators_by_test_id": {
                 "tc1": [
-                    {"uuid": "ev1", "name": "Correctness"},
-                    {"uuid": "ev2", "name": "Script Fidelity"},
+                    # Snapshot name is stale/suffixed (as calibrate would write
+                    # it on a name collision) — the live DB name must win.
+                    {"uuid": ev_a["uuid"], "name": f"{live_name_a}-a1b2c3d4"},
+                    {"uuid": ev_b["uuid"], "name": live_name_b},
+                    # Snapshot references an evaluator that no longer resolves
+                    # — falls back to the snapshot name instead of vanishing.
+                    {"uuid": NONEXISTENT_UUID, "name": "Deleted Evaluator"},
                 ],
-                # "Correctness" repeats — must be deduped, not re-listed.
-                "tc2": [{"uuid": "ev1", "name": "Correctness"}],
+                # ev_a repeats under its live name — must be deduped, not
+                # re-listed, even though the snapshot entries differ in uuid
+                # casing/name across tests.
+                "tc2": [{"uuid": ev_a["uuid"], "name": f"{live_name_a}-a1b2c3d4"}],
             },
+            "has_tool_call_test": True,
         },
     )
     update_agent_test_job(job_id, status="done", results={"total_tests": 3, "passed": 3, "failed": 0})
@@ -493,7 +526,53 @@ def test_agent_runs_list_evaluators_column(client):
     resp = client.get(f"/agent-tests/agent/{agent['uuid']}/runs", headers=h)
     assert resp.status_code == 200
     run = resp.json()["items"][0]
-    assert run["evaluators"] == ["Correctness", "Script Fidelity", "Tool call"]
+    assert run["evaluators"] == [
+        live_name_a,
+        live_name_b,
+        "Deleted Evaluator",
+        "Tool call",
+    ]
+
+
+def test_agent_runs_list_has_tool_call_test_is_snapshotted_not_derived(client):
+    """`has_tool_call_test` is read straight from the job's `details` snapshot
+    (set once at job creation) rather than re-derived from the current state
+    of the linked tests, so a job predating this field, or with no snapshot
+    at all, shows no `Tool call` entry even if its `test_uuids` happen to
+    reference a tool-call test."""
+    from db import create_agent_test_job, create_test, get_personal_org_for_user, update_agent_test_job
+
+    auth = _signup(client)
+    h = auth["headers"]
+    agent = _create_agent(client, h)
+    org_uuid = get_personal_org_for_user(auth["user_uuid"])["uuid"]
+
+    tool_test_uuid = create_test(
+        name="uses-tool-2",
+        type="tool_call",
+        org_uuid=org_uuid,
+        config={
+            "history": [{"role": "user", "content": "hi"}],
+            "evaluation": {
+                "type": "tool_call",
+                "tool_calls": [{"tool": "x", "accept_any_arguments": True}],
+            },
+        },
+    )
+
+    # No `has_tool_call_test` key in details, unlike a job created via the
+    # real launch path — simulates a pre-existing job from before this field.
+    job_id = create_agent_test_job(
+        agent_id=agent["uuid"],
+        job_type="llm-unit-test",
+        details={"test_uuids": [tool_test_uuid]},
+    )
+    update_agent_test_job(job_id, status="done", results={"total_tests": 1, "passed": 1, "failed": 0})
+
+    resp = client.get(f"/agent-tests/agent/{agent['uuid']}/runs", headers=h)
+    assert resp.status_code == 200
+    run = resp.json()["items"][0]
+    assert run["evaluators"] == []
 
 
 def test_agent_runs_list_filters_and_pagination(client):
