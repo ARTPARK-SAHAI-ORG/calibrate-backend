@@ -596,7 +596,7 @@ def test_bulk_create_general_tests_rejects_conversation_agent(client):
         headers=jwt,
     )
     assert r.status_code == 400, r.text
-    assert "cannot link general tests to it" in r.text
+    assert f"cannot link general test '{test_name}' to it" in r.text
 
     tests = client.get("/tests", params={"q": test_name}, headers=jwt).json()["items"]
     assert tests == []
@@ -628,3 +628,125 @@ def test_general_test_type_immutable(client):
     r2 = client.put(f"/tests/{response_uuid}", json={"type": "general"}, headers=jwt)
     assert r2.status_code == 400, r2.text
     assert "Test type is immutable" in r2.text
+
+
+# ---------------------------------------------------------------------------
+# Bulk tool_call tests: `input` or `conversation_history`, never both
+# ---------------------------------------------------------------------------
+
+
+def _bulk_tool_call(client, jwt, item, agent_uuids=None):
+    body = {"type": "tool_call", "tests": [item]}
+    if agent_uuids:
+        body["agent_uuids"] = agent_uuids
+    return client.post("/tests/bulk", json=body, headers=jwt)
+
+
+def _tool_call_item(name, *, input_text=None, history=None):
+    item = {"name": name, "tool_calls": [{"tool": "search", "arguments": {"q": "x"}}]}
+    if input_text is not None:
+        item["input"] = input_text
+    if history is not None:
+        item["conversation_history"] = history
+    return item
+
+
+def test_bulk_tool_call_with_input_stores_input_config(client):
+    jwt = _signup(client)
+    name = f"tc-{uuid.uuid4().hex[:6]}"
+    r = _bulk_tool_call(client, jwt, _tool_call_item(name, input_text="find weather"))
+    assert r.status_code == 200, r.text
+
+    test = client.get(f"/tests/{r.json()['uuids'][0]}", headers=jwt).json()
+    assert test["config"]["input"] == "find weather"
+    assert "history" not in test["config"]
+
+
+def test_bulk_tool_call_rejects_both_input_and_history(client):
+    jwt = _signup(client)
+    r = _bulk_tool_call(
+        client,
+        jwt,
+        _tool_call_item(
+            f"tc-{uuid.uuid4().hex[:6]}",
+            input_text="find weather",
+            history=[{"role": "user", "content": "hi"}],
+        ),
+    )
+    assert r.status_code == 422, r.text
+    assert "exactly one of 'input' or 'conversation_history'" in r.text
+
+
+def test_bulk_tool_call_rejects_neither_input_nor_history(client):
+    jwt = _signup(client)
+    r = _bulk_tool_call(client, jwt, _tool_call_item(f"tc-{uuid.uuid4().hex[:6]}"))
+    assert r.status_code == 422, r.text
+    assert "exactly one of 'input' or 'conversation_history'" in r.text
+
+
+def test_bulk_tool_call_with_input_links_to_general_agent(client):
+    jwt = _signup(client)
+    agent_uuid = client.post(
+        "/agents",
+        json={
+            "name": f"agent-{uuid.uuid4().hex[:6]}",
+            "type": "agent",
+            "interaction_type": "general",
+        },
+        headers=jwt,
+    ).json()["uuid"]
+
+    r = _bulk_tool_call(
+        client,
+        jwt,
+        _tool_call_item(f"tc-{uuid.uuid4().hex[:6]}", input_text="find weather"),
+        agent_uuids=[agent_uuid],
+    )
+    assert r.status_code == 200, r.text
+
+    linked = client.get(f"/agent-tests/agent/{agent_uuid}/tests", headers=jwt).json()
+    assert r.json()["uuids"][0] in {t["uuid"] for t in linked["items"]}
+
+
+def test_bulk_tool_call_with_history_rejects_general_agent(client):
+    """The batch is rejected before any test is written."""
+    jwt = _signup(client)
+    agent_uuid = client.post(
+        "/agents",
+        json={
+            "name": f"agent-{uuid.uuid4().hex[:6]}",
+            "type": "agent",
+            "interaction_type": "general",
+        },
+        headers=jwt,
+    ).json()["uuid"]
+
+    name = f"tc-{uuid.uuid4().hex[:6]}"
+    r = _bulk_tool_call(
+        client,
+        jwt,
+        _tool_call_item(name, history=[{"role": "user", "content": "find weather"}]),
+        agent_uuids=[agent_uuid],
+    )
+    assert r.status_code == 400, r.text
+    assert f"cannot link tool_call test '{name}' to it" in r.text
+
+    listed = client.get("/tests", headers=jwt).json()
+    assert name not in {t["name"] for t in listed["items"]}
+
+
+def test_bulk_tool_call_with_input_rejects_conversation_agent(client):
+    jwt = _signup(client)
+    agent_uuid = client.post(
+        "/agents",
+        json={"name": f"agent-{uuid.uuid4().hex[:6]}", "type": "agent"},
+        headers=jwt,
+    ).json()["uuid"]
+
+    r = _bulk_tool_call(
+        client,
+        jwt,
+        _tool_call_item(f"tc-{uuid.uuid4().hex[:6]}", input_text="find weather"),
+        agent_uuids=[agent_uuid],
+    )
+    assert r.status_code == 400, r.text

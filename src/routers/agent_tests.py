@@ -55,7 +55,7 @@ from llm_judge import build_test_evaluators_payload, evaluator_value_name
 from routers.agents import AgentSummary, to_agent_summary
 from routers.tests import (
     DEFAULT_AGENT_INTERACTION_TYPE,
-    REQUIRED_AGENT_INTERACTION_TYPE_BY_TEST_TYPE,
+    required_agent_interaction_type,
 )
 from auth_utils import get_current_org, get_org_jwt_or_api_key, OrgContext
 from utils import (
@@ -624,8 +624,8 @@ def create_agent_test_links(
         test = get_test(test_uuid)
         if not test or test.get("org_uuid") != ctx.org_uuid:
             raise HTTPException(status_code=404, detail=f"Test {test_uuid} not found")
-        required_interaction_type = REQUIRED_AGENT_INTERACTION_TYPE_BY_TEST_TYPE.get(
-            test.get("type"), DEFAULT_AGENT_INTERACTION_TYPE
+        required_interaction_type = required_agent_interaction_type(
+            test.get("type"), test.get("config")
         )
         if required_interaction_type != agent_interaction_type:
             mismatched_uuids.append(test_uuid)
@@ -1362,6 +1362,13 @@ def _build_calibrate_config(
         test_config["evaluation"] = evaluation
 
         if row_type == "tool_call":
+            # A tool_call test aimed at a general agent stores a standalone
+            # `input` instead of a conversation. calibrate only reads `history`
+            # for this row type, so widen it to the one user turn it stands for.
+            if test_config.get("input") is not None and "history" not in test_config:
+                test_config["history"] = [
+                    {"role": "user", "content": test_config.pop("input")}
+                ]
             tool_calls = []
             for tool_call in evaluation.get("tool_calls", []):
                 tool_calls.append(
