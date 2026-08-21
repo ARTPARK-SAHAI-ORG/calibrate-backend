@@ -810,6 +810,24 @@ def test_slim_run_list_helpers_guard_edge_cases():
     ]
 
 
+def test_run_evaluator_names_guards_malformed_snapshot_entries():
+    """`_run_evaluator_names` skips non-dict entries and entries with no
+    resolvable name (no live match and no snapshot name) rather than
+    crashing or emitting a blank/junk entry."""
+    from routers.agent_tests import _run_evaluator_names
+
+    job = {
+        "evaluators_by_test_id": {
+            "tc1": [
+                "not-a-dict",
+                {"uuid": "ev1"},  # no name anywhere → skipped
+                {"uuid": "ev2", "name": "Correctness"},
+            ]
+        }
+    }
+    assert _run_evaluator_names(job) == ["Correctness"]
+
+
 def _seed_run_job(client, h, agent):
     """Seed a unit-test run with three cases (one pass, one fail, one still
     pending/`passed=None`) and an evaluator carrying a rubric, for the
