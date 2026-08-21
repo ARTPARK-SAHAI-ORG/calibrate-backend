@@ -108,8 +108,10 @@ EVAL_JOB_TYPES = ["stt-eval", "tts-eval", "annotation-eval"]
 ANNOTATION_EVAL_JOB_TYPE = "annotation-eval"
 
 # Task types whose annotation rows we know how to evaluate via the CLI's
-# --eval-only modes (or `calibrate general` for `llm-general`). Matches
-# db.ANNOTATION_TASK_TYPES — every creatable task type has a run path.
+# --eval-only modes (or `calibrate general` for `llm-general`). This is a
+# SUBSET of db.ANNOTATION_TASK_TYPES, not a mirror: `llm-tool-call` is
+# creatable but human-labelling-only and deliberately absent here, so its
+# evaluator-run launch 400s at the endpoint guard.
 # `llm-general` (non-conversational input -> output) uses the dedicated
 # `calibrate general` command — see `_build_llm_general_dataset`.
 SUPPORTED_EVAL_TASK_TYPES = ("stt", "llm", "llm-general", "conversation", "tts")
