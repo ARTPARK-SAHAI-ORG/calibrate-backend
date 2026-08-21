@@ -624,9 +624,9 @@ def create_agent_test_links(
         test = get_test(test_uuid)
         if not test or test.get("org_uuid") != ctx.org_uuid:
             raise HTTPException(status_code=404, detail=f"Test {test_uuid} not found")
-        required_interaction_type = REQUIRED_AGENT_INTERACTION_TYPE_BY_TEST_TYPE[
-            test.get("type")
-        ]
+        required_interaction_type = REQUIRED_AGENT_INTERACTION_TYPE_BY_TEST_TYPE.get(
+            test.get("type"), DEFAULT_AGENT_INTERACTION_TYPE
+        )
         if required_interaction_type != agent_interaction_type:
             mismatched_uuids.append(test_uuid)
     if mismatched_uuids:
