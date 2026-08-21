@@ -738,6 +738,54 @@ def test_conversation_test_no_legacy_llm_evaluator_fallback():
     assert case["evaluation"]["criteria"] == []
 
 
+def test_general_test_gets_criteria_in_calibrate_config():
+    """A `general` test's linked evaluator must reach the calibrate test case as
+    `evaluation.criteria`, the same way `response`/`conversation` do — otherwise
+    the run has nothing to judge the case against despite an evaluator being
+    linked and required at creation time."""
+    from routers.agent_tests import _build_calibrate_config
+
+    user_uuid = db.create_user("R", "GC", f"rgc-{os.urandom(4).hex()}@x.com")
+    org_uuid = db.get_personal_org_for_user(user_uuid)["uuid"]
+    agent_uuid = db.create_agent(
+        name=f"a-{os.urandom(4).hex()}",
+        org_uuid=org_uuid,
+        user_id=user_uuid,
+        interaction_type="general",
+    )
+    ev_uuid = db.create_evaluator(
+        name=f"gen-ev-{os.urandom(4).hex()}",
+        evaluator_type="llm-general",
+        output_type="binary",
+        owner_user_id=user_uuid,
+        org_uuid=org_uuid,
+    )
+    version = db.create_evaluator_version(
+        ev_uuid, judge_model="m", system_prompt="judge"
+    )
+    db.set_evaluator_live_version(ev_uuid, version["uuid"])
+    test_uuid = db.create_test(
+        name=f"gen-{os.urandom(4).hex()}",
+        type="general",
+        config={
+            "input": "Summarize this article.",
+            "evaluation": {"type": "general"},
+        },
+        org_uuid=org_uuid,
+        user_id=user_uuid,
+    )
+    db.set_test_evaluators(
+        test_uuid, [{"evaluator_id": ev_uuid, "variable_values": None}]
+    )
+
+    agent = db.get_agent(agent_uuid)
+    config, evaluators_by_test_id = _build_calibrate_config(agent, [db.get_test(test_uuid)])
+
+    assert test_uuid in evaluators_by_test_id
+    case = next(c for c in config["test_cases"] if c["id"] == test_uuid)
+    assert case["evaluation"]["criteria"]
+
+
 def test_build_calibrate_config_tool_call_branch():
     """Exercise the tool_call branch of _build_calibrate_config (and the
     `elif type in (response, conversation)` false-path) alongside a conversation

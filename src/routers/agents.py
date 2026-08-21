@@ -20,7 +20,15 @@ _AgentEvaluatorSearch = make_search_params(searchable=["name"])
 from pydantic import BaseModel, Field
 from calibrate_agent.connections import TextAgentConnection
 
-from utils import env_bool, env_int, env_str, AGENT_TYPE_DESCRIPTION, EvaluatorUuid
+from utils import (
+    env_bool,
+    env_int,
+    env_str,
+    AGENT_TYPE_DESCRIPTION,
+    AGENT_INTERACTION_TYPE_DESCRIPTION,
+    EvaluatorUuid,
+)
+from routers.tests import DEFAULT_AGENT_INTERACTION_TYPE
 
 from db import (
     create_agent,
@@ -305,6 +313,9 @@ class AgentCreate(BaseModel):
         "agent",
         description=AGENT_TYPE_DESCRIPTION,
     )
+    interaction_type: Literal["conversation", "general"] = Field(
+        "conversation", description=AGENT_INTERACTION_TYPE_DESCRIPTION
+    )
     config: Optional[Dict[str, Any]] = Field(
         None,
         description=_AGENT_CONFIG_DESCRIPTION
@@ -398,6 +409,10 @@ class AgentUpdate(BaseModel):
         description="Set the benchmark verification map, keyed by model, for a `type=connection` agent. Omit to leave it untouched",
         examples=[{"openai/gpt-4.1": {"verified": True, "verified_at": "2026-01-01T00:00:00Z", "error": None}}],
     )
+    interaction_type: Optional[Literal["conversation", "general"]] = Field(
+        None,
+        description=AGENT_INTERACTION_TYPE_DESCRIPTION + "\n\nOmit to leave unchanged",
+    )
 
 
 class AgentResponse(BaseModel):
@@ -409,6 +424,9 @@ class AgentResponse(BaseModel):
     )
     name: str = Field(description="Name of the agent")
     type: Literal["agent", "connection"] = Field(description=AGENT_TYPE_DESCRIPTION)
+    interaction_type: Literal["conversation", "general"] = Field(
+        description=AGENT_INTERACTION_TYPE_DESCRIPTION
+    )
     config: Optional[Dict[str, Any]] = Field(None, description="Agent configuration")
     created_at: str = Field(description="When the agent was created (ISO 8601 UTC)")
     updated_at: str = Field(
@@ -425,6 +443,9 @@ class AgentSummary(BaseModel):
     )
     name: str = Field(description="Name of the agent")
     type: Literal["agent", "connection"] = Field(description=AGENT_TYPE_DESCRIPTION)
+    interaction_type: Literal["conversation", "general"] = Field(
+        description=AGENT_INTERACTION_TYPE_DESCRIPTION
+    )
     created_at: str = Field(description="When the agent was created (ISO 8601 UTC)")
     updated_at: str = Field(
         description="When the agent was last updated (ISO 8601 UTC)"
@@ -453,6 +474,7 @@ def to_agent_summary(agent: Dict[str, Any]) -> AgentSummary:
         uuid=agent["uuid"],
         name=agent["name"],
         type=agent["type"],
+        interaction_type=agent.get("interaction_type") or DEFAULT_AGENT_INTERACTION_TYPE,
         created_at=agent["created_at"],
         updated_at=agent["updated_at"],
         connection_verified=None if verified is None else bool(verified),
@@ -737,6 +759,7 @@ def create_agent_endpoint(
             config=merged_config,
             org_uuid=ctx.org_uuid,
             user_id=ctx.user_id,
+            interaction_type=agent.interaction_type,
         )
     return AgentCreateResponse(uuid=agent_uuid, message="Agent created successfully")
 
@@ -840,6 +863,7 @@ def update_agent_endpoint(
             agent_uuid=agent_uuid,
             name=agent.name,
             config=agent.config,
+            interaction_type=agent.interaction_type,
         )
 
     if not updated:
@@ -933,6 +957,9 @@ def duplicate_agent_endpoint(
             org_uuid=ctx.org_uuid,
             user_id=ctx.user_id,
             link_default_evaluator=False,  # copied below from the original instead
+            interaction_type=original_agent.get(
+                "interaction_type", DEFAULT_AGENT_INTERACTION_TYPE
+            ),
         )
 
     # Copy all linked tools

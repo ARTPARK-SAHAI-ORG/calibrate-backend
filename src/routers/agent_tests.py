@@ -53,6 +53,10 @@ from db import (
 )
 from llm_judge import build_test_evaluators_payload, evaluator_value_name
 from routers.agents import AgentSummary, to_agent_summary
+from routers.tests import (
+    DEFAULT_AGENT_INTERACTION_TYPE,
+    REQUIRED_AGENT_INTERACTION_TYPE_BY_TEST_TYPE,
+)
 from auth_utils import get_current_org, get_org_jwt_or_api_key, OrgContext
 from utils import (
     job_slot,
@@ -610,11 +614,29 @@ def create_agent_test_links(
     if not agent or agent.get("org_uuid") != ctx.org_uuid:
         raise HTTPException(status_code=404, detail="Agent not found")
 
-    # Every test must exist and belong to the caller's workspace (404 otherwise).
+    # Every test must exist, belong to the caller's workspace, and match the agent's
+    # interaction_type (404/400 before any link is created).
+    agent_interaction_type = agent.get(
+        "interaction_type", DEFAULT_AGENT_INTERACTION_TYPE
+    )
+    mismatched_uuids = []
     for test_uuid in agent_tests.test_uuids:
         test = get_test(test_uuid)
         if not test or test.get("org_uuid") != ctx.org_uuid:
             raise HTTPException(status_code=404, detail=f"Test {test_uuid} not found")
+        required_interaction_type = REQUIRED_AGENT_INTERACTION_TYPE_BY_TEST_TYPE.get(
+            test.get("type"), DEFAULT_AGENT_INTERACTION_TYPE
+        )
+        if required_interaction_type != agent_interaction_type:
+            mismatched_uuids.append(test_uuid)
+    if mismatched_uuids:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"Agent has interaction_type='{agent_interaction_type}'; "
+                f"cannot link tests of a different category: {mismatched_uuids}"
+            ),
+        )
 
     link_ids = []
     for test_uuid in agent_tests.test_uuids:
@@ -1233,7 +1255,7 @@ def _build_calibrate_config(
         if not test_config:
             continue
         evaluation = test_config.get("evaluation", {})
-        if test.get("type") not in ("response", "conversation"):
+        if test.get("type") not in ("response", "conversation", "general"):
             continue
 
         linked_evaluators = get_evaluators_for_test(test["uuid"])
@@ -1353,12 +1375,13 @@ def _build_calibrate_config(
                     }
                 )
             evaluation["tool_calls"] = tool_calls
-        elif row_type in ("response", "conversation"):
+        elif row_type in ("response", "conversation", "general"):
             # Reference the top-level evaluators by name (with per-test {{var}}
             # arguments). For `response`, legacy string criteria were promoted to a
             # synthetic evaluator link in the first pass; either way we overwrite
             # with the structured refs from criteria_per_test. `conversation` rows
-            # keep their `history` and carry no `output`/`tool_calls`.
+            # keep their `history` and carry no `output`/`tool_calls`; `general`
+            # rows judge a single output the same way `response` does.
             evaluation["criteria"] = criteria_per_test.get(test["uuid"], [])
 
         all_test_cases.append(test_config)

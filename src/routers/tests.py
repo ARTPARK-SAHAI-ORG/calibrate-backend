@@ -45,7 +45,7 @@ _EXAMPLE_EVALUATOR_UUID = "f47ac10b-58cc-4372-a567-0e02b2c3d479"
 _EXAMPLE_AGENT_UUID = "a3b2c1d0-e5f4-3210-abcd-ef1234567890"
 
 
-TestType = Literal["response", "tool_call", "conversation"]
+TestType = Literal["response", "tool_call", "conversation", "general"]
 
 # Shared across every `type` field (create/update/response/bulk) so the gloss
 # stays identical everywhere it renders.
@@ -63,7 +63,8 @@ _TEST_NAME_DESCRIPTION = "Name of the test, unique within the workspace"
 # passthrough, so it's documented, not enforced.
 _TEST_CONFIG_DESCRIPTION = """The calibrate test config. Three top-level keys.
 
-- `history`: the required conversation up to the agent's turn. Each item is `{role, content}` with `role` one of `user`, `assistant`, `tool`. A `tool` message also carries `tool_call_id` and `name`.
+- `history`: the required conversation up to the agent's turn, for `response`/`conversation`/`tool_call` tests. Each item is `{role, content}` with `role` one of `user`, `assistant`, `tool`. A `tool` message also carries `tool_call_id` and `name`.
+- `input`: the required plain-text prompt, for `general` tests only. A string, not a conversation.
 - `evaluation`: the required `{type, ...}`, where `type` matches the test's `type` below.
 - `settings`: an optional object, e.g. `{"language": "en"}`.
 
@@ -71,6 +72,7 @@ _TEST_CONFIG_DESCRIPTION = """The calibrate test config. Three top-level keys.
 - `response`: judge the agent's reply, graded by the linked evaluators. `{"type": "response"}`
 - `conversation`: append the reply and judge the whole conversation. `{"type": "conversation"}`
 - `tool_call`: diff the agent's tool calls against expected ones. Add `tool_calls`, a list of `{tool, arguments, accept_any_arguments?}`.
+- `general`: judge a standalone, non-conversational input/output pair, graded by the linked evaluators. `{"type": "general"}`
 
 For `tool_call`, each expected argument value is one of:
 - `{"match_type": "exact", "value": <any>}`: must equal `value`
@@ -106,15 +108,38 @@ For `tool_call`, each expected argument value is one of:
 }
 ```
 
+`general` example:
+```json
+{
+  "input": "Summarize this article: ...",
+  "evaluation": {"type": "general"},
+  "settings": {"language": "en"}
+}
+```
+
 Evaluators are linked via the separate `evaluators` field, not inside `config`."""
 
 # Each test type pins the evaluator_type it accepts. `conversation` tests judge whole
 # simulated conversations, so only `conversation` evaluators apply; `response`/`tool_call`
-# tests judge a single LLM reply, so only `llm` evaluators apply.
+# tests judge a single LLM reply, so only `llm` evaluators apply; `general` tests judge a
+# standalone, non-conversational input/output pair, so only `llm-general` evaluators apply.
 REQUIRED_EVALUATOR_TYPE_BY_TEST_TYPE: Dict[str, str] = {
     "response": "llm",
     "tool_call": "llm",
     "conversation": "conversation",
+    "general": "llm-general",
+}
+
+# Each test type requires a matching agent `interaction_type`: `general` tests have no
+# conversation history to feed a conversational agent, and conversation-style tests
+# (response/tool_call/conversation) have nothing to feed a `general` agent. Single
+# source of truth for the gate enforced in `POST /agent-tests` and `POST /tests/bulk`.
+DEFAULT_AGENT_INTERACTION_TYPE = "conversation"
+REQUIRED_AGENT_INTERACTION_TYPE_BY_TEST_TYPE: Dict[str, str] = {
+    "response": "conversation",
+    "tool_call": "conversation",
+    "conversation": "conversation",
+    "general": "general",
 }
 
 
@@ -260,12 +285,17 @@ class ExpectedToolCall(BaseModel):
 
 class BulkTestItem(BaseModel):
     name: str = Field(description=_TEST_NAME_DESCRIPTION + " and within the batch")
-    conversation_history: List[ChatMessage] = Field(
-        description="Ordered messages ending at the user turn the agent should answer"
+    conversation_history: Optional[List[ChatMessage]] = Field(
+        None,
+        description="Ordered messages ending at the user turn the agent should answer. **Required for `response`, `tool_call`, and `conversation` batches**, ignored otherwise",
+    )
+    input: Optional[str] = Field(
+        None,
+        description="Plain-text input for this test. **Required for `general` batches**, ignored otherwise",
     )
     evaluators: Optional[List[EvaluatorRef]] = Field(
         None,
-        description="Evaluators to link. Used by `response` and `conversation` tests",
+        description="Evaluators to link. Used by `response`, `conversation`, and `general` tests",
     )
     tool_calls: Optional[List[ExpectedToolCall]] = Field(
         None, description="Expected tool calls. **Required for `tool_call` batches**"
@@ -312,6 +342,15 @@ class BulkTestUpload(BaseModel):
             raise ValueError(f"Duplicate test names in request: {', '.join(dupes)}")
 
         for t in self.tests:
+            if self.type == "general":
+                if not t.input:
+                    raise ValueError(f"Test '{t.name}' must have 'input' for general type")
+                if not t.evaluators:
+                    raise ValueError(
+                        f"Test '{t.name}' must have at least one evaluator for general type"
+                    )
+                continue
+
             if not t.conversation_history:
                 raise ValueError(
                     f"Test '{t.name}' must have at least one message in conversation_history"
@@ -437,12 +476,28 @@ def bulk_upload_tests(
     payload: BulkTestUpload, ctx: OrgContext = Depends(get_org_jwt_or_api_key)
 ):
     """Create many test cases at once and link them to your agents"""
+    # An agent's interaction_type gates which test category can run against it —
+    # `general` tests have no conversation history to feed a conversational agent,
+    # and conversation-style tests have nothing to feed a `general` agent. Check
+    # every agent up front so a mismatch never creates a partial batch.
+    required_interaction_type = REQUIRED_AGENT_INTERACTION_TYPE_BY_TEST_TYPE[payload.type]
     if payload.agent_uuids:
         for agent_uuid in payload.agent_uuids:
             agent = get_agent(agent_uuid)
             if not agent or agent.get("org_uuid") != ctx.org_uuid:
                 raise HTTPException(
                     status_code=404, detail=f"Agent {agent_uuid} not found"
+                )
+            agent_interaction_type = agent.get(
+                "interaction_type", DEFAULT_AGENT_INTERACTION_TYPE
+            )
+            if agent_interaction_type != required_interaction_type:
+                raise HTTPException(
+                    status_code=400,
+                    detail=(
+                        f"Agent {agent_uuid} has interaction_type="
+                        f"'{agent_interaction_type}'; cannot link {payload.type} tests to it."
+                    ),
                 )
 
     resolved_evaluator_refs: List[Optional[List[Dict[str, Any]]]] = []
@@ -460,12 +515,15 @@ def bulk_upload_tests(
         if payload.type == "tool_call":
             evaluation["tool_calls"] = [tc.model_dump() for tc in t.tool_calls]
 
-        config: Dict[str, Any] = {
-            "history": [
-                msg.model_dump(exclude_none=True) for msg in t.conversation_history
-            ],
-            "evaluation": evaluation,
-        }
+        if payload.type == "general":
+            config: Dict[str, Any] = {"input": t.input, "evaluation": evaluation}
+        else:
+            config = {
+                "history": [
+                    msg.model_dump(exclude_none=True) for msg in t.conversation_history
+                ],
+                "evaluation": evaluation,
+            }
         if payload.language:
             config["settings"] = {"language": payload.language}
         if t.inputs:
@@ -529,15 +587,15 @@ def create_test_endpoint(
     test: TestCreate, ctx: OrgContext = Depends(get_org_jwt_or_api_key)
 ):
     """Create a test that runs your agent against a conversation and evaluates its answer quality or the tools it calls"""
-    # Conversation tests have no evaluator fallback (unlike `response`, which can
-    # synthesize the default LLM judge from legacy string criteria) — without a
-    # linked simulation evaluator a run produces an empty calibrate config with
+    # Conversation and general tests have no evaluator fallback (unlike `response`,
+    # which can synthesize the default LLM judge from legacy string criteria) —
+    # without a linked evaluator a run produces an empty calibrate config with
     # nothing to judge. Require at least one up front. (The bulk endpoint already
     # enforces this; this closes the single-create gap.)
-    if test.type == "conversation" and not test.evaluators:
+    if test.type in ("conversation", "general") and not test.evaluators:
         raise HTTPException(
             status_code=400,
-            detail="Conversation tests require at least one evaluator.",
+            detail=f"{test.type.capitalize()} tests require at least one evaluator.",
         )
     resolved = (
         _validate_evaluators(test.evaluators, ctx.org_uuid, test.type)
@@ -632,16 +690,16 @@ def update_test_endpoint(
             ),
         )
 
-    # Conversation tests must keep at least one evaluator (see create-endpoint
-    # note). Reject an update that would clear them all.
+    # Conversation and general tests must keep at least one evaluator (see
+    # create-endpoint note). Reject an update that would clear them all.
     if (
-        existing_type == "conversation"
+        existing_type in ("conversation", "general")
         and test.evaluators is not None
         and len(test.evaluators) == 0
     ):
         raise HTTPException(
             status_code=400,
-            detail="Conversation tests require at least one evaluator; cannot remove all.",
+            detail=f"{existing_type.capitalize()} tests require at least one evaluator; cannot remove all.",
         )
 
     resolved = (

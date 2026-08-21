@@ -203,7 +203,7 @@ EvalJobType = Literal["stt-eval", "tts-eval", "annotation-eval"]
 # Keep in sync with db.ANNOTATION_TASK_TYPES and db.VALID_EVALUATOR_TYPES
 # (Literal requires literal members, so the vocabulary is mirrored here).
 AnnotationTaskTypeLiteral = Literal["stt", "llm", "llm-general", "conversation", "tts"]
-TestTypeLiteral = Literal["response", "tool_call", "conversation"]
+TestTypeLiteral = Literal["response", "tool_call", "conversation", "general"]
 MemberRoleLiteral = Literal["owner", "admin"]  # mirrors DB CHECK(role IN ('owner','admin'))
 EvaluatorUuid = Annotated[str, StringConstraints(min_length=36, max_length=36)]
 
@@ -220,6 +220,15 @@ AGENT_TYPE_DESCRIPTION = (
     "- `agent`: built inside Calibrate\n"
     "- `connection`: your existing agent connected to Calibrate"
 )
+# Bulleted gloss of the agent `interaction_type` enum. A separate axis from
+# `type` above: `type` is how the agent is reached, `interaction_type` is what
+# kind of task it's built for. It only gates which test types can link to the
+# agent (conversation/response/tool_call tests need `conversation`, general
+# tests need `general`); it does not change how the agent is invoked.
+AGENT_INTERACTION_TYPE_DESCRIPTION = (
+    "- `conversation`: a normal back-and-forth agent, answers within an ongoing conversation\n"
+    "- `general`: a one-shot agent, takes a single plain input and produces a single plain output, no conversation"
+)
 # Status a job can carry at *creation* time: it either starts immediately
 # (`in_progress`) or waits for a concurrency slot (`queued`). Narrower than
 # TaskStatus so create-response docs advertise only the reachable values.
@@ -234,6 +243,7 @@ TEST_TYPE_DESCRIPTION = (
     "- `response`: judges the generated reply\n"
     "- `tool_call`: diffs the generated tool calls\n"
     "- `conversation`: judges the full conversation\n"
+    "- `general`: judges a single plain-text input/output pair with no conversation involved (e.g. summarization, extraction, classification)\n"
 )
 
 

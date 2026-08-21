@@ -1193,6 +1193,13 @@ def init_db():
         except sqlite3.OperationalError:
             pass
 
+        try:
+            cursor.execute(
+                "ALTER TABLE agents ADD COLUMN interaction_type TEXT NOT NULL DEFAULT 'conversation'"
+            )
+        except sqlite3.OperationalError:
+            pass
+
         # Add is_public and share_token columns for public sharing feature
         for table in ("jobs", "agent_test_jobs", "simulation_jobs"):
             try:
@@ -2974,18 +2981,36 @@ def _backfill_fork_default_evaluators(cursor: sqlite3.Cursor) -> int:
 
 
 CORRECTNESS_EVALUATOR_SLUG = "default-llm-next-reply"
+# The `general`-agent counterpart: `default-llm-next-reply` judges a reply given
+# conversation history, which a general (one-shot input/output) agent never has.
+GENERAL_CORRECTNESS_EVALUATOR_SLUG = "default-llm-general"
+
+
+def _correctness_evaluator_slug_for_interaction_type(interaction_type: str) -> str:
+    return (
+        GENERAL_CORRECTNESS_EVALUATOR_SLUG
+        if interaction_type == "general"
+        else CORRECTNESS_EVALUATOR_SLUG
+    )
 
 
 def _link_default_correctness_evaluator(
-    cursor: sqlite3.Cursor, agent_uuid: str, org_uuid: str
+    cursor: sqlite3.Cursor,
+    agent_uuid: str,
+    org_uuid: str,
+    interaction_type: str = "conversation",
 ) -> None:
     """Fork the org's copy of the correctness evaluator if it doesn't have one
-    yet, then link it to `agent_uuid`. Runs on the caller's cursor and does not
-    commit — callers own the transaction."""
+    yet, then link it to `agent_uuid`. Picks `default-llm-general` for a
+    `general` agent, `default-llm-next-reply` otherwise, matching the
+    evaluator_type each interaction_type requires (see
+    REQUIRED_AGENT_INTERACTION_TYPE_BY_TEST_TYPE in routers/tests.py). Runs on
+    the caller's cursor and does not commit — callers own the transaction."""
+    slug = _correctness_evaluator_slug_for_interaction_type(interaction_type)
     cursor.execute(
         "SELECT evaluator_uuid FROM org_default_evaluators "
         "WHERE org_uuid = ? AND source_default_slug = ?",
-        (org_uuid, CORRECTNESS_EVALUATOR_SLUG),
+        (org_uuid, slug),
     )
     row = cursor.fetchone()
     if row is None:
@@ -2996,7 +3021,7 @@ def _link_default_correctness_evaluator(
         cursor.execute(
             "SELECT evaluator_uuid FROM org_default_evaluators "
             "WHERE org_uuid = ? AND source_default_slug = ?",
-            (org_uuid, CORRECTNESS_EVALUATOR_SLUG),
+            (org_uuid, slug),
         )
         row = cursor.fetchone()
     evaluator_uuid = row["evaluator_uuid"] if row else None
@@ -3020,9 +3045,11 @@ LINK_DEFAULT_CORRECTNESS_EVALUATOR_MIGRATION = (
 def _backfill_link_default_correctness_evaluator(cursor: sqlite3.Cursor) -> int:
     """One-time migration: for every agent with zero active evaluators linked,
     link its org's fork of the correctness evaluator (forking one per org first
-    if missing). Caller commits and records
-    `LINK_DEFAULT_CORRECTNESS_EVALUATOR_MIGRATION` in the same transaction so a
-    crash mid-migration retries on next init_db."""
+    if missing) — `default-llm-general` for a `general` agent,
+    `default-llm-next-reply` otherwise (see
+    `_correctness_evaluator_slug_for_interaction_type`). Caller commits and
+    records `LINK_DEFAULT_CORRECTNESS_EVALUATOR_MIGRATION` in the same
+    transaction so a crash mid-migration retries on next init_db."""
     cursor.execute("SELECT DISTINCT org_uuid FROM agents WHERE deleted_at IS NULL")
     for row in cursor.fetchall():
         _provision_default_evaluators_for_org(cursor, row["org_uuid"])
@@ -3033,7 +3060,9 @@ def _backfill_link_default_correctness_evaluator(cursor: sqlite3.Cursor) -> int:
         SELECT a.uuid, fork.evaluator_uuid
           FROM agents a
           JOIN org_default_evaluators fork
-            ON fork.org_uuid = a.org_uuid AND fork.source_default_slug = ?
+            ON fork.org_uuid = a.org_uuid
+           AND fork.source_default_slug = CASE WHEN a.interaction_type = 'general'
+                                                THEN ? ELSE ? END
          WHERE a.deleted_at IS NULL
            AND fork.evaluator_uuid IS NOT NULL
            AND NOT EXISTS (
@@ -3043,7 +3072,7 @@ def _backfill_link_default_correctness_evaluator(cursor: sqlite3.Cursor) -> int:
         ON CONFLICT(agent_id, evaluator_id)
         DO UPDATE SET deleted_at = NULL, created_at = CURRENT_TIMESTAMP
         """,
-        (CORRECTNESS_EVALUATOR_SLUG,),
+        (GENERAL_CORRECTNESS_EVALUATOR_SLUG, CORRECTNESS_EVALUATOR_SLUG),
     )
     cursor.execute("SELECT changes()")
     row = cursor.fetchone()
@@ -3976,6 +4005,7 @@ def create_agent(
     name: str,
     org_uuid: str,
     agent_type: str = "agent",
+    interaction_type: str = "conversation",
     config: Optional[Dict[str, Any]] = None,
     user_id: Optional[str] = None,
     link_default_evaluator: bool = True,
@@ -3986,6 +4016,7 @@ def create_agent(
         name: Name of the agent
         org_uuid: UUID of the org this agent belongs to (access key — required)
         agent_type: Type of agent — 'agent' or 'connection'
+        interaction_type: What kind of task the agent handles — 'conversation' or 'general'
         config: Optional configuration dict
         user_id: UUID of the user creating this agent (audit / created-by)
         link_default_evaluator: Auto-link the org's correctness evaluator fork.
@@ -4003,13 +4034,23 @@ def create_agent(
         config_json = json.dumps(config) if config is not None else None
         cursor.execute(
             """
-            INSERT INTO agents (uuid, name, type, config, user_id, org_uuid)
-            VALUES (?, ?, ?, ?, ?, ?)
+            INSERT INTO agents (uuid, name, type, interaction_type, config, user_id, org_uuid)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
             """,
-            (agent_uuid, name, agent_type, config_json, user_id, org_uuid),
+            (
+                agent_uuid,
+                name,
+                agent_type,
+                interaction_type,
+                config_json,
+                user_id,
+                org_uuid,
+            ),
         )
         if link_default_evaluator:
-            _link_default_correctness_evaluator(cursor, agent_uuid, org_uuid)
+            _link_default_correctness_evaluator(
+                cursor, agent_uuid, org_uuid, interaction_type
+            )
         conn.commit()
         logger.info(f"Created agent with UUID: {agent_uuid}")
         return agent_uuid
@@ -4077,6 +4118,7 @@ def update_agent(
     agent_uuid: str,
     name: Optional[str] = None,
     config: Optional[Dict[str, Any]] = None,
+    interaction_type: Optional[str] = None,
 ) -> bool:
     """Update an agent. Returns True if the agent was found and updated."""
     # Build dynamic update query
@@ -4090,6 +4132,9 @@ def update_agent(
         updates.append("config = ?")
         # Serialize config to JSON string for storage
         params.append(json.dumps(config))
+    if interaction_type is not None:
+        updates.append("interaction_type = ?")
+        params.append(interaction_type)
 
     if not updates:
         return False

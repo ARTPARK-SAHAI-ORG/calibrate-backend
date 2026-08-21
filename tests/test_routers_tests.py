@@ -411,3 +411,220 @@ def test_create_test_bearer_sk_key(client):
         headers={"Authorization": f"Bearer {key}"},
     )
     assert r.status_code == 200, r.text
+
+
+def _create_llm_general_evaluator(client, headers):
+    ev = client.post(
+        "/evaluators",
+        json={
+            "name": f"gen-ev-{uuid.uuid4().hex[:6]}",
+            "evaluator_type": "llm-general",
+            "version": {
+                "judge_model": "openai/gpt-4o-mini",
+                "system_prompt": "Judge the input/output pair.",
+            },
+        },
+        headers=headers,
+    )
+    assert ev.status_code == 200, ev.text
+    return ev.json()["uuid"]
+
+
+def test_create_general_test_succeeds(client):
+    """POST /tests with type=general and a linked llm-general evaluator succeeds."""
+    jwt = _signup(client)
+    gen_ev_uuid = _create_llm_general_evaluator(client, jwt)
+    r = client.post(
+        "/tests",
+        json={
+            "name": f"gen-{uuid.uuid4().hex[:6]}",
+            "type": "general",
+            "config": {
+                "input": "Summarize this article.",
+                "evaluation": {"type": "general"},
+            },
+            "evaluators": [{"evaluator_uuid": gen_ev_uuid}],
+        },
+        headers=jwt,
+    )
+    assert r.status_code == 200, r.text
+
+
+def test_update_general_test_cannot_remove_all_evaluators(client):
+    """PUT /tests/{uuid} on a general test must keep the same guard as
+    conversation tests: an update that clears every evaluator is rejected,
+    since general tests have no fallback judge."""
+    jwt = _signup(client)
+    gen_ev_uuid = _create_llm_general_evaluator(client, jwt)
+    create = client.post(
+        "/tests",
+        json={
+            "name": f"gen-{uuid.uuid4().hex[:6]}",
+            "type": "general",
+            "config": {
+                "input": "Summarize this article.",
+                "evaluation": {"type": "general"},
+            },
+            "evaluators": [{"evaluator_uuid": gen_ev_uuid}],
+        },
+        headers=jwt,
+    )
+    assert create.status_code == 200, create.text
+    test_uuid = create.json()["uuid"]
+
+    r = client.put(
+        f"/tests/{test_uuid}",
+        json={"evaluators": []},
+        headers=jwt,
+    )
+    assert r.status_code == 400, r.text
+    assert "at least one evaluator" in r.text
+
+
+def test_create_general_test_rejects_llm_evaluator(client):
+    """POST /tests with type=general and a linked `llm` (not `llm-general`)
+    evaluator fails 400 — evaluator_type mismatch."""
+    jwt = _signup(client)
+    evaluators = client.get("/evaluators", headers=jwt).json()["items"]
+    llm_ev = next(e for e in evaluators if e.get("evaluator_type") == "llm")
+    r = client.post(
+        "/tests",
+        json={
+            "name": f"gen-{uuid.uuid4().hex[:6]}",
+            "type": "general",
+            "evaluators": [{"evaluator_uuid": llm_ev["uuid"]}],
+        },
+        headers=jwt,
+    )
+    assert r.status_code == 400, r.text
+    assert "only accept 'llm-general' evaluators" in r.text
+
+
+def test_create_general_test_requires_evaluator(client):
+    """POST /tests with type=general and no evaluators fails 400."""
+    jwt = _signup(client)
+    r = client.post(
+        "/tests",
+        json={"name": f"gen-{uuid.uuid4().hex[:6]}", "type": "general"},
+        headers=jwt,
+    )
+    assert r.status_code == 400, r.text
+    assert "General tests require at least one evaluator" in r.text
+
+
+def test_bulk_create_general_tests_succeeds(client):
+    """POST /tests/bulk with type=general: an item with `input` set and no
+    `conversation_history`, with a linked llm-general evaluator, succeeds and
+    the created test's config carries `input`, not `history`."""
+    jwt = _signup(client)
+    gen_ev_uuid = _create_llm_general_evaluator(client, jwt)
+    r = client.post(
+        "/tests/bulk",
+        json={
+            "type": "general",
+            "tests": [
+                {
+                    "name": f"bulk-gen-{uuid.uuid4().hex[:6]}",
+                    "input": "Summarize this article.",
+                    "evaluators": [{"evaluator_uuid": gen_ev_uuid}],
+                }
+            ],
+        },
+        headers=jwt,
+    )
+    assert r.status_code == 200, r.text
+    test_uuid = r.json()["uuids"][0]
+    config = client.get(f"/tests/{test_uuid}", headers=jwt).json()["config"]
+    assert config["input"] == "Summarize this article."
+    assert "history" not in config
+
+
+def test_bulk_create_general_tests_requires_input(client):
+    """POST /tests/bulk with type=general and a batch item missing `input`
+    fails validation — the pydantic model_validator raises a ValueError,
+    which FastAPI surfaces as 422."""
+    jwt = _signup(client)
+    gen_ev_uuid = _create_llm_general_evaluator(client, jwt)
+    r = client.post(
+        "/tests/bulk",
+        json={
+            "type": "general",
+            "tests": [
+                {
+                    "name": f"bulk-gen-{uuid.uuid4().hex[:6]}",
+                    "evaluators": [{"evaluator_uuid": gen_ev_uuid}],
+                }
+            ],
+        },
+        headers=jwt,
+    )
+    assert r.status_code == 422, r.text
+
+
+def test_bulk_create_general_tests_rejects_conversation_agent(client):
+    """POST /tests/bulk with type=general and agent_uuids pointing at an agent
+    whose interaction_type is `conversation` (the DB default) rejects the whole
+    batch with 400 and creates no tests."""
+    jwt = _signup(client)
+    gen_ev_uuid = _create_llm_general_evaluator(client, jwt)
+    agent = client.post(
+        "/agents",
+        json={
+            "name": f"agent-{uuid.uuid4().hex[:6]}",
+            "type": "connection",
+            "config": {"agent_url": "https://example.com/agent"},
+        },
+        headers=jwt,
+    )
+    assert agent.status_code == 200, agent.text
+    agent_uuid = agent.json()["uuid"]
+
+    test_name = f"bulk-gen-{uuid.uuid4().hex[:6]}"
+    r = client.post(
+        "/tests/bulk",
+        json={
+            "type": "general",
+            "tests": [
+                {
+                    "name": test_name,
+                    "input": "Summarize this article.",
+                    "evaluators": [{"evaluator_uuid": gen_ev_uuid}],
+                }
+            ],
+            "agent_uuids": [agent_uuid],
+        },
+        headers=jwt,
+    )
+    assert r.status_code == 400, r.text
+    assert "cannot link general tests to it" in r.text
+
+    tests = client.get("/tests", params={"q": test_name}, headers=jwt).json()["items"]
+    assert tests == []
+
+
+def test_general_test_type_immutable(client):
+    """A test's `type` is immutable: PUT cannot switch a `general` test to
+    another type, or another type to `general`."""
+    jwt = _signup(client)
+    gen_ev_uuid = _create_llm_general_evaluator(client, jwt)
+    created = client.post(
+        "/tests",
+        json={
+            "name": f"gen-{uuid.uuid4().hex[:6]}",
+            "type": "general",
+            "config": {"input": "hi", "evaluation": {"type": "general"}},
+            "evaluators": [{"evaluator_uuid": gen_ev_uuid}],
+        },
+        headers=jwt,
+    )
+    assert created.status_code == 200, created.text
+    t_uuid = created.json()["uuid"]
+
+    r = client.put(f"/tests/{t_uuid}", json={"type": "response"}, headers=jwt)
+    assert r.status_code == 400, r.text
+    assert "Test type is immutable" in r.text
+
+    response_uuid = _create_test(client, jwt)
+    r2 = client.put(f"/tests/{response_uuid}", json={"type": "general"}, headers=jwt)
+    assert r2.status_code == 400, r2.text
+    assert "Test type is immutable" in r2.text
