@@ -5655,9 +5655,9 @@ def soft_delete_evaluator_version(evaluator_uuid: str, version_uuid: str) -> str
     """Soft-delete one version of an evaluator.
 
     Returns "deleted", or a refusal reason: "not_found" (unknown version, wrong
-    evaluator, or already deleted), "live" (it is the evaluator's live version),
-    "last" (it is the only remaining version). The row is kept so finished runs
-    that pinned this version still resolve its number and prompt.
+    evaluator, or already deleted) or "live" (it is the evaluator's live
+    version). The row is kept so finished runs that pinned this version still
+    resolve its number and prompt.
     """
     with get_db_connection() as conn:
         cursor = conn.cursor()
@@ -5674,13 +5674,6 @@ def soft_delete_evaluator_version(evaluator_uuid: str, version_uuid: str) -> str
         parent = cursor.fetchone()
         if parent and parent["live_version_id"] == version_uuid:
             return "live"
-        cursor.execute(
-            "SELECT COUNT(*) AS n FROM evaluator_versions "
-            "WHERE evaluator_id = ? AND deleted_at IS NULL",
-            (evaluator_uuid,),
-        )
-        if cursor.fetchone()["n"] <= 1:
-            return "last"
         cursor.execute(
             "UPDATE evaluator_versions SET deleted_at = CURRENT_TIMESTAMP WHERE uuid = ?",
             (version_uuid,),

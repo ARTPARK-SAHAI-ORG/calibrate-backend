@@ -819,7 +819,7 @@ def delete_version(
         examples=["f47ac10b-58cc-4372-a567-0e02b2c3d479"],
     ),
     version_uuid: str = Path(
-        description="Version to delete. Cannot be the live version or the only version",
+        description="Version to delete. Cannot be the live version",
         examples=[_EXAMPLE_VERSION_UUID],
     ),
     ctx: OrgContext = Depends(get_current_org),
@@ -834,10 +834,6 @@ def delete_version(
         raise HTTPException(
             status_code=400,
             detail="Cannot delete the live version. Set another version live first",
-        )
-    if outcome == "last":
-        raise HTTPException(
-            status_code=400, detail="Cannot delete an evaluator's only version"
         )
     return {"message": "Version deleted"}
 

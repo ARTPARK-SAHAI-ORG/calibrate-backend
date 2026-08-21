@@ -343,7 +343,7 @@ def test_delete_version_hides_it_from_reads(client):
     assert detail["live_version_index"] == 0
 
 
-def test_delete_version_rejects_live_and_only_version(client):
+def test_delete_version_rejects_the_live_version(client):
     h = _signup(client)
     _, ev_uuid, v1_uuid = _create_rating_evaluator(client, h)
 
@@ -351,21 +351,32 @@ def test_delete_version_rejects_live_and_only_version(client):
     assert resp.status_code == 400, resp.text
     assert "live version" in resp.json()["detail"]
 
-    v2 = _add_version(client, h, ev_uuid, make_live=True)
+    _add_version(client, h, ev_uuid, make_live=True)
     assert client.delete(f"/evaluators/{ev_uuid}/versions/{v1_uuid}", headers=h).status_code == 200
-    # v2 is both live and last; unset live to reach the "only version" branch.
-    from db import set_evaluator_live_version, get_db_connection
 
-    with get_db_connection() as conn:
-        conn.execute(
-            "UPDATE evaluators SET live_version_id = NULL WHERE uuid = ?", (ev_uuid,)
-        )
-        conn.commit()
-    resp = client.delete(f"/evaluators/{ev_uuid}/versions/{v2}", headers=h)
-    assert resp.status_code == 400, resp.text
-    assert "only version" in resp.json()["detail"]
-    # a soft-deleted version cannot be made live again
+    from db import set_evaluator_live_version
+
     assert set_evaluator_live_version(ev_uuid, v1_uuid) is False
+
+
+def test_deleted_version_still_resolves_for_historical_reads(client):
+    """A finished run stores an `evaluator_version_id`; deleting the version must
+    not stop that id resolving to its number and prompt."""
+    from db import get_evaluator_version, get_evaluator_versions, get_evaluator_versions_by_uuids
+
+    h = _signup(client)
+    _, ev_uuid, v1_uuid = _create_rating_evaluator(client, h)
+    _add_version(client, h, ev_uuid, make_live=True)
+    assert client.delete(f"/evaluators/{ev_uuid}/versions/{v1_uuid}", headers=h).status_code == 200
+
+    stored = get_evaluator_version(v1_uuid)
+    assert stored is not None and stored["version_number"] == 1
+    assert stored["system_prompt"]
+    assert v1_uuid in get_evaluator_versions_by_uuids([v1_uuid])
+    assert v1_uuid not in [v["uuid"] for v in get_evaluator_versions(ev_uuid)]
+    assert v1_uuid in [
+        v["uuid"] for v in get_evaluator_versions(ev_uuid, include_deleted=True)
+    ]
 
 
 def test_delete_version_404s_on_unknown_repeat_and_other_org(client):
