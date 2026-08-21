@@ -3978,6 +3978,7 @@ def create_agent(
     agent_type: str = "agent",
     config: Optional[Dict[str, Any]] = None,
     user_id: Optional[str] = None,
+    link_default_evaluator: bool = True,
 ) -> str:
     """Create a new agent and return its UUID.
 
@@ -3987,6 +3988,9 @@ def create_agent(
         agent_type: Type of agent — 'agent' or 'connection'
         config: Optional configuration dict
         user_id: UUID of the user creating this agent (audit / created-by)
+        link_default_evaluator: Auto-link the org's correctness evaluator fork.
+            Duplication passes False and copies the source agent's own
+            evaluator set instead, so the copy matches the original exactly.
 
     Raises:
         ValueError: If org_uuid is not provided
@@ -4004,7 +4008,8 @@ def create_agent(
             """,
             (agent_uuid, name, agent_type, config_json, user_id, org_uuid),
         )
-        _link_default_correctness_evaluator(cursor, agent_uuid, org_uuid)
+        if link_default_evaluator:
+            _link_default_correctness_evaluator(cursor, agent_uuid, org_uuid)
         conn.commit()
         logger.info(f"Created agent with UUID: {agent_uuid}")
         return agent_uuid
