@@ -175,7 +175,7 @@ def paginate_around(
     contains the matching item instead of the page at `pagination.offset`,
     so a client that navigated away from a specific row (e.g. into a detail
     view) can reopen the list already scrolled to it. Unbounded `limit`
-    (`None`) is honored the same as plain `paginate` — the whole list comes
+    (`None`) is honored the same as plain `paginate`: the whole list comes
     back, since there's no page to compute a bounded offset into. `key`
     extracts the comparable id from each item (default: `.uuid` attribute).
 
