@@ -731,10 +731,12 @@ def _run_evaluator_names(
 
     Prefers each evaluator's current name over the snapshot (same preference
     order as `_build_evaluators_block_for_test_run`), via a caller-shared
-    `evaluator_cache` so repeated evaluators across a list of runs cost one
-    DB lookup, not one per run. The snapshot name is calibrate's disambiguated
-    name (e.g. `Correctness-a1b2c3d4` when two linked evaluators share a
-    display name) and goes stale on rename — neither is fit for display."""
+    `evaluator_cache` — callers building a whole list should pre-seed it with
+    `_prefetch_evaluator_cache(jobs)` (one batched query) rather than let this
+    function discover each distinct evaluator one at a time. The snapshot name
+    is calibrate's disambiguated name (e.g. `Correctness-a1b2c3d4` when two
+    linked evaluators share a display name) and goes stale on rename — neither
+    is fit for display."""
     cache: Dict[str, Optional[Dict[str, Any]]] = (
         evaluator_cache if evaluator_cache is not None else {}
     )
@@ -752,6 +754,28 @@ def _run_evaluator_names(
     if job.get("has_tool_call_test"):
         names.append("Tool call")
     return names
+
+
+def _prefetch_evaluator_cache(
+    jobs: List[Dict[str, Any]],
+) -> Dict[str, Optional[Dict[str, Any]]]:
+    """One batched DB read for every evaluator uuid referenced across `jobs`'
+    `evaluators_by_test_id` snapshots, seeded as the `evaluator_cache` for
+    `_run_evaluator_names`. Without this, each distinct evaluator triggers its
+    own `get_evaluator()` round trip on first sight (N+1 for a run-list
+    referencing many evaluators); missing/deleted uuids are cached as `None`
+    so `_run_evaluator_names` never re-queries them either."""
+    from db import get_evaluators_by_uuids
+
+    all_uuids = {
+        ev["uuid"]
+        for job in jobs
+        for evals in (job.get("evaluators_by_test_id") or {}).values()
+        for ev in evals or []
+        if isinstance(ev, dict) and ev.get("uuid")
+    }
+    found = get_evaluators_by_uuids(list(all_uuids)) if all_uuids else {}
+    return {uid: found.get(uid) for uid in all_uuids}
 
 
 def _build_agent_test_run_item_fields(
@@ -877,7 +901,7 @@ def get_agent_test_runs(
             name_map[job["uuid"]] = "Job"
 
     runs = []
-    evaluator_cache: Dict[str, Optional[Dict[str, Any]]] = {}
+    evaluator_cache = _prefetch_evaluator_cache(jobs)
     for job in jobs:  # already newest-first
         name = name_map.get(job["uuid"], "Job")
         run_item = AgentTestRunListItem(
@@ -955,7 +979,7 @@ def get_all_test_runs_for_user(
     # Build every run item FIRST (before status/has_failures filtering) so the
     # "Run N"/"Benchmark N" names stay stable regardless of which filters apply.
     runs = []
-    evaluator_cache: Dict[str, Optional[Dict[str, Any]]] = {}
+    evaluator_cache = _prefetch_evaluator_cache(jobs)
     for job in jobs:  # already newest-first
         run_item = GlobalTestRunListItem(
             **_build_agent_test_run_item_fields(

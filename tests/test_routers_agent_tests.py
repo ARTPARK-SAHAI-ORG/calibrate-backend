@@ -575,6 +575,92 @@ def test_agent_runs_list_has_tool_call_test_is_snapshotted_not_derived(client):
     assert run["evaluators"] == []
 
 
+def test_agent_runs_list_evaluator_cache_batches_lookups(client, monkeypatch):
+    """Resolving evaluator names for a list of runs costs one batched DB
+    query total (`_prefetch_evaluator_cache` → `get_evaluators_by_uuids`),
+    not one per distinct evaluator: three runs sharing one evaluator must
+    not trigger three individual `get_evaluator` lookups."""
+    import db
+    from db import create_agent_test_job, update_agent_test_job
+
+    auth = _signup(client)
+    h = auth["headers"]
+    agent = _create_agent(client, h)
+
+    live_name = f"Shared {uuid.uuid4().hex[:6]}"
+    ev = _create_llm_evaluator(client, h, live_name)
+
+    job_uuids = set()
+    for i in range(3):
+        job_id = create_agent_test_job(
+            agent_id=agent["uuid"],
+            job_type="llm-unit-test",
+            details={
+                "evaluators_by_test_id": {
+                    f"tc{i}": [{"uuid": ev["uuid"], "name": f"{live_name}-stale"}]
+                }
+            },
+        )
+        job_uuids.add(job_id)
+        update_agent_test_job(
+            job_id, status="done", results={"total_tests": 1, "passed": 1, "failed": 0}
+        )
+
+    batch_calls = []
+    real_batch = db.get_evaluators_by_uuids
+
+    def _counting_batch(uuids):
+        batch_calls.append(list(uuids))
+        return real_batch(uuids)
+
+    def _fail_individual(_uuid):
+        raise AssertionError(
+            "get_evaluator was called individually; the batch cache should "
+            "already have every referenced uuid"
+        )
+
+    monkeypatch.setattr(db, "get_evaluators_by_uuids", _counting_batch)
+    monkeypatch.setattr(db, "get_evaluator", _fail_individual)
+
+    resp = client.get(f"/agent-tests/agent/{agent['uuid']}/runs", headers=h)
+    assert resp.status_code == 200
+    assert len(batch_calls) == 1
+    seen = {r["uuid"]: r for r in resp.json()["items"] if r["uuid"] in job_uuids}
+    assert len(seen) == 3
+    for run in seen.values():
+        assert run["evaluators"] == [live_name]
+
+
+def test_global_runs_list_evaluators_column(client):
+    """The workspace-wide GET /agent-tests/runs surfaces the same `evaluators`
+    column, resolved and cached the same way as the per-agent endpoint."""
+    from db import create_agent_test_job, update_agent_test_job
+
+    auth = _signup(client)
+    h = auth["headers"]
+    agent = _create_agent(client, h)
+
+    live_name = f"Global {uuid.uuid4().hex[:6]}"
+    ev = _create_llm_evaluator(client, h, live_name)
+
+    job_id = create_agent_test_job(
+        agent_id=agent["uuid"],
+        job_type="llm-unit-test",
+        details={
+            "evaluators_by_test_id": {
+                "tc1": [{"uuid": ev["uuid"], "name": f"{live_name}-stale"}]
+            },
+            "has_tool_call_test": True,
+        },
+    )
+    update_agent_test_job(job_id, status="done", results={"total_tests": 1, "passed": 1, "failed": 0})
+
+    resp = client.get("/agent-tests/runs", headers=h)
+    assert resp.status_code == 200
+    run = next(r for r in resp.json()["items"] if r["uuid"] == job_id)
+    assert run["evaluators"] == [live_name, "Tool call"]
+
+
 def test_agent_runs_list_filters_and_pagination(client):
     """The agent runs-list accepts optional `type`/`status`/`has_failures`
     filters + `limit`/`offset` paging, returning the `{items, total, ...}`
