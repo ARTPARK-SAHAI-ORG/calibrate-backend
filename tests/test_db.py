@@ -805,6 +805,60 @@ def test_backfill_links_correctness_evaluator_only_onto_agents_with_none(user):
     assert db.get_evaluators_for_agent(bare_agent) == []
 
 
+def test_create_general_agent_links_general_correctness_evaluator(user):
+    """A `general` agent has no conversation history — it must get
+    `default-llm-general` (evaluator_type `llm-general`), not the
+    conversational `default-llm-next-reply` (evaluator_type `llm`)."""
+    agent_uuid = db.create_agent(
+        name=_u("a-correctness-general"),
+        user_id=user["uuid"],
+        org_uuid=user["org_uuid"],
+        interaction_type="general",
+    )
+    linked = db.get_evaluators_for_agent(agent_uuid)
+    assert len(linked) == 1
+    assert linked[0]["source_default_slug"] == db.GENERAL_CORRECTNESS_EVALUATOR_SLUG
+    assert linked[0]["evaluator_type"] == "llm-general"
+    assert linked[0]["org_uuid"] == user["org_uuid"]
+
+
+def test_backfill_links_general_correctness_evaluator_onto_general_agents(user):
+    general_agent = db.create_agent(
+        name=_u("a-bare-general"),
+        user_id=user["uuid"],
+        org_uuid=user["org_uuid"],
+        interaction_type="general",
+    )
+    conv_agent = db.create_agent(
+        name=_u("a-bare-conv"), user_id=user["uuid"], org_uuid=user["org_uuid"]
+    )
+
+    # Simulate a pre-feature DB: both agents lost their evaluator link and the
+    # migration hasn't run yet.
+    db.remove_evaluator_from_agent(
+        general_agent, db.get_evaluators_for_agent(general_agent)[0]["uuid"]
+    )
+    db.remove_evaluator_from_agent(
+        conv_agent, db.get_evaluators_for_agent(conv_agent)[0]["uuid"]
+    )
+    with db.get_db_connection() as conn:
+        conn.execute(
+            "DELETE FROM _schema_migrations WHERE name = ?",
+            (db.LINK_DEFAULT_CORRECTNESS_EVALUATOR_MIGRATION,),
+        )
+        conn.commit()
+
+    db.init_db()
+
+    general_linked = db.get_evaluators_for_agent(general_agent)
+    assert len(general_linked) == 1
+    assert general_linked[0]["source_default_slug"] == db.GENERAL_CORRECTNESS_EVALUATOR_SLUG
+
+    conv_linked = db.get_evaluators_for_agent(conv_agent)
+    assert len(conv_linked) == 1
+    assert conv_linked[0]["source_default_slug"] == db.CORRECTNESS_EVALUATOR_SLUG
+
+
 # ---------------------------------------------------------------------------
 # Per-org default-evaluator provisioning (fork-on-provision)
 # ---------------------------------------------------------------------------
