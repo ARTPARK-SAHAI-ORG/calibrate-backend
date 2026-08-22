@@ -636,6 +636,36 @@ def _resolve_evaluators(
     return refs
 
 
+# How many offending IDs a conflict lists before it just reports the count. A
+# `select_all` conversion can hit hundreds, and a wall of UUIDs buries the hint
+# that actually resolves it.
+_MAX_REPORTED_CONFLICTS = 20
+
+
+def _shape_conflict_detail(
+    error: str,
+    offending: List[str],
+    considered: int,
+    *,
+    select_all: bool,
+    hint: str,
+) -> Dict[str, Any]:
+    """Build the 400 body for traces the requested test type cannot take."""
+    detail: Dict[str, Any] = {
+        "error": error,
+        "trace_ids": offending[:_MAX_REPORTED_CONFLICTS],
+    }
+    if select_all:
+        detail["error"] = (
+            f"{error}. {len(offending)} of the {considered} matching traces "
+            "cannot be converted, so nothing was created"
+        )
+        detail["hint"] = hint
+        if len(offending) > _MAX_REPORTED_CONFLICTS:
+            detail["trace_ids_truncated"] = True
+    return detail
+
+
 def _dedupe_test_names(candidates: List[str], taken: set) -> List[str]:
     """Make each candidate unique against `taken` (the workspace's existing test
     names, mutated as names are claimed) by appending ` (2)`, ` (3)`, … so
@@ -728,16 +758,24 @@ def convert_traces_to_tests(
         if wrong_shape:
             raise HTTPException(
                 status_code=400,
-                detail={
-                    "error": (
+                detail=_shape_conflict_detail(
+                    (
                         "general tests take a standalone prompt, but these traces "
                         "carry a conversation"
                         if wants_text
                         else "response tests take a conversation, but these traces "
                         "carry a standalone prompt"
                     ),
-                    "trace_ids": wrong_shape,
-                },
+                    wrong_shape,
+                    len(traces),
+                    select_all=payload.select_all,
+                    hint=(
+                        "Pass agent_id to convert one agent's traces at a time. "
+                        "A trace's shape follows the agent that produced it, so a "
+                        f"single {'general' if wants_text else 'conversation'} "
+                        "agent's traces are all the right shape."
+                    ),
+                ),
             )
 
     if payload.type == "tool_call":
@@ -749,10 +787,16 @@ def convert_traces_to_tests(
         if no_calls:
             raise HTTPException(
                 status_code=400,
-                detail={
-                    "error": "Some traces recorded no tool calls to assert",
-                    "trace_ids": no_calls,
-                },
+                detail=_shape_conflict_detail(
+                    "Some traces recorded no tool calls to assert",
+                    no_calls,
+                    len(traces),
+                    select_all=payload.select_all,
+                    hint=(
+                        "Pass output_type=tool_call to convert only the traces "
+                        "that issued tool calls."
+                    ),
+                ),
             )
 
     existing_names = {t["name"] for t in get_all_tests_summary(org_uuid=ctx.org_uuid)}

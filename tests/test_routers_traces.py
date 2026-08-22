@@ -1911,3 +1911,63 @@ def test_select_all_ignores_an_over_cap_trace_ids_list(client):
     assert deleted.status_code == 200, deleted.text
     assert deleted.json() == {"deleted": 1}
     assert client.get(f"/traces/{trace['uuid']}", headers=h).status_code == 404
+
+
+def test_convert_select_all_explains_a_shape_conflict(client):
+    h, agent_id = _signup_with_agent(client)
+    general_agent = _create_agent(client, h, interaction_type="general")["uuid"]
+    _post_trace(client, h, _payload(agent_id, _mid()))
+    odd = _post_trace(client, h, _general_payload(general_agent, _mid()))
+    evaluator = _create_evaluator(client, h)
+
+    res = _convert(
+        client,
+        h,
+        select_all=True,
+        type="response",
+        evaluators=[evaluator["uuid"]],
+    )
+    assert res.status_code == 400, res.text
+    detail = res.json()["detail"]
+    assert detail["trace_ids"] == [odd["uuid"]]
+    assert "1 of the 2 matching traces" in detail["error"]
+    assert "nothing was created" in detail["error"]
+    assert "agent_id" in detail["hint"]
+    assert "trace_ids_truncated" not in detail
+    assert client.get("/tests", headers=h).json()["total"] == 0
+
+    # Narrowing to one agent is what the hint tells you to do, and it works.
+    ok = _convert(client, h, select_all=True, agent_id=agent_id, type="tool_call")
+    assert ok.status_code == 200, ok.text
+    assert ok.json()["created"] == 1
+
+
+def test_convert_select_all_truncates_a_long_conflict_list(client, monkeypatch):
+    import routers.traces as traces_mod
+
+    h, agent_id = _signup_with_agent(client)
+    monkeypatch.setattr(traces_mod, "_MAX_REPORTED_CONFLICTS", 1)
+    for _ in range(2):
+        _post_trace(
+            client, h, _payload(agent_id, _mid(), output={"response": "text only"})
+        )
+
+    res = _convert(client, h, select_all=True, type="tool_call")
+    assert res.status_code == 400, res.text
+    detail = res.json()["detail"]
+    assert len(detail["trace_ids"]) == 1
+    assert detail["trace_ids_truncated"] is True
+    assert "output_type=tool_call" in detail["hint"]
+
+
+def test_convert_by_ids_keeps_the_plain_conflict_error(client):
+    h, agent_id = _signup_with_agent(client)
+    odd = _post_trace(
+        client, h, _payload(agent_id, _mid(), output={"response": "text only"})
+    )
+
+    res = _convert(client, h, trace_ids=[odd["uuid"]], type="tool_call")
+    assert res.status_code == 400, res.text
+    detail = res.json()["detail"]
+    assert set(detail) == {"error", "trace_ids"}
+    assert detail["error"] == "Some traces recorded no tool calls to assert"
