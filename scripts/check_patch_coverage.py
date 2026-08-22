@@ -57,16 +57,32 @@ def main() -> int:
         print("No main branch to compare against — skipping patch coverage.")
         return 0
 
-    if not (ROOT / ".coverage").exists():
+    data_file = ROOT / ".coverage"
+    if not data_file.exists():
         print(
             "No .coverage found. Run `uv run --group dev pytest` first.",
             file=sys.stderr,
         )
         return 1
 
+    # Line numbers in the coverage data are only meaningful against the sources
+    # it was recorded from; a later edit shifts them and the verdict is wrong.
+    stale = [
+        f
+        for f in (ROOT / "src").rglob("*.py")
+        if f.stat().st_mtime > data_file.stat().st_mtime
+    ]
+    if stale:
+        print(
+            f"Coverage data is older than {len(stale)} source file(s), starting with "
+            f"{stale[0].relative_to(ROOT)}.\nRe-run `uv run --group dev pytest` first.",
+            file=sys.stderr,
+        )
+        return 1
+
     from coverage import Coverage
 
-    cov = Coverage(data_file=str(ROOT / ".coverage"))
+    cov = Coverage(data_file=str(data_file))
     cov.load()
 
     overall_total = overall_missing = 0
