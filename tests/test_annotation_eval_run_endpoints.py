@@ -216,6 +216,71 @@ def test_evaluator_run_bad_evaluator_resolution(client):
     assert resp.status_code == 400
 
 
+def _llm_task_with_evaluator(client, h):
+    llm_ev = _llm_ev(client, h)
+    task_uuid = client.post(
+        "/annotation-tasks",
+        json={
+            "name": f"t-{uuid.uuid4().hex[:6]}",
+            "type": "llm",
+            "evaluator_ids": [llm_ev["uuid"]],
+        },
+        headers=h,
+    ).json()["uuid"]
+    return task_uuid, llm_ev
+
+
+def test_evaluator_run_all_tool_call_rows_blocked(client):
+    """A run whose items are all tool-call rows (agent output is a tool call,
+    no text) has nothing for the LLM judge to do — 400, no job created."""
+    auth = _signup(client)
+    h = auth["headers"]
+    task_uuid, llm_ev = _llm_task_with_evaluator(client, h)
+    client.post(
+        f"/annotation-tasks/{task_uuid}/items",
+        json={
+            "items": [
+                {"payload": {"name": "tc1", "tool_calls": [{"tool": "t", "arguments": {}}]}},
+                {"payload": {"name": "tc2", "actual_tool_calls": [{"tool": "u", "arguments": {}}]}},
+            ]
+        },
+        headers=h,
+    )
+    resp = client.post(
+        f"/annotation-tasks/{task_uuid}/evaluator-runs",
+        json={"evaluators": [{"evaluator_id": llm_ev["uuid"]}], "select_all": True},
+        headers=h,
+    )
+    assert resp.status_code == 400
+    assert "tool-call" in resp.json()["detail"]
+
+
+def test_evaluator_run_mixed_tool_call_rows_launches(client):
+    """A mixed run (some text, some tool-call rows) launches — the judge runs
+    on the text rows and the runner skips the tool-call ones."""
+    auth = _signup(client)
+    h = auth["headers"]
+    task_uuid, llm_ev = _llm_task_with_evaluator(client, h)
+    client.post(
+        f"/annotation-tasks/{task_uuid}/items",
+        json={
+            "items": [
+                {"payload": {"name": "tc", "tool_calls": [{"tool": "t", "arguments": {}}]}},
+                {"payload": {"name": "resp", "chat_history": [], "agent_response": "hi"}},
+            ]
+        },
+        headers=h,
+    )
+    with patch("routers.annotation_tasks.can_start_job", return_value=False):
+        resp = client.post(
+            f"/annotation-tasks/{task_uuid}/evaluator-runs",
+            json={"evaluators": [{"evaluator_id": llm_ev["uuid"]}], "select_all": True},
+            headers=h,
+        )
+    assert resp.status_code == 200
+    assert resp.json()["status"] == "queued"
+
+
 def test_evaluator_run_detail_shape(client):
     """GET /annotation-tasks/{uuid}/evaluator-runs/{job_uuid} exposes the
     rubric via top-level `evaluators[].output_config.scale` (mirrors the
