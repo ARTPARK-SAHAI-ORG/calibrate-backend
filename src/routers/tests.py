@@ -134,6 +134,9 @@ REQUIRED_EVALUATOR_TYPE_BY_TEST_TYPE: Dict[str, str] = {
 # conversation history to feed a conversational agent, and conversation-style tests
 # (response/tool_call/conversation) have nothing to feed a `general` agent. Single
 # source of truth for the gate enforced in `POST /agent-tests` and `POST /tests/bulk`.
+# Mirrors calibrate's `connections.AGENT_TYPES`, which the config's `agent_type`
+# is validated against before the run starts.
+AGENT_INTERACTION_TYPES = ("conversation", "general")
 DEFAULT_AGENT_INTERACTION_TYPE = "conversation"
 REQUIRED_AGENT_INTERACTION_TYPE_BY_TEST_TYPE: Dict[str, str] = {
     "response": "conversation",

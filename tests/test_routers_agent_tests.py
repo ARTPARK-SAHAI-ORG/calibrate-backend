@@ -2626,3 +2626,27 @@ def test_build_calibrate_config_sends_the_agents_type(
         db.get_agent(agent["uuid"]), [db.get_test(test["uuid"])], "bucket"
     )
     assert config["agent_type"] == expected
+
+
+def test_build_calibrate_config_rejects_an_unknown_agent_type(client):
+    """calibrate exits the whole run on an unknown `agent_type`, so catch it here."""
+    import db
+    from routers.agent_tests import _build_calibrate_config
+
+    h = _signup(client)["headers"]
+    agent = _create_agent(client, h)
+    db.update_agent(
+        agent["uuid"],
+        config={"agent_url": "http://agent.local/run", "connection_verified": True},
+    )
+    test = _create_test(client, h)
+
+    stored = db.get_agent(agent["uuid"])
+    stored["interaction_type"] = "chat"
+
+    from fastapi import HTTPException
+
+    with pytest.raises(HTTPException) as exc:
+        _build_calibrate_config(stored, [db.get_test(test["uuid"])], "bucket")
+    assert exc.value.status_code == 400
+    assert "conversation, general" in exc.value.detail
