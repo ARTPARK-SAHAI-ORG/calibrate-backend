@@ -226,8 +226,11 @@ AGENT_TYPE_DESCRIPTION = (
 # agent (conversation/response/tool_call tests need `conversation`, general
 # tests need `general`); it does not change how the agent is invoked.
 AGENT_INTERACTION_TYPE_DESCRIPTION = (
-    "- `conversation`: a normal back-and-forth agent, answers within an ongoing conversation\n"
-    "- `general`: a one-shot agent, takes a single plain input and produces a single plain output, no conversation"
+    "What the agent expects in the request body:\n\n"
+    "- `conversation`: a normal back-and-forth agent, answers within an ongoing "
+    'conversation. Receives `{"messages": [...]}`\n'
+    "- `general`: a one-shot agent, takes a single plain input and produces a "
+    'single plain output, no conversation. Receives `{"input": "..."}`'
 )
 # Status a job can carry at *creation* time: it either starts immediately
 # (`in_progress`) or waits for a concurrency slot (`queued`). Narrower than

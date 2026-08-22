@@ -605,7 +605,8 @@ class VerifyConnectionRequest(AgentVerifyRequest):
     )
     interaction_type: Literal["conversation", "general"] = Field(
         DEFAULT_AGENT_INTERACTION_TYPE,
-        description="What the agent expects in the request body, since no agent is stored yet",
+        description=AGENT_INTERACTION_TYPE_DESCRIPTION
+        + "\n\nOmit for a back-and-forth agent",
     )
 
 

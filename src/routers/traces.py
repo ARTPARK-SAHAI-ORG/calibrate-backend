@@ -119,8 +119,8 @@ TraceInput = Union[TraceInputText, TraceInputHistory]
 
 _TRACE_INPUT_DESCRIPTION = (
     "What the agent was given for this turn. For a `general` agent, the "
-    "standalone prompt as a string. For every other agent, the conversation "
-    "history up to the reported output, oldest turn first, in OpenAI chat format"
+    "standalone prompt as a string. For a `conversation` agent, the history up "
+    "to the reported output, oldest turn first, in OpenAI chat format"
 )
 
 
@@ -483,7 +483,7 @@ _CONVERT_TYPE_DESCRIPTION = (
     "- `tool_call`: re-run the agent and diff its tool calls against the ones the trace recorded\n\n"
     "`response` needs traces carrying a conversation and `general` needs traces "
     "carrying a standalone prompt, so each one fits the agent it came from. "
-    "`tool_call` takes either and keeps the shape the trace has."
+    "`tool_call` takes either and keeps the shape the trace has"
 )
 
 
