@@ -18,8 +18,7 @@ production GitHub release published
   ├─ Deploy to Production (deploy.yml)
   │
   └─ Auto-publish SDK and CLI (auto-publish-sdk.yml)
-       ├─ compare public OpenAPI spec hash vs parent commit
-       ├─ if changed → auto-bump patch from latest v* tag on client repos
+       ├─ auto-bump patch from latest v* tag on client repos
        └─ call publish-sdk.yml
             ├─ prepare ─ fetch openapi/openapi.json (PUBLIC_API_BASE_URL → servers block)
             ├─ publish-python-sdk (parallel)
@@ -220,9 +219,9 @@ Generated output also supports **npm install** and optional **Cloudflare Workers
    - [`openapi/overlay.yaml`](openapi/overlay.yaml) (Speakeasy CLI names + `x-speakeasy-mcp` tool metadata)  
    Enforced by [`tests/test_sdk_overrides.py`](tests/test_sdk_overrides.py).
 
-2. **Ship** — publish is automatic after **Deploy to Production** when the public OpenAPI spec changed (patch version auto-bumps from the latest `v*` tag on client repos). Manual options:
-   - Actions → **Auto-publish SDK and CLI** → Run workflow (optional `force` / `version`)
-   - Actions → **Publish SDK and CLI** → Run workflow → enter version (skips change detection)
+2. **Ship** — publish is automatic after every **Deploy to Production** (patch version auto-bumps from the latest `v*` tag on client repos). Manual options:
+   - Actions → **Auto-publish SDK and CLI** → Run workflow (optional `version`)
+   - Actions → **Publish SDK and CLI** → Run workflow → enter version
 
 3. **Verify backend workflow** — `auto-publish-sdk` (if used) then `publish-python-sdk`, `publish-cli`, and `publish-mcp` jobs green.
 

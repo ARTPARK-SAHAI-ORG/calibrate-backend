@@ -1,7 +1,7 @@
 name: Auto-publish SDK, CLI, and MCP
 
-# After a successful production deploy, publishes clients when the public OpenAPI
-# spec changed. Manual dispatch can force a publish or pin a version.
+# Publishes clients after every successful production deploy. Manual dispatch can
+# pin a version.
 # Gated by Production secrets (SDK_AUTO_PUBLISH_ENABLED + PUSH_TO_REPO_TOKEN).
 # Setup: SETUP_SDK.md
 on:
@@ -13,10 +13,6 @@ on:
       version:
         description: "Client version (e.g. 0.1.0). Leave empty to auto-bump patch."
         required: false
-      force:
-        description: "Publish even when the public OpenAPI spec is unchanged"
-        type: boolean
-        default: false
 
 concurrency:
   group: auto-publish-sdk
@@ -40,122 +36,38 @@ jobs:
           sdk_auto_publish_enabled: ${{ secrets.SDK_AUTO_PUBLISH_ENABLED }}
           push_to_repo_token: ${{ secrets.PUSH_TO_REPO_TOKEN }}
 
-  detect:
+  version:
     needs: gate
     if: needs.gate.outputs.publish_enabled == 'yes'
     runs-on: ubuntu-latest
     environment: Production
     outputs:
-      should_publish: ${{ steps.plan.outputs.should_publish }}
       version: ${{ steps.plan.outputs.version }}
     steps:
-      - name: Resolve target commit
-        id: target
-        run: |
-          if [ "${{ github.event_name }}" = "workflow_run" ]; then
-            echo "sha=${{ github.event.workflow_run.head_sha }}" >> "$GITHUB_OUTPUT"
-          else
-            echo "sha=${{ github.sha }}" >> "$GITHUB_OUTPUT"
-          fi
-
       - uses: actions/checkout@v4
-        with:
-          ref: ${{ steps.target.outputs.sha }}
-          fetch-depth: 2
 
-      - uses: ./.github/actions/fetch-public-spec
-        env:
-          PUBLIC_API_BASE_URL: ${{ secrets.PUBLIC_API_BASE_URL }}
-
-      - name: Stage CI helper scripts
-        run: |
-          stage_file() {
-            local path="$1" dest="$2"
-            if [ -f "$path" ]; then
-              cp "$path" "$dest"
-            else
-              git fetch origin main --depth=1
-              git show "origin/main:${path}" > "$dest"
-            fi
-          }
-          stage_file .github/scripts/fetch-public-openapi.sh /tmp/fetch-public-openapi.sh
-          stage_file .github/scripts/normalize_openapi_hash.py /tmp/normalize_openapi_hash.py
-          stage_file .github/scripts/next_sdk_version.py /tmp/next_sdk_version.py
-          chmod +x /tmp/fetch-public-openapi.sh
-
-      - name: Compute current release spec hash
-        id: head_hash
-        run: |
-          HASH=$(python3 /tmp/normalize_openapi_hash.py openapi/openapi.json)
-          echo "hash=$HASH" >> "$GITHUB_OUTPUT"
-
-      - name: Compute previous release spec hash
-        id: parent_hash_done
-        env:
-          PUBLIC_API_BASE_URL: ${{ secrets.PUBLIC_API_BASE_URL }}
-        run: |
-          if ! git rev-parse --verify HEAD~1 >/dev/null 2>&1; then
-            echo "missing_parent=true" >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
-
-          git checkout --quiet HEAD~1
-          uv sync --frozen
-          /tmp/fetch-public-openapi.sh openapi/openapi-parent.json
-          HASH=$(python3 /tmp/normalize_openapi_hash.py openapi/openapi-parent.json)
-          echo "hash=$HASH" >> "$GITHUB_OUTPUT"
-          echo "missing_parent=false" >> "$GITHUB_OUTPUT"
-
-      - name: Decide whether to publish
+      - name: Resolve client version
         id: plan
         env:
           GH_TOKEN: ${{ secrets.PUSH_TO_REPO_TOKEN }}
-          FORCE: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.force == 'true' }}
-          INPUT_VERSION: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.version || '' }}
-          HEAD_HASH: ${{ steps.head_hash.outputs.hash }}
-          PARENT_HASH: ${{ steps.parent_hash_done.outputs.hash }}
-          MISSING_PARENT: ${{ steps.parent_hash_done.outputs.missing_parent }}
+          INPUT_VERSION: ${{ github.event.inputs.version || '' }}
         run: |
-          if [ "$FORCE" = "true" ]; then
-            CHANGED=true
-          elif [ "$MISSING_PARENT" = "true" ]; then
-            CHANGED=true
-          elif [ "$HEAD_HASH" = "$PARENT_HASH" ]; then
-            CHANGED=false
-          else
-            CHANGED=true
-          fi
-
-          if [ "$CHANGED" != "true" ]; then
-            echo "Public OpenAPI spec unchanged; skipping client publish."
-            echo "should_publish=false" >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
-
-          if [ -n "$INPUT_VERSION" ]; then
-            VERSION="$INPUT_VERSION"
-          else
-            VERSION="$(python3 /tmp/next_sdk_version.py)"
-          fi
-
-          echo "should_publish=true" >> "$GITHUB_OUTPUT"
+          VERSION="${INPUT_VERSION:-$(python3 .github/scripts/next_sdk_version.py)}"
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
           echo "Will publish SDK + CLI + MCP version $VERSION"
 
   publish:
-    needs: detect
-    if: needs.detect.outputs.should_publish == 'true'
+    needs: version
     uses: ./.github/workflows/publish-sdk.yml
     with:
-      version: ${{ needs.detect.outputs.version }}
+      version: ${{ needs.version.outputs.version }}
     secrets: inherit
 
   # ARTPARK-SAHAI-ORG/calibrate syncs docs from the live public spec and
   # client repos (SDK reference, CLI command pages). Wait for publish so
   # calibrate-cli/docs/ is already pushed before the docs workflow clones it.
   sync-docs:
-    needs: [detect, publish]
-    if: needs.detect.outputs.should_publish == 'true'
+    needs: [version, publish]
     runs-on: ubuntu-latest
     environment: Production
     steps:
@@ -165,7 +77,7 @@ jobs:
         run: |
           gh api repos/ARTPARK-SAHAI-ORG/calibrate/dispatches \
             -f event_type=sync-api-spec \
-            -f "client_payload[version]=${{ needs.detect.outputs.version }}"
+            -f "client_payload[version]=${{ needs.version.outputs.version }}"
           echo "Triggered sync-api-spec on ARTPARK-SAHAI-ORG/calibrate"
 
   # dalmia/calibrate-skills drift-checks its agent skills against the live public
@@ -174,8 +86,7 @@ jobs:
   # already lists calibrate-skills with Contents: write, which is what
   # repository_dispatch needs — so no separate secret.
   sync-skills:
-    needs: [detect, publish]
-    if: needs.detect.outputs.should_publish == 'true'
+    needs: [version, publish]
     runs-on: ubuntu-latest
     environment: Production
     steps:
@@ -185,5 +96,5 @@ jobs:
         run: |
           gh api repos/dalmia/calibrate-skills/dispatches \
             -f event_type=sync-api-spec \
-            -f "client_payload[version]=${{ needs.detect.outputs.version }}"
+            -f "client_payload[version]=${{ needs.version.outputs.version }}"
           echo "Triggered sync-api-spec on dalmia/calibrate-skills"

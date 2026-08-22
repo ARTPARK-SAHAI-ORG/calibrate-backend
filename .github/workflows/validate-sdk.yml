@@ -15,7 +15,6 @@ on:
       - ".github/workflows/publish-sdk.yml"
       - ".github/workflows/auto-publish-sdk.yml"
       - ".github/scripts/sync-client-repo.sh"
-      - ".github/scripts/normalize_openapi_hash.py"
       - ".github/scripts/next-sdk-version.sh"
       - ".github/scripts/next_sdk_version.py"
   workflow_dispatch:
