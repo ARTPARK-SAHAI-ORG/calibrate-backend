@@ -17,7 +17,7 @@ OTel-gateway migration.
 
 import logging
 import os
-from typing import Annotated, Any, Dict, List, Literal, Optional, Union
+from typing import Annotated, Any, ClassVar, Dict, List, Literal, Optional, Union
 
 from fastapi import APIRouter, Depends, HTTPException, Path, Query
 from pydantic import BaseModel, ConfigDict, Field, StringConstraints, model_validator
@@ -315,6 +315,11 @@ class _TraceSelection(BaseModel):
     # otherwise look like it filtered something.
     model_config = ConfigDict(extra="forbid")
 
+    # The cap is enforced in the validator, not as `max_length`, so a caller
+    # that posts its whole selection alongside `select_all` is not rejected on
+    # a list the handler never reads.
+    max_trace_ids: ClassVar[int] = 0
+
     trace_ids: List[TraceUuid] = Field(
         default_factory=list, description="IDs of the traces to act on"
     )
@@ -327,15 +332,22 @@ class _TraceSelection(BaseModel):
 
     @model_validator(mode="after")
     def _require_a_selection(self):
-        if not self.select_all and not self.trace_ids:
+        if self.select_all:
+            return self
+        if not self.trace_ids:
             raise ValueError("provide trace_ids, or select_all=true")
+        if len(self.trace_ids) > self.max_trace_ids:
+            raise ValueError(
+                f"trace_ids accepts at most {self.max_trace_ids} IDs"
+            )
         return self
 
 
 class BulkDeleteTracesRequest(_TraceSelection):
+    max_trace_ids: ClassVar[int] = MAX_DELETE_IDS
+
     trace_ids: List[TraceUuid] = Field(
         default_factory=list,
-        max_length=MAX_DELETE_IDS,
         description="IDs of the traces to delete. Omit when `select_all` is on",
     )
 
@@ -551,9 +563,10 @@ _CONVERT_TYPE_DESCRIPTION = (
 
 
 class ConvertTracesToTestsRequest(_TraceSelection):
+    max_trace_ids: ClassVar[int] = MAX_CONVERT_TRACES
+
     trace_ids: List[TraceUuid] = Field(
         default_factory=list,
-        max_length=MAX_CONVERT_TRACES,
         description="IDs of the traces to convert, one test per trace. Omit when `select_all` is on",
     )
     type: Literal["response", "general", "tool_call"] = Field(

@@ -7,7 +7,7 @@ from unittest.mock import patch
 
 import pytest
 
-from routers.traces import MAX_LIST_LIMIT
+from routers.traces import MAX_DELETE_IDS, MAX_LIST_LIMIT
 from fastapi.testclient import TestClient
 
 
@@ -1887,3 +1887,27 @@ def test_select_all_off_still_requires_trace_ids(client):
         == 422
     )
     assert _convert(client, h, select_all=False, type="tool_call").status_code == 422
+
+
+def test_select_all_ignores_an_over_cap_trace_ids_list(client):
+    """The cap belongs to the list the handler reads, not to one it ignores."""
+    from routers.traces import MAX_CONVERT_TRACES
+
+    h, agent_id = _signup_with_agent(client)
+    trace = _post_trace(client, h, _payload(agent_id, _mid()))
+    stale = ["0" * 36] * (MAX_CONVERT_TRACES + 1)
+
+    converted = _convert(
+        client, h, select_all=True, trace_ids=stale, type="tool_call"
+    )
+    assert converted.status_code == 200, converted.text
+    assert converted.json()["created"] == 1
+
+    deleted = client.post(
+        "/traces/bulk-delete",
+        json={"select_all": True, "trace_ids": ["0" * 36] * (MAX_DELETE_IDS + 1)},
+        headers=h,
+    )
+    assert deleted.status_code == 200, deleted.text
+    assert deleted.json() == {"deleted": 1}
+    assert client.get(f"/traces/{trace['uuid']}", headers=h).status_code == 404
