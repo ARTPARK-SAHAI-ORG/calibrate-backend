@@ -1400,6 +1400,10 @@ def _build_calibrate_config(
         # Agent connection mode — agent owns its LLM; no system_prompt/tools/model in config
         config: Dict[str, Any] = {
             "agent_url": agent_config["agent_url"],
+            # Tells calibrate what to POST: the exchange so far as `messages`, or
+            # just the latest user text as `input` for a one-shot agent.
+            "agent_type": agent.get("interaction_type")
+            or DEFAULT_AGENT_INTERACTION_TYPE,
             "test_cases": all_test_cases,
         }
         if top_level_evaluators:

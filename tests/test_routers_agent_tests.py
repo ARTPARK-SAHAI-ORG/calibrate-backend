@@ -2594,3 +2594,35 @@ def test_build_calibrate_config_tolerates_expected_tool_call_without_arguments(c
     assert config["test_cases"][0]["evaluation"]["tool_calls"] == [
         {"tool": "search", "arguments": None}
     ]
+
+
+@pytest.mark.parametrize(
+    "interaction_type,expected", [(None, "conversation"), ("general", "general")]
+)
+def test_build_calibrate_config_sends_the_agents_type(
+    client, interaction_type, expected
+):
+    """calibrate reads `agent_type` to decide whether to POST `messages` or `input`."""
+    import db
+    from routers.agent_tests import _build_calibrate_config
+
+    h = _signup(client)["headers"]
+    agent = (
+        _create_general_agent(client, h)
+        if interaction_type
+        else _create_agent(client, h)
+    )
+    db.update_agent(
+        agent["uuid"],
+        config={"agent_url": "http://agent.local/run", "connection_verified": True},
+    )
+    test = (
+        _create_tool_call_test(client, h, input_text="find the weather in Delhi")
+        if interaction_type
+        else _create_test(client, h)
+    )
+
+    config, _ = _build_calibrate_config(
+        db.get_agent(agent["uuid"]), [db.get_test(test["uuid"])], "bucket"
+    )
+    assert config["agent_type"] == expected
