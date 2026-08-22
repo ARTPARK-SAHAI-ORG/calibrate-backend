@@ -643,6 +643,72 @@ def test_list_filters_by_agent_id(client):
     assert only_b["items"][0]["agent_id"] == agent_b
 
 
+def test_list_filters_by_output_type(client):
+    h, agent_id = _signup_with_agent(client)
+    reply_only = _post_trace(
+        client, h, _payload(agent_id, _mid(), output={"response": "just a reply"})
+    )
+    tools_only = _post_trace(
+        client,
+        h,
+        _payload(
+            agent_id,
+            _mid(),
+            output={"tool_calls": [{"tool": "get_schedule", "arguments": {}}]},
+        ),
+    )
+    # A trace carrying both counts as a reply, matching what the row shows.
+    both = _post_trace(
+        client,
+        h,
+        _payload(
+            agent_id,
+            _mid(),
+            output={
+                "response": "here you go",
+                "tool_calls": [{"tool": "get_schedule", "arguments": {}}],
+            },
+        ),
+    )
+
+    assert client.get("/traces", headers=h).json()["total"] == 3
+
+    replies = client.get(
+        "/traces", params={"output_type": "response"}, headers=h
+    ).json()
+    assert replies["total"] == 2
+    assert {item["uuid"] for item in replies["items"]} == {
+        reply_only["uuid"],
+        both["uuid"],
+    }
+    assert all(item["response_preview"] for item in replies["items"])
+
+    calls = client.get(
+        "/traces", params={"output_type": "tool_call"}, headers=h
+    ).json()
+    assert calls["total"] == 1
+    assert calls["items"][0]["uuid"] == tools_only["uuid"]
+    assert calls["items"][0]["tool_call_count"] == 1
+    assert calls["items"][0]["response_preview"] is None
+
+    # Combines with the other filters.
+    other_agent = _create_agent(client, h)["uuid"]
+    _post_trace(
+        client, h, _payload(other_agent, _mid(), output={"response": "elsewhere"})
+    )
+    scoped = client.get(
+        "/traces",
+        params={"output_type": "response", "agent_id": other_agent},
+        headers=h,
+    ).json()
+    assert scoped["total"] == 1
+
+    assert (
+        client.get("/traces", params={"output_type": "reply"}, headers=h).status_code
+        == 422
+    )
+
+
 def test_list_searches_every_stored_text_field(client):
     h, agent_id = _signup_with_agent(client)
     target = _post_trace(
