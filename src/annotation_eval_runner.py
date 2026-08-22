@@ -116,6 +116,54 @@ ANNOTATION_EVAL_JOB_TYPE = "annotation-eval"
 # `calibrate general` command — see `_build_llm_general_dataset`.
 SUPPORTED_EVAL_TASK_TYPES = ("stt", "llm", "llm-general", "conversation", "tts")
 
+# A row whose agent output is a tool call (not text) can't be scored by an LLM
+# judge — the judge reads the reply text. These rows are skipped by evaluator
+# runs and labelled by a human instead. Detected as: no text output
+# (`agent_response`/`output`) AND tool calls present.
+TOOL_CALL_SKIP_MESSAGE = (
+    "LLM judge does not run on tool-call rows — label this row manually."
+)
+
+
+def is_tool_call_row(item: Dict[str, Any]) -> bool:
+    """True when an annotation item's agent output is a tool call with no text
+    response (see TOOL_CALL_SKIP_MESSAGE). Safe on any item — returns False
+    for stt/tts/conversation rows, which carry neither field."""
+    payload = item.get("payload")
+    if not isinstance(payload, dict):
+        return False
+    text = payload.get("agent_response")
+    if text is None:
+        text = payload.get("output")
+    calls = payload.get("tool_calls") or payload.get("actual_tool_calls")
+    return not text and bool(calls)
+
+
+def _skip_runs_for_tool_call_rows(
+    items: List[Dict[str, Any]],
+    evaluators_resolved: List[Dict[str, Any]],
+    job_uuid: str,
+) -> List[Dict[str, Any]]:
+    """One evaluator_runs row per (tool-call item × evaluator), carrying the
+    skip message so the eval-run page shows the judge did not run on it."""
+    runs: List[Dict[str, Any]] = []
+    for it in items:
+        if not is_tool_call_row(it):
+            continue
+        for ev in evaluators_resolved:
+            runs.append(
+                {
+                    "job_id": job_uuid,
+                    "item_id": it["uuid"],
+                    "evaluator_id": ev["uuid"],
+                    "evaluator_version_id": ev["_evaluator_version_id"],
+                    "value": {"skipped": True, "message": TOOL_CALL_SKIP_MESSAGE},
+                    "status": "completed",
+                }
+            )
+    return runs
+
+
 logger = logging.getLogger(__name__)
 
 
@@ -330,6 +378,10 @@ def _build_llm_dataset(
     _require_evaluators(evaluators_resolved, "LLM --eval-only")
     out: List[Dict[str, Any]] = []
     for it in items:
+        # Tool-call rows have no text reply to judge — skip them; the runner
+        # records a skip message per row instead.
+        if is_tool_call_row(it):
+            continue
         payload = _payload_dict(it)
         history = payload.get("chat_history")
         response = payload.get("agent_response")
@@ -430,6 +482,10 @@ def _build_llm_general_dataset(
     _require_evaluators(evaluators_resolved, "general eval")
     out: List[Dict[str, Any]] = []
     for it in items:
+        # Tool-call rows have no text output to judge — skip them; the runner
+        # records a skip message per row instead.
+        if is_tool_call_row(it):
+            continue
         payload = _payload_dict(it)
         input_text = payload.get("input")
         output_text = payload.get("output")
@@ -1402,9 +1458,16 @@ def _run_job(
                 # flight was read while calibrate was still appending, so its
                 # reasoning text may have been cut mid-write. Rewriting also
                 # picks up the unscored rows the in-flight path held back.
+                # Tool-call rows were excluded from the judge dataset; store a
+                # skip-message run per (tool-call item × evaluator) so they show
+                # up on the eval-run page as "not judged, label manually".
+                skip_runs = _skip_runs_for_tool_call_rows(
+                    items, evaluators_resolved, job_uuid
+                )
                 clear_evaluator_runs_for_job(job_uuid)
-                if runs_to_insert:
-                    create_evaluator_runs(runs_to_insert)
+                all_runs = runs_to_insert + skip_runs
+                if all_runs:
+                    create_evaluator_runs(all_runs)
 
                 # 6. Upload all artifacts to S3 (mirrors normal STT eval layout).
                 s3_bucket = get_s3_output_config()

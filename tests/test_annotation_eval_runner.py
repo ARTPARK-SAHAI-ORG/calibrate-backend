@@ -238,6 +238,58 @@ def test_build_llm_dataset_happy():
     assert out[0]["test_case"]["evaluation"]["criteria"][0]["arguments"] == {"x": 1}
 
 
+def test_is_tool_call_row():
+    # Tool call, no text output → True (both field conventions).
+    assert runner.is_tool_call_row(
+        {"payload": {"tool_calls": [{"tool": "t", "arguments": {}}]}}
+    )
+    assert runner.is_tool_call_row(
+        {"payload": {"actual_tool_calls": [{"tool": "t", "arguments": {}}]}}
+    )
+    # Text output present → False, even with tool calls alongside.
+    assert not runner.is_tool_call_row(
+        {"payload": {"agent_response": "hi", "tool_calls": [{"tool": "t"}]}}
+    )
+    assert not runner.is_tool_call_row({"payload": {"output": "o"}})
+    # No tool calls, no text → False. Non-dict payload → False.
+    assert not runner.is_tool_call_row({"payload": {"tool_calls": []}})
+    assert not runner.is_tool_call_row({"payload": "nope"})
+
+
+def test_build_llm_dataset_skips_tool_call_rows():
+    evs = [{"uuid": "e1", "name": "judge"}]
+    out = runner._build_llm_dataset(
+        [
+            {"uuid": "tc", "payload": {"tool_calls": [{"tool": "t", "arguments": {}}]}},
+            {
+                "uuid": "resp",
+                "payload": {
+                    "chat_history": [{"role": "user", "content": "hi"}],
+                    "agent_response": "hi back",
+                },
+            },
+        ],
+        evs,
+    )
+    # Only the response row makes it into the judge dataset.
+    assert [row["test_case"]["id"] for row in out] == ["resp"]
+
+
+def test_skip_runs_for_tool_call_rows():
+    evs = [{"uuid": "e1", "name": "j", "_evaluator_version_id": "v1"}]
+    items = [
+        {"uuid": "tc", "payload": {"tool_calls": [{"tool": "t", "arguments": {}}]}},
+        {"uuid": "resp", "payload": {"agent_response": "hi"}},
+    ]
+    runs = runner._skip_runs_for_tool_call_rows(items, evs, "job-1")
+    assert len(runs) == 1
+    assert runs[0]["item_id"] == "tc"
+    assert runs[0]["evaluator_id"] == "e1"
+    assert runs[0]["evaluator_version_id"] == "v1"
+    assert runs[0]["value"]["skipped"] is True
+    assert runs[0]["status"] == "completed"
+
+
 def test_build_llm_general_dataset_no_evaluators():
     with pytest.raises(runner.DatasetBuildError):
         runner._build_llm_general_dataset([], [])

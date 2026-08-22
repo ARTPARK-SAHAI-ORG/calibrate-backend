@@ -68,6 +68,7 @@ from annotation_eval_runner import (
     DatasetBuildError,
     _resolve_evaluator_dicts,
     build_dataset_for_task_type,
+    is_tool_call_row,
     start_annotation_eval_job,
 )
 from utils import (
@@ -1896,6 +1897,18 @@ def start_evaluator_run(
         items_by_id = {it["uuid"]: it for it in all_items}
         items = [items_by_id[i] for i in ordered_subset_ids]
         item_ids_persisted = ordered_subset_ids
+
+    # Tool-call rows (agent output is a tool call, no text) can't be scored by
+    # an LLM judge. Block a run with nothing else to judge; a mixed run
+    # proceeds and the runner records a skip message per tool-call row.
+    if all(is_tool_call_row(it) for it in items):
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "All selected items are tool-call rows; the LLM judge cannot "
+                "run on them. Label them manually."
+            ),
+        )
 
     linked = {
         e["uuid"] for e in get_evaluators_for_annotation_task(task_uuid)
