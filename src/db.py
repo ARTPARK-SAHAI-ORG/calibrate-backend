@@ -10066,6 +10066,27 @@ def list_traces(
 _TRACE_DELETE_CHUNK = 500
 
 
+def soft_delete_traces_matching(
+    org_uuid: str,
+    *,
+    agent_id: Optional[str] = None,
+    q: Optional[str] = None,
+    output_type: Optional[str] = None,
+) -> int:
+    """Soft-delete every live trace matching the list filters, returning the
+    number of rows flipped. No UUID list, so a workspace-wide delete stays one
+    statement however many traces it covers."""
+    where, params = _trace_filters(org_uuid, agent_id, q, output_type)
+    with get_db_connection() as conn:
+        cursor = conn.execute(
+            f"UPDATE traces SET deleted_at = CURRENT_TIMESTAMP, "
+            f"updated_at = CURRENT_TIMESTAMP WHERE {where}",
+            params,
+        )
+        conn.commit()
+        return cursor.rowcount or 0
+
+
 def soft_delete_traces(org_uuid: str, *, trace_ids: List[str]) -> int:
     """Soft-delete the given traces, returning the number of rows flipped."""
     if not trace_ids:
