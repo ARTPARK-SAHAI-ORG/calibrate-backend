@@ -41,8 +41,6 @@ def changed_lines(base: str) -> dict[str, set[int]]:
     for line in diff.splitlines():
         if line.startswith("+++ b/"):
             path = line[6:].strip()
-            if path == "/dev/null":
-                path = None
         elif line.startswith("@@") and path:
             m = re.search(r"\+(\d+)(?:,(\d+))?", line)
             if not m:
