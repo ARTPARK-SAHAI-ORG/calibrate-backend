@@ -2522,7 +2522,9 @@ def test_build_calibrate_config_widens_tool_call_input_to_one_user_turn(client):
     assert case["history"] == [
         {"role": "user", "content": "find the weather in Delhi"}
     ]
-    assert "input" not in case
+    # The plain input survives on the test case so the run result can show it
+    # as an Input/Output pair instead of a chat.
+    assert case["input"] == "find the weather in Delhi"
     assert case["evaluation"]["type"] == "tool_call"
     assert case["evaluation"]["tool_calls"] == [
         {"tool": "search", "arguments": {"q": "x"}}
