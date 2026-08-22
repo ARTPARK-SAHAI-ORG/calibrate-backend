@@ -9914,8 +9914,26 @@ def _like_escape(text: str) -> str:
     return text.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
 
 
+# What each output_type means, kept in SQL so the count and the page agree.
+# Mirrors how routers/traces._to_summary fills response_preview and
+# tool_call_count: a reply is non-blank text, a tool call needs a tool name,
+# and a trace with both counts as a reply only.
+_TRACE_HAS_RESPONSE = "TRIM(COALESCE(json_extract(output, '$.response'), '')) != ''"
+_TRACE_HAS_TOOL_CALL = (
+    "EXISTS (SELECT 1 FROM json_each(output, '$.tool_calls') "
+    "WHERE COALESCE(json_extract(value, '$.tool'), '') != '')"
+)
+TRACE_OUTPUT_TYPE_SQL = {
+    "response": _TRACE_HAS_RESPONSE,
+    "tool_call": f"NOT ({_TRACE_HAS_RESPONSE}) AND {_TRACE_HAS_TOOL_CALL}",
+}
+
+
 def _trace_filters(
-    org_uuid: str, agent_id: Optional[str] = None, q: Optional[str] = None
+    org_uuid: str,
+    agent_id: Optional[str] = None,
+    q: Optional[str] = None,
+    output_type: Optional[str] = None,
 ) -> Tuple[str, List[Any]]:
     """Build the shared WHERE clause for every live-trace query."""
     where = ["org_uuid = ?", "deleted_at IS NULL"]
@@ -9923,6 +9941,8 @@ def _trace_filters(
     if agent_id:
         where.append("agent_id = ?")
         params.append(agent_id)
+    if output_type:
+        where.append("(" + TRACE_OUTPUT_TYPE_SQL[output_type] + ")")
     if q and q.strip():
         lowered = q.strip().lower()
         # json.dumps escapes non-ASCII, so a Hindi word sits in the JSON columns
@@ -10025,9 +10045,10 @@ def list_traces(
     offset: int,
     agent_id: Optional[str] = None,
     q: Optional[str] = None,
+    output_type: Optional[str] = None,
 ) -> Tuple[List[Dict[str, Any]], int]:
     """Return `(page, total)` newest-first; filters and count run in SQL."""
-    where, params = _trace_filters(org_uuid, agent_id, q)
+    where, params = _trace_filters(org_uuid, agent_id, q, output_type)
     with get_db_connection() as conn:
         total = conn.execute(
             f"SELECT COUNT(*) FROM traces WHERE {where}", params

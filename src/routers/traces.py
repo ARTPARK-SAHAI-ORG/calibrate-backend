@@ -443,6 +443,10 @@ async def list_traces_endpoint(
         None,
         description="Return only traces containing this text in their message ID, conversation ID, conversation history, output, or metadata",
     ),
+    output_type: Optional[Literal["response", "tool_call"]] = Query(
+        None,
+        description="Return only traces whose output is of this kind. `response` covers every trace carrying a reply, including one that also issued tool calls. `tool_call` covers traces that only issued tool calls",
+    ),
 ):
     """List ingested traces, newest first"""
     if pagination.limit > MAX_LIST_LIMIT:
@@ -459,6 +463,7 @@ async def list_traces_endpoint(
         offset=pagination.offset,
         agent_id=agent_id,
         q=q,
+        output_type=output_type,
     )
     return page_envelope([_to_summary(row) for row in rows], total, pagination)
 
