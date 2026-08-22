@@ -844,7 +844,7 @@ def test_bulk_delete_rejects_an_unknown_key(client):
 
     res = client.post(
         "/traces/bulk-delete",
-        json={"trace_ids": [kept["uuid"]], "select_all": True},
+        json={"trace_ids": [kept["uuid"]], "selectall": True},
         headers=h,
     )
     assert res.status_code == 422, res.text
@@ -1742,3 +1742,148 @@ def test_tool_call_output_is_stored_and_ignored_by_conversion(client):
         "evaluation"
     ]["tool_calls"][0]
     assert "output" not in assertion
+
+
+# ---------------------------------------------------------------------------
+# select_all
+# ---------------------------------------------------------------------------
+
+
+def test_bulk_delete_select_all_honours_the_list_filters(client):
+    h, agent_id = _signup_with_agent(client)
+    other_agent = _create_agent(client, h)["uuid"]
+    text_only = _post_trace(
+        client, h, _payload(agent_id, _mid(), output={"response": "plain reply"})
+    )
+    tool_only = _post_trace(
+        client,
+        h,
+        _payload(
+            agent_id,
+            _mid(),
+            output={"tool_calls": [{"tool": "get_schedule", "arguments": {}}]},
+        ),
+    )
+    elsewhere = _post_trace(client, h, _payload(other_agent, _mid()))
+
+    res = client.post(
+        "/traces/bulk-delete",
+        json={"select_all": True, "agent_id": agent_id, "output_type": "tool_call"},
+        headers=h,
+    )
+    assert res.status_code == 200, res.text
+    assert res.json() == {"deleted": 1}
+    remaining = {
+        item["uuid"] for item in client.get("/traces", headers=h).json()["items"]
+    }
+    assert remaining == {text_only["uuid"], elsewhere["uuid"]}
+    assert tool_only["uuid"] not in remaining
+
+    # q narrows the same way the list does.
+    marked = _post_trace(
+        client,
+        h,
+        _payload(agent_id, _mid(), output={"response": "needle in here"}),
+    )
+    by_q = client.post(
+        "/traces/bulk-delete", json={"select_all": True, "q": "needle"}, headers=h
+    )
+    assert by_q.status_code == 200 and by_q.json() == {"deleted": 1}
+    assert client.get(f"/traces/{marked['uuid']}", headers=h).status_code == 404
+
+
+def test_bulk_delete_select_all_ignores_trace_ids_and_stays_in_the_workspace(client):
+    h, agent_id = _signup_with_agent(client)
+    mine = _post_trace(client, h, _payload(agent_id, _mid()))
+    other_h, other_agent = _signup_with_agent(client)
+    theirs = _post_trace(client, other_h, _payload(other_agent, _mid()))
+
+    res = client.post(
+        "/traces/bulk-delete",
+        json={"select_all": True, "trace_ids": [theirs["uuid"]]},
+        headers=h,
+    )
+    assert res.status_code == 200, res.text
+    assert res.json() == {"deleted": 1}
+    assert client.get(f"/traces/{mine['uuid']}", headers=h).status_code == 404
+    assert client.get(f"/traces/{theirs['uuid']}", headers=other_h).status_code == 200
+
+
+def test_bulk_delete_select_all_with_no_matches_deletes_nothing(client):
+    h, agent_id = _signup_with_agent(client)
+    _post_trace(client, h, _payload(agent_id, _mid()))
+
+    res = client.post(
+        "/traces/bulk-delete",
+        json={"select_all": True, "q": "no-such-text-anywhere"},
+        headers=h,
+    )
+    assert res.status_code == 200, res.text
+    assert res.json() == {"deleted": 0}
+    assert client.get("/traces", headers=h).json()["total"] == 1
+
+
+def test_convert_select_all_honours_the_list_filters(client):
+    h, agent_id = _signup_with_agent(client)
+    other_agent = _create_agent(client, h)["uuid"]
+    wanted = _post_trace(client, h, _payload(agent_id, _mid()))
+    _post_trace(client, h, _payload(other_agent, _mid()))
+
+    res = _convert(
+        client, h, select_all=True, agent_id=agent_id, type="tool_call"
+    )
+    assert res.status_code == 200, res.text
+    assert res.json()["created"] == 1
+    tests = client.get("/tests", headers=h).json()
+    assert tests["total"] == 1
+    assert tests["items"][0]["name"] == wanted["message_id"]
+
+
+def test_convert_select_all_ignores_trace_ids(client):
+    h, agent_id = _signup_with_agent(client)
+    a = _post_trace(client, h, _payload(agent_id, _mid()))
+    _post_trace(client, h, _payload(agent_id, _mid()))
+
+    res = _convert(
+        client, h, select_all=True, trace_ids=[a["uuid"]], type="tool_call"
+    )
+    assert res.status_code == 200, res.text
+    assert res.json()["created"] == 2
+
+
+def test_convert_select_all_rejects_an_empty_match(client):
+    h, agent_id = _signup_with_agent(client)
+    _post_trace(client, h, _payload(agent_id, _mid()))
+
+    res = _convert(
+        client, h, select_all=True, q="no-such-text-anywhere", type="tool_call"
+    )
+    assert res.status_code == 400, res.text
+    assert "No traces matched" in res.json()["detail"]
+    assert client.get("/tests", headers=h).json()["total"] == 0
+
+
+def test_convert_select_all_rejects_more_than_the_cap(client, monkeypatch):
+    import routers.traces as traces_mod
+
+    h, agent_id = _signup_with_agent(client)
+    _post_trace(client, h, _payload(agent_id, _mid()))
+    _post_trace(client, h, _payload(agent_id, _mid()))
+    monkeypatch.setattr(traces_mod, "MAX_CONVERT_TRACES", 1)
+
+    res = _convert(client, h, select_all=True, type="tool_call")
+    assert res.status_code == 400, res.text
+    assert "2 traces match" in res.json()["detail"]
+    assert client.get("/tests", headers=h).json()["total"] == 0
+
+
+def test_select_all_off_still_requires_trace_ids(client):
+    h, _ = _signup_with_agent(client)
+
+    assert (
+        client.post(
+            "/traces/bulk-delete", json={"select_all": False}, headers=h
+        ).status_code
+        == 422
+    )
+    assert _convert(client, h, select_all=False, type="tool_call").status_code == 422

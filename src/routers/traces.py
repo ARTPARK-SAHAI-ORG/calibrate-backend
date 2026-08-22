@@ -37,6 +37,7 @@ from db import (
     list_traces,
     set_test_evaluators,
     soft_delete_traces,
+    soft_delete_traces_matching,
 )
 from org_scope import ensure_owned_agent
 from pagination import PaginatedResponse, PaginationParams, page_envelope
@@ -288,15 +289,54 @@ class TraceResponse(BaseModel):
     )
 
 
-class BulkDeleteTracesRequest(BaseModel):
+_SELECT_ALL_DESCRIPTION = (
+    "Act on every trace matching the filters below instead of a list of IDs. "
+    "`trace_ids` is ignored when this is on"
+)
+_FILTER_AGENT_DESCRIPTION = (
+    "With `select_all` on, act only on traces from this agent"
+)
+_FILTER_Q_DESCRIPTION = (
+    "With `select_all` on, act only on traces containing this text in their "
+    "message ID, conversation ID, conversation history, output, or metadata"
+)
+_FILTER_OUTPUT_TYPE_DESCRIPTION = (
+    "With `select_all` on, act only on traces whose output is of this kind. "
+    "`response` covers every trace carrying a reply, including one that also "
+    "issued tool calls. `tool_call` covers traces that only issued tool calls"
+)
+
+
+class _TraceSelection(BaseModel):
+    """Either a list of IDs or `select_all` plus the same filters `GET /traces`
+    takes, so a caller acting on a whole filtered set never has to name its rows."""
+
     # Unknown keys must not be silently dropped: a misspelled field would
     # otherwise look like it filtered something.
     model_config = ConfigDict(extra="forbid")
 
     trace_ids: List[TraceUuid] = Field(
-        min_length=1,
+        default_factory=list, description="IDs of the traces to act on"
+    )
+    select_all: bool = Field(False, description=_SELECT_ALL_DESCRIPTION)
+    agent_id: Optional[str] = Field(None, description=_FILTER_AGENT_DESCRIPTION)
+    q: Optional[str] = Field(None, description=_FILTER_Q_DESCRIPTION)
+    output_type: Optional[Literal["response", "tool_call"]] = Field(
+        None, description=_FILTER_OUTPUT_TYPE_DESCRIPTION
+    )
+
+    @model_validator(mode="after")
+    def _require_a_selection(self):
+        if not self.select_all and not self.trace_ids:
+            raise ValueError("provide trace_ids, or select_all=true")
+        return self
+
+
+class BulkDeleteTracesRequest(_TraceSelection):
+    trace_ids: List[TraceUuid] = Field(
+        default_factory=list,
         max_length=MAX_DELETE_IDS,
-        description="IDs of the traces to delete",
+        description="IDs of the traces to delete. Omit when `select_all` is on",
     )
 
 
@@ -487,7 +527,15 @@ async def bulk_delete_traces(
     payload: BulkDeleteTracesRequest, ctx: OrgContext = Depends(get_current_org)
 ):
     """Soft-delete traces, freeing their capacity"""
-    deleted = soft_delete_traces(ctx.org_uuid, trace_ids=payload.trace_ids)
+    if payload.select_all:
+        deleted = soft_delete_traces_matching(
+            ctx.org_uuid,
+            agent_id=payload.agent_id,
+            q=payload.q,
+            output_type=payload.output_type,
+        )
+    else:
+        deleted = soft_delete_traces(ctx.org_uuid, trace_ids=payload.trace_ids)
     return {"deleted": deleted}
 
 
@@ -502,15 +550,11 @@ _CONVERT_TYPE_DESCRIPTION = (
 )
 
 
-class ConvertTracesToTestsRequest(BaseModel):
-    # Unknown keys must not be silently dropped: a misspelled `evaluators` would
-    # look like it linked judges when it linked none.
-    model_config = ConfigDict(extra="forbid")
-
+class ConvertTracesToTestsRequest(_TraceSelection):
     trace_ids: List[TraceUuid] = Field(
-        min_length=1,
+        default_factory=list,
         max_length=MAX_CONVERT_TRACES,
-        description="IDs of the traces to convert, one test per trace",
+        description="IDs of the traces to convert, one test per trace. Omit when `select_all` is on",
     )
     type: Literal["response", "general", "tool_call"] = Field(
         description=_CONVERT_TYPE_DESCRIPTION
@@ -625,15 +669,37 @@ def convert_traces_to_tests(
             list(dict.fromkeys(payload.evaluators)), ctx.org_uuid, payload.type
         )
 
-    requested = list(dict.fromkeys(payload.trace_ids))
-    traces = get_traces_by_uuids(ctx.org_uuid, requested)
-    found = {trace["uuid"] for trace in traces}
-    missing = [trace_uuid for trace_uuid in requested if trace_uuid not in found]
-    if missing:
-        raise HTTPException(
-            status_code=404,
-            detail={"error": "Some traces were not found", "trace_ids": missing},
+    if payload.select_all:
+        traces, total = list_traces(
+            ctx.org_uuid,
+            limit=MAX_CONVERT_TRACES,
+            offset=0,
+            agent_id=payload.agent_id,
+            q=payload.q,
+            output_type=payload.output_type,
         )
+        if total > MAX_CONVERT_TRACES:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    f"{total} traces match, more than the {MAX_CONVERT_TRACES} "
+                    "one conversion accepts. Narrow the filters and convert in batches."
+                ),
+            )
+        if not traces:
+            raise HTTPException(
+                status_code=400, detail="No traces matched the filters"
+            )
+    else:
+        requested = list(dict.fromkeys(payload.trace_ids))
+        traces = get_traces_by_uuids(ctx.org_uuid, requested)
+        found = {trace["uuid"] for trace in traces}
+        missing = [trace_uuid for trace_uuid in requested if trace_uuid not in found]
+        if missing:
+            raise HTTPException(
+                status_code=404,
+                detail={"error": "Some traces were not found", "trace_ids": missing},
+            )
 
     # `general` tests carry a standalone `input` and `response` tests a
     # `history`; calibrate refuses a row holding the wrong one. Since ingest ties
