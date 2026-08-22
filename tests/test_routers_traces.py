@@ -1593,10 +1593,11 @@ def test_convert_skips_the_link_when_the_agent_switched_interaction_type(client)
     evaluator = _create_evaluator(client, h, evaluator_type="llm-general")
     trace = _post_trace(client, h, _general_payload(agent_id, _mid()))
 
-    switched = client.put(
-        f"/agents/{agent_id}", json={"interaction_type": "conversation"}, headers=h
-    )
-    assert switched.status_code == 200, switched.text
+    # The API no longer allows this flip, so drive the column directly: the
+    # link guard exists because `db.update_agent` still accepts the change.
+    import db
+
+    assert db.update_agent(agent_id, interaction_type="conversation")
 
     res = _convert(
         client,

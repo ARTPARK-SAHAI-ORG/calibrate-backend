@@ -361,8 +361,6 @@ def _ensure_input_matches_agent(stored_input: Any, agent: Dict[str, Any]) -> Non
         agent.get("interaction_type") or DEFAULT_AGENT_INTERACTION_TYPE
     )
     is_text = isinstance(stored_input, str)
-    if is_text and not stored_input.strip():
-        raise HTTPException(status_code=400, detail="input must not be blank")
     if is_text and interaction_type != "general":
         raise HTTPException(
             status_code=400,
@@ -379,6 +377,8 @@ def _ensure_input_matches_agent(stored_input: Any, agent: Dict[str, Any]) -> Non
                 "standalone prompt, so input must be a string, not a list of turns."
             ),
         )
+    if is_text and not stored_input.strip():
+        raise HTTPException(status_code=400, detail="input must not be blank")
 
 
 @router.post(

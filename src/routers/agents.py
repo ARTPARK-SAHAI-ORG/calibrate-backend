@@ -418,10 +418,6 @@ class AgentUpdate(BaseModel):
         description="Set the benchmark verification map, keyed by model, for a `type=connection` agent. Omit to leave it untouched",
         examples=[{"openai/gpt-4.1": {"verified": True, "verified_at": "2026-01-01T00:00:00Z", "error": None}}],
     )
-    interaction_type: Optional[Literal["conversation", "general"]] = Field(
-        None,
-        description=AGENT_INTERACTION_TYPE_DESCRIPTION + "\n\nOmit to leave unchanged",
-    )
 
 
 class AgentResponse(BaseModel):
@@ -881,7 +877,6 @@ def update_agent_endpoint(
             agent_uuid=agent_uuid,
             name=agent.name,
             config=agent.config,
-            interaction_type=agent.interaction_type,
         )
 
     if not updated:

@@ -2538,6 +2538,30 @@ def run_agent_test(
                     status_code=404, detail=f"Test {test_uuid} not found"
                 )
             tests.append(test)
+        # Linking checks this, running by ID never did. It matters now that the
+        # agent's interaction_type picks the request body: calibrate raises on
+        # the first test whose shape the agent cannot be sent, and it gathers
+        # without return_exceptions, so one bad test takes the whole run down.
+        agent_interaction_type = (
+            agent.get("interaction_type") or DEFAULT_AGENT_INTERACTION_TYPE
+        )
+        mismatched = [
+            test["uuid"]
+            for test in tests
+            if required_agent_interaction_type(test.get("type"), test.get("config"))
+            != agent_interaction_type
+        ]
+        if mismatched:
+            raise HTTPException(
+                status_code=400,
+                detail={
+                    "error": (
+                        f"Agent has interaction_type='{agent_interaction_type}' "
+                        "and cannot run these tests"
+                    ),
+                    "test_uuids": mismatched,
+                },
+            )
     else:
         # No test_uuids provided — run all tests linked to the agent
         tests = get_tests_for_agent(agent_uuid)

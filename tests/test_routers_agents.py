@@ -820,27 +820,53 @@ def test_create_agent_with_interaction_type_general(client):
     assert r.json()["interaction_type"] == "general"
 
 
-def test_update_agent_interaction_type_is_mutable(client):
-    """Unlike `type`, `interaction_type` can be changed after creation."""
+def test_update_agent_interaction_type_is_immutable(client):
+    """It picks the request body the agent is sent, so changing it would strand
+    every test already linked and leave the connection verified against a body
+    the agent no longer receives. Ignored on update, exactly like `type`."""
     h = _signup(client)
-    agent = _create_agent(client, h, f"it-mutable-{uuid.uuid4().hex[:6]}")
-    assert client.get(f"/agents/{agent['uuid']}", headers=h).json()["interaction_type"] == "conversation"
+    agent = _create_agent(client, h, f"it-immutable-{uuid.uuid4().hex[:6]}")
 
     r = client.put(
         f"/agents/{agent['uuid']}",
-        json={"interaction_type": "general"},
+        json={"name": "renamed", "interaction_type": "general"},
+        headers=h,
+    )
+    assert r.status_code == 200, r.text
+    assert r.json()["interaction_type"] == "conversation"
+    assert r.json()["name"] == "renamed"
+    fetched = client.get(f"/agents/{agent['uuid']}", headers=h).json()
+    assert fetched["interaction_type"] == "conversation"
+
+
+def test_update_agent_cannot_flip_a_general_agent_either(client):
+    h = _signup(client)
+    created = client.post(
+        "/agents",
+        json={
+            "name": f"it-gen-{uuid.uuid4().hex[:6]}",
+            "type": "agent",
+            "interaction_type": "general",
+        },
+        headers=h,
+    ).json()
+
+    r = client.put(
+        f"/agents/{created['uuid']}",
+        json={"name": "renamed", "interaction_type": "conversation"},
         headers=h,
     )
     assert r.status_code == 200, r.text
     assert r.json()["interaction_type"] == "general"
 
-    r = client.put(
-        f"/agents/{agent['uuid']}",
+    # Sending it alone leaves nothing to update, so the caller gets an error
+    # rather than a success that changed nothing.
+    alone = client.put(
+        f"/agents/{created['uuid']}",
         json={"interaction_type": "conversation"},
         headers=h,
     )
-    assert r.status_code == 200, r.text
-    assert r.json()["interaction_type"] == "conversation"
+    assert alone.status_code == 400, alone.text
 
 
 def test_update_agent_omitting_interaction_type_leaves_it_unchanged(client):

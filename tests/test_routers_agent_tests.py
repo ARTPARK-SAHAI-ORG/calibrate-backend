@@ -2650,3 +2650,33 @@ def test_build_calibrate_config_rejects_an_unknown_agent_type(client):
         _build_calibrate_config(stored, [db.get_test(test["uuid"])], "bucket")
     assert exc.value.status_code == 400
     assert "conversation, general" in exc.value.detail
+
+
+def test_run_by_test_uuids_rejects_a_test_the_agent_cannot_be_sent(client):
+    """Linking checks this; running by ID never did. calibrate raises on the
+    first test whose shape the agent cannot take and gathers without
+    return_exceptions, so one of these would take the whole run down."""
+    import db
+
+    h = _signup(client)["headers"]
+    agent = _create_general_agent(client, h)
+    db.update_agent(
+        agent["uuid"],
+        config={"agent_url": "http://agent.local/run", "connection_verified": True},
+    )
+    conversational = _create_test(client, h)
+    fits = _create_tool_call_test(client, h, input_text="find the weather in Delhi")
+
+    blocked = client.post(
+        f"/agent-tests/agent/{agent['uuid']}/run",
+        json={"test_uuids": [fits["uuid"], conversational["uuid"]]},
+        headers=h,
+    )
+    assert blocked.status_code == 400, blocked.text
+    detail = blocked.json()["detail"]
+    assert detail["test_uuids"] == [conversational["uuid"]]
+    assert "general" in detail["error"]
+
+    # No job was created, so the run never started.
+    runs = client.get(f"/agent-tests/agent/{agent['uuid']}/runs", headers=h)
+    assert runs.json()["total"] == 0
