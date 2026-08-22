@@ -1366,12 +1366,15 @@ def _build_calibrate_config(
             # A tool_call test aimed at a general agent stores a standalone
             # `input` instead of a conversation. calibrate only reads `history`
             # for this row type, so widen it to the one user turn it stands for.
+            # `input` is copied, not moved: this config is echoed back as
+            # `test_case` on the run result, and it is the only marker telling a
+            # reader the test was written as one input rather than a conversation.
             if (
                 test_config.get("history") is None
                 and test_config.get("input") is not None
             ):
                 test_config["history"] = [
-                    {"role": "user", "content": test_config.pop("input")}
+                    {"role": "user", "content": test_config["input"]}
                 ]
             tool_calls = []
             for tool_call in evaluation.get("tool_calls", []):
