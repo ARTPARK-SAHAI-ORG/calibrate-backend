@@ -138,7 +138,7 @@ class TraceToolCall(BaseModel):
     )
     # Stored and displayed only. Conversion asserts the call, not its result,
     # so `POST /traces/convert-to-tests` never reads this.
-    output: Optional[Any] = Field(
+    output: Any = Field(
         None,
         description="What the tool returned for this call. Any JSON value. Omit when you do not record it",
     )
