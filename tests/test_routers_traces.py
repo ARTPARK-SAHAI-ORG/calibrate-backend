@@ -192,7 +192,7 @@ def test_ingest_validation(client):
     assert tool_only_row["response_preview"] is None
     assert tool_only_row["tool_names"] == ["get_schedule"]
     assert tool_only_row["tool_calls"] == [
-        {"tool": "get_schedule", "arguments": {}}
+        {"tool": "get_schedule", "arguments": {}, "output": None}
     ]
 
     # input must be non-empty.
@@ -440,7 +440,7 @@ def test_list_and_detail_roundtrip(client):
     assert summary_b["tool_call_count"] == 1
     assert summary_b["tool_names"] == ["get_schedule"]
     assert summary_b["tool_calls"] == [
-        {"tool": "get_schedule", "arguments": {"child_age_weeks": 14}}
+        {"tool": "get_schedule", "arguments": {"child_age_weeks": 14}, "output": None}
     ]
     assert summary_b["metadata_count"] == 1
     assert summary_b["input_preview"] == "and in months?"
@@ -456,6 +456,7 @@ def test_list_and_detail_roundtrip(client):
     assert full["output"]["tool_calls"][0] == {
         "tool": "get_schedule",
         "arguments": {"child_age_weeks": 14},
+        "output": None,
     }
     assert full["metadata"] == [{"key": "gen_ai.request.model", "value": "gpt-4"}]
 
@@ -499,11 +500,15 @@ def test_output_with_multiple_tool_calls_roundtrips(client):
     summary = client.get("/traces", headers=h).json()["items"][0]
     assert summary["tool_call_count"] == 2
     assert summary["tool_names"] == ["check_availability", "book_appointment"]
-    assert summary["tool_calls"] == output["tool_calls"]
+    assert summary["tool_calls"] == [
+        {**call, "output": None} for call in output["tool_calls"]
+    ]
     assert summary["response_preview"].startswith("You're booked")
 
     full = client.get(f"/traces/{created['uuid']}", headers=h).json()
-    assert full["output"]["tool_calls"] == output["tool_calls"]
+    assert full["output"]["tool_calls"] == [
+        {**call, "output": None} for call in output["tool_calls"]
+    ]
     assert full["output"]["response"] == output["response"]
 
 
@@ -1385,7 +1390,10 @@ def test_ingest_stores_a_standalone_prompt_for_a_general_agent(client):
 
     detail = client.get(f"/traces/{created['uuid']}", headers=h).json()
     assert detail["input"] == payload["input"]
-    assert detail["output"] == payload["output"]
+    assert detail["output"]["response"] == payload["output"]["response"]
+    assert detail["output"]["tool_calls"] == [
+        {**call, "output": None} for call in payload["output"]["tool_calls"]
+    ]
 
 
 def test_ingest_rejects_a_standalone_prompt_for_a_conversational_agent(client):
@@ -1622,3 +1630,35 @@ def test_last_user_content_handles_both_input_shapes():
     assert _last_user_content("just the prompt") == "just the prompt"
     assert _last_user_content([{"role": "user", "content": "hi"}]) == "hi"
     assert _last_user_content([{"role": "assistant", "content": "hi"}]) is None
+
+
+def test_tool_call_output_is_stored_and_ignored_by_conversion(client):
+    h, agent_id = _signup_with_agent(client)
+    output = {
+        "response": "Next visit is at 14 weeks.",
+        "tool_calls": [
+            {
+                "tool": "get_schedule",
+                "arguments": {"child_age_weeks": 14},
+                "output": {"next_visit": "2026-09-01", "vaccines": ["OPV"]},
+            }
+        ],
+    }
+    created = _post_trace(client, h, _payload(agent_id, _mid(), output=output))
+
+    summary = next(
+        item
+        for item in client.get("/traces", headers=h).json()["items"]
+        if item["uuid"] == created["uuid"]
+    )
+    assert summary["tool_calls"] == output["tool_calls"]
+    full = client.get(f"/traces/{created['uuid']}", headers=h).json()
+    assert full["output"]["tool_calls"] == output["tool_calls"]
+
+    res = _convert(client, h, trace_ids=[created["uuid"]], type="tool_call")
+    assert res.status_code == 200, res.text
+    test_uuid = res.json()["test_uuids"][0]
+    assertion = client.get(f"/tests/{test_uuid}", headers=h).json()["config"][
+        "evaluation"
+    ]["tool_calls"][0]
+    assert "output" not in assertion

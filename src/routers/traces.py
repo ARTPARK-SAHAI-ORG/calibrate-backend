@@ -136,6 +136,12 @@ class TraceToolCall(BaseModel):
         None,
         description="Argument values the agent passed to the tool. Omit when the call had none",
     )
+    # Stored and displayed only. Conversion asserts the call, not its result,
+    # so `POST /traces/convert-to-tests` never reads this.
+    output: Optional[Dict[str, Any]] = Field(
+        None,
+        description="What the tool returned for this call. Omit when you do not record it",
+    )
 
 
 class TraceOutput(BaseModel):
@@ -340,7 +346,11 @@ def _to_summary(row: Dict[str, Any]) -> Dict[str, Any]:
         "response_preview": _preview(output.get("response")),
         "tool_names": [call["tool"] for call in calls],
         "tool_calls": [
-            {"tool": call["tool"], "arguments": call.get("arguments")}
+            {
+                "tool": call["tool"],
+                "arguments": call.get("arguments"),
+                "output": call.get("output"),
+            }
             for call in calls
         ],
         "turn_count": _turn_count(row.get("input")),
