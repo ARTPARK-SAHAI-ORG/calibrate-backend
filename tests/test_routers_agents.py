@@ -909,8 +909,11 @@ def test_list_and_get_agents_include_interaction_type(client):
 @pytest.mark.parametrize(
     "interaction_type,expected_body",
     [
-        ("conversation", {"messages": [{"role": "user", "content": "Hi"}]}),
-        ("general", {"input": "Hi"}),
+        (
+            "conversation",
+            {"messages": [{"role": "user", "content": "Hello, are you there?"}]},
+        ),
+        ("general", {"input": "Hello, are you there?"}),
     ],
 )
 def test_verify_sends_the_body_the_agents_type_expects(
@@ -986,7 +989,7 @@ def test_presave_verify_sends_the_body_its_stated_type_expects(client, monkeypat
         headers=h,
     )
     assert res.status_code == 200, res.text
-    assert sent["body"] == {"input": "Hi"}
+    assert sent["body"] == {"input": "Hello, are you there?"}
 
     # Omitting it keeps the conversation body.
     client.post(
@@ -994,4 +997,6 @@ def test_presave_verify_sends_the_body_its_stated_type_expects(client, monkeypat
         json={"agent_url": "https://example.com/run"},
         headers=h,
     )
-    assert sent["body"] == {"messages": [{"role": "user", "content": "Hi"}]}
+    assert sent["body"] == {
+        "messages": [{"role": "user", "content": "Hello, are you there?"}]
+    }
