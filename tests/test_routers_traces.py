@@ -1655,6 +1655,20 @@ def test_tool_call_output_is_stored_and_ignored_by_conversion(client):
     full = client.get(f"/traces/{created['uuid']}", headers=h).json()
     assert full["output"]["tool_calls"] == output["tool_calls"]
 
+    # A tool result is not always an object: a list or a bare string is stored too.
+    for value in ([{"date": "2026-09-01"}], "2026-09-01", 14, True):
+        other = _post_trace(
+            client,
+            h,
+            _payload(
+                agent_id,
+                _mid(),
+                output={"tool_calls": [{"tool": "get_schedule", "output": value}]},
+            ),
+        )
+        stored = client.get(f"/traces/{other['uuid']}", headers=h).json()
+        assert stored["output"]["tool_calls"][0]["output"] == value
+
     res = _convert(client, h, trace_ids=[created["uuid"]], type="tool_call")
     assert res.status_code == 200, res.text
     test_uuid = res.json()["test_uuids"][0]
