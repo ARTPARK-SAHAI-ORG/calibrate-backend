@@ -61,12 +61,14 @@ _TEST_NAME_DESCRIPTION = "Name of the test, unique within the workspace"
 # Free-form on purpose (see the type-decision note): `evaluation` is a
 # discriminated union by test type and the whole config is a calibrate
 # passthrough, so it's documented, not enforced.
-_TEST_CONFIG_DESCRIPTION = """The calibrate test config. Three top-level keys.
+_TEST_CONFIG_DESCRIPTION = """The calibrate test config.
 
-- `history`: the required conversation up to the agent's turn, for `response`/`conversation`/`tool_call` tests. Each item is `{role, content}` with `role` one of `user`, `assistant`, `tool`. A `tool` message also carries `tool_call_id` and `name`.
-- `input`: the required plain-text prompt, for `general` tests only. A string, not a conversation.
+- `history`: the conversation up to the agent's turn, required for `response` and `conversation` tests and for a `tool_call` test aimed at a conversational agent. Each item is `{role, content}` with `role` one of `user`, `assistant`, `tool`. A `tool` message also carries `tool_call_id` and `name`.
+- `input`: a standalone prompt with no conversation around it, required for `general` tests and for a `tool_call` test aimed at a `general` agent. A string, not a conversation.
 - `evaluation`: the required `{type, ...}`, where `type` matches the test's `type` below.
 - `settings`: an optional object, e.g. `{"language": "en"}`.
+
+A `tool_call` test carries exactly one of `history` or `input`, and which one it carries decides the agent it can be linked to.
 
 `evaluation` by test type:
 - `response`: judge the agent's reply, graded by the linked evaluators. `{"type": "response"}`
@@ -88,7 +90,7 @@ For `tool_call`, each expected argument value is one of:
 }
 ```
 
-`tool_call` example:
+`tool_call` example, for a conversational agent. Swap `history` for `input` to aim it at a `general` agent:
 ```json
 {
   "history": [{"role": "user", "content": "Book room 101 for tomorrow"}],
@@ -134,6 +136,9 @@ REQUIRED_EVALUATOR_TYPE_BY_TEST_TYPE: Dict[str, str] = {
 # conversation history to feed a conversational agent, and conversation-style tests
 # (response/tool_call/conversation) have nothing to feed a `general` agent. Single
 # source of truth for the gate enforced in `POST /agent-tests` and `POST /tests/bulk`.
+# Mirrors calibrate's `connections.AGENT_TYPES`, which the config's `agent_type`
+# is validated against before the run starts.
+AGENT_INTERACTION_TYPES = ("conversation", "general")
 DEFAULT_AGENT_INTERACTION_TYPE = "conversation"
 REQUIRED_AGENT_INTERACTION_TYPE_BY_TEST_TYPE: Dict[str, str] = {
     "response": "conversation",

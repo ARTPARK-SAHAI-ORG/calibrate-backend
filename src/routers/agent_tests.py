@@ -54,6 +54,7 @@ from db import (
 from llm_judge import build_test_evaluators_payload, evaluator_value_name
 from routers.agents import AgentSummary, to_agent_summary
 from routers.tests import (
+    AGENT_INTERACTION_TYPES,
     DEFAULT_AGENT_INTERACTION_TYPE,
     required_agent_interaction_type,
 )
@@ -1398,8 +1399,22 @@ def _build_calibrate_config(
 
     if agent_config.get("agent_url"):
         # Agent connection mode — agent owns its LLM; no system_prompt/tools/model in config
+        # Tells calibrate what to POST: the exchange so far as `messages`, or just
+        # the latest user text as `input` for a one-shot agent. Checked here
+        # because calibrate exits the whole run on an unknown value, and the
+        # column has no CHECK constraint to lean on.
+        agent_type = agent.get("interaction_type") or DEFAULT_AGENT_INTERACTION_TYPE
+        if agent_type not in AGENT_INTERACTION_TYPES:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    f"Agent has interaction_type='{agent_type}', which is not one "
+                    f"of {', '.join(AGENT_INTERACTION_TYPES)}."
+                ),
+            )
         config: Dict[str, Any] = {
             "agent_url": agent_config["agent_url"],
+            "agent_type": agent_type,
             "test_cases": all_test_cases,
         }
         if top_level_evaluators:
@@ -2523,6 +2538,30 @@ def run_agent_test(
                     status_code=404, detail=f"Test {test_uuid} not found"
                 )
             tests.append(test)
+        # Linking checks this, running by ID never did. It matters now that the
+        # agent's interaction_type picks the request body: calibrate raises on
+        # the first test whose shape the agent cannot be sent, and it gathers
+        # without return_exceptions, so one bad test takes the whole run down.
+        agent_interaction_type = (
+            agent.get("interaction_type") or DEFAULT_AGENT_INTERACTION_TYPE
+        )
+        mismatched = [
+            test["uuid"]
+            for test in tests
+            if required_agent_interaction_type(test.get("type"), test.get("config"))
+            != agent_interaction_type
+        ]
+        if mismatched:
+            raise HTTPException(
+                status_code=400,
+                detail={
+                    "error": (
+                        f"Agent has interaction_type='{agent_interaction_type}' "
+                        "and cannot run these tests"
+                    ),
+                    "test_uuids": mismatched,
+                },
+            )
     else:
         # No test_uuids provided — run all tests linked to the agent
         tests = get_tests_for_agent(agent_uuid)

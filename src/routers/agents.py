@@ -148,12 +148,21 @@ async def _verify_agent_connection(
     messages: Optional[List[Dict[str, str]]] = None,
     default_inputs: Optional[Dict[str, Any]] = None,
     inputs: Optional[Dict[str, Any]] = None,
+    interaction_type: str = DEFAULT_AGENT_INTERACTION_TYPE,
 ) -> Dict[str, Any]:
-    """Verify agent connection using calibrate's TextAgentConnection."""
+    """Verify agent connection using calibrate's TextAgentConnection.
+
+    `interaction_type` picks the request body the probe sends, so verification
+    exercises the same shape a run will: the exchange so far as `messages`, or
+    only the latest user text as `input` for a `general` agent.
+    """
     _validate_agent_url(agent_url)
     safe_headers = _sanitize_headers(agent_headers)
     agent = TextAgentConnection(
-        url=agent_url, headers=safe_headers, default_inputs=default_inputs
+        url=agent_url,
+        headers=safe_headers,
+        default_inputs=default_inputs,
+        type=interaction_type,
     )
 
     try:
@@ -409,10 +418,6 @@ class AgentUpdate(BaseModel):
         description="Set the benchmark verification map, keyed by model, for a `type=connection` agent. Omit to leave it untouched",
         examples=[{"openai/gpt-4.1": {"verified": True, "verified_at": "2026-01-01T00:00:00Z", "error": None}}],
     )
-    interaction_type: Optional[Literal["conversation", "general"]] = Field(
-        None,
-        description=AGENT_INTERACTION_TYPE_DESCRIPTION + "\n\nOmit to leave unchanged",
-    )
 
 
 class AgentResponse(BaseModel):
@@ -594,6 +599,11 @@ class VerifyConnectionRequest(AgentVerifyRequest):
         description="Extra fields merged into every request to the agent, since no agent is stored yet",
         examples=[{"condition_area": "cardiology"}],
     )
+    interaction_type: Literal["conversation", "general"] = Field(
+        DEFAULT_AGENT_INTERACTION_TYPE,
+        description=AGENT_INTERACTION_TYPE_DESCRIPTION
+        + "\n\nOmit for a back-and-forth agent",
+    )
 
 
 class VerifyConnectionResponse(BaseModel):
@@ -627,6 +637,7 @@ async def verify_agent_connection_presave(
         messages=request.messages,
         default_inputs=request.default_inputs,
         inputs=request.inputs,
+        interaction_type=request.interaction_type,
     )
     return VerifyConnectionResponse(**result)
 
@@ -676,6 +687,9 @@ async def verify_agent_connection(
         messages=request.messages,
         default_inputs=agent_config.get("default_inputs"),
         inputs=request.inputs,
+        interaction_type=(
+            agent.get("interaction_type") or DEFAULT_AGENT_INTERACTION_TYPE
+        ),
     )
 
     # Only persist successful verification results into agent config.
@@ -863,7 +877,6 @@ def update_agent_endpoint(
             agent_uuid=agent_uuid,
             name=agent.name,
             config=agent.config,
-            interaction_type=agent.interaction_type,
         )
 
     if not updated:

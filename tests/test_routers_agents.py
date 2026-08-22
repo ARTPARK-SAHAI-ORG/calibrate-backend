@@ -820,27 +820,53 @@ def test_create_agent_with_interaction_type_general(client):
     assert r.json()["interaction_type"] == "general"
 
 
-def test_update_agent_interaction_type_is_mutable(client):
-    """Unlike `type`, `interaction_type` can be changed after creation."""
+def test_update_agent_interaction_type_is_immutable(client):
+    """It picks the request body the agent is sent, so changing it would strand
+    every test already linked and leave the connection verified against a body
+    the agent no longer receives. Ignored on update, exactly like `type`."""
     h = _signup(client)
-    agent = _create_agent(client, h, f"it-mutable-{uuid.uuid4().hex[:6]}")
-    assert client.get(f"/agents/{agent['uuid']}", headers=h).json()["interaction_type"] == "conversation"
+    agent = _create_agent(client, h, f"it-immutable-{uuid.uuid4().hex[:6]}")
 
     r = client.put(
         f"/agents/{agent['uuid']}",
-        json={"interaction_type": "general"},
+        json={"name": "renamed", "interaction_type": "general"},
+        headers=h,
+    )
+    assert r.status_code == 200, r.text
+    assert r.json()["interaction_type"] == "conversation"
+    assert r.json()["name"] == "renamed"
+    fetched = client.get(f"/agents/{agent['uuid']}", headers=h).json()
+    assert fetched["interaction_type"] == "conversation"
+
+
+def test_update_agent_cannot_flip_a_general_agent_either(client):
+    h = _signup(client)
+    created = client.post(
+        "/agents",
+        json={
+            "name": f"it-gen-{uuid.uuid4().hex[:6]}",
+            "type": "agent",
+            "interaction_type": "general",
+        },
+        headers=h,
+    ).json()
+
+    r = client.put(
+        f"/agents/{created['uuid']}",
+        json={"name": "renamed", "interaction_type": "conversation"},
         headers=h,
     )
     assert r.status_code == 200, r.text
     assert r.json()["interaction_type"] == "general"
 
-    r = client.put(
-        f"/agents/{agent['uuid']}",
+    # Sending it alone leaves nothing to update, so the caller gets an error
+    # rather than a success that changed nothing.
+    alone = client.put(
+        f"/agents/{created['uuid']}",
         json={"interaction_type": "conversation"},
         headers=h,
     )
-    assert r.status_code == 200, r.text
-    assert r.json()["interaction_type"] == "conversation"
+    assert alone.status_code == 400, alone.text
 
 
 def test_update_agent_omitting_interaction_type_leaves_it_unchanged(client):
@@ -904,3 +930,99 @@ def test_list_and_get_agents_include_interaction_type(client):
     assert r.status_code == 200, r.text
     item = next(a for a in r.json()["items"] if a["uuid"] == agent["uuid"])
     assert item["interaction_type"] == "conversation"
+
+
+@pytest.mark.parametrize(
+    "interaction_type,expected_body",
+    [
+        (
+            "conversation",
+            {"messages": [{"role": "user", "content": "Hello, are you there?"}]},
+        ),
+        ("general", {"input": "Hello, are you there?"}),
+    ],
+)
+def test_verify_sends_the_body_the_agents_type_expects(
+    client, monkeypatch, interaction_type, expected_body
+):
+    """A general agent takes one plain prompt, so verification must probe it that
+    way rather than with a conversation it cannot read."""
+    import httpx
+
+    sent = {}
+
+    class _Reply:
+        status_code = 200
+        text = ""
+
+        @staticmethod
+        def json():
+            return {"response": "hello"}
+
+    async def _fake_post(self, url, json=None, headers=None):
+        sent["body"] = json
+        return _Reply()
+
+    monkeypatch.setattr(httpx.AsyncClient, "post", _fake_post)
+
+    h = _signup(client)
+    agent = client.post(
+        "/agents",
+        json={
+            "name": f"a-{uuid.uuid4().hex[:6]}",
+            "type": "connection",
+            "interaction_type": interaction_type,
+            "config": {"agent_url": "https://example.com/run"},
+        },
+        headers=h,
+    ).json()
+
+    res = client.post(
+        f"/agents/{agent['uuid']}/verify-connection", json={}, headers=h
+    )
+    assert res.status_code == 200, res.text
+    assert res.json()["success"] is True
+    assert sent["body"] == expected_body
+
+
+def test_presave_verify_sends_the_body_its_stated_type_expects(client, monkeypatch):
+    """No agent exists yet, so the caller states the type on the request."""
+    import httpx
+
+    sent = {}
+
+    class _Reply:
+        status_code = 200
+        text = ""
+
+        @staticmethod
+        def json():
+            return {"response": "hello"}
+
+    async def _fake_post(self, url, json=None, headers=None):
+        sent["body"] = json
+        return _Reply()
+
+    monkeypatch.setattr(httpx.AsyncClient, "post", _fake_post)
+
+    h = _signup(client)
+    res = client.post(
+        "/agents/verify-connection",
+        json={
+            "agent_url": "https://example.com/run",
+            "interaction_type": "general",
+        },
+        headers=h,
+    )
+    assert res.status_code == 200, res.text
+    assert sent["body"] == {"input": "Hello, are you there?"}
+
+    # Omitting it keeps the conversation body.
+    client.post(
+        "/agents/verify-connection",
+        json={"agent_url": "https://example.com/run"},
+        headers=h,
+    )
+    assert sent["body"] == {
+        "messages": [{"role": "user", "content": "Hello, are you there?"}]
+    }

@@ -2594,3 +2594,89 @@ def test_build_calibrate_config_tolerates_expected_tool_call_without_arguments(c
     assert config["test_cases"][0]["evaluation"]["tool_calls"] == [
         {"tool": "search", "arguments": None}
     ]
+
+
+@pytest.mark.parametrize(
+    "interaction_type,expected", [(None, "conversation"), ("general", "general")]
+)
+def test_build_calibrate_config_sends_the_agents_type(
+    client, interaction_type, expected
+):
+    """calibrate reads `agent_type` to decide whether to POST `messages` or `input`."""
+    import db
+    from routers.agent_tests import _build_calibrate_config
+
+    h = _signup(client)["headers"]
+    agent = (
+        _create_general_agent(client, h)
+        if interaction_type
+        else _create_agent(client, h)
+    )
+    db.update_agent(
+        agent["uuid"],
+        config={"agent_url": "http://agent.local/run", "connection_verified": True},
+    )
+    test = (
+        _create_tool_call_test(client, h, input_text="find the weather in Delhi")
+        if interaction_type
+        else _create_test(client, h)
+    )
+
+    config, _ = _build_calibrate_config(
+        db.get_agent(agent["uuid"]), [db.get_test(test["uuid"])], "bucket"
+    )
+    assert config["agent_type"] == expected
+
+
+def test_build_calibrate_config_rejects_an_unknown_agent_type(client):
+    """calibrate exits the whole run on an unknown `agent_type`, so catch it here."""
+    import db
+    from routers.agent_tests import _build_calibrate_config
+
+    h = _signup(client)["headers"]
+    agent = _create_agent(client, h)
+    db.update_agent(
+        agent["uuid"],
+        config={"agent_url": "http://agent.local/run", "connection_verified": True},
+    )
+    test = _create_test(client, h)
+
+    stored = db.get_agent(agent["uuid"])
+    stored["interaction_type"] = "chat"
+
+    from fastapi import HTTPException
+
+    with pytest.raises(HTTPException) as exc:
+        _build_calibrate_config(stored, [db.get_test(test["uuid"])], "bucket")
+    assert exc.value.status_code == 400
+    assert "conversation, general" in exc.value.detail
+
+
+def test_run_by_test_uuids_rejects_a_test_the_agent_cannot_be_sent(client):
+    """Linking checks this; running by ID never did. calibrate raises on the
+    first test whose shape the agent cannot take and gathers without
+    return_exceptions, so one of these would take the whole run down."""
+    import db
+
+    h = _signup(client)["headers"]
+    agent = _create_general_agent(client, h)
+    db.update_agent(
+        agent["uuid"],
+        config={"agent_url": "http://agent.local/run", "connection_verified": True},
+    )
+    conversational = _create_test(client, h)
+    fits = _create_tool_call_test(client, h, input_text="find the weather in Delhi")
+
+    blocked = client.post(
+        f"/agent-tests/agent/{agent['uuid']}/run",
+        json={"test_uuids": [fits["uuid"], conversational["uuid"]]},
+        headers=h,
+    )
+    assert blocked.status_code == 400, blocked.text
+    detail = blocked.json()["detail"]
+    assert detail["test_uuids"] == [conversational["uuid"]]
+    assert "general" in detail["error"]
+
+    # No job was created, so the run never started.
+    runs = client.get(f"/agent-tests/agent/{agent['uuid']}/runs", headers=h)
+    assert runs.json()["total"] == 0
