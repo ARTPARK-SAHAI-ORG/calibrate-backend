@@ -45,12 +45,11 @@ def _api_key_headers(client, h):
     return {"X-API-Key": created.json()["key"]}
 
 
-def _create_agent(client, h):
-    return client.post(
-        "/agents",
-        json={"name": f"a-{uuid.uuid4().hex[:6]}", "type": "agent"},
-        headers=h,
-    ).json()
+def _create_agent(client, h, interaction_type=None):
+    body = {"name": f"a-{uuid.uuid4().hex[:6]}", "type": "agent"}
+    if interaction_type:
+        body["interaction_type"] = interaction_type
+    return client.post("/agents", json=body, headers=h).json()
 
 
 def _signup_with_agent(client):
@@ -80,6 +79,19 @@ def _payload(
     }
     payload.update(overrides)
     return payload
+
+
+def _general_payload(agent_id: str, message_id: str, **overrides):
+    """Trace shaped for a `general` agent: a standalone prompt, not a conversation."""
+    overrides.setdefault(
+        "input", "Summarize the vaccination schedule for a 14-week-old."
+    )
+    return _payload(agent_id, message_id, **overrides)
+
+
+def _signup_with_general_agent(client):
+    h = _signup(client)
+    return h, _create_agent(client, h, interaction_type="general")["uuid"]
 
 
 def _mid() -> str:
@@ -1358,3 +1370,254 @@ def test_convert_response_accepts_a_trace_with_no_tool_calls(client):
     assert created["type"] == "response"
     assert created["config"]["evaluation"] == {"type": "response"}
     assert created["config"]["history"] == payload["input"]
+
+
+# ---------------------------------------------------------------------------
+# Standalone-prompt traces (general agents)
+# ---------------------------------------------------------------------------
+
+
+def test_ingest_stores_a_standalone_prompt_for_a_general_agent(client):
+    h, agent_id = _signup_with_general_agent(client)
+    payload = _general_payload(agent_id, _mid())
+
+    created = _post_trace(client, h, payload)
+
+    detail = client.get(f"/traces/{created['uuid']}", headers=h).json()
+    assert detail["input"] == payload["input"]
+    assert detail["output"] == payload["output"]
+
+
+def test_ingest_rejects_a_standalone_prompt_for_a_conversational_agent(client):
+    h, agent_id = _signup_with_agent(client)
+
+    res = client.post(
+        "/traces", json=_general_payload(agent_id, _mid()), headers=h
+    )
+    assert res.status_code == 400, res.text
+    assert "list of turns" in res.json()["detail"]
+
+
+def test_ingest_rejects_a_conversation_for_a_general_agent(client):
+    h, agent_id = _signup_with_general_agent(client)
+
+    res = client.post("/traces", json=_payload(agent_id, _mid()), headers=h)
+    assert res.status_code == 400, res.text
+    assert "must be a string" in res.json()["detail"]
+
+
+def test_ingest_rejects_a_blank_standalone_prompt(client):
+    h, agent_id = _signup_with_general_agent(client)
+
+    res = client.post(
+        "/traces", json=_general_payload(agent_id, _mid(), input="   "), headers=h
+    )
+    assert res.status_code == 400, res.text
+    assert res.json()["detail"] == "input must not be blank"
+
+
+def test_ingest_rejects_an_empty_or_oversized_standalone_prompt(client):
+    h, agent_id = _signup_with_general_agent(client)
+
+    empty = client.post(
+        "/traces", json=_general_payload(agent_id, _mid(), input=""), headers=h
+    )
+    assert empty.status_code == 422, empty.text
+
+    oversized = client.post(
+        "/traces",
+        json=_general_payload(agent_id, _mid(), input="x" * 50_001),
+        headers=h,
+    )
+    assert oversized.status_code == 422, oversized.text
+
+
+def test_ingest_checks_the_agent_shape_before_writing(client):
+    h, agent_id = _signup_with_general_agent(client)
+
+    client.post("/traces", json=_payload(agent_id, _mid()), headers=h)
+
+    assert client.get("/traces", headers=h).json()["total"] == 0
+
+
+def test_a_standalone_prompt_trace_lists_and_searches(client):
+    h, agent_id = _signup_with_general_agent(client)
+    payload = _general_payload(agent_id, _mid())
+    _post_trace(client, h, payload)
+
+    row = client.get("/traces", headers=h).json()["items"][0]
+    assert row["input_preview"] == payload["input"]
+    assert row["turn_count"] == 1
+
+    found = client.get("/traces?q=14-week-old", headers=h).json()
+    assert found["total"] == 1
+
+
+def test_a_long_standalone_prompt_preview_is_truncated(client):
+    h, agent_id = _signup_with_general_agent(client)
+    prompt = "s" * 400
+    _post_trace(client, h, _general_payload(agent_id, _mid(), input=prompt))
+
+    row = client.get("/traces", headers=h).json()["items"][0]
+    assert row["input_preview"] == "s" * 159 + "…"
+    assert client.get(f"/traces/{row['uuid']}", headers=h).json()["input"] == prompt
+
+
+# ---------------------------------------------------------------------------
+# Converting standalone-prompt traces
+# ---------------------------------------------------------------------------
+
+
+def test_convert_general_creates_and_links_tests(client):
+    from db import get_evaluators_for_test, get_tests_for_agent
+
+    h, agent_id = _signup_with_general_agent(client)
+    evaluator = _create_evaluator(client, h, evaluator_type="llm-general")
+    payload = _general_payload(agent_id, _mid())
+    trace = _post_trace(client, h, payload)
+
+    res = _convert(
+        client,
+        h,
+        trace_ids=[trace["uuid"]],
+        type="general",
+        evaluators=[evaluator["uuid"]],
+    )
+    assert res.status_code == 200, res.text
+    body = res.json()
+    assert body["created"] == 1
+    assert body.get("warnings") is None
+
+    created = client.get(f"/tests/{body['test_uuids'][0]}", headers=h).json()
+    assert created["type"] == "general"
+    assert created["config"]["input"] == payload["input"]
+    assert "history" not in created["config"]
+    assert created["config"]["evaluation"] == {"type": "general"}
+
+    linked = get_evaluators_for_test(body["test_uuids"][0])
+    assert [e["uuid"] for e in linked] == [evaluator["uuid"]]
+    assert {t["uuid"] for t in get_tests_for_agent(agent_id)} == set(body["test_uuids"])
+
+
+def test_convert_general_rejects_a_conversation_trace(client):
+    h, agent_id = _signup_with_agent(client)
+    evaluator = _create_evaluator(client, h, evaluator_type="llm-general")
+    trace = _post_trace(client, h, _payload(agent_id, _mid()))
+
+    res = _convert(
+        client,
+        h,
+        trace_ids=[trace["uuid"]],
+        type="general",
+        evaluators=[evaluator["uuid"]],
+    )
+    assert res.status_code == 400, res.text
+    detail = res.json()["detail"]
+    assert detail["trace_ids"] == [trace["uuid"]]
+    assert "standalone prompt" in detail["error"]
+
+
+def test_convert_response_rejects_a_standalone_prompt_trace(client):
+    h, agent_id = _signup_with_general_agent(client)
+    evaluator = _create_evaluator(client, h)
+    trace = _post_trace(client, h, _general_payload(agent_id, _mid()))
+
+    res = _convert(
+        client,
+        h,
+        trace_ids=[trace["uuid"]],
+        type="response",
+        evaluators=[evaluator["uuid"]],
+    )
+    assert res.status_code == 400, res.text
+    detail = res.json()["detail"]
+    assert detail["trace_ids"] == [trace["uuid"]]
+    assert "conversation" in detail["error"]
+
+
+def test_convert_general_requires_evaluators(client):
+    h, agent_id = _signup_with_general_agent(client)
+    trace = _post_trace(client, h, _general_payload(agent_id, _mid()))
+
+    res = _convert(client, h, trace_ids=[trace["uuid"]], type="general")
+    assert res.status_code == 400, res.text
+    assert res.json()["detail"] == "general tests require at least one evaluator"
+
+
+def test_convert_general_rejects_an_llm_evaluator(client):
+    h, agent_id = _signup_with_general_agent(client)
+    evaluator = _create_evaluator(client, h, evaluator_type="llm")
+    trace = _post_trace(client, h, _general_payload(agent_id, _mid()))
+
+    res = _convert(
+        client,
+        h,
+        trace_ids=[trace["uuid"]],
+        type="general",
+        evaluators=[evaluator["uuid"]],
+    )
+    assert res.status_code == 400, res.text
+    assert "only accept 'llm-general' evaluators" in res.json()["detail"]
+
+
+def test_convert_tool_call_keeps_a_standalone_prompt(client):
+    from db import get_tests_for_agent
+
+    h, agent_id = _signup_with_general_agent(client)
+    payload = _general_payload(agent_id, _mid())
+    trace = _post_trace(client, h, payload)
+
+    res = _convert(client, h, trace_ids=[trace["uuid"]], type="tool_call")
+    assert res.status_code == 200, res.text
+    body = res.json()
+    assert body.get("warnings") is None
+
+    created = client.get(f"/tests/{body['test_uuids'][0]}", headers=h).json()
+    assert created["type"] == "tool_call"
+    assert created["config"]["input"] == payload["input"]
+    assert "history" not in created["config"]
+    assert created["config"]["evaluation"]["tool_calls"] == [
+        {
+            "tool": "get_schedule",
+            "arguments": {"child_age_weeks": 14},
+            "accept_any_arguments": False,
+        }
+    ]
+    assert {t["uuid"] for t in get_tests_for_agent(agent_id)} == set(body["test_uuids"])
+
+
+def test_convert_skips_the_link_when_the_agent_switched_interaction_type(client):
+    from db import get_tests_for_agent
+
+    h, agent_id = _signup_with_general_agent(client)
+    evaluator = _create_evaluator(client, h, evaluator_type="llm-general")
+    trace = _post_trace(client, h, _general_payload(agent_id, _mid()))
+
+    switched = client.put(
+        f"/agents/{agent_id}", json={"interaction_type": "conversation"}, headers=h
+    )
+    assert switched.status_code == 200, switched.text
+
+    res = _convert(
+        client,
+        h,
+        trace_ids=[trace["uuid"]],
+        type="general",
+        evaluators=[evaluator["uuid"]],
+    )
+    assert res.status_code == 200, res.text
+    body = res.json()
+    assert body["created"] == 1
+    assert body["warnings"] == [
+        "1 of 1 tests were not linked to an agent, "
+        "so they will not appear on any agent's test list"
+    ]
+    assert get_tests_for_agent(agent_id) == []
+
+
+def test_last_user_content_handles_both_input_shapes():
+    from routers.traces import _last_user_content
+
+    assert _last_user_content("just the prompt") == "just the prompt"
+    assert _last_user_content([{"role": "user", "content": "hi"}]) == "hi"
+    assert _last_user_content([{"role": "assistant", "content": "hi"}]) is None

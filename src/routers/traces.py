@@ -5,9 +5,10 @@ Customer backends POST one trace per agent turn: the conversation history as
 pense.db.
 
 The stored shape deliberately mirrors test creation. `input` is
-`tests.config.history` verbatim, and `output.tool_calls` matches the
-expected-tool-call shape, so `POST /traces/convert-to-tests` needs no
-transformation.
+`tests.config.history` verbatim for a conversational agent and
+`tests.config.input` verbatim for a `general` one, and `output.tool_calls`
+matches the expected-tool-call shape, so `POST /traces/convert-to-tests` needs
+no transformation.
 
 New contract needs go into `metadata` keys, not new top-level fields.
 Customers integrate against this shape, and every field deepens the eventual
@@ -16,7 +17,7 @@ OTel-gateway migration.
 
 import logging
 import os
-from typing import Annotated, Any, Dict, List, Literal, Optional
+from typing import Annotated, Any, Dict, List, Literal, Optional, Union
 
 from fastapi import APIRouter, Depends, HTTPException, Path, Query
 from pydantic import BaseModel, ConfigDict, Field, StringConstraints, model_validator
@@ -42,7 +43,12 @@ from pagination import PaginatedResponse, PaginationParams, page_envelope
 
 # Reuse the tests router's validation so a converted test accepts exactly what
 # POST /tests does (evaluator visible to the workspace, evaluator_type matches).
-from routers.tests import EvaluatorRef, _validate_evaluators
+from routers.tests import (
+    DEFAULT_AGENT_INTERACTION_TYPE,
+    EvaluatorRef,
+    _validate_evaluators,
+    required_agent_interaction_type,
+)
 from utils import EXAMPLE_TEST_UUID, EvaluatorUuid
 
 logger = logging.getLogger(__name__)
@@ -97,6 +103,25 @@ class TraceTurn(BaseModel):
         max_length=MAX_TURN_CONTENT_CHARS,
         description="Message text. Omit for turns that only carry tool calls",
     )
+
+
+# A trace's input takes the shape its agent is called with: one standalone
+# prompt for a `general` agent, a conversation for the rest. Separate aliases
+# rather than one Field so each side keeps its own bound (turn count vs
+# characters) instead of sharing whichever one is declared.
+TraceInputText = Annotated[
+    str, StringConstraints(min_length=1, max_length=MAX_TURN_CONTENT_CHARS)
+]
+TraceInputHistory = Annotated[
+    List[TraceTurn], Field(min_length=1, max_length=MAX_INPUT_TURNS)
+]
+TraceInput = Union[TraceInputText, TraceInputHistory]
+
+_TRACE_INPUT_DESCRIPTION = (
+    "What the agent was given for this turn. For a `general` agent, the "
+    "standalone prompt as a string. For every other agent, the conversation "
+    "history up to the reported output, oldest turn first, in OpenAI chat format"
+)
 
 
 class TraceToolCall(BaseModel):
@@ -168,11 +193,7 @@ class TraceIngest(BaseModel):
         max_length=255,
         description="Your own ID for the conversation this turn belongs to, stored for reference only. Omit if you have none",
     )
-    input: List[TraceTurn] = Field(
-        min_length=1,
-        max_length=MAX_INPUT_TURNS,
-        description="Conversation history up to the reported output, oldest turn first, in OpenAI chat format",
-    )
+    input: TraceInput = Field(description=_TRACE_INPUT_DESCRIPTION)
     output: TraceOutput = Field(description="What the agent produced for this turn")
     metadata: Optional[List[TraceMetadataEntry]] = Field(
         None,
@@ -212,7 +233,8 @@ class TraceSummary(BaseModel):
         None, description="The conversation ID you sent, if any"
     )
     input_preview: Optional[str] = Field(
-        None, description="The last user message, truncated for display"
+        None,
+        description="The standalone prompt or the last user message, truncated for display",
     )
     response_preview: Optional[str] = Field(
         None, description="The agent reply, truncated for display"
@@ -224,7 +246,7 @@ class TraceSummary(BaseModel):
         description="Tools the agent issued on this turn, with the arguments it passed"
     )
     turn_count: int = Field(
-        description="Number of turns in the stored conversation history"
+        description="Number of turns in the stored input. A standalone prompt counts as 1"
     )
     tool_call_count: int = Field(
         description="Number of tool calls the agent issued for this turn"
@@ -249,9 +271,7 @@ class TraceResponse(BaseModel):
     conversation_id: Optional[str] = Field(
         None, description="The conversation ID you sent, if any"
     )
-    input: List[TraceTurn] = Field(
-        description="Conversation history stored for this trace, oldest turn first"
-    )
+    input: TraceInput = Field(description=_TRACE_INPUT_DESCRIPTION)
     output: TraceOutput = Field(description="What the agent produced for this turn")
     metadata: Optional[List[TraceMetadataEntry]] = Field(
         None, description="Key-value pairs stored with the trace"
@@ -290,11 +310,18 @@ def _preview(text: Optional[str]) -> Optional[str]:
     return text[: _PREVIEW_CHARS - 1] + "…"
 
 
-def _last_user_content(input_turns: List[Dict[str, Any]]) -> Optional[str]:
-    for turn in reversed(input_turns or []):
+def _last_user_content(stored_input: Any) -> Optional[str]:
+    if isinstance(stored_input, str):
+        return stored_input
+    for turn in reversed(stored_input or []):
         if turn.get("role") == "user" and isinstance(turn.get("content"), str):
             return turn["content"]
     return None
+
+
+def _turn_count(stored_input: Any) -> int:
+    """A standalone prompt is the single turn it stands for."""
+    return 1 if isinstance(stored_input, str) else len(stored_input or [])
 
 
 def _to_summary(row: Dict[str, Any]) -> Dict[str, Any]:
@@ -309,18 +336,49 @@ def _to_summary(row: Dict[str, Any]) -> Dict[str, Any]:
         "agent_id": row["agent_id"],
         "message_id": row["message_id"],
         "conversation_id": row["conversation_id"],
-        "input_preview": _preview(_last_user_content(row.get("input") or [])),
+        "input_preview": _preview(_last_user_content(row.get("input"))),
         "response_preview": _preview(output.get("response")),
         "tool_names": [call["tool"] for call in calls],
         "tool_calls": [
             {"tool": call["tool"], "arguments": call.get("arguments")}
             for call in calls
         ],
-        "turn_count": len(row.get("input") or []),
+        "turn_count": _turn_count(row.get("input")),
         "tool_call_count": len(calls),
         "metadata_count": len(row.get("metadata") or []),
         "created_at": row["created_at"],
     }
+
+
+def _ensure_input_matches_agent(stored_input: Any, agent: Dict[str, Any]) -> None:
+    """Reject an input whose shape the trace's agent is never called with.
+
+    Tying the two together at ingest is what lets `convert-to-tests` build each
+    test from the trace alone: the stored shape already matches what the agent
+    can be given, so a converted test can only ever fit it.
+    """
+    interaction_type = (
+        agent.get("interaction_type") or DEFAULT_AGENT_INTERACTION_TYPE
+    )
+    is_text = isinstance(stored_input, str)
+    if is_text and not stored_input.strip():
+        raise HTTPException(status_code=400, detail="input must not be blank")
+    if is_text and interaction_type != "general":
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"Agent has interaction_type='{interaction_type}' and is called "
+                "with a conversation, so input must be a list of turns, not a string."
+            ),
+        )
+    if not is_text and interaction_type == "general":
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "Agent has interaction_type='general' and is called with a "
+                "standalone prompt, so input must be a string, not a list of turns."
+            ),
+        )
 
 
 @router.post(
@@ -333,7 +391,8 @@ async def ingest_trace(
     payload: TraceIngest, ctx: OrgContext = Depends(get_org_jwt_or_api_key)
 ):
     """Store a production agent turn and its conversation history for later review"""
-    ensure_owned_agent(payload.agent_id, ctx.org_uuid)
+    agent = ensure_owned_agent(payload.agent_id, ctx.org_uuid)
+    _ensure_input_matches_agent(payload.input, agent)
 
     cap = MAX_TRACES_PER_WORKSPACE
     current = count_live_traces(ctx.org_uuid)
@@ -353,7 +412,11 @@ async def ingest_trace(
         agent_id=payload.agent_id,
         message_id=payload.message_id,
         conversation_id=payload.conversation_id,
-        input=[turn.model_dump(exclude_none=True) for turn in payload.input],
+        input=(
+            payload.input
+            if isinstance(payload.input, str)
+            else [turn.model_dump(exclude_none=True) for turn in payload.input]
+        ),
         output=payload.output.model_dump(exclude_none=True),
         metadata=(
             [entry.model_dump() for entry in payload.metadata]
@@ -415,8 +478,12 @@ async def bulk_delete_traces(
 
 _CONVERT_TYPE_DESCRIPTION = (
     "What the created tests judge:\n\n"
-    "- `response`: re-run the agent on the trace's history and judge the fresh reply against the linked evaluators\n"
-    "- `tool_call`: re-run the agent and diff its tool calls against the ones the trace recorded"
+    "- `response`: re-run the agent on the trace's conversation and judge the fresh reply against the linked evaluators\n"
+    "- `general`: re-run the agent on the trace's standalone prompt and judge the fresh reply against the linked evaluators\n"
+    "- `tool_call`: re-run the agent and diff its tool calls against the ones the trace recorded\n\n"
+    "`response` needs traces carrying a conversation and `general` needs traces "
+    "carrying a standalone prompt, so each one fits the agent it came from. "
+    "`tool_call` takes either and keeps the shape the trace has."
 )
 
 
@@ -430,12 +497,12 @@ class ConvertTracesToTestsRequest(BaseModel):
         max_length=MAX_CONVERT_TRACES,
         description="IDs of the traces to convert, one test per trace",
     )
-    type: Literal["response", "tool_call"] = Field(
+    type: Literal["response", "general", "tool_call"] = Field(
         description=_CONVERT_TYPE_DESCRIPTION
     )
     evaluators: Optional[List[EvaluatorUuid]] = Field(
         None,
-        description="IDs of the evaluators to link to every created test. **Required for `response`**, rejected for `tool_call`, which compares the recorded calls instead of judging. Each evaluator must judge on its prompt alone, with no `{{placeholder}}` variables to fill in",
+        description="IDs of the evaluators to link to every created test. **Required for `response` and `general`**, rejected for `tool_call`, which compares the recorded calls instead of judging. Each evaluator must match the created tests: `llm` for `response`, `llm-general` for `general`. Each must also judge on its prompt alone, with no `{{placeholder}}` variables to fill in",
     )
     accept_any_arguments: bool = Field(
         False,
@@ -456,13 +523,13 @@ class ConvertTracesToTestsResponse(BaseModel):
 
 
 def _resolve_evaluators(
-    evaluator_uuids: List[str], org_uuid: str
+    evaluator_uuids: List[str], org_uuid: str, test_type: str
 ) -> List[Dict[str, Any]]:
     """Validate as POST /tests does, then reject any evaluator whose prompt needs
     variables filled in. A conversion has no per-test place to supply them, and a
     half-rendered prompt would reach the judge with `{{placeholders}}` intact."""
     refs = _validate_evaluators(
-        [EvaluatorRef(evaluator_uuid=u) for u in evaluator_uuids], org_uuid, "response"
+        [EvaluatorRef(evaluator_uuid=u) for u in evaluator_uuids], org_uuid, test_type
     )
     evaluators = get_evaluators_by_uuids(evaluator_uuids)
     live_ids = {
@@ -522,15 +589,15 @@ def convert_traces_to_tests(
     payload: ConvertTracesToTestsRequest, ctx: OrgContext = Depends(get_current_org)
 ):
     """Turn production traces into regression tests you can run and benchmark"""
-    # A converted response test re-runs the agent and judges the fresh reply, so
-    # it has no fallback judge. A tool_call run only diffs the recorded calls
-    # (see the row-type skip in agent_tests._build_calibrate_config), so an
+    # A converted response or general test re-runs the agent and judges the fresh
+    # reply, so it has no fallback judge. A tool_call run only diffs the recorded
+    # calls (see the row-type skip in agent_tests._build_calibrate_config), so an
     # evaluator attached here would never judge anything: refuse it rather than
     # store a judge the user never sees run.
-    if payload.type == "response" and not payload.evaluators:
+    if payload.type in ("response", "general") and not payload.evaluators:
         raise HTTPException(
             status_code=400,
-            detail="response tests require at least one evaluator",
+            detail=f"{payload.type} tests require at least one evaluator",
         )
     if payload.type == "tool_call" and payload.evaluators:
         raise HTTPException(
@@ -540,7 +607,7 @@ def convert_traces_to_tests(
     resolved_refs: List[Dict[str, Any]] = []
     if payload.evaluators:
         resolved_refs = _resolve_evaluators(
-            list(dict.fromkeys(payload.evaluators)), ctx.org_uuid
+            list(dict.fromkeys(payload.evaluators)), ctx.org_uuid, payload.type
         )
 
     requested = list(dict.fromkeys(payload.trace_ids))
@@ -552,6 +619,32 @@ def convert_traces_to_tests(
             status_code=404,
             detail={"error": "Some traces were not found", "trace_ids": missing},
         )
+
+    # `general` tests carry a standalone `input` and `response` tests a
+    # `history`; calibrate refuses a row holding the wrong one. Since ingest ties
+    # each trace's shape to its agent, this also keeps every created test
+    # linkable to the agent it came from.
+    if payload.type in ("response", "general"):
+        wants_text = payload.type == "general"
+        wrong_shape = [
+            trace["uuid"]
+            for trace in traces
+            if isinstance(trace["input"], str) is not wants_text
+        ]
+        if wrong_shape:
+            raise HTTPException(
+                status_code=400,
+                detail={
+                    "error": (
+                        "general tests take a standalone prompt, but these traces "
+                        "carry a conversation"
+                        if wants_text
+                        else "response tests take a conversation, but these traces "
+                        "carry a standalone prompt"
+                    ),
+                    "trace_ids": wrong_shape,
+                },
+            )
 
     if payload.type == "tool_call":
         no_calls = [
@@ -585,14 +678,21 @@ def convert_traces_to_tests(
                 }
                 for call in trace["output"]["tool_calls"]
             ]
-        # `input` is already OpenAI history. The recorded reply is dropped for a
-        # response test (the agent is re-run) and captured as the assertion for
-        # a tool_call test above.
+        # A trace's `input` is already the test config field it maps to: a
+        # standalone prompt becomes `input`, a conversation becomes `history`.
+        # The recorded reply is dropped for a response or general test (the agent
+        # is re-run) and captured as the assertion for a tool_call test above.
+        stored_input = trace["input"]
+        given = (
+            {"input": stored_input}
+            if isinstance(stored_input, str)
+            else {"history": stored_input}
+        )
         db_tests.append(
             {
                 "name": name,
                 "type": payload.type,
-                "config": {"history": trace["input"], "evaluation": evaluation},
+                "config": {**given, "evaluation": evaluation},
             }
         )
 
@@ -621,15 +721,21 @@ def convert_traces_to_tests(
         )
 
     # Each test links to the agent that produced its trace. One agent deleted
-    # since ingest must not fail a batch the user cannot retry.
-    linkable: Dict[str, bool] = {}
+    # since ingest, or switched to an interaction_type the created test no longer
+    # fits, must not fail a batch the user cannot retry.
+    agents_seen: Dict[str, Optional[Dict[str, Any]]] = {}
     unlinked = 0
-    for trace, test_uuid in zip(traces, test_uuids):
+    for trace, test_uuid, db_test in zip(traces, test_uuids, db_tests):
         agent_id = trace["agent_id"]
-        if agent_id not in linkable:
-            agent = get_agent(agent_id)
-            linkable[agent_id] = bool(agent and agent["org_uuid"] == ctx.org_uuid)
-        if not linkable[agent_id]:
+        if agent_id not in agents_seen:
+            found = get_agent(agent_id)
+            agents_seen[agent_id] = (
+                found if found and found["org_uuid"] == ctx.org_uuid else None
+            )
+        agent = agents_seen[agent_id]
+        if not agent or required_agent_interaction_type(
+            payload.type, db_test["config"]
+        ) != (agent.get("interaction_type") or DEFAULT_AGENT_INTERACTION_TYPE):
             unlinked += 1
             continue
         try:
