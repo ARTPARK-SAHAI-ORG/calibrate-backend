@@ -797,10 +797,12 @@ def _tool_call_evaluator_for_run(
     test_results: Optional[List[Dict[str, Any]]] = None,
     model_results: Optional[List[Dict[str, Any]]] = None,
 ) -> Optional[Dict[str, Any]]:
-    """One lookup per request: the tool-call evaluator when this run holds a
-    tool-call test, else None. The rows are scanned as well as the job's
-    `has_tool_call_test` flag so runs created before that flag existed still
-    get the wording."""
+    """The wording for this run's tool-call verdicts, or None when the run
+    holds no tool-call test.
+
+    The copy frozen into the job at launch wins, so a finished run keeps the
+    labels it was shown with. Runs launched before that copy existed fall back
+    to one live lookup for the whole request."""
     rows = list(test_results or [])
     for mr in model_results or []:
         if isinstance(mr, dict):
@@ -809,6 +811,9 @@ def _tool_call_evaluator_for_run(
         _is_tool_call_row(r) for r in rows
     ):
         return None
+    frozen = details.get("tool_call_evaluator")
+    if isinstance(frozen, dict):
+        return frozen
     return _tool_call_evaluator(org_uuid)
 
 
@@ -838,11 +843,12 @@ def _run_evaluator_names(
 ) -> List[str]:
     """Flat, deduped evaluator names for the run-list `evaluators` column, in
     first-appearance order across the job's `details.evaluators_by_test_id`
-    snapshot. When any linked test was a tool-call test, appends the
-    workspace's tool-call evaluator name (`tool_call_evaluator_name`, resolved
-    once per request by the caller), falling back to the literal `"Tool call"`
-    for a workspace that deleted its copy. Tool-call tests never carry
-    evaluators, so they would otherwise be invisible in this column.
+    snapshot. When any linked test was a tool-call test, appends the tool-call
+    evaluator's name: the one frozen into the run at launch, else the
+    workspace's current one (`tool_call_evaluator_name`, resolved once per
+    request by the caller) for runs launched before that copy existed, else the
+    literal `"Tool call"`. Tool-call tests never carry evaluators, so they
+    would otherwise be invisible in this column.
 
     Prefers each evaluator's current name over the snapshot (same preference
     order as `_build_evaluators_block_for_test_run`), via a caller-shared
@@ -867,7 +873,11 @@ def _run_evaluator_names(
                 raw_names.append(name)
     names = list(dict.fromkeys(raw_names))
     if job.get("has_tool_call_test"):
-        names.append(tool_call_evaluator_name or "Tool call")
+        names.append(
+            job.get("tool_call_evaluator_name")
+            or tool_call_evaluator_name
+            or "Tool call"
+        )
     return names
 
 
@@ -2554,6 +2564,7 @@ def _agent_test_job_details(
     """
     test_names = [test.get("name") for test in tests if test.get("name")]
     calibrate_config, evaluators_by_test_id = _build_calibrate_config(agent, tests)
+    has_tool_call_test = any(t.get("type") == "tool_call" for t in tests)
     return test_names, {
         "agent_uuid": agent["uuid"],
         "test_uuids": [t["uuid"] for t in tests],
@@ -2563,7 +2574,14 @@ def _agent_test_job_details(
         "evaluators_by_test_id": evaluators_by_test_id,
         # Snapshot rather than re-deriving per run-list request (a test's type
         # is immutable, so this is static for the life of the job).
-        "has_tool_call_test": any(t.get("type") == "tool_call" for t in tests),
+        "has_tool_call_test": has_tool_call_test,
+        # The wording a tool-call verdict is shown with, frozen the same way
+        # `evaluators_by_test_id` freezes a judged rubric, so editing the
+        # evaluator later never rewrites a finished run. Only read when the run
+        # holds a tool-call test, since nothing else displays it.
+        "tool_call_evaluator": (
+            _tool_call_evaluator(agent.get("org_uuid")) if has_tool_call_test else None
+        ),
     }
 
 

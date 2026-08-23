@@ -3304,3 +3304,47 @@ def test_initial_annotations_incomplete_without_tool_call_answer(client):
     assert resp.status_code == 200
     job_uuid = resp.json()["annotation_job_id"]
     assert _job_status(client, h, task_uuid, job_uuid) == "in_progress"
+
+
+def test_initial_annotations_complete_when_a_row_shows_nothing(client):
+    """A task carrying only the tool-call evaluator shows nothing on a normal
+    row, so that row must not hold the job open."""
+    auth = _signup(client)
+    h = auth["headers"]
+    task_uuid = client.post(
+        "/annotation-tasks",
+        json={"name": f"tc-{uuid.uuid4().hex[:6]}", "type": "llm"},
+        headers=h,
+    ).json()["uuid"]
+    annotator = client.post(
+        "/annotators", json={"name": f"a-{uuid.uuid4().hex[:6]}"}, headers=h
+    ).json()
+
+    # The first tool-call row links the tool-call evaluator, and nothing else
+    # is ever linked to this task.
+    client.post(
+        f"/annotation-tasks/{task_uuid}/items",
+        json={"items": [{"payload": _tool_call_payload("seed")}]},
+        headers=h,
+    )
+    links = _tool_call_links(client, h, task_uuid)
+    assert len(links) == 1
+    tool_call_ev = links[0]
+
+    resp = client.post(
+        f"/annotation-tasks/{task_uuid}/items",
+        json={
+            "items": [
+                {"payload": {"name": "n1", "agent_response": "hi"}},
+                {
+                    "payload": _tool_call_payload("tc1"),
+                    "annotations": {tool_call_ev["uuid"]: {"value": True}},
+                },
+            ],
+            "annotator_id": annotator["uuid"],
+        },
+        headers=h,
+    )
+    assert resp.status_code == 200
+    job_uuid = resp.json()["annotation_job_id"]
+    assert _job_status(client, h, task_uuid, job_uuid) == "completed"

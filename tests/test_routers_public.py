@@ -408,3 +408,24 @@ def test_all_tool_call_job_completes_on_the_tool_call_evaluator_alone(client):
 
     assert _save(client, token, item_uuids[0], tool_ev) == "in_progress"
     assert _save(client, token, item_uuids[1], tool_ev) == "completed"
+
+
+def test_job_completes_when_a_row_has_nothing_to_answer(client):
+    """A task carrying only the tool-call evaluator draws nothing on its text
+    rows, so those rows must not hold the job open. Answering every tool-call
+    row finishes it."""
+    token, item_uuids, evaluator_uuids = _labelling_job(
+        client, [_TOOL_CALL_PAYLOAD, _TEXT_PAYLOAD], ["tool-call"]
+    )
+    tool_call_item, text_item = item_uuids
+
+    body = client.get(f"/public/annotation-jobs/{token}").json()
+    assert [ev["evaluator_type"] for ev in body["evaluators"]] == ["tool-call"]
+
+    assert _save(client, token, tool_call_item, evaluator_uuids[0]) == "completed"
+    # The text row was never touched and could not have been.
+    annotated_items = {
+        a["item_id"]
+        for a in client.get(f"/public/annotation-jobs/{token}").json()["annotations"]
+    }
+    assert text_item not in annotated_items

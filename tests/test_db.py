@@ -965,7 +965,7 @@ def test_provision_picks_up_a_newly_added_default():
             conn.commit()
 
 
-def test_provision_skips_default_whose_name_collides_with_a_custom():
+def test_provision_renames_default_whose_name_collides_with_a_custom():
     user_uuid, org_uuid = _fresh_org()
     safety = _forks_by_slug(org_uuid)["default-safety"]
 
@@ -987,21 +987,29 @@ def test_provision_skips_default_whose_name_collides_with_a_custom():
         org_uuid=org_uuid,
     )
 
-    assert db.provision_default_evaluators_for_org(org_uuid) == 0  # skipped
-    safeties = [
-        e for e in db.get_all_evaluators(org_uuid=org_uuid) if e["name"] == "Safety"
-    ]
-    assert len(safeties) == 1  # only the custom, no second copy
-    assert safeties[0].get("source_default_slug") is None
+    # The org gets the default under a free name rather than going without it.
+    assert db.provision_default_evaluators_for_org(org_uuid) == 1
+    by_name = {e["name"]: e for e in db.get_all_evaluators(org_uuid=org_uuid)}
+    assert by_name["Safety"].get("source_default_slug") is None  # the custom one
+    assert by_name["Safety (2)"]["source_default_slug"] == "default-safety"
 
-    # A receipt is still written (NULL evaluator_uuid) so it isn't retried.
+    # The receipt points at the fork, so it is not retried.
     with db.get_db_connection() as conn:
         row = conn.execute(
             "SELECT evaluator_uuid FROM org_default_evaluators "
             "WHERE org_uuid = ? AND source_default_slug = ?",
             (org_uuid, "default-safety"),
         ).fetchone()
-    assert row is not None and row["evaluator_uuid"] is None
+    assert row is not None and row["evaluator_uuid"] == by_name["Safety (2)"]["uuid"]
+
+    # Suffixes keep climbing while each candidate is taken. The org already
+    # holds "Safety" and "Safety (2)" by now.
+    with db.get_db_connection() as conn:
+        cursor = conn.cursor()
+        assert db._free_evaluator_name(cursor, org_uuid, "Safety") == "Safety (3)"
+        assert db._free_evaluator_name(cursor, org_uuid, "Nobody uses this") == (
+            "Nobody uses this"
+        )
 
 
 def test_backfill_forks_defaults_into_existing_orgs_and_runs_once():
@@ -2980,3 +2988,37 @@ def test_linking_an_already_linked_evaluator_is_a_no_op(user):
     assert db.add_evaluator_to_annotation_task(task_uuid, first) == link_id
     linked = db.get_evaluators_for_annotation_task(task_uuid)
     assert [e["uuid"] for e in linked] == [first, second]
+
+
+def test_tool_call_backfill_survives_a_payload_that_is_not_a_list():
+    """An item saved with `tool_calls` as text rather than a list must not stop
+    the deploy: asking SQLite for the length of a non-list raises, and the
+    exception would come out of init_db and keep the service down."""
+    user_uuid, org_uuid = _fresh_org()
+    odd = db.create_annotation_task(
+        name=_u("odd-task"), user_id=user_uuid, org_uuid=org_uuid, type="llm"
+    )
+    db.create_annotation_items(
+        odd,
+        [
+            {"payload": {"chat_history": [], "tool_calls": "search(x)"}},
+            {"payload": {"chat_history": [], "actual_tool_calls": "search(x)"}},
+            {"payload": {"chat_history": [], "tool_calls": {"tool": "search"}}},
+        ],
+    )
+    real = db.create_annotation_task(
+        name=_u("real-task"), user_id=user_uuid, org_uuid=org_uuid, type="llm"
+    )
+    db.create_annotation_items(
+        real, [{"payload": {"chat_history": [], "tool_calls": [{"tool": "search"}]}}]
+    )
+
+    _rerun_tool_call_backfills()
+
+    fork_uuid = db.get_tool_call_evaluator_for_org(org_uuid)["uuid"]
+    # The odd payloads are not tool-call rows, so that task stays unlinked,
+    # and the real one is still found.
+    assert db.get_evaluators_for_annotation_task(odd) == []
+    assert [e["uuid"] for e in db.get_evaluators_for_annotation_task(real)] == [
+        fork_uuid
+    ]

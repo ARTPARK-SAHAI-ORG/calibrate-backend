@@ -2877,6 +2877,27 @@ def _org_owner_user_id(cursor: sqlite3.Cursor, org_uuid: str) -> Optional[str]:
     return row["user_id"] if row else None
 
 
+def _free_evaluator_name(cursor: sqlite3.Cursor, org_uuid: str, name: str) -> str:
+    """`name`, or the first ` (2)`, ` (3)`, ... variant the org is not using.
+
+    A default whose name an org already took used to be skipped for good, which
+    left that org silently without the default rather than with a renameable
+    copy of it.
+    """
+    candidate = name
+    suffix = 1
+    while True:
+        cursor.execute(
+            "SELECT 1 FROM evaluators "
+            "WHERE org_uuid = ? AND name = ? AND deleted_at IS NULL LIMIT 1",
+            (org_uuid, candidate),
+        )
+        if cursor.fetchone() is None:
+            return candidate
+        suffix += 1
+        candidate = f"{name} ({suffix})"
+
+
 def _fork_default_evaluator_row(
     cursor: sqlite3.Cursor,
     template: Dict[str, Any],
@@ -2996,24 +3017,15 @@ def _provision_default_evaluators_for_org(
         if slug in already:
             continue
 
-        cursor.execute(
-            "SELECT 1 FROM evaluators "
-            "WHERE org_uuid = ? AND name = ? AND deleted_at IS NULL LIMIT 1",
-            (org_uuid, template["name"]),
-        )
-        if cursor.fetchone() is not None:
-            cursor.execute(
-                "INSERT OR IGNORE INTO org_default_evaluators "
-                "(org_uuid, source_default_slug, evaluator_uuid) VALUES (?, ?, NULL)",
-                (org_uuid, slug),
-            )
+        free_name = _free_evaluator_name(cursor, org_uuid, template["name"])
+        if free_name != template["name"]:
             logger.info(
-                f"Skipped forking default {slug} into org {org_uuid}: name already in use"
+                f"Forking default {slug} into org {org_uuid} as {free_name!r}: "
+                "the template name is already in use"
             )
-            continue
 
         fork_uuid = _fork_default_evaluator_row(
-            cursor, template, org_uuid, owner_user_id
+            cursor, {**template, "name": free_name}, org_uuid, owner_user_id
         )
         cursor.execute(
             "INSERT OR IGNORE INTO org_default_evaluators "
@@ -3157,12 +3169,20 @@ LINK_TOOL_CALL_EVALUATOR_TO_TASKS_MIGRATION = "link_tool_call_evaluator_to_tasks
 # Mirrors `is_tool_call_row` in annotation_eval_runner.py: no agent_response /
 # output text, and a non-empty tool_calls or actual_tool_calls list. Repeated
 # here in SQL because db.py must not import a module that imports it.
+# The json_type guards are load-bearing: json_array_length raises "malformed
+# JSON" on a value that is not an array, and one such payload anywhere in the
+# table would abort init_db and stop the service from starting.
 _TOOL_CALL_ITEM_CONDITION = """
     COALESCE(COALESCE(json_extract(i.payload, '$.agent_response'),
                       json_extract(i.payload, '$.output')), '') = ''
     AND (CASE
-            WHEN json_array_length(json_extract(i.payload, '$.tool_calls')) > 0 THEN 1
-            WHEN json_array_length(json_extract(i.payload, '$.actual_tool_calls')) > 0 THEN 1
+            WHEN json_type(i.payload, '$.tool_calls') = 'array'
+                 AND json_array_length(json_extract(i.payload, '$.tool_calls')) > 0
+                 THEN 1
+            WHEN json_type(i.payload, '$.actual_tool_calls') = 'array'
+                 AND json_array_length(
+                         json_extract(i.payload, '$.actual_tool_calls')) > 0
+                 THEN 1
             ELSE 0
          END) = 1
 """
@@ -7296,7 +7316,9 @@ _AGENT_TEST_JOB_SUMMARY_COLUMNS = """
          WHERE je.type = 'object'
         ) AS model_results,
         json_extract(atj.details, '$.evaluators_by_test_id') AS evaluators_by_test_id,
-        json_extract(atj.details, '$.has_tool_call_test') AS has_tool_call_test
+        json_extract(atj.details, '$.has_tool_call_test') AS has_tool_call_test,
+        json_extract(atj.details, '$.tool_call_evaluator.name')
+            AS tool_call_evaluator_name
 """
 
 
@@ -7327,6 +7349,7 @@ def _row_to_agent_test_job_summary(row: sqlite3.Row) -> Dict[str, Any]:
         "id": row.get("id"),
         "evaluators_by_test_id": _loads(row.get("evaluators_by_test_id")),
         "has_tool_call_test": bool(row.get("has_tool_call_test")),
+        "tool_call_evaluator_name": row.get("tool_call_evaluator_name"),
         "results": {
             "total_tests": row.get("total_tests"),
             "passed": row.get("passed"),

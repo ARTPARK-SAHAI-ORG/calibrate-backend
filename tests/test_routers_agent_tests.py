@@ -2726,13 +2726,16 @@ _PENDING_TOOL_CALL_ROW = {
 }
 
 
-def _seed_tool_call_run(agent, rows=None):
+def _seed_tool_call_run(agent, rows=None, frozen_evaluator=None):
     from db import create_agent_test_job, update_agent_test_job
 
+    details = {"test_uuids": ["tc_ok", "tc_bad"], "has_tool_call_test": True}
+    if frozen_evaluator is not None:
+        details["tool_call_evaluator"] = frozen_evaluator
     job_id = create_agent_test_job(
         agent_id=agent["uuid"],
         job_type="llm-unit-test",
-        details={"test_uuids": ["tc_ok", "tc_bad"], "has_tool_call_test": True},
+        details=details,
     )
     update_agent_test_job(
         job_id,
@@ -2795,12 +2798,62 @@ def test_run_detail_tool_call_rows_use_workspace_evaluator(client):
     assert pending_row["judge_results"] is None
 
 
-def test_run_detail_tool_call_wording_is_read_fresh(client):
-    """The wording is resolved on every read, never frozen into the run:
-    renaming the evaluator, or one of its labels, changes what an ALREADY
-    FINISHED run returns."""
+def _rename_tool_call_evaluator(evaluator_uuid):
+    """Rename the evaluator and its two labels, and make that the live version."""
     from db import create_evaluator_version, set_evaluator_live_version, update_evaluator
 
+    update_evaluator(evaluator_uuid, name="Did it call the right tool")
+    version = create_evaluator_version(
+        evaluator_uuid,
+        judge_model="",
+        system_prompt="",
+        output_config={
+            "scale": [
+                {"value": True, "name": "Right tool"},
+                {"value": False, "name": "Wrong tool"},
+            ]
+        },
+    )
+    set_evaluator_live_version(evaluator_uuid, version["uuid"])
+
+
+def test_run_detail_tool_call_wording_is_frozen_at_launch(client):
+    """A run keeps the wording it was launched with, the same way a judged run
+    keeps the rubric it judged against. Renaming the evaluator afterwards does
+    not rewrite a finished run."""
+    auth = _signup(client)
+    h = auth["headers"]
+    agent = _create_agent(client, h)
+    tc_ev = _tool_call_evaluator_of(auth["user_uuid"])
+    frozen = {
+        "uuid": tc_ev["uuid"],
+        "name": "Tool call correctness",
+        "description": tc_ev.get("description"),
+        "output_type": "binary",
+        "output_config": {
+            "scale": [
+                {"value": True, "name": "Correct"},
+                {"value": False, "name": "Wrong"},
+            ]
+        },
+        "scale_min": None,
+        "scale_max": None,
+        "version_number": 1,
+    }
+    job_id = _seed_tool_call_run(agent, frozen_evaluator=frozen)
+
+    _rename_tool_call_evaluator(tc_ev["uuid"])
+
+    after = client.get(f"/agent-tests/run/{job_id}", headers=h).json()
+    assert after["evaluators"][0]["name"] == "Tool call correctness"
+    assert after["evaluators"][0]["version_number"] == 1
+    assert after["results"][0]["judge_results"][0]["value_name"] == "Correct"
+    assert after["results"][1]["judge_results"][0]["value_name"] == "Wrong"
+
+
+def test_run_detail_tool_call_wording_falls_back_for_older_runs(client):
+    """A run launched before the wording was frozen has none stored, so it
+    shows the workspace's current wording rather than nothing."""
     auth = _signup(client)
     h = auth["headers"]
     agent = _create_agent(client, h)
@@ -2811,19 +2864,7 @@ def test_run_detail_tool_call_wording_is_read_fresh(client):
     assert before["evaluators"][0]["name"] == "Tool call correctness"
     assert before["results"][0]["judge_results"][0]["value_name"] == "Correct"
 
-    update_evaluator(tc_ev["uuid"], name="Did it call the right tool")
-    version = create_evaluator_version(
-        tc_ev["uuid"],
-        judge_model="",
-        system_prompt="",
-        output_config={
-            "scale": [
-                {"value": True, "name": "Right tool"},
-                {"value": False, "name": "Wrong tool"},
-            ]
-        },
-    )
-    set_evaluator_live_version(tc_ev["uuid"], version["uuid"])
+    _rename_tool_call_evaluator(tc_ev["uuid"])
 
     after = client.get(f"/agent-tests/run/{job_id}", headers=h).json()
     assert after["evaluators"][0]["name"] == "Did it call the right tool"
@@ -2971,3 +3012,55 @@ def test_tool_call_evaluator_for_run_scans_rows_when_flag_is_missing(client):
         )
         is None
     )
+
+
+def test_launch_freezes_tool_call_wording_into_the_run(client):
+    """The launch path stores the wording on the job, so the run list and the
+    run detail both read the labels the run was started with."""
+    from routers.agent_tests import _agent_test_job_details
+
+    auth = _signup(client)
+    h = auth["headers"]
+    agent = _create_agent(client, h)
+    tc_ev = _tool_call_evaluator_of(auth["user_uuid"])
+
+    from db import get_personal_org_for_user
+
+    org_uuid = get_personal_org_for_user(auth["user_uuid"])["uuid"]
+    _names, details = _agent_test_job_details(
+        {**agent, "org_uuid": org_uuid},
+        [{"uuid": "t1", "name": "calls the tool", "type": "tool_call", "config": {}}],
+        "bucket",
+    )
+    frozen = details["tool_call_evaluator"]
+    assert frozen["uuid"] == tc_ev["uuid"]
+    assert frozen["name"] == "Tool call correctness"
+
+    job_id = _seed_tool_call_run(agent, frozen_evaluator=frozen)
+    _rename_tool_call_evaluator(tc_ev["uuid"])
+
+    listed = client.get(
+        f"/agent-tests/agent/{agent['uuid']}/runs", headers=h
+    ).json()["items"]
+    assert listed[0]["evaluators"] == ["Tool call correctness"]
+
+
+def test_launch_skips_the_wording_lookup_without_a_tool_call_test(client):
+    """A run of ordinary tests displays no tool-call wording, so it must not
+    pay for reading it."""
+    from unittest.mock import patch
+
+    from db import get_personal_org_for_user
+    from routers.agent_tests import _agent_test_job_details
+
+    auth = _signup(client)
+    agent = _create_agent(client, auth["headers"])
+    org_uuid = get_personal_org_for_user(auth["user_uuid"])["uuid"]
+    plain = {"uuid": "t1", "name": "replies well", "type": "response", "config": {}}
+
+    with patch("routers.agent_tests.get_tool_call_evaluator_for_org") as lookup:
+        _names, details = _agent_test_job_details(
+            {**agent, "org_uuid": org_uuid}, [plain], "bucket"
+        )
+    lookup.assert_not_called()
+    assert details["tool_call_evaluator"] is None
