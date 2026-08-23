@@ -3114,3 +3114,220 @@ def test_job_form_settings_round_trip(client):
         headers=h,
     )
     assert bad.status_code == 422
+
+
+def test_summary_surfaces_item_tool_call_annotations(client):
+    """A tool-call row is marked correct or wrong with no evaluator attached.
+    The summary exposes that judgement (and its reasoning) per item and per
+    annotator in `item_tool_call_annotations`, applies latest-wins, erases a cleared one, and
+    keeps the annotator in `annotators[]` even with no evaluator annotation."""
+    auth = _signup(client)
+    h = auth["headers"]
+    llm_ev = _llm_evaluator(client, h)
+    task_uuid = client.post(
+        "/annotation-tasks",
+        json={
+            "name": f"t-{uuid.uuid4().hex[:6]}",
+            "type": "llm",
+            "evaluator_ids": [llm_ev["uuid"]],
+        },
+        headers=h,
+    ).json()["uuid"]
+    items = client.post(
+        f"/annotation-tasks/{task_uuid}/items",
+        json={
+            "items": [
+                {"payload": {"name": "i1"}},
+                {"payload": {"name": "i2"}},
+                {"payload": {"name": "i3"}},
+            ]
+        },
+        headers=h,
+    ).json()["item_ids"]
+    item_a, item_b, item_cleared = items
+
+    annotator = client.post("/annotators", json={"name": "tc"}, headers=h).json()
+    job = client.post(
+        f"/annotation-tasks/{task_uuid}/jobs",
+        json={"annotator_ids": [annotator["uuid"]], "item_ids": items},
+        headers=h,
+    ).json()["jobs"][0]
+
+    def _row_level(item_id, value):
+        return client.post(
+            f"/annotation-tasks/{task_uuid}/annotations",
+            json={"job_id": job["uuid"], "item_id": item_id, "value": value},
+            headers=h,
+        ).status_code
+
+    # Latest-wins: the second write replaces the first.
+    assert _row_level(item_a, {"value": False, "reasoning": "wrong tool"}) == 200
+    assert (
+        _row_level(
+            item_a,
+            {"value": True, "reasoning": "right tool", "comment": "checked twice"},
+        )
+        == 200
+    )
+    # No reasoning is fine.
+    assert _row_level(item_b, {"value": False}) == 200
+    # A judgement then cleared to a comment only: the label must not survive.
+    assert _row_level(item_cleared, {"value": True}) == 200
+    assert _row_level(item_cleared, {"comment": "no verdict after all"}) == 200
+
+    body = client.get(f"/annotation-tasks/{task_uuid}/summary", headers=h).json()
+    labels = body["item_tool_call_annotations"]
+    assert labels[item_a] == {
+        annotator["uuid"]: {"value": True, "reasoning": "right tool"}
+    }
+    assert labels[item_b] == {annotator["uuid"]: {"value": False, "reasoning": None}}
+    assert item_cleared not in labels
+    # A comment written alongside the judgement still lands in its own block.
+    assert body["item_comments"][item_a][annotator["uuid"]] == "checked twice"
+    # The annotator is in the union with no evaluator annotation at all.
+    assert annotator["uuid"] in {a["uuid"] for a in body["annotators"]}
+
+    compact = client.get(
+        f"/annotation-tasks/{task_uuid}/summary",
+        params={"compact": "true"},
+        headers=h,
+    ).json()
+    assert compact["item_tool_call_annotations"][item_a][annotator["uuid"]] == {
+        "value": True,
+        "reasoning": None,
+    }
+
+    # Only the items on the current page carry judgements, same as comments.
+    first_page = client.get(
+        f"/annotation-tasks/{task_uuid}/summary",
+        params={"limit": 1, "offset": 0},
+        headers=h,
+    ).json()
+    on_page = {r["item_id"] for r in first_page["rows"]}
+    assert set(first_page["item_tool_call_annotations"].keys()) == (
+        on_page & {item_a, item_b}
+    )
+    assert len(on_page) == 1
+
+    # A second annotator judges only item_a, so the erase below leaves that
+    # cell standing while item_b loses its last one and drops out.
+    other = client.post("/annotators", json={"name": "tc2"}, headers=h).json()
+    other_job = client.post(
+        f"/annotation-tasks/{task_uuid}/jobs",
+        json={"annotator_ids": [other["uuid"]], "item_ids": [item_a]},
+        headers=h,
+    ).json()["jobs"][0]
+    assert (
+        client.post(
+            f"/annotation-tasks/{task_uuid}/annotations",
+            json={
+                "job_id": other_job["uuid"],
+                "item_id": item_a,
+                "value": {"value": True},
+            },
+            headers=h,
+        ).status_code
+        == 200
+    )
+
+    # A second job for the same annotator keeps its own row, so clearing the
+    # judgement there must erase the older job's, not leave it standing.
+    second_job = client.post(
+        f"/annotation-tasks/{task_uuid}/jobs",
+        json={"annotator_ids": [annotator["uuid"]], "item_ids": [item_a, item_b]},
+        headers=h,
+    ).json()["jobs"][0]
+    for cleared_item in (item_a, item_b):
+        assert (
+            client.post(
+                f"/annotation-tasks/{task_uuid}/annotations",
+                json={
+                    "job_id": second_job["uuid"],
+                    "item_id": cleared_item,
+                    "value": {"comment": "changed my mind"},
+                },
+                headers=h,
+            ).status_code
+            == 200
+        )
+    after_clear = client.get(
+        f"/annotation-tasks/{task_uuid}/summary", headers=h
+    ).json()["item_tool_call_annotations"]
+    assert annotator["uuid"] not in after_clear.get(item_a, {})
+    assert after_clear[item_a] == {other["uuid"]: {"value": True, "reasoning": None}}
+    assert item_b not in after_clear
+
+    # A deleted annotator's judgements drop out with them, leaving no item
+    # keyed to a name the response never lists.
+    assert client.delete(f"/annotators/{other['uuid']}", headers=h).status_code == 200
+    after_delete = client.get(
+        f"/annotation-tasks/{task_uuid}/summary", headers=h
+    ).json()
+    assert after_delete["item_tool_call_annotations"] == {}
+
+
+def test_task_agreement_reports_tool_call_number_separately(client):
+    """Tool-call rows are marked correct or wrong with no evaluator, so the
+    task agreement response carries its own `tool_call` number alongside
+    `human_human`, which still counts those rows too."""
+    auth = _signup(client)
+    h = auth["headers"]
+    llm_ev = _llm_evaluator(client, h)
+    task_uuid = client.post(
+        "/annotation-tasks",
+        json={
+            "name": f"t-{uuid.uuid4().hex[:6]}",
+            "type": "llm",
+            "evaluator_ids": [llm_ev["uuid"]],
+        },
+        headers=h,
+    ).json()["uuid"]
+    items = client.post(
+        f"/annotation-tasks/{task_uuid}/items",
+        json={"items": [{"payload": {"name": "i1"}}, {"payload": {"name": "i2"}}]},
+        headers=h,
+    ).json()["item_ids"]
+    item_agree, item_differ = items
+
+    annotators = [
+        client.post("/annotators", json={"name": n}, headers=h).json()
+        for n in ("a1", "a2")
+    ]
+    jobs = client.post(
+        f"/annotation-tasks/{task_uuid}/jobs",
+        json={
+            "annotator_ids": [a["uuid"] for a in annotators],
+            "item_ids": items,
+        },
+        headers=h,
+    ).json()["jobs"]
+
+    def _annotate(job_uuid, item_id, value, evaluator_id=None):
+        body = {"job_id": job_uuid, "item_id": item_id, "value": value}
+        if evaluator_id:
+            body["evaluator_id"] = evaluator_id
+        assert (
+            client.post(
+                f"/annotation-tasks/{task_uuid}/annotations", json=body, headers=h
+            ).status_code
+            == 200
+        )
+
+    # Tool-call rows: both annotators agree on one item, differ on the other.
+    for job in jobs:
+        _annotate(job["uuid"], item_agree, {"value": True})
+    _annotate(jobs[0]["uuid"], item_differ, {"value": True})
+    _annotate(jobs[1]["uuid"], item_differ, {"value": False})
+    # An evaluator-scored row both agree on, which must not move the
+    # tool-call number.
+    for job in jobs:
+        _annotate(job["uuid"], item_agree, {"value": True}, llm_ev["uuid"])
+
+    body = client.get(
+        f"/annotation-tasks/{task_uuid}/agreement", headers=h
+    ).json()
+    assert body["tool_call"] == {"current": 0.5, "pair_count": 2}
+    # The evaluator-scored pair lifts the overall number above the tool-call
+    # one, which is how you can tell the two are counted separately.
+    assert body["human_human"]["pair_count"] == 3
+    assert body["human_human"]["current"] > body["tool_call"]["current"]

@@ -197,6 +197,16 @@ class HumanAgreementBlock(BaseModel):
     )
 
 
+class ToolCallAgreementBlock(BaseModel):
+    model_config = ConfigDict(extra="allow")
+    current: Optional[float] = Field(
+        description="Current mean pairwise agreement among annotators on tool-call rows"
+    )
+    pair_count: int = Field(
+        description="How many annotator pairs the current value averages over"
+    )
+
+
 class TaskAgreementResponse(BaseModel):
     model_config = ConfigDict(extra="allow")
     task_id: str = Field(description="ID of the task", examples=[_EXAMPLE_ID])
@@ -204,6 +214,9 @@ class TaskAgreementResponse(BaseModel):
     days: int = Field(description="Length of the trailing window in days")
     human_human: HumanAgreementBlock = Field(
         description="Agreement between annotators who labelled the same items"
+    )
+    tool_call: ToolCallAgreementBlock = Field(
+        description="Agreement between annotators on tool-call rows, which are marked correct or wrong by hand with no evaluator. These rows also count towards `human_human`"
     )
     evaluators: List[Dict[str, Any]] = Field(
         description="Agreement between each evaluator and the annotators, plus that evaluator's own results and the human results, one entry per linked evaluator"
@@ -226,6 +239,10 @@ class TaskSummaryResponse(BaseModel):
     item_comments: Optional[Dict[str, Any]] = Field(
         default=None,
         description="Annotator comments, keyed by item ID",
+    )
+    item_tool_call_annotations: Optional[Dict[str, Any]] = Field(
+        default=None,
+        description="Tool-call judgements, which carry no evaluator, keyed by item ID then annotator ID. Each holds the annotator's correct or wrong `value` and their `reasoning`",
     )
     pagination: PaginationMeta = Field(
         description="Where this page sits in the full item list"
@@ -288,6 +305,7 @@ _SummaryProjection = make_projection_params(
         "rows[].payload",
         "rows[].evaluator_reasoning",
         "rows[].annotations.*.reasoning",
+        "item_tool_call_annotations.*.*.reasoning",
         "evaluators[].versions[].system_prompt",
         "evaluators[].versions[].output_config",
         "evaluators[].versions[].variables",
@@ -2628,6 +2646,12 @@ def task_agreement(
     hh_current, hh_pairs = aggregate_agreement(annotations)
     hh_series = trend_series(annotations, bucket=bucket, days=days)
 
+    # Tool-call rows are judged by hand with no evaluator attached, so their
+    # slots ride inside `human_human` too. Report them on their own as well,
+    # since a tool call is right or wrong rather than scored on a rubric.
+    tool_call_annotations = [a for a in annotations if a.get("evaluator_id") is None]
+    tc_current, tc_pairs = aggregate_agreement(tool_call_annotations)
+
     evaluators_block = _evaluator_alignment_block(
         annotations, runs, linked, bucket, days
     )
@@ -2640,6 +2664,10 @@ def task_agreement(
             "current": hh_current,
             "pair_count": hh_pairs,
             "series": hh_series,
+        },
+        "tool_call": {
+            "current": tc_current,
+            "pair_count": tc_pairs,
         },
         "evaluators": evaluators_block,
     }
@@ -2776,6 +2804,11 @@ def task_summary(
     # per-evaluator path — the per-item filter is applied later, only to
     # the response block.
     all_item_comments: Dict[str, Dict[str, str]] = {}
+    # The judgement carried by the same row-level annotation: a tool-call row
+    # has no evaluator to score it, so its correct/wrong lives here rather
+    # than in `latest_ann`. Same latest-wins-then-erase rule as the comments
+    # above.
+    all_item_tool_call_annotations: Dict[str, Dict[str, Dict[str, Any]]] = {}
     for a in annotations:
         annotator_id = a.get("annotator_id")
         ev_id = a.get("evaluator_id")
@@ -2785,10 +2818,26 @@ def task_summary(
         if ev_id is None:
             value = a.get("value")
             comment: Optional[str] = None
+            tool_call_annotation: Optional[Dict[str, Any]] = None
             if isinstance(value, dict):
                 raw = value.get("comment")
                 if isinstance(raw, str) and raw:
                     comment = raw
+                if value.get("value") is not None:
+                    tool_call_annotation = {
+                        "value": value.get("value"),
+                        "reasoning": value.get("reasoning"),
+                    }
+            if tool_call_annotation is not None:
+                all_item_tool_call_annotations.setdefault(a_item_id, {})[
+                    annotator_id
+                ] = tool_call_annotation
+            else:
+                tool_call_cells = all_item_tool_call_annotations.get(a_item_id)
+                if tool_call_cells is not None:
+                    tool_call_cells.pop(annotator_id, None)
+                    if not tool_call_cells:
+                        all_item_tool_call_annotations.pop(a_item_id, None)
             if comment is not None:
                 all_item_comments.setdefault(a_item_id, {})[annotator_id] = comment
             else:
@@ -2803,13 +2852,18 @@ def task_summary(
         latest_ann[(a_item_id, ev_id, annotator_id)] = a
 
     # Annotator union — those with ≥1 (item, evaluator) annotation OR ≥1
-    # free-text comment anywhere in this task. Stays task-wide even when
+    # free-text comment or tool-call judgement anywhere in this task. Stays task-wide even when
     # `item_id` is set, matching the docstring contract. Stable ordering by
     # name then uuid. Single bulk lookup replaces the per-annotator
     # `get_annotator(aid)` round-trips.
     annotator_ids = list(
         {key[2] for key in latest_ann.keys()}
         | {aid for cells in all_item_comments.values() for aid in cells.keys()}
+        | {
+            aid
+            for cells in all_item_tool_call_annotations.values()
+            for aid in cells.keys()
+        }
     )
     annotator_rows = get_annotators_by_uuids(annotator_ids)
     annotators: List[Dict[str, Any]] = [
@@ -3078,6 +3132,18 @@ def task_summary(
         if surviving_cells:
             item_comments[cmt_item_id] = surviving_cells
 
+    item_tool_call_annotations: Dict[str, Dict[str, Dict[str, Any]]] = {}
+    for tc_item_id, tool_call_cells in all_item_tool_call_annotations.items():
+        if tc_item_id not in paged_item_ids:
+            continue
+        surviving_tool_call_cells = {
+            aid: annotation
+            for aid, annotation in tool_call_cells.items()
+            if aid in surviving_annotator_ids
+        }
+        if surviving_tool_call_cells:
+            item_tool_call_annotations[tc_item_id] = surviving_tool_call_cells
+
     response: Dict[str, Any] = {
         "task_id": task_uuid,
         "task_type": task["type"],
@@ -3085,6 +3151,7 @@ def task_summary(
         "annotators": annotators,
         "rows": rows,
         "item_comments": item_comments,
+        "item_tool_call_annotations": item_tool_call_annotations,
         "pagination": {
             "total": total_items,
             "limit": pagination.limit,
