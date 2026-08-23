@@ -965,7 +965,7 @@ def test_provision_picks_up_a_newly_added_default():
             conn.commit()
 
 
-def test_provision_renames_default_whose_name_collides_with_a_custom():
+def test_provision_skips_default_whose_name_collides_with_a_custom():
     user_uuid, org_uuid = _fresh_org()
     safety = _forks_by_slug(org_uuid)["default-safety"]
 
@@ -987,29 +987,21 @@ def test_provision_renames_default_whose_name_collides_with_a_custom():
         org_uuid=org_uuid,
     )
 
-    # The org gets the default under a free name rather than going without it.
-    assert db.provision_default_evaluators_for_org(org_uuid) == 1
-    by_name = {e["name"]: e for e in db.get_all_evaluators(org_uuid=org_uuid)}
-    assert by_name["Safety"].get("source_default_slug") is None  # the custom one
-    assert by_name["Safety (2)"]["source_default_slug"] == "default-safety"
+    assert db.provision_default_evaluators_for_org(org_uuid) == 0  # skipped
+    safeties = [
+        e for e in db.get_all_evaluators(org_uuid=org_uuid) if e["name"] == "Safety"
+    ]
+    assert len(safeties) == 1  # only the custom, no second copy
+    assert safeties[0].get("source_default_slug") is None
 
-    # The receipt points at the fork, so it is not retried.
+    # A receipt is still written (NULL evaluator_uuid) so it isn't retried.
     with db.get_db_connection() as conn:
         row = conn.execute(
             "SELECT evaluator_uuid FROM org_default_evaluators "
             "WHERE org_uuid = ? AND source_default_slug = ?",
             (org_uuid, "default-safety"),
         ).fetchone()
-    assert row is not None and row["evaluator_uuid"] == by_name["Safety (2)"]["uuid"]
-
-    # Suffixes keep climbing while each candidate is taken. The org already
-    # holds "Safety" and "Safety (2)" by now.
-    with db.get_db_connection() as conn:
-        cursor = conn.cursor()
-        assert db._free_evaluator_name(cursor, org_uuid, "Safety") == "Safety (3)"
-        assert db._free_evaluator_name(cursor, org_uuid, "Nobody uses this") == (
-            "Nobody uses this"
-        )
+    assert row is not None and row["evaluator_uuid"] is None
 
 
 def test_backfill_forks_defaults_into_existing_orgs_and_runs_once():

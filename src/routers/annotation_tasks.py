@@ -1135,27 +1135,20 @@ def bulk_create_items(
         required_evaluator_ids = set(
             get_evaluator_ids_for_job(job_uuid, required_only=True)
         )
-        job_evaluators = get_evaluators_for_job(job_uuid)
-        all_evaluator_ids = [ev["uuid"] for ev in job_evaluators]
         tool_call_evaluator_ids = {
             ev["uuid"]
-            for ev in job_evaluators
+            for ev in get_evaluators_for_job(job_uuid)
             if ev.get("evaluator_type") == TOOL_CALL_EVALUATOR_TYPE
         }
-
-        def _item_done(it) -> bool:
-            item = {"payload": it.payload}
-            # A row the form draws nothing on cannot be visited, so it must not
-            # hold the job open. Same rule as the public-form path.
-            if not required_evaluator_ids_for_item(
-                item, all_evaluator_ids, tool_call_evaluator_ids
-            ):
-                return True
-            return bool(it.annotations) and required_evaluator_ids_for_item(
-                item, required_evaluator_ids, tool_call_evaluator_ids
+        items_fully_annotated = all(
+            it.annotations
+            and required_evaluator_ids_for_item(
+                {"payload": it.payload},
+                required_evaluator_ids,
+                tool_call_evaluator_ids,
             ).issubset(set(it.annotations.keys()))
-
-        items_fully_annotated = all(_item_done(it) for it in payload.items)
+            for it in payload.items
+        )
         if any_annotation_written and items_fully_annotated:
             update_annotation_job_status(
                 job_uuid, status="completed", set_completed_at=True

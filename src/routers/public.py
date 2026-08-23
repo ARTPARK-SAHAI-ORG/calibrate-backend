@@ -984,11 +984,9 @@ def upsert_public_annotations(
     required_evaluator_ids = get_evaluator_ids_for_job(
         job["uuid"], required_only=True
     )
-    job_evaluators = get_evaluators_for_job(job["uuid"])
-    all_evaluator_ids = [ev["uuid"] for ev in job_evaluators]
     tool_call_evaluator_ids = {
         ev["uuid"]
-        for ev in job_evaluators
+        for ev in get_evaluators_for_job(job["uuid"])
         if ev.get("evaluator_type") == TOOL_CALL_EVALUATOR_TYPE
     }
     job_annotations = get_annotations_for_job(job["uuid"])
@@ -1005,20 +1003,10 @@ def upsert_public_annotations(
         )
     }
     items_touched = {a["item_id"] for a in job_annotations}
-    # The visit rule only applies to rows the form actually draws something on.
-    # A row whose whole evaluator set belongs to the other kind (a text row in a
-    # job carrying only the tool-call evaluator, say) shows nothing to answer,
-    # so demanding a visit would leave the job open with no way to close it.
     completed = (
         bool(job_items)
         and expected_pairs.issubset(annotated_pairs)
-        and all(
-            it["uuid"] in items_touched
-            or not required_evaluator_ids_for_item(
-                it, all_evaluator_ids, tool_call_evaluator_ids
-            )
-            for it in job_items
-        )
+        and all(it["uuid"] in items_touched for it in job_items)
     )
     if completed and job["status"] != "completed":
         update_annotation_job_status(

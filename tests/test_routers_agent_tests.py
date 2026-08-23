@@ -565,7 +565,7 @@ def test_agent_runs_list_evaluators_column(client):
         live_name_a,
         live_name_b,
         "Deleted Evaluator",
-        "Tool call correctness",
+        "Tool call",
     ]
 
 
@@ -693,7 +693,7 @@ def test_global_runs_list_evaluators_column(client):
     resp = client.get("/agent-tests/runs", headers=h)
     assert resp.status_code == 200
     run = next(r for r in resp.json()["items"] if r["uuid"] == job_id)
-    assert run["evaluators"] == [live_name, "Tool call correctness"]
+    assert run["evaluators"] == [live_name, "Tool call"]
 
 
 def test_agent_runs_list_filters_and_pagination(client):
@@ -2726,11 +2726,33 @@ _PENDING_TOOL_CALL_ROW = {
 }
 
 
-def _seed_tool_call_run(agent, rows=None, frozen_evaluator=None):
+_NO_FROZEN_COPY = object()
+
+
+def _frozen_tool_call(tc_ev):
+    """The wording a real launch freezes onto the job."""
+    return {
+        "uuid": tc_ev["uuid"],
+        "name": tc_ev["name"],
+        "description": tc_ev.get("description"),
+        "output_type": "binary",
+        "output_config": {
+            "scale": [
+                {"value": True, "name": "Correct"},
+                {"value": False, "name": "Wrong"},
+            ]
+        },
+        "scale_min": None,
+        "scale_max": None,
+        "version_number": 1,
+    }
+
+
+def _seed_tool_call_run(agent, rows=None, frozen_evaluator=_NO_FROZEN_COPY):
     from db import create_agent_test_job, update_agent_test_job
 
     details = {"test_uuids": ["tc_ok", "tc_bad"], "has_tool_call_test": True}
-    if frozen_evaluator is not None:
+    if frozen_evaluator is not _NO_FROZEN_COPY and frozen_evaluator is not None:
         details["tool_call_evaluator"] = frozen_evaluator
     job_id = create_agent_test_job(
         agent_id=agent["uuid"],
@@ -2766,7 +2788,7 @@ def test_run_detail_tool_call_rows_use_workspace_evaluator(client):
     h = auth["headers"]
     agent = _create_agent(client, h)
     tc_ev = _tool_call_evaluator_of(auth["user_uuid"])
-    job_id = _seed_tool_call_run(agent)
+    job_id = _seed_tool_call_run(agent, frozen_evaluator=_frozen_tool_call(tc_ev))
 
     body = client.get(f"/agent-tests/run/{job_id}", headers=h).json()
 
@@ -2851,43 +2873,34 @@ def test_run_detail_tool_call_wording_is_frozen_at_launch(client):
     assert after["results"][1]["judge_results"][0]["value_name"] == "Wrong"
 
 
-def test_run_detail_tool_call_wording_falls_back_for_older_runs(client):
-    """A run launched before the wording was frozen has none stored, so it
-    shows the workspace's current wording rather than nothing."""
+def test_run_detail_tool_call_wording_absent_for_older_runs(client):
+    """A run launched before the wording was stored carries none, so it shows
+    what it always did: no evaluator entry and no label on the row."""
     auth = _signup(client)
     h = auth["headers"]
     agent = _create_agent(client, h)
-    tc_ev = _tool_call_evaluator_of(auth["user_uuid"])
-    job_id = _seed_tool_call_run(agent)
+    job_id = _seed_tool_call_run(agent, frozen_evaluator=None)
 
-    before = client.get(f"/agent-tests/run/{job_id}", headers=h).json()
-    assert before["evaluators"][0]["name"] == "Tool call correctness"
-    assert before["results"][0]["judge_results"][0]["value_name"] == "Correct"
-
-    _rename_tool_call_evaluator(tc_ev["uuid"])
-
-    after = client.get(f"/agent-tests/run/{job_id}", headers=h).json()
-    assert after["evaluators"][0]["name"] == "Did it call the right tool"
-    assert after["evaluators"][0]["version_number"] == 2
-    assert after["results"][0]["judge_results"][0]["value_name"] == "Right tool"
-    assert after["results"][1]["judge_results"][0]["value_name"] == "Wrong tool"
+    body = client.get(f"/agent-tests/run/{job_id}", headers=h).json()
+    assert body["evaluators"] is None
+    assert body["results"][0]["judge_results"] is None
 
 
-def test_run_detail_tool_call_without_workspace_copy(client):
-    """A workspace that deleted its copy behaves exactly as before the
-    evaluator existed: no entry in the block, no verdict on the row."""
+def test_run_detail_tool_call_wording_outlives_a_deleted_evaluator(client):
+    """The wording lives on the run, so deleting the workspace's evaluator
+    afterwards does not blank out a finished run."""
     from db import delete_evaluator
 
     auth = _signup(client)
     h = auth["headers"]
     agent = _create_agent(client, h)
     tc_ev = _tool_call_evaluator_of(auth["user_uuid"])
+    job_id = _seed_tool_call_run(agent, frozen_evaluator=_frozen_tool_call(tc_ev))
     assert delete_evaluator(tc_ev["uuid"]) is True
-    job_id = _seed_tool_call_run(agent)
 
     body = client.get(f"/agent-tests/run/{job_id}", headers=h).json()
-    assert body["evaluators"] is None
-    assert body["results"][0]["judge_results"] is None
+    assert body["evaluators"][0]["name"] == "Tool call correctness"
+    assert body["results"][0]["judge_results"][0]["value_name"] == "Correct"
 
 
 def test_run_detail_without_tool_call_test_is_unchanged(client):
@@ -2917,7 +2930,11 @@ def test_benchmark_detail_tool_call_rows_use_workspace_evaluator(client):
     job_id = create_agent_test_job(
         agent_id=agent["uuid"],
         job_type="llm-benchmark",
-        details={"test_uuids": ["tc_ok"], "has_tool_call_test": True},
+        details={
+            "test_uuids": ["tc_ok"],
+            "has_tool_call_test": True,
+            "tool_call_evaluator": _frozen_tool_call(tc_ev),
+        },
     )
     update_agent_test_job(
         job_id,
@@ -2955,63 +2972,43 @@ def test_benchmark_detail_tool_call_rows_use_workspace_evaluator(client):
     )
 
 
-def test_agent_runs_list_tool_call_name_falls_back_when_copy_deleted(client):
-    """The run list shows the evaluator's current name, and falls back to the
-    literal `Tool call` for a workspace that deleted its copy."""
-    from db import create_agent_test_job, delete_evaluator, update_agent_test_job, update_evaluator
+def test_agent_runs_list_shows_the_name_frozen_on_the_run(client):
+    """The run list names the tool-call evaluator from the copy stored on the
+    run, so a later rename leaves finished runs alone. A run launched before
+    that was stored shows the literal `Tool call`."""
+    from db import create_agent_test_job, update_agent_test_job, update_evaluator
 
     auth = _signup(client)
     h = auth["headers"]
     agent = _create_agent(client, h)
     tc_ev = _tool_call_evaluator_of(auth["user_uuid"])
-    update_evaluator(tc_ev["uuid"], name="Did it call the right tool")
 
-    job_id = create_agent_test_job(
+    older = create_agent_test_job(
         agent_id=agent["uuid"],
         job_type="llm-unit-test",
         details={"has_tool_call_test": True},
     )
-    update_agent_test_job(job_id, status="done", results={"total_tests": 1})
+    update_agent_test_job(older, status="done", results={"total_tests": 1})
+    current = create_agent_test_job(
+        agent_id=agent["uuid"],
+        job_type="llm-unit-test",
+        details={
+            "has_tool_call_test": True,
+            "tool_call_evaluator": _frozen_tool_call(tc_ev),
+        },
+    )
+    update_agent_test_job(current, status="done", results={"total_tests": 1})
+
+    update_evaluator(tc_ev["uuid"], name="Did it call the right tool")
 
     runs = client.get(f"/agent-tests/agent/{agent['uuid']}/runs", headers=h).json()
-    assert runs["items"][0]["evaluators"] == ["Did it call the right tool"]
-
-    assert delete_evaluator(tc_ev["uuid"]) is True
-    runs = client.get(f"/agent-tests/agent/{agent['uuid']}/runs", headers=h).json()
-    assert runs["items"][0]["evaluators"] == ["Tool call"]
+    by_task = {r["uuid"]: r["evaluators"] for r in runs["items"]}
+    assert by_task[current] == ["Tool call correctness"]
+    assert by_task[older] == ["Tool call"]
 
     workspace_runs = client.get("/agent-tests/runs", headers=h).json()
-    assert workspace_runs["items"][0]["evaluators"] == ["Tool call"]
-
-
-def test_tool_call_evaluator_for_run_scans_rows_when_flag_is_missing(client):
-    """A run created before the `has_tool_call_test` flag existed still gets the
-    wording: the rows are scanned instead. Rows that are not tool-call rows
-    (including malformed ones and unfinished ones with no test case) resolve to
-    nothing."""
-    from db import get_personal_org_for_user
-    from routers.agent_tests import _tool_call_evaluator_for_run
-
-    auth = _signup(client)
-    org_uuid = get_personal_org_for_user(auth["user_uuid"])["uuid"]
-    tc_ev = _tool_call_evaluator_of(auth["user_uuid"])
-
-    resolved = _tool_call_evaluator_for_run(
-        org_uuid,
-        {},
-        model_results=[
-            "not a model result",
-            {"test_results": [_tool_call_result_row("tc_ok", True, "ok")]},
-        ],
-    )
-    assert resolved["uuid"] == tc_ev["uuid"]
-
-    assert (
-        _tool_call_evaluator_for_run(
-            org_uuid, {}, test_results=["not a row", _PENDING_TOOL_CALL_ROW]
-        )
-        is None
-    )
+    by_task = {r["uuid"]: r["evaluators"] for r in workspace_runs["items"]}
+    assert by_task[current] == ["Tool call correctness"]
 
 
 def test_launch_freezes_tool_call_wording_into_the_run(client):

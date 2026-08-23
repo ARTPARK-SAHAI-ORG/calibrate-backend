@@ -2877,27 +2877,6 @@ def _org_owner_user_id(cursor: sqlite3.Cursor, org_uuid: str) -> Optional[str]:
     return row["user_id"] if row else None
 
 
-def _free_evaluator_name(cursor: sqlite3.Cursor, org_uuid: str, name: str) -> str:
-    """`name`, or the first ` (2)`, ` (3)`, ... variant the org is not using.
-
-    A default whose name an org already took used to be skipped for good, which
-    left that org silently without the default rather than with a renameable
-    copy of it.
-    """
-    candidate = name
-    suffix = 1
-    while True:
-        cursor.execute(
-            "SELECT 1 FROM evaluators "
-            "WHERE org_uuid = ? AND name = ? AND deleted_at IS NULL LIMIT 1",
-            (org_uuid, candidate),
-        )
-        if cursor.fetchone() is None:
-            return candidate
-        suffix += 1
-        candidate = f"{name} ({suffix})"
-
-
 def _fork_default_evaluator_row(
     cursor: sqlite3.Cursor,
     template: Dict[str, Any],
@@ -3017,15 +2996,24 @@ def _provision_default_evaluators_for_org(
         if slug in already:
             continue
 
-        free_name = _free_evaluator_name(cursor, org_uuid, template["name"])
-        if free_name != template["name"]:
-            logger.info(
-                f"Forking default {slug} into org {org_uuid} as {free_name!r}: "
-                "the template name is already in use"
+        cursor.execute(
+            "SELECT 1 FROM evaluators "
+            "WHERE org_uuid = ? AND name = ? AND deleted_at IS NULL LIMIT 1",
+            (org_uuid, template["name"]),
+        )
+        if cursor.fetchone() is not None:
+            cursor.execute(
+                "INSERT OR IGNORE INTO org_default_evaluators "
+                "(org_uuid, source_default_slug, evaluator_uuid) VALUES (?, ?, NULL)",
+                (org_uuid, slug),
             )
+            logger.info(
+                f"Skipped forking default {slug} into org {org_uuid}: name already in use"
+            )
+            continue
 
         fork_uuid = _fork_default_evaluator_row(
-            cursor, {**template, "name": free_name}, org_uuid, owner_user_id
+            cursor, template, org_uuid, owner_user_id
         )
         cursor.execute(
             "INSERT OR IGNORE INTO org_default_evaluators "
