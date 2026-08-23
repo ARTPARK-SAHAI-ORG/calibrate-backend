@@ -33,6 +33,7 @@ from pydantic import BaseModel, Field, model_validator
 from auth_utils import get_current_org, get_current_user_id, get_org_jwt_or_api_key, OrgContext
 from db import (
     DEFAULT_PROMPTS_BY_PURPOSE,
+    TOOL_CALL_EVALUATOR_SLUG,
     create_evaluator,
     name_uniqueness_guard,
     create_evaluator_version,
@@ -318,6 +319,9 @@ class EvaluatorResponseBase(BaseModel):
     is_default: bool = Field(
         description="True when the evaluator is a built-in default or your workspace's editable copy of one. False for an evaluator you created yourself"
     )
+    is_deletable: bool = Field(
+        description="Whether this evaluator can be deleted. Deleting a protected evaluator is refused"
+    )
     slug: Optional[str] = Field(None, description="Stable slug for a built-in default evaluator")
     source_default_slug: Optional[str] = Field(
         None,
@@ -402,6 +406,14 @@ def _owner_check(evaluator: Dict[str, Any], org_uuid: str) -> None:
         raise HTTPException(status_code=403, detail="Default evaluators cannot be modified")
     if evaluator.get("org_uuid") != org_uuid:
         raise HTTPException(status_code=404, detail="Evaluator not found")
+
+
+def _is_deletable(evaluator: Dict[str, Any]) -> bool:
+    """The tool call evaluator is the only slot a person can record a tool call verdict in, so deleting it would strand every tool call row."""
+    return TOOL_CALL_EVALUATOR_SLUG not in (
+        evaluator.get("slug"),
+        evaluator.get("source_default_slug"),
+    )
 
 
 def _visible_or_404(
@@ -504,6 +516,7 @@ def _evaluator_response(
             evaluator.get("source_default_slug") is not None
             or evaluator.get("owner_user_id") is None
         ),
+        is_deletable=_is_deletable(evaluator),
         slug=evaluator.get("slug"),
         source_default_slug=evaluator.get("source_default_slug"),
         live_version_id=evaluator.get("live_version_id"),
@@ -724,6 +737,10 @@ def delete_evaluator_endpoint(
     """Delete an evaluator you created"""
     existing = _visible_or_404(get_evaluator(evaluator_uuid), ctx.org_uuid)
     _owner_check(existing, ctx.org_uuid)
+    if not _is_deletable(existing):
+        raise HTTPException(
+            status_code=403, detail="This evaluator cannot be deleted"
+        )
     if not delete_evaluator(evaluator_uuid):
         raise HTTPException(status_code=404, detail="Evaluator not found")
     return {"message": "Evaluator deleted"}

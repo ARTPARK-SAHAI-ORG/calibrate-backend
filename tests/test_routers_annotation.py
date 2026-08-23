@@ -3216,7 +3216,10 @@ def test_tool_call_rows_accepted_when_org_copy_deleted(client):
         for e in client.get("/evaluators", headers=h).json()["items"]
         if e.get("evaluator_type") == "tool-call"
     )
-    assert client.delete(f"/evaluators/{tool_call_ev['uuid']}", headers=h).status_code == 200
+    # The API refuses this delete; drop the row directly to reach the code path.
+    from db import delete_evaluator
+
+    assert delete_evaluator(tool_call_ev["uuid"])
 
     resp = client.post(
         f"/annotation-tasks/{task_uuid}/items",

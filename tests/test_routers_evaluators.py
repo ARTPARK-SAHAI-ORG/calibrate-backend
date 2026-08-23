@@ -447,3 +447,26 @@ def test_list_evaluators_filtered_by_tool_call_type(client):
     assert len(forks) == 1
     assert forks[0]["is_default"] is True
     assert forks[0]["live_version"]["judge_model"] == ""
+
+
+def test_tool_call_default_fork_cannot_be_deleted(client):
+    """The workspace's copy of `Tool call correctness` reports `is_deletable`
+    false and the delete is refused; an ordinary evaluator stays deletable."""
+    h = _signup(client)
+    from db import TOOL_CALL_EVALUATOR_SLUG
+
+    items = client.get("/evaluators", headers=h).json()["items"]
+    fork = next(
+        e for e in items if e["source_default_slug"] == TOOL_CALL_EVALUATOR_SLUG
+    )
+    assert fork["is_deletable"] is False
+    resp = client.delete(f"/evaluators/{fork['uuid']}", headers=h)
+    assert resp.status_code == 403, resp.text
+    assert client.get(f"/evaluators/{fork['uuid']}", headers=h).status_code == 200
+    assert client.get(f"/evaluators/{fork['uuid']}", headers=h).json()["is_deletable"] is False
+
+    other = next(
+        e for e in items if e["source_default_slug"] != TOOL_CALL_EVALUATOR_SLUG
+    )
+    assert other["is_deletable"] is True
+    assert client.delete(f"/evaluators/{other['uuid']}", headers=h).status_code == 200
