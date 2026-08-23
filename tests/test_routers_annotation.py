@@ -3326,7 +3326,14 @@ def test_task_agreement_reports_tool_call_number_separately(client):
     body = client.get(
         f"/annotation-tasks/{task_uuid}/agreement", headers=h
     ).json()
-    assert body["tool_call"] == {"current": 0.5, "pair_count": 2}
+    # The human score on tool-call rows: four verdicts, three of them correct.
+    assert body["tool_call"]["human_result"] == {
+        "count": 4,
+        "true_count": 3,
+        "mean": None,
+    }
+    assert body["tool_call"]["current"] == 0.5
+    assert body["tool_call"]["pair_count"] == 2
     # The evaluator-scored pair lifts the overall number above the tool-call
     # one, which is how you can tell the two are counted separately.
     assert body["human_human"]["pair_count"] == 3

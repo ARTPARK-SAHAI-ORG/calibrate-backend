@@ -199,6 +199,9 @@ class HumanAgreementBlock(BaseModel):
 
 class ToolCallAgreementBlock(BaseModel):
     model_config = ConfigDict(extra="allow")
+    human_result: Optional[Dict[str, Any]] = Field(
+        description="How the annotators scored the tool-call rows: `count` verdicts in total, of which `true_count` marked the call correct"
+    )
     current: Optional[float] = Field(
         description="Current mean pairwise agreement among annotators on tool-call rows"
     )
@@ -2646,11 +2649,13 @@ def task_agreement(
     hh_current, hh_pairs = aggregate_agreement(annotations)
     hh_series = trend_series(annotations, bucket=bucket, days=days)
 
-    # Tool-call rows are judged by hand with no evaluator attached, so their
-    # slots ride inside `human_human` too. Report them on their own as well,
-    # since a tool call is right or wrong rather than scored on a rubric.
+    # Tool-call rows are judged by hand with no evaluator attached, so they
+    # have no entry in `evaluators` and their slots ride inside `human_human`.
+    # Report them on their own: how the annotators scored them, plus how much
+    # they agreed with each other on those rows alone.
     tool_call_annotations = [a for a in annotations if a.get("evaluator_id") is None]
     tc_current, tc_pairs = aggregate_agreement(tool_call_annotations)
+    tc_human_result = human_result_summary(annotations, None)
 
     evaluators_block = _evaluator_alignment_block(
         annotations, runs, linked, bucket, days
@@ -2666,6 +2671,7 @@ def task_agreement(
             "series": hh_series,
         },
         "tool_call": {
+            "human_result": tc_human_result,
             "current": tc_current,
             "pair_count": tc_pairs,
         },
