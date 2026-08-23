@@ -42,6 +42,7 @@ from db import (
     get_tools_for_agent,
     get_evaluators_for_test,
     get_evaluator_by_slug,
+    get_tool_call_evaluator_for_org,
     get_evaluator_version,
     create_agent_test_job,
     get_agent_test_job,
@@ -51,7 +52,11 @@ from db import (
     get_agent_test_jobs_for_org_summary,
     delete_agent_test_job,
 )
-from llm_judge import build_test_evaluators_payload, evaluator_value_name
+from llm_judge import (
+    build_test_evaluators_payload,
+    default_output_config,
+    evaluator_value_name,
+)
 from routers.agents import AgentSummary, to_agent_summary
 from routers.tests import (
     AGENT_INTERACTION_TYPES,
@@ -742,15 +747,102 @@ def _slim_model_results(model_results: Any) -> Optional[List[Dict[str, Any]]]:
     return slim or None
 
 
+def _tool_call_evaluator(org_uuid: Optional[str]) -> Optional[Dict[str, Any]]:
+    """The workspace's tool-call correctness evaluator, shaped as one
+    `TestRunEvaluator` entry, or None when the workspace deleted its copy.
+
+    Deliberately resolved on every read and never snapshotted onto a run:
+    calibrate decides a tool-call verdict on its own, this evaluator supplies
+    only the wording, so renaming it or one of its labels must change what
+    every finished run displays. That is the opposite of a judged run, which
+    freezes the rubric it ran against.
+    """
+    ev = get_tool_call_evaluator_for_org(org_uuid) if org_uuid else None
+    if not ev:
+        return None
+    version = (
+        get_evaluator_version(ev["live_version_id"])
+        if ev.get("live_version_id")
+        else None
+    ) or {}
+    output_type = ev.get("output_type")
+    return {
+        "uuid": ev["uuid"],
+        "name": ev.get("name"),
+        "description": ev.get("description"),
+        "output_type": output_type,
+        "output_config": (
+            version.get("output_config") or default_output_config(output_type)
+        ),
+        "scale_min": None,
+        "scale_max": None,
+        "version_number": version.get("version_number"),
+    }
+
+
+def _is_tool_call_row(row: Any) -> bool:
+    """True for a result row calibrate produced by diffing tool calls."""
+    if not isinstance(row, dict):
+        return False
+    test_case = row.get("test_case")
+    if not isinstance(test_case, dict):
+        return False
+    evaluation = test_case.get("evaluation")
+    return isinstance(evaluation, dict) and evaluation.get("type") == "tool_call"
+
+
+def _tool_call_evaluator_for_run(
+    org_uuid: Optional[str],
+    details: Dict[str, Any],
+    test_results: Optional[List[Dict[str, Any]]] = None,
+    model_results: Optional[List[Dict[str, Any]]] = None,
+) -> Optional[Dict[str, Any]]:
+    """One lookup per request: the tool-call evaluator when this run holds a
+    tool-call test, else None. The rows are scanned as well as the job's
+    `has_tool_call_test` flag so runs created before that flag existed still
+    get the wording."""
+    rows = list(test_results or [])
+    for mr in model_results or []:
+        if isinstance(mr, dict):
+            rows.extend(mr.get("test_results") or [])
+    if not details.get("has_tool_call_test") and not any(
+        _is_tool_call_row(r) for r in rows
+    ):
+        return None
+    return _tool_call_evaluator(org_uuid)
+
+
+def _tool_call_judge_result(
+    row: Dict[str, Any], evaluator: Dict[str, Any]
+) -> Dict[str, Any]:
+    """Give a tool-call row the same displayable verdict shape a judged row
+    has: the verdict is calibrate's own `passed`, the reasoning is calibrate's
+    tool-call diff unchanged, and only the label comes from the evaluator."""
+    passed = row.get("passed")
+    return {
+        "evaluator_uuid": evaluator.get("uuid"),
+        "reasoning": row.get("reasoning"),
+        "match": passed,
+        "score": None,
+        "value_name": evaluator_value_name(
+            passed, evaluator.get("output_type"), evaluator.get("output_config")
+        ),
+        "variable_values": None,
+    }
+
+
 def _run_evaluator_names(
     job: Dict[str, Any],
     evaluator_cache: Optional[Dict[str, Optional[Dict[str, Any]]]] = None,
+    tool_call_evaluator_name: Optional[str] = None,
 ) -> List[str]:
     """Flat, deduped evaluator names for the run-list `evaluators` column, in
     first-appearance order across the job's `details.evaluators_by_test_id`
-    snapshot. Appends the literal `"Tool call"` when any linked test was a
-    tool-call test (tool-call tests never carry evaluators, so they'd
-    otherwise be invisible in this column).
+    snapshot. When any linked test was a tool-call test, appends the
+    workspace's tool-call evaluator name (`tool_call_evaluator_name`, resolved
+    once per request by the caller), falling back to the literal `"Tool call"`
+    for a workspace that deleted its copy. Tool-call tests never carry
+    evaluators, so they would otherwise be invisible in this column.
 
     Prefers each evaluator's current name over the snapshot (same preference
     order as `_build_evaluators_block_for_test_run`), via a caller-shared
@@ -775,7 +867,7 @@ def _run_evaluator_names(
                 raw_names.append(name)
     names = list(dict.fromkeys(raw_names))
     if job.get("has_tool_call_test"):
-        names.append("Tool call")
+        names.append(tool_call_evaluator_name or "Tool call")
     return names
 
 
@@ -805,6 +897,7 @@ def _build_agent_test_run_item_fields(
     job: Dict[str, Any],
     name: str,
     evaluator_cache: Optional[Dict[str, Optional[Dict[str, Any]]]] = None,
+    tool_call_evaluator_name: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Shared field mapping for the run-list item models (``AgentTestRunListItem``
     and its ``GlobalTestRunListItem`` subclass).
@@ -833,7 +926,9 @@ def _build_agent_test_run_item_fields(
         "total_tests": job_results.get("total_tests"),
         "passed": job_results.get("passed"),
         "failed": job_results.get("failed"),
-        "evaluators": _run_evaluator_names(job, evaluator_cache),
+        "evaluators": _run_evaluator_names(
+            job, evaluator_cache, tool_call_evaluator_name
+        ),
         "latency_ms": job_results.get("latency_ms"),
         "cost": job_results.get("cost"),
         "total_tokens": job_results.get("total_tokens"),
@@ -929,10 +1024,18 @@ def get_agent_test_runs(
 
     runs = []
     evaluator_cache = _prefetch_evaluator_cache(jobs)
+    # One lookup for the whole list, and only when a run needs it.
+    tool_call_name = (
+        (_tool_call_evaluator(ctx.org_uuid) or {}).get("name")
+        if any(j.get("has_tool_call_test") for j in jobs)
+        else None
+    )
     for job in jobs:  # already newest-first
         name = name_map.get(job["uuid"], "Job")
         run_item = AgentTestRunListItem(
-            **_build_agent_test_run_item_fields(job, name, evaluator_cache)
+            **_build_agent_test_run_item_fields(
+                job, name, evaluator_cache, tool_call_name
+            )
         )
         runs.append(run_item)
 
@@ -1011,10 +1114,16 @@ def get_all_test_runs_for_user(
     # "Run N"/"Benchmark N" names stay stable regardless of which filters apply.
     runs = []
     evaluator_cache = _prefetch_evaluator_cache(jobs)
+    # One lookup for the whole list, and only when a run needs it.
+    tool_call_name = (
+        (_tool_call_evaluator(ctx.org_uuid) or {}).get("name")
+        if any(j.get("has_tool_call_test") for j in jobs)
+        else None
+    )
     for job in jobs:  # already newest-first
         run_item = GlobalTestRunListItem(
             **_build_agent_test_run_item_fields(
-                job, name_map[job["uuid"]], evaluator_cache
+                job, name_map[job["uuid"]], evaluator_cache, tool_call_name
             ),
             # Agent identity (global-only fields)
             agent_id=job.get("agent_id", ""),
@@ -1613,6 +1722,7 @@ def _build_evaluators_block_for_test_run(
     test_results: Optional[List[Dict[str, Any]]] = None,
     model_results: Optional[List[Dict[str, Any]]] = None,
     evaluator_cache: Optional[Dict[str, Optional[Dict[str, Any]]]] = None,
+    tool_call_evaluator: Optional[Dict[str, Any]] = None,
 ) -> List[Dict[str, Any]]:
     """Build the top-level `evaluators[]` block for an agent-test / benchmark
     response: one entry per unique evaluator UUID, carrying the
@@ -1631,9 +1741,11 @@ def _build_evaluators_block_for_test_run(
 
     Binary evaluators with no rubric snapshot get the Correct/Wrong default
     (via `default_output_config`) so the FE always has a scale to render.
-    """
-    from llm_judge import default_output_config
 
+    `tool_call_evaluator` is the workspace's tool-call evaluator read live at
+    request time (see `_tool_call_evaluator`); it is appended as its own entry
+    because a tool-call test carries no linked evaluator to snapshot.
+    """
     cache: Dict[str, Optional[Dict[str, Any]]] = (
         evaluator_cache if evaluator_cache is not None else {}
     )
@@ -1697,6 +1809,11 @@ def _build_evaluators_block_for_test_run(
                 "version_number": snap.get("version_number"),
             }
         )
+    if tool_call_evaluator:
+        # The live entry wins over one derived from the rows, which carries no
+        # rubric or version.
+        block = [e for e in block if e["uuid"] != tool_call_evaluator["uuid"]]
+        block.append(tool_call_evaluator)
     return block
 
 
@@ -1704,6 +1821,7 @@ def _enrich_test_results_with_evaluators(
     test_results: Optional[List[Dict[str, Any]]],
     evaluators_by_test_id: Optional[Dict[str, List[Dict[str, Any]]]],
     evaluator_cache: Optional[Dict[str, Optional[Dict[str, Any]]]] = None,
+    tool_call_evaluator: Optional[Dict[str, Any]] = None,
 ) -> None:
     """Mutate ``test_results`` in place: convert each row's raw ``judge_results``
     dict (keyed by calibrate evaluator name) into a structured list of
@@ -1720,6 +1838,10 @@ def _enrich_test_results_with_evaluators(
 
     Pass ``evaluator_cache`` to dedupe ``get_evaluator`` across rows and across
     nested benchmark models (same dict as ``_enrich_model_results_with_evaluators``).
+
+    A tool-call row has no ``judge_results`` (calibrate diffs the tool calls
+    instead of judging), so it gets a single synthesized verdict against
+    ``tool_call_evaluator`` at read time only, nothing is stored.
     """
     if not test_results:
         return
@@ -1733,6 +1855,14 @@ def _enrich_test_results_with_evaluators(
             continue
         raw = r.get("judge_results")
         if raw is None:
+            if (
+                tool_call_evaluator
+                and r.get("passed") is not None
+                and _is_tool_call_row(r)
+            ):
+                r["judge_results"] = [
+                    _tool_call_judge_result(r, tool_call_evaluator)
+                ]
             continue
 
         test_id = r.get("test_case_id")
@@ -1814,6 +1944,7 @@ def _enrich_model_results_with_evaluators(
     model_results: Optional[List[Dict[str, Any]]],
     evaluators_by_test_id: Optional[Dict[str, List[Dict[str, Any]]]],
     evaluator_cache: Optional[Dict[str, Optional[Dict[str, Any]]]] = None,
+    tool_call_evaluator: Optional[Dict[str, Any]] = None,
 ) -> None:
     """Run ``_enrich_test_results_with_evaluators`` for each model's nested
     ``test_results`` list. The same snapshot applies to every model in a
@@ -1826,7 +1957,10 @@ def _enrich_model_results_with_evaluators(
     for mr in model_results:
         if isinstance(mr, dict):
             _enrich_test_results_with_evaluators(
-                mr.get("test_results"), evaluators_by_test_id, cache
+                mr.get("test_results"),
+                evaluators_by_test_id,
+                cache,
+                tool_call_evaluator,
             )
             _enrich_evaluator_summary(mr.get("evaluator_summary"), cache)
 
@@ -2800,13 +2934,20 @@ def get_agent_test_run_status(
 
     evaluators_snapshot = details.get("evaluators_by_test_id") or {}
     evaluator_cache: Dict[str, Optional[Dict[str, Any]]] = {}
+    tool_call_evaluator = _tool_call_evaluator_for_run(
+        ctx.org_uuid, details, test_results=results.get("test_results")
+    )
     _enrich_test_results_with_evaluators(
-        results.get("test_results"), evaluators_snapshot, evaluator_cache
+        results.get("test_results"),
+        evaluators_snapshot,
+        evaluator_cache,
+        tool_call_evaluator,
     )
     evaluators_block = _build_evaluators_block_for_test_run(
         evaluators_snapshot,
         test_results=results.get("test_results"),
         evaluator_cache=evaluator_cache,
+        tool_call_evaluator=tool_call_evaluator,
     )
 
     response = TestRunStatusResponse(
@@ -3622,13 +3763,20 @@ def get_benchmark_status(
 
     evaluators_snapshot = details.get("evaluators_by_test_id") or {}
     evaluator_cache: Dict[str, Optional[Dict[str, Any]]] = {}
+    tool_call_evaluator = _tool_call_evaluator_for_run(
+        ctx.org_uuid, details, model_results=results.get("model_results")
+    )
     _enrich_model_results_with_evaluators(
-        results.get("model_results"), evaluators_snapshot, evaluator_cache
+        results.get("model_results"),
+        evaluators_snapshot,
+        evaluator_cache,
+        tool_call_evaluator,
     )
     evaluators_block = _build_evaluators_block_for_test_run(
         evaluators_snapshot,
         model_results=results.get("model_results"),
         evaluator_cache=evaluator_cache,
+        tool_call_evaluator=tool_call_evaluator,
     )
 
     response = BenchmarkStatusResponse(

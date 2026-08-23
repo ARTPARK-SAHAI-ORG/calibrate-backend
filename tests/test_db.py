@@ -2815,3 +2815,168 @@ def test_simulation_jobs_summary_returns_headers_only(user):
     # Neither heavy blob is fetched.
     assert "results" not in row
     assert "details" not in row
+
+
+# ---------------------------------------------------------------------------
+# Tool-call correctness default evaluator
+# ---------------------------------------------------------------------------
+
+
+def test_tool_call_evaluator_is_seeded_with_no_judge():
+    tmpl = db.get_evaluator_by_slug(db.TOOL_CALL_EVALUATOR_SLUG)
+    assert tmpl is not None
+    assert tmpl["name"] == "Tool call correctness"
+    assert tmpl["evaluator_type"] == "tool-call"
+    assert tmpl["data_type"] == "text"
+    assert tmpl["kind"] == "single"
+    assert tmpl["output_type"] == "binary"
+
+    version = db.get_evaluator_version(tmpl["live_version_id"])
+    assert version["judge_model"] == ""
+    assert version["system_prompt"] == ""
+    assert version["variables"] in (None, [])
+    scale = version["output_config"]["scale"]
+    assert [(s["value"], s["name"]) for s in scale] == [
+        (True, "Correct"),
+        (False, "Wrong"),
+    ]
+
+
+def test_tool_call_fork_is_per_org_and_not_the_template():
+    _u1, org_a = _fresh_org()
+    _u2, org_b = _fresh_org()
+
+    fork_a = db.get_tool_call_evaluator_for_org(org_a)
+    fork_b = db.get_tool_call_evaluator_for_org(org_b)
+    assert fork_a and fork_b
+    assert fork_a["org_uuid"] == org_a
+    assert fork_a["uuid"] != fork_b["uuid"]
+    assert fork_a["slug"] is None  # the slug stays on the hidden template
+    assert fork_a["evaluator_type"] == "tool-call"
+
+
+def test_tool_call_evaluator_is_none_when_org_deleted_its_fork():
+    _user, org_uuid = _fresh_org()
+    fork = db.get_tool_call_evaluator_for_org(org_uuid)
+    assert db.delete_evaluator(fork["uuid"]) is True
+    # Never falls back to the hidden template.
+    assert db.get_tool_call_evaluator_for_org(org_uuid) is None
+
+
+def test_tool_call_backfills_are_idempotent():
+    _user, org_uuid = _fresh_org()
+    before = db.get_tool_call_evaluator_for_org(org_uuid)["uuid"]
+    tmpl = db.get_evaluator_by_slug(db.TOOL_CALL_EVALUATOR_SLUG)["uuid"]
+    db.init_db()
+    db.init_db()
+    assert db.get_tool_call_evaluator_for_org(org_uuid)["uuid"] == before
+    # The empty judge_model / system_prompt still compare equal to the seed, so
+    # re-seeding does not churn out a new version every startup.
+    assert len(db.get_evaluator_versions(tmpl)) == 1
+
+
+def _rerun_tool_call_backfills():
+    with db.get_db_connection() as conn:
+        conn.execute(
+            "DELETE FROM _schema_migrations WHERE name IN (?, ?)",
+            (
+                db.PROVISION_TOOL_CALL_EVALUATOR_MIGRATION,
+                db.LINK_TOOL_CALL_EVALUATOR_TO_TASKS_MIGRATION,
+            ),
+        )
+        conn.commit()
+    db.init_db()
+
+
+def test_tool_call_backfill_links_only_tasks_with_tool_call_rows():
+    user_uuid, org_uuid = _fresh_org()
+    with_calls = db.create_annotation_task(
+        name=_u("tc-task"), user_id=user_uuid, org_uuid=org_uuid, type="llm"
+    )
+    db.create_annotation_items(
+        with_calls,
+        [
+            {"payload": {"chat_history": [], "agent_response": "hi"}},
+            {"payload": {"chat_history": [], "tool_calls": [{"tool": "search"}]}},
+        ],
+    )
+    without_calls = db.create_annotation_task(
+        name=_u("plain-task"), user_id=user_uuid, org_uuid=org_uuid, type="llm"
+    )
+    db.create_annotation_items(
+        without_calls,
+        [
+            {"payload": {"chat_history": [], "agent_response": "hi"}},
+            {"payload": {"chat_history": [], "tool_calls": []}},
+        ],
+    )
+
+    _rerun_tool_call_backfills()
+
+    fork_uuid = db.get_tool_call_evaluator_for_org(org_uuid)["uuid"]
+    linked = [
+        e["uuid"] for e in db.get_evaluators_for_annotation_task(with_calls)
+    ]
+    assert linked == [fork_uuid]
+    assert db.get_evaluators_for_annotation_task(without_calls) == []
+
+    # Re-running does not double-link.
+    _rerun_tool_call_backfills()
+    assert [
+        e["uuid"] for e in db.get_evaluators_for_annotation_task(with_calls)
+    ] == [fork_uuid]
+
+
+def test_tool_call_backfill_skips_org_without_a_fork():
+    user_uuid, org_uuid = _fresh_org()
+    task = db.create_annotation_task(
+        name=_u("orphan-task"), user_id=user_uuid, org_uuid=org_uuid, type="llm"
+    )
+    db.create_annotation_items(
+        task, [{"payload": {"actual_tool_calls": [{"tool": "search"}]}}]
+    )
+    assert db.delete_evaluator(db.get_tool_call_evaluator_for_org(org_uuid)["uuid"])
+
+    _rerun_tool_call_backfills()
+
+    assert db.get_evaluators_for_annotation_task(task) == []
+
+
+def test_tool_call_backfill_forks_into_a_pre_feature_org():
+    _user, org_uuid = _fresh_org()
+    fork_uuid = db.get_tool_call_evaluator_for_org(org_uuid)["uuid"]
+    # Simulate an org that predates the tool-call default: no fork, no receipt.
+    with db.get_db_connection() as conn:
+        conn.execute(
+            "DELETE FROM evaluator_versions WHERE evaluator_id = ?", (fork_uuid,)
+        )
+        conn.execute("DELETE FROM evaluators WHERE uuid = ?", (fork_uuid,))
+        conn.execute(
+            "DELETE FROM org_default_evaluators "
+            "WHERE org_uuid = ? AND source_default_slug = ?",
+            (org_uuid, db.TOOL_CALL_EVALUATOR_SLUG),
+        )
+        conn.commit()
+    assert db.get_tool_call_evaluator_for_org(org_uuid) is None
+
+    _rerun_tool_call_backfills()
+
+    refreshed = db.get_tool_call_evaluator_for_org(org_uuid)
+    assert refreshed and refreshed["uuid"] != fork_uuid
+
+
+def test_linking_an_already_linked_evaluator_is_a_no_op(user):
+    """A repeat link keeps the existing row and its display order instead of
+    hitting the pivot's uniqueness rule and raising."""
+    org_uuid = user["org_uuid"]
+    task_uuid = db.create_annotation_task(
+        name=_u("repeat-link"), user_id=user["uuid"], org_uuid=org_uuid, type="llm"
+    )
+    first = db.create_evaluator(name=_u("first"), org_uuid=org_uuid)
+    second = db.create_evaluator(name=_u("second"), org_uuid=org_uuid)
+    link_id = db.add_evaluator_to_annotation_task(task_uuid, first)
+    db.add_evaluator_to_annotation_task(task_uuid, second)
+
+    assert db.add_evaluator_to_annotation_task(task_uuid, first) == link_id
+    linked = db.get_evaluators_for_annotation_task(task_uuid)
+    assert [e["uuid"] for e in linked] == [first, second]

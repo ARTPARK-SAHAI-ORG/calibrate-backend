@@ -171,7 +171,9 @@ class AnnotationStatus(str, Enum):
 
 
 # Concrete value sets reused across routers for entity/job "type" fields.
-EvaluatorTypeLiteral = Literal["tts", "stt", "llm", "llm-general", "conversation"]
+EvaluatorTypeLiteral = Literal[
+    "tts", "stt", "llm", "llm-general", "conversation", "tool-call"
+]
 DataTypeLiteral = Literal["text", "audio"]
 OutputTypeLiteral = Literal["binary", "rating"]
 EvaluatorKindLiteral = Literal["single", "side_by_side"]
@@ -186,6 +188,7 @@ EVALUATOR_TYPE_DESCRIPTION = (
     "- `llm`: a reply with its conversation history\n"
     "- `llm-general`: a standalone input and output pair\n"
     "- `conversation`: a full conversation\n"
+    "- `tool-call`: whether the agent called the right tool, labelled by a person\n"
 )
 DATA_TYPE_DESCRIPTION = (
     "The modality the judge reads:\n\n"

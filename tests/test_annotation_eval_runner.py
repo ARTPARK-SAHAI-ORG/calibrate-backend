@@ -290,6 +290,77 @@ def test_skip_runs_for_tool_call_rows():
     assert runs[0]["status"] == "completed"
 
 
+# ---------------------------------------------------------------------------
+# tool-call evaluator (human-answered only)
+# ---------------------------------------------------------------------------
+
+TC_ROW = {"uuid": "tc", "payload": {"tool_calls": [{"tool": "t", "arguments": {}}]}}
+TEXT_ROW = {"uuid": "resp", "payload": {"agent_response": "hi"}}
+
+
+def test_required_evaluator_ids_for_item_tool_call_row():
+    assert runner.required_evaluator_ids_for_item(
+        TC_ROW, ["ev-1", "ev-tc"], {"ev-tc"}
+    ) == {"ev-tc"}
+    # No tool-call evaluator on the job → nothing is required on the row.
+    assert runner.required_evaluator_ids_for_item(TC_ROW, ["ev-1"], set()) == set()
+
+
+def test_required_evaluator_ids_for_item_normal_row():
+    assert runner.required_evaluator_ids_for_item(
+        TEXT_ROW, ["ev-1", "ev-tc"], {"ev-tc"}
+    ) == {"ev-1"}
+    # Job carries only the tool-call evaluator → nothing is required here.
+    assert (
+        runner.required_evaluator_ids_for_item(TEXT_ROW, ["ev-tc"], {"ev-tc"}) == set()
+    )
+
+
+def _resolve_with_tool_call_evaluator(requested):
+    """Resolve `requested` where ev-tc is a tool-call evaluator and ev-1 is a
+    normal LLM judge."""
+    evaluators = {
+        "ev-1": _ev_record(evaluator_type="llm"),
+        "ev-tc": _ev_record(
+            uuid="ev-tc",
+            name="Tool call",
+            live_version_id="ver-tc",
+            evaluator_type=runner.TOOL_CALL_EVALUATOR_TYPE,
+        ),
+    }
+    versions = {
+        "ver-1": _version_record(),
+        "ver-tc": _version_record(uuid="ver-tc", evaluator_id="ev-tc"),
+    }
+    with patch(
+        "annotation_eval_runner.get_evaluator", side_effect=lambda u: evaluators[u]
+    ), patch(
+        "annotation_eval_runner.get_evaluator_version",
+        side_effect=lambda u: versions[u],
+    ):
+        return runner._resolve_evaluator_dicts(
+            [{"evaluator_id": e} for e in requested], set(evaluators)
+        )
+
+
+def test_tool_call_evaluator_never_reaches_calibrate_payload():
+    resolved = _resolve_with_tool_call_evaluator(["ev-1", "ev-tc"])
+    assert [ev["uuid"] for ev in resolved] == ["ev-1"]
+    payload = runner.build_evaluator_cli_payload_unrendered(resolved)
+    assert [p["name"] for p in payload] == ["Safety"]
+
+
+def test_no_skip_placeholder_row_for_tool_call_evaluator():
+    resolved = _resolve_with_tool_call_evaluator(["ev-1", "ev-tc"])
+    runs = runner._skip_runs_for_tool_call_rows([TC_ROW, TEXT_ROW], resolved, "job-1")
+    assert [(r["item_id"], r["evaluator_id"]) for r in runs] == [("tc", "ev-1")]
+
+
+def test_resolve_rejects_only_tool_call_evaluators():
+    with pytest.raises(runner.EvaluatorResolutionError):
+        _resolve_with_tool_call_evaluator(["ev-tc"])
+
+
 def test_build_llm_general_dataset_no_evaluators():
     with pytest.raises(runner.DatasetBuildError):
         runner._build_llm_general_dataset([], [])

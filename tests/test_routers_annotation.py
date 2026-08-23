@@ -3114,3 +3114,193 @@ def test_job_form_settings_round_trip(client):
         headers=h,
     )
     assert bad.status_code == 422
+
+
+# ---------------------------------------------------------------------------
+# Tool-call rows: automatic evaluator attach + completion rule
+# ---------------------------------------------------------------------------
+
+
+def _tool_call_payload(name):
+    return {
+        "name": name,
+        "chat_history": [{"role": "user", "content": "book it"}],
+        "tool_calls": [{"tool": "book", "arguments": {"id": 1}}],
+    }
+
+
+def _task_evaluators(client, h, task_uuid):
+    return client.get(
+        f"/annotation-tasks/{task_uuid}/evaluators", headers=h
+    ).json()
+
+
+def _tool_call_links(client, h, task_uuid):
+    return [
+        e
+        for e in _task_evaluators(client, h, task_uuid)
+        if e.get("evaluator_type") == "tool-call"
+    ]
+
+
+def _llm_task(client, h, llm_ev):
+    return client.post(
+        "/annotation-tasks",
+        json={
+            "name": f"tc-{uuid.uuid4().hex[:6]}",
+            "type": "llm",
+            "evaluator_ids": [llm_ev["uuid"]],
+        },
+        headers=h,
+    ).json()["uuid"]
+
+
+def test_tool_call_row_links_tool_call_evaluator_once(client):
+    auth = _signup(client)
+    h = auth["headers"]
+    llm_ev = _llm_evaluator(client, h)
+    task_uuid = _llm_task(client, h, llm_ev)
+
+    first = client.post(
+        f"/annotation-tasks/{task_uuid}/items",
+        json={"items": [{"payload": _tool_call_payload("tc1")}]},
+        headers=h,
+    )
+    assert first.status_code == 200
+    links = _tool_call_links(client, h, task_uuid)
+    assert len(links) == 1
+    order_after_first = [e["uuid"] for e in _task_evaluators(client, h, task_uuid)]
+
+    # A later batch with another tool-call row neither duplicates the link
+    # nor moves it to the end of the display order.
+    second = client.post(
+        f"/annotation-tasks/{task_uuid}/items",
+        json={"items": [{"payload": _tool_call_payload("tc2")}]},
+        headers=h,
+    )
+    assert second.status_code == 200
+    assert len(_tool_call_links(client, h, task_uuid)) == 1
+    assert [
+        e["uuid"] for e in _task_evaluators(client, h, task_uuid)
+    ] == order_after_first
+
+
+def test_normal_rows_do_not_link_tool_call_evaluator(client):
+    auth = _signup(client)
+    h = auth["headers"]
+    llm_ev = _llm_evaluator(client, h)
+    task_uuid = _llm_task(client, h, llm_ev)
+
+    resp = client.post(
+        f"/annotation-tasks/{task_uuid}/items",
+        json={
+            "items": [
+                {"payload": {"name": "n1", "agent_response": "hi"}},
+                {"payload": {"name": "n2"}},
+            ]
+        },
+        headers=h,
+    )
+    assert resp.status_code == 200
+    assert _tool_call_links(client, h, task_uuid) == []
+
+
+def test_tool_call_rows_accepted_when_org_copy_deleted(client):
+    auth = _signup(client)
+    h = auth["headers"]
+    llm_ev = _llm_evaluator(client, h)
+    task_uuid = _llm_task(client, h, llm_ev)
+
+    tool_call_ev = next(
+        e
+        for e in client.get("/evaluators", headers=h).json()["items"]
+        if e.get("evaluator_type") == "tool-call"
+    )
+    assert client.delete(f"/evaluators/{tool_call_ev['uuid']}", headers=h).status_code == 200
+
+    resp = client.post(
+        f"/annotation-tasks/{task_uuid}/items",
+        json={"items": [{"payload": _tool_call_payload("tc1")}]},
+        headers=h,
+    )
+    assert resp.status_code == 200
+    assert _tool_call_links(client, h, task_uuid) == []
+
+
+def _job_status(client, h, task_uuid, job_uuid):
+    detail = client.get(
+        f"/annotation-tasks/{task_uuid}/jobs/{job_uuid}", headers=h
+    ).json()
+    return detail["status"]
+
+
+def test_initial_annotations_complete_mixed_rows(client):
+    """A mixed batch completes when each row carries the answer it shows: the
+    tool-call row only the tool-call evaluator, the normal row only the LLM one."""
+    auth = _signup(client)
+    h = auth["headers"]
+    llm_ev = _llm_evaluator(client, h)
+    task_uuid = _llm_task(client, h, llm_ev)
+    annotator = client.post(
+        "/annotators", json={"name": f"a-{uuid.uuid4().hex[:6]}"}, headers=h
+    ).json()
+
+    # First batch links the tool-call evaluator so its uuid is known.
+    client.post(
+        f"/annotation-tasks/{task_uuid}/items",
+        json={"items": [{"payload": _tool_call_payload("seed")}]},
+        headers=h,
+    )
+    tool_call_ev = _tool_call_links(client, h, task_uuid)[0]
+
+    resp = client.post(
+        f"/annotation-tasks/{task_uuid}/items",
+        json={
+            "items": [
+                {
+                    "payload": {"name": "n1", "agent_response": "hi"},
+                    "annotations": {llm_ev["uuid"]: {"value": True}},
+                },
+                {
+                    "payload": _tool_call_payload("tc1"),
+                    "annotations": {tool_call_ev["uuid"]: {"value": True}},
+                },
+            ],
+            "annotator_id": annotator["uuid"],
+        },
+        headers=h,
+    )
+    assert resp.status_code == 200
+    job_uuid = resp.json()["annotation_job_id"]
+    assert _job_status(client, h, task_uuid, job_uuid) == "completed"
+
+
+def test_initial_annotations_incomplete_without_tool_call_answer(client):
+    auth = _signup(client)
+    h = auth["headers"]
+    llm_ev = _llm_evaluator(client, h)
+    task_uuid = _llm_task(client, h, llm_ev)
+    annotator = client.post(
+        "/annotators", json={"name": f"a-{uuid.uuid4().hex[:6]}"}, headers=h
+    ).json()
+
+    resp = client.post(
+        f"/annotation-tasks/{task_uuid}/items",
+        json={
+            "items": [
+                {
+                    "payload": {"name": "n1", "agent_response": "hi"},
+                    "annotations": {llm_ev["uuid"]: {"value": True}},
+                },
+                {
+                    "payload": _tool_call_payload("tc1"),
+                    "annotations": {llm_ev["uuid"]: {"value": True}},
+                },
+            ],
+            "annotator_id": annotator["uuid"],
+        },
+        headers=h,
+    )
+    assert resp.status_code == 200
+    job_uuid = resp.json()["annotation_job_id"]
+    assert _job_status(client, h, task_uuid, job_uuid) == "in_progress"

@@ -21,6 +21,8 @@ from db import (
     set_evaluators_for_annotation_task,
     get_evaluators_for_annotation_task,
     get_evaluators_for_annotation_tasks,
+    get_evaluators_for_job,
+    get_tool_call_evaluator_for_org,
     get_evaluator,
     get_evaluator_version,
     get_annotations_for_task,
@@ -69,7 +71,9 @@ from annotation_eval_runner import (
     _resolve_evaluator_dicts,
     build_dataset_for_task_type,
     is_tool_call_row,
+    required_evaluator_ids_for_item,
     start_annotation_eval_job,
+    TOOL_CALL_EVALUATOR_TYPE,
 )
 from utils import (
     job_slot,
@@ -957,6 +961,19 @@ def bulk_create_items(
             },
         )
 
+    # A tool-call row is answered by a person, never a judge, so the
+    # workspace's tool-call evaluator has to be on the task before anyone
+    # opens the labelling form. `add_evaluator_to_annotation_task` inserts
+    # unconditionally on an active link, so skip when it is already there:
+    # later batches must not duplicate the link or move its display position.
+    # A workspace that deleted its copy simply gets no link.
+    if any(is_tool_call_row({"payload": it.payload}) for it in payload.items):
+        tool_call_evaluator = get_tool_call_evaluator_for_org(ctx.org_uuid)
+        if tool_call_evaluator and tool_call_evaluator["uuid"] not in {
+            e["uuid"] for e in get_evaluators_for_annotation_task(task_uuid)
+        }:
+            add_evaluator_to_annotation_task(task_uuid, tool_call_evaluator["uuid"])
+
     annotator: Optional[Dict[str, Any]] = None
     linked_evaluator_ids: set = set()
     if items_with_annotations:
@@ -1107,18 +1124,29 @@ def bulk_create_items(
                     evaluator_id=evaluator_id,
                 )
                 any_annotation_written = True
-        # Auto-complete contract: every item × every REQUIRED evaluator in the
-        # job snapshot must have a row, and every item must carry at least one
-        # judgement (so a job whose evaluators are all optional still needs the
-        # annotator to visit each item). Same source of truth as the
+        # Auto-complete contract: every REQUIRED slot an item actually shows
+        # must have a row, and every item must carry at least one judgement
+        # (so a job whose evaluators are all optional still needs the
+        # annotator to visit each item). A tool-call row shows only the
+        # tool-call evaluator, every other row shows everything except it
+        # (required_evaluator_ids_for_item). Same source of truth as the
         # public-form auto-complete path — see also the snapshot-mismatch gate
         # above, which measures against the full snapshot instead.
         required_evaluator_ids = set(
             get_evaluator_ids_for_job(job_uuid, required_only=True)
         )
+        tool_call_evaluator_ids = {
+            ev["uuid"]
+            for ev in get_evaluators_for_job(job_uuid)
+            if ev.get("evaluator_type") == TOOL_CALL_EVALUATOR_TYPE
+        }
         items_fully_annotated = all(
             it.annotations
-            and required_evaluator_ids.issubset(set(it.annotations.keys()))
+            and required_evaluator_ids_for_item(
+                {"payload": it.payload},
+                required_evaluator_ids,
+                tool_call_evaluator_ids,
+            ).issubset(set(it.annotations.keys()))
             for it in payload.items
         )
         if any_annotation_written and items_fully_annotated:
