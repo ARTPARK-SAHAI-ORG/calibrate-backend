@@ -109,6 +109,13 @@ def test_public_evaluators_defaults_token_validation(client):
     assert all(e["evaluator_type"] == "llm-general" for e in general_body)
     assert any(e["name"] == "Output correctness" for e in general_body)
 
+    # `tool-call` is an accepted filter value.
+    tool_call = client.get(
+        "/public/evaluators/defaults",
+        params={"share_token": token, "types": "tool-call"},
+    )
+    assert tool_call.status_code == 200
+
     # Invalid types value → 400
     bad = client.get(
         "/public/evaluators/defaults",
@@ -281,3 +288,123 @@ def test_public_annotation_eval_must_be_done(client):
     db_mod.update_job(job_uuid, status="done")
     resp = client.get(f"/public/annotation-eval/{token}")
     assert resp.status_code == 200
+
+
+# ---------------------------------------------------------------------------
+# Labelling form: tool-call rows
+# ---------------------------------------------------------------------------
+
+
+_TOOL_CALL_PAYLOAD = {
+    "chat_history": [{"role": "user", "content": "book it"}],
+    "tool_calls": [{"tool": "book", "arguments": {"day": "mon"}}],
+}
+_TEXT_PAYLOAD = {
+    "chat_history": [{"role": "user", "content": "hi"}],
+    "agent_response": "hello",
+}
+
+
+def _labelling_job(client, payloads, evaluator_types):
+    """Seed a task with `payloads` as items and one evaluator per entry in
+    `evaluator_types`, then snapshot both into a labelling job. Returns the
+    annotator token, item uuids, and evaluator uuids in the order given."""
+    import db as db_mod
+
+    auth = _user(client)
+    user_id = auth["user_uuid"]
+    org_uuid = auth["org_uuid"]
+    task_uuid = db_mod.create_annotation_task(
+        name=f"t-{uuid.uuid4().hex[:6]}",
+        type="llm",
+        org_uuid=org_uuid,
+        user_id=user_id,
+    )
+    item_uuids = db_mod.create_annotation_items(
+        task_uuid, [{"payload": p} for p in payloads]
+    )
+    evaluator_uuids = []
+    for ev_type in evaluator_types:
+        ev_uuid = db_mod.create_evaluator(
+            name=f"ev-{uuid.uuid4().hex[:6]}",
+            evaluator_type=ev_type,
+            org_uuid=org_uuid,
+            owner_user_id=user_id,
+        )
+        db_mod.add_evaluator_to_annotation_task(task_uuid, ev_uuid)
+        evaluator_uuids.append(ev_uuid)
+    annotator_uuid = db_mod.create_annotator(
+        name=f"a-{uuid.uuid4().hex[:6]}", org_uuid=org_uuid, user_id=user_id
+    )
+    token = uuid.uuid4().hex
+    db_mod.create_annotation_job(
+        task_id=task_uuid,
+        annotator_id=annotator_uuid,
+        item_uuids=item_uuids,
+        public_token=token,
+    )
+    return token, item_uuids, evaluator_uuids
+
+
+def _save(client, token, item_uuid, evaluator_uuid):
+    resp = client.post(
+        f"/public/annotation-jobs/{token}/annotations",
+        json={
+            "item_id": item_uuid,
+            "annotations": [
+                {"evaluator_id": evaluator_uuid, "value": {"value": True}}
+            ],
+        },
+    )
+    assert resp.status_code == 200, resp.text
+    return resp.json()["status"]
+
+
+def test_public_annotation_job_marks_tool_call_items(client):
+    token, item_uuids, evaluator_uuids = _labelling_job(
+        client, [_TOOL_CALL_PAYLOAD, _TEXT_PAYLOAD], ["tool-call", "llm"]
+    )
+
+    body = client.get(f"/public/annotation-jobs/{token}").json()
+    by_uuid = {it["uuid"]: it for it in body["items"]}
+    assert by_uuid[item_uuids[0]]["is_tool_call"] is True
+    assert by_uuid[item_uuids[1]]["is_tool_call"] is False
+    # The evaluator entries carry the type the browser pairs the flag against.
+    assert [ev["evaluator_type"] for ev in body["evaluators"]] == [
+        "tool-call",
+        "llm",
+    ]
+
+
+def test_mixed_job_completes_on_the_evaluator_each_row_shows(client):
+    token, item_uuids, evaluator_uuids = _labelling_job(
+        client, [_TOOL_CALL_PAYLOAD, _TEXT_PAYLOAD], ["tool-call", "llm"]
+    )
+    tool_item, text_item = item_uuids
+    tool_ev, llm_ev = evaluator_uuids
+
+    assert _save(client, token, text_item, llm_ev) == "in_progress"
+    # The text evaluator is not required on the tool-call row, so answering it
+    # there leaves the row's own tool-call slot open.
+    assert _save(client, token, tool_item, llm_ev) == "in_progress"
+    assert _save(client, token, tool_item, tool_ev) == "completed"
+
+
+def test_tool_call_answer_does_not_substitute_on_a_text_row(client):
+    token, item_uuids, evaluator_uuids = _labelling_job(
+        client, [_TEXT_PAYLOAD], ["tool-call", "llm"]
+    )
+    tool_ev, llm_ev = evaluator_uuids
+
+    assert _save(client, token, item_uuids[0], tool_ev) == "in_progress"
+    assert _save(client, token, item_uuids[0], llm_ev) == "completed"
+
+
+def test_all_tool_call_job_completes_on_the_tool_call_evaluator_alone(client):
+    token, item_uuids, evaluator_uuids = _labelling_job(
+        client, [_TOOL_CALL_PAYLOAD, _TOOL_CALL_PAYLOAD], ["tool-call", "llm"]
+    )
+    tool_ev = evaluator_uuids[0]
+
+    assert _save(client, token, item_uuids[0], tool_ev) == "in_progress"
+    assert _save(client, token, item_uuids[1], tool_ev) == "completed"

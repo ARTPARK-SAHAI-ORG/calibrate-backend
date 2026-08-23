@@ -1668,6 +1668,37 @@ def init_db():
                     f"Forked default evaluators into existing orgs: {forked} copy(ies)"
                 )
 
+        # Fork the tool-call correctness default (shipped after the fork
+        # backfill above already ran) into every existing org, then link it to
+        # every annotation task that already holds a tool-call row.
+        if not _schema_migration_applied(
+            cursor, PROVISION_TOOL_CALL_EVALUATOR_MIGRATION
+        ):
+            forked = _backfill_provision_tool_call_evaluator(cursor)
+            _mark_schema_migration_applied(
+                cursor, PROVISION_TOOL_CALL_EVALUATOR_MIGRATION
+            )
+            conn.commit()
+            if forked:
+                logger.info(
+                    f"Forked the tool-call correctness evaluator into existing "
+                    f"orgs: {forked} copy(ies)"
+                )
+
+        if not _schema_migration_applied(
+            cursor, LINK_TOOL_CALL_EVALUATOR_TO_TASKS_MIGRATION
+        ):
+            tc_linked = _backfill_link_tool_call_evaluator_to_tasks(cursor)
+            _mark_schema_migration_applied(
+                cursor, LINK_TOOL_CALL_EVALUATOR_TO_TASKS_MIGRATION
+            )
+            conn.commit()
+            if tc_linked:
+                logger.info(
+                    f"Linked the tool-call correctness evaluator onto {tc_linked} "
+                    "annotation task(s) with tool-call rows"
+                )
+
         # Re-point pre-existing evaluator links from the shared default templates
         # to each org's fork (one-time). Runs after the fork backfill so the
         # forks exist. Finished-run job snapshots stay frozen.
@@ -2039,9 +2070,48 @@ _LLM_GENERAL_SEED = {
 }
 
 
+# Seed for `default-tool-call-correctness`: the only default with no AI judge.
+# A tool-call row is labelled by a person, so `judge_model` and `system_prompt`
+# are deliberately empty strings (the columns are NOT NULL) and nothing ever
+# renders or sends them.
+TOOL_CALL_EVALUATOR_SLUG = "default-tool-call-correctness"
+
+_TOOL_CALL_SEED = {
+    "slug": TOOL_CALL_EVALUATOR_SLUG,
+    "name": "Tool call correctness",
+    "description": "Records whether the agent made the right tool call, judged by a person",
+    "evaluator_type": "tool-call",
+    "data_type": "text",
+    "kind": "single",
+    "output_type": "binary",
+    "version": {
+        "judge_model": "",
+        "system_prompt": "",
+        "output_config": {
+            "scale": [
+                {
+                    "value": True,
+                    "name": "Correct",
+                    "description": "The agent made the right tool call.",
+                    "color": "#16a34a",
+                },
+                {
+                    "value": False,
+                    "name": "Wrong",
+                    "description": "The agent made the wrong tool call.",
+                    "color": "#dc2626",
+                },
+            ]
+        },
+        "variables": [],
+    },
+}
+
+
 DEFAULT_EVALUATORS_SEED = [
     _LLM_NEXT_REPLY_SEED,
     _LLM_GENERAL_SEED,
+    _TOOL_CALL_SEED,
     _seed_from_purpose(
         "default-stt-transcription",
         "Judges whether the transcription preserves the meaning of the reference texts",
@@ -3079,6 +3149,76 @@ def _backfill_link_default_correctness_evaluator(cursor: sqlite3.Cursor) -> int:
     cursor.execute("SELECT changes()")
     row = cursor.fetchone()
     return int(row[0]) if row else 0
+
+
+PROVISION_TOOL_CALL_EVALUATOR_MIGRATION = "provision_tool_call_evaluator_v1"
+LINK_TOOL_CALL_EVALUATOR_TO_TASKS_MIGRATION = "link_tool_call_evaluator_to_tasks_v1"
+
+# Mirrors `is_tool_call_row` in annotation_eval_runner.py: no agent_response /
+# output text, and a non-empty tool_calls or actual_tool_calls list. Repeated
+# here in SQL because db.py must not import a module that imports it.
+_TOOL_CALL_ITEM_CONDITION = """
+    COALESCE(COALESCE(json_extract(i.payload, '$.agent_response'),
+                      json_extract(i.payload, '$.output')), '') = ''
+    AND (CASE
+            WHEN json_array_length(json_extract(i.payload, '$.tool_calls')) > 0 THEN 1
+            WHEN json_array_length(json_extract(i.payload, '$.actual_tool_calls')) > 0 THEN 1
+            ELSE 0
+         END) = 1
+"""
+
+
+def _backfill_provision_tool_call_evaluator(cursor: sqlite3.Cursor) -> int:
+    """One-time migration: fork the tool-call correctness default into every
+    existing org. Runs the full provisioning pass, since the receipt ledger means
+    only slugs the org has no receipt for are forked, so an org that deleted an
+    older fork is never resurrected. Caller commits and records
+    `PROVISION_TOOL_CALL_EVALUATOR_MIGRATION` in the same transaction."""
+    cursor.execute("SELECT uuid FROM organizations WHERE deleted_at IS NULL")
+    org_uuids = [r["uuid"] for r in cursor.fetchall()]
+    total = 0
+    for org_uuid in org_uuids:
+        total += _provision_default_evaluators_for_org(cursor, org_uuid)
+    return total
+
+
+def _backfill_link_tool_call_evaluator_to_tasks(cursor: sqlite3.Cursor) -> int:
+    """One-time migration: link each org's fork of the tool-call correctness
+    evaluator to every existing annotation task holding at least one tool-call
+    row. Skips tasks that already link it and orgs with no fork. Caller commits
+    and records `LINK_TOOL_CALL_EVALUATOR_TO_TASKS_MIGRATION` in the same
+    transaction."""
+    cursor.execute(
+        "SELECT org_uuid, uuid FROM evaluators "
+        "WHERE source_default_slug = ? AND org_uuid IS NOT NULL AND deleted_at IS NULL",
+        (TOOL_CALL_EVALUATOR_SLUG,),
+    )
+    fork_by_org = {r["org_uuid"]: r["uuid"] for r in cursor.fetchall()}
+
+    cursor.execute(
+        f"""
+        SELECT DISTINCT t.uuid AS task_uuid, t.org_uuid AS org_uuid
+          FROM annotation_tasks t
+          JOIN annotation_items i ON i.task_id = t.uuid AND i.deleted_at IS NULL
+         WHERE t.deleted_at IS NULL AND ({_TOOL_CALL_ITEM_CONDITION})
+        """
+    )
+    linked = 0
+    for row in cursor.fetchall():
+        evaluator_uuid = fork_by_org.get(row["org_uuid"])
+        if not evaluator_uuid:
+            continue
+        task_uuid = row["task_uuid"]
+        if evaluator_uuid in _visible_evaluator_ids_for_task(cursor, task_uuid):
+            continue
+        _relink_or_insert_evaluator(
+            cursor,
+            task_uuid,
+            evaluator_uuid,
+            _next_evaluator_position(cursor, task_uuid),
+        )
+        linked += 1
+    return linked
 
 
 def _template_and_fork_maps(cursor: sqlite3.Cursor):
@@ -5197,7 +5337,7 @@ def _validate_output(output_type: str, output_config: Optional[Dict[str, Any]]) 
         raise ValueError("output_config.scale must be a list")
 
 
-VALID_EVALUATOR_TYPES = ("tts", "stt", "llm", "llm-general", "conversation")
+VALID_EVALUATOR_TYPES = ("tts", "stt", "llm", "llm-general", "conversation", "tool-call")
 VALID_DATA_TYPES = ("text", "audio")
 
 
@@ -5329,6 +5469,23 @@ def get_evaluator_by_slug(slug: str) -> Optional[Dict[str, Any]]:
         cursor.execute(
             "SELECT * FROM evaluators WHERE slug = ? AND deleted_at IS NULL",
             (slug,),
+        )
+        row = cursor.fetchone()
+        return _parse_evaluator_row(row) if row else None
+
+
+def get_tool_call_evaluator_for_org(org_uuid: str) -> Optional[Dict[str, Any]]:
+    """Return the org's live fork of the tool-call correctness default, or None.
+
+    Never falls back to the hidden template. An org whose fork was deleted has
+    no tool-call evaluator, and must not be handed one it cannot edit.
+    """
+    with get_db_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            "SELECT * FROM evaluators "
+            "WHERE source_default_slug = ? AND org_uuid = ? AND deleted_at IS NULL",
+            (TOOL_CALL_EVALUATOR_SLUG, org_uuid),
         )
         row = cursor.fetchone()
         return _parse_evaluator_row(row) if row else None
@@ -8324,13 +8481,18 @@ def _relink_or_insert_evaluator(
     renumbers the whole set afterward). A restored row is reset to the given
     `is_optional` rather than keeping what it carried before it was unlinked.
     Returns the pivot row id.
+
+    An already-active link is left exactly as it is, position included, so a
+    repeat link is a no-op rather than a UNIQUE violation.
     """
     cursor.execute(
-        "SELECT id FROM annotation_task_evaluators "
-        "WHERE task_id = ? AND evaluator_id = ? AND deleted_at IS NOT NULL",
+        "SELECT id, deleted_at FROM annotation_task_evaluators "
+        "WHERE task_id = ? AND evaluator_id = ?",
         (task_id, evaluator_id),
     )
     existing = cursor.fetchone()
+    if existing and existing["deleted_at"] is None:
+        return existing["id"]
     if existing:
         cursor.execute(
             "UPDATE annotation_task_evaluators "

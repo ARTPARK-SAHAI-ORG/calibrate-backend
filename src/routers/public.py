@@ -73,7 +73,12 @@ from routers.annotation_tasks import (
     _human_agreement_for_run,
     _shape_eval_job_for_response,
 )
-from annotation_eval_runner import ANNOTATION_EVAL_JOB_TYPE
+from annotation_eval_runner import (
+    ANNOTATION_EVAL_JOB_TYPE,
+    TOOL_CALL_EVALUATOR_TYPE,
+    is_tool_call_row,
+    required_evaluator_ids_for_item,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -388,7 +393,7 @@ def _parse_evaluator_types(types: Optional[str]) -> Optional[set[str]]:
     if types is None or not types.strip():
         return None
 
-    allowed = {"stt", "tts", "llm", "llm-general", "conversation"}
+    allowed = {"stt", "tts", "llm", "llm-general", "conversation", "tool-call"}
     parsed = {item.strip() for item in types.split(",") if item.strip()}
     invalid = parsed - allowed
     if invalid:
@@ -434,7 +439,7 @@ def get_public_default_evaluators(
     share_token: str = Query(..., min_length=1, description="Share token that grants access to the linked run"),
     types: Optional[str] = Query(
         None,
-        description="Evaluator types to include as a comma-separated list, any of `stt`, `tts`, `llm`, `llm-general`, `conversation`. Omit for all",
+        description="Evaluator types to include as a comma-separated list, any of `stt`, `tts`, `llm`, `llm-general`, `conversation`, `tool-call`. Omit for all",
     ),
 ):
     """List default evaluator metadata when you have a valid share token"""
@@ -799,7 +804,12 @@ def _build_annotation_job_payload(
     the viewer route (read-only). When `read_only=True`, the response carries
     a `read_only` flag so the FE can disable form inputs. The annotator
     identity is included in both modes — the viewer is meant to see *whose*
-    labels they're looking at."""
+    labels they're looking at.
+
+    Each item carries `is_tool_call`: true when the row's agent output is a
+    tool call rather than text. The form draws the tool-call evaluator only on
+    those rows and every other evaluator only on the rest, pairing this flag
+    against each entry's `evaluator_type`."""
     task = get_annotation_task(job["task_id"])
     if not task:
         raise HTTPException(status_code=404, detail="Job not found")
@@ -829,6 +839,8 @@ def _build_annotation_job_payload(
     # Annotators open this form unauthenticated and may keep it open for hours;
     # sign TTS audio with a long TTL so playback doesn't die mid-session.
     presign_annotation_items_audio(items, task.get("type"))
+    for item in items:
+        item["is_tool_call"] = is_tool_call_row(item)
     annotations = get_annotations_for_job(job["uuid"])
 
     return {
@@ -956,9 +968,11 @@ def upsert_public_annotations(
     if job["status"] == "pending":
         update_annotation_job_status(job["uuid"], "in_progress")
 
-    # Auto-complete: every (item, REQUIRED evaluator) slot in this job must
-    # have a row, and every item must carry at least one judgement. The second
-    # condition is what makes a job whose evaluators are all optional still
+    # Auto-complete: every required slot each item actually shows must have a
+    # row, and every item must carry at least one judgement. A tool-call row
+    # shows only the tool-call evaluator, every other row shows everything
+    # except it (required_evaluator_ids_for_item). The second condition is
+    # what makes a job whose evaluators are all optional still
     # require the annotator to visit each item, rather than completing on the
     # first save. We re-check on every save (including post-completion edits)
     # so the status remains accurate. `completed_at` is preserved on subsequent
@@ -970,6 +984,11 @@ def upsert_public_annotations(
     required_evaluator_ids = get_evaluator_ids_for_job(
         job["uuid"], required_only=True
     )
+    tool_call_evaluator_ids = {
+        ev["uuid"]
+        for ev in get_evaluators_for_job(job["uuid"])
+        if ev.get("evaluator_type") == TOOL_CALL_EVALUATOR_TYPE
+    }
     job_annotations = get_annotations_for_job(job["uuid"])
     annotated_pairs = {
         (a["item_id"], a.get("evaluator_id"))
@@ -977,7 +996,11 @@ def upsert_public_annotations(
         if a.get("evaluator_id") is not None
     }
     expected_pairs = {
-        (it["uuid"], ev_id) for it in job_items for ev_id in required_evaluator_ids
+        (it["uuid"], ev_id)
+        for it in job_items
+        for ev_id in required_evaluator_ids_for_item(
+            it, required_evaluator_ids, tool_call_evaluator_ids
+        )
     }
     items_touched = {a["item_id"] for a in job_annotations}
     completed = (

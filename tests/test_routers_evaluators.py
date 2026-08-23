@@ -394,3 +394,56 @@ def test_delete_version_404s_on_unknown_repeat_and_other_org(client):
     # deleting the whole evaluator does.
     other = _signup(client)
     assert client.delete(f"/evaluators/{ev_uuid}/versions/{v2}", headers=other).status_code == 403
+
+
+def test_tool_call_evaluator_has_no_judge_and_stays_editable(client):
+    """A tool-call evaluator is answered by a person, so its judge model and
+    system prompt are empty strings. Creating one from scratch, adding a version
+    to it, and filtering the list by its type must all still work."""
+    h = _signup(client)
+    name = f"ev-{uuid.uuid4().hex[:6]}"
+    created = client.post(
+        "/evaluators",
+        json={
+            "name": name,
+            "evaluator_type": "tool-call",
+            "data_type": "text",
+            "kind": "single",
+            "output_type": "binary",
+            "version": {"judge_model": "", "system_prompt": ""},
+        },
+        headers=h,
+    )
+    assert created.status_code == 200, created.text
+    ev_uuid = created.json()["uuid"]
+
+    new_version = client.post(
+        f"/evaluators/{ev_uuid}/versions",
+        json={"judge_model": "", "system_prompt": "", "make_live": True},
+        headers=h,
+    )
+    assert new_version.status_code == 200, new_version.text
+    assert new_version.json()["version_number"] == 2
+
+    detail = client.get(f"/evaluators/{ev_uuid}", headers=h).json()
+    assert detail["evaluator_type"] == "tool-call"
+    assert detail["live_version_id"] == new_version.json()["version_uuid"]
+    assert detail["versions"][1]["judge_model"] == ""
+    assert detail["versions"][1]["system_prompt"] == ""
+    # Binary rows with no rubric still get the Correct/Wrong default.
+    assert detail["versions"][1]["output_config"]["scale"]
+
+
+def test_list_evaluators_filtered_by_tool_call_type(client):
+    """The type filter returns the workspace's tool-call evaluators, including
+    its copy of the shipped `Tool call correctness` default."""
+    h = _signup(client)
+    items = client.get("/evaluators?evaluator_type=tool-call", headers=h).json()["items"]
+    assert items, "expected the seeded tool-call default fork"
+    assert {e["evaluator_type"] for e in items} == {"tool-call"}
+    from db import TOOL_CALL_EVALUATOR_SLUG
+
+    forks = [e for e in items if e["source_default_slug"] == TOOL_CALL_EVALUATOR_SLUG]
+    assert len(forks) == 1
+    assert forks[0]["is_default"] is True
+    assert forks[0]["live_version"]["judge_model"] == ""

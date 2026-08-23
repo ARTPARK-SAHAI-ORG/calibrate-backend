@@ -498,9 +498,9 @@ def test_agent_runs_list_evaluators_column(client):
     each evaluator that judged the run (not the frozen submission-time
     snapshot, which can be stale after a rename or carry calibrate's
     `-{uuid8}` name-collision suffix), deduplicated and in first-appearance
-    order, with `Tool call` appended when any linked test was a tool-call
-    test — the tool-call test itself never carries an evaluator, so this is
-    the only signal that it ran. An evaluator uuid the snapshot references
+    order, with the workspace's tool-call evaluator name appended when any
+    linked test was a tool-call test — the tool-call test itself never carries
+    an evaluator, so this is the only signal that it ran. An evaluator uuid the snapshot references
     but that no longer resolves (e.g. deleted) falls back to the snapshot
     name rather than dropping the entry."""
     from db import (
@@ -565,7 +565,7 @@ def test_agent_runs_list_evaluators_column(client):
         live_name_a,
         live_name_b,
         "Deleted Evaluator",
-        "Tool call",
+        "Tool call correctness",
     ]
 
 
@@ -693,7 +693,7 @@ def test_global_runs_list_evaluators_column(client):
     resp = client.get("/agent-tests/runs", headers=h)
     assert resp.status_code == 200
     run = next(r for r in resp.json()["items"] if r["uuid"] == job_id)
-    assert run["evaluators"] == [live_name, "Tool call"]
+    assert run["evaluators"] == [live_name, "Tool call correctness"]
 
 
 def test_agent_runs_list_filters_and_pagination(client):
@@ -2682,3 +2682,292 @@ def test_run_by_test_uuids_rejects_a_test_the_agent_cannot_be_sent(client):
     # No job was created, so the run never started.
     runs = client.get(f"/agent-tests/agent/{agent['uuid']}/runs", headers=h)
     assert runs.json()["total"] == 0
+
+
+# ---------------------------------------------------------------------------
+# Tool-call wording (the workspace's "Tool call correctness" evaluator)
+# ---------------------------------------------------------------------------
+
+
+def _tool_call_evaluator_of(user_uuid):
+    """The signed-up user's workspace copy of the tool-call evaluator."""
+    from db import get_personal_org_for_user, get_tool_call_evaluator_for_org
+
+    org_uuid = get_personal_org_for_user(user_uuid)["uuid"]
+    return get_tool_call_evaluator_for_org(org_uuid)
+
+
+def _tool_call_result_row(case_id, passed, reasoning):
+    """A finished tool-call row exactly as calibrate writes it: a verdict and a
+    diff, no `judge_results`."""
+    return {
+        "name": case_id,
+        "test_case_id": case_id,
+        "passed": passed,
+        "reasoning": reasoning,
+        "output": {"response": None, "tool_calls": [{"tool": "x", "arguments": {}}]},
+        "test_case": {
+            "id": case_id,
+            "name": case_id,
+            "evaluation": {"type": "tool_call", "tool_calls": [{"tool": "x"}]},
+        },
+        "judge_results": None,
+    }
+
+
+_PENDING_TOOL_CALL_ROW = {
+    "name": "tc_pending",
+    "test_case_id": None,
+    "passed": None,
+    "reasoning": None,
+    "output": None,
+    "test_case": None,
+    "judge_results": None,
+}
+
+
+def _seed_tool_call_run(agent, rows=None):
+    from db import create_agent_test_job, update_agent_test_job
+
+    job_id = create_agent_test_job(
+        agent_id=agent["uuid"],
+        job_type="llm-unit-test",
+        details={"test_uuids": ["tc_ok", "tc_bad"], "has_tool_call_test": True},
+    )
+    update_agent_test_job(
+        job_id,
+        status="done",
+        results={
+            "total_tests": 2,
+            "passed": 1,
+            "failed": 1,
+            "test_results": rows
+            if rows is not None
+            else [
+                _tool_call_result_row("tc_ok", True, "Called x as expected"),
+                _tool_call_result_row("tc_bad", False, "Expected x, called y"),
+                _PENDING_TOOL_CALL_ROW,
+            ],
+        },
+    )
+    return job_id
+
+
+def test_run_detail_tool_call_rows_use_workspace_evaluator(client):
+    """A tool-call run's detail carries the workspace's tool-call evaluator in
+    the `evaluators` block, and each finished tool-call row gets the same
+    displayable verdict a judged row has: calibrate's own pass/fail, calibrate's
+    diff as the reasoning, and the label from the evaluator's rubric. A row
+    that has not finished stays without a verdict."""
+    auth = _signup(client)
+    h = auth["headers"]
+    agent = _create_agent(client, h)
+    tc_ev = _tool_call_evaluator_of(auth["user_uuid"])
+    job_id = _seed_tool_call_run(agent)
+
+    body = client.get(f"/agent-tests/run/{job_id}", headers=h).json()
+
+    assert [e["uuid"] for e in body["evaluators"]] == [tc_ev["uuid"]]
+    entry = body["evaluators"][0]
+    assert entry["name"] == "Tool call correctness"
+    assert entry["description"] == tc_ev["description"]
+    assert entry["output_type"] == "binary"
+    assert entry["version_number"] == 1
+    assert [(s["value"], s["name"]) for s in entry["output_config"]["scale"]] == [
+        (True, "Correct"),
+        (False, "Wrong"),
+    ]
+
+    passed_row, failed_row, pending_row = body["results"]
+    assert passed_row["judge_results"] == [
+        {
+            "evaluator_uuid": tc_ev["uuid"],
+            "reasoning": "Called x as expected",
+            "match": True,
+            "score": None,
+            "value_name": "Correct",
+            "variable_values": None,
+        }
+    ]
+    assert failed_row["judge_results"][0]["match"] is False
+    assert failed_row["judge_results"][0]["value_name"] == "Wrong"
+    assert failed_row["judge_results"][0]["reasoning"] == "Expected x, called y"
+    assert pending_row["judge_results"] is None
+
+
+def test_run_detail_tool_call_wording_is_read_fresh(client):
+    """The wording is resolved on every read, never frozen into the run:
+    renaming the evaluator, or one of its labels, changes what an ALREADY
+    FINISHED run returns."""
+    from db import create_evaluator_version, set_evaluator_live_version, update_evaluator
+
+    auth = _signup(client)
+    h = auth["headers"]
+    agent = _create_agent(client, h)
+    tc_ev = _tool_call_evaluator_of(auth["user_uuid"])
+    job_id = _seed_tool_call_run(agent)
+
+    before = client.get(f"/agent-tests/run/{job_id}", headers=h).json()
+    assert before["evaluators"][0]["name"] == "Tool call correctness"
+    assert before["results"][0]["judge_results"][0]["value_name"] == "Correct"
+
+    update_evaluator(tc_ev["uuid"], name="Did it call the right tool")
+    version = create_evaluator_version(
+        tc_ev["uuid"],
+        judge_model="",
+        system_prompt="",
+        output_config={
+            "scale": [
+                {"value": True, "name": "Right tool"},
+                {"value": False, "name": "Wrong tool"},
+            ]
+        },
+    )
+    set_evaluator_live_version(tc_ev["uuid"], version["uuid"])
+
+    after = client.get(f"/agent-tests/run/{job_id}", headers=h).json()
+    assert after["evaluators"][0]["name"] == "Did it call the right tool"
+    assert after["evaluators"][0]["version_number"] == 2
+    assert after["results"][0]["judge_results"][0]["value_name"] == "Right tool"
+    assert after["results"][1]["judge_results"][0]["value_name"] == "Wrong tool"
+
+
+def test_run_detail_tool_call_without_workspace_copy(client):
+    """A workspace that deleted its copy behaves exactly as before the
+    evaluator existed: no entry in the block, no verdict on the row."""
+    from db import delete_evaluator
+
+    auth = _signup(client)
+    h = auth["headers"]
+    agent = _create_agent(client, h)
+    tc_ev = _tool_call_evaluator_of(auth["user_uuid"])
+    assert delete_evaluator(tc_ev["uuid"]) is True
+    job_id = _seed_tool_call_run(agent)
+
+    body = client.get(f"/agent-tests/run/{job_id}", headers=h).json()
+    assert body["evaluators"] is None
+    assert body["results"][0]["judge_results"] is None
+
+
+def test_run_detail_without_tool_call_test_is_unchanged(client):
+    """A run with no tool-call test gains nothing: the block holds only the
+    evaluators that judged it."""
+    auth = _signup(client)
+    h = auth["headers"]
+    agent = _create_agent(client, h)
+    tc_ev = _tool_call_evaluator_of(auth["user_uuid"])
+    job_id = _seed_run_job(client, h, agent)
+
+    body = client.get(f"/agent-tests/run/{job_id}", headers=h).json()
+    assert tc_ev["uuid"] not in [e["uuid"] for e in body["evaluators"]]
+    assert body["results"][2]["judge_results"] is None
+
+
+def test_benchmark_detail_tool_call_rows_use_workspace_evaluator(client):
+    """A tool-call test benchmarked across models gets the same wording on each
+    model's rows."""
+    from db import create_agent_test_job, update_agent_test_job
+
+    auth = _signup(client)
+    h = auth["headers"]
+    agent = _create_agent(client, h)
+    tc_ev = _tool_call_evaluator_of(auth["user_uuid"])
+
+    job_id = create_agent_test_job(
+        agent_id=agent["uuid"],
+        job_type="llm-benchmark",
+        details={"test_uuids": ["tc_ok"], "has_tool_call_test": True},
+    )
+    update_agent_test_job(
+        job_id,
+        status="done",
+        results={
+            "model_results": [
+                {
+                    "model": "openai/gpt-4.1",
+                    "success": True,
+                    "message": "ok",
+                    "test_results": [
+                        _tool_call_result_row("tc_ok", True, "Called x as expected")
+                    ],
+                },
+                {
+                    "model": "anthropic/claude-sonnet-4",
+                    "success": True,
+                    "message": "ok",
+                    "test_results": [
+                        _tool_call_result_row("tc_ok", False, "Called y instead")
+                    ],
+                },
+            ]
+        },
+    )
+
+    body = client.get(f"/agent-tests/benchmark/{job_id}", headers=h).json()
+    assert [e["uuid"] for e in body["evaluators"]] == [tc_ev["uuid"]]
+    first, second = body["model_results"]
+    assert first["test_results"][0]["judge_results"][0]["value_name"] == "Correct"
+    assert second["test_results"][0]["judge_results"][0]["value_name"] == "Wrong"
+    assert (
+        second["test_results"][0]["judge_results"][0]["reasoning"]
+        == "Called y instead"
+    )
+
+
+def test_agent_runs_list_tool_call_name_falls_back_when_copy_deleted(client):
+    """The run list shows the evaluator's current name, and falls back to the
+    literal `Tool call` for a workspace that deleted its copy."""
+    from db import create_agent_test_job, delete_evaluator, update_agent_test_job, update_evaluator
+
+    auth = _signup(client)
+    h = auth["headers"]
+    agent = _create_agent(client, h)
+    tc_ev = _tool_call_evaluator_of(auth["user_uuid"])
+    update_evaluator(tc_ev["uuid"], name="Did it call the right tool")
+
+    job_id = create_agent_test_job(
+        agent_id=agent["uuid"],
+        job_type="llm-unit-test",
+        details={"has_tool_call_test": True},
+    )
+    update_agent_test_job(job_id, status="done", results={"total_tests": 1})
+
+    runs = client.get(f"/agent-tests/agent/{agent['uuid']}/runs", headers=h).json()
+    assert runs["items"][0]["evaluators"] == ["Did it call the right tool"]
+
+    assert delete_evaluator(tc_ev["uuid"]) is True
+    runs = client.get(f"/agent-tests/agent/{agent['uuid']}/runs", headers=h).json()
+    assert runs["items"][0]["evaluators"] == ["Tool call"]
+
+    workspace_runs = client.get("/agent-tests/runs", headers=h).json()
+    assert workspace_runs["items"][0]["evaluators"] == ["Tool call"]
+
+
+def test_tool_call_evaluator_for_run_scans_rows_when_flag_is_missing(client):
+    """A run created before the `has_tool_call_test` flag existed still gets the
+    wording: the rows are scanned instead. Rows that are not tool-call rows
+    (including malformed ones and unfinished ones with no test case) resolve to
+    nothing."""
+    from db import get_personal_org_for_user
+    from routers.agent_tests import _tool_call_evaluator_for_run
+
+    auth = _signup(client)
+    org_uuid = get_personal_org_for_user(auth["user_uuid"])["uuid"]
+    tc_ev = _tool_call_evaluator_of(auth["user_uuid"])
+
+    resolved = _tool_call_evaluator_for_run(
+        org_uuid,
+        {},
+        model_results=[
+            "not a model result",
+            {"test_results": [_tool_call_result_row("tc_ok", True, "ok")]},
+        ],
+    )
+    assert resolved["uuid"] == tc_ev["uuid"]
+
+    assert (
+        _tool_call_evaluator_for_run(
+            org_uuid, {}, test_results=["not a row", _PENDING_TOOL_CALL_ROW]
+        )
+        is None
+    )

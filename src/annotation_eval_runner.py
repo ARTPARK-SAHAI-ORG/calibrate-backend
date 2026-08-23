@@ -22,7 +22,7 @@ import threading
 import time
 import traceback
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, Iterable, List, Optional, Set, Tuple
 
 
 def _utcnow_str() -> str:
@@ -124,6 +124,12 @@ TOOL_CALL_SKIP_MESSAGE = (
     "LLM judge does not run on tool-call rows — label this row manually."
 )
 
+# `evaluators.evaluator_type` of the human-only "did the agent make the right
+# tool call" evaluator. No judge ever runs on it, so it is dropped before the
+# calibrate payload is built and gets no skip-message row (there was never a
+# judge whose absence needed explaining).
+TOOL_CALL_EVALUATOR_TYPE = "tool-call"
+
 
 def is_tool_call_row(item: Dict[str, Any]) -> bool:
     """True when an annotation item's agent output is a tool call with no text
@@ -137,6 +143,21 @@ def is_tool_call_row(item: Dict[str, Any]) -> bool:
         text = payload.get("output")
     calls = payload.get("tool_calls") or payload.get("actual_tool_calls")
     return not text and bool(calls)
+
+
+def required_evaluator_ids_for_item(
+    item: Dict[str, Any],
+    evaluator_ids: Iterable[str],
+    tool_call_evaluator_ids: Set[str],
+) -> Set[str]:
+    """Which evaluators must carry an answer on this row before a labelling job
+    counts as finished, mirroring what the labelling form draws: a tool-call
+    row shows only the tool-call evaluator, every other row shows everything
+    except it. Either side can come back empty (e.g. a tool-call row in a job
+    with no tool-call evaluator)."""
+    if is_tool_call_row(item):
+        return {e for e in evaluator_ids if e in tool_call_evaluator_ids}
+    return {e for e in evaluator_ids if e not in tool_call_evaluator_ids}
 
 
 def _skip_runs_for_tool_call_rows(
@@ -223,7 +244,12 @@ def _resolve_evaluator_dicts(
 ) -> List[Dict[str, Any]]:
     """Combine each (evaluator_id, evaluator_version_id?) pair into a single dict
     that `build_evaluator_cli_payload` understands. Validates that every
-    requested evaluator is linked to the task and the version belongs to it."""
+    requested evaluator is linked to the task and the version belongs to it.
+
+    Tool-call evaluators are human-answered only, so they are dropped here,
+    the one choke point every launch path goes through. A request made up of
+    nothing else has nothing to judge and is rejected instead of starting an
+    empty CLI run."""
     resolved: List[Dict[str, Any]] = []
     for entry in requested:
         evaluator_id = entry.get("evaluator_id")
@@ -236,6 +262,8 @@ def _resolve_evaluator_dicts(
         evaluator = get_evaluator(evaluator_id)
         if not evaluator:
             raise EvaluatorResolutionError(f"Evaluator {evaluator_id} not found")
+        if evaluator.get("evaluator_type") == TOOL_CALL_EVALUATOR_TYPE:
+            continue
         version_uuid = entry.get("evaluator_version_id") or evaluator.get(
             "live_version_id"
         )
@@ -279,6 +307,11 @@ def _resolve_evaluator_dicts(
                 # extra fields for our own bookkeeping (not seen by CLI):
                 "_evaluator_version_id": version_uuid,
             }
+        )
+    if requested and not resolved:
+        raise EvaluatorResolutionError(
+            "Every selected evaluator is a tool-call evaluator, which is "
+            "answered by a person; there is nothing for the judge to run on."
         )
     _dedupe_evaluator_names(resolved)
     return resolved
