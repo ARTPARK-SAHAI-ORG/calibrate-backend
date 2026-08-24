@@ -862,6 +862,36 @@ def presign_annotation_items_audio(
     return items
 
 
+def is_tool_call_row(item: Dict[str, Any]) -> bool:
+    """True when an annotation item is judged on the tool call it made rather
+    than on a text reply. Safe on any item — returns False for stt/tts/
+    conversation rows, which carry none of these fields.
+
+    Two shapes qualify. An item built from a tool-call test or trace carries
+    `expected_tool_calls` / `actual_tool_calls`, and the mere presence of
+    either list settles it whatever the agent produced: an agent that answered
+    in words instead of calling the tool is the failure a person is there to
+    mark, and the empty list it leaves behind must not read as a text row.
+    Any other item qualifies only the original way — a tool call in place of a
+    reply: no `agent_response` / `output` text and a non-empty `tool_calls`
+    list.
+
+    The canonical home for this rule — `db._TOOL_CALL_ITEM_CONDITION` mirrors
+    it in raw SQL for a WHERE clause and must move with it."""
+    payload = item.get("payload")
+    if not isinstance(payload, dict):
+        return False
+    if isinstance(payload.get("expected_tool_calls"), list) or isinstance(
+        payload.get("actual_tool_calls"), list
+    ):
+        return True
+    text = payload.get("agent_response")
+    if text is None:
+        text = payload.get("output")
+    calls = payload.get("tool_calls")
+    return not text and isinstance(calls, list) and bool(calls)
+
+
 def generate_presigned_upload_url(
     s3_key: str,
     content_type: str,

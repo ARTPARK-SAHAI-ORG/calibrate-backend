@@ -588,7 +588,6 @@ def get_annotation_task_endpoint(
     )
     # TTS items store audio as an S3 key; sign it so the Items tab can play it.
     presign_annotation_items_audio(items, task.get("type"))
-    _mark_tool_call_items(items)
     task["items"] = items
     return task
 
@@ -804,14 +803,6 @@ class BulkItemsRequest(BaseModel):
     )
 
 
-def _mark_tool_call_items(items: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-    """Stamp `is_tool_call` on each item, the same flag and rule the labelling
-    form gets, so no reader has to work it out from the payload itself."""
-    for item in items:
-        item["is_tool_call"] = is_tool_call_row(item)
-    return items
-
-
 @router.get("/{task_uuid}/items", summary="List task items")
 def list_task_items(
     task_uuid: str = Path(
@@ -822,7 +813,7 @@ def list_task_items(
 ):
     """List non-deleted items in a task, each flagged as a tool-call row or not"""
     _ensure_owned_task(task_uuid, ctx.org_uuid)
-    return _mark_tool_call_items(get_annotation_items_for_task(task_uuid))
+    return get_annotation_items_for_task(task_uuid)
 
 
 class AnnotatedItemsCheckRequest(BaseModel):
@@ -1384,7 +1375,6 @@ def get_item(
     item = get_annotation_item(item_uuid)
     if not item or item.get("task_id") != task_uuid:
         raise HTTPException(status_code=404, detail="Item not found")
-    item["is_tool_call"] = is_tool_call_row(item)
     return item
 
 

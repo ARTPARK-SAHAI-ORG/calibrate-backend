@@ -275,6 +275,9 @@ def test_is_tool_call_row():
     assert not runner.is_tool_call_row(
         {"payload": {"output": "o", "expected_tool_calls": "t"}}
     )
+    # Same rule for the original tool_calls field: a truthy non-list value
+    # (e.g. a raw string) must not count either.
+    assert not runner.is_tool_call_row({"payload": {"tool_calls": "search(x)"}})
 
 
 def test_build_llm_dataset_skips_tool_call_rows():

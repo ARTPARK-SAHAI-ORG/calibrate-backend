@@ -76,7 +76,6 @@ from routers.annotation_tasks import (
 from annotation_eval_runner import (
     ANNOTATION_EVAL_JOB_TYPE,
     TOOL_CALL_EVALUATOR_TYPE,
-    is_tool_call_row,
     required_evaluator_ids_for_item,
 )
 
@@ -806,10 +805,10 @@ def _build_annotation_job_payload(
     identity is included in both modes — the viewer is meant to see *whose*
     labels they're looking at.
 
-    Each item carries `is_tool_call`: true when the row's agent output is a
-    tool call rather than text. The form draws the tool-call evaluator only on
-    those rows and every other evaluator only on the rest, pairing this flag
-    against each entry's `evaluator_type`."""
+    Each item carries `is_tool_call` (stamped by `get_job_items`): true when
+    the row's agent output is a tool call rather than text. The form draws the
+    tool-call evaluator only on those rows and every other evaluator only on
+    the rest, pairing this flag against each entry's `evaluator_type`."""
     task = get_annotation_task(job["task_id"])
     if not task:
         raise HTTPException(status_code=404, detail="Job not found")
@@ -839,8 +838,6 @@ def _build_annotation_job_payload(
     # Annotators open this form unauthenticated and may keep it open for hours;
     # sign TTS audio with a long TTL so playback doesn't die mid-session.
     presign_annotation_items_audio(items, task.get("type"))
-    for item in items:
-        item["is_tool_call"] = is_tool_call_row(item)
     annotations = get_annotations_for_job(job["uuid"])
 
     return {

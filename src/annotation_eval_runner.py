@@ -55,6 +55,7 @@ from utils import (
     get_s3_client,
     get_s3_output_config,
     is_job_timed_out,
+    is_tool_call_row,
     kill_process_group,
     normalize_stored_audio_path,
     register_job_starter,
@@ -129,32 +130,6 @@ TOOL_CALL_SKIP_MESSAGE = (
 # calibrate payload is built and gets no skip-message row (there was never a
 # judge whose absence needed explaining).
 TOOL_CALL_EVALUATOR_TYPE = "tool-call"
-
-
-def is_tool_call_row(item: Dict[str, Any]) -> bool:
-    """True when an annotation item is judged on the tool call it made rather
-    than on a text reply (see TOOL_CALL_SKIP_MESSAGE). Safe on any item —
-    returns False for stt/tts/conversation rows, which carry none of these
-    fields.
-
-    Two shapes qualify. An item built from a tool-call test or trace carries
-    `expected_tool_calls` / `actual_tool_calls`, and the mere presence of
-    either list settles it whatever the agent produced: an agent that answered
-    in words instead of calling the tool is the failure a person is there to
-    mark, and the empty list it leaves behind must not read as a text row.
-    Any other item qualifies only the original way — a tool call in place of a
-    reply: no `agent_response` / `output` text and a non-empty call list."""
-    payload = item.get("payload")
-    if not isinstance(payload, dict):
-        return False
-    if isinstance(payload.get("expected_tool_calls"), list) or isinstance(
-        payload.get("actual_tool_calls"), list
-    ):
-        return True
-    text = payload.get("agent_response")
-    if text is None:
-        text = payload.get("output")
-    return not text and bool(payload.get("tool_calls"))
 
 
 def required_evaluator_ids_for_item(

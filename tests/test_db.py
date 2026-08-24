@@ -20,6 +20,7 @@ import pytest
 
 import db
 from db import NameAlreadyExistsError
+from utils import is_tool_call_row
 
 
 def _u(prefix: str = "x") -> str:
@@ -3014,3 +3015,58 @@ def test_tool_call_backfill_survives_a_payload_that_is_not_a_list():
     assert [e["uuid"] for e in db.get_evaluators_for_annotation_task(real)] == [
         fork_uuid
     ]
+
+
+def test_tool_call_item_condition_matches_python_rule():
+    """`_TOOL_CALL_ITEM_CONDITION` (SQL, used by the one-time backfill) and
+    `is_tool_call_row` (Python, used everywhere else) must classify every row
+    identically — this is the guardrail the two are allowed to be hand-copied
+    against, per the comment on `_TOOL_CALL_ITEM_CONDITION`."""
+    user_uuid, org_uuid = _fresh_org()
+    task_uuid = db.create_annotation_task(
+        name=_u("sql-vs-python"), user_id=user_uuid, org_uuid=org_uuid, type="llm"
+    )
+    payloads = [
+        {"chat_history": [], "agent_response": "hi"},
+        {"chat_history": [], "tool_calls": [{"tool": "search"}]},
+        {"chat_history": [], "tool_calls": []},
+        {"chat_history": [], "actual_tool_calls": []},
+        {"chat_history": [], "expected_tool_calls": []},
+        {
+            "chat_history": [],
+            "agent_response": "I cannot do that",
+            "expected_tool_calls": [{"tool": "book"}],
+            "actual_tool_calls": [],
+        },
+        {"chat_history": [], "tool_calls": "search(x)"},
+        {"chat_history": [], "actual_tool_calls": "search(x)"},
+        {"chat_history": [], "output": "words", "actual_tool_calls": []},
+    ]
+    item_uuids = db.create_annotation_items(
+        task_uuid, [{"payload": p} for p in payloads]
+    )
+
+    # Filter via WHERE, exactly how `_TOOL_CALL_ITEM_CONDITION`'s only real
+    # caller (the tool-call-evaluator backfill) uses it. SQLite short-circuits
+    # the AND there; pulled into a SELECT column instead, a non-list
+    # `tool_calls` value would trip `json_array_length` before the preceding
+    # `json_type` guard rules it out.
+    with db.get_db_connection() as conn:
+        cursor = conn.cursor()
+        sql_result = {}
+        for iu in item_uuids:
+            cursor.execute(
+                f"""
+                SELECT 1 FROM annotation_items i
+                 WHERE i.uuid = ? AND ({db._TOOL_CALL_ITEM_CONDITION})
+                """,
+                (iu,),
+            )
+            sql_result[iu] = cursor.fetchone() is not None
+
+    items_by_uuid = {it["uuid"]: it for it in db.get_annotation_items_for_task(task_uuid)}
+    for item_uuid, payload in zip(item_uuids, payloads):
+        item = items_by_uuid[item_uuid]
+        assert sql_result[item_uuid] == is_tool_call_row(item) == item["is_tool_call"], (
+            payload,
+        )
