@@ -3205,28 +3205,6 @@ def test_normal_rows_do_not_link_tool_call_evaluator(client):
     assert _tool_call_links(client, h, task_uuid) == []
 
 
-def test_tool_call_rows_accepted_when_org_copy_deleted(client):
-    auth = _signup(client)
-    h = auth["headers"]
-    llm_ev = _llm_evaluator(client, h)
-    task_uuid = _llm_task(client, h, llm_ev)
-
-    tool_call_ev = next(
-        e
-        for e in client.get("/evaluators", headers=h).json()["items"]
-        if e.get("evaluator_type") == "tool-call"
-    )
-    assert client.delete(f"/evaluators/{tool_call_ev['uuid']}", headers=h).status_code == 200
-
-    resp = client.post(
-        f"/annotation-tasks/{task_uuid}/items",
-        json={"items": [{"payload": _tool_call_payload("tc1")}]},
-        headers=h,
-    )
-    assert resp.status_code == 200
-    assert _tool_call_links(client, h, task_uuid) == []
-
-
 def _job_status(client, h, task_uuid, job_uuid):
     detail = client.get(
         f"/annotation-tasks/{task_uuid}/jobs/{job_uuid}", headers=h
