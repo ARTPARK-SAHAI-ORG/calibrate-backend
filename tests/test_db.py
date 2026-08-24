@@ -2980,3 +2980,37 @@ def test_linking_an_already_linked_evaluator_is_a_no_op(user):
     assert db.add_evaluator_to_annotation_task(task_uuid, first) == link_id
     linked = db.get_evaluators_for_annotation_task(task_uuid)
     assert [e["uuid"] for e in linked] == [first, second]
+
+
+def test_tool_call_backfill_survives_a_payload_that_is_not_a_list():
+    """An item saved with `tool_calls` as text rather than a list must not stop
+    the deploy: asking SQLite for the length of a non-list raises, and the
+    exception would come out of init_db and keep the service down."""
+    user_uuid, org_uuid = _fresh_org()
+    odd = db.create_annotation_task(
+        name=_u("odd-task"), user_id=user_uuid, org_uuid=org_uuid, type="llm"
+    )
+    db.create_annotation_items(
+        odd,
+        [
+            {"payload": {"chat_history": [], "tool_calls": "search(x)"}},
+            {"payload": {"chat_history": [], "actual_tool_calls": "search(x)"}},
+            {"payload": {"chat_history": [], "tool_calls": {"tool": "search"}}},
+        ],
+    )
+    real = db.create_annotation_task(
+        name=_u("real-task"), user_id=user_uuid, org_uuid=org_uuid, type="llm"
+    )
+    db.create_annotation_items(
+        real, [{"payload": {"chat_history": [], "tool_calls": [{"tool": "search"}]}}]
+    )
+
+    _rerun_tool_call_backfills()
+
+    fork_uuid = db.get_tool_call_evaluator_for_org(org_uuid)["uuid"]
+    # The odd payloads are not tool-call rows, so that task stays unlinked,
+    # and the real one is still found.
+    assert db.get_evaluators_for_annotation_task(odd) == []
+    assert [e["uuid"] for e in db.get_evaluators_for_annotation_task(real)] == [
+        fork_uuid
+    ]

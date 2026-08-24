@@ -3157,12 +3157,20 @@ LINK_TOOL_CALL_EVALUATOR_TO_TASKS_MIGRATION = "link_tool_call_evaluator_to_tasks
 # Mirrors `is_tool_call_row` in annotation_eval_runner.py: no agent_response /
 # output text, and a non-empty tool_calls or actual_tool_calls list. Repeated
 # here in SQL because db.py must not import a module that imports it.
+# The json_type guards are load-bearing: json_array_length raises "malformed
+# JSON" on a value that is not an array, and one such payload anywhere in the
+# table would abort init_db and stop the service from starting.
 _TOOL_CALL_ITEM_CONDITION = """
     COALESCE(COALESCE(json_extract(i.payload, '$.agent_response'),
                       json_extract(i.payload, '$.output')), '') = ''
     AND (CASE
-            WHEN json_array_length(json_extract(i.payload, '$.tool_calls')) > 0 THEN 1
-            WHEN json_array_length(json_extract(i.payload, '$.actual_tool_calls')) > 0 THEN 1
+            WHEN json_type(i.payload, '$.tool_calls') = 'array'
+                 AND json_array_length(json_extract(i.payload, '$.tool_calls')) > 0
+                 THEN 1
+            WHEN json_type(i.payload, '$.actual_tool_calls') = 'array'
+                 AND json_array_length(
+                         json_extract(i.payload, '$.actual_tool_calls')) > 0
+                 THEN 1
             ELSE 0
          END) = 1
 """
@@ -7296,7 +7304,9 @@ _AGENT_TEST_JOB_SUMMARY_COLUMNS = """
          WHERE je.type = 'object'
         ) AS model_results,
         json_extract(atj.details, '$.evaluators_by_test_id') AS evaluators_by_test_id,
-        json_extract(atj.details, '$.has_tool_call_test') AS has_tool_call_test
+        json_extract(atj.details, '$.has_tool_call_test') AS has_tool_call_test,
+        json_extract(atj.details, '$.tool_call_evaluator.name')
+            AS tool_call_evaluator_name
 """
 
 
@@ -7327,6 +7337,7 @@ def _row_to_agent_test_job_summary(row: sqlite3.Row) -> Dict[str, Any]:
         "id": row.get("id"),
         "evaluators_by_test_id": _loads(row.get("evaluators_by_test_id")),
         "has_tool_call_test": bool(row.get("has_tool_call_test")),
+        "tool_call_evaluator_name": row.get("tool_call_evaluator_name"),
         "results": {
             "total_tests": row.get("total_tests"),
             "passed": row.get("passed"),
