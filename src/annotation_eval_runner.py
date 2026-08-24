@@ -111,24 +111,16 @@ ANNOTATION_EVAL_JOB_TYPE = "annotation-eval"
 # Task types whose annotation rows we know how to evaluate via the CLI's
 # --eval-only modes (or `calibrate general` for `llm-general`). Matches
 # db.ANNOTATION_TASK_TYPES — every creatable task type has a run path.
-# (Individual tool-call rows inside an llm/llm-general task are skipped by the
-# runner — see `is_tool_call_row` — but that is a per-row concern, not a type.)
+# (Individual tool-call rows inside an llm/llm-general task are excluded from
+# a run entirely — see `is_tool_call_row` — but that is a per-row concern,
+# not a type.)
 # `llm-general` (non-conversational input -> output) uses the dedicated
 # `calibrate general` command — see `_build_llm_general_dataset`.
 SUPPORTED_EVAL_TASK_TYPES = ("stt", "llm", "llm-general", "conversation", "tts")
 
-# A row whose agent output is a tool call (not text) can't be scored by an LLM
-# judge — the judge reads the reply text. These rows are skipped by evaluator
-# runs and labelled by a human instead. Detected as: no text output
-# (`agent_response`/`output`) AND tool calls present.
-TOOL_CALL_SKIP_MESSAGE = (
-    "LLM judge does not run on tool-call rows — label this row manually."
-)
-
 # `evaluators.evaluator_type` of the human-only "did the agent make the right
 # tool call" evaluator. No judge ever runs on it, so it is dropped before the
-# calibrate payload is built and gets no skip-message row (there was never a
-# judge whose absence needed explaining).
+# calibrate payload is built.
 TOOL_CALL_EVALUATOR_TYPE = "tool-call"
 
 
@@ -145,31 +137,6 @@ def required_evaluator_ids_for_item(
     if is_tool_call_row(item):
         return {e for e in evaluator_ids if e in tool_call_evaluator_ids}
     return {e for e in evaluator_ids if e not in tool_call_evaluator_ids}
-
-
-def _skip_runs_for_tool_call_rows(
-    items: List[Dict[str, Any]],
-    evaluators_resolved: List[Dict[str, Any]],
-    job_uuid: str,
-) -> List[Dict[str, Any]]:
-    """One evaluator_runs row per (tool-call item × evaluator), carrying the
-    skip message so the eval-run page shows the judge did not run on it."""
-    runs: List[Dict[str, Any]] = []
-    for it in items:
-        if not is_tool_call_row(it):
-            continue
-        for ev in evaluators_resolved:
-            runs.append(
-                {
-                    "job_id": job_uuid,
-                    "item_id": it["uuid"],
-                    "evaluator_id": ev["uuid"],
-                    "evaluator_version_id": ev["_evaluator_version_id"],
-                    "value": {"skipped": True, "message": TOOL_CALL_SKIP_MESSAGE},
-                    "status": "completed",
-                }
-            )
-    return runs
 
 
 logger = logging.getLogger(__name__)
@@ -1478,16 +1445,9 @@ def _run_job(
                 # flight was read while calibrate was still appending, so its
                 # reasoning text may have been cut mid-write. Rewriting also
                 # picks up the unscored rows the in-flight path held back.
-                # Tool-call rows were excluded from the judge dataset; store a
-                # skip-message run per (tool-call item × evaluator) so they show
-                # up on the eval-run page as "not judged, label manually".
-                skip_runs = _skip_runs_for_tool_call_rows(
-                    items, evaluators_resolved, job_uuid
-                )
                 clear_evaluator_runs_for_job(job_uuid)
-                all_runs = runs_to_insert + skip_runs
-                if all_runs:
-                    create_evaluator_runs(all_runs)
+                if runs_to_insert:
+                    create_evaluator_runs(runs_to_insert)
 
                 # 6. Upload all artifacts to S3 (mirrors normal STT eval layout).
                 s3_bucket = get_s3_output_config()

@@ -299,21 +299,6 @@ def test_build_llm_dataset_skips_tool_call_rows():
     assert [row["test_case"]["id"] for row in out] == ["resp"]
 
 
-def test_skip_runs_for_tool_call_rows():
-    evs = [{"uuid": "e1", "name": "j", "_evaluator_version_id": "v1"}]
-    items = [
-        {"uuid": "tc", "payload": {"tool_calls": [{"tool": "t", "arguments": {}}]}},
-        {"uuid": "resp", "payload": {"agent_response": "hi"}},
-    ]
-    runs = runner._skip_runs_for_tool_call_rows(items, evs, "job-1")
-    assert len(runs) == 1
-    assert runs[0]["item_id"] == "tc"
-    assert runs[0]["evaluator_id"] == "e1"
-    assert runs[0]["evaluator_version_id"] == "v1"
-    assert runs[0]["value"]["skipped"] is True
-    assert runs[0]["status"] == "completed"
-
-
 # ---------------------------------------------------------------------------
 # tool-call evaluator (human-answered only)
 # ---------------------------------------------------------------------------
@@ -372,12 +357,6 @@ def test_tool_call_evaluator_never_reaches_calibrate_payload():
     assert [ev["uuid"] for ev in resolved] == ["ev-1"]
     payload = runner.build_evaluator_cli_payload_unrendered(resolved)
     assert [p["name"] for p in payload] == ["Safety"]
-
-
-def test_no_skip_placeholder_row_for_tool_call_evaluator():
-    resolved = _resolve_with_tool_call_evaluator(["ev-1", "ev-tc"])
-    runs = runner._skip_runs_for_tool_call_rows([TC_ROW, TEXT_ROW], resolved, "job-1")
-    assert [(r["item_id"], r["evaluator_id"]) for r in runs] == [("tc", "ev-1")]
 
 
 def test_resolve_rejects_only_tool_call_evaluators():
