@@ -1911,14 +1911,19 @@ def start_evaluator_run(
         item_ids_persisted = ordered_subset_ids
 
     # Tool-call rows (agent output is a tool call, no text) can't be scored by
-    # an LLM judge. Block a run with nothing else to judge; a mixed run
-    # proceeds and the runner records a skip message per tool-call row.
-    if all(is_tool_call_row(it) for it in items):
+    # an LLM judge, so they never enter the run at all — not in `items`, not
+    # in `item_ids_persisted`, not in the item count. A caller that picks
+    # explicit rows already leaves these out; this catches `select_all` and
+    # any other path the frontend can't filter itself.
+    items = [it for it in items if not is_tool_call_row(it)]
+    item_ids_persisted = [it["uuid"] for it in items]
+    if not items:
         raise HTTPException(
             status_code=400,
             detail=(
-                "All selected items are tool-call rows; the LLM judge cannot "
-                "run on them. Label them manually."
+                "The chosen items evaluate one or more tool calls, which "
+                "only supports human review today. Evaluators do not run "
+                "on them."
             ),
         )
 

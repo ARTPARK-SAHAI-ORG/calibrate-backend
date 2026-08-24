@@ -252,12 +252,16 @@ def test_evaluator_run_all_tool_call_rows_blocked(client):
         headers=h,
     )
     assert resp.status_code == 400
-    assert "tool-call" in resp.json()["detail"]
+    assert resp.json()["detail"] == (
+        "The chosen items evaluate one or more tool calls, which only "
+        "supports human review today. Evaluators do not run on them."
+    )
 
 
 def test_evaluator_run_mixed_tool_call_rows_launches(client):
-    """A mixed run (some text, some tool-call rows) launches — the judge runs
-    on the text rows and the runner skips the tool-call ones."""
+    """A mixed run (some text, some tool-call rows) launches — the tool-call
+    row is filtered out before the run is created, so only the text row is
+    counted and run."""
     auth = _signup(client)
     h = auth["headers"]
     task_uuid, llm_ev = _llm_task_with_evaluator(client, h)
@@ -279,6 +283,38 @@ def test_evaluator_run_mixed_tool_call_rows_launches(client):
         )
     assert resp.status_code == 200
     assert resp.json()["status"] == "queued"
+    assert resp.json()["item_count"] == 1
+
+
+def test_evaluator_run_explicit_item_ids_filters_tool_call_rows(client):
+    """`select_all=false` with an explicit `item_ids` list still drops any
+    tool-call row from that list rather than 400ing or including it in
+    `item_count` — the backend filter applies regardless of how the item
+    set was chosen."""
+    auth = _signup(client)
+    h = auth["headers"]
+    task_uuid, llm_ev = _llm_task_with_evaluator(client, h)
+    item_ids = client.post(
+        f"/annotation-tasks/{task_uuid}/items",
+        json={
+            "items": [
+                {"payload": {"name": "tc", "tool_calls": [{"tool": "t", "arguments": {}}]}},
+                {"payload": {"name": "resp", "chat_history": [], "agent_response": "hi"}},
+            ]
+        },
+        headers=h,
+    ).json()["item_ids"]
+    with patch("routers.annotation_tasks.can_start_job", return_value=False):
+        resp = client.post(
+            f"/annotation-tasks/{task_uuid}/evaluator-runs",
+            json={
+                "evaluators": [{"evaluator_id": llm_ev["uuid"]}],
+                "item_ids": item_ids,
+            },
+            headers=h,
+        )
+    assert resp.status_code == 200
+    assert resp.json()["item_count"] == 1
 
 
 def test_evaluator_run_detail_shape(client):
