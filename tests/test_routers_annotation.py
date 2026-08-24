@@ -609,6 +609,66 @@ def test_annotation_items_crud(client):
     assert bd.status_code == 200
 
 
+def test_item_reads_flag_tool_call_rows(client):
+    """Every item read path reports `is_tool_call`, so no client re-derives it.
+    An item built from a tool-call test counts even when the agent answered in
+    words instead of calling the tool."""
+    auth = _signup(client)
+    h = auth["headers"]
+    llm_ev = _llm_evaluator(client, h)
+    task_uuid = client.post(
+        "/annotation-tasks",
+        json={
+            "name": f"t-{uuid.uuid4().hex[:6]}",
+            "type": "llm",
+            "evaluator_ids": [llm_ev["uuid"]],
+        },
+        headers=h,
+    ).json()["uuid"]
+
+    created = client.post(
+        f"/annotation-tasks/{task_uuid}/items",
+        json={
+            "items": [
+                {
+                    "payload": {
+                        "name": "missed-the-call",
+                        "chat_history": [{"role": "user", "content": "book it"}],
+                        "agent_response": "I cannot do that",
+                        "expected_tool_calls": [{"tool": "book", "arguments": {}}],
+                        "actual_tool_calls": [],
+                    }
+                },
+                {
+                    "payload": {
+                        "name": "plain-text",
+                        "chat_history": [{"role": "user", "content": "hi"}],
+                        "agent_response": "hello",
+                    }
+                },
+            ]
+        },
+        headers=h,
+    )
+    assert created.status_code == 200
+    tool_call_item, text_item = created.json()["item_ids"]
+
+    listed = client.get(f"/annotation-tasks/{task_uuid}/items", headers=h).json()
+    by_uuid = {i["uuid"]: i for i in listed}
+    assert by_uuid[tool_call_item]["is_tool_call"] is True
+    assert by_uuid[text_item]["is_tool_call"] is False
+
+    detail = client.get(f"/annotation-tasks/{task_uuid}", headers=h).json()
+    by_uuid = {i["uuid"]: i for i in detail["items"]}
+    assert by_uuid[tool_call_item]["is_tool_call"] is True
+    assert by_uuid[text_item]["is_tool_call"] is False
+
+    one = client.get(
+        f"/annotation-tasks/{task_uuid}/items/{tool_call_item}", headers=h
+    ).json()
+    assert one["is_tool_call"] is True
+
+
 def test_bulk_delete_items_select_all(client):
     """`select_all=True` (with optional `q` filter) replaces the per-row
     item_ids list — useful for FE 'select all matching filter' actions."""

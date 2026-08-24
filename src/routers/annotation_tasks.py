@@ -415,7 +415,7 @@ class AnnotationTaskResponse(BaseModel):
     # empty (use the dedicated /items and /jobs endpoints for those views).
     items: List[Dict[str, Any]] = Field(
         default=[],
-        description="The task's items, each with its agreement stats. You get these when you fetch one task by ID, not when you list tasks",
+        description="The task's items, each with its agreement stats and an `is_tool_call` flag marking the rows a person labels on the tool call rather than a text reply. You get these when you fetch one task by ID, not when you list tasks",
     )
     jobs: List[Dict[str, Any]] = Field(
         default=[],
@@ -811,7 +811,7 @@ def list_task_items(
     ),
     ctx: OrgContext = Depends(get_current_org),
 ):
-    """List non-deleted items in a task"""
+    """List non-deleted items in a task, each flagged as a tool-call row or not"""
     _ensure_owned_task(task_uuid, ctx.org_uuid)
     return get_annotation_items_for_task(task_uuid)
 
@@ -1370,7 +1370,7 @@ def get_item(
     ),
     ctx: OrgContext = Depends(get_current_org),
 ):
-    """Get one item in a task"""
+    """Get one item in a task, flagged as a tool-call row or not"""
     _ensure_owned_task(task_uuid, ctx.org_uuid)
     item = get_annotation_item(item_uuid)
     if not item or item.get("task_id") != task_uuid:

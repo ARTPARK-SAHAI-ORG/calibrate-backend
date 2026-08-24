@@ -8,6 +8,8 @@ from pathlib import Path
 from typing import Optional, List, Dict, Any, Set, Tuple, TYPE_CHECKING
 from contextlib import contextmanager
 
+from utils import is_tool_call_row
+
 if TYPE_CHECKING:
     from routers.org_limits import OrgLimits
 
@@ -3154,25 +3156,25 @@ def _backfill_link_default_correctness_evaluator(cursor: sqlite3.Cursor) -> int:
 PROVISION_TOOL_CALL_EVALUATOR_MIGRATION = "provision_tool_call_evaluator_v1"
 LINK_TOOL_CALL_EVALUATOR_TO_TASKS_MIGRATION = "link_tool_call_evaluator_to_tasks_v1"
 
-# Mirrors `is_tool_call_row` in annotation_eval_runner.py: no agent_response /
-# output text, and a non-empty tool_calls or actual_tool_calls list. Repeated
-# here in SQL because db.py must not import a module that imports it.
+# Mirrors `is_tool_call_row` in utils.py: an expected_tool_calls or
+# actual_tool_calls list, whatever it holds and whatever the agent produced;
+# otherwise no agent_response / output text and a non-empty tool_calls list.
+# Repeated here in SQL — unlike the Python function, this one runs inside a
+# migration's WHERE clause over the whole table, so it can't call out per row.
 # The json_type guards are load-bearing: json_array_length raises "malformed
 # JSON" on a value that is not an array, and one such payload anywhere in the
 # table would abort init_db and stop the service from starting.
+# test_db.py::test_tool_call_item_condition_matches_python_rule checks the two
+# stay in step.
 _TOOL_CALL_ITEM_CONDITION = """
-    COALESCE(COALESCE(json_extract(i.payload, '$.agent_response'),
-                      json_extract(i.payload, '$.output')), '') = ''
-    AND (CASE
-            WHEN json_type(i.payload, '$.tool_calls') = 'array'
-                 AND json_array_length(json_extract(i.payload, '$.tool_calls')) > 0
-                 THEN 1
-            WHEN json_type(i.payload, '$.actual_tool_calls') = 'array'
-                 AND json_array_length(
-                         json_extract(i.payload, '$.actual_tool_calls')) > 0
-                 THEN 1
-            ELSE 0
-         END) = 1
+    json_type(i.payload, '$.expected_tool_calls') = 'array'
+    OR json_type(i.payload, '$.actual_tool_calls') = 'array'
+    OR (
+        COALESCE(COALESCE(json_extract(i.payload, '$.agent_response'),
+                          json_extract(i.payload, '$.output')), '') = ''
+        AND json_type(i.payload, '$.tool_calls') = 'array'
+        AND json_array_length(json_extract(i.payload, '$.tool_calls')) > 0
+    )
 """
 
 
@@ -8815,6 +8817,10 @@ def _parse_annotation_item_row(row: sqlite3.Row) -> Dict[str, Any]:
             item["payload"] = json.loads(item["payload"])
         except (TypeError, ValueError):
             pass
+    # Every item read stamps `is_tool_call` here, at the one place both
+    # `get_annotation_item` and `get_annotation_items_for_task` parse a row,
+    # so no caller has to remember to do it.
+    item["is_tool_call"] = is_tool_call_row(item)
     return item
 
 
@@ -9676,6 +9682,7 @@ def get_job_items(job_uuid: str) -> List[Dict[str, Any]]:
                     d["payload"] = json.loads(d["payload"])
                 except (TypeError, ValueError):
                     pass
+            d["is_tool_call"] = is_tool_call_row(d)
             out.append(d)
         return out
 

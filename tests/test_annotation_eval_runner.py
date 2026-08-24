@@ -254,6 +254,30 @@ def test_is_tool_call_row():
     # No tool calls, no text → False. Non-dict payload → False.
     assert not runner.is_tool_call_row({"payload": {"tool_calls": []}})
     assert not runner.is_tool_call_row({"payload": "nope"})
+    # An item built from a tool-call test or trace carries the expected and
+    # actual call lists. Either one present makes it a tool-call row whatever
+    # the agent produced, including the agent answering in words and leaving
+    # the actual list empty.
+    assert runner.is_tool_call_row(
+        {
+            "payload": {
+                "agent_response": "I cannot do that",
+                "expected_tool_calls": [{"tool": "t", "arguments": {}}],
+                "actual_tool_calls": [],
+            }
+        }
+    )
+    assert runner.is_tool_call_row({"payload": {"expected_tool_calls": []}})
+    assert runner.is_tool_call_row(
+        {"payload": {"output": "words", "actual_tool_calls": []}}
+    )
+    # The key must hold a list — a stray value of another type does not count.
+    assert not runner.is_tool_call_row(
+        {"payload": {"output": "o", "expected_tool_calls": "t"}}
+    )
+    # Same rule for the original tool_calls field: a truthy non-list value
+    # (e.g. a raw string) must not count either.
+    assert not runner.is_tool_call_row({"payload": {"tool_calls": "search(x)"}})
 
 
 def test_build_llm_dataset_skips_tool_call_rows():

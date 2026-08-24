@@ -55,6 +55,7 @@ from utils import (
     get_s3_client,
     get_s3_output_config,
     is_job_timed_out,
+    is_tool_call_row,
     kill_process_group,
     normalize_stored_audio_path,
     register_job_starter,
@@ -129,20 +130,6 @@ TOOL_CALL_SKIP_MESSAGE = (
 # calibrate payload is built and gets no skip-message row (there was never a
 # judge whose absence needed explaining).
 TOOL_CALL_EVALUATOR_TYPE = "tool-call"
-
-
-def is_tool_call_row(item: Dict[str, Any]) -> bool:
-    """True when an annotation item's agent output is a tool call with no text
-    response (see TOOL_CALL_SKIP_MESSAGE). Safe on any item — returns False
-    for stt/tts/conversation rows, which carry neither field."""
-    payload = item.get("payload")
-    if not isinstance(payload, dict):
-        return False
-    text = payload.get("agent_response")
-    if text is None:
-        text = payload.get("output")
-    calls = payload.get("tool_calls") or payload.get("actual_tool_calls")
-    return not text and bool(calls)
 
 
 def required_evaluator_ids_for_item(
