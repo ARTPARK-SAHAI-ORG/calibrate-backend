@@ -449,9 +449,10 @@ def test_list_evaluators_filtered_by_tool_call_type(client):
     assert forks[0]["live_version"]["judge_model"] == ""
 
 
-def test_tool_call_default_fork_cannot_be_deleted(client):
-    """The workspace's copy of `Tool call correctness` reports `is_deletable`
-    false and the delete is refused; an ordinary evaluator stays deletable."""
+def test_tool_call_default_fork_is_protected(client):
+    """The workspace's copy of `Tool call correctness` reports `is_protected`,
+    refuses the delete, refuses a change to what it judges, and still takes a
+    new name, description and rubric. An ordinary evaluator stays open."""
     h = _signup(client)
     from db import TOOL_CALL_EVALUATOR_SLUG
 
@@ -459,14 +460,52 @@ def test_tool_call_default_fork_cannot_be_deleted(client):
     fork = next(
         e for e in items if e["source_default_slug"] == TOOL_CALL_EVALUATOR_SLUG
     )
-    assert fork["is_deletable"] is False
-    resp = client.delete(f"/evaluators/{fork['uuid']}", headers=h)
-    assert resp.status_code == 403, resp.text
-    assert client.get(f"/evaluators/{fork['uuid']}", headers=h).status_code == 200
-    assert client.get(f"/evaluators/{fork['uuid']}", headers=h).json()["is_deletable"] is False
+    assert fork["is_protected"] is True
+    assert client.delete(f"/evaluators/{fork['uuid']}", headers=h).status_code == 403
+
+    for field, value in (
+        ("evaluator_type", "llm"),
+        ("data_type", "audio"),
+        ("kind", "side_by_side"),
+        ("output_type", "rating"),
+    ):
+        locked = client.put(
+            f"/evaluators/{fork['uuid']}", json={field: value}, headers=h
+        )
+        assert locked.status_code == 403, f"{field}: {locked.text}"
+
+    renamed = client.put(
+        f"/evaluators/{fork['uuid']}",
+        json={"name": "Tool calls, checked by hand", "description": "d"},
+        headers=h,
+    )
+    assert renamed.status_code == 200, renamed.text
+    assert renamed.json()["is_protected"] is True
+    new_rubric = client.post(
+        f"/evaluators/{fork['uuid']}/versions",
+        json={
+            "judge_model": "",
+            "system_prompt": "",
+            "make_live": True,
+            "output_config": {
+                "scale": [
+                    {"value": True, "name": "Right call"},
+                    {"value": False, "name": "Wrong call"},
+                ]
+            },
+        },
+        headers=h,
+    )
+    assert new_rubric.status_code == 200, new_rubric.text
 
     other = next(
         e for e in items if e["source_default_slug"] != TOOL_CALL_EVALUATOR_SLUG
     )
-    assert other["is_deletable"] is True
+    assert other["is_protected"] is False
+    assert (
+        client.put(
+            f"/evaluators/{other['uuid']}", json={"output_type": "rating"}, headers=h
+        ).status_code
+        == 200
+    )
     assert client.delete(f"/evaluators/{other['uuid']}", headers=h).status_code == 200

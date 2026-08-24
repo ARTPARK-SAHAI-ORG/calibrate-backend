@@ -319,8 +319,8 @@ class EvaluatorResponseBase(BaseModel):
     is_default: bool = Field(
         description="True when the evaluator is a built-in default or your workspace's editable copy of one. False for an evaluator you created yourself"
     )
-    is_deletable: bool = Field(
-        description="Whether this evaluator can be deleted. Deleting a protected evaluator is refused"
+    is_protected: bool = Field(
+        description="True when the evaluator is locked. A locked evaluator cannot be deleted, and only its name, description and rubric can change"
     )
     slug: Optional[str] = Field(None, description="Stable slug for a built-in default evaluator")
     source_default_slug: Optional[str] = Field(
@@ -408,9 +408,14 @@ def _owner_check(evaluator: Dict[str, Any], org_uuid: str) -> None:
         raise HTTPException(status_code=404, detail="Evaluator not found")
 
 
-def _is_deletable(evaluator: Dict[str, Any]) -> bool:
-    """The tool call evaluator is the only slot a person can record a tool call verdict in, so deleting it would strand every tool call row."""
-    return TOOL_CALL_EVALUATOR_SLUG not in (
+# What the evaluator judges and the shape of its answer. Locked on a protected
+# evaluator, whose name, description and rubric stay editable.
+_LOCKED_UPDATE_FIELDS = ("evaluator_type", "data_type", "kind", "output_type")
+
+
+def _is_protected(evaluator: Dict[str, Any]) -> bool:
+    """The tool call evaluator is the only slot a person can record a tool call verdict in, so deleting it or repurposing it would strand every tool call row."""
+    return TOOL_CALL_EVALUATOR_SLUG in (
         evaluator.get("slug"),
         evaluator.get("source_default_slug"),
     )
@@ -516,7 +521,7 @@ def _evaluator_response(
             evaluator.get("source_default_slug") is not None
             or evaluator.get("owner_user_id") is None
         ),
-        is_deletable=_is_deletable(evaluator),
+        is_protected=_is_protected(evaluator),
         slug=evaluator.get("slug"),
         source_default_slug=evaluator.get("source_default_slug"),
         live_version_id=evaluator.get("live_version_id"),
@@ -704,6 +709,13 @@ def update_evaluator_endpoint(
     """Update an evaluator, the judge used to grade outputs"""
     existing = _visible_or_404(get_evaluator(evaluator_uuid), ctx.org_uuid)
     _owner_check(existing, ctx.org_uuid)
+    if _is_protected(existing) and any(
+        getattr(payload, f) is not None for f in _LOCKED_UPDATE_FIELDS
+    ):
+        raise HTTPException(
+            status_code=403,
+            detail="This evaluator only allows its name and description to change",
+        )
     if payload.name is not None:
         _ensure_unique_evaluator_name(
             payload.name, ctx.org_uuid, exclude_uuid=evaluator_uuid
@@ -737,7 +749,7 @@ def delete_evaluator_endpoint(
     """Delete an evaluator you created"""
     existing = _visible_or_404(get_evaluator(evaluator_uuid), ctx.org_uuid)
     _owner_check(existing, ctx.org_uuid)
-    if not _is_deletable(existing):
+    if _is_protected(existing):
         raise HTTPException(
             status_code=403, detail="This evaluator cannot be deleted"
         )
