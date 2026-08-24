@@ -460,3 +460,11 @@ def test_run_job_discards_in_flight_rows_when_calibrate_fails():
     clear, create, _ = _run_job_with(1, [_row()])
     clear.assert_called_once_with("j-1")
     create.assert_not_called()
+
+
+def test_run_job_no_rows_skips_create():
+    """A successful run that parses zero rows still clears the job's prior
+    runs, but has nothing to insert."""
+    clear, create, order = _run_job_with(0, [])
+    assert order == ["clear"]
+    create.assert_not_called()
