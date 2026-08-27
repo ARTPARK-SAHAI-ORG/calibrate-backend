@@ -529,6 +529,20 @@ class ModelRunSummary(BaseModel):
     )
 
 
+class RunListEvaluator(BaseModel):
+    """One evaluator on a run-LIST row: just enough to name it and open it.
+    The rubric, prompt and version live on the run-DETAIL endpoint."""
+
+    uuid: Optional[str] = Field(
+        None,
+        description=(
+            "ID of the evaluator. Absent for the `Tool call` entry, which is "
+            "not an evaluator in the library"
+        ),
+    )
+    name: str = Field(description="Name of the evaluator")
+
+
 class AgentTestRunListItem(BaseModel):
     uuid: str = Field(
         min_length=36,
@@ -559,12 +573,13 @@ class AgentTestRunListItem(BaseModel):
     failed: Optional[int] = Field(
         None, description="Number of test cases that failed"
     )
-    evaluators: List[str] = Field(
+    evaluators: List[RunListEvaluator] = Field(
         default_factory=list,
         description=(
-            "Names of the evaluators that judged this run, deduplicated and in "
-            "display order. `Tool call` is appended when any test in the run was "
-            "a tool-call test. Empty when the run had no evaluators"
+            "The evaluators that judged this run, deduplicated and in display "
+            "order. A `Tool call` entry is appended when any test in the run "
+            "was a tool-call test. That entry has no `uuid`, because it is not "
+            "an evaluator in the library. Empty when the run had no evaluators"
         ),
     )
     results: Optional[List[TestRunCaseSummary]] = Field(
@@ -819,16 +834,18 @@ def _tool_call_judge_result(
     }
 
 
-def _run_evaluator_names(
+def _run_evaluators(
     job: Dict[str, Any],
     evaluator_cache: Optional[Dict[str, Optional[Dict[str, Any]]]] = None,
-) -> List[str]:
-    """Flat, deduped evaluator names for the run-list `evaluators` column, in
-    first-appearance order across the job's `details.evaluators_by_test_id`
-    snapshot. When any linked test was a tool-call test, appends the tool-call
-    evaluator's name frozen onto the run at launch, or the literal `"Tool call"`
-    for a run launched before that was stored. Tool-call tests never carry
-    evaluators, so they would otherwise be invisible in this column.
+) -> List[Dict[str, Optional[str]]]:
+    """The evaluators for the run-list `evaluators` column as `{uuid, name}`,
+    deduplicated and in first-appearance order across the job's
+    `details.evaluators_by_test_id` snapshot. The id is what lets a caller open
+    the evaluator; entries whose snapshot carries no id keep `uuid: None`. When
+    any linked test was a tool-call test, appends the tool-call evaluator's name
+    frozen onto the run at launch, or the literal `"Tool call"` for a run
+    launched before that was stored, with no id either way. Tool-call tests
+    never carry evaluators, so they would otherwise be invisible in this column.
 
     Prefers each evaluator's current name over the snapshot (same preference
     order as `_build_evaluators_block_for_test_run`), via a caller-shared
@@ -841,7 +858,10 @@ def _run_evaluator_names(
     cache: Dict[str, Optional[Dict[str, Any]]] = (
         evaluator_cache if evaluator_cache is not None else {}
     )
-    raw_names: List[str] = []
+    out: List[Dict[str, Optional[str]]] = []
+    # Two evaluators can share a display name, so dedupe on the id where there
+    # is one and fall back to the name only for entries without one.
+    seen: set = set()
     for evals in (job.get("evaluators_by_test_id") or {}).values():
         for ev in evals or []:
             if not isinstance(ev, dict):
@@ -849,12 +869,18 @@ def _run_evaluator_names(
             uid = ev.get("uuid")
             ev_row = _get_evaluator_cached_for_enrichment(uid, cache) if uid else None
             name = (ev_row.get("name") if ev_row else None) or ev.get("name")
-            if name:
-                raw_names.append(name)
-    names = list(dict.fromkeys(raw_names))
+            if not name:
+                continue
+            key = uid or f"name:{name}"
+            if key in seen:
+                continue
+            seen.add(key)
+            out.append({"uuid": uid, "name": name})
     if job.get("has_tool_call_test"):
-        names.append(job.get("tool_call_evaluator_name") or "Tool call")
-    return names
+        out.append(
+            {"uuid": None, "name": job.get("tool_call_evaluator_name") or "Tool call"}
+        )
+    return out
 
 
 def _prefetch_evaluator_cache(
@@ -862,10 +888,10 @@ def _prefetch_evaluator_cache(
 ) -> Dict[str, Optional[Dict[str, Any]]]:
     """One batched DB read for every evaluator uuid referenced across `jobs`'
     `evaluators_by_test_id` snapshots, seeded as the `evaluator_cache` for
-    `_run_evaluator_names`. Without this, each distinct evaluator triggers its
+    `_run_evaluators`. Without this, each distinct evaluator triggers its
     own `get_evaluator()` round trip on first sight (N+1 for a run-list
     referencing many evaluators); missing/deleted uuids are cached as `None`
-    so `_run_evaluator_names` never re-queries them either."""
+    so `_run_evaluators` never re-queries them either."""
     from db import get_evaluators_by_uuids
 
     all_uuids = {
@@ -896,7 +922,7 @@ def _build_agent_test_run_item_fields(
     ``agent_id``/``agent_name`` for the global view). Pass a shared
     ``evaluator_cache`` when building a whole list so repeated evaluators
     across runs cost one DB lookup, not one per run (see
-    ``_run_evaluator_names``).
+    ``_run_evaluators``).
     """
     job_results = job.get("results") or {}
 
@@ -911,7 +937,7 @@ def _build_agent_test_run_item_fields(
         "total_tests": job_results.get("total_tests"),
         "passed": job_results.get("passed"),
         "failed": job_results.get("failed"),
-        "evaluators": _run_evaluator_names(job, evaluator_cache),
+        "evaluators": _run_evaluators(job, evaluator_cache),
         "latency_ms": job_results.get("latency_ms"),
         "cost": job_results.get("cost"),
         "total_tokens": job_results.get("total_tokens"),
