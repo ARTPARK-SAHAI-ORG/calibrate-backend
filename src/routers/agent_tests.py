@@ -9,7 +9,7 @@ import traceback
 import threading
 import logging
 from pathlib import Path
-from typing import List, Dict, Any, Literal, Optional
+from typing import List, Dict, Any, Literal, Optional, Set
 
 from fastapi import APIRouter, HTTPException, Depends, Path as PathParam, Query
 from pagination import (
@@ -841,10 +841,12 @@ def _run_evaluators(
     """The evaluators for the run-list `evaluators` column as `{uuid, name}`,
     deduplicated and in first-appearance order across the job's
     `details.evaluators_by_test_id` snapshot. The id is what lets a caller open
-    the evaluator; entries whose snapshot carries no id keep `uuid: None`. When
-    any linked test was a tool-call test, appends the tool-call evaluator's name
-    frozen onto the run at launch, or the literal `"Tool call"` for a run
-    launched before that was stored, with no id either way. Tool-call tests
+    the evaluator, so it is sent only for an evaluator that is still in the
+    library. An entry whose snapshot carries no id, or whose evaluator has been
+    deleted since the run, keeps its name and `uuid: None`. When any linked
+    test was a tool-call test, appends the tool-call evaluator's name frozen
+    onto the run at launch, or the literal `"Tool call"` for a run launched
+    before that was stored, with no id either way. Tool-call tests
     never carry evaluators, so they would otherwise be invisible in this column.
 
     Prefers each evaluator's current name over the snapshot (same preference
@@ -859,9 +861,9 @@ def _run_evaluators(
         evaluator_cache if evaluator_cache is not None else {}
     )
     out: List[Dict[str, Optional[str]]] = []
-    # Two evaluators can share a display name, so dedupe on the id where there
-    # is one and fall back to the name only for entries without one.
-    seen: set = set()
+    # Dedupe on the id, which is what identifies an evaluator, falling back to
+    # the name for a snapshot entry that carries no id.
+    seen: Set[str] = set()
     for evals in (job.get("evaluators_by_test_id") or {}).values():
         for ev in evals or []:
             if not isinstance(ev, dict):
@@ -875,7 +877,10 @@ def _run_evaluators(
             if key in seen:
                 continue
             seen.add(key)
-            out.append({"uuid": uid, "name": name})
+            # The id goes out only when the evaluator is still there. An
+            # evaluator deleted since the run keeps its name from the snapshot
+            # but no id, so a caller shows it without offering to open it.
+            out.append({"uuid": uid if ev_row else None, "name": name})
     if job.get("has_tool_call_test"):
         out.append(
             {"uuid": None, "name": job.get("tool_call_evaluator_name") or "Tool call"}

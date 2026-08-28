@@ -567,9 +567,12 @@ def test_agent_runs_list_evaluators_column(client):
         "Deleted Evaluator",
         "Tool call",
     ]
-    # The id is what lets a caller open the evaluator; the tool-call entry has
-    # none, because it is not an evaluator in the library.
+    # The id is what lets a caller open the evaluator. The evaluator deleted
+    # since the run has none, so a caller shows its name without offering to
+    # open a page that no longer exists. Neither does the tool-call entry,
+    # which is not an evaluator in the library.
     assert run["evaluators"][0]["uuid"] == ev_a["uuid"]
+    assert run["evaluators"][2]["uuid"] is None
     assert run["evaluators"][-1]["uuid"] is None
 
 
@@ -906,7 +909,8 @@ def test_run_evaluators_guards_malformed_snapshot_entries():
             ]
         }
     }
-    assert _run_evaluators(job) == [{"uuid": "ev2", "name": "Correctness"}]
+    cache = {"ev1": None, "ev2": {"name": "Correctness"}}
+    assert _run_evaluators(job, cache) == [{"uuid": "ev2", "name": "Correctness"}]
 
 
 def test_run_evaluators_carries_the_id_so_a_caller_can_open_it():
@@ -923,31 +927,28 @@ def test_run_evaluators_carries_the_id_so_a_caller_can_open_it():
         "has_tool_call_test": True,
         "tool_call_evaluator_name": "Tool call correctness",
     }
-    assert _run_evaluators(job) == [
+    cache = {"ev1": {"name": "Correctness"}, "ev2": {"name": "Helpfulness"}}
+    assert _run_evaluators(job, cache) == [
         {"uuid": "ev1", "name": "Correctness"},
         {"uuid": "ev2", "name": "Helpfulness"},
         {"uuid": None, "name": "Tool call correctness"},
     ]
 
 
-def test_run_evaluators_keeps_two_evaluators_that_share_a_name():
-    """Deduplication is by id, so two different evaluators that happen to
-    share a display name both survive. Deduplicating by name would drop one
-    and the run would look like it was judged by fewer evaluators than it was."""
+def test_run_evaluators_drops_the_id_of_an_evaluator_deleted_since_the_run():
+    """An evaluator deleted since the run keeps its name from the snapshot but
+    loses its id, so a caller shows the name without offering to open a page
+    that would only fail to load."""
     from routers.agent_tests import _run_evaluators
 
     job = {
         "evaluators_by_test_id": {
-            "tc1": [{"uuid": "ev1", "name": "Correctness"}],
-            "tc2": [
-                {"uuid": "ev2", "name": "Correctness"},
-                {"uuid": "ev1", "name": "Correctness"},
-            ],
+            "tc1": [{"uuid": "gone", "name": "Deleted Evaluator"}],
         }
     }
-    assert _run_evaluators(job) == [
-        {"uuid": "ev1", "name": "Correctness"},
-        {"uuid": "ev2", "name": "Correctness"},
+    # The cache says this uuid resolves to nothing, the same as a deleted row.
+    assert _run_evaluators(job, {"gone": None}) == [
+        {"uuid": None, "name": "Deleted Evaluator"}
     ]
 
 
