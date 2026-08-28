@@ -269,6 +269,29 @@ def test_agent_tests_link_crud(client):
     assert foreign.status_code == 404
 
 
+def test_agent_test_uuid_lists_reject_malformed_ids(client):
+    """A short id is rejected before any lookup, so a typo cannot come back as
+    a successful call that removed nothing."""
+    auth = _signup(client)
+    h = auth["headers"]
+    agent = _create_agent(client, h)
+
+    for path, body in (
+        ("/agent-tests", {"agent_uuid": agent["uuid"], "test_uuids": ["abc"]}),
+        ("/agent-tests/bulk-unlink", {"agent_uuid": agent["uuid"], "test_uuids": ["abc"]}),
+        (
+            "/agent-tests/bulk-delete-tests",
+            {"agent_uuid": agent["uuid"], "test_uuids": ["abc"]},
+        ),
+        (f"/agent-tests/agent/{agent['uuid']}/run", {"test_uuids": ["abc"]}),
+        (
+            f"/agent-tests/agent/{agent['uuid']}/benchmark",
+            {"models": ["openai/gpt-4.1"], "test_uuids": ["abc"]},
+        ),
+    ):
+        assert client.post(path, json=body, headers=h).status_code == 422, path
+
+
 def test_agent_test_unlink_routes_are_org_scoped(client):
     """Unlinking and the raw link list stay inside the caller's workspace."""
     auth = _signup(client)

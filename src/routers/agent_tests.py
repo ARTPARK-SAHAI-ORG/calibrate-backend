@@ -72,6 +72,7 @@ from utils import (
     EXAMPLE_TEST_UUID,
     TestListResponse,
     TestTypeLiteral,
+    TestUuid,
     to_test_list_response,
     OutputTypeLiteral,
     AgentTestJobType,
@@ -212,7 +213,7 @@ class AgentTestsCreate(BaseModel):
         description="Agent to link tests to",
         examples=[_EXAMPLE_AGENT_UUID],
     )
-    test_uuids: List[str] = Field(
+    test_uuids: List[TestUuid] = Field(
         description="Tests to link. Any that are already linked are skipped",
         examples=[[EXAMPLE_TEST_UUID]],
     )
@@ -258,7 +259,7 @@ class AgentTestsCreateResponse(BaseModel):
 
 
 class RunTestRequest(BaseModel):
-    test_uuids: Optional[List[str]] = Field(
+    test_uuids: Optional[List[TestUuid]] = Field(
         None,
         description="Tests to run. Omit to run all tests linked to the agent",
         examples=[[EXAMPLE_TEST_UUID]],
@@ -1214,7 +1215,7 @@ class AgentTestBulkDelete(BaseModel):
         description="Agent to unlink tests from",
         examples=[_EXAMPLE_AGENT_UUID],
     )
-    test_uuids: List[str] = Field(
+    test_uuids: List[TestUuid] = Field(
         description="Tests to unlink from the agent",
         examples=[[EXAMPLE_TEST_UUID]],
     )
@@ -1266,7 +1267,7 @@ class AgentTestsBulkDeleteAll(BaseModel):
         description="Agent whose linked tests define the deletion scope",
         examples=[_EXAMPLE_AGENT_UUID],
     )
-    test_uuids: List[str] = Field(
+    test_uuids: List[TestUuid] = Field(
         description="Tests to delete. Only tests linked to this agent in your workspace are deleted. Others are skipped",
         examples=[[EXAMPLE_TEST_UUID]],
     )
@@ -3042,7 +3043,7 @@ class BenchmarkRequest(BaseModel):
         description="Model names to benchmark",
         examples=[["openai/gpt-4.1", "anthropic/claude-sonnet-4"]],
     )
-    test_uuids: Optional[List[str]] = Field(
+    test_uuids: Optional[List[TestUuid]] = Field(
         None,
         description="A subset of the agent's linked tests to benchmark. Each ID must be linked to the agent. Omit to run all linked tests",
         examples=[[EXAMPLE_TEST_UUID]],
