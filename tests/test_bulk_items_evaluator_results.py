@@ -176,29 +176,72 @@ def test_unknown_version_number_is_rejected(client):
     assert "no version 99" in r.json()["detail"]
 
 
-def test_tool_call_row_is_rejected(client):
+def _tool_call_item(name="tc"):
+    return {
+        "payload": {
+            "name": name,
+            "chat_history": [{"role": "user", "content": "hi"}],
+            "expected_tool_calls": [{"tool": "search", "arguments": {}}],
+        }
+    }
+
+
+def _tool_call_ev(client, h):
+    evs = client.get("/evaluators", headers=h).json()["items"]
+    return next(e for e in evs if e.get("evaluator_type") == "tool-call")
+
+
+def test_a_tool_call_row_is_scored_by_the_tool_call_evaluator(client):
+    h = _signup(client)
+    ev = _llm_ev(client, h)
+    task = _task(client, h, ev["uuid"])
+    tc_ev = _tool_call_ev(client, h)
+
+    item = _tool_call_item()
+    item["evaluator_results"] = {tc_ev["uuid"]: {"value": True, "reasoning": "calls match"}}
+    body = client.post(
+        f"/annotation-tasks/{task}/items", json={"items": [item]}, headers=h
+    ).json()
+    assert body["evaluator_result_count"] == 1
+
+    from db import get_evaluator_runs_for_job
+
+    rows = get_evaluator_runs_for_job(body["evaluator_run_job_id"])
+    assert [r["evaluator_id"] for r in rows] == [tc_ev["uuid"]]
+    assert rows[0]["value"] == {"value": True, "reasoning": "calls match"}
+
+
+def test_any_other_evaluator_on_a_tool_call_row_is_rejected(client):
     h = _signup(client)
     ev = _llm_ev(client, h)
     task = _task(client, h, ev["uuid"])
 
+    item = _tool_call_item()
+    item["evaluator_results"] = {ev["uuid"]: {"value": True}}
+    r = client.post(
+        f"/annotation-tasks/{task}/items", json={"items": [item]}, headers=h
+    )
+    assert r.status_code == 400
+    assert "only the tool-call evaluator scores" in r.json()["detail"]
+
+
+def test_the_tool_call_evaluator_on_a_reply_row_is_rejected(client):
+    h = _signup(client)
+    ev = _llm_ev(client, h)
+    task = _task(client, h, ev["uuid"])
+    tc_ev = _tool_call_ev(client, h)
+    # Linking it requires a tool-call row in the task first.
+    client.post(
+        f"/annotation-tasks/{task}/items", json={"items": [_tool_call_item()]}, headers=h
+    )
+
     r = client.post(
         f"/annotation-tasks/{task}/items",
-        json={
-            "items": [
-                {
-                    "payload": {
-                        "name": "tc",
-                        "chat_history": [{"role": "user", "content": "hi"}],
-                        "expected_tool_calls": [{"tool": "search", "arguments": {}}],
-                    },
-                    "evaluator_results": {ev["uuid"]: {"value": True}},
-                }
-            ]
-        },
+        json={"items": [_item("i1", evaluator_results={tc_ev["uuid"]: {"value": True}})]},
         headers=h,
     )
     assert r.status_code == 400
-    assert "tool call" in r.json()["detail"]
+    assert "records a reply rather than a tool call" in r.json()["detail"]
 
 
 def test_scores_on_an_item_that_already_exists_are_refused(client):

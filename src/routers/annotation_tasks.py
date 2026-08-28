@@ -801,7 +801,7 @@ class AnnotationItemPayload(BaseModel):
     )
     evaluator_results: Optional[Dict[str, Any]] = Field(
         None,
-        description="Evaluator scores to record, keyed by evaluator ID. Each evaluator ID must be linked to the task. Put the score in `value`, a bool for binary or a number within the scale for rating, with optional `reasoning` and `version_number`. Omit `version_number` to record against the evaluator's live version. Not allowed on a tool-call item",
+        description="Evaluator scores to record, keyed by evaluator ID. Each evaluator ID must be linked to the task. Put the score in `value`, a bool for binary or a number within the scale for rating, with optional `reasoning` and `version_number`. Omit `version_number` to record against the evaluator's live version. An item recording a tool call takes the tool-call evaluator and no other, and every other item takes any evaluator except that one",
         examples=[{_EXAMPLE_ID: {"value": True, "reasoning": "meets the bar", "version_number": 2}}],
     )
 
@@ -922,15 +922,6 @@ def _resolve_evaluator_results(
                 status_code=400,
                 detail=f"items[{idx}].evaluator_results must be an object keyed by evaluator UUID",
             )
-        if is_tool_call_row({"payload": it.payload}):
-            raise HTTPException(
-                status_code=400,
-                detail=(
-                    f"items[{idx}] evaluates a tool call, which only supports "
-                    f"human review today. Evaluators do not run on it, so it "
-                    f"cannot carry `evaluator_results`."
-                ),
-            )
         unknown = [
             ev_id
             for ev_id in it.evaluator_results.keys()
@@ -967,6 +958,31 @@ def _resolve_evaluator_results(
             if not evaluator:
                 raise HTTPException(
                     status_code=400, detail=f"Evaluator {ev_id} not found"
+                )
+            # Same pairing the labelling form draws and
+            # `required_evaluator_ids_for_item` enforces: a tool-call row is
+            # answered by the tool-call evaluator alone, every other row by
+            # everything except it.
+            row_is_tool_call = is_tool_call_row({"payload": it.payload})
+            evaluator_is_tool_call = (
+                evaluator.get("evaluator_type") == TOOL_CALL_EVALUATOR_TYPE
+            )
+            if row_is_tool_call and not evaluator_is_tool_call:
+                raise HTTPException(
+                    status_code=400,
+                    detail=(
+                        f"items[{idx}] records a tool call, which only the "
+                        f"tool-call evaluator scores. Evaluator {ev_id} does not "
+                        f"run on it."
+                    ),
+                )
+            if evaluator_is_tool_call and not row_is_tool_call:
+                raise HTTPException(
+                    status_code=400,
+                    detail=(
+                        f"Evaluator {ev_id} scores tool calls, and items[{idx}] "
+                        f"records a reply rather than a tool call."
+                    ),
                 )
             version_number = raw.get("version_number")
             if version_number is None:
