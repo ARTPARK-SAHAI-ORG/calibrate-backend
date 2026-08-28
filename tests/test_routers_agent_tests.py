@@ -164,7 +164,9 @@ def test_agent_tests_link_crud(client):
     assert again.status_code == 200
 
     # List
-    assert client.get("/agent-tests").status_code == 200
+    assert client.get("/agent-tests", headers=h).status_code == 200
+    # The route is org-scoped now, so it rejects an anonymous caller.
+    assert client.get("/agent-tests").status_code == 403
     assert (
         client.get(
             f"/agent-tests/agent/{agent['uuid']}/tests", headers=h
@@ -208,11 +210,20 @@ def test_agent_tests_link_crud(client):
     empty = client.post(
         "/agent-tests/bulk-unlink",
         json={"agent_uuid": agent["uuid"], "test_uuids": []},
+        headers=h,
     )
     assert empty.status_code == 400
+    assert (
+        client.post(
+            "/agent-tests/bulk-unlink",
+            json={"agent_uuid": agent["uuid"], "test_uuids": [test_a["uuid"]]},
+        ).status_code
+        == 403
+    )
     bulk_unlink = client.post(
         "/agent-tests/bulk-unlink",
         json={"agent_uuid": agent["uuid"], "test_uuids": [test_a["uuid"]]},
+        headers=h,
     )
     assert bulk_unlink.status_code == 200
 
@@ -220,6 +231,7 @@ def test_agent_tests_link_crud(client):
     missing = client.post(
         "/agent-tests/bulk-unlink",
         json={"agent_uuid": NONEXISTENT_UUID, "test_uuids": [test_b["uuid"]]},
+        headers=h,
     )
     assert missing.status_code == 404
 
@@ -255,6 +267,204 @@ def test_agent_tests_link_crud(client):
         headers=other["headers"],
     )
     assert foreign.status_code == 404
+
+
+def test_agent_test_uuid_lists_reject_malformed_ids(client):
+    """A short id is rejected before any lookup, so a typo cannot come back as
+    a successful call that removed nothing."""
+    auth = _signup(client)
+    h = auth["headers"]
+    agent = _create_agent(client, h)
+
+    for path, body in (
+        ("/agent-tests", {"agent_uuid": agent["uuid"], "test_uuids": ["abc"]}),
+        ("/agent-tests/bulk-unlink", {"agent_uuid": agent["uuid"], "test_uuids": ["abc"]}),
+        (
+            "/agent-tests/bulk-delete-tests",
+            {"agent_uuid": agent["uuid"], "test_uuids": ["abc"]},
+        ),
+        (f"/agent-tests/agent/{agent['uuid']}/run", {"test_uuids": ["abc"]}),
+        (
+            f"/agent-tests/agent/{agent['uuid']}/benchmark",
+            {"models": ["openai/gpt-4.1"], "test_uuids": ["abc"]},
+        ),
+    ):
+        assert client.post(path, json=body, headers=h).status_code == 422, path
+
+
+def test_agent_test_unlink_routes_are_org_scoped(client):
+    """Unlinking and the raw link list stay inside the caller's workspace."""
+    auth = _signup(client)
+    h = auth["headers"]
+    agent = _create_agent(client, h)
+    test = _create_test(client, h)
+    client.post(
+        "/agent-tests",
+        json={"agent_uuid": agent["uuid"], "test_uuids": [test["uuid"]]},
+        headers=h,
+    )
+
+    other = _signup(client)["headers"]
+    body = {"agent_uuid": agent["uuid"], "test_uuid": test["uuid"]}
+
+    assert client.request("DELETE", "/agent-tests", json=body).status_code == 403
+    assert (
+        client.request("DELETE", "/agent-tests", json=body, headers=other).status_code
+        == 404
+    )
+    assert (
+        client.post(
+            "/agent-tests/bulk-unlink",
+            json={"agent_uuid": agent["uuid"], "test_uuids": [test["uuid"]]},
+            headers=other,
+        ).status_code
+        == 404
+    )
+    # The other workspace's link list never shows this link.
+    assert client.get("/agent-tests", headers=other).json() == []
+
+    links = client.get("/agent-tests", headers=h).json()
+    assert [link["agent_id"] for link in links] == [agent["uuid"]]
+
+    # The owner can unlink, and a second attempt finds nothing left.
+    assert (
+        client.request("DELETE", "/agent-tests", json=body, headers=h).status_code == 200
+    )
+    assert (
+        client.request("DELETE", "/agent-tests", json=body, headers=h).status_code == 404
+    )
+
+
+def _create_typed_test(client, h, name, type, config, evaluator_uuid=None):
+    body = {"name": name, "type": type, "config": config}
+    if evaluator_uuid:
+        body["evaluators"] = [{"evaluator_uuid": evaluator_uuid}]
+    return client.post("/tests", json=body, headers=h).json()
+
+
+def test_agent_tests_list_type_filter_and_search_modes(client):
+    """`?type=` narrows by test type (repeated or comma-separated) and
+    `?q_mode=` picks how `q` matches the name."""
+    auth = _signup(client)
+    h = auth["headers"]
+    agent = _create_agent(client, h)
+    conv_ev = _create_simulation_evaluator(client, h)
+
+    response_test = _create_test(client, h, name="alpha response")
+    tool_test = _create_typed_test(
+        client,
+        h,
+        "beta tool",
+        "tool_call",
+        {
+            "history": [{"role": "user", "content": "hi"}],
+            "evaluation": {
+                "type": "tool_call",
+                "tool_calls": [{"tool": "x", "accept_any_arguments": True}],
+            },
+        },
+    )
+    conv_test = _create_typed_test(
+        client,
+        h,
+        "gamma conversation",
+        "conversation",
+        {"history": [{"role": "user", "content": "hi"}]},
+        evaluator_uuid=conv_ev["uuid"],
+    )
+    client.post(
+        "/agent-tests",
+        json={
+            "agent_uuid": agent["uuid"],
+            "test_uuids": [
+                response_test["uuid"],
+                tool_test["uuid"],
+                conv_test["uuid"],
+            ],
+        },
+        headers=h,
+    )
+
+    url = f"/agent-tests/agent/{agent['uuid']}/tests"
+
+    def names(**params):
+        r = client.get(url, params=params, headers=h)
+        assert r.status_code == 200, r.text
+        body = r.json()
+        assert body["total"] == len(body["items"])
+        return sorted(i["name"] for i in body["items"])
+
+    assert names() == ["alpha response", "beta tool", "gamma conversation"]
+    assert names(type="tool_call") == ["beta tool"]
+    # Comma-separated and repeated forms agree.
+    assert names(type="response,conversation") == ["alpha response", "gamma conversation"]
+    assert names(type=["response", "conversation"]) == [
+        "alpha response",
+        "gamma conversation",
+    ]
+    # Blank value is treated as no filter.
+    assert len(names(type="")) == 3
+
+    bad = client.get(url, params={"type": "nope"}, headers=h)
+    assert bad.status_code == 422
+    assert "nope" in bad.text
+
+    # Search modes.
+    assert names(q="response") == ["alpha response"]
+    assert names(q="response", q_mode="contains") == ["alpha response"]
+    assert names(q="alpha", q_mode="starts_with") == ["alpha response"]
+    assert names(q="response", q_mode="starts_with") == []
+    assert names(q="tool", q_mode="ends_with") == ["beta tool"]
+    assert names(q="beta", q_mode="ends_with") == []
+    assert names(q="BETA TOOL", q_mode="exact") == ["beta tool"]
+    assert names(q="beta", q_mode="exact") == []
+    # A stray space is part of an exact query, and the other modes still trim it.
+    assert names(q="beta tool ", q_mode="exact") == []
+    assert names(q=" beta tool", q_mode="contains") == ["beta tool"]
+    # Type and search combine.
+    assert names(q="a", q_mode="contains", type="tool_call") == ["beta tool"]
+
+    assert client.get(url, params={"q_mode": "sideways"}, headers=h).status_code == 422
+
+    # A name that begins with a space is reachable in exact mode.
+    spaced = _create_test(client, h, name=" padded")
+    client.post(
+        "/agent-tests",
+        json={"agent_uuid": agent["uuid"], "test_uuids": [spaced["uuid"]]},
+        headers=h,
+    )
+    assert names(q=" padded", q_mode="exact") == [" padded"]
+    assert names(q="padded", q_mode="exact") == []
+
+
+def test_agent_tests_list_paging_is_stable_across_pages(client):
+    """Tests linked in one bulk call share a timestamp; paging must still
+    cover every test exactly once."""
+    auth = _signup(client)
+    h = auth["headers"]
+    agent = _create_agent(client, h)
+    test_uuids = [_create_test(client, h)["uuid"] for _ in range(6)]
+    client.post(
+        "/agent-tests",
+        json={"agent_uuid": agent["uuid"], "test_uuids": test_uuids},
+        headers=h,
+    )
+
+    url = f"/agent-tests/agent/{agent['uuid']}/tests"
+    full = client.get(url, params={"limit": 6}, headers=h).json()
+    assert full["total"] == 6
+
+    paged = []
+    for offset in (0, 2, 4):
+        page = client.get(url, params={"limit": 2, "offset": offset}, headers=h).json()
+        assert page["total"] == 6
+        paged.extend(i["uuid"] for i in page["items"])
+
+    assert paged == [i["uuid"] for i in full["items"]]
+    assert sorted(paged) == sorted(test_uuids)
+    # Newest link first, so the shared timestamp is broken by link id, not by
+    # whatever order sqlite happens to return.
+    assert paged == list(reversed(test_uuids))
 
 
 def test_agent_tests_list_returns_trimmed_shape(client):
@@ -1259,6 +1469,7 @@ def test_agent_tests_delete_link_not_found(client):
         "DELETE",
         "/agent-tests",
         json={"agent_uuid": NONEXISTENT_UUID, "test_uuid": NONEXISTENT_UUID_2},
+        headers=h,
     )
     assert resp.status_code == 404
 

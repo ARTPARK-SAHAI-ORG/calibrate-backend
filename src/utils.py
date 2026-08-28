@@ -209,6 +209,7 @@ AnnotationTaskTypeLiteral = Literal["stt", "llm", "llm-general", "conversation",
 TestTypeLiteral = Literal["response", "tool_call", "conversation", "general"]
 MemberRoleLiteral = Literal["owner", "admin"]  # mirrors DB CHECK(role IN ('owner','admin'))
 EvaluatorUuid = Annotated[str, StringConstraints(min_length=36, max_length=36)]
+TestUuid = Annotated[str, StringConstraints(min_length=36, max_length=36)]
 
 # Evaluator names that collide with reserved bulk-CSV output columns (an
 # evaluator's name becomes a `<name>`/`<name>_reasoning` column in eval result

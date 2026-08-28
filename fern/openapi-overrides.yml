@@ -60,6 +60,10 @@ paths:
     post:
       x-fern-sdk-group-name: agent_tests
       x-fern-sdk-method-name: link
+  /agent-tests/bulk-unlink:
+    post:
+      x-fern-sdk-group-name: agent_tests
+      x-fern-sdk-method-name: bulk_unlink
   /agent-tests/agent/{agent_uuid}/tests:
     get:
       x-fern-sdk-group-name: agent_tests

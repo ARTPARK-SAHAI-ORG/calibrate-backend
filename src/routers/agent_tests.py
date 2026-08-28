@@ -9,7 +9,7 @@ import traceback
 import threading
 import logging
 from pathlib import Path
-from typing import List, Dict, Any, Literal, Optional, Set
+from typing import List, Dict, Any, Literal, Optional, Set, get_args
 
 from fastapi import APIRouter, HTTPException, Depends, Path as PathParam, Query
 from pagination import (
@@ -22,7 +22,7 @@ from pagination import (
     paginate_around,
 )
 
-_AgentTestSearch = make_search_params(searchable=["name"])
+_AgentTestSearch = make_search_params(searchable=["name"], with_modes=True)
 from pydantic import BaseModel, Field
 from sqlite3 import IntegrityError
 
@@ -71,6 +71,8 @@ from utils import (
     TaskCreateResponse,
     EXAMPLE_TEST_UUID,
     TestListResponse,
+    TestTypeLiteral,
+    TestUuid,
     to_test_list_response,
     OutputTypeLiteral,
     AgentTestJobType,
@@ -86,6 +88,8 @@ from utils import (
     upload_directory_tree_to_s3,
     upload_file_to_s3,
 )
+
+_TEST_TYPES = get_args(TestTypeLiteral)
 
 # Job types that share the same queue
 AGENT_TEST_JOB_TYPES = ["llm-unit-test", "llm-benchmark"]
@@ -209,7 +213,7 @@ class AgentTestsCreate(BaseModel):
         description="Agent to link tests to",
         examples=[_EXAMPLE_AGENT_UUID],
     )
-    test_uuids: List[str] = Field(
+    test_uuids: List[TestUuid] = Field(
         description="Tests to link. Any that are already linked are skipped",
         examples=[[EXAMPLE_TEST_UUID]],
     )
@@ -255,7 +259,7 @@ class AgentTestsCreateResponse(BaseModel):
 
 
 class RunTestRequest(BaseModel):
-    test_uuids: Optional[List[str]] = Field(
+    test_uuids: Optional[List[TestUuid]] = Field(
         None,
         description="Tests to run. Omit to run all tests linked to the agent",
         examples=[[EXAMPLE_TEST_UUID]],
@@ -681,10 +685,27 @@ def create_agent_test_links(
 
 
 @router.get("", response_model=List[AgentTestResponse], summary="List agent-test links")
-def list_agent_tests():
+def list_agent_tests(ctx: OrgContext = Depends(get_current_org)):
     """List which tests are linked to which agents."""
-    links = get_all_agent_tests()
+    links = get_all_agent_tests(ctx.org_uuid)
     return links
+
+
+def _parse_test_type_filter(values: Optional[List[str]]) -> Optional[Set[str]]:
+    """Parse `?type=` into a set of test types, accepting both the repeated form
+    and one comma-separated value. Returns None when nothing was requested."""
+    wanted = {
+        part.strip() for value in values or [] for part in value.split(",") if part.strip()
+    }
+    if not wanted:
+        return None
+    unknown = sorted(wanted - set(_TEST_TYPES))
+    if unknown:
+        raise HTTPException(
+            status_code=422,
+            detail=f"type={unknown!r} not allowed; expected one of {list(_TEST_TYPES)!r}",
+        )
+    return wanted
 
 
 @router.get(
@@ -699,6 +720,13 @@ def get_agent_tests_endpoint(
         examples=[_EXAMPLE_AGENT_UUID],
     ),
     ctx: OrgContext = Depends(get_org_jwt_or_api_key),
+    type: Optional[List[str]] = Query(
+        None,
+        description=(
+            "Keep only tests of these types. Repeat the parameter or pass one "
+            f"comma-separated value. Accepts {', '.join(f'`{t}`' for t in _TEST_TYPES)}"
+        ),
+    ),
     search: _AgentTestSearch = Depends(),
     pagination: OptionalPaginationParams = Depends(),
 ):
@@ -714,6 +742,9 @@ def get_agent_tests_endpoint(
     # shape (uuid/name/type + config.description, no evaluator hydration);
     # the transform runs only on the returned page.
     tests = get_tests_for_agent_summary(agent_uuid)
+    wanted_types = _parse_test_type_filter(type)
+    if wanted_types is not None:
+        tests = [t for t in tests if t.get("type") in wanted_types]
     tests = search.apply(tests)
     page, total = count_and_page(tests, pagination)
     return page_envelope([to_test_list_response(t) for t in page], total, pagination)
@@ -1162,8 +1193,15 @@ def get_test_agents(
 
 
 @router.delete("", summary="Unlink test from agent")
-def delete_agent_test_link(agent_test: AgentTestDelete):
+def delete_agent_test_link(
+    agent_test: AgentTestDelete,
+    ctx: OrgContext = Depends(get_current_org),
+):
     """Unlink a test from an agent so it no longer runs for that agent."""
+    agent = get_agent(agent_test.agent_uuid)
+    if not agent or agent.get("org_uuid") != ctx.org_uuid:
+        raise HTTPException(status_code=404, detail="Agent not found")
+
     deleted = remove_test_from_agent(agent_test.agent_uuid, agent_test.test_uuid)
     if not deleted:
         raise HTTPException(status_code=404, detail="Agent-test link not found")
@@ -1177,20 +1215,38 @@ class AgentTestBulkDelete(BaseModel):
         description="Agent to unlink tests from",
         examples=[_EXAMPLE_AGENT_UUID],
     )
-    test_uuids: List[str] = Field(
+    test_uuids: List[TestUuid] = Field(
         description="Tests to unlink from the agent",
         examples=[[EXAMPLE_TEST_UUID]],
     )
 
 
-@router.post("/bulk-unlink", summary="Bulk unlink tests from agent")
-def bulk_delete_agent_test_links(payload: AgentTestBulkDelete):
-    """Unlink multiple tests from an agent."""
+class AgentTestsBulkUnlinkResponse(BaseModel):
+    deleted_count: int = Field(
+        description="Number of links removed. Tests that were not linked are excluded"
+    )
+    message: str = Field(description="Confirmation message")
+
+
+@router.post(
+    "/bulk-unlink",
+    response_model=AgentTestsBulkUnlinkResponse,
+    summary="Bulk unlink tests from agent",
+    tags=["Public API"],
+)
+def bulk_delete_agent_test_links(
+    payload: AgentTestBulkDelete,
+    ctx: OrgContext = Depends(get_org_jwt_or_api_key),
+):
+    """Unlink one or more tests from an agent. Tests that are not linked are skipped."""
+    # Public API (auth via get_org_jwt_or_api_key). Verify the agent exists and
+    # belongs to the caller's workspace (404 otherwise). The tests themselves
+    # keep existing; only the links to this agent go.
     if not payload.test_uuids:
         raise HTTPException(status_code=400, detail="test_uuids must not be empty")
 
     agent = get_agent(payload.agent_uuid)
-    if not agent:
+    if not agent or agent.get("org_uuid") != ctx.org_uuid:
         raise HTTPException(status_code=404, detail="Agent not found")
 
     deleted_count = bulk_remove_tests_from_agent(
@@ -1211,7 +1267,7 @@ class AgentTestsBulkDeleteAll(BaseModel):
         description="Agent whose linked tests define the deletion scope",
         examples=[_EXAMPLE_AGENT_UUID],
     )
-    test_uuids: List[str] = Field(
+    test_uuids: List[TestUuid] = Field(
         description="Tests to delete. Only tests linked to this agent in your workspace are deleted. Others are skipped",
         examples=[[EXAMPLE_TEST_UUID]],
     )
@@ -2987,7 +3043,7 @@ class BenchmarkRequest(BaseModel):
         description="Model names to benchmark",
         examples=[["openai/gpt-4.1", "anthropic/claude-sonnet-4"]],
     )
-    test_uuids: Optional[List[str]] = Field(
+    test_uuids: Optional[List[TestUuid]] = Field(
         None,
         description="A subset of the agent's linked tests to benchmark. Each ID must be linked to the agent. Omit to run all linked tests",
         examples=[[EXAMPLE_TEST_UUID]],
