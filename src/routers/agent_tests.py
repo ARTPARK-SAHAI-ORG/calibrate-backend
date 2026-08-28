@@ -1220,12 +1220,27 @@ class AgentTestBulkDelete(BaseModel):
     )
 
 
-@router.post("/bulk-unlink", summary="Bulk unlink tests from agent")
+class AgentTestsBulkUnlinkResponse(BaseModel):
+    deleted_count: int = Field(
+        description="Number of links removed. Tests that were not linked are excluded"
+    )
+    message: str = Field(description="Confirmation message")
+
+
+@router.post(
+    "/bulk-unlink",
+    response_model=AgentTestsBulkUnlinkResponse,
+    summary="Bulk unlink tests from agent",
+    tags=["Public API"],
+)
 def bulk_delete_agent_test_links(
     payload: AgentTestBulkDelete,
-    ctx: OrgContext = Depends(get_current_org),
+    ctx: OrgContext = Depends(get_org_jwt_or_api_key),
 ):
-    """Unlink multiple tests from an agent."""
+    """Unlink one or more tests from an agent. Tests that are not linked are skipped."""
+    # Public API (auth via get_org_jwt_or_api_key). Verify the agent exists and
+    # belongs to the caller's workspace (404 otherwise). The tests themselves
+    # keep existing; only the links to this agent go.
     if not payload.test_uuids:
         raise HTTPException(status_code=400, detail="test_uuids must not be empty")
 

@@ -112,6 +112,7 @@ def test_public_api_docs_are_unauthenticated_and_filtered(client, monkeypatch):
     assert "put" in paths.get("/agents/{agent_uuid}", {})
     assert "post" in paths.get("/agents/resolve", {})
     assert "post" in paths.get("/agent-tests", {})  # link tests to agent
+    assert "post" in paths.get("/agent-tests/bulk-unlink", {})  # unlink is public
     assert "post" in paths.get("/agent-tests/agent/{agent_uuid}/run", {})
     assert "get" in paths.get("/agent-tests/run/{task_id}", {})
     assert "post" in paths.get("/agent-tests/agent/{agent_uuid}/benchmark", {})
