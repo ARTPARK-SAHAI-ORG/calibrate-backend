@@ -61,6 +61,8 @@ from db import (
     get_evaluator_runs_for_tasks,
     get_annotations_for_tasks,
     clear_evaluator_runs_for_job,
+    create_evaluator_runs,
+    get_evaluator_versions,
 )
 from annotation_eval_runner import (
     ANNOTATION_EVAL_JOB_TYPE,
@@ -74,6 +76,7 @@ from annotation_eval_runner import (
     required_evaluator_ids_for_item,
     start_annotation_eval_job,
     TOOL_CALL_EVALUATOR_TYPE,
+    _utcnow_str,
 )
 from utils import (
     job_slot,
@@ -163,6 +166,14 @@ class BulkCreateItemsResponse(BaseModel):
     annotation_job_id: Optional[str] = Field(
         None,
         description="ID of the labelling job that holds the annotations you provided, present only when you send annotations with the items",
+    )
+    evaluator_result_count: Optional[int] = Field(
+        None,
+        description="How many evaluator scores were stored, present only when you send `evaluator_results` with the items",
+    )
+    evaluator_run_job_id: Optional[str] = Field(
+        None,
+        description="ID of the evaluator-run job that holds the scores you provided, present only when you send `evaluator_results` with the items",
     )
 
 
@@ -788,6 +799,11 @@ class AnnotationItemPayload(BaseModel):
         description="Human annotations to seed, keyed by evaluator ID. Each evaluator ID must be linked to the task. Put the judgement in `value`, a bool for binary or a number for rating, with optional `reasoning`. Requires `annotator_id`",
         examples=[{_EXAMPLE_ID: {"value": True, "reasoning": "meets the bar"}}],
     )
+    evaluator_results: Optional[Dict[str, Any]] = Field(
+        None,
+        description="Evaluator scores to record, keyed by evaluator ID. Each evaluator ID must be linked to the task. Put the score in `value`, a bool for binary or a number within the scale for rating, with optional `reasoning` and `version_number`. Omit `version_number` to record against the evaluator's live version. Not allowed on a tool-call item",
+        examples=[{_EXAMPLE_ID: {"value": True, "reasoning": "meets the bar", "version_number": 2}}],
+    )
 
 
 class BulkItemsRequest(BaseModel):
@@ -879,6 +895,158 @@ def check_annotated_items(
         "existing_with_annotations": existing_with_annotations,
         "existing_without_annotations": existing_without_annotations,
     }
+
+
+def _resolve_evaluator_results(
+    task_uuid: str, items: List["AnnotationItemPayload"]
+) -> List[Dict[str, Any]]:
+    """Validate every item's `evaluator_results` and resolve each score to the
+    evaluator version it was produced against.
+
+    Returns one entry per (item index, evaluator) as
+    `{index, evaluator_id, evaluator_version_id, name, value}`, where `value`
+    is the `{"value": ..., "reasoning"?: ...}` shape `evaluator_runs` stores.
+    Raises HTTPException so nothing is written when any entry is bad.
+    """
+    from llm_judge import _scale_bounds  # local to avoid module-load cycle
+
+    linked_evaluator_ids = {
+        e["uuid"] for e in get_evaluators_for_annotation_task(task_uuid)
+    }
+    resolved: List[Dict[str, Any]] = []
+    for idx, it in enumerate(items):
+        if it.evaluator_results is None:
+            continue
+        if not isinstance(it.evaluator_results, dict):
+            raise HTTPException(
+                status_code=400,
+                detail=f"items[{idx}].evaluator_results must be an object keyed by evaluator UUID",
+            )
+        if is_tool_call_row({"payload": it.payload}):
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    f"items[{idx}] evaluates a tool call, which only supports "
+                    f"human review today. Evaluators do not run on it, so it "
+                    f"cannot carry `evaluator_results`."
+                ),
+            )
+        unknown = [
+            ev_id
+            for ev_id in it.evaluator_results.keys()
+            if ev_id not in linked_evaluator_ids
+        ]
+        if unknown:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    f"Evaluator(s) not linked to this task: {unknown}. "
+                    f"Link them via PUT /annotation-tasks/{task_uuid}/evaluators "
+                    f"before seeding evaluator results."
+                ),
+            )
+        for ev_id, raw in it.evaluator_results.items():
+            if not isinstance(raw, dict):
+                raise HTTPException(
+                    status_code=400,
+                    detail=(
+                        f"items[{idx}].evaluator_results[{ev_id!r}] must be an object "
+                        f"like {{\"value\": <bool|number>, \"reasoning\"?: str, "
+                        f"\"version_number\"?: int}}; got {type(raw).__name__}"
+                    ),
+                )
+            if "value" not in raw:
+                raise HTTPException(
+                    status_code=400,
+                    detail=(
+                        f"items[{idx}].evaluator_results[{ev_id!r}] is missing required "
+                        f"key `value`. Binary uses a bool in `value`, rating uses a number."
+                    ),
+                )
+            evaluator = get_evaluator(ev_id)
+            if not evaluator:
+                raise HTTPException(
+                    status_code=400, detail=f"Evaluator {ev_id} not found"
+                )
+            version_number = raw.get("version_number")
+            if version_number is None:
+                version_uuid = evaluator.get("live_version_id")
+                if not version_uuid:
+                    raise HTTPException(
+                        status_code=400,
+                        detail=(
+                            f"Evaluator {ev_id} has no live version; pass "
+                            f"`version_number` on items[{idx}].evaluator_results[{ev_id!r}]"
+                        ),
+                    )
+                version = get_evaluator_version(version_uuid)
+            else:
+                version = next(
+                    (
+                        v
+                        for v in get_evaluator_versions(ev_id, include_deleted=True)
+                        if v["version_number"] == version_number
+                    ),
+                    None,
+                )
+                if not version:
+                    raise HTTPException(
+                        status_code=400,
+                        detail=(
+                            f"Evaluator {ev_id} has no version {version_number} "
+                            f"(items[{idx}].evaluator_results)"
+                        ),
+                    )
+            if not version:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Evaluator {ev_id} live version not found",
+                )
+
+            value = raw["value"]
+            output_type = evaluator.get("output_type")
+            if output_type == "binary":
+                if not isinstance(value, bool):
+                    raise HTTPException(
+                        status_code=400,
+                        detail=(
+                            f"items[{idx}].evaluator_results[{ev_id!r}].value must be a "
+                            f"bool for a binary evaluator; got {type(value).__name__}"
+                        ),
+                    )
+            else:
+                if isinstance(value, bool) or not isinstance(value, (int, float)):
+                    raise HTTPException(
+                        status_code=400,
+                        detail=(
+                            f"items[{idx}].evaluator_results[{ev_id!r}].value must be a "
+                            f"number for a rating evaluator; got {type(value).__name__}"
+                        ),
+                    )
+                scale_min, scale_max = _scale_bounds(version.get("output_config"))
+                if scale_min is not None and not (scale_min <= value <= scale_max):
+                    raise HTTPException(
+                        status_code=400,
+                        detail=(
+                            f"items[{idx}].evaluator_results[{ev_id!r}].value {value} is "
+                            f"outside this evaluator's scale of {scale_min} to {scale_max}"
+                        ),
+                    )
+
+            stored: Dict[str, Any] = {"value": value}
+            reasoning = raw.get("reasoning")
+            if reasoning:
+                stored["reasoning"] = reasoning
+            resolved.append(
+                {
+                    "index": idx,
+                    "evaluator_id": ev_id,
+                    "evaluator_version_id": version["uuid"],
+                    "name": evaluator["name"],
+                    "value": stored,
+                }
+            )
+    return resolved
 
 
 @router.post("/{task_uuid}/items", response_model=BulkCreateItemsResponse, response_model_exclude_none=True, summary="Bulk create items", tags=["Public API"])
@@ -1034,6 +1202,10 @@ def bulk_create_items(
                         ),
                     )
 
+    # Resolve before any write so a bad score creates nothing, the same way a
+    # name conflict does.
+    resolved_results = _resolve_evaluator_results(task_uuid, payload.items)
+
     # Create only the items that don't already exist by name.
     new_uuids = create_annotation_items(
         task_uuid,
@@ -1052,6 +1224,64 @@ def bulk_create_items(
         for i in range(len(payload.items))
     }
     all_item_uuids = list(item_uuid_by_index.values())
+
+    eval_run_fields: Dict[str, Any] = {}
+    if resolved_results:
+        scored_indexes = sorted({r["index"] for r in resolved_results})
+        scored_item_ids = [item_uuid_by_index[i] for i in scored_indexes]
+        # One job per request, already finished: the scores arrived with the
+        # request, so there is no queue slot and no runner. Its `details` match
+        # what `start_evaluator_run` writes so every reader of an evaluator-run
+        # job works on it unchanged.
+        job_evaluators = list(
+            {
+                (r["evaluator_id"], r["evaluator_version_id"]): {
+                    "evaluator_id": r["evaluator_id"],
+                    "evaluator_version_id": r["evaluator_version_id"],
+                    "name": r["name"],
+                }
+                for r in resolved_results
+            }.values()
+        )
+        eval_job_uuid = create_job(
+            job_type=ANNOTATION_EVAL_JOB_TYPE,
+            org_uuid=ctx.org_uuid,
+            user_id=ctx.user_id,
+            status=TaskStatus.DONE.value,
+            details={
+                "task_id": task_uuid,
+                "evaluators": job_evaluators,
+                "item_count": len(scored_item_ids),
+                "item_ids": scored_item_ids,
+                "completed_at": _utcnow_str(),
+            },
+        )
+        # Same frozen item snapshot every evaluator run carries, so the run
+        # page renders the payloads that were scored even after a later edit.
+        snapshot_eval_job_items(
+            eval_job_uuid,
+            [
+                {"uuid": item_uuid_by_index[i], "payload": payload.items[i].payload}
+                for i in scored_indexes
+            ],
+        )
+        create_evaluator_runs(
+            [
+                {
+                    "job_id": eval_job_uuid,
+                    "item_id": item_uuid_by_index[r["index"]],
+                    "evaluator_id": r["evaluator_id"],
+                    "evaluator_version_id": r["evaluator_version_id"],
+                    "value": r["value"],
+                    "status": "completed",
+                }
+                for r in resolved_results
+            ]
+        )
+        eval_run_fields = {
+            "evaluator_result_count": len(resolved_results),
+            "evaluator_run_job_id": eval_job_uuid,
+        }
 
     if items_with_annotations:
         # One synthesised job covers every item (new + existing), so the
@@ -1167,9 +1397,10 @@ def bulk_create_items(
             "existing_item_ids": list(matched_existing.values()),
             "count": len(all_item_uuids),
             "annotation_job_id": job_uuid,
+            **eval_run_fields,
         }
 
-    return {"item_ids": new_uuids, "count": len(new_uuids)}
+    return {"item_ids": new_uuids, "count": len(new_uuids), **eval_run_fields}
 
 
 class ItemUpdatePayload(BaseModel):
