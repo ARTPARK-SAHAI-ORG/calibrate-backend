@@ -395,10 +395,23 @@ def test_agent_tests_list_type_filter_and_search_modes(client):
     assert names(q="beta", q_mode="ends_with") == []
     assert names(q="BETA TOOL", q_mode="exact") == ["beta tool"]
     assert names(q="beta", q_mode="exact") == []
+    # A stray space is part of an exact query, and the other modes still trim it.
+    assert names(q="beta tool ", q_mode="exact") == []
+    assert names(q=" beta tool", q_mode="contains") == ["beta tool"]
     # Type and search combine.
     assert names(q="a", q_mode="contains", type="tool_call") == ["beta tool"]
 
     assert client.get(url, params={"q_mode": "sideways"}, headers=h).status_code == 422
+
+    # A name that begins with a space is reachable in exact mode.
+    spaced = _create_test(client, h, name=" padded")
+    client.post(
+        "/agent-tests",
+        json={"agent_uuid": agent["uuid"], "test_uuids": [spaced["uuid"]]},
+        headers=h,
+    )
+    assert names(q=" padded", q_mode="exact") == [" padded"]
+    assert names(q="padded", q_mode="exact") == []
 
 
 def test_agent_tests_list_paging_is_stable_across_pages(client):

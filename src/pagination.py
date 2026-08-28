@@ -315,16 +315,20 @@ def make_search_params(*, searchable: List[str], with_modes: bool = False) -> Ty
 
     class _Search:
         def _init(self, q: Optional[str], q_mode: SearchMode = "contains") -> None:
-            self.q: Optional[str] = (
-                q.strip().lower() if isinstance(q, str) and q.strip() else None
-            )
+            blank = not (isinstance(q, str) and q.strip())
+            self.q: Optional[str] = None if blank else q.strip().lower()
+            # `exact` compares the query verbatim (minus case), so a name that
+            # begins or ends with a space is still reachable; the other modes
+            # keep trimming, where a stray typed space is noise.
+            self.q_exact: Optional[str] = None if blank else q.lower()
             self.q_mode: SearchMode = q_mode
 
         def apply(self, items: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
             if self.q is None:
                 return items
+            needle = self.q_exact if self.q_mode == "exact" else self.q
             match = _SEARCH_MATCHERS[self.q_mode]
-            return [it for it in items if _matches(it, paths, self.q, match)]
+            return [it for it in items if _matches(it, paths, needle, match)]
 
     if with_modes:
 
