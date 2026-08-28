@@ -615,7 +615,8 @@ def test_agent_tests_pivot_and_test_evaluators(user):
     assert db.get_agent_test_link(agent_uuid, test_uuid)
     assert len(db.get_tests_for_agent(agent_uuid)) == 2
     assert any(a["uuid"] == agent_uuid for a in db.get_agents_for_test(test_uuid))
-    assert db.get_all_agent_tests()
+    assert db.get_all_agent_tests(user["org_uuid"])
+    assert db.get_all_agent_tests(str(_uuid.uuid4())) == []
 
     # remove one + bulk remove rest
     assert db.remove_test_from_agent(agent_uuid, test_uuid) is True

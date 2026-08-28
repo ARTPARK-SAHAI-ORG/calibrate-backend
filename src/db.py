@@ -6742,12 +6742,20 @@ def get_agent_test_link(agent_id: str, test_id: str) -> Optional[Dict[str, Any]]
         return None
 
 
-def get_all_agent_tests() -> List[Dict[str, Any]]:
-    """Get all agent-test links."""
+def get_all_agent_tests(org_uuid: str) -> List[Dict[str, Any]]:
+    """Get all agent-test links whose agent belongs to the given org."""
     with get_db_connection() as conn:
         cursor = conn.cursor()
         cursor.execute(
-            "SELECT * FROM agent_tests WHERE deleted_at IS NULL ORDER BY created_at DESC"
+            """
+            SELECT at.* FROM agent_tests at
+            JOIN agents a ON a.uuid = at.agent_id
+            WHERE at.deleted_at IS NULL
+              AND a.deleted_at IS NULL
+              AND a.org_uuid = ?
+            ORDER BY at.created_at DESC
+            """,
+            (org_uuid,),
         )
         rows = cursor.fetchall()
         return [dict(row) for row in rows]

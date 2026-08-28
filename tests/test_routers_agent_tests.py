@@ -164,7 +164,9 @@ def test_agent_tests_link_crud(client):
     assert again.status_code == 200
 
     # List
-    assert client.get("/agent-tests").status_code == 200
+    assert client.get("/agent-tests", headers=h).status_code == 200
+    # The route is org-scoped now, so it rejects an anonymous caller.
+    assert client.get("/agent-tests").status_code == 403
     assert (
         client.get(
             f"/agent-tests/agent/{agent['uuid']}/tests", headers=h
@@ -208,11 +210,20 @@ def test_agent_tests_link_crud(client):
     empty = client.post(
         "/agent-tests/bulk-unlink",
         json={"agent_uuid": agent["uuid"], "test_uuids": []},
+        headers=h,
     )
     assert empty.status_code == 400
+    assert (
+        client.post(
+            "/agent-tests/bulk-unlink",
+            json={"agent_uuid": agent["uuid"], "test_uuids": [test_a["uuid"]]},
+        ).status_code
+        == 403
+    )
     bulk_unlink = client.post(
         "/agent-tests/bulk-unlink",
         json={"agent_uuid": agent["uuid"], "test_uuids": [test_a["uuid"]]},
+        headers=h,
     )
     assert bulk_unlink.status_code == 200
 
@@ -220,6 +231,7 @@ def test_agent_tests_link_crud(client):
     missing = client.post(
         "/agent-tests/bulk-unlink",
         json={"agent_uuid": NONEXISTENT_UUID, "test_uuids": [test_b["uuid"]]},
+        headers=h,
     )
     assert missing.status_code == 404
 
@@ -255,6 +267,49 @@ def test_agent_tests_link_crud(client):
         headers=other["headers"],
     )
     assert foreign.status_code == 404
+
+
+def test_agent_test_unlink_routes_are_org_scoped(client):
+    """Unlinking and the raw link list stay inside the caller's workspace."""
+    auth = _signup(client)
+    h = auth["headers"]
+    agent = _create_agent(client, h)
+    test = _create_test(client, h)
+    client.post(
+        "/agent-tests",
+        json={"agent_uuid": agent["uuid"], "test_uuids": [test["uuid"]]},
+        headers=h,
+    )
+
+    other = _signup(client)["headers"]
+    body = {"agent_uuid": agent["uuid"], "test_uuid": test["uuid"]}
+
+    assert client.request("DELETE", "/agent-tests", json=body).status_code == 403
+    assert (
+        client.request("DELETE", "/agent-tests", json=body, headers=other).status_code
+        == 404
+    )
+    assert (
+        client.post(
+            "/agent-tests/bulk-unlink",
+            json={"agent_uuid": agent["uuid"], "test_uuids": [test["uuid"]]},
+            headers=other,
+        ).status_code
+        == 404
+    )
+    # The other workspace's link list never shows this link.
+    assert client.get("/agent-tests", headers=other).json() == []
+
+    links = client.get("/agent-tests", headers=h).json()
+    assert [link["agent_id"] for link in links] == [agent["uuid"]]
+
+    # The owner can unlink, and a second attempt finds nothing left.
+    assert (
+        client.request("DELETE", "/agent-tests", json=body, headers=h).status_code == 200
+    )
+    assert (
+        client.request("DELETE", "/agent-tests", json=body, headers=h).status_code == 404
+    )
 
 
 def test_agent_tests_list_returns_trimmed_shape(client):
@@ -1259,6 +1314,7 @@ def test_agent_tests_delete_link_not_found(client):
         "DELETE",
         "/agent-tests",
         json={"agent_uuid": NONEXISTENT_UUID, "test_uuid": NONEXISTENT_UUID_2},
+        headers=h,
     )
     assert resp.status_code == 404
 
