@@ -842,12 +842,12 @@ def _run_evaluators(
     deduplicated and in first-appearance order across the job's
     `details.evaluators_by_test_id` snapshot. The id is what lets a caller open
     the evaluator, so it is sent only for an evaluator that is still in the
-    library. An entry whose snapshot carries no id, or whose evaluator has been
-    deleted since the run, keeps its name and `uuid: None`. When any linked
+    library. One deleted since the run keeps its name and gets `uuid: None`.
+    When any linked
     test was a tool-call test, appends the tool-call evaluator's name frozen
     onto the run at launch, or the literal `"Tool call"` for a run launched
-    before that was stored, with no id either way. Tool-call tests
-    never carry evaluators, so they would otherwise be invisible in this column.
+    before that was stored, with no id either way. Tool-call tests never carry
+    evaluators, so they would otherwise be invisible in this column.
 
     Prefers each evaluator's current name over the snapshot (same preference
     order as `_build_evaluators_block_for_test_run`), via a caller-shared
@@ -861,22 +861,19 @@ def _run_evaluators(
         evaluator_cache if evaluator_cache is not None else {}
     )
     out: List[Dict[str, Optional[str]]] = []
-    # Dedupe on the id, which is what identifies an evaluator, falling back to
-    # the name for a snapshot entry that carries no id.
     seen: Set[str] = set()
     for evals in (job.get("evaluators_by_test_id") or {}).values():
         for ev in evals or []:
             if not isinstance(ev, dict):
                 continue
             uid = ev.get("uuid")
-            ev_row = _get_evaluator_cached_for_enrichment(uid, cache) if uid else None
+            if not uid or uid in seen:
+                continue
+            seen.add(uid)
+            ev_row = _get_evaluator_cached_for_enrichment(uid, cache)
             name = (ev_row.get("name") if ev_row else None) or ev.get("name")
             if not name:
                 continue
-            key = uid or f"name:{name}"
-            if key in seen:
-                continue
-            seen.add(key)
             # The id goes out only when the evaluator is still there. An
             # evaluator deleted since the run keeps its name from the snapshot
             # but no id, so a caller shows it without offering to open it.
