@@ -4595,7 +4595,7 @@ def get_tools_for_agent(agent_id: str) -> List[Dict[str, Any]]:
             SELECT t.* FROM tools t
             INNER JOIN agent_tools at ON t.uuid = at.tool_id
             WHERE at.agent_id = ? AND at.deleted_at IS NULL AND t.deleted_at IS NULL
-            ORDER BY at.created_at DESC
+            ORDER BY at.created_at DESC, at.id DESC
             """,
             (agent_id,),
         )
@@ -4720,7 +4720,7 @@ def get_agents_for_tool(tool_id: str) -> List[Dict[str, Any]]:
             SELECT a.* FROM agents a
             INNER JOIN agent_tools at ON a.uuid = at.agent_id
             WHERE at.tool_id = ? AND at.deleted_at IS NULL AND a.deleted_at IS NULL
-            ORDER BY at.created_at DESC
+            ORDER BY at.created_at DESC, at.id DESC
             """,
             (tool_id,),
         )
@@ -4761,7 +4761,7 @@ def get_all_agent_tools(org_uuid: Optional[str] = None) -> List[Dict[str, Any]]:
                  WHERE at.deleted_at IS NULL
                    AND a.deleted_at IS NULL
                    AND a.org_uuid = ?
-                 ORDER BY at.created_at DESC
+                 ORDER BY at.created_at DESC, at.id DESC
                 """,
                 (org_uuid,),
             )
@@ -4924,7 +4924,10 @@ def get_all_tests_summary(org_uuid: Optional[str] = None) -> List[Dict[str, Any]
 def get_tests_for_agent_summary(agent_id: str) -> List[Dict[str, Any]]:
     """Slim tests-list headers for one agent's linked tests (see
     `_row_to_test_summary`). Never parses the full `config`. Ordering matches
-    `get_tests_for_agent`."""
+    `get_tests_for_agent`.
+
+    The `at.id` tiebreak keeps paging stable: `created_at` is second-resolution,
+    so a bulk link writes many rows with an identical timestamp."""
     with get_db_connection() as conn:
         cursor = conn.cursor()
         cursor.execute(
@@ -4932,7 +4935,7 @@ def get_tests_for_agent_summary(agent_id: str) -> List[Dict[str, Any]]:
             SELECT {_TEST_SUMMARY_COLUMNS} FROM tests t
             INNER JOIN agent_tests at ON t.uuid = at.test_id
             WHERE at.agent_id = ? AND at.deleted_at IS NULL AND t.deleted_at IS NULL
-            ORDER BY at.created_at DESC
+            ORDER BY at.created_at DESC, at.id DESC
             """,
             (agent_id,),
         )
@@ -6703,7 +6706,7 @@ def get_tests_for_agent(agent_id: str) -> List[Dict[str, Any]]:
             SELECT t.* FROM tests t
             INNER JOIN agent_tests at ON t.uuid = at.test_id
             WHERE at.agent_id = ? AND at.deleted_at IS NULL AND t.deleted_at IS NULL
-            ORDER BY at.created_at DESC
+            ORDER BY at.created_at DESC, at.id DESC
             """,
             (agent_id,),
         )
@@ -6720,7 +6723,7 @@ def get_agents_for_test(test_id: str) -> List[Dict[str, Any]]:
             SELECT a.* FROM agents a
             INNER JOIN agent_tests at ON a.uuid = at.agent_id
             WHERE at.test_id = ? AND at.deleted_at IS NULL AND a.deleted_at IS NULL
-            ORDER BY at.created_at DESC
+            ORDER BY at.created_at DESC, at.id DESC
             """,
             (test_id,),
         )
@@ -6753,7 +6756,7 @@ def get_all_agent_tests(org_uuid: str) -> List[Dict[str, Any]]:
             WHERE at.deleted_at IS NULL
               AND a.deleted_at IS NULL
               AND a.org_uuid = ?
-            ORDER BY at.created_at DESC
+            ORDER BY at.created_at DESC, at.id DESC
             """,
             (org_uuid,),
         )

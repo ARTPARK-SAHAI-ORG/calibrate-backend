@@ -33,7 +33,18 @@ as a strict allowlist — anything else gets a 422 from FastAPI (no
 SQL-injection surface even though sort runs post-fetch in Python).
 """
 
-from typing import Any, Dict, Generic, List, Literal, Optional, Tuple, Type, TypeVar
+from typing import (
+    Any,
+    Callable,
+    Dict,
+    Generic,
+    List,
+    Literal,
+    Optional,
+    Tuple,
+    Type,
+    TypeVar,
+)
 
 from fastapi import HTTPException, Query
 from pydantic import BaseModel, Field
@@ -266,7 +277,17 @@ def make_sort_params(
     return SortParams
 
 
-def make_search_params(*, searchable: List[str]) -> Type:
+SearchMode = Literal["contains", "starts_with", "ends_with", "exact"]
+
+_SEARCH_MATCHERS: Dict[str, Callable[[str, str], bool]] = {
+    "contains": str.__contains__,
+    "starts_with": str.startswith,
+    "ends_with": str.endswith,
+    "exact": str.__eq__,
+}
+
+
+def make_search_params(*, searchable: List[str], with_modes: bool = False) -> Type:
     """Build a FastAPI `Depends`-compatible search class for one endpoint.
 
     `searchable` is the list of dotted paths the search will match against
@@ -277,31 +298,54 @@ def make_search_params(*, searchable: List[str]) -> Type:
     `q` is case-insensitive substring; empty/whitespace-only `q` is a no-op
     so a FE search-input binding doesn't have to special-case the cleared
     state. Returns `apply(items) -> filtered list`.
+
+    `with_modes=True` adds a `?q_mode=` parameter (`contains` default,
+    `starts_with`, `ends_with`, `exact`) for endpoints backing a search box
+    that offers match modes. It is opt-in so the other adopters' public
+    contract stays a plain `?q=`.
     """
     if not searchable:
         raise ValueError("searchable must be non-empty")
     paths = [p.split(".") for p in searchable]
+    fields = ", ".join(f"`{s}`" for s in searchable)
     description = (
-        f"Case-insensitive substring search on {', '.join(f'`{s}`' for s in searchable)}. "
+        f"Case-insensitive {'' if with_modes else 'substring '}search on {fields}. "
         "Blank is a no-op"
     )
 
-    class SearchParams:
-        def __init__(
-            self,
-            q: Optional[str] = Query(None, description=description),
-        ):
+    class _Search:
+        def _init(self, q: Optional[str], q_mode: SearchMode = "contains") -> None:
             self.q: Optional[str] = (
                 q.strip().lower() if isinstance(q, str) and q.strip() else None
             )
+            self.q_mode: SearchMode = q_mode
 
-        def apply(
-            self, items: List[Dict[str, Any]]
-        ) -> List[Dict[str, Any]]:
+        def apply(self, items: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
             if self.q is None:
                 return items
-            needle = self.q
-            return [it for it in items if _matches(it, paths, needle)]
+            match = _SEARCH_MATCHERS[self.q_mode]
+            return [it for it in items if _matches(it, paths, self.q, match)]
+
+    if with_modes:
+
+        class SearchParams(_Search):
+            def __init__(
+                self,
+                q: Optional[str] = Query(None, description=description),
+                q_mode: SearchMode = Query(
+                    "contains", description="How to match `q` against the searched fields"
+                ),
+            ):
+                self._init(q, q_mode)
+
+    else:
+
+        class SearchParams(_Search):
+            def __init__(
+                self,
+                q: Optional[str] = Query(None, description=description),
+            ):
+                self._init(q)
 
     SearchParams.__name__ = f"SearchParams[{'|'.join(searchable)}]"
     return SearchParams
@@ -407,10 +451,15 @@ def _null_at(obj: Any, tokens: List[str]) -> None:
         _null_at(obj.get(tok), rest)
 
 
-def _matches(item: Dict[str, Any], paths: List[List[str]], needle: str) -> bool:
+def _matches(
+    item: Dict[str, Any],
+    paths: List[List[str]],
+    needle: str,
+    match: Callable[[str, str], bool] = str.__contains__,
+) -> bool:
     for path in paths:
         value = _get_path(item, path)
-        if isinstance(value, str) and needle in value.lower():
+        if isinstance(value, str) and match(value.lower(), needle):
             return True
     return False
 
@@ -435,6 +484,7 @@ __all__ = [
     "paginate",
     "make_sort_params",
     "make_search_params",
+    "SearchMode",
     "make_projection_params",
     "paginate_around",
 ]

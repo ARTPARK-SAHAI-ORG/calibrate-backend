@@ -9,7 +9,7 @@ import traceback
 import threading
 import logging
 from pathlib import Path
-from typing import List, Dict, Any, Literal, Optional, Set
+from typing import List, Dict, Any, Literal, Optional, Set, get_args
 
 from fastapi import APIRouter, HTTPException, Depends, Path as PathParam, Query
 from pagination import (
@@ -22,7 +22,7 @@ from pagination import (
     paginate_around,
 )
 
-_AgentTestSearch = make_search_params(searchable=["name"])
+_AgentTestSearch = make_search_params(searchable=["name"], with_modes=True)
 from pydantic import BaseModel, Field
 from sqlite3 import IntegrityError
 
@@ -71,6 +71,7 @@ from utils import (
     TaskCreateResponse,
     EXAMPLE_TEST_UUID,
     TestListResponse,
+    TestTypeLiteral,
     to_test_list_response,
     OutputTypeLiteral,
     AgentTestJobType,
@@ -86,6 +87,8 @@ from utils import (
     upload_directory_tree_to_s3,
     upload_file_to_s3,
 )
+
+_TEST_TYPES = get_args(TestTypeLiteral)
 
 # Job types that share the same queue
 AGENT_TEST_JOB_TYPES = ["llm-unit-test", "llm-benchmark"]
@@ -687,6 +690,23 @@ def list_agent_tests(ctx: OrgContext = Depends(get_current_org)):
     return links
 
 
+def _parse_test_type_filter(values: Optional[List[str]]) -> Optional[Set[str]]:
+    """Parse `?type=` into a set of test types, accepting both the repeated form
+    and one comma-separated value. Returns None when nothing was requested."""
+    wanted = {
+        part.strip() for value in values or [] for part in value.split(",") if part.strip()
+    }
+    if not wanted:
+        return None
+    unknown = sorted(wanted - set(_TEST_TYPES))
+    if unknown:
+        raise HTTPException(
+            status_code=422,
+            detail=f"type={unknown!r} not allowed; expected one of {list(_TEST_TYPES)!r}",
+        )
+    return wanted
+
+
 @router.get(
     "/agent/{agent_uuid}/tests",
     response_model=PaginatedResponse[TestListResponse],
@@ -699,6 +719,13 @@ def get_agent_tests_endpoint(
         examples=[_EXAMPLE_AGENT_UUID],
     ),
     ctx: OrgContext = Depends(get_org_jwt_or_api_key),
+    type: Optional[List[str]] = Query(
+        None,
+        description=(
+            "Keep only tests of these types. Repeat the parameter or pass one "
+            f"comma-separated value. Accepts {', '.join(f'`{t}`' for t in _TEST_TYPES)}"
+        ),
+    ),
     search: _AgentTestSearch = Depends(),
     pagination: OptionalPaginationParams = Depends(),
 ):
@@ -714,6 +741,9 @@ def get_agent_tests_endpoint(
     # shape (uuid/name/type + config.description, no evaluator hydration);
     # the transform runs only on the returned page.
     tests = get_tests_for_agent_summary(agent_uuid)
+    wanted_types = _parse_test_type_filter(type)
+    if wanted_types is not None:
+        tests = [t for t in tests if t.get("type") in wanted_types]
     tests = search.apply(tests)
     page, total = count_and_page(tests, pagination)
     return page_envelope([to_test_list_response(t) for t in page], total, pagination)

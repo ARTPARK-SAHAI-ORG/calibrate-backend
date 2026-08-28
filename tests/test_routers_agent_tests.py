@@ -312,6 +312,125 @@ def test_agent_test_unlink_routes_are_org_scoped(client):
     )
 
 
+def _create_typed_test(client, h, name, type, config, evaluator_uuid=None):
+    body = {"name": name, "type": type, "config": config}
+    if evaluator_uuid:
+        body["evaluators"] = [{"evaluator_uuid": evaluator_uuid}]
+    return client.post("/tests", json=body, headers=h).json()
+
+
+def test_agent_tests_list_type_filter_and_search_modes(client):
+    """`?type=` narrows by test type (repeated or comma-separated) and
+    `?q_mode=` picks how `q` matches the name."""
+    auth = _signup(client)
+    h = auth["headers"]
+    agent = _create_agent(client, h)
+    conv_ev = _create_simulation_evaluator(client, h)
+
+    response_test = _create_test(client, h, name="alpha response")
+    tool_test = _create_typed_test(
+        client,
+        h,
+        "beta tool",
+        "tool_call",
+        {
+            "history": [{"role": "user", "content": "hi"}],
+            "evaluation": {
+                "type": "tool_call",
+                "tool_calls": [{"tool": "x", "accept_any_arguments": True}],
+            },
+        },
+    )
+    conv_test = _create_typed_test(
+        client,
+        h,
+        "gamma conversation",
+        "conversation",
+        {"history": [{"role": "user", "content": "hi"}]},
+        evaluator_uuid=conv_ev["uuid"],
+    )
+    client.post(
+        "/agent-tests",
+        json={
+            "agent_uuid": agent["uuid"],
+            "test_uuids": [
+                response_test["uuid"],
+                tool_test["uuid"],
+                conv_test["uuid"],
+            ],
+        },
+        headers=h,
+    )
+
+    url = f"/agent-tests/agent/{agent['uuid']}/tests"
+
+    def names(**params):
+        r = client.get(url, params=params, headers=h)
+        assert r.status_code == 200, r.text
+        body = r.json()
+        assert body["total"] == len(body["items"])
+        return sorted(i["name"] for i in body["items"])
+
+    assert names() == ["alpha response", "beta tool", "gamma conversation"]
+    assert names(type="tool_call") == ["beta tool"]
+    # Comma-separated and repeated forms agree.
+    assert names(type="response,conversation") == ["alpha response", "gamma conversation"]
+    assert names(type=["response", "conversation"]) == [
+        "alpha response",
+        "gamma conversation",
+    ]
+    # Blank value is treated as no filter.
+    assert len(names(type="")) == 3
+
+    bad = client.get(url, params={"type": "nope"}, headers=h)
+    assert bad.status_code == 422
+    assert "nope" in bad.text
+
+    # Search modes.
+    assert names(q="response") == ["alpha response"]
+    assert names(q="response", q_mode="contains") == ["alpha response"]
+    assert names(q="alpha", q_mode="starts_with") == ["alpha response"]
+    assert names(q="response", q_mode="starts_with") == []
+    assert names(q="tool", q_mode="ends_with") == ["beta tool"]
+    assert names(q="beta", q_mode="ends_with") == []
+    assert names(q="BETA TOOL", q_mode="exact") == ["beta tool"]
+    assert names(q="beta", q_mode="exact") == []
+    # Type and search combine.
+    assert names(q="a", q_mode="contains", type="tool_call") == ["beta tool"]
+
+    assert client.get(url, params={"q_mode": "sideways"}, headers=h).status_code == 422
+
+
+def test_agent_tests_list_paging_is_stable_across_pages(client):
+    """Tests linked in one bulk call share a timestamp; paging must still
+    cover every test exactly once."""
+    auth = _signup(client)
+    h = auth["headers"]
+    agent = _create_agent(client, h)
+    test_uuids = [_create_test(client, h)["uuid"] for _ in range(6)]
+    client.post(
+        "/agent-tests",
+        json={"agent_uuid": agent["uuid"], "test_uuids": test_uuids},
+        headers=h,
+    )
+
+    url = f"/agent-tests/agent/{agent['uuid']}/tests"
+    full = client.get(url, params={"limit": 6}, headers=h).json()
+    assert full["total"] == 6
+
+    paged = []
+    for offset in (0, 2, 4):
+        page = client.get(url, params={"limit": 2, "offset": offset}, headers=h).json()
+        assert page["total"] == 6
+        paged.extend(i["uuid"] for i in page["items"])
+
+    assert paged == [i["uuid"] for i in full["items"]]
+    assert sorted(paged) == sorted(test_uuids)
+    # Newest link first, so the shared timestamp is broken by link id, not by
+    # whatever order sqlite happens to return.
+    assert paged == list(reversed(test_uuids))
+
+
 def test_agent_tests_list_returns_trimmed_shape(client):
     """GET /agent-tests/agent/{uuid}/tests returns the trimmed list shape:
     uuid/name/type only, with `config.history`/`evaluation` and the hydrated
