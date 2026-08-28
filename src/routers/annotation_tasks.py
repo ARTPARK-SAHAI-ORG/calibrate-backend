@@ -1049,6 +1049,80 @@ def _resolve_evaluator_results(
     return resolved
 
 
+def _store_evaluator_results(
+    task_uuid: str,
+    ctx: OrgContext,
+    resolved_results: List[Dict[str, Any]],
+    item_uuid_by_index: Dict[int, str],
+    items: List["AnnotationItemPayload"],
+) -> Dict[str, Any]:
+    """Store resolved scores as one evaluator-run job that is already finished.
+
+    Call this only once the request can no longer roll itself back, or a
+    failure later on leaves the job and its rows behind on a task whose items
+    were removed. Returns the response fields, empty when there is nothing to
+    store.
+    """
+    if not resolved_results:
+        return {}
+    scored_indexes = sorted({r["index"] for r in resolved_results})
+    scored_item_ids = [item_uuid_by_index[i] for i in scored_indexes]
+    # The scores arrived with the request, so there is no queue slot and no
+    # runner. The `details` match what `start_evaluator_run` writes so every
+    # reader of an evaluator-run job works on it unchanged.
+    job_evaluators = list(
+        {
+            (r["evaluator_id"], r["evaluator_version_id"]): {
+                "evaluator_id": r["evaluator_id"],
+                "evaluator_version_id": r["evaluator_version_id"],
+                "name": r["name"],
+            }
+            for r in resolved_results
+        }.values()
+    )
+    eval_job_uuid = create_job(
+        job_type=ANNOTATION_EVAL_JOB_TYPE,
+        org_uuid=ctx.org_uuid,
+        user_id=ctx.user_id,
+        status=TaskStatus.DONE.value,
+        details={
+            "task_id": task_uuid,
+            "evaluators": job_evaluators,
+            "item_count": len(scored_item_ids),
+            "item_ids": scored_item_ids,
+            "completed_at": _utcnow_str(),
+        },
+    )
+    # Same frozen item snapshot every evaluator run carries, so the run still
+    # reports the payloads that were scored after a later edit. A scored item
+    # is always newly created (an existing name is refused), so the payload
+    # sent is the payload stored.
+    snapshot_eval_job_items(
+        eval_job_uuid,
+        [
+            {"uuid": item_uuid_by_index[i], "payload": items[i].payload}
+            for i in scored_indexes
+        ],
+    )
+    create_evaluator_runs(
+        [
+            {
+                "job_id": eval_job_uuid,
+                "item_id": item_uuid_by_index[r["index"]],
+                "evaluator_id": r["evaluator_id"],
+                "evaluator_version_id": r["evaluator_version_id"],
+                "value": r["value"],
+                "status": "completed",
+            }
+            for r in resolved_results
+        ]
+    )
+    return {
+        "evaluator_result_count": len(resolved_results),
+        "evaluator_run_job_id": eval_job_uuid,
+    }
+
+
 @router.post("/{task_uuid}/items", response_model=BulkCreateItemsResponse, response_model_exclude_none=True, summary="Bulk create items", tags=["Public API"])
 def bulk_create_items(
     task_uuid: str = Path(
@@ -1103,6 +1177,29 @@ def bulk_create_items(
         for i, it in enumerate(payload.items)
         if it.payload["name"] in existing_name_to_uuid
     }
+
+    # An existing item keeps its stored payload and ignores the one sent here,
+    # so a score would end up describing text the item does not hold. Refuse
+    # instead, which also keeps every scored item newly created.
+    scored_conflicts = sorted(
+        payload.items[i].payload["name"]
+        for i in matched_existing
+        if payload.items[i].evaluator_results is not None
+    )
+    if scored_conflicts:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code": "ITEM_NAME_CONFLICT_WITH_EVALUATOR_RESULTS",
+                "message": (
+                    f"`payload.name` already exists in this task, and an item "
+                    f"that already exists cannot take `evaluator_results`: "
+                    f"{scored_conflicts}. Send the scores under a new name, or "
+                    f"drop `evaluator_results` from these items."
+                ),
+                "conflicting_names": scored_conflicts,
+            },
+        )
 
     items_with_annotations = [
         it for it in payload.items if it.annotations is not None
@@ -1225,64 +1322,6 @@ def bulk_create_items(
     }
     all_item_uuids = list(item_uuid_by_index.values())
 
-    eval_run_fields: Dict[str, Any] = {}
-    if resolved_results:
-        scored_indexes = sorted({r["index"] for r in resolved_results})
-        scored_item_ids = [item_uuid_by_index[i] for i in scored_indexes]
-        # One job per request, already finished: the scores arrived with the
-        # request, so there is no queue slot and no runner. Its `details` match
-        # what `start_evaluator_run` writes so every reader of an evaluator-run
-        # job works on it unchanged.
-        job_evaluators = list(
-            {
-                (r["evaluator_id"], r["evaluator_version_id"]): {
-                    "evaluator_id": r["evaluator_id"],
-                    "evaluator_version_id": r["evaluator_version_id"],
-                    "name": r["name"],
-                }
-                for r in resolved_results
-            }.values()
-        )
-        eval_job_uuid = create_job(
-            job_type=ANNOTATION_EVAL_JOB_TYPE,
-            org_uuid=ctx.org_uuid,
-            user_id=ctx.user_id,
-            status=TaskStatus.DONE.value,
-            details={
-                "task_id": task_uuid,
-                "evaluators": job_evaluators,
-                "item_count": len(scored_item_ids),
-                "item_ids": scored_item_ids,
-                "completed_at": _utcnow_str(),
-            },
-        )
-        # Same frozen item snapshot every evaluator run carries, so the run
-        # page renders the payloads that were scored even after a later edit.
-        snapshot_eval_job_items(
-            eval_job_uuid,
-            [
-                {"uuid": item_uuid_by_index[i], "payload": payload.items[i].payload}
-                for i in scored_indexes
-            ],
-        )
-        create_evaluator_runs(
-            [
-                {
-                    "job_id": eval_job_uuid,
-                    "item_id": item_uuid_by_index[r["index"]],
-                    "evaluator_id": r["evaluator_id"],
-                    "evaluator_version_id": r["evaluator_version_id"],
-                    "value": r["value"],
-                    "status": "completed",
-                }
-                for r in resolved_results
-            ]
-        )
-        eval_run_fields = {
-            "evaluator_result_count": len(resolved_results),
-            "evaluator_run_job_id": eval_job_uuid,
-        }
-
     if items_with_annotations:
         # One synthesised job covers every item (new + existing), so the
         # annotator shows up exactly once in agreement aggregates per
@@ -1397,10 +1436,18 @@ def bulk_create_items(
             "existing_item_ids": list(matched_existing.values()),
             "count": len(all_item_uuids),
             "annotation_job_id": job_uuid,
-            **eval_run_fields,
+            **_store_evaluator_results(
+                task_uuid, ctx, resolved_results, item_uuid_by_index, payload.items
+            ),
         }
 
-    return {"item_ids": new_uuids, "count": len(new_uuids), **eval_run_fields}
+    return {
+        "item_ids": new_uuids,
+        "count": len(new_uuids),
+        **_store_evaluator_results(
+            task_uuid, ctx, resolved_results, item_uuid_by_index, payload.items
+        ),
+    }
 
 
 class ItemUpdatePayload(BaseModel):

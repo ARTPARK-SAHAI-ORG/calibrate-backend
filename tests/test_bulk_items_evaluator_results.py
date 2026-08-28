@@ -201,7 +201,7 @@ def test_tool_call_row_is_rejected(client):
     assert "tool call" in r.json()["detail"]
 
 
-def test_second_submission_keeps_both_rows(client):
+def test_scores_on_an_item_that_already_exists_are_refused(client):
     h = _signup(client)
     ev = _llm_ev(client, h)
     task = _task(client, h, ev["uuid"])
@@ -209,13 +209,14 @@ def test_second_submission_keeps_both_rows(client):
         "/annotators", json={"name": f"a-{uuid.uuid4().hex[:6]}"}, headers=h
     ).json()["uuid"]
 
-    first = client.post(
+    client.post(
         f"/annotation-tasks/{task}/items",
         json={"items": [_item("i1", evaluator_results={ev["uuid"]: {"value": True}})]},
         headers=h,
-    ).json()
-    # Same name reuses the item; annotations force the reuse path.
-    second = client.post(
+    )
+    # Annotations are what let a repeat name through, so this is the one path
+    # that could otherwise have scored the item that already exists.
+    r = client.post(
         f"/annotation-tasks/{task}/items",
         json={
             "items": [
@@ -228,15 +229,38 @@ def test_second_submission_keeps_both_rows(client):
             "annotator_id": annotator,
         },
         headers=h,
-    ).json()
-
-    assert second["item_ids"] == first["item_ids"]
-    assert second["evaluator_run_job_id"] != first["evaluator_run_job_id"]
+    )
+    assert r.status_code == 409
+    assert r.json()["detail"]["code"] == "ITEM_NAME_CONFLICT_WITH_EVALUATOR_RESULTS"
+    assert r.json()["detail"]["conflicting_names"] == ["i1"]
 
     from db import get_evaluator_runs_for_task
 
-    rows = get_evaluator_runs_for_task(task)
-    assert [r["value"]["value"] for r in rows] == [True, False]
+    assert len(get_evaluator_runs_for_task(task)) == 1
+
+
+def test_a_repeat_name_without_scores_still_goes_through(client):
+    h = _signup(client)
+    ev = _llm_ev(client, h)
+    task = _task(client, h, ev["uuid"])
+    annotator = client.post(
+        "/annotators", json={"name": f"a-{uuid.uuid4().hex[:6]}"}, headers=h
+    ).json()["uuid"]
+
+    first = client.post(
+        f"/annotation-tasks/{task}/items",
+        json={"items": [_item("i1", evaluator_results={ev["uuid"]: {"value": True}})]},
+        headers=h,
+    ).json()
+    second = client.post(
+        f"/annotation-tasks/{task}/items",
+        json={
+            "items": [_item("i1", annotations={ev["uuid"]: {"value": False}})],
+            "annotator_id": annotator,
+        },
+        headers=h,
+    ).json()
+    assert second["item_ids"] == first["item_ids"]
 
 
 def test_items_without_scores_create_no_job(client):
@@ -395,3 +419,39 @@ def test_scores_can_name_an_older_version(client):
 
     rows = get_evaluator_runs_for_job(body["evaluator_run_job_id"])
     assert [r["evaluator_version_id"] for r in rows] == [v1]
+
+
+def test_a_rolled_back_request_leaves_no_run(client, monkeypatch):
+    h = _signup(client)
+    ev = _llm_ev(client, h)
+    task = _task(client, h, ev["uuid"])
+    annotator = client.post(
+        "/annotators", json={"name": f"a-{uuid.uuid4().hex[:6]}"}, headers=h
+    ).json()["uuid"]
+
+    import routers.annotation_tasks as mod
+
+    # Stand in for an evaluator unlinked between validation and job creation,
+    # the one path that rolls the whole request back near the end.
+    monkeypatch.setattr(mod, "get_evaluator_ids_for_job", lambda j, **kw: [])
+
+    r = client.post(
+        f"/annotation-tasks/{task}/items",
+        json={
+            "items": [
+                _item(
+                    "i1",
+                    annotations={ev["uuid"]: {"value": False}},
+                    evaluator_results={ev["uuid"]: {"value": True}},
+                )
+            ],
+            "annotator_id": annotator,
+        },
+        headers=h,
+    )
+    assert r.status_code == 409
+    assert client.get(f"/annotation-tasks/{task}/items", headers=h).json() == []
+    assert (
+        client.get(f"/annotation-tasks/{task}/evaluator-runs", headers=h).json()["runs"]
+        == []
+    )
