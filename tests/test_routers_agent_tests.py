@@ -561,12 +561,19 @@ def test_agent_runs_list_evaluators_column(client):
     resp = client.get(f"/agent-tests/agent/{agent['uuid']}/runs", headers=h)
     assert resp.status_code == 200
     run = resp.json()["items"][0]
-    assert run["evaluators"] == [
+    assert [e["name"] for e in run["evaluators"]] == [
         live_name_a,
         live_name_b,
         "Deleted Evaluator",
         "Tool call",
     ]
+    # The id is what lets a caller open the evaluator. The evaluator deleted
+    # since the run has none, so a caller shows its name without offering to
+    # open a page that no longer exists. Neither does the tool-call entry,
+    # which is not an evaluator in the library.
+    assert run["evaluators"][0]["uuid"] == ev_a["uuid"]
+    assert run["evaluators"][2]["uuid"] is None
+    assert run["evaluators"][-1]["uuid"] is None
 
 
 def test_agent_runs_list_has_tool_call_test_is_snapshotted_not_derived(client):
@@ -663,7 +670,7 @@ def test_agent_runs_list_evaluator_cache_batches_lookups(client, monkeypatch):
     seen = {r["uuid"]: r for r in resp.json()["items"] if r["uuid"] in job_uuids}
     assert len(seen) == 3
     for run in seen.values():
-        assert run["evaluators"] == [live_name]
+        assert run["evaluators"] == [{"uuid": ev["uuid"], "name": live_name}]
 
 
 def test_global_runs_list_evaluators_column(client):
@@ -693,7 +700,10 @@ def test_global_runs_list_evaluators_column(client):
     resp = client.get("/agent-tests/runs", headers=h)
     assert resp.status_code == 200
     run = next(r for r in resp.json()["items"] if r["uuid"] == job_id)
-    assert run["evaluators"] == [live_name, "Tool call"]
+    assert run["evaluators"] == [
+        {"uuid": ev["uuid"], "name": live_name},
+        {"uuid": None, "name": "Tool call"},
+    ]
 
 
 def test_agent_runs_list_filters_and_pagination(client):
@@ -884,11 +894,11 @@ def test_slim_run_list_helpers_guard_edge_cases():
     ]
 
 
-def test_run_evaluator_names_guards_malformed_snapshot_entries():
-    """`_run_evaluator_names` skips non-dict entries and entries with no
-    resolvable name (no live match and no snapshot name) rather than
-    crashing or emitting a blank/junk entry."""
-    from routers.agent_tests import _run_evaluator_names
+def test_run_evaluators_guards_malformed_snapshot_entries():
+    """`_run_evaluators` skips non-dict entries and entries with no resolvable
+    name (no live match and no snapshot name) rather than crashing or emitting
+    a blank/junk entry."""
+    from routers.agent_tests import _run_evaluators
 
     job = {
         "evaluators_by_test_id": {
@@ -899,7 +909,47 @@ def test_run_evaluator_names_guards_malformed_snapshot_entries():
             ]
         }
     }
-    assert _run_evaluator_names(job) == ["Correctness"]
+    cache = {"ev1": None, "ev2": {"name": "Correctness"}}
+    assert _run_evaluators(job, cache) == [{"uuid": "ev2", "name": "Correctness"}]
+
+
+def test_run_evaluators_carries_the_id_so_a_caller_can_open_it():
+    """Each entry carries the evaluator's id, which is what lets the runs list
+    open how that evaluator judges. The tool-call entry has no id, because it
+    is not an evaluator in the library."""
+    from routers.agent_tests import _run_evaluators
+
+    job = {
+        "evaluators_by_test_id": {
+            "tc1": [{"uuid": "ev1", "name": "Correctness"}],
+            "tc2": [{"uuid": "ev2", "name": "Helpfulness"}],
+        },
+        "has_tool_call_test": True,
+        "tool_call_evaluator_name": "Tool call correctness",
+    }
+    cache = {"ev1": {"name": "Correctness"}, "ev2": {"name": "Helpfulness"}}
+    assert _run_evaluators(job, cache) == [
+        {"uuid": "ev1", "name": "Correctness"},
+        {"uuid": "ev2", "name": "Helpfulness"},
+        {"uuid": None, "name": "Tool call correctness"},
+    ]
+
+
+def test_run_evaluators_drops_the_id_of_an_evaluator_deleted_since_the_run():
+    """An evaluator deleted since the run keeps its name from the snapshot but
+    loses its id, so a caller shows the name without offering to open a page
+    that would only fail to load."""
+    from routers.agent_tests import _run_evaluators
+
+    job = {
+        "evaluators_by_test_id": {
+            "tc1": [{"uuid": "gone", "name": "Deleted Evaluator"}],
+        }
+    }
+    # The cache says this uuid resolves to nothing, the same as a deleted row.
+    assert _run_evaluators(job, {"gone": None}) == [
+        {"uuid": None, "name": "Deleted Evaluator"}
+    ]
 
 
 def _seed_run_job(client, h, agent):
@@ -3002,12 +3052,17 @@ def test_agent_runs_list_shows_the_name_frozen_on_the_run(client):
     update_evaluator(tc_ev["uuid"], name="Did it call the right tool")
 
     runs = client.get(f"/agent-tests/agent/{agent['uuid']}/runs", headers=h).json()
-    by_task = {r["uuid"]: r["evaluators"] for r in runs["items"]}
+    by_task = {
+        r["uuid"]: [e["name"] for e in r["evaluators"]] for r in runs["items"]
+    }
     assert by_task[current] == ["Tool call correctness"]
     assert by_task[older] == ["Tool call"]
 
     workspace_runs = client.get("/agent-tests/runs", headers=h).json()
-    by_task = {r["uuid"]: r["evaluators"] for r in workspace_runs["items"]}
+    by_task = {
+        r["uuid"]: [e["name"] for e in r["evaluators"]]
+        for r in workspace_runs["items"]
+    }
     assert by_task[current] == ["Tool call correctness"]
 
 
@@ -3039,7 +3094,9 @@ def test_launch_freezes_tool_call_wording_into_the_run(client):
     listed = client.get(
         f"/agent-tests/agent/{agent['uuid']}/runs", headers=h
     ).json()["items"]
-    assert listed[0]["evaluators"] == ["Tool call correctness"]
+    assert listed[0]["evaluators"] == [
+        {"uuid": None, "name": "Tool call correctness"}
+    ]
 
 
 def test_launch_skips_the_wording_lookup_without_a_tool_call_test(client):
