@@ -1602,7 +1602,7 @@ def init_db():
         # match=0 must stay distinct from a rating of 0.
         cursor.execute(
             """
-            CREATE TABLE IF NOT EXISTS trace_scores (
+            CREATE TABLE IF NOT EXISTS trace_eval_scores (
                 run_uuid TEXT NOT NULL,
                 trace_uuid TEXT NOT NULL,
                 evaluator_uuid TEXT NOT NULL,

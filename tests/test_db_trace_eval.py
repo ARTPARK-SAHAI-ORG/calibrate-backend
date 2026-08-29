@@ -1,4 +1,4 @@
-"""Schema tests for trace_eval_runs, trace_scores, and agents.auto_score_traces.
+"""Schema tests for trace_eval_runs, trace_eval_scores, and agents.auto_score_traces.
 
 This slice ships tables + indexes only -- no enqueue/claim/settle logic yet,
 so these tests write directly via raw SQL.
@@ -86,7 +86,7 @@ def _insert_score(org: str, run_uuid: str, trace_uuid: str, **overrides):
     row.update(overrides)
     with db.get_db_connection() as conn:
         conn.execute(
-            "INSERT INTO trace_scores "
+            "INSERT INTO trace_eval_scores "
             "(run_uuid, trace_uuid, evaluator_uuid, evaluator_version_id, "
             "org_uuid, match, score, reasoning, completed_at) "
             "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
@@ -125,15 +125,15 @@ def test_init_db_is_idempotent():
             r["name"]
             for r in conn.execute("PRAGMA table_info(agents)").fetchall()
         }
-    assert {"trace_eval_runs", "trace_scores"} <= names
+    assert {"trace_eval_runs", "trace_eval_scores"} <= names
     assert {
         "ux_trace_eval_active",
         "ix_trace_eval_claim",
         "ix_trace_eval_agent_status",
         "ix_trace_eval_trace",
     } <= indexes
-    assert "ix_trace_scores_trace" not in indexes
-    assert "ix_trace_scores_org_eval" not in indexes
+    assert "ix_trace_eval_scores_trace" not in indexes
+    assert "ix_trace_eval_scores_org_eval" not in indexes
     assert "auto_score_traces" in cols
 
 
@@ -190,7 +190,7 @@ def test_typed_result_check_accepts_binary_or_rating():
     )
     with db.get_db_connection() as conn:
         rows = conn.execute(
-            "SELECT evaluator_uuid, match, score FROM trace_scores "
+            "SELECT evaluator_uuid, match, score FROM trace_eval_scores "
             "WHERE run_uuid = ? ORDER BY evaluator_uuid",
             (run,),
         ).fetchall()
@@ -256,7 +256,7 @@ def test_same_version_scores_are_preserved_across_distinct_runs():
     )
     with db.get_db_connection() as conn:
         rows = conn.execute(
-            "SELECT run_uuid, match, reasoning FROM trace_scores "
+            "SELECT run_uuid, match, reasoning FROM trace_eval_scores "
             "WHERE trace_uuid = ? ORDER BY completed_at",
             (trace["uuid"],),
         ).fetchall()
