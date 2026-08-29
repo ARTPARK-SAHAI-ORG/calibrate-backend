@@ -24,6 +24,7 @@ TRACE_SCORING_MODE_BY_INTERACTION_TYPE: dict[str, tuple[Literal["response", "gen
 
 class IneligibleReason(str, Enum):
     """Why a linked evaluator cannot score this agent's traces."""
+
     WRONG_TYPE = "wrong_type_for_agent"
     NO_LIVE_VERSION = "no_live_version"
     DECLARES_VARIABLES = "declares_variables"
@@ -39,7 +40,7 @@ class ScoringPlanPin:
 
 @dataclass(frozen=True)
 class ScoringPlan:
-    """JSON envelope written onto a runnable `trace_eval_runs` row."""
+    """JSON envelope pinning evaluators to use in a runnable `trace_eval_runs` row."""
 
     type: Literal["response", "general"]
     evaluators: list[ScoringPlanPin]
@@ -54,6 +55,8 @@ class ScoringPlanSkip:
 
 @dataclass(frozen=True)
 class TraceScoringPin:
+    """One evaluator pinned to a particular version, stored on `trace_eval_runs.scoring_plan`."""
+
     evaluator_uuid: str
     evaluator_version_id: str
     name: str
@@ -61,6 +64,8 @@ class TraceScoringPin:
 
 @dataclass(frozen=True)
 class TraceScoringIneligible:
+    """One evaluator ineligible to score this agent's traces."""
+
     evaluator_uuid: str
     name: str
     reason: IneligibleReason
@@ -68,6 +73,8 @@ class TraceScoringIneligible:
 
 @dataclass(frozen=True)
 class TraceScoringResolution:
+    """The result of resolving a linked evaluator set for a particular agent."""
+
     evaluation_type: Literal["response", "general"] | None
     evaluator_type: str | None
     eligible: list[TraceScoringPin] = field(default_factory=list)
@@ -90,16 +97,6 @@ class TraceScoringResolution:
             ],
         )
 
-    def ineligible_payload(self) -> list[dict[str, str]]:
-        return [
-            {
-                "evaluator_uuid": item.evaluator_uuid,
-                "name": item.name,
-                "reason": item.reason,
-            }
-            for item in self.ineligible
-        ]
-
 
 def resolve_trace_scoring(
     interaction_type: str | None,
@@ -108,10 +105,11 @@ def resolve_trace_scoring(
     """Split linked evaluators into eligible pins and ineligible-with-reason.
 
     Args:
-        interaction_type: `agents.interaction_type` (`conversation` | `general`; anything else is unsupported).
-        live_evaluators: The list from `db.resolve_live_evaluators`: each pair is an `evaluators` row
-            (`_parse_evaluator_row`) and its live `evaluator_versions` row (`_parse_evaluator_version_row`), or `None`
-            when `live_version_id` is unset or that version row is gone.
+        interaction_type: `agents.interaction_type` (supports: `conversation` | `general`)
+        live_evaluators: each pair is an `evaluators` row (`_parse_evaluator_row`)
+            and its live `evaluator_versions` row (`_parse_evaluator_version_row`),
+            or `None` when `live_version_id` is unset or that version row is gone.
+            See also `db.resolve_live_evaluators`.
         
     Type is checked before live-version / variable checks so a mixed linked
     set is never handed to `_validate_evaluators`, which raises on the first

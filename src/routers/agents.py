@@ -3,6 +3,7 @@ import ipaddress
 import json
 import logging
 import socket
+from dataclasses import asdict
 from datetime import datetime, timezone
 from typing import Optional, List, Dict, Any, Literal
 from urllib.parse import urlparse
@@ -602,7 +603,7 @@ def _enable_auto_score_rejected(resolution) -> HTTPException:
         status_code=422,
         detail={
             "error": "There are no eligible evaluators configured for this agent",
-            "ineligible": resolution.ineligible_payload(),
+            "ineligible": [asdict(item) for item in resolution.ineligible],
         },
     )
 
