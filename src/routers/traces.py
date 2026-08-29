@@ -79,8 +79,11 @@ MAX_INPUT_TURNS = 500
 MAX_TURN_CONTENT_CHARS = 50_000
 MAX_TOOL_CALLS = 50
 MAX_METADATA_ENTRIES = 100
+# Caps both how many labels one trace carries and how many a filter may name,
+# so listing, deleting and converting all accept the same set.
 MAX_LABELS = 50
 MAX_LABEL_CHARS = 128
+
 _EXAMPLE_TRACE_UUID = "f47ac10b-58cc-4372-a567-0e02b2c3d479"
 
 _TRACE_UUID_DESCRIPTION = "Unique ID for the trace"
@@ -560,6 +563,10 @@ async def list_traces_endpoint(
     if pagination.limit > MAX_LIST_LIMIT:
         raise HTTPException(
             status_code=422, detail=f"limit must be {MAX_LIST_LIMIT} or less"
+        )
+    if labels and len(labels) > MAX_LABELS:
+        raise HTTPException(
+            status_code=422, detail=f"labels accepts at most {MAX_LABELS} labels"
         )
     # Search/filter/count run in SQL (db.list_traces), not the post-fetch
     # pagination helpers, and paging uses the bounded PaginationParams rather

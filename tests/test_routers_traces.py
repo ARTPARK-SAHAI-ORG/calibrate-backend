@@ -7,7 +7,7 @@ from unittest.mock import patch
 
 import pytest
 
-from routers.traces import MAX_DELETE_IDS, MAX_LIST_LIMIT
+from routers.traces import MAX_DELETE_IDS, MAX_LABELS, MAX_LIST_LIMIT
 from fastapi.testclient import TestClient
 
 
@@ -2075,3 +2075,45 @@ def test_deleted_traces_drop_out_of_the_labels_list(client):
         "/traces/bulk-delete", json={"trace_ids": [gone["uuid"]]}, headers=h
     )
     assert client.get("/traces/labels", headers=h).json()["labels"] == ["staging"]
+
+
+def test_every_filter_accepts_the_same_number_of_labels(client):
+    """One cap across listing, deleting and converting: a set that lists must not
+    be refused by the delete that follows it."""
+    h, agent_id = _signup_with_agent(client)
+    _post_trace(client, h, _payload(agent_id, _mid(), labels=["l7"]))
+    at_cap = [f"l{i}" for i in range(MAX_LABELS)]
+    over_cap = at_cap + ["one-too-many"]
+
+    listed = client.get("/traces", params=[("labels", x) for x in at_cap], headers=h)
+    assert listed.status_code == 200, listed.text
+    assert listed.json()["total"] == 1
+    assert (
+        client.get(
+            "/traces", params=[("labels", x) for x in over_cap], headers=h
+        ).status_code
+        == 422
+    )
+
+    def delete(chosen):
+        return client.post(
+            "/traces/bulk-delete",
+            json={"select_all": True, "labels": chosen},
+            headers=h,
+        )
+
+    assert delete(over_cap).status_code == 422
+    assert delete(at_cap).status_code == 200
+    assert delete(at_cap).json()["deleted"] == 0
+
+
+def test_label_list_sorts_regardless_of_case(client):
+    h, agent_id = _signup_with_agent(client)
+    _post_trace(client, h, _payload(agent_id, _mid(), labels=["Prod", "apple"]))
+    _post_trace(client, h, _payload(agent_id, _mid(), labels=["escalated"]))
+
+    assert client.get("/traces/labels", headers=h).json()["labels"] == [
+        "apple",
+        "escalated",
+        "Prod",
+    ]

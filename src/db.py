@@ -10191,12 +10191,13 @@ def list_trace_labels(org_uuid: str, agent_id: Optional[str] = None) -> List[str
     """Every distinct label on the workspace's live traces, A to Z, so a filter
     menu can offer the whole set rather than the labels on the page on screen.
     Deliberately not narrowed by the label filter itself: picking one label must
-    not hide the rest."""
+    not hide the rest. Sorted case-insensitively, or every capitalised label
+    would sort ahead of every lowercase one."""
     where, params = _trace_filters(org_uuid, agent_id)
     with get_db_connection() as conn:
         rows = conn.execute(
             f"SELECT DISTINCT value FROM traces, json_each(traces.labels) "
-            f"WHERE {where} ORDER BY value",
+            f"WHERE {where} ORDER BY value COLLATE NOCASE, value",
             params,
         ).fetchall()
         return [row[0] for row in rows]
