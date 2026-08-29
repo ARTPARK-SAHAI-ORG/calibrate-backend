@@ -27,11 +27,11 @@ def test_conversation_agent_maps_to_response_llm():
     result = ts.resolve_trace_scoring("conversation", [(ev, _version(live))])
     assert result.evaluation_type == "response"
     assert result.evaluator_type == "llm"
-    assert [p.evaluator_uuid for p in result.eligible] == [ev["uuid"]]
-    assert result.eligible[0].evaluator_version_id == live
+    assert [p.pin.evaluator_uuid for p in result.eligible] == [ev["uuid"]]
+    assert result.eligible[0].pin.evaluator_version_id == live
     assert result.ineligible == []
     assert result.as_plan() == ts.ScoringPlan(
-        type="response",
+        evaluation_type="response",
         evaluators=[
             ts.ScoringPlanPin(
                 evaluator_uuid=ev["uuid"], evaluator_version_id=live
@@ -46,8 +46,8 @@ def test_general_agent_maps_to_general_llm_general():
     result = ts.resolve_trace_scoring("general", [(ev, _version(live))])
     assert result.evaluation_type == "general"
     assert result.evaluator_type == "llm-general"
-    assert result.eligible[0].evaluator_uuid == ev["uuid"]
-    assert result.as_plan().type == "general"
+    assert result.eligible[0].pin.evaluator_uuid == ev["uuid"]
+    assert result.as_plan().evaluation_type == "general"
 
 
 def test_mixed_evaluator_types_are_filtered_before_validation():
@@ -162,9 +162,9 @@ def test_resolve_live_evaluators_pairs_version_or_none():
     agent = db.get_agent(agent_uuid)
     result = ts.resolve_trace_scoring(agent["interaction_type"], pairs)
     assert result.evaluation_type == "general"
-    assert [p.evaluator_uuid for p in result.eligible] == [live_ev]
+    assert [p.pin.evaluator_uuid for p in result.eligible] == [live_ev]
     assert result.as_plan() == ts.ScoringPlan(
-        type="general",
+        evaluation_type="general",
         evaluators=[
             ts.ScoringPlanPin(
                 evaluator_uuid=live_ev, evaluator_version_id=version["uuid"]

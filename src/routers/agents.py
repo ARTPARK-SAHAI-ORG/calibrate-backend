@@ -581,11 +581,11 @@ def _eligibility_response(resolution) -> TraceScoringEligibilityResponse:
     return TraceScoringEligibilityResponse(
         eligible=[
             TraceScoringEligibleEvaluator(
-                evaluator_uuid=pin.evaluator_uuid,
-                evaluator_version_id=pin.evaluator_version_id,
-                name=pin.name,
+                evaluator_uuid=item.pin.evaluator_uuid,
+                evaluator_version_id=item.pin.evaluator_version_id,
+                name=item.name,
             )
-            for pin in resolution.eligible
+            for item in resolution.eligible
         ],
         ineligible=[
             TraceScoringIneligibleEvaluator(

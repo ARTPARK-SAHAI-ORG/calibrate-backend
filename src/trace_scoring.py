@@ -17,10 +17,13 @@ from typing import Any, Literal
 # cycle. Must stay aligned with REQUIRED_EVALUATOR_TYPE_BY_TEST_TYPE for
 # `response`/`general`.
 # TODO: redefine in terms of shared enums lifted up from tests.py
-TRACE_SCORING_MODE_BY_INTERACTION_TYPE: dict[str, tuple[Literal["response", "general"], str]] = {
+EvaluationType = Literal["response", "general"]
+RequiredEvaluatorType = Literal["llm", "llm-general"]
+TRACE_SCORING_MODE_BY_INTERACTION_TYPE: dict[str, tuple[EvaluationType, RequiredEvaluatorType]] = {
     "conversation": ("response", "llm"),
     "general": ("general", "llm-general"),
 }
+
 
 class IneligibleReason(str, Enum):
     """Why a linked evaluator cannot score this agent's traces."""
@@ -32,7 +35,7 @@ class IneligibleReason(str, Enum):
 
 @dataclass(frozen=True)
 class ScoringPlanPin:
-    """One evaluator pin stored on `trace_eval_runs.scoring_plan`."""
+    """One evaluator pin stored within a `trace_eval_runs.scoring_plan`."""
 
     evaluator_uuid: str
     evaluator_version_id: str
@@ -42,7 +45,7 @@ class ScoringPlanPin:
 class ScoringPlan:
     """JSON envelope pinning evaluators to use in a runnable `trace_eval_runs` row."""
 
-    type: Literal["response", "general"]
+    evaluation_type: EvaluationType
     evaluators: list[ScoringPlanPin]
 
 
@@ -55,10 +58,9 @@ class ScoringPlanSkip:
 
 @dataclass(frozen=True)
 class TraceScoringPin:
-    """One evaluator pinned to a particular version, stored on `trace_eval_runs.scoring_plan`."""
+    """Eligible snapshot pin plus the evaluator name for eligibility responses."""
 
-    evaluator_uuid: str
-    evaluator_version_id: str
+    pin: ScoringPlanPin
     name: str
 
 
@@ -75,8 +77,13 @@ class TraceScoringIneligible:
 class TraceScoringResolution:
     """The result of resolving a linked evaluator set for a particular agent."""
 
-    evaluation_type: Literal["response", "general"] | None
-    evaluator_type: str | None
+    # Scoring subset of TestTypeLiteral. From TRACE_SCORING_MODE_BY_INTERACTION_TYPE
+    # (None if interaction_type is unsupported).
+    evaluation_type: EvaluationType | None
+    # Required EvaluatorTypeLiteral for that mode, same map as
+    # REQUIRED_EVALUATOR_TYPE_BY_TEST_TYPE. Not the full VALID_EVALUATOR_TYPES
+    # column on evaluators.
+    evaluator_type: RequiredEvaluatorType | None
     eligible: list[TraceScoringPin] = field(default_factory=list)
     ineligible: list[TraceScoringIneligible] = field(default_factory=list)
 
@@ -87,14 +94,8 @@ class TraceScoringResolution:
         if not self.eligible:
             return ScoringPlanSkip(skip="no_usable_evaluators")
         return ScoringPlan(
-            type=self.evaluation_type,
-            evaluators=[
-                ScoringPlanPin(
-                    evaluator_uuid=pin.evaluator_uuid,
-                    evaluator_version_id=pin.evaluator_version_id,
-                )
-                for pin in self.eligible
-            ],
+            evaluation_type=self.evaluation_type,
+            evaluators=[item.pin for item in self.eligible],
         )
 
 
@@ -165,8 +166,10 @@ def resolve_trace_scoring(
             continue
         eligible.append(
             TraceScoringPin(
-                evaluator_uuid=ev["uuid"],
-                evaluator_version_id=version["uuid"],
+                pin=ScoringPlanPin(
+                    evaluator_uuid=ev["uuid"],
+                    evaluator_version_id=version["uuid"],
+                ),
                 name=name,
             )
         )

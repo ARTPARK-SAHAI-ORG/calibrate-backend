@@ -2058,7 +2058,7 @@ def test_ingest_opted_in_conversation_creates_pending_response_run(client):
     assert rows[0]["scoring_plan"] is not None
     snapshot = json.loads(rows[0]["scoring_plan"])
     assert snapshot == {
-        "type": "response",
+        "evaluation_type": "response",
         "evaluators": [
             {"evaluator_uuid": ev_uuid, "evaluator_version_id": version_id},
         ],
@@ -2077,7 +2077,7 @@ def test_ingest_opted_in_general_creates_pending_general_run(client):
     rows = _runs_for_trace(body["uuid"])
     assert len(rows) == 1
     snapshot = json.loads(rows[0]["scoring_plan"])
-    assert snapshot["type"] == "general"
+    assert snapshot["evaluation_type"] == "general"
     assert snapshot["evaluators"] == [
         {"evaluator_uuid": ev_uuid, "evaluator_version_id": version_id},
     ]
