@@ -179,3 +179,26 @@ def test_apply_simulation_job_evaluator_enrichment_no_snaps():
         {"evaluators": []}, []
     )
     assert evaluators_out is None
+
+
+def test_simulation_config_marks_the_call_as_an_evaluation():
+    """A simulation reaches a connection agent the same way a test run does, so
+    it carries the marker header whether or not the agent configures headers."""
+    from routers.simulations import _build_calibrate_simulation_config
+
+    def build(agent_headers=None):
+        config = {"agent_url": "https://example.com/agent"}
+        if agent_headers:
+            config["agent_headers"] = agent_headers
+        return _build_calibrate_simulation_config(
+            {"type": "connection", "config": config},
+            personas=[{"description": "p", "config": {}}],
+            scenarios=[{"description": "s"}],
+            evaluators=[],
+        )
+
+    assert build()["agent_headers"] == {"X-Calibrate-Eval": "1"}
+    assert build({"Authorization": "Bearer t"})["agent_headers"] == {
+        "Authorization": "Bearer t",
+        "X-Calibrate-Eval": "1",
+    }

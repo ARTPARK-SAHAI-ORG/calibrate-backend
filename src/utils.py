@@ -93,6 +93,21 @@ def capture_exception_to_sentry(exception: Exception) -> None:
     sentry_sdk.flush(timeout=2)
 
 
+# Sent on every request Calibrate makes to a customer's agent: a test run, a
+# benchmark, a simulation, or a connection check. Their own tracing reads it to
+# tell an evaluation turn from a production one, so nobody has to configure a
+# marker header by hand.
+CALIBRATE_EVAL_HEADER = "X-Calibrate-Eval"
+
+
+def with_calibrate_eval_header(
+    agent_headers: Optional[Dict[str, str]] = None,
+) -> Dict[str, str]:
+    """The agent's configured headers plus Calibrate's own marker. The marker is
+    set last, so a configured header of the same name cannot suppress it."""
+    return {**(agent_headers or {}), CALIBRATE_EVAL_HEADER: "1"}
+
+
 def build_tool_configs(agent_tools: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     """
     Build tool configurations for calibrate CLI from agent tools.

@@ -47,6 +47,7 @@ from db import (
 from llm_judge import build_evaluator_cli_payload
 from utils import (
     job_slot,
+    with_calibrate_eval_header,
     AGENT_TYPE_DESCRIPTION,
     TaskStatus,
     TaskCreateResponse,
@@ -1269,8 +1270,9 @@ def _build_calibrate_simulation_config(
             "evaluators": evaluators_payload,
             "settings": shared_settings,
         }
-        if agent_config.get("agent_headers"):
-            config["agent_headers"] = agent_config["agent_headers"]
+        config["agent_headers"] = with_calibrate_eval_header(
+            agent_config.get("agent_headers")
+        )
         return config
 
     # Calibrate agent mode
