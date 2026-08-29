@@ -10,14 +10,14 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Any, Dict, List, Literal, Optional, Tuple, Union
+from typing import Any, Literal
 
 # interaction_type → (evaluation.type, required evaluator_type). Kept here
 # (not imported from routers.tests) so resolution never creates a db→router
 # cycle. Must stay aligned with REQUIRED_EVALUATOR_TYPE_BY_TEST_TYPE for
 # `response`/`general`.
 # TODO: redefine in terms of shared enums lifted up from tests.py
-TRACE_SCORING_MODE_BY_INTERACTION_TYPE: Dict[str, Tuple[str, str]] = {
+TRACE_SCORING_MODE_BY_INTERACTION_TYPE: dict[str, tuple[Literal["response", "general"], str]] = {
     "conversation": ("response", "llm"),
     "general": ("general", "llm-general"),
 }
@@ -42,7 +42,7 @@ class ScoringPlan:
     """JSON envelope written onto a runnable `trace_eval_runs` row."""
 
     type: Literal["response", "general"]
-    evaluators: List[ScoringPlanPin]
+    evaluators: list[ScoringPlanPin]
 
 
 @dataclass(frozen=True)
@@ -68,12 +68,12 @@ class TraceScoringIneligible:
 
 @dataclass(frozen=True)
 class TraceScoringResolution:
-    evaluation_type: Optional[str]
-    evaluator_type: Optional[str]
-    eligible: List[TraceScoringPin] = field(default_factory=list)
-    ineligible: List[TraceScoringIneligible] = field(default_factory=list)
+    evaluation_type: Literal["response", "general"] | None
+    evaluator_type: str | None
+    eligible: list[TraceScoringPin] = field(default_factory=list)
+    ineligible: list[TraceScoringIneligible] = field(default_factory=list)
 
-    def as_plan(self) -> Union[ScoringPlan, ScoringPlanSkip]:
+    def as_plan(self) -> ScoringPlan | ScoringPlanSkip:
         """Snapshot written at ingest, or a skip reason if nothing can score."""
         if self.evaluation_type is None:
             return ScoringPlanSkip(skip="unsupported_interaction_type")
@@ -90,7 +90,7 @@ class TraceScoringResolution:
             ],
         )
 
-    def ineligible_payload(self) -> List[Dict[str, str]]:
+    def ineligible_payload(self) -> list[dict[str, str]]:
         return [
             {
                 "evaluator_uuid": item.evaluator_uuid,
@@ -102,8 +102,8 @@ class TraceScoringResolution:
 
 
 def resolve_trace_scoring(
-    interaction_type: Optional[str],
-    live_evaluators: List[Tuple[Dict[str, Any], Optional[Dict[str, Any]]]],
+    interaction_type: str | None,
+    live_evaluators: list[tuple[dict[str, Any], dict[str, Any] | None]],
 ) -> TraceScoringResolution:
     """Split linked evaluators into eligible pins and ineligible-with-reason.
 
@@ -134,8 +134,8 @@ def resolve_trace_scoring(
         )
 
     evaluation_type, required_evaluator_type = mode
-    eligible: List[TraceScoringPin] = []
-    ineligible: List[TraceScoringIneligible] = []
+    eligible: list[TraceScoringPin] = []
+    ineligible: list[TraceScoringIneligible] = []
     for ev, version in live_evaluators:
         name = ev.get("name") or ev["uuid"]
         if ev.get("evaluator_type") != required_evaluator_type:
