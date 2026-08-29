@@ -37,7 +37,7 @@ def _insert_run(org: str, trace_uuid: str, *, run_uuid: str | None = None, **ove
         "org_uuid": org,
         "agent_id": "agent-1",
         "status": "pending",
-        "criteria": None,
+        "scoring_plan": None,
         "available_at": 0,
         "attempts": 0,
         "error": None,
@@ -49,7 +49,7 @@ def _insert_run(org: str, trace_uuid: str, *, run_uuid: str | None = None, **ove
     with db.get_db_connection() as conn:
         conn.execute(
             "INSERT INTO trace_eval_runs "
-            "(uuid, trace_uuid, org_uuid, agent_id, status, criteria, "
+            "(uuid, trace_uuid, org_uuid, agent_id, status, scoring_plan, "
             "available_at, attempts, error, created_at, updated_at, completed_at) "
             "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (
@@ -58,7 +58,7 @@ def _insert_run(org: str, trace_uuid: str, *, run_uuid: str | None = None, **ove
                 row["org_uuid"],
                 row["agent_id"],
                 row["status"],
-                row["criteria"],
+                row["scoring_plan"],
                 row["available_at"],
                 row["attempts"],
                 row["error"],

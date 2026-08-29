@@ -2055,8 +2055,8 @@ def test_ingest_opted_in_conversation_creates_pending_response_run(client):
     rows = _runs_for_trace(body["uuid"])
     assert len(rows) == 1
     assert rows[0]["status"] == "pending"
-    assert rows[0]["criteria"] is not None
-    snapshot = json.loads(rows[0]["criteria"])
+    assert rows[0]["scoring_plan"] is not None
+    snapshot = json.loads(rows[0]["scoring_plan"])
     assert snapshot == {
         "type": "response",
         "evaluators": [
@@ -2076,7 +2076,7 @@ def test_ingest_opted_in_general_creates_pending_general_run(client):
 
     rows = _runs_for_trace(body["uuid"])
     assert len(rows) == 1
-    snapshot = json.loads(rows[0]["criteria"])
+    snapshot = json.loads(rows[0]["scoring_plan"])
     assert snapshot["type"] == "general"
     assert snapshot["evaluators"] == [
         {"evaluator_uuid": ev_uuid, "evaluator_version_id": version_id},
@@ -2096,7 +2096,7 @@ def test_ingest_eligibility_drift_creates_skipped_run(client):
     assert len(rows) == 1
     assert rows[0]["status"] == "skipped"
     assert rows[0]["error"] == "no_usable_evaluators"
-    assert rows[0]["criteria"] is None
+    assert rows[0]["scoring_plan"] is None
 
 
 def test_ingest_opted_in_still_scopes_to_the_caller_org(client):

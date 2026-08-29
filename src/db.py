@@ -3,6 +3,7 @@ import json
 import logging
 import time
 import uuid
+from dataclasses import asdict
 from os.path import join
 import os
 from pathlib import Path
@@ -1564,7 +1565,7 @@ def init_db():
                 org_uuid TEXT NOT NULL,
                 agent_id TEXT NOT NULL,
                 status TEXT NOT NULL DEFAULT 'pending',
-                criteria TEXT,
+                scoring_plan TEXT,
                 available_at INTEGER NOT NULL,
                 attempts INTEGER NOT NULL DEFAULT 0,
                 error TEXT,
@@ -10329,7 +10330,7 @@ def _insert_trace_eval_run(
     org_uuid: str,
     agent_id: str,
     status: str,
-    criteria: Optional[str],
+    scoring_plan: Optional[str],
     error: Optional[str],
     now: int,
     completed_at: Optional[int] = None,
@@ -10337,7 +10338,7 @@ def _insert_trace_eval_run(
     """Insert one trace_eval_runs row on `cur`. Does not commit."""
     cur.execute(
         "INSERT INTO trace_eval_runs "
-        "(uuid, trace_uuid, org_uuid, agent_id, status, criteria, "
+        "(uuid, trace_uuid, org_uuid, agent_id, status, scoring_plan, "
         "error, available_at, created_at, updated_at, completed_at) "
         "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         (
@@ -10346,7 +10347,7 @@ def _insert_trace_eval_run(
             org_uuid,
             agent_id,
             status,
-            criteria,
+            scoring_plan,
             error,
             now,
             now,
@@ -10397,9 +10398,9 @@ def create_trace_with_eval_run(
 ) -> Dict[str, Any]:
     """Insert a trace and, when auto-scoring is on, its immutable run together.
 
-    Resolution (`trace_scoring.resolve_scoring_plan`) runs before the write
-    lock so evaluator reads do not hold it. The inserts share one transaction
-    so a mid-write failure leaves neither row.
+    Resolution (`trace_scoring.resolve_trace_scoring` / `as_plan`) runs
+    before the write lock so evaluator reads do not hold it. The inserts
+    share one transaction so a mid-write failure leaves neither row.
 
     Uses BEGIN IMMEDIATE rather than a bare BEGIN: a deferred transaction
     starts as a reader and only upgrades at the first write, which can fail
@@ -10408,9 +10409,9 @@ def create_trace_with_eval_run(
     """
     plan = None
     if agent.get("auto_score_traces"):
-        from trace_scoring import resolve_scoring_plan
+        from trace_scoring import ScoringPlanSkip, resolve_trace_scoring
 
-        plan = resolve_scoring_plan(agent)
+        plan = resolve_trace_scoring(agent).as_plan()
 
     now = int(time.time())
     with get_db_connection() as conn:
@@ -10427,16 +10428,19 @@ def create_trace_with_eval_run(
             metadata,
         )
         if plan is not None:
-            skip_reason = plan.get("skip")
-            if skip_reason or not plan.get("evaluators"):
+            if isinstance(plan, ScoringPlanSkip) or not plan.evaluators:
                 _insert_trace_eval_run(
                     cur,
                     trace_uuid=row["uuid"],
                     org_uuid=org_uuid,
                     agent_id=agent["uuid"],
                     status="skipped",
-                    criteria=None,
-                    error=skip_reason or "no_usable_evaluators",
+                    scoring_plan=None,
+                    error=(
+                        plan.skip
+                        if isinstance(plan, ScoringPlanSkip)
+                        else "no_usable_evaluators"
+                    ),
                     now=now,
                     completed_at=now,
                 )
@@ -10447,7 +10451,7 @@ def create_trace_with_eval_run(
                     org_uuid=org_uuid,
                     agent_id=agent["uuid"],
                     status="pending",
-                    criteria=json.dumps(plan),
+                    scoring_plan=json.dumps(asdict(plan)),
                     error=None,
                     now=now,
                 )

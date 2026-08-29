@@ -9,6 +9,7 @@ import uuid
 import pytest
 
 import db
+import trace_scoring as ts
 
 
 def _org() -> str:
@@ -334,8 +335,8 @@ def test_opted_in_conversation_run_pins_response_snapshot():
     assert run["completed_at"] is None
     assert run["org_uuid"] == org
     assert run["agent_id"] == agent["uuid"]
-    assert run["criteria"] is not None
-    snapshot = json.loads(run["criteria"])
+    assert run["scoring_plan"] is not None
+    snapshot = json.loads(run["scoring_plan"])
     assert snapshot == {
         "type": "response",
         "evaluators": [
@@ -358,13 +359,13 @@ def test_opted_in_general_run_pins_general_snapshot():
     )
     rows = _runs_for(trace["uuid"])
     assert len(rows) == 1
-    snapshot = json.loads(rows[0]["criteria"])
+    snapshot = json.loads(rows[0]["scoring_plan"])
     assert snapshot["type"] == "general"
     assert snapshot["evaluators"] == [
         {"evaluator_uuid": ev, "evaluator_version_id": version_id},
     ]
     assert rows[0]["status"] == "pending"
-    assert rows[0]["criteria"] is not None
+    assert rows[0]["scoring_plan"] is not None
 
 
 def test_eligibility_drift_persists_skipped_run():
@@ -379,7 +380,7 @@ def test_eligibility_drift_persists_skipped_run():
     assert len(rows) == 1
     assert rows[0]["status"] == "skipped"
     assert rows[0]["error"] == "no_usable_evaluators"
-    assert rows[0]["criteria"] is None
+    assert rows[0]["scoring_plan"] is None
     assert rows[0]["completed_at"] is not None
 
 
@@ -394,16 +395,20 @@ def test_unsupported_interaction_type_persists_skipped_run():
     assert len(rows) == 1
     assert rows[0]["status"] == "skipped"
     assert rows[0]["error"] == "unsupported_interaction_type"
-    assert rows[0]["criteria"] is None
+    assert rows[0]["scoring_plan"] is None
     assert rows[0]["completed_at"] is not None
 
 
 def test_empty_evaluators_plan_is_skipped_not_pending(monkeypatch):
     org = _org()
     agent = _insert_agent(org, auto_score=True)
+
+    class _EmptyPlan:
+        def as_plan(self):
+            return ts.ScoringPlan(type="response", evaluators=[])
+
     monkeypatch.setattr(
-        "trace_scoring.resolve_scoring_plan",
-        lambda _agent: {"type": "response", "evaluators": []},
+        "trace_scoring.resolve_trace_scoring", lambda _agent: _EmptyPlan()
     )
 
     trace = _combined_ingest(org, agent)
@@ -411,7 +416,7 @@ def test_empty_evaluators_plan_is_skipped_not_pending(monkeypatch):
     assert len(rows) == 1
     assert rows[0]["status"] == "skipped"
     assert rows[0]["error"] == "no_usable_evaluators"
-    assert rows[0]["criteria"] is None
+    assert rows[0]["scoring_plan"] is None
 
 
 def test_trace_and_run_roll_back_together(monkeypatch):

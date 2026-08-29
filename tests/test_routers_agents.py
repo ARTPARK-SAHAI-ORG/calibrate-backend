@@ -1065,7 +1065,7 @@ def _insert_run(org, agent_id, trace_uuid, status, **overrides):
         "org_uuid": org,
         "agent_id": agent_id,
         "status": status,
-        "criteria": None,
+        "scoring_plan": None,
         "available_at": 0,
         "attempts": 0,
         "error": None,
@@ -1077,7 +1077,7 @@ def _insert_run(org, agent_id, trace_uuid, status, **overrides):
     with db.get_db_connection() as conn:
         conn.execute(
             "INSERT INTO trace_eval_runs "
-            "(uuid, trace_uuid, org_uuid, agent_id, status, criteria, "
+            "(uuid, trace_uuid, org_uuid, agent_id, status, scoring_plan, "
             "available_at, attempts, error, created_at, updated_at, completed_at) "
             "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (
@@ -1086,7 +1086,7 @@ def _insert_run(org, agent_id, trace_uuid, status, **overrides):
                 row["org_uuid"],
                 row["agent_id"],
                 row["status"],
-                row["criteria"],
+                row["scoring_plan"],
                 row["available_at"],
                 row["attempts"],
                 row["error"],

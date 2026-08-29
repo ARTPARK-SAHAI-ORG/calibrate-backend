@@ -32,12 +32,14 @@ def test_conversation_agent_maps_to_response_llm():
     assert [p.evaluator_uuid for p in result.eligible] == [ev["uuid"]]
     assert result.eligible[0].evaluator_version_id == live
     assert result.ineligible == []
-    assert result.as_plan() == {
-        "type": "response",
-        "evaluators": [
-            {"evaluator_uuid": ev["uuid"], "evaluator_version_id": live}
+    assert result.as_plan() == ts.ScoringPlan(
+        type="response",
+        evaluators=[
+            ts.ScoringPlanPin(
+                evaluator_uuid=ev["uuid"], evaluator_version_id=live
+            )
         ],
-    }
+    )
 
 
 def test_general_agent_maps_to_general_llm_general():
@@ -49,7 +51,7 @@ def test_general_agent_maps_to_general_llm_general():
     assert result.evaluation_type == "general"
     assert result.evaluator_type == "llm-general"
     assert result.eligible[0].evaluator_uuid == ev["uuid"]
-    assert result.as_plan()["type"] == "general"
+    assert result.as_plan().type == "general"
 
 
 def test_mixed_evaluator_types_are_filtered_before_validation():
@@ -91,7 +93,7 @@ def test_no_live_version_disqualifies():
         "none": ts.INELIGIBLE_REASON_NO_LIVE_VERSION,
         "missing": ts.INELIGIBLE_REASON_NO_LIVE_VERSION,
     }
-    assert result.as_plan() == {"skip": "no_usable_evaluators"}
+    assert result.as_plan() == ts.ScoringPlanSkip(skip="no_usable_evaluators")
 
 
 def test_declares_variables_disqualifies():
@@ -124,14 +126,14 @@ def test_unsupported_interaction_type_skips_and_marks_wrong_type():
     assert result.evaluation_type is None
     assert result.eligible == []
     assert result.ineligible[0].reason == ts.INELIGIBLE_REASON_WRONG_TYPE
-    assert result.as_plan() == {"skip": "unsupported_interaction_type"}
+    assert result.as_plan() == ts.ScoringPlanSkip(skip="unsupported_interaction_type")
 
 
 def test_empty_linked_set_is_not_usable():
     result = ts.partition_trace_scoring_evaluators("conversation", [], {})
     assert result.eligible == []
     assert result.ineligible == []
-    assert result.as_plan() == {"skip": "no_usable_evaluators"}
+    assert result.as_plan() == ts.ScoringPlanSkip(skip="no_usable_evaluators")
 
 
 def test_resolve_trace_scoring_loads_linked_evaluators():
@@ -157,4 +159,11 @@ def test_resolve_trace_scoring_loads_linked_evaluators():
     result = ts.resolve_trace_scoring(agent)
     assert result.evaluation_type == "general"
     assert [p.evaluator_uuid for p in result.eligible] == [ev]
-    assert ts.resolve_scoring_plan(agent)["type"] == "general"
+    assert result.as_plan() == ts.ScoringPlan(
+        type="general",
+        evaluators=[
+            ts.ScoringPlanPin(
+                evaluator_uuid=ev, evaluator_version_id=version["uuid"]
+            )
+        ],
+    )

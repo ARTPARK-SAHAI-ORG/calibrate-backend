@@ -7,7 +7,7 @@ Shared by the agent opt-in API and ingest-time run creation. Lives outside
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Literal, Optional, Tuple, Union
 
 # interaction_type → (evaluation.type, required evaluator_type). Kept here
 # (not imported from routers.tests) so resolution never creates a db→router
@@ -21,6 +21,29 @@ TRACE_SCORING_MODE_BY_INTERACTION_TYPE: Dict[str, Tuple[str, str]] = {
 INELIGIBLE_REASON_WRONG_TYPE = "wrong_type_for_agent"
 INELIGIBLE_REASON_NO_LIVE_VERSION = "no_live_version"
 INELIGIBLE_REASON_DECLARES_VARIABLES = "declares_variables"
+
+
+@dataclass(frozen=True)
+class ScoringPlanPin:
+    """One evaluator pin stored on `trace_eval_runs.scoring_plan`."""
+
+    evaluator_uuid: str
+    evaluator_version_id: str
+
+
+@dataclass(frozen=True)
+class ScoringPlan:
+    """JSON envelope written onto a runnable `trace_eval_runs` row."""
+
+    type: Literal["response", "general"]
+    evaluators: List[ScoringPlanPin]
+
+
+@dataclass(frozen=True)
+class ScoringPlanSkip:
+    """Why ingest wrote a `skipped` run instead of a runnable plan."""
+
+    skip: Literal["unsupported_interaction_type", "no_usable_evaluators"]
 
 
 @dataclass(frozen=True)
@@ -44,22 +67,22 @@ class TraceScoringResolution:
     eligible: List[TraceScoringPin] = field(default_factory=list)
     ineligible: List[TraceScoringIneligible] = field(default_factory=list)
 
-    def as_plan(self) -> Dict[str, Any]:
-        """Snapshot envelope for a new run, or a skip reason if nothing can score."""
+    def as_plan(self) -> Union[ScoringPlan, ScoringPlanSkip]:
+        """Snapshot written at ingest, or a skip reason if nothing can score."""
         if self.evaluation_type is None:
-            return {"skip": "unsupported_interaction_type"}
+            return ScoringPlanSkip(skip="unsupported_interaction_type")
         if not self.eligible:
-            return {"skip": "no_usable_evaluators"}
-        return {
-            "type": self.evaluation_type,
-            "evaluators": [
-                {
-                    "evaluator_uuid": pin.evaluator_uuid,
-                    "evaluator_version_id": pin.evaluator_version_id,
-                }
+            return ScoringPlanSkip(skip="no_usable_evaluators")
+        return ScoringPlan(
+            type=self.evaluation_type,
+            evaluators=[
+                ScoringPlanPin(
+                    evaluator_uuid=pin.evaluator_uuid,
+                    evaluator_version_id=pin.evaluator_version_id,
+                )
                 for pin in self.eligible
             ],
-        }
+        )
 
     def ineligible_payload(self) -> List[Dict[str, str]]:
         return [
@@ -158,8 +181,3 @@ def resolve_trace_scoring(agent: Dict[str, Any]) -> TraceScoringResolution:
     return partition_trace_scoring_evaluators(
         agent.get("interaction_type"), evaluators, versions
     )
-
-
-def resolve_scoring_plan(agent: Dict[str, Any]) -> Dict[str, Any]:
-    """Plan written into `trace_eval_runs.criteria`, or a skip envelope."""
-    return resolve_trace_scoring(agent).as_plan()
