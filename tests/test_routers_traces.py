@@ -1971,3 +1971,73 @@ def test_convert_by_ids_keeps_the_plain_conflict_error(client):
     detail = res.json()["detail"]
     assert set(detail) == {"error", "trace_ids"}
     assert detail["error"] == "Some traces recorded no tool calls to assert"
+
+
+# ---------------------------------------------------------------------------
+# Labels
+# ---------------------------------------------------------------------------
+
+
+def test_labels_are_stored_trimmed_and_deduped(client):
+    h, agent_id = _signup_with_agent(client)
+    created = _post_trace(
+        client,
+        h,
+        _payload(agent_id, _mid(), labels=["  prod ", "prod", "escalated"]),
+    )
+
+    detail = client.get(f"/traces/{created['uuid']}", headers=h).json()
+    assert detail["labels"] == ["prod", "escalated"]
+
+    summary = client.get("/traces", headers=h).json()["items"][0]
+    assert summary["labels"] == ["prod", "escalated"]
+
+
+def test_trace_without_labels_reads_as_empty_list(client):
+    h, agent_id = _signup_with_agent(client)
+    created = _post_trace(client, h, _payload(agent_id, _mid()))
+
+    assert client.get(f"/traces/{created['uuid']}", headers=h).json()["labels"] == []
+    assert client.get("/traces", headers=h).json()["items"][0]["labels"] == []
+
+
+def test_blank_label_is_rejected(client):
+    h, agent_id = _signup_with_agent(client)
+    res = client.post(
+        "/traces", json=_payload(agent_id, _mid(), labels=["   "]), headers=h
+    )
+    assert res.status_code == 422, res.text
+
+
+def test_list_filters_by_label(client):
+    h, agent_id = _signup_with_agent(client)
+    prod = _post_trace(client, h, _payload(agent_id, _mid(), labels=["prod"]))
+    staging = _post_trace(client, h, _payload(agent_id, _mid(), labels=["staging"]))
+    _post_trace(client, h, _payload(agent_id, _mid()))
+
+    one = client.get("/traces?labels=prod", headers=h).json()
+    assert one["total"] == 1
+    assert [t["uuid"] for t in one["items"]] == [prod["uuid"]]
+
+    both = client.get("/traces?labels=prod&labels=staging", headers=h).json()
+    assert both["total"] == 2
+    assert {t["uuid"] for t in both["items"]} == {prod["uuid"], staging["uuid"]}
+
+    assert client.get("/traces?labels=missing", headers=h).json()["total"] == 0
+
+
+def test_bulk_delete_by_label_leaves_other_traces(client):
+    h, agent_id = _signup_with_agent(client)
+    _post_trace(client, h, _payload(agent_id, _mid(), labels=["prod"]))
+    kept = _post_trace(client, h, _payload(agent_id, _mid(), labels=["staging"]))
+
+    res = client.post(
+        "/traces/bulk-delete",
+        json={"select_all": True, "labels": ["prod"]},
+        headers=h,
+    )
+    assert res.status_code == 200, res.text
+    assert res.json()["deleted"] == 1
+
+    remaining = client.get("/traces", headers=h).json()
+    assert [t["uuid"] for t in remaining["items"]] == [kept["uuid"]]
