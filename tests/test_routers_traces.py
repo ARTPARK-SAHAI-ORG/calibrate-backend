@@ -7,7 +7,7 @@ from unittest.mock import patch
 
 import pytest
 
-from routers.traces import MAX_DELETE_IDS, MAX_LIST_LIMIT
+from routers.traces import MAX_DELETE_IDS, MAX_LABELS, MAX_LIST_LIMIT
 from fastapi.testclient import TestClient
 
 
@@ -1971,3 +1971,149 @@ def test_convert_by_ids_keeps_the_plain_conflict_error(client):
     detail = res.json()["detail"]
     assert set(detail) == {"error", "trace_ids"}
     assert detail["error"] == "Some traces recorded no tool calls to assert"
+
+
+# ---------------------------------------------------------------------------
+# Labels
+# ---------------------------------------------------------------------------
+
+
+def test_labels_are_stored_trimmed_and_deduped(client):
+    h, agent_id = _signup_with_agent(client)
+    created = _post_trace(
+        client,
+        h,
+        _payload(agent_id, _mid(), labels=["  prod ", "prod", "escalated"]),
+    )
+
+    detail = client.get(f"/traces/{created['uuid']}", headers=h).json()
+    assert detail["labels"] == ["prod", "escalated"]
+
+    summary = client.get("/traces", headers=h).json()["items"][0]
+    assert summary["labels"] == ["prod", "escalated"]
+
+
+def test_trace_without_labels_reads_as_empty_list(client):
+    h, agent_id = _signup_with_agent(client)
+    created = _post_trace(client, h, _payload(agent_id, _mid()))
+
+    assert client.get(f"/traces/{created['uuid']}", headers=h).json()["labels"] == []
+    assert client.get("/traces", headers=h).json()["items"][0]["labels"] == []
+
+
+def test_blank_label_is_rejected(client):
+    h, agent_id = _signup_with_agent(client)
+    res = client.post(
+        "/traces", json=_payload(agent_id, _mid(), labels=["   "]), headers=h
+    )
+    assert res.status_code == 422, res.text
+
+
+def test_list_filters_by_label(client):
+    h, agent_id = _signup_with_agent(client)
+    prod = _post_trace(client, h, _payload(agent_id, _mid(), labels=["prod"]))
+    staging = _post_trace(client, h, _payload(agent_id, _mid(), labels=["staging"]))
+    _post_trace(client, h, _payload(agent_id, _mid()))
+
+    one = client.get("/traces?labels=prod", headers=h).json()
+    assert one["total"] == 1
+    assert [t["uuid"] for t in one["items"]] == [prod["uuid"]]
+
+    both = client.get("/traces?labels=prod&labels=staging", headers=h).json()
+    assert both["total"] == 2
+    assert {t["uuid"] for t in both["items"]} == {prod["uuid"], staging["uuid"]}
+
+    assert client.get("/traces?labels=missing", headers=h).json()["total"] == 0
+
+
+def test_bulk_delete_by_label_leaves_other_traces(client):
+    h, agent_id = _signup_with_agent(client)
+    _post_trace(client, h, _payload(agent_id, _mid(), labels=["prod"]))
+    kept = _post_trace(client, h, _payload(agent_id, _mid(), labels=["staging"]))
+
+    res = client.post(
+        "/traces/bulk-delete",
+        json={"select_all": True, "labels": ["prod"]},
+        headers=h,
+    )
+    assert res.status_code == 200, res.text
+    assert res.json()["deleted"] == 1
+
+    remaining = client.get("/traces", headers=h).json()
+    assert [t["uuid"] for t in remaining["items"]] == [kept["uuid"]]
+
+
+def test_labels_endpoint_lists_every_label_in_use(client):
+    h, agent_id = _signup_with_agent(client)
+    other_agent = _create_agent(client, h)["uuid"]
+    _post_trace(client, h, _payload(agent_id, _mid(), labels=["prod", "escalated"]))
+    _post_trace(client, h, _payload(agent_id, _mid(), labels=["prod"]))
+    _post_trace(client, h, _payload(other_agent, _mid(), labels=["staging"]))
+    _post_trace(client, h, _payload(agent_id, _mid()))
+
+    assert client.get("/traces/labels", headers=h).json()["labels"] == [
+        "escalated",
+        "prod",
+        "staging",
+    ]
+    assert client.get(
+        f"/traces/labels?agent_id={agent_id}", headers=h
+    ).json()["labels"] == ["escalated", "prod"]
+
+
+def test_labels_endpoint_is_empty_for_a_fresh_workspace(client):
+    h = _signup(client)
+    assert client.get("/traces/labels", headers=h).json()["labels"] == []
+
+
+def test_deleted_traces_drop_out_of_the_labels_list(client):
+    h, agent_id = _signup_with_agent(client)
+    gone = _post_trace(client, h, _payload(agent_id, _mid(), labels=["prod"]))
+    _post_trace(client, h, _payload(agent_id, _mid(), labels=["staging"]))
+
+    client.post(
+        "/traces/bulk-delete", json={"trace_ids": [gone["uuid"]]}, headers=h
+    )
+    assert client.get("/traces/labels", headers=h).json()["labels"] == ["staging"]
+
+
+def test_every_filter_accepts_the_same_number_of_labels(client):
+    """One cap across listing, deleting and converting: a set that lists must not
+    be refused by the delete that follows it."""
+    h, agent_id = _signup_with_agent(client)
+    _post_trace(client, h, _payload(agent_id, _mid(), labels=["l7"]))
+    at_cap = [f"l{i}" for i in range(MAX_LABELS)]
+    over_cap = at_cap + ["one-too-many"]
+
+    listed = client.get("/traces", params=[("labels", x) for x in at_cap], headers=h)
+    assert listed.status_code == 200, listed.text
+    assert listed.json()["total"] == 1
+    assert (
+        client.get(
+            "/traces", params=[("labels", x) for x in over_cap], headers=h
+        ).status_code
+        == 422
+    )
+
+    def delete(chosen):
+        return client.post(
+            "/traces/bulk-delete",
+            json={"select_all": True, "labels": chosen},
+            headers=h,
+        )
+
+    assert delete(over_cap).status_code == 422
+    assert delete(at_cap).status_code == 200
+    assert delete(at_cap).json()["deleted"] == 0
+
+
+def test_label_list_sorts_regardless_of_case(client):
+    h, agent_id = _signup_with_agent(client)
+    _post_trace(client, h, _payload(agent_id, _mid(), labels=["Prod", "apple"]))
+    _post_trace(client, h, _payload(agent_id, _mid(), labels=["escalated"]))
+
+    assert client.get("/traces/labels", headers=h).json()["labels"] == [
+        "apple",
+        "escalated",
+        "Prod",
+    ]

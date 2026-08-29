@@ -22,6 +22,7 @@ from calibrate_agent.connections import TextAgentConnection
 
 from utils import (
     env_bool,
+    with_calibrate_eval_header,
     env_int,
     env_str,
     AGENT_TYPE_DESCRIPTION,
@@ -157,7 +158,7 @@ async def _verify_agent_connection(
     only the latest user text as `input` for a `general` agent.
     """
     _validate_agent_url(agent_url)
-    safe_headers = _sanitize_headers(agent_headers)
+    safe_headers = _sanitize_headers(with_calibrate_eval_header(agent_headers))
     agent = TextAgentConnection(
         url=agent_url,
         headers=safe_headers,
@@ -313,7 +314,11 @@ _AGENT_CONFIG_DESCRIPTION = """Agent behavioral config. The keys depend on `type
   "agent_headers": {"Authorization": "Bearer <token>"},
   "benchmark_provider": "openrouter"
 }
-```"""
+```
+
+Every request Calibrate makes to your endpoint carries the header
+`X-Calibrate-Eval: 1`. Read it to tell a test run from a real user, for example
+to tag the trace you send back or to skip sending one."""
 
 
 class AgentCreate(BaseModel):

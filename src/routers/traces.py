@@ -34,6 +34,7 @@ from db import (
     get_evaluators_by_uuids,
     get_trace,
     get_traces_by_uuids,
+    list_trace_labels,
     list_traces,
     set_test_evaluators,
     soft_delete_traces,
@@ -78,11 +79,30 @@ MAX_INPUT_TURNS = 500
 MAX_TURN_CONTENT_CHARS = 50_000
 MAX_TOOL_CALLS = 50
 MAX_METADATA_ENTRIES = 100
+# Caps both how many labels one trace carries and how many a filter may name,
+# so listing, deleting and converting all accept the same set.
+MAX_LABELS = 50
+MAX_LABEL_CHARS = 128
+
 _EXAMPLE_TRACE_UUID = "f47ac10b-58cc-4372-a567-0e02b2c3d479"
 
 _TRACE_UUID_DESCRIPTION = "Unique ID for the trace"
 
 _AGENT_ID_DESCRIPTION = "ID of the agent that produced the turn"
+
+_LABELS_DESCRIPTION = (
+    "Your own tags for this turn, such as an environment or a release. "
+    "Matched exactly when filtering, so keep the spelling stable"
+)
+
+# Trailing spaces and duplicates would each read as a separate tag in the
+# filter, so a label is stored in the one form a caller can search for.
+TraceLabel = Annotated[
+    str,
+    StringConstraints(
+        strip_whitespace=True, min_length=1, max_length=MAX_LABEL_CHARS
+    ),
+]
 
 # Bounds each entry so a malformed list is rejected before it reaches the
 # database rather than being bound into a query.
@@ -207,6 +227,11 @@ class TraceIngest(BaseModel):
         max_length=MAX_METADATA_ENTRIES,
         description="Key-value pairs stored with the trace. Prefer OTel `gen_ai.*` key names where they fit. Omit if you have none",
     )
+    labels: List[TraceLabel] = Field(
+        default_factory=list,
+        max_length=MAX_LABELS,
+        description=_LABELS_DESCRIPTION + ". Omit if you have none",
+    )
 
 
 class TraceIngestResponse(BaseModel):
@@ -261,6 +286,7 @@ class TraceSummary(BaseModel):
     metadata_count: int = Field(
         description="Number of metadata entries stored with the trace"
     )
+    labels: List[str] = Field(description=_LABELS_DESCRIPTION)
     created_at: str = Field(description="When the trace was created (ISO 8601 UTC)")
 
 
@@ -283,9 +309,16 @@ class TraceResponse(BaseModel):
     metadata: Optional[List[TraceMetadataEntry]] = Field(
         None, description="Key-value pairs stored with the trace"
     )
+    labels: List[str] = Field(description=_LABELS_DESCRIPTION)
     created_at: str = Field(description="When the trace was created (ISO 8601 UTC)")
     updated_at: str = Field(
         description="When the trace was last updated (ISO 8601 UTC)"
+    )
+
+
+class TraceLabelsResponse(BaseModel):
+    labels: List[str] = Field(
+        description="Every label in use on your live traces, A to Z"
     )
 
 
@@ -304,6 +337,11 @@ _FILTER_OUTPUT_TYPE_DESCRIPTION = (
     "With `select_all` on, act only on traces whose output is of this kind. "
     "`response` covers every trace carrying a reply, including one that also "
     "issued tool calls. `tool_call` covers traces that only issued tool calls"
+)
+
+
+_FILTER_LABELS_DESCRIPTION = (
+    "With `select_all` on, act only on traces carrying at least one of these labels"
 )
 
 
@@ -328,6 +366,11 @@ class _TraceSelection(BaseModel):
     q: Optional[str] = Field(None, description=_FILTER_Q_DESCRIPTION)
     output_type: Optional[Literal["response", "tool_call"]] = Field(
         None, description=_FILTER_OUTPUT_TYPE_DESCRIPTION
+    )
+    labels: List[TraceLabel] = Field(
+        default_factory=list,
+        max_length=MAX_LABELS,
+        description=_FILTER_LABELS_DESCRIPTION,
     )
 
     @model_validator(mode="after")
@@ -408,6 +451,7 @@ def _to_summary(row: Dict[str, Any]) -> Dict[str, Any]:
         "turn_count": _turn_count(row.get("input")),
         "tool_call_count": len(calls),
         "metadata_count": len(row.get("metadata") or []),
+        "labels": row.get("labels") or [],
         "created_at": row["created_at"],
     }
 
@@ -485,6 +529,7 @@ async def ingest_trace(
             if payload.metadata
             else None
         ),
+        labels=list(dict.fromkeys(payload.labels)),
     )
     return {
         "uuid": row["uuid"],
@@ -509,11 +554,19 @@ async def list_traces_endpoint(
         None,
         description="Return only traces whose output is of this kind. `response` covers every trace carrying a reply, including one that also issued tool calls. `tool_call` covers traces that only issued tool calls",
     ),
+    labels: Optional[List[TraceLabel]] = Query(
+        None,
+        description="Return only traces carrying at least one of these labels. Repeat the parameter for each label",
+    ),
 ):
     """List ingested traces, newest first"""
     if pagination.limit > MAX_LIST_LIMIT:
         raise HTTPException(
             status_code=422, detail=f"limit must be {MAX_LIST_LIMIT} or less"
+        )
+    if labels and len(labels) > MAX_LABELS:
+        raise HTTPException(
+            status_code=422, detail=f"labels accepts at most {MAX_LABELS} labels"
         )
     # Search/filter/count run in SQL (db.list_traces), not the post-fetch
     # pagination helpers, and paging uses the bounded PaginationParams rather
@@ -526,8 +579,24 @@ async def list_traces_endpoint(
         agent_id=agent_id,
         q=q,
         output_type=output_type,
+        labels=labels,
     )
     return page_envelope([_to_summary(row) for row in rows], total, pagination)
+
+
+@router.get(
+    "/labels",
+    response_model=TraceLabelsResponse,
+    summary="List trace labels",
+)
+async def list_trace_labels_endpoint(
+    ctx: OrgContext = Depends(get_current_org),
+    agent_id: Optional[str] = Query(
+        None, description="Return only labels used by this agent's traces"
+    ),
+):
+    """List every label in use, so a filter can offer the whole set"""
+    return {"labels": list_trace_labels(ctx.org_uuid, agent_id=agent_id)}
 
 
 @router.post(
@@ -545,6 +614,7 @@ async def bulk_delete_traces(
             agent_id=payload.agent_id,
             q=payload.q,
             output_type=payload.output_type,
+            labels=payload.labels,
         )
     else:
         deleted = soft_delete_traces(ctx.org_uuid, trace_ids=payload.trace_ids)
@@ -720,6 +790,7 @@ def convert_traces_to_tests(
             agent_id=payload.agent_id,
             q=payload.q,
             output_type=payload.output_type,
+            labels=payload.labels,
         )
         if total > MAX_CONVERT_TRACES:
             raise HTTPException(

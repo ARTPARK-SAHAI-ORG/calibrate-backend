@@ -633,6 +633,36 @@ def test_agent_verify_forwards_default_inputs(client):
     assert fake_agent.verify.await_args.kwargs["inputs"] == {"condition_area": "anc"}
 
 
+def test_agent_verify_marks_the_probe_as_an_evaluation(client):
+    """The connection check carries the same marker header a run does, so a
+    customer's tracing does not read the probe as a production turn."""
+    auth = _signup(client)
+    h = auth["headers"]
+
+    fake_agent = MagicMock()
+    fake_agent.verify = AsyncMock(
+        return_value={"ok": True, "sample_output": {"text": "hi"}}
+    )
+    ctor = MagicMock(return_value=fake_agent)
+    fake_addr = [(0, 0, 0, "", ("93.184.216.34", 0))]
+    with patch("routers.agents.TextAgentConnection", ctor), patch(
+        "routers.agents.socket.getaddrinfo", return_value=fake_addr
+    ):
+        resp = client.post(
+            "/agents/verify-connection",
+            json={
+                "agent_url": "https://example.com/agent",
+                "agent_headers": {"Authorization": "Bearer t"},
+            },
+            headers=h,
+        )
+    assert resp.status_code == 200
+    assert ctor.call_args.kwargs["headers"] == {
+        "Authorization": "Bearer t",
+        "X-Calibrate-Eval": "1",
+    }
+
+
 def test_agent_verify_saved_with_model_persists(client):
     auth = _signup(client)
     h = auth["headers"]

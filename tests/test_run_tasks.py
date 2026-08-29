@@ -682,6 +682,47 @@ def test_build_calibrate_config_connection_mode_passes_default_inputs():
     assert config["agent_default_inputs"] == {"condition_area": "cardiology"}
 
 
+def test_build_calibrate_config_always_marks_the_call_as_an_evaluation():
+    """Every request Calibrate makes to a connection agent carries the marker
+    header, so a customer's tracing can label evaluation turns without them
+    configuring anything. A configured header of the same name cannot suppress it."""
+    from routers.agent_tests import _build_calibrate_config
+
+    user_uuid = db.create_user("R", "EH", f"reh-{os.urandom(4).hex()}@x.com")
+    org_uuid = db.get_personal_org_for_user(user_uuid)["uuid"]
+    plain_uuid = db.create_agent(
+        name=f"a-{os.urandom(4).hex()}",
+        org_uuid=org_uuid,
+        agent_type="connection",
+        config={"agent_url": "https://example.com/agent"},
+        user_id=user_uuid,
+    )
+    configured_uuid = db.create_agent(
+        name=f"a-{os.urandom(4).hex()}",
+        org_uuid=org_uuid,
+        agent_type="connection",
+        config={
+            "agent_url": "https://example.com/agent",
+            "agent_headers": {
+                "Authorization": "Bearer t",
+                "X-Calibrate-Eval": "0",
+            },
+        },
+        user_id=user_uuid,
+    )
+    test_uuid, _ = _make_conversation_test(db, org_uuid, user_uuid)
+    test = db.get_test(test_uuid)
+
+    plain, _ = _build_calibrate_config(db.get_agent(plain_uuid), [test])
+    assert plain["agent_headers"] == {"X-Calibrate-Eval": "1"}
+
+    configured, _ = _build_calibrate_config(db.get_agent(configured_uuid), [test])
+    assert configured["agent_headers"] == {
+        "Authorization": "Bearer t",
+        "X-Calibrate-Eval": "1",
+    }
+
+
 def test_parse_agent_test_results_surfaces_effective_inputs():
     """Each result carries the agent's default_inputs with any per-case override."""
     from routers.agent_tests import _parse_agent_test_results

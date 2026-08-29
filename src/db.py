@@ -1525,6 +1525,7 @@ def init_db():
                 input TEXT NOT NULL,
                 output TEXT NOT NULL,
                 metadata TEXT DEFAULT NULL,
+                labels TEXT DEFAULT NULL,
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                 updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                 deleted_at TIMESTAMP DEFAULT NULL,
@@ -1541,6 +1542,10 @@ def init_db():
             "CREATE INDEX IF NOT EXISTS idx_traces_org_created "
             "ON traces(org_uuid, deleted_at, created_at DESC, id DESC)"
         )
+        try:
+            cursor.execute("ALTER TABLE traces ADD COLUMN labels TEXT DEFAULT NULL")
+        except sqlite3.OperationalError:
+            pass
         conn.commit()
 
         # ============ org_limits (renamed from user_limits) ============
@@ -10080,6 +10085,7 @@ def _trace_row(row: sqlite3.Row) -> Dict[str, Any]:
         "input": json.loads(row["input"]),
         "output": json.loads(row["output"]),
         "metadata": json.loads(row["metadata"]) if row["metadata"] else None,
+        "labels": json.loads(row["labels"]) if row["labels"] else [],
         "created_at": _trace_iso(row["created_at"]),
         "updated_at": _trace_iso(row["updated_at"]),
     }
@@ -10119,6 +10125,7 @@ def _trace_filters(
     agent_id: Optional[str] = None,
     q: Optional[str] = None,
     output_type: Optional[str] = None,
+    labels: Optional[List[str]] = None,
 ) -> Tuple[str, List[Any]]:
     """Build the shared WHERE clause for every live-trace query."""
     where = ["org_uuid = ?", "deleted_at IS NULL"]
@@ -10126,6 +10133,13 @@ def _trace_filters(
     if agent_id:
         where.append("agent_id = ?")
         params.append(agent_id)
+    if labels:
+        placeholders = ",".join("?" * len(labels))
+        where.append(
+            "EXISTS (SELECT 1 FROM json_each(traces.labels) "
+            f"WHERE value IN ({placeholders}))"
+        )
+        params.extend(labels)
     if output_type:
         where.append("(" + TRACE_OUTPUT_TYPE_SQL[output_type] + ")")
     if q and q.strip():
@@ -10173,6 +10187,22 @@ def get_traces_by_uuids(org_uuid: str, trace_uuids: List[str]) -> List[Dict[str,
     return [by_uuid[u] for u in unique if u in by_uuid]
 
 
+def list_trace_labels(org_uuid: str, agent_id: Optional[str] = None) -> List[str]:
+    """Every distinct label on the workspace's live traces, A to Z, so a filter
+    menu can offer the whole set rather than the labels on the page on screen.
+    Deliberately not narrowed by the label filter itself: picking one label must
+    not hide the rest. Sorted case-insensitively, or every capitalised label
+    would sort ahead of every lowercase one."""
+    where, params = _trace_filters(org_uuid, agent_id)
+    with get_db_connection() as conn:
+        rows = conn.execute(
+            f"SELECT DISTINCT value FROM traces, json_each(traces.labels) "
+            f"WHERE {where} ORDER BY value COLLATE NOCASE, value",
+            params,
+        ).fetchall()
+        return [row[0] for row in rows]
+
+
 def count_live_traces(org_uuid: str) -> int:
     """Live trace count for the workspace cap. Deliberately not agent-scoped."""
     with get_db_connection() as conn:
@@ -10190,6 +10220,7 @@ def create_trace(
     message_id: Optional[str] = None,
     conversation_id: Optional[str] = None,
     metadata: Optional[Any] = None,
+    labels: Optional[List[str]] = None,
 ) -> Dict[str, Any]:
     """Insert a trace and return it.
 
@@ -10202,8 +10233,8 @@ def create_trace(
             """
             INSERT INTO traces
                 (uuid, org_uuid, agent_id, message_id, conversation_id,
-                 input, output, metadata)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                 input, output, metadata, labels)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 trace_uuid,
@@ -10214,6 +10245,7 @@ def create_trace(
                 json.dumps(input),
                 json.dumps(output),
                 json.dumps(metadata) if metadata is not None else None,
+                json.dumps(labels) if labels else None,
             ),
         )
         conn.commit()
@@ -10231,9 +10263,10 @@ def list_traces(
     agent_id: Optional[str] = None,
     q: Optional[str] = None,
     output_type: Optional[str] = None,
+    labels: Optional[List[str]] = None,
 ) -> Tuple[List[Dict[str, Any]], int]:
     """Return `(page, total)` newest-first; filters and count run in SQL."""
-    where, params = _trace_filters(org_uuid, agent_id, q, output_type)
+    where, params = _trace_filters(org_uuid, agent_id, q, output_type, labels)
     with get_db_connection() as conn:
         total = conn.execute(
             f"SELECT COUNT(*) FROM traces WHERE {where}", params
@@ -10257,11 +10290,12 @@ def soft_delete_traces_matching(
     agent_id: Optional[str] = None,
     q: Optional[str] = None,
     output_type: Optional[str] = None,
+    labels: Optional[List[str]] = None,
 ) -> int:
     """Soft-delete every live trace matching the list filters, returning the
     number of rows flipped. No UUID list, so a workspace-wide delete stays one
     statement however many traces it covers."""
-    where, params = _trace_filters(org_uuid, agent_id, q, output_type)
+    where, params = _trace_filters(org_uuid, agent_id, q, output_type, labels)
     with get_db_connection() as conn:
         cursor = conn.execute(
             f"UPDATE traces SET deleted_at = CURRENT_TIMESTAMP, "

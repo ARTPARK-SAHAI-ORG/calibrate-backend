@@ -66,6 +66,7 @@ from routers.tests import (
 from auth_utils import get_current_org, get_org_jwt_or_api_key, OrgContext
 from utils import (
     job_slot,
+    with_calibrate_eval_header,
     TaskStatus,
     InitialTaskStatus,
     TaskCreateResponse,
@@ -1584,8 +1585,9 @@ def _build_calibrate_config(
         }
         if top_level_evaluators:
             config["evaluators"] = top_level_evaluators
-        if agent_config.get("agent_headers"):
-            config["agent_headers"] = agent_config["agent_headers"]
+        config["agent_headers"] = with_calibrate_eval_header(
+            agent_config.get("agent_headers")
+        )
         if agent_config.get("default_inputs"):
             config["agent_default_inputs"] = agent_config["default_inputs"]
         return config, evaluators_by_test_id
