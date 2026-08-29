@@ -9,20 +9,24 @@ module does not import `db`.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from enum import Enum
 from typing import Any, Dict, List, Literal, Optional, Tuple, Union
 
 # interaction_type → (evaluation.type, required evaluator_type). Kept here
 # (not imported from routers.tests) so resolution never creates a db→router
 # cycle. Must stay aligned with REQUIRED_EVALUATOR_TYPE_BY_TEST_TYPE for
 # `response`/`general`.
+# TODO: redefine in terms of shared enums lifted up from tests.py
 TRACE_SCORING_MODE_BY_INTERACTION_TYPE: Dict[str, Tuple[str, str]] = {
     "conversation": ("response", "llm"),
     "general": ("general", "llm-general"),
 }
 
-INELIGIBLE_REASON_WRONG_TYPE = "wrong_type_for_agent"
-INELIGIBLE_REASON_NO_LIVE_VERSION = "no_live_version"
-INELIGIBLE_REASON_DECLARES_VARIABLES = "declares_variables"
+class IneligibleReason(str, Enum):
+    """Why a linked evaluator cannot score this agent's traces."""
+    WRONG_TYPE = "wrong_type_for_agent"
+    NO_LIVE_VERSION = "no_live_version"
+    DECLARES_VARIABLES = "declares_variables"
 
 
 @dataclass(frozen=True)
@@ -59,7 +63,7 @@ class TraceScoringPin:
 class TraceScoringIneligible:
     evaluator_uuid: str
     name: str
-    reason: str
+    reason: IneligibleReason
 
 
 @dataclass(frozen=True)
@@ -123,7 +127,7 @@ def resolve_trace_scoring(
                 TraceScoringIneligible(
                     evaluator_uuid=ev["uuid"],
                     name=ev.get("name") or ev["uuid"],
-                    reason=INELIGIBLE_REASON_WRONG_TYPE,
+                    reason=IneligibleReason.WRONG_TYPE,
                 )
                 for ev, _ in live_evaluators
             ],
@@ -139,7 +143,7 @@ def resolve_trace_scoring(
                 TraceScoringIneligible(
                     evaluator_uuid=ev["uuid"],
                     name=name,
-                    reason=INELIGIBLE_REASON_WRONG_TYPE,
+                    reason=IneligibleReason.WRONG_TYPE,
                 )
             )
             continue
@@ -148,7 +152,7 @@ def resolve_trace_scoring(
                 TraceScoringIneligible(
                     evaluator_uuid=ev["uuid"],
                     name=name,
-                    reason=INELIGIBLE_REASON_NO_LIVE_VERSION,
+                    reason=IneligibleReason.NO_LIVE_VERSION,
                 )
             )
             continue
@@ -157,7 +161,7 @@ def resolve_trace_scoring(
                 TraceScoringIneligible(
                     evaluator_uuid=ev["uuid"],
                     name=name,
-                    reason=INELIGIBLE_REASON_DECLARES_VARIABLES,
+                    reason=IneligibleReason.DECLARES_VARIABLES,
                 )
             )
             continue

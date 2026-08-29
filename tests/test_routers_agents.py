@@ -9,6 +9,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 import db
+from trace_scoring import IneligibleReason
 
 
 @pytest.fixture(scope="module")
@@ -1203,7 +1204,9 @@ def test_enable_rejected_when_only_default_correctness_evaluator_is_linked(clien
         "There are no eligible evaluators configured for this agent"
     )
     assert body["ineligible"]
-    assert {e["reason"] for e in body["ineligible"]} == {"declares_variables"}
+    assert {e["reason"] for e in body["ineligible"]} == {
+        IneligibleReason.DECLARES_VARIABLES
+    }
     assert client.get(f"/agents/{agent['uuid']}", headers=h).json()[
         "auto_score_traces"
     ] is False
@@ -1228,7 +1231,7 @@ def test_enable_rejected_for_general_agent_with_only_default_evaluator(client):
     )
     assert r.status_code == 422, r.text
     assert {e["reason"] for e in r.json()["detail"]["ineligible"]} == {
-        "declares_variables"
+        IneligibleReason.DECLARES_VARIABLES
     }
 
 
@@ -1289,9 +1292,9 @@ def test_eligibility_endpoint_partitions_mixed_evaluator_types(client):
     assert body["eligible"][0]["name"]
     assert body["eligible"][0]["evaluator_version_id"]
     by_id = {e["evaluator_uuid"]: e["reason"] for e in body["ineligible"]}
-    assert by_id[general] == "wrong_type_for_agent"
-    assert by_id[stt] == "wrong_type_for_agent"
-    assert "declares_variables" in by_id.values()
+    assert by_id[general] == IneligibleReason.WRONG_TYPE
+    assert by_id[stt] == IneligibleReason.WRONG_TYPE
+    assert IneligibleReason.DECLARES_VARIABLES in by_id.values()
 
 
 def test_eligibility_endpoint_reports_each_disqualification_reason(client):
@@ -1324,9 +1327,9 @@ def test_eligibility_endpoint_reports_each_disqualification_reason(client):
     )
     assert r.status_code == 200, r.text
     by_id = {e["evaluator_uuid"]: e["reason"] for e in r.json()["ineligible"]}
-    assert by_id[with_vars] == "declares_variables"
-    assert by_id[wrong_type] == "wrong_type_for_agent"
-    assert by_id[no_live] == "no_live_version"
+    assert by_id[with_vars] == IneligibleReason.DECLARES_VARIABLES
+    assert by_id[wrong_type] == IneligibleReason.WRONG_TYPE
+    assert by_id[no_live] == IneligibleReason.NO_LIVE_VERSION
     assert r.json()["eligible"] == []
 
     blocked = client.put(
@@ -1336,9 +1339,9 @@ def test_eligibility_endpoint_reports_each_disqualification_reason(client):
     )
     assert blocked.status_code == 422, blocked.text
     assert {e["reason"] for e in blocked.json()["detail"]["ineligible"]} == {
-        "declares_variables",
-        "wrong_type_for_agent",
-        "no_live_version",
+        IneligibleReason.DECLARES_VARIABLES,
+        IneligibleReason.WRONG_TYPE,
+        IneligibleReason.NO_LIVE_VERSION,
     }
 
 

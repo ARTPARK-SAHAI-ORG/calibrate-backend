@@ -71,9 +71,9 @@ def test_mixed_evaluator_types_are_filtered_before_validation():
     assert [p.name for p in result.eligible] == ["clean"]
     by_name = {i.name: i.reason for i in result.ineligible}
     assert by_name == {
-        "general-vars": ts.INELIGIBLE_REASON_WRONG_TYPE,
-        "stt": ts.INELIGIBLE_REASON_WRONG_TYPE,
-        "sim": ts.INELIGIBLE_REASON_WRONG_TYPE,
+        "general-vars": ts.IneligibleReason.WRONG_TYPE,
+        "stt": ts.IneligibleReason.WRONG_TYPE,
+        "sim": ts.IneligibleReason.WRONG_TYPE,
     }
 
 
@@ -85,8 +85,8 @@ def test_no_live_version_disqualifies():
     )
     assert result.eligible == []
     assert {i.name: i.reason for i in result.ineligible} == {
-        "none": ts.INELIGIBLE_REASON_NO_LIVE_VERSION,
-        "missing": ts.INELIGIBLE_REASON_NO_LIVE_VERSION,
+        "none": ts.IneligibleReason.NO_LIVE_VERSION,
+        "missing": ts.IneligibleReason.NO_LIVE_VERSION,
     }
     assert result.as_plan() == ts.ScoringPlanSkip(skip="no_usable_evaluators")
 
@@ -99,7 +99,7 @@ def test_declares_variables_disqualifies():
         [(ev, _version(live, variables=[{"name": "criteria"}]))],
     )
     assert result.eligible == []
-    assert result.ineligible[0].reason == ts.INELIGIBLE_REASON_DECLARES_VARIABLES
+    assert result.ineligible[0].reason == ts.IneligibleReason.DECLARES_VARIABLES
 
 
 def test_empty_variables_list_is_eligible():
@@ -117,7 +117,7 @@ def test_unsupported_interaction_type_skips_and_marks_wrong_type():
     result = ts.resolve_trace_scoring("voice", [(ev, _version(live))])
     assert result.evaluation_type is None
     assert result.eligible == []
-    assert result.ineligible[0].reason == ts.INELIGIBLE_REASON_WRONG_TYPE
+    assert result.ineligible[0].reason == ts.IneligibleReason.WRONG_TYPE
     assert result.as_plan() == ts.ScoringPlanSkip(skip="unsupported_interaction_type")
 
 
@@ -172,4 +172,4 @@ def test_resolve_live_evaluators_pairs_version_or_none():
         ],
     )
     assert result.ineligible[0].evaluator_uuid == bare_ev
-    assert result.ineligible[0].reason == ts.INELIGIBLE_REASON_NO_LIVE_VERSION
+    assert result.ineligible[0].reason == ts.IneligibleReason.NO_LIVE_VERSION

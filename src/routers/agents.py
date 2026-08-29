@@ -47,7 +47,7 @@ from db import (
     remove_evaluator_from_agent,
     resolve_live_evaluators,
 )
-from trace_scoring import resolve_trace_scoring
+from trace_scoring import IneligibleReason, resolve_trace_scoring
 from auth_utils import get_current_org, get_org_jwt_or_api_key, OrgContext
 from org_scope import ensure_owned_agent, ensure_owned_evaluator
 
@@ -550,14 +550,12 @@ class TraceScoringIneligibleEvaluator(BaseModel):
         examples=["f47ac10b-58cc-4372-a567-0e02b2c3d479"],
     )
     name: str = Field(description="Name of the evaluator")
-    reason: Literal[
-        "wrong_type_for_agent", "no_live_version", "declares_variables"
-    ] = Field(
+    reason: IneligibleReason = Field(
         description=(
             "Why this evaluator cannot score traces for this agent:\n\n"
-            "- `wrong_type_for_agent`: its type does not match the agent's interaction type\n"
-            "- `no_live_version`: it has no live version to run\n"
-            "- `declares_variables`: its live version defines prompt variables that cannot be filled"
+            f"- `{IneligibleReason.WRONG_TYPE}`: its type does not match the agent's interaction type\n"
+            f"- `{IneligibleReason.NO_LIVE_VERSION}`: it has no live version to run\n"
+            f"- `{IneligibleReason.DECLARES_VARIABLES}`: its live version defines prompt variables that cannot be filled"
         )
     )
 
