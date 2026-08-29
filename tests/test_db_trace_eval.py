@@ -131,9 +131,9 @@ def test_init_db_is_idempotent():
         "ix_trace_eval_claim",
         "ix_trace_eval_agent_status",
         "ix_trace_eval_trace",
-        "ix_trace_scores_trace",
-        "ix_trace_scores_org_eval",
     } <= indexes
+    assert "ix_trace_scores_trace" not in indexes
+    assert "ix_trace_scores_org_eval" not in indexes
     assert "auto_score_traces" in cols
 
 

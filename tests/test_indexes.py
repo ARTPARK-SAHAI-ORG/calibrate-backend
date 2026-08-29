@@ -26,8 +26,6 @@ EXPECTED_INDEXES = [
     "ix_trace_eval_claim",
     "ix_trace_eval_agent_status",
     "ix_trace_eval_trace",
-    "ix_trace_scores_trace",
-    "ix_trace_scores_org_eval",
 ]
 
 
@@ -182,20 +180,3 @@ def test_trace_eval_history_uses_index():
     )
     assert "ix_trace_eval_trace" in plan, plan
     assert "TEMP B-TREE" not in plan, plan
-
-
-def test_trace_scores_by_trace_uses_index():
-    plan = _query_plan(
-        "SELECT * FROM trace_scores WHERE trace_uuid = ? ORDER BY completed_at",
-        ("trace",),
-    )
-    assert "ix_trace_scores_trace" in plan, plan
-
-
-def test_trace_scores_by_org_eval_uses_index():
-    plan = _query_plan(
-        "SELECT * FROM trace_scores WHERE org_uuid = ? AND evaluator_uuid = ? "
-        "ORDER BY completed_at",
-        ("org", "eval"),
-    )
-    assert "ix_trace_scores_org_eval" in plan, plan

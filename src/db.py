@@ -1628,14 +1628,6 @@ def init_db():
             )
             """
         )
-        cursor.execute(
-            "CREATE INDEX IF NOT EXISTS ix_trace_scores_trace "
-            "ON trace_scores (trace_uuid, completed_at)"
-        )
-        cursor.execute(
-            "CREATE INDEX IF NOT EXISTS ix_trace_scores_org_eval "
-            "ON trace_scores (org_uuid, evaluator_uuid, completed_at)"
-        )
         conn.commit()
 
         # ============ org_limits (renamed from user_limits) ============
