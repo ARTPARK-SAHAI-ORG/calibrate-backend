@@ -44,11 +44,13 @@ from pagination import PaginatedResponse, PaginationParams, page_envelope
 
 # Reuse the tests router's validation so a converted test accepts exactly what
 # POST /tests does (evaluator visible to the workspace, evaluator_type matches).
-from routers.tests import (
+from shared_enums import (
     DEFAULT_AGENT_INTERACTION_TYPE,
+    required_agent_interaction_type,
+)
+from routers.tests import (
     EvaluatorRef,
     _validate_evaluators,
-    required_agent_interaction_type,
 )
 from utils import EXAMPLE_TEST_UUID, EvaluatorUuid
 

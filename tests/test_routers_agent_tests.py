@@ -2584,7 +2584,7 @@ def test_build_calibrate_config_widens_tool_call_input_to_one_user_turn(client):
 def test_tool_call_test_with_both_input_and_history_reads_as_conversational(client):
     """The link gate and the calibrate handoff must agree on which one is sent."""
     from routers.agent_tests import _build_calibrate_config
-    from routers.tests import required_agent_interaction_type
+    from shared_enums import required_agent_interaction_type
     from db import get_agent as _get_agent, get_test as _get_test
 
     h = _signup(client)["headers"]

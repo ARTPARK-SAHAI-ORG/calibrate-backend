@@ -3162,7 +3162,7 @@ def _link_default_correctness_evaluator(
     yet, then link it to `agent_uuid`. Picks `default-llm-general` for a
     `general` agent, `default-llm-next-reply` otherwise, matching the
     evaluator_type each interaction_type requires (see
-    REQUIRED_AGENT_INTERACTION_TYPE_BY_TEST_TYPE in routers/tests.py). Runs on
+    REQUIRED_AGENT_INTERACTION_TYPE_BY_TEST_TYPE in shared_enums.py). Runs on
     the caller's cursor and does not commit — callers own the transaction."""
     slug = _correctness_evaluator_slug_for_interaction_type(interaction_type)
     cursor.execute(

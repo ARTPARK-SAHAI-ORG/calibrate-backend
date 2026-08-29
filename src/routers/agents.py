@@ -27,10 +27,9 @@ from utils import (
     env_str,
     AGENT_TYPE_DESCRIPTION,
     AGENT_INTERACTION_TYPE_DESCRIPTION,
-    AgentInteractionType,
     EvaluatorUuid,
 )
-from routers.tests import DEFAULT_AGENT_INTERACTION_TYPE
+from shared_enums import AgentInteractionType, DEFAULT_AGENT_INTERACTION_TYPE
 
 from db import (
     create_agent,

@@ -27,13 +27,16 @@ from db import (
     set_test_evaluators,
 )
 from auth_utils import get_current_org, get_org_jwt_or_api_key, OrgContext
+from shared_enums import (
+    DEFAULT_AGENT_INTERACTION_TYPE,
+    REQUIRED_EVALUATOR_TYPE_BY_TEST_TYPE,
+    TestType,
+    required_agent_interaction_type,
+)
 from utils import (
-    AgentInteractionType,
     EXAMPLE_TEST_UUID,
-    EvaluatorTypeLiteral,
     TEST_TYPE_DESCRIPTION,
     TestListResponse,
-    TestType,
     to_test_list_response,
 )
 
@@ -120,62 +123,6 @@ For `tool_call`, each expected argument value is one of:
 ```
 
 Evaluators are linked via the separate `evaluators` field, not inside `config`."""
-
-# Each test type pins the evaluator_type it accepts. `conversation` tests judge whole
-# simulated conversations, so only `conversation` evaluators apply; `response`/`tool_call`
-# tests judge a single LLM reply, so only `llm` evaluators apply; `general` tests judge a
-# standalone, non-conversational input/output pair, so only `llm-general` evaluators apply.
-REQUIRED_EVALUATOR_TYPE_BY_TEST_TYPE: dict[TestType, EvaluatorTypeLiteral] = {
-    "response": "llm",
-    "tool_call": "llm",
-    "conversation": "conversation",
-    "general": "llm-general",
-}
-
-# Each test type requires a matching agent `interaction_type`: `general` tests have no
-# conversation history to feed a conversational agent, and conversation-style tests
-# (response/tool_call/conversation) have nothing to feed a `general` agent. Single
-# source of truth for the gate enforced in `POST /agent-tests` and `POST /tests/bulk`.
-# Mirrors calibrate's `connections.AGENT_TYPES`, which the config's `agent_type`
-# is validated against before the run starts.
-AGENT_INTERACTION_TYPES: tuple[AgentInteractionType, ...] = (
-    "conversation",
-    "general",
-)
-DEFAULT_AGENT_INTERACTION_TYPE: AgentInteractionType = "conversation"
-REQUIRED_AGENT_INTERACTION_TYPE_BY_TEST_TYPE: dict[
-    TestType, AgentInteractionType
-] = {
-    "response": "conversation",
-    "tool_call": "conversation",
-    "conversation": "conversation",
-    "general": "general",
-}
-
-
-def required_agent_interaction_type(
-    test_type: Optional[str], config: Optional[Dict[str, Any]]
-) -> AgentInteractionType:
-    """Return the agent `interaction_type` a test can be linked to.
-
-    `tool_call` is the one type that spans both: it asserts on the tool calls the
-    agent generated, which a one-shot agent produces just as well as a
-    conversational one. Its config shape decides which: `input` (a standalone
-    prompt, the same field a `general` test carries) means a `general` agent,
-    `history` means a conversational one. A config carrying both is read as
-    conversational, matching which of the two `_build_calibrate_config` sends.
-    """
-    if (
-        test_type == "tool_call"
-        and isinstance(config, dict)
-        and config.get("history") is None
-        and config.get("input") is not None
-    ):
-        return "general"
-    if test_type in REQUIRED_AGENT_INTERACTION_TYPE_BY_TEST_TYPE:
-        return REQUIRED_AGENT_INTERACTION_TYPE_BY_TEST_TYPE[test_type]
-    return DEFAULT_AGENT_INTERACTION_TYPE
-
 
 # Linked evaluators resolve to the live version at run time (not pinned per test).
 class EvaluatorRef(BaseModel):

@@ -12,20 +12,21 @@ from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any, Literal
 
-from utils import AgentInteractionType
+from shared_enums import (
+    AgentInteractionType,
+    EvaluatorType,
+    REQUIRED_EVALUATOR_TYPE_BY_TEST_TYPE,
+)
 
-# interaction_type → (evaluation.type, required evaluator_type). Kept here
-# (not imported from routers.tests) so resolution never creates a db→router
-# cycle. Must stay aligned with REQUIRED_EVALUATOR_TYPE_BY_TEST_TYPE for
-# `response`/`general`.
+# interaction_type → (evaluation.type, required evaluator_type). Evaluator
+# types come from REQUIRED_EVALUATOR_TYPE_BY_TEST_TYPE for `response`/`general`.
 EvaluationType = Literal["response", "general"]
-RequiredEvaluatorType = Literal["llm", "llm-general"]
 TRACE_SCORING_MODE_BY_INTERACTION_TYPE: dict[
     AgentInteractionType,
-    tuple[EvaluationType, RequiredEvaluatorType]
+    tuple[EvaluationType, EvaluatorType],
 ] = {
-    "conversation": ("response", "llm"),
-    "general": ("general", "llm-general"),
+    "conversation": ("response", REQUIRED_EVALUATOR_TYPE_BY_TEST_TYPE["response"]),
+    "general": ("general", REQUIRED_EVALUATOR_TYPE_BY_TEST_TYPE["general"]),
 }
 
 
@@ -84,10 +85,8 @@ class TraceScoringResolution:
     # Scoring subset of TestType. From TRACE_SCORING_MODE_BY_INTERACTION_TYPE
     # (None if interaction_type is unsupported).
     evaluation_type: EvaluationType | None
-    # Required EvaluatorTypeLiteral for that mode, same map as
-    # REQUIRED_EVALUATOR_TYPE_BY_TEST_TYPE. Not the full VALID_EVALUATOR_TYPES
-    # column on evaluators.
-    evaluator_type: RequiredEvaluatorType | None
+    # Required evaluator_type for that mode, from REQUIRED_EVALUATOR_TYPE_BY_TEST_TYPE.
+    evaluator_type: EvaluatorType | None
     eligible: list[TraceScoringEligible] = field(default_factory=list)
     ineligible: list[TraceScoringIneligible] = field(default_factory=list)
 

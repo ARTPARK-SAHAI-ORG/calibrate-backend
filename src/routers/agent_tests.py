@@ -58,7 +58,7 @@ from llm_judge import (
     evaluator_value_name,
 )
 from routers.agents import AgentSummary, to_agent_summary
-from routers.tests import (
+from shared_enums import (
     AGENT_INTERACTION_TYPES,
     DEFAULT_AGENT_INTERACTION_TYPE,
     required_agent_interaction_type,

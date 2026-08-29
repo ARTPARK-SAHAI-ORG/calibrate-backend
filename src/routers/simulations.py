@@ -45,13 +45,13 @@ from db import (
     delete_simulation_job,
 )
 from llm_judge import build_evaluator_cli_payload
+from shared_enums import EvaluatorType
 from utils import (
     job_slot,
     AGENT_TYPE_DESCRIPTION,
     TaskStatus,
     TaskCreateResponse,
     SimulationRunType,
-    EvaluatorTypeLiteral,
     DataTypeLiteral,
     OutputTypeLiteral,
     EvaluatorKindLiteral,
@@ -442,7 +442,7 @@ class EvaluatorResponse(BaseModel):
     )
     name: str = Field(description="Evaluator name")
     description: Optional[str] = Field(None, description="Evaluator description")
-    evaluator_type: EvaluatorTypeLiteral = Field(
+    evaluator_type: EvaluatorType = Field(
         "conversation", description="What the evaluator judges (always `conversation` for simulations)"
     )
     data_type: DataTypeLiteral = Field("text", description=DATA_TYPE_DESCRIPTION)

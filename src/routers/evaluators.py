@@ -49,8 +49,8 @@ from db import (
     set_evaluator_live_version,
     update_evaluator,
 )
+from shared_enums import EvaluatorType
 from utils import (
-    EvaluatorTypeLiteral,
     DataTypeLiteral,
     EVALUATOR_TYPE_DESCRIPTION,
     DATA_TYPE_DESCRIPTION,
@@ -186,7 +186,7 @@ class EvaluatorVersionCreateRequest(EvaluatorVersionCreate):
 class EvaluatorCreate(BaseModel):
     name: str = Field(..., min_length=1, description="Evaluator name, unique within your workspace")
     description: Optional[str] = Field(None, description="Description. Omit to leave blank")
-    evaluator_type: EvaluatorTypeLiteral = Field(
+    evaluator_type: EvaluatorType = Field(
         "llm",
         description=EVALUATOR_TYPE_DESCRIPTION,
     )
@@ -219,7 +219,7 @@ class EvaluatorCreate(BaseModel):
 class EvaluatorUpdate(BaseModel):
     name: Optional[str] = Field(None, min_length=1, description="New name. Omit to leave unchanged")
     description: Optional[str] = Field(None, description="New description. Omit to leave unchanged")
-    evaluator_type: Optional[EvaluatorTypeLiteral] = Field(
+    evaluator_type: Optional[EvaluatorType] = Field(
         None, description="New value for what the evaluator judges. Omit to leave unchanged"
     )
     data_type: Optional[DataTypeLiteral] = Field(None, description="New modality. Omit to leave unchanged")
@@ -297,7 +297,7 @@ class EvaluatorResponseBase(BaseModel):
     )
     name: str = Field(description="Evaluator name")
     description: Optional[str] = Field(None, description="What the evaluator checks")
-    evaluator_type: EvaluatorTypeLiteral = Field(
+    evaluator_type: EvaluatorType = Field(
         description=EVALUATOR_TYPE_DESCRIPTION
     )
     data_type: DataTypeLiteral = Field(description=DATA_TYPE_DESCRIPTION)
@@ -605,7 +605,7 @@ class DefaultPromptResponse(BaseModel):
     )
     system_prompt: str = Field(description="Suggested judge system prompt for prefilling the create form")
     judge_model: str = Field(description="Suggested judge model")
-    evaluator_type: EvaluatorTypeLiteral = Field(description="Suggested value for what the evaluator judges")
+    evaluator_type: EvaluatorType = Field(description="Suggested value for what the evaluator judges")
     data_type: DataTypeLiteral = Field(description="Suggested modality")
     kind: Literal["single", "side_by_side"] = Field(description="Suggested scoring mode")
     output_type: Literal["binary", "rating"] = Field(description="Suggested output shape")
@@ -640,7 +640,7 @@ def get_default_prompt(
 
 @router.get("", response_model=PaginatedResponse[EvaluatorResponse], summary="List evaluators", tags=["Public API"])
 def list_evaluators(
-    evaluator_type: Optional[EvaluatorTypeLiteral] = Query(
+    evaluator_type: Optional[EvaluatorType] = Query(
         None, description="Filter by what the evaluator judges. Omit for all types"
     ),
     data_type: Optional[DataTypeLiteral] = Query(
