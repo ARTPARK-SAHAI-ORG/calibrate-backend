@@ -1557,7 +1557,7 @@ def init_db():
         # open run is settled at claim, not via a delete trigger.
         cursor.execute(
             """
-            CREATE TABLE IF NOT EXISTS trace_evaluations (
+            CREATE TABLE IF NOT EXISTS trace_eval_runs (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 uuid TEXT NOT NULL UNIQUE,
                 trace_uuid TEXT NOT NULL,
@@ -1579,21 +1579,21 @@ def init_db():
         )
         cursor.execute(
             "CREATE UNIQUE INDEX IF NOT EXISTS ux_trace_eval_active "
-            "ON trace_evaluations (trace_uuid) "
+            "ON trace_eval_runs (trace_uuid) "
             "WHERE status IN ('pending', 'processing')"
         )
         cursor.execute(
             "CREATE INDEX IF NOT EXISTS ix_trace_eval_claim "
-            "ON trace_evaluations (available_at) "
+            "ON trace_eval_runs (available_at) "
             "WHERE status IN ('pending', 'processing')"
         )
         cursor.execute(
             "CREATE INDEX IF NOT EXISTS ix_trace_eval_agent_status "
-            "ON trace_evaluations (agent_id, status, completed_at)"
+            "ON trace_eval_runs (agent_id, status, completed_at)"
         )
         cursor.execute(
             "CREATE INDEX IF NOT EXISTS ix_trace_eval_trace "
-            "ON trace_evaluations (trace_uuid, created_at DESC)"
+            "ON trace_eval_runs (trace_uuid, created_at DESC)"
         )
 
         # One score per (run, evaluator). Keyed on the run so a same-version
@@ -1620,7 +1620,7 @@ def init_db():
                         (match IS NULL AND score IS NOT NULL)
                     ) IS TRUE
                 ),
-                FOREIGN KEY (run_uuid) REFERENCES trace_evaluations(uuid),
+                FOREIGN KEY (run_uuid) REFERENCES trace_eval_runs(uuid),
                 FOREIGN KEY (trace_uuid) REFERENCES traces(uuid),
                 FOREIGN KEY (evaluator_uuid) REFERENCES evaluators(uuid),
                 FOREIGN KEY (org_uuid) REFERENCES organizations(uuid)
@@ -4372,7 +4372,7 @@ def update_agent(
     """Update an agent. Returns True if the agent was found and updated.
 
     Turning `auto_score_traces` off deletes this agent's `pending`
-    `trace_evaluations` in the same transaction. `processing` and terminal
+    `trace_eval_runs` in the same transaction. `processing` and terminal
     runs are left alone so in-flight judge spend is not thrown away.
     """
     # Build dynamic update query
@@ -4408,7 +4408,7 @@ def update_agent(
         cursor.execute(query, params)
         updated = cursor.rowcount > 0
         if updated and auto_score_traces is False:
-            _delete_pending_trace_evaluations(cursor, agent_uuid, org_uuid)
+            _delete_pending_trace_eval_runs(cursor, agent_uuid, org_uuid)
         if updated:
             conn.commit()
             logger.info(f"Updated agent with UUID: {agent_uuid}")
@@ -10334,9 +10334,9 @@ def _insert_trace_eval_run(
     now: int,
     completed_at: Optional[int] = None,
 ) -> None:
-    """Insert one trace_evaluations row on `cur`. Does not commit."""
+    """Insert one trace_eval_runs row on `cur`. Does not commit."""
     cur.execute(
-        "INSERT INTO trace_evaluations "
+        "INSERT INTO trace_eval_runs "
         "(uuid, trace_uuid, org_uuid, agent_id, status, criteria, "
         "error, available_at, created_at, updated_at, completed_at) "
         "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
@@ -10524,7 +10524,7 @@ def soft_delete_traces(org_uuid: str, *, trace_ids: List[str]) -> int:
     return deleted
 
 
-def _delete_pending_trace_evaluations(
+def _delete_pending_trace_eval_runs(
     cursor: sqlite3.Cursor,
     agent_id: str,
     org_uuid: Optional[str] = None,
@@ -10532,24 +10532,24 @@ def _delete_pending_trace_evaluations(
     """Delete never-started runs for an agent. Leaves processing/terminal rows."""
     if org_uuid:
         cursor.execute(
-            "DELETE FROM trace_evaluations "
+            "DELETE FROM trace_eval_runs "
             "WHERE agent_id = ? AND org_uuid = ? AND status = 'pending'",
             (agent_id, org_uuid),
         )
     else:
         cursor.execute(
-            "DELETE FROM trace_evaluations WHERE agent_id = ? AND status = 'pending'",
+            "DELETE FROM trace_eval_runs WHERE agent_id = ? AND status = 'pending'",
             (agent_id,),
         )
     return cursor.rowcount or 0
 
 
-def delete_pending_trace_evaluations_for_agent(
+def delete_pending_trace_eval_runs_for_agent(
     agent_id: str, org_uuid: Optional[str] = None
 ) -> int:
     """Delete this agent's pending trace-scoring runs. Processing and terminal
     runs are left in place."""
     with get_db_connection() as conn:
-        deleted = _delete_pending_trace_evaluations(conn.cursor(), agent_id, org_uuid)
+        deleted = _delete_pending_trace_eval_runs(conn.cursor(), agent_id, org_uuid)
         conn.commit()
         return deleted

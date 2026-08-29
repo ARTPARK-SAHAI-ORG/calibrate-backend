@@ -161,5 +161,5 @@ def resolve_trace_scoring(agent: Dict[str, Any]) -> TraceScoringResolution:
 
 
 def resolve_scoring_plan(agent: Dict[str, Any]) -> Dict[str, Any]:
-    """Plan written into `trace_evaluations.criteria`, or a skip envelope."""
+    """Plan written into `trace_eval_runs.criteria`, or a skip envelope."""
     return resolve_trace_scoring(agent).as_plan()

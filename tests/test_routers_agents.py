@@ -1076,7 +1076,7 @@ def _insert_run(org, agent_id, trace_uuid, status, **overrides):
     row.update(overrides)
     with db.get_db_connection() as conn:
         conn.execute(
-            "INSERT INTO trace_evaluations "
+            "INSERT INTO trace_eval_runs "
             "(uuid, trace_uuid, org_uuid, agent_id, status, criteria, "
             "available_at, attempts, error, created_at, updated_at, completed_at) "
             "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
@@ -1432,7 +1432,7 @@ def test_disable_auto_score_traces_deletes_pending_runs_only(client):
         remaining = {
             row["uuid"]: row["status"]
             for row in conn.execute(
-                "SELECT uuid, status FROM trace_evaluations "
+                "SELECT uuid, status FROM trace_eval_runs "
                 "WHERE uuid IN (?, ?, ?)",
                 (pending, processing, completed),
             ).fetchall()
@@ -1473,7 +1473,7 @@ def test_omitting_auto_score_traces_does_not_delete_pending_runs(client):
     assert r.json()["auto_score_traces"] is True
     with db.get_db_connection() as conn:
         row = conn.execute(
-            "SELECT status FROM trace_evaluations WHERE uuid = ?", (pending,)
+            "SELECT status FROM trace_eval_runs WHERE uuid = ?", (pending,)
         ).fetchone()
     assert row["status"] == "pending"
 

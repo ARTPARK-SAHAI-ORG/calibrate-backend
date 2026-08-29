@@ -149,7 +149,7 @@ def test_traces_default_list_sorts_from_the_index():
 
 def test_trace_eval_active_lookup_uses_index():
     plan = _query_plan(
-        "SELECT * FROM trace_evaluations WHERE trace_uuid = ? "
+        "SELECT * FROM trace_eval_runs WHERE trace_uuid = ? "
         "AND status IN ('pending', 'processing')",
         ("trace",),
     )
@@ -158,7 +158,7 @@ def test_trace_eval_active_lookup_uses_index():
 
 def test_trace_eval_claim_uses_index():
     plan = _query_plan(
-        "SELECT * FROM trace_evaluations WHERE status IN ('pending', 'processing') "
+        "SELECT * FROM trace_eval_runs WHERE status IN ('pending', 'processing') "
         "AND available_at <= ? ORDER BY available_at LIMIT 10",
         (0,),
     )
@@ -167,7 +167,7 @@ def test_trace_eval_claim_uses_index():
 
 def test_trace_eval_agent_status_uses_index():
     plan = _query_plan(
-        "SELECT * FROM trace_evaluations WHERE agent_id = ? AND status = ? "
+        "SELECT * FROM trace_eval_runs WHERE agent_id = ? AND status = ? "
         "ORDER BY completed_at",
         ("agent", "failed"),
     )
@@ -176,7 +176,7 @@ def test_trace_eval_agent_status_uses_index():
 
 def test_trace_eval_history_uses_index():
     plan = _query_plan(
-        "SELECT * FROM trace_evaluations WHERE trace_uuid = ? "
+        "SELECT * FROM trace_eval_runs WHERE trace_uuid = ? "
         "ORDER BY created_at DESC",
         ("trace",),
     )

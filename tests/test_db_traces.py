@@ -306,7 +306,7 @@ def _combined_ingest(org: str, agent: dict, **overrides):
 def _runs_for(trace_uuid: str):
     with db.get_db_connection() as conn:
         return conn.execute(
-            "SELECT * FROM trace_evaluations WHERE trace_uuid = ?",
+            "SELECT * FROM trace_eval_runs WHERE trace_uuid = ?",
             (trace_uuid,),
         ).fetchall()
 
@@ -433,7 +433,7 @@ def test_trace_and_run_roll_back_together(monkeypatch):
             "SELECT COUNT(*) c FROM traces WHERE org_uuid = ?", (org,)
         ).fetchone()["c"]
         run_count = conn.execute(
-            "SELECT COUNT(*) c FROM trace_evaluations WHERE org_uuid = ?", (org,)
+            "SELECT COUNT(*) c FROM trace_eval_runs WHERE org_uuid = ?", (org,)
         ).fetchone()["c"]
     assert trace_count == 0
     assert run_count == 0

@@ -1,4 +1,4 @@
-"""Schema tests for trace_evaluations, trace_scores, and agents.auto_score_traces.
+"""Schema tests for trace_eval_runs, trace_scores, and agents.auto_score_traces.
 
 This slice ships tables + indexes only -- no enqueue/claim/settle logic yet,
 so these tests write directly via raw SQL.
@@ -48,7 +48,7 @@ def _insert_run(org: str, trace_uuid: str, *, run_uuid: str | None = None, **ove
     row.update(overrides)
     with db.get_db_connection() as conn:
         conn.execute(
-            "INSERT INTO trace_evaluations "
+            "INSERT INTO trace_eval_runs "
             "(uuid, trace_uuid, org_uuid, agent_id, status, criteria, "
             "available_at, attempts, error, created_at, updated_at, completed_at) "
             "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
@@ -125,7 +125,7 @@ def test_init_db_is_idempotent():
             r["name"]
             for r in conn.execute("PRAGMA table_info(agents)").fetchall()
         }
-    assert {"trace_evaluations", "trace_scores"} <= names
+    assert {"trace_eval_runs", "trace_scores"} <= names
     assert {
         "ux_trace_eval_active",
         "ix_trace_eval_claim",
@@ -167,7 +167,7 @@ def test_terminal_run_allows_a_new_open_run():
     second = _insert_run(org, trace["uuid"], status="pending", created_at=6)
     with db.get_db_connection() as conn:
         rows = conn.execute(
-            "SELECT uuid, status FROM trace_evaluations WHERE trace_uuid = ? "
+            "SELECT uuid, status FROM trace_eval_runs WHERE trace_uuid = ? "
             "ORDER BY created_at",
             (trace["uuid"],),
         ).fetchall()
@@ -269,7 +269,7 @@ def test_same_version_scores_are_preserved_across_distinct_runs():
     assert rows[1]["reasoning"] == "rescore"
 
 
-def test_delete_pending_trace_evaluations_leaves_processing_and_terminal():
+def test_delete_pending_trace_eval_runs_leaves_processing_and_terminal():
     org = _org()
     agent_id = str(uuid.uuid4())
     pending_trace = _ingest_trace(org, agent_id=agent_id)
@@ -302,13 +302,13 @@ def test_delete_pending_trace_evaluations_leaves_processing_and_terminal():
         org, other_agent_trace["uuid"], agent_id="other-agent", status="pending"
     )
 
-    deleted = db.delete_pending_trace_evaluations_for_agent(agent_id, org)
+    deleted = db.delete_pending_trace_eval_runs_for_agent(agent_id, org)
     assert deleted == 1
     with db.get_db_connection() as conn:
         remaining = {
             r["uuid"]: r["status"]
             for r in conn.execute(
-                "SELECT uuid, status FROM trace_evaluations "
+                "SELECT uuid, status FROM trace_eval_runs "
                 "WHERE uuid IN (?, ?, ?, ?, ?, ?)",
                 (pending, processing, completed, failed, skipped, other_pending),
             ).fetchall()
@@ -326,12 +326,12 @@ def test_delete_pending_without_org_uuid_still_scopes_to_agent():
     agent_id = str(uuid.uuid4())
     trace = _ingest_trace(org, agent_id=agent_id)
     pending = _insert_run(org, trace["uuid"], agent_id=agent_id, status="pending")
-    deleted = db.delete_pending_trace_evaluations_for_agent(agent_id)
+    deleted = db.delete_pending_trace_eval_runs_for_agent(agent_id)
     assert deleted == 1
     with db.get_db_connection() as conn:
         assert (
             conn.execute(
-                "SELECT 1 FROM trace_evaluations WHERE uuid = ?", (pending,)
+                "SELECT 1 FROM trace_eval_runs WHERE uuid = ?", (pending,)
             ).fetchone()
             is None
         )

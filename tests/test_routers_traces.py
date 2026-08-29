@@ -2028,7 +2028,7 @@ def _enable_auto_score(client, h, agent_uuid, evaluator_type="llm"):
 def _runs_for_trace(trace_uuid: str):
     with db.get_db_connection() as conn:
         return conn.execute(
-            "SELECT * FROM trace_evaluations WHERE trace_uuid = ?",
+            "SELECT * FROM trace_eval_runs WHERE trace_uuid = ?",
             (trace_uuid,),
         ).fetchall()
 
@@ -2135,7 +2135,7 @@ def test_ingest_opted_in_cap_still_returns_429(client, monkeypatch):
 
     with db.get_db_connection() as conn:
         run_count = conn.execute(
-            "SELECT COUNT(*) c FROM trace_evaluations WHERE agent_id = ?",
+            "SELECT COUNT(*) c FROM trace_eval_runs WHERE agent_id = ?",
             (agent_id,),
         ).fetchone()["c"]
     assert run_count == 1
