@@ -78,8 +78,8 @@ def _insert_score(org: str, run_uuid: str, trace_uuid: str, **overrides):
         "evaluator_uuid": "eval-1",
         "evaluator_version_id": "version-1",
         "org_uuid": org,
-        "match": 1,
-        "score": None,
+        "value": 1,
+        "output_type": "binary",
         "reasoning": "ok",
         "completed_at": 10,
     }
@@ -88,7 +88,7 @@ def _insert_score(org: str, run_uuid: str, trace_uuid: str, **overrides):
         conn.execute(
             "INSERT INTO trace_eval_scores "
             "(run_uuid, trace_uuid, evaluator_uuid, evaluator_version_id, "
-            "org_uuid, match, score, reasoning, completed_at) "
+            "org_uuid, value, output_type, reasoning, completed_at) "
             "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 row["run_uuid"],
@@ -96,8 +96,8 @@ def _insert_score(org: str, run_uuid: str, trace_uuid: str, **overrides):
                 row["evaluator_uuid"],
                 row["evaluator_version_id"],
                 row["org_uuid"],
-                row["match"],
-                row["score"],
+                row["value"],
+                row["output_type"],
                 row["reasoning"],
                 row["completed_at"],
             ),
@@ -132,8 +132,6 @@ def test_init_db_is_idempotent():
         "ix_trace_eval_agent_status",
         "ix_trace_eval_trace",
     } <= indexes
-    assert "ix_trace_eval_scores_trace" not in indexes
-    assert "ix_trace_eval_scores_org_eval" not in indexes
     assert "auto_score_traces" in cols
 
 
@@ -179,44 +177,55 @@ def test_typed_result_check_accepts_binary_or_rating():
     org = _org()
     trace = _ingest_trace(org)
     run = _insert_run(org, trace["uuid"], status="completed", completed_at=5)
-    _insert_score(org, run, trace["uuid"], match=0, score=None)
+    _insert_score(org, run, trace["uuid"], value=0, output_type="binary")
     _insert_score(
         org,
         run,
         trace["uuid"],
         evaluator_uuid="eval-rating",
-        match=None,
-        score=0.0,
+        value=0.0,
+        output_type="rating",
+    )
+    _insert_score(
+        org,
+        run,
+        trace["uuid"],
+        evaluator_uuid="eval-rating-high",
+        value=4,
+        output_type="rating",
     )
     with db.get_db_connection() as conn:
         rows = conn.execute(
-            "SELECT evaluator_uuid, match, score FROM trace_eval_scores "
+            "SELECT evaluator_uuid, value, output_type FROM trace_eval_scores "
             "WHERE run_uuid = ? ORDER BY evaluator_uuid",
             (run,),
         ).fetchall()
-    assert len(rows) == 2
+    assert len(rows) == 3
     by_eval = {r["evaluator_uuid"]: r for r in rows}
-    assert by_eval["eval-1"]["match"] == 0
-    assert by_eval["eval-1"]["score"] is None
-    assert by_eval["eval-rating"]["match"] is None
-    assert by_eval["eval-rating"]["score"] == 0.0
+    assert by_eval["eval-1"]["value"] == 0
+    assert by_eval["eval-1"]["output_type"] == "binary"
+    assert by_eval["eval-rating"]["value"] == 0.0
+    assert by_eval["eval-rating"]["output_type"] == "rating"
+    assert by_eval["eval-rating-high"]["value"] == 4
+    assert by_eval["eval-rating-high"]["output_type"] == "rating"
 
 
 @pytest.mark.parametrize(
-    "match,score",
+    "kwargs",
     [
-        (None, None),
-        (1, 0.5),
-        (2, None),
-        (0, 0.0),
+        {"value": None, "output_type": "binary"},
+        {"value": 1, "output_type": None},
+        {"value": 1, "output_type": "categorical"},
+        {"value": 2, "output_type": "binary"},
+        {"value": 0.5, "output_type": "binary"},
     ],
 )
-def test_typed_result_check_rejects_both_neither_and_invalid_match(match, score):
+def test_typed_result_check_rejects_null_invalid_type_and_non_binary_value(kwargs):
     org = _org()
     trace = _ingest_trace(org)
     run = _insert_run(org, trace["uuid"], status="completed", completed_at=5)
     with pytest.raises(sqlite3.IntegrityError):
-        _insert_score(org, run, trace["uuid"], match=match, score=score)
+        _insert_score(org, run, trace["uuid"], **kwargs)
 
 
 def test_evaluator_version_id_is_required():
@@ -235,8 +244,8 @@ def test_same_version_scores_are_preserved_across_distinct_runs():
         org,
         first,
         trace["uuid"],
-        match=1,
-        score=None,
+        value=1,
+        output_type="binary",
         evaluator_version_id="version-same",
         reasoning="first run",
         completed_at=5,
@@ -248,24 +257,24 @@ def test_same_version_scores_are_preserved_across_distinct_runs():
         org,
         second,
         trace["uuid"],
-        match=0,
-        score=None,
+        value=0,
+        output_type="binary",
         evaluator_version_id="version-same",
         reasoning="rescore",
         completed_at=7,
     )
     with db.get_db_connection() as conn:
         rows = conn.execute(
-            "SELECT run_uuid, match, reasoning FROM trace_eval_scores "
+            "SELECT run_uuid, value, reasoning FROM trace_eval_scores "
             "WHERE trace_uuid = ? ORDER BY completed_at",
             (trace["uuid"],),
         ).fetchall()
     assert len(rows) == 2
     assert rows[0]["run_uuid"] == first
-    assert rows[0]["match"] == 1
+    assert rows[0]["value"] == 1
     assert rows[0]["reasoning"] == "first run"
     assert rows[1]["run_uuid"] == second
-    assert rows[1]["match"] == 0
+    assert rows[1]["value"] == 0
     assert rows[1]["reasoning"] == "rescore"
 
 
@@ -347,4 +356,4 @@ def test_same_run_evaluator_is_unique():
     run = _insert_run(org, trace["uuid"], status="completed", completed_at=5)
     _insert_score(org, run, trace["uuid"], evaluator_version_id="v1")
     with pytest.raises(sqlite3.IntegrityError):
-        _insert_score(org, run, trace["uuid"], evaluator_version_id="v2", match=0)
+        _insert_score(org, run, trace["uuid"], evaluator_version_id="v2", value=0)

@@ -1598,8 +1598,7 @@ def init_db():
         )
 
         # One score per (run, evaluator). Keyed on the run so a same-version
-        # rescore never overwrites earlier history. match XOR score: a binary
-        # match=0 must stay distinct from a rating of 0.
+        # rescore never overwrites earlier history.
         cursor.execute(
             """
             CREATE TABLE IF NOT EXISTS trace_eval_scores (
@@ -1608,19 +1607,16 @@ def init_db():
                 evaluator_uuid TEXT NOT NULL,
                 evaluator_version_id TEXT NOT NULL,
                 org_uuid TEXT NOT NULL,
-                match INTEGER,
-                score REAL,
+                -- NUMERIC affinity: 0/1 and integer ratings store as integers;
+                -- a future float rating stores as real.
+                value NUMERIC NOT NULL,
+                -- Denormalized from evaluators.output_type.
+                output_type TEXT NOT NULL,
                 reasoning TEXT,
                 completed_at INTEGER,
                 UNIQUE (run_uuid, evaluator_uuid),
-                -- SQLite CHECKs pass on UNKNOWN; `IS TRUE` makes both-NULL fail.
-                CHECK (
-                    (
-                        (match IN (0, 1) AND score IS NULL)
-                        OR
-                        (match IS NULL AND score IS NOT NULL)
-                    ) IS TRUE
-                ),
+                CHECK (output_type IN ('binary', 'rating')),
+                CHECK (output_type <> 'binary' OR value IN (0, 1)),
                 FOREIGN KEY (run_uuid) REFERENCES trace_eval_runs(uuid),
                 FOREIGN KEY (trace_uuid) REFERENCES traces(uuid),
                 FOREIGN KEY (evaluator_uuid) REFERENCES evaluators(uuid),
