@@ -28,9 +28,12 @@ from db import (
 )
 from auth_utils import get_current_org, get_org_jwt_or_api_key, OrgContext
 from utils import (
+    AgentInteractionType,
     EXAMPLE_TEST_UUID,
+    EvaluatorTypeLiteral,
     TEST_TYPE_DESCRIPTION,
     TestListResponse,
+    TestType,
     to_test_list_response,
 )
 
@@ -43,9 +46,6 @@ router = APIRouter(prefix="/tests", tags=["tests"])
 
 _EXAMPLE_EVALUATOR_UUID = "f47ac10b-58cc-4372-a567-0e02b2c3d479"
 _EXAMPLE_AGENT_UUID = "a3b2c1d0-e5f4-3210-abcd-ef1234567890"
-
-
-TestType = Literal["response", "tool_call", "conversation", "general"]
 
 # Shared across every `type` field (create/update/response/bulk) so the gloss
 # stays identical everywhere it renders.
@@ -125,7 +125,7 @@ Evaluators are linked via the separate `evaluators` field, not inside `config`."
 # simulated conversations, so only `conversation` evaluators apply; `response`/`tool_call`
 # tests judge a single LLM reply, so only `llm` evaluators apply; `general` tests judge a
 # standalone, non-conversational input/output pair, so only `llm-general` evaluators apply.
-REQUIRED_EVALUATOR_TYPE_BY_TEST_TYPE: Dict[str, str] = {
+REQUIRED_EVALUATOR_TYPE_BY_TEST_TYPE: dict[TestType, EvaluatorTypeLiteral] = {
     "response": "llm",
     "tool_call": "llm",
     "conversation": "conversation",
@@ -138,9 +138,14 @@ REQUIRED_EVALUATOR_TYPE_BY_TEST_TYPE: Dict[str, str] = {
 # source of truth for the gate enforced in `POST /agent-tests` and `POST /tests/bulk`.
 # Mirrors calibrate's `connections.AGENT_TYPES`, which the config's `agent_type`
 # is validated against before the run starts.
-AGENT_INTERACTION_TYPES = ("conversation", "general")
-DEFAULT_AGENT_INTERACTION_TYPE = "conversation"
-REQUIRED_AGENT_INTERACTION_TYPE_BY_TEST_TYPE: Dict[str, str] = {
+AGENT_INTERACTION_TYPES: tuple[AgentInteractionType, ...] = (
+    "conversation",
+    "general",
+)
+DEFAULT_AGENT_INTERACTION_TYPE: AgentInteractionType = "conversation"
+REQUIRED_AGENT_INTERACTION_TYPE_BY_TEST_TYPE: dict[
+    TestType, AgentInteractionType
+] = {
     "response": "conversation",
     "tool_call": "conversation",
     "conversation": "conversation",
@@ -150,7 +155,7 @@ REQUIRED_AGENT_INTERACTION_TYPE_BY_TEST_TYPE: Dict[str, str] = {
 
 def required_agent_interaction_type(
     test_type: Optional[str], config: Optional[Dict[str, Any]]
-) -> str:
+) -> AgentInteractionType:
     """Return the agent `interaction_type` a test can be linked to.
 
     `tool_call` is the one type that spans both: it asserts on the tool calls the
@@ -167,9 +172,9 @@ def required_agent_interaction_type(
         and config.get("input") is not None
     ):
         return "general"
-    return REQUIRED_AGENT_INTERACTION_TYPE_BY_TEST_TYPE.get(
-        test_type, DEFAULT_AGENT_INTERACTION_TYPE
-    )
+    if test_type in REQUIRED_AGENT_INTERACTION_TYPE_BY_TEST_TYPE:
+        return REQUIRED_AGENT_INTERACTION_TYPE_BY_TEST_TYPE[test_type]
+    return DEFAULT_AGENT_INTERACTION_TYPE
 
 
 # Linked evaluators resolve to the live version at run time (not pinned per test).
@@ -445,9 +450,9 @@ def _validate_evaluators(
     """Validate that each referenced evaluator is visible to the workspace and that its
     `evaluator_type` matches the test's type (`response`/`tool_call` ⇒ `llm`,
     `conversation` ⇒ `conversation`). Returns validated refs."""
-    required_evaluator_type = REQUIRED_EVALUATOR_TYPE_BY_TEST_TYPE.get(test_type)
-    if required_evaluator_type is None:
+    if test_type not in REQUIRED_EVALUATOR_TYPE_BY_TEST_TYPE:
         raise HTTPException(status_code=400, detail=f"Unknown test type '{test_type}'")
+    required_evaluator_type = REQUIRED_EVALUATOR_TYPE_BY_TEST_TYPE[test_type]
     out: List[Dict[str, Any]] = []
     for ref in refs:
         evaluator = get_evaluator(ref.evaluator_uuid)

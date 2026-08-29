@@ -27,6 +27,7 @@ from utils import (
     env_str,
     AGENT_TYPE_DESCRIPTION,
     AGENT_INTERACTION_TYPE_DESCRIPTION,
+    AgentInteractionType,
     EvaluatorUuid,
 )
 from routers.tests import DEFAULT_AGENT_INTERACTION_TYPE
@@ -325,7 +326,7 @@ class AgentCreate(BaseModel):
         "agent",
         description=AGENT_TYPE_DESCRIPTION,
     )
-    interaction_type: Literal["conversation", "general"] = Field(
+    interaction_type: AgentInteractionType = Field(
         "conversation", description=AGENT_INTERACTION_TYPE_DESCRIPTION
     )
     config: Optional[Dict[str, Any]] = Field(
@@ -436,7 +437,7 @@ class AgentResponse(BaseModel):
     )
     name: str = Field(description="Name of the agent")
     type: Literal["agent", "connection"] = Field(description=AGENT_TYPE_DESCRIPTION)
-    interaction_type: Literal["conversation", "general"] = Field(
+    interaction_type: AgentInteractionType = Field(
         description=AGENT_INTERACTION_TYPE_DESCRIPTION
     )
     config: Optional[Dict[str, Any]] = Field(None, description="Agent configuration")
@@ -458,7 +459,7 @@ class AgentSummary(BaseModel):
     )
     name: str = Field(description="Name of the agent")
     type: Literal["agent", "connection"] = Field(description=AGENT_TYPE_DESCRIPTION)
-    interaction_type: Literal["conversation", "general"] = Field(
+    interaction_type: AgentInteractionType = Field(
         description=AGENT_INTERACTION_TYPE_DESCRIPTION
     )
     created_at: str = Field(description="When the agent was created (ISO 8601 UTC)")
@@ -694,7 +695,7 @@ class VerifyConnectionRequest(AgentVerifyRequest):
         description="Extra fields merged into every request to the agent, since no agent is stored yet",
         examples=[{"condition_area": "cardiology"}],
     )
-    interaction_type: Literal["conversation", "general"] = Field(
+    interaction_type: AgentInteractionType = Field(
         DEFAULT_AGENT_INTERACTION_TYPE,
         description=AGENT_INTERACTION_TYPE_DESCRIPTION
         + "\n\nOmit for a back-and-forth agent",

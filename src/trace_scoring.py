@@ -12,14 +12,18 @@ from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any, Literal
 
+from utils import AgentInteractionType
+
 # interaction_type → (evaluation.type, required evaluator_type). Kept here
 # (not imported from routers.tests) so resolution never creates a db→router
 # cycle. Must stay aligned with REQUIRED_EVALUATOR_TYPE_BY_TEST_TYPE for
 # `response`/`general`.
-# TODO: redefine in terms of shared enums lifted up from tests.py
 EvaluationType = Literal["response", "general"]
 RequiredEvaluatorType = Literal["llm", "llm-general"]
-TRACE_SCORING_MODE_BY_INTERACTION_TYPE: dict[str, tuple[EvaluationType, RequiredEvaluatorType]] = {
+TRACE_SCORING_MODE_BY_INTERACTION_TYPE: dict[
+    AgentInteractionType,
+    tuple[EvaluationType, RequiredEvaluatorType]
+] = {
     "conversation": ("response", "llm"),
     "general": ("general", "llm-general"),
 }
@@ -57,7 +61,7 @@ class ScoringPlanSkip:
 
 
 @dataclass(frozen=True)
-class TraceScoringPin:
+class TraceScoringEligible:
     """Eligible snapshot pin plus the evaluator name for eligibility responses."""
 
     pin: ScoringPlanPin
@@ -77,14 +81,14 @@ class TraceScoringIneligible:
 class TraceScoringResolution:
     """The result of resolving a linked evaluator set for a particular agent."""
 
-    # Scoring subset of TestTypeLiteral. From TRACE_SCORING_MODE_BY_INTERACTION_TYPE
+    # Scoring subset of TestType. From TRACE_SCORING_MODE_BY_INTERACTION_TYPE
     # (None if interaction_type is unsupported).
     evaluation_type: EvaluationType | None
     # Required EvaluatorTypeLiteral for that mode, same map as
     # REQUIRED_EVALUATOR_TYPE_BY_TEST_TYPE. Not the full VALID_EVALUATOR_TYPES
     # column on evaluators.
     evaluator_type: RequiredEvaluatorType | None
-    eligible: list[TraceScoringPin] = field(default_factory=list)
+    eligible: list[TraceScoringEligible] = field(default_factory=list)
     ineligible: list[TraceScoringIneligible] = field(default_factory=list)
 
     def as_plan(self) -> ScoringPlan | ScoringPlanSkip:
@@ -100,7 +104,7 @@ class TraceScoringResolution:
 
 
 def resolve_trace_scoring(
-    interaction_type: str | None,
+    interaction_type: AgentInteractionType | None,
     live_evaluators: list[tuple[dict[str, Any], dict[str, Any] | None]],
 ) -> TraceScoringResolution:
     """Split linked evaluators into eligible pins and ineligible-with-reason.
@@ -116,7 +120,7 @@ def resolve_trace_scoring(
     set is never handed to `_validate_evaluators`, which raises on the first
     mismatch. Never raises.
     """
-    mode = TRACE_SCORING_MODE_BY_INTERACTION_TYPE.get(interaction_type or "")
+    mode = TRACE_SCORING_MODE_BY_INTERACTION_TYPE.get(interaction_type) if interaction_type is not None else None
     if mode is None:
         return TraceScoringResolution(
             evaluation_type=None,
@@ -133,7 +137,7 @@ def resolve_trace_scoring(
         )
 
     evaluation_type, required_evaluator_type = mode
-    eligible: list[TraceScoringPin] = []
+    eligible: list[TraceScoringEligible] = []
     ineligible: list[TraceScoringIneligible] = []
     for ev, version in live_evaluators:
         name = ev.get("name") or ev["uuid"]
@@ -165,7 +169,7 @@ def resolve_trace_scoring(
             )
             continue
         eligible.append(
-            TraceScoringPin(
+            TraceScoringEligible(
                 pin=ScoringPlanPin(
                     evaluator_uuid=ev["uuid"],
                     evaluator_version_id=version["uuid"],

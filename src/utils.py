@@ -206,7 +206,8 @@ EvalJobType = Literal["stt-eval", "tts-eval", "annotation-eval"]
 # Keep in sync with db.ANNOTATION_TASK_TYPES and db.VALID_EVALUATOR_TYPES
 # (Literal requires literal members, so the vocabulary is mirrored here).
 AnnotationTaskTypeLiteral = Literal["stt", "llm", "llm-general", "conversation", "tts"]
-TestTypeLiteral = Literal["response", "tool_call", "conversation", "general"]
+TestType = Literal["response", "tool_call", "conversation", "general"]
+AgentInteractionType = Literal["conversation", "general"]
 MemberRoleLiteral = Literal["owner", "admin"]  # mirrors DB CHECK(role IN ('owner','admin'))
 EvaluatorUuid = Annotated[str, StringConstraints(min_length=36, max_length=36)]
 
@@ -272,7 +273,7 @@ class TestListResponse(BaseModel):
         examples=[EXAMPLE_TEST_UUID],
     )
     name: str = Field(description="Name of the test")
-    type: TestTypeLiteral = Field(description=TEST_TYPE_DESCRIPTION)
+    type: TestType = Field(description=TEST_TYPE_DESCRIPTION)
     config: Optional[TestListConfig] = Field(
         None,
         description="Trimmed config carrying only the test's description. Fetch the test by ID for the full config and evaluators",
