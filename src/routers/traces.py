@@ -34,6 +34,7 @@ from db import (
     get_evaluators_by_uuids,
     get_trace,
     get_traces_by_uuids,
+    list_trace_labels,
     list_traces,
     set_test_evaluators,
     soft_delete_traces,
@@ -312,6 +313,12 @@ class TraceResponse(BaseModel):
     )
 
 
+class TraceLabelsResponse(BaseModel):
+    labels: List[str] = Field(
+        description="Every label in use on your live traces, A to Z"
+    )
+
+
 _SELECT_ALL_DESCRIPTION = (
     "Act on every trace matching the filters below instead of a list of IDs. "
     "`trace_ids` is ignored when this is on"
@@ -568,6 +575,21 @@ async def list_traces_endpoint(
         labels=labels,
     )
     return page_envelope([_to_summary(row) for row in rows], total, pagination)
+
+
+@router.get(
+    "/labels",
+    response_model=TraceLabelsResponse,
+    summary="List trace labels",
+)
+async def list_trace_labels_endpoint(
+    ctx: OrgContext = Depends(get_current_org),
+    agent_id: Optional[str] = Query(
+        None, description="Return only labels used by this agent's traces"
+    ),
+):
+    """List every label in use, so a filter can offer the whole set"""
+    return {"labels": list_trace_labels(ctx.org_uuid, agent_id=agent_id)}
 
 
 @router.post(

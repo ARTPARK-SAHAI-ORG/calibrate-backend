@@ -2041,3 +2041,37 @@ def test_bulk_delete_by_label_leaves_other_traces(client):
 
     remaining = client.get("/traces", headers=h).json()
     assert [t["uuid"] for t in remaining["items"]] == [kept["uuid"]]
+
+
+def test_labels_endpoint_lists_every_label_in_use(client):
+    h, agent_id = _signup_with_agent(client)
+    other_agent = _create_agent(client, h)["uuid"]
+    _post_trace(client, h, _payload(agent_id, _mid(), labels=["prod", "escalated"]))
+    _post_trace(client, h, _payload(agent_id, _mid(), labels=["prod"]))
+    _post_trace(client, h, _payload(other_agent, _mid(), labels=["staging"]))
+    _post_trace(client, h, _payload(agent_id, _mid()))
+
+    assert client.get("/traces/labels", headers=h).json()["labels"] == [
+        "escalated",
+        "prod",
+        "staging",
+    ]
+    assert client.get(
+        f"/traces/labels?agent_id={agent_id}", headers=h
+    ).json()["labels"] == ["escalated", "prod"]
+
+
+def test_labels_endpoint_is_empty_for_a_fresh_workspace(client):
+    h = _signup(client)
+    assert client.get("/traces/labels", headers=h).json()["labels"] == []
+
+
+def test_deleted_traces_drop_out_of_the_labels_list(client):
+    h, agent_id = _signup_with_agent(client)
+    gone = _post_trace(client, h, _payload(agent_id, _mid(), labels=["prod"]))
+    _post_trace(client, h, _payload(agent_id, _mid(), labels=["staging"]))
+
+    client.post(
+        "/traces/bulk-delete", json={"trace_ids": [gone["uuid"]]}, headers=h
+    )
+    assert client.get("/traces/labels", headers=h).json()["labels"] == ["staging"]
