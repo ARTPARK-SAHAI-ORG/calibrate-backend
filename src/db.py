@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Optional, List, Dict, Any, Set, Tuple, TYPE_CHECKING
 from contextlib import contextmanager
 
+import trace_scoring
 from utils import is_tool_call_row
 
 if TYPE_CHECKING:
@@ -4807,6 +4808,25 @@ def get_evaluators_for_agent(agent_id: str) -> List[Dict[str, Any]]:
             (agent_id,),
         )
         return [_parse_evaluator_row(row) for row in cursor.fetchall()]
+
+
+def resolve_live_evaluators(
+    agent_uuid: str,
+) -> List[Tuple[Dict[str, Any], Optional[Dict[str, Any]]]]:
+    """Linked evaluators paired with their live version, if any.
+
+    Each item is `(evaluator, live_version)`. `evaluator` is an `evaluators`
+    row (`_parse_evaluator_row`, same as `get_evaluators_for_agent`).
+    `live_version` is the `evaluator_versions` row for that evaluator's
+    `live_version_id` (`_parse_evaluator_version_row`), or `None` when the
+    id is unset or the version row is missing. Order matches
+    `get_evaluators_for_agent`.
+    """
+    evaluators = get_evaluators_for_agent(agent_uuid)
+    versions = get_evaluator_versions_by_uuids(
+        [ev.get("live_version_id") for ev in evaluators if ev.get("live_version_id")]
+    )
+    return [(ev, versions.get(ev.get("live_version_id"))) for ev in evaluators]
 
 
 def get_agents_for_tool(tool_id: str) -> List[Dict[str, Any]]:
@@ -10386,9 +10406,10 @@ def create_trace_with_eval_run(
 ) -> Dict[str, Any]:
     """Insert a trace and, when auto-scoring is on, its immutable run together.
 
-    Resolution (`trace_scoring.resolve_trace_scoring` / `as_plan`) runs
-    before the write lock so evaluator reads do not hold it. The inserts
-    share one transaction so a mid-write failure leaves neither row.
+    Resolution (`resolve_live_evaluators` then
+    `trace_scoring.resolve_trace_scoring` / `as_plan`) runs before the
+    write lock so evaluator reads do not hold it. The inserts share one
+    transaction so a mid-write failure leaves neither row.
 
     Uses BEGIN IMMEDIATE rather than a bare BEGIN: a deferred transaction
     starts as a reader and only upgrades at the first write, which can fail
@@ -10397,9 +10418,10 @@ def create_trace_with_eval_run(
     """
     plan = None
     if agent.get("auto_score_traces"):
-        from trace_scoring import ScoringPlanSkip, resolve_trace_scoring
-
-        plan = resolve_trace_scoring(agent).as_plan()
+        plan = trace_scoring.resolve_trace_scoring(
+            agent.get("interaction_type"),
+            resolve_live_evaluators(agent["uuid"]),
+        ).as_plan()
 
     now = int(time.time())
     with get_db_connection() as conn:
@@ -10416,7 +10438,7 @@ def create_trace_with_eval_run(
             metadata,
         )
         if plan is not None:
-            if isinstance(plan, ScoringPlanSkip) or not plan.evaluators:
+            if isinstance(plan, trace_scoring.ScoringPlanSkip) or not plan.evaluators:
                 _insert_trace_eval_run(
                     cur,
                     trace_uuid=row["uuid"],
@@ -10426,7 +10448,7 @@ def create_trace_with_eval_run(
                     scoring_plan=None,
                     error=(
                         plan.skip
-                        if isinstance(plan, ScoringPlanSkip)
+                        if isinstance(plan, trace_scoring.ScoringPlanSkip)
                         else "no_usable_evaluators"
                     ),
                     now=now,

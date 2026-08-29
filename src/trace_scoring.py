@@ -1,7 +1,9 @@
 """Trace-scoring eligibility and plan resolution.
 
 Shared by the agent opt-in API and ingest-time run creation. Lives outside
-`routers/` so `db.py` can call it without importing a router.
+`routers/` so `db.py` can call it without importing a router. Callers load
+`(evaluator, live_version)` pairs via `db.resolve_live_evaluators`; this
+module does not import `db`.
 """
 
 from __future__ import annotations
@@ -95,16 +97,21 @@ class TraceScoringResolution:
         ]
 
 
-def partition_trace_scoring_evaluators(
+def resolve_trace_scoring(
     interaction_type: Optional[str],
-    evaluators: List[Dict[str, Any]],
-    versions_by_uuid: Dict[str, Dict[str, Any]],
+    live_evaluators: List[Tuple[Dict[str, Any], Optional[Dict[str, Any]]]],
 ) -> TraceScoringResolution:
     """Split linked evaluators into eligible pins and ineligible-with-reason.
 
-    Filters to the required evaluator type *before* live-version / variable
-    checks. A mixed linked set must not be handed to `_validate_evaluators`,
-    which raises on the first type mismatch. Never raises.
+    Args:
+        interaction_type: `agents.interaction_type` (`conversation` | `general`; anything else is unsupported).
+        live_evaluators: The list from `db.resolve_live_evaluators`: each pair is an `evaluators` row
+            (`_parse_evaluator_row`) and its live `evaluator_versions` row (`_parse_evaluator_version_row`), or `None`
+            when `live_version_id` is unset or that version row is gone.
+        
+    Type is checked before live-version / variable checks so a mixed linked
+    set is never handed to `_validate_evaluators`, which raises on the first
+    mismatch. Never raises.
     """
     mode = TRACE_SCORING_MODE_BY_INTERACTION_TYPE.get(interaction_type or "")
     if mode is None:
@@ -118,14 +125,14 @@ def partition_trace_scoring_evaluators(
                     name=ev.get("name") or ev["uuid"],
                     reason=INELIGIBLE_REASON_WRONG_TYPE,
                 )
-                for ev in evaluators
+                for ev, _ in live_evaluators
             ],
         )
 
     evaluation_type, required_evaluator_type = mode
     eligible: List[TraceScoringPin] = []
     ineligible: List[TraceScoringIneligible] = []
-    for ev in evaluators:
+    for ev, version in live_evaluators:
         name = ev.get("name") or ev["uuid"]
         if ev.get("evaluator_type") != required_evaluator_type:
             ineligible.append(
@@ -136,8 +143,6 @@ def partition_trace_scoring_evaluators(
                 )
             )
             continue
-        live_id = ev.get("live_version_id") or ""
-        version = versions_by_uuid.get(live_id)
         if not version:
             ineligible.append(
                 TraceScoringIneligible(
@@ -168,16 +173,4 @@ def partition_trace_scoring_evaluators(
         evaluator_type=required_evaluator_type,
         eligible=eligible,
         ineligible=ineligible,
-    )
-
-
-def resolve_trace_scoring(agent: Dict[str, Any]) -> TraceScoringResolution:
-    """Load this agent's linked evaluators and partition them. Never raises."""
-    from db import get_evaluator_versions_by_uuids, get_evaluators_for_agent
-
-    evaluators = get_evaluators_for_agent(agent["uuid"])
-    live_ids = [ev.get("live_version_id") for ev in evaluators if ev.get("live_version_id")]
-    versions = get_evaluator_versions_by_uuids(live_ids)
-    return partition_trace_scoring_evaluators(
-        agent.get("interaction_type"), evaluators, versions
     )

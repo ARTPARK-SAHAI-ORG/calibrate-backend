@@ -45,6 +45,7 @@ from db import (
     get_evaluators_for_agent,
     add_evaluator_to_agent,
     remove_evaluator_from_agent,
+    resolve_live_evaluators,
 )
 from trace_scoring import resolve_trace_scoring
 from auth_utils import get_current_org, get_org_jwt_or_api_key, OrgContext
@@ -570,6 +571,13 @@ class TraceScoringEligibilityResponse(BaseModel):
     )
 
 
+def _resolve_agent_scoring(agent: Dict[str, Any]):
+    return resolve_trace_scoring(
+        agent.get("interaction_type"),
+        resolve_live_evaluators(agent["uuid"]),
+    )
+
+
 def _eligibility_response(resolution) -> TraceScoringEligibilityResponse:
     return TraceScoringEligibilityResponse(
         eligible=[
@@ -928,7 +936,7 @@ def get_trace_scoring_eligibility(
     agent = get_agent(agent_uuid)
     if not agent or agent.get("org_uuid") != ctx.org_uuid:
         raise HTTPException(status_code=404, detail="Agent not found")
-    return _eligibility_response(resolve_trace_scoring(agent))
+    return _eligibility_response(_resolve_agent_scoring(agent))
 
 
 @router.put(
@@ -980,7 +988,7 @@ def update_agent_endpoint(
     # Only the off→on flip is blocked. An already-on agent whose evaluators
     # later all become ineligible stays on; ingest skips those runs.
     if agent.auto_score_traces is True and not existing_agent.get("auto_score_traces"):
-        resolution = resolve_trace_scoring(existing_agent)
+        resolution = _resolve_agent_scoring(existing_agent)
         if not resolution.eligible:
             raise _enable_auto_score_rejected(resolution)
 

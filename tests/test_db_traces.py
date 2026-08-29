@@ -408,7 +408,8 @@ def test_empty_evaluators_plan_is_skipped_not_pending(monkeypatch):
             return ts.ScoringPlan(type="response", evaluators=[])
 
     monkeypatch.setattr(
-        "trace_scoring.resolve_trace_scoring", lambda _agent: _EmptyPlan()
+        "trace_scoring.resolve_trace_scoring",
+        lambda *_args, **_kwargs: _EmptyPlan(),
     )
 
     trace = _combined_ingest(org, agent)
