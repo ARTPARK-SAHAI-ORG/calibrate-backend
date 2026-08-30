@@ -274,6 +274,7 @@ class EvaluatorRunResponse(BaseModel):
     )
 from auth_utils import get_current_org, get_org_jwt_or_api_key, OrgContext
 from org_scope import ensure_owned_evaluator
+from routers.org_limits import enforce_max_rows_per_eval
 from pagination import (
     OptionalPaginationParams,
     PaginatedResponse,
@@ -2230,6 +2231,8 @@ def start_evaluator_run(
         )
     except EvaluatorResolutionError as e:
         raise HTTPException(status_code=400, detail=str(e))
+
+    enforce_max_rows_per_eval(ctx.org_uuid, len(items) * len(resolved))
 
     # Validate item payload shape early so we 400 instead of failing async.
     try:

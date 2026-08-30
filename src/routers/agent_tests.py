@@ -58,6 +58,7 @@ from llm_judge import (
     evaluator_value_name,
 )
 from routers.agents import AgentSummary, to_agent_summary
+from routers.org_limits import enforce_max_rows_per_eval
 from routers.tests import (
     AGENT_INTERACTION_TYPES,
     DEFAULT_AGENT_INTERACTION_TYPE,
@@ -2873,6 +2874,8 @@ def run_agent_test(
                 detail="No tests linked to this agent. Link tests first or provide test_uuids.",
             )
 
+    enforce_max_rows_per_eval(ctx.org_uuid, len(tests))
+
     # Get S3 configuration
     try:
         s3_bucket = get_s3_output_config()
@@ -3963,6 +3966,8 @@ def run_agent_benchmark(
                 tests.append(linked_by_uuid[u])
     else:
         tests = linked_tests
+
+    enforce_max_rows_per_eval(ctx.org_uuid, len(tests) * len(request.models))
 
     # Get S3 configuration
     try:
