@@ -2,12 +2,17 @@
 
 Set caps for each workspace on dataset rows per eval run. Members can read their
 workspace's effective limit via `/me/max-rows-per-eval`.
+
+The cap exists to bound what a run costs the server. A workspace paying for the
+run with its own provider keys therefore has no cap, which is why every call
+site names the providers its run will actually use.
 """
 
 import os
 import sqlite3
+from typing import Iterable, List, Optional
 
-from fastapi import APIRouter, HTTPException, Depends, Path
+from fastapi import APIRouter, HTTPException, Depends, Path, Query
 from pydantic import BaseModel, Field
 
 from db import (
@@ -19,6 +24,7 @@ from db import (
     delete_org_limits,
 )
 from auth_utils import get_current_org, OrgContext, require_superadmin, is_superadmin_user
+from provider_keys import covered_providers
 
 router = APIRouter(prefix="/org-limits", tags=["org-limits"])
 
@@ -73,31 +79,57 @@ class OrgLimitsCreateResponse(BaseModel):
     message: str = Field(description="Status message")
 
 
-def effective_max_rows_per_eval(org_uuid: str) -> int:
-    """Workspace cap on rows per eval run, falling back to the server default."""
+def _workspace_pays_for(org_uuid: str, providers: Iterable[str]) -> bool:
+    """True when the workspace's own keys cover every provider named."""
+    wanted = {p for p in providers if p}
+    if not wanted:
+        return False
+    return wanted <= covered_providers(org_uuid)
+
+
+def effective_max_rows_per_eval(
+    org_uuid: str, providers: Optional[Iterable[str]] = None
+) -> Optional[int]:
+    """Cap on rows per eval run, or None when the run is uncapped.
+
+    `providers` names what the run will actually call. Passing every one of them
+    covered by the workspace's own keys lifts the cap, because the run then costs
+    the server nothing. Omitting it always yields the cap.
+    """
+    if providers is not None and _workspace_pays_for(org_uuid, providers):
+        return None
     limits = get_org_limits(org_uuid)
     if limits and "max_rows_per_eval" in limits.get("limits", {}):
         return limits["limits"]["max_rows_per_eval"]
     return DEFAULT_MAX_ROWS_PER_EVAL
 
 
-def enforce_max_rows_per_eval(org_uuid: str, rows: int) -> None:
+def enforce_max_rows_per_eval(
+    org_uuid: str, rows: int, providers: Optional[Iterable[str]] = None
+) -> None:
     """Reject a run that would process more rows than the workspace allows."""
-    cap = effective_max_rows_per_eval(org_uuid)
-    if rows > cap:
+    cap = effective_max_rows_per_eval(org_uuid, providers)
+    if cap is not None and rows > cap:
         raise HTTPException(
             status_code=400,
             detail=(
                 f"This run would process {rows} rows, above this workspace's "
-                f"limit of {cap}. Run fewer rows, or ask an admin to raise the limit."
+                f"limit of {cap}. Run fewer rows, add your own provider API keys, "
+                "or ask an admin to raise the limit."
             ),
         )
 
 
 @router.get("/me/max-rows-per-eval", summary="Get own max rows per eval")
-def get_max_rows_per_eval(ctx: OrgContext = Depends(get_current_org)):
+def get_max_rows_per_eval(
+    ctx: OrgContext = Depends(get_current_org),
+    providers: Optional[List[str]] = Query(
+        None,
+        description="Providers an upcoming run would call. Answers `null` when your own API keys cover all of them",
+    ),
+):
     """Get the max rows per eval"""
-    return {"max_rows_per_eval": effective_max_rows_per_eval(ctx.org_uuid)}
+    return {"max_rows_per_eval": effective_max_rows_per_eval(ctx.org_uuid, providers)}
 
 
 @router.post("", response_model=OrgLimitsCreateResponse, summary="Create workspace limits")

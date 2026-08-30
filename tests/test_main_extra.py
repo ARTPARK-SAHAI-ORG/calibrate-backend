@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import uuid
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -28,6 +29,20 @@ def client(app):
         ):
             with TestClient(app) as c:
                 yield c
+
+
+@pytest.fixture(scope="module")
+def auth(client):
+    body = client.post(
+        "/auth/signup",
+        json={
+            "first_name": "Prov",
+            "last_name": "User",
+            "email": f"prov-{uuid.uuid4().hex[:8]}@example.com",
+            "password": "passw0rd",
+        },
+    ).json()
+    return {"Authorization": f"Bearer {body['access_token']}"}
 
 
 @pytest.fixture(autouse=True)
@@ -332,7 +347,7 @@ def _openrouter_models_client(payload):
     return fake_client
 
 
-def test_openrouter_filtered_list(client, monkeypatch):
+def test_openrouter_filtered_list(client, auth, monkeypatch):
     monkeypatch.setenv("OPENROUTER_API_KEY", "k")
     monkeypatch.setenv("OPENROUTER_ALLOWED_PROVIDERS", "anthropic,openai")
 
@@ -347,7 +362,7 @@ def test_openrouter_filtered_list(client, monkeypatch):
 
     fake_client = _openrouter_models_client(payload)
     with patch("main.httpx.AsyncClient", return_value=fake_client):
-        resp = client.get("/openrouter/providers")
+        resp = client.get("/openrouter/providers", headers=auth)
     assert resp.status_code == 200
     body = resp.json()
     # Slug is the model-id author prefix, de-duped across models; name is the label.
@@ -357,7 +372,7 @@ def test_openrouter_filtered_list(client, monkeypatch):
     ]
 
 
-def test_openrouter_filters_by_author_prefix_not_serving_provider(client, monkeypatch):
+def test_openrouter_filters_by_author_prefix_not_serving_provider(client, auth, monkeypatch):
     monkeypatch.setenv("OPENROUTER_API_KEY", "k")
     # The user allows "google" (the model-id author), NOT "google-ai-studio"
     # (OpenRouter's serving-provider slug) — Gemini must still surface.
@@ -372,13 +387,13 @@ def test_openrouter_filters_by_author_prefix_not_serving_provider(client, monkey
 
     fake_client = _openrouter_models_client(payload)
     with patch("main.httpx.AsyncClient", return_value=fake_client):
-        resp = client.get("/openrouter/providers")
+        resp = client.get("/openrouter/providers", headers=auth)
     assert resp.status_code == 200
     slugs = {p["slug"] for p in resp.json()["providers"]}
     assert slugs == {"openai", "google"}
 
 
-def test_openrouter_filtered_list_http_error(client, monkeypatch):
+def test_openrouter_filtered_list_http_error(client, auth, monkeypatch):
     import httpx
 
     monkeypatch.setenv("OPENROUTER_API_KEY", "k")
@@ -390,7 +405,7 @@ def test_openrouter_filtered_list_http_error(client, monkeypatch):
     fake_client.__aexit__ = AsyncMock(return_value=None)
 
     with patch("main.httpx.AsyncClient", return_value=fake_client):
-        resp = client.get("/openrouter/providers")
+        resp = client.get("/openrouter/providers", headers=auth)
     assert resp.status_code == 502
 
 
@@ -408,51 +423,51 @@ def _clear_provider_env(monkeypatch):
             monkeypatch.delenv(var, raising=False)
 
 
-def test_providers_none_configured(client, monkeypatch):
+def test_providers_none_configured(client, auth, monkeypatch):
     _clear_provider_env(monkeypatch)
-    resp = client.get("/providers")
+    resp = client.get("/providers", headers=auth)
     assert resp.status_code == 200
     assert resp.json() == {"providers": []}
 
 
-def test_providers_reports_only_configured(client, monkeypatch):
+def test_providers_reports_only_configured(client, auth, monkeypatch):
     _clear_provider_env(monkeypatch)
     monkeypatch.setenv("OPENAI_API_KEY", "k")
     monkeypatch.setenv("DEEPGRAM_API_KEY", "k")
 
-    resp = client.get("/providers")
+    resp = client.get("/providers", headers=auth)
     assert resp.status_code == 200
     assert set(resp.json()["providers"]) == {"openai", "deepgram"}
 
 
-def test_providers_empty_string_key_is_unset(client, monkeypatch):
+def test_providers_empty_string_key_is_unset(client, auth, monkeypatch):
     _clear_provider_env(monkeypatch)
     monkeypatch.setenv("SARVAM_API_KEY", "")
 
-    resp = client.get("/providers")
+    resp = client.get("/providers", headers=auth)
     assert "sarvam" not in resp.json()["providers"]
 
 
-def test_providers_multi_var_requires_all(client, monkeypatch):
+def test_providers_multi_var_requires_all(client, auth, monkeypatch):
     _clear_provider_env(monkeypatch)
     # google needs BOTH credentials + project id — one alone is not enough.
     monkeypatch.setenv("GOOGLE_APPLICATION_CREDENTIALS", "/creds.json")
 
-    resp = client.get("/providers")
+    resp = client.get("/providers", headers=auth)
     assert "google" not in resp.json()["providers"]
 
     monkeypatch.setenv("GOOGLE_CLOUD_PROJECT_ID", "proj")
-    resp = client.get("/providers")
+    resp = client.get("/providers", headers=auth)
     assert "google" in resp.json()["providers"]
 
 
-def test_providers_fake_flag_returns_all(client, monkeypatch):
+def test_providers_fake_flag_returns_all(client, auth, monkeypatch):
     import provider_status
 
     _clear_provider_env(monkeypatch)
     monkeypatch.setenv("FAKE_AI_PROVIDERS", "1")
 
-    resp = client.get("/providers")
+    resp = client.get("/providers", headers=auth)
     assert resp.status_code == 200
     assert resp.json()["providers"] == list(provider_status.PROVIDER_ENV_VARS)
 

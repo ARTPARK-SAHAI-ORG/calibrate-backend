@@ -57,6 +57,7 @@ from llm_judge import (
     default_output_config,
     evaluator_value_name,
 )
+from provider_keys import provider_env
 from routers.agents import AgentSummary, to_agent_summary
 from routers.org_limits import effective_max_rows_per_eval, enforce_max_rows_per_eval
 from routers.tests import (
@@ -2439,6 +2440,7 @@ def run_llm_test_task(
                         text=True,
                         start_new_session=True,
                         cwd=str(temp_path),
+                        env=provider_env(agent.get("org_uuid"), temp_path),
                     )
 
                     # Poll for process completion while updating intermediate results
@@ -2883,7 +2885,7 @@ def run_agent_test(
                 detail="No tests linked to this agent. Link tests first or provide test_uuids.",
             )
 
-    enforce_max_rows_per_eval(ctx.org_uuid, len(tests))
+    enforce_max_rows_per_eval(ctx.org_uuid, len(tests), ["openrouter"])
 
     # Get S3 configuration
     try:
@@ -2909,7 +2911,7 @@ def _run_tests_for_agents(
     """
     runs: List[BatchTestRun] = []
     skipped: List[BatchTestSkip] = []
-    max_rows = effective_max_rows_per_eval(org_uuid)
+    max_rows = effective_max_rows_per_eval(org_uuid, ["openrouter"])
 
     for agent in agents:
         if _agent_connection_unverified(agent):
@@ -2933,7 +2935,7 @@ def _run_tests_for_agents(
             )
             continue
 
-        if len(tests) > max_rows:
+        if max_rows is not None and len(tests) > max_rows:
             skipped.append(
                 BatchTestSkip(
                     agent_name=agent.get("name", ""),
@@ -3607,6 +3609,7 @@ def run_benchmark_task(
                         text=True,
                         start_new_session=True,
                         cwd=str(temp_path),
+                        env=provider_env(agent.get("org_uuid"), temp_path),
                     )
 
                     # Poll for process completion while updating intermediate results
@@ -3989,7 +3992,9 @@ def run_agent_benchmark(
     else:
         tests = linked_tests
 
-    enforce_max_rows_per_eval(ctx.org_uuid, len(tests) * len(request.models))
+    enforce_max_rows_per_eval(
+        ctx.org_uuid, len(tests) * len(request.models), ["openrouter"]
+    )
 
     # Get S3 configuration
     try:

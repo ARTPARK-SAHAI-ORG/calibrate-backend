@@ -269,8 +269,10 @@ def test_recover_stt_job_starts_thread():
                 "language": "en",
                 "s3_bucket": "b",
             },
+            "org-1",
         )
         thread_mock.return_value.start.assert_called_once()
+        assert thread_mock.call_args.kwargs["args"][3] == "org-1"
 
 
 def test_recover_tts_job_starts_thread():
@@ -285,8 +287,10 @@ def test_recover_tts_job_starts_thread():
                 "language": "en",
                 "s3_bucket": "b",
             },
+            "org-1",
         )
         thread_mock.return_value.start.assert_called_once()
+        assert thread_mock.call_args.kwargs["args"][3] == "org-1"
 
 
 def test_recover_llm_unit_test_missing_agent_raises():

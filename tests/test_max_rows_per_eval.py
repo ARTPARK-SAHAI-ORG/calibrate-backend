@@ -359,3 +359,111 @@ def test_run_counts_a_repeated_test_once(client, monkeypatch):
         headers=h,
     )
     assert missing.status_code == 404
+
+
+# ---------------------------------------------------------------------------
+# The cap lifts when the workspace pays for the run with its own provider keys
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def own_keys(monkeypatch):
+    """Store this workspace's own keys for the providers a test names."""
+    from cryptography.fernet import Fernet
+
+    import provider_keys as pk
+
+    monkeypatch.setenv(pk.ENCRYPTION_KEY_ENV, Fernet.generate_key().decode())
+
+    def _store(client, auth, *providers):
+        for provider in providers:
+            values = {
+                env_var: (
+                    '{"client_email": "r@p.iam.gserviceaccount.com"}'
+                    if pk.env_var_kind(env_var) == pk.FILE
+                    else f"wk-{env_var.lower()}"
+                )
+                for env_var in pk.provider_env_vars(provider)
+            }
+            resp = client.put(
+                f"/provider-keys/{provider}",
+                json={"values": values},
+                headers=auth["headers"],
+            )
+            assert resp.status_code == 200, resp.text
+
+    return _store
+
+
+def test_stt_stays_capped_when_only_the_transcriber_is_paid_for(
+    client, monkeypatch, own_keys
+):
+    auth = _signup(client)
+    monkeypatch.setenv("S3_OUTPUT_BUCKET", "test-bucket")
+    own_keys(client, auth, "openai")
+
+    # The Sarvam judge bundle bills OpenRouter, which this workspace has not paid for.
+    resp = client.post(
+        "/stt/evaluate",
+        json={
+            "providers": ["openai"],
+            "language": "en",
+            "audio_paths": ["s3://b/1.wav", "s3://b/2.wav"],
+            "texts": ["one", "two"],
+            "sarvam_judges": True,
+        },
+        headers=auth["headers"],
+    )
+    assert resp.status_code == 400
+
+
+def test_stt_is_uncapped_once_every_provider_it_calls_is_paid_for(
+    client, monkeypatch, own_keys
+):
+    auth = _signup(client)
+    monkeypatch.setenv("S3_OUTPUT_BUCKET", "test-bucket")
+    own_keys(client, auth, "openai", "openrouter")
+
+    resp = client.post(
+        "/stt/evaluate",
+        json={
+            "providers": ["openai"],
+            "language": "en",
+            "audio_paths": ["s3://b/1.wav", "s3://b/2.wav"],
+            "texts": ["one", "two"],
+            "sarvam_judges": True,
+        },
+        headers=auth["headers"],
+    )
+    assert resp.status_code == 200, resp.text
+
+
+def test_tts_is_uncapped_once_its_providers_are_paid_for(client, monkeypatch, own_keys):
+    auth = _signup(client)
+    monkeypatch.setenv("S3_OUTPUT_BUCKET", "test-bucket")
+    own_keys(client, auth, "openai", "openrouter")
+
+    resp = client.post(
+        "/tts/evaluate",
+        json={"providers": ["openai"], "language": "en", "texts": ["one", "two"]},
+        headers=auth["headers"],
+    )
+    assert resp.status_code == 200, resp.text
+
+
+def test_the_reported_cap_reflects_the_providers_a_run_would_call(
+    client, monkeypatch, own_keys
+):
+    auth = _signup(client)
+    own_keys(client, auth, "sarvam")
+
+    def cap(*providers):
+        query = "".join(f"?providers={p}" if i == 0 else f"&providers={p}"
+                        for i, p in enumerate(providers))
+        return client.get(
+            f"/org-limits/me/max-rows-per-eval{query}", headers=auth["headers"]
+        ).json()["max_rows_per_eval"]
+
+    assert cap() == 1
+    assert cap("sarvam") is None
+    assert cap("sarvam", "openrouter") == 1

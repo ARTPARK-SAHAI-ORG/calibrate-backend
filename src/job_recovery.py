@@ -212,9 +212,9 @@ def recover_pending_jobs():
 
             try:
                 if job_type == "stt-eval":
-                    _recover_stt_job(job_id, details)
+                    _recover_stt_job(job_id, details, job.get("org_uuid", ""))
                 elif job_type == "tts-eval":
-                    _recover_tts_job(job_id, details)
+                    _recover_tts_job(job_id, details, job.get("org_uuid", ""))
                 elif job_type == "annotation-eval":
                     _recover_annotation_eval_job(job)
                 else:
@@ -334,7 +334,7 @@ def recover_pending_jobs():
     _start_queued_jobs()
 
 
-def _recover_stt_job(job_id: str, details: dict):
+def _recover_stt_job(job_id: str, details: dict, org_uuid: str):
     """Recover an STT evaluation job."""
     from routers.stt import run_evaluation_task, STTEvaluationRequest
 
@@ -353,14 +353,14 @@ def _recover_stt_job(job_id: str, details: dict):
 
     thread = threading.Thread(
         target=run_evaluation_task,
-        args=(job_id, request, s3_bucket),
+        args=(job_id, request, s3_bucket, org_uuid),
         daemon=True,
     )
     thread.start()
     logger.info(f"STT job {job_id} recovery started")
 
 
-def _recover_tts_job(job_id: str, details: dict):
+def _recover_tts_job(job_id: str, details: dict, org_uuid: str):
     """Recover a TTS evaluation job."""
     from routers.tts import run_tts_evaluation_task, TTSEvaluationRequest
 
@@ -378,7 +378,7 @@ def _recover_tts_job(job_id: str, details: dict):
 
     thread = threading.Thread(
         target=run_tts_evaluation_task,
-        args=(job_id, request, s3_bucket),
+        args=(job_id, request, s3_bucket, org_uuid),
         daemon=True,
     )
     thread.start()

@@ -79,6 +79,7 @@ from utils import (
 )
 from auth_utils import get_current_org, OrgContext
 from routers.org_limits import enforce_max_rows_per_eval
+from provider_keys import provider_env
 from datetime import datetime
 
 # Job types that share the same queue
@@ -1310,6 +1311,23 @@ def _build_calibrate_simulation_config(
     return config
 
 
+def _simulation_providers(agent: Dict[str, Any], simulation_type: str) -> List[str]:
+    """Providers a run will call, for the row-limit check. A voice run drives the
+    agent's own speech-to-text and text-to-speech on top of the judge."""
+    providers = ["openrouter"]
+    if simulation_type == "voice":
+        agent_config = agent.get("config") or {}
+        providers.append(
+            (agent_config.get("stt") or {}).get("provider")
+            or env_str("DEFAULT_AGENT_STT_PROVIDER", "google")
+        )
+        providers.append(
+            (agent_config.get("tts") or {}).get("provider")
+            or env_str("DEFAULT_AGENT_TTS_PROVIDER", "google")
+        )
+    return providers
+
+
 def _extract_persona_scenario_indices(sim_name: str) -> tuple:
     """
     Extract persona and scenario indices from simulation directory name.
@@ -1511,6 +1529,7 @@ def _run_calibrate_text_simulation(
     s3_prefix: str,
     task_id: Optional[str] = None,
     log_prefix: str = "LLM simulation",
+    env: Optional[Dict[str, str]] = None,
 ) -> Dict[str, Any]:
     """
     Run calibrate llm simulations run command and return parsed results.
@@ -1585,6 +1604,7 @@ def _run_calibrate_text_simulation(
             stdout=stdout_file,
             stderr=stderr_file,
             start_new_session=True,
+            env=env,
         )
 
         # Poll for process completion while updating intermediate results
@@ -1997,6 +2017,7 @@ def _run_calibrate_voice_simulation(
     s3_prefix: str,
     task_id: str,
     log_prefix: str = "Voice simulation",
+    env: Optional[Dict[str, str]] = None,
 ) -> Dict[str, Any]:
     """
     Run calibrate agent simulation command and return parsed results.
@@ -2063,6 +2084,7 @@ def _run_calibrate_voice_simulation(
             stderr=stderr_file,
             start_new_session=True,  # Detach from parent process group
             cwd=str(output_dir),
+            env=env,
         )
 
         # Store the process PID and process group ID in the job for cleanup on restart
@@ -2329,6 +2351,8 @@ def run_simulation_task(
                 # Create input and output directories
                 input_dir = temp_path / "input"
                 output_dir = temp_path / "output"
+                # Written into temp_path so a credentials file dies with the run.
+                run_env = provider_env(agent.get("org_uuid"), temp_path)
 
                 # Run calibrate simulation based on type
                 results_prefix = f"simulations/runs/{task_id}"
@@ -2341,6 +2365,7 @@ def run_simulation_task(
                         s3_prefix=results_prefix,
                         task_id=task_id,
                         log_prefix=f"Voice simulation {task_id}",
+                        env=run_env,
                     )
                 else:
                     # Agent connection mode has no params.model — pass None
@@ -2359,6 +2384,7 @@ def run_simulation_task(
                         s3_prefix=results_prefix,
                         task_id=task_id,
                         log_prefix=f"Chat simulation {task_id}",
+                        env=run_env,
                     )
 
                 # Check if job was aborted by user - don't overwrite abort results
@@ -2496,7 +2522,11 @@ def run_simulation_endpoint(
             detail="Simulation has no scenarios. Add at least one scenario.",
         )
 
-    enforce_max_rows_per_eval(ctx.org_uuid, len(personas) * len(scenarios))
+    enforce_max_rows_per_eval(
+        ctx.org_uuid,
+        len(personas) * len(scenarios),
+        _simulation_providers(agent, request.type),
+    )
 
     # Get S3 configuration
     try:

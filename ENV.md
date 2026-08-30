@@ -39,6 +39,7 @@ These are **not read directly** by most backend modules; they are passed through
 | **`ELEVENLABS_API_KEY`**             | ElevenLabs TTS.                                                                                                                                                                                                                                          |
 | **`OPENROUTER_API_KEY`**             | OpenRouter key for LLM/judge flows and [`GET /openrouter/providers`](src/main.py). If unset, that endpoint returns `null` (OpenRouter treated as disabled).                                                                                              |
 | **`OPENROUTER_ALLOWED_PROVIDERS`**   | Optional comma-separated OpenRouter **provider slugs**. If empty/unset, [`GET /openrouter/providers`](src/main.py) reports all providers (`"providers": "all"`). If set, the response lists only those slugs after fetching the catalog from OpenRouter. |
+| **`PROVIDER_KEY_ENCRYPTION_KEY`**    | Locks the provider API keys a workspace saves for itself, which its runs use instead of the keys above ([`src/provider_keys.py`](src/provider_keys.py)). Generate one with `python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"`. Optional: leave it unset and workspaces cannot save their own keys, so every run uses the keys above. **Once set, do not change it.** Every key a workspace already saved becomes unreadable, and those workspaces quietly go back to the keys above. |
 
 ---
 

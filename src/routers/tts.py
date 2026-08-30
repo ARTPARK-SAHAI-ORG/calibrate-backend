@@ -29,6 +29,7 @@ from dataset_utils import (
 )
 from auth_utils import get_current_org, OrgContext
 from routers.org_limits import enforce_max_rows_per_eval
+from provider_keys import provider_env
 from llm_judge import build_evaluator_cli_payload, refresh_evaluators_to_live
 from utils import (
     job_slot,
@@ -64,6 +65,13 @@ from utils import (
 EVAL_JOB_TYPES = ["stt-eval", "tts-eval", "annotation-eval"]
 
 
+def _providers_called_by_run(
+    providers: List[str], has_evaluators: bool
+) -> List[str]:
+    """Every provider the run bills: the voices, plus the judge's own."""
+    return list(providers) + (["openrouter"] if has_evaluators else [])
+
+
 def _start_tts_job_from_queue(job: dict) -> bool:
     """Start a TTS evaluation job from the queue.
 
@@ -78,7 +86,7 @@ def _start_tts_job_from_queue(job: dict) -> bool:
     # Start background task in a separate thread
     thread = threading.Thread(
         target=run_tts_evaluation_task,
-        args=(job_id, request, s3_bucket),
+        args=(job_id, request, s3_bucket, job["org_uuid"]),
         daemon=True,
     )
     thread.start()
@@ -344,6 +352,7 @@ def run_tts_evaluation_task(
     task_id: str,
     request: TTSEvaluationRequest,
     s3_bucket: str,
+    org_uuid: str,
 ):
     """Run the TTS evaluation in the background."""
     try:
@@ -422,6 +431,7 @@ def run_tts_evaluation_task(
                         text=True,
                         start_new_session=True,
                         cwd=str(temp_path),
+                        env=provider_env(org_uuid, temp_path),
                     )
 
                     # Store PID and output dir for cleanup and intermediate results
@@ -718,8 +728,6 @@ def evaluate_tts(
 
     request.texts = texts
 
-    enforce_max_rows_per_eval(ctx.org_uuid, len(texts))
-
     try:
         s3_bucket = get_s3_output_config()
     except ValueError as e:
@@ -730,6 +738,12 @@ def evaluate_tts(
         org_uuid=ctx.org_uuid,
         default_slug="default-tts-audio-quality",
         expected_evaluator_type="tts",
+    )
+
+    enforce_max_rows_per_eval(
+        ctx.org_uuid,
+        len(texts),
+        _providers_called_by_run(request.providers, bool(resolved_evaluators)),
     )
 
     with job_slot(
@@ -757,7 +771,7 @@ def evaluate_tts(
         # Start background task in a separate thread
         thread = threading.Thread(
             target=run_tts_evaluation_task,
-            args=(job_id, request, s3_bucket),
+            args=(job_id, request, s3_bucket, ctx.org_uuid),
             daemon=True,
         )
         thread.start()
@@ -814,7 +828,11 @@ def retry_tts_evaluation(
         expected_type="tts",
     )
 
-    enforce_max_rows_per_eval(ctx.org_uuid, len(resolved.texts))
+    enforce_max_rows_per_eval(
+        ctx.org_uuid,
+        len(resolved.texts),
+        _providers_called_by_run(providers, bool(details.get("evaluators"))),
+    )
 
     rerun_details = {
         "texts": resolved.texts,
@@ -842,7 +860,7 @@ def retry_tts_evaluation(
     if initial_status == TaskStatus.IN_PROGRESS.value:
         thread = threading.Thread(
             target=run_tts_evaluation_task,
-            args=(task_id, request, s3_bucket),
+            args=(task_id, request, s3_bucket, ctx.org_uuid),
             daemon=True,
         )
         thread.start()

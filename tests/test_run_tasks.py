@@ -128,7 +128,7 @@ def test_stt_run_evaluation_task_success(tmp_path):
             providers=["openai"],
             language="en",
         )
-        run_evaluation_task(job_uuid, request, "bucket")
+        run_evaluation_task(job_uuid, request, "bucket", "org-1")
 
     job = db.get_job(job_uuid)
     # Success path → status moves to done
@@ -224,7 +224,7 @@ def test_stt_run_evaluation_task_refreshes_evaluators_to_live():
             providers=["openai"],
             language="en",
         )
-        run_evaluation_task(job_uuid, request, "bucket")
+        run_evaluation_task(job_uuid, request, "bucket", "org-1")
 
     stored = db.get_job(job_uuid)["details"]["evaluators"][0]
     assert stored["evaluator_version_id"] == v2
@@ -257,7 +257,7 @@ def test_stt_run_evaluation_task_subprocess_failure(tmp_path):
             providers=["openai"],
             language="en",
         )
-        run_evaluation_task(job_uuid, request, "bucket")
+        run_evaluation_task(job_uuid, request, "bucket", "org-1")
 
     job = db.get_job(job_uuid)
     assert job["status"] == "failed"
@@ -278,7 +278,7 @@ def test_stt_run_evaluation_task_unexpected_exception():
             providers=["openai"],
             language="en",
         )
-        run_evaluation_task(job_uuid, request, "bucket")
+        run_evaluation_task(job_uuid, request, "bucket", "org-1")
 
     job = db.get_job(job_uuid)
     assert job["status"] == "failed"
@@ -340,7 +340,7 @@ def test_tts_run_evaluation_task_with_outputs():
         request = TTSEvaluationRequest(
             texts=["hi"], providers=["openai"], language="en"
         )
-        run_tts_evaluation_task(job_uuid, request, "bucket")
+        run_tts_evaluation_task(job_uuid, request, "bucket", "org-1")
 
     job = db.get_job(job_uuid)
     # The post-processing path ran; final status depends on path-mapping
@@ -379,7 +379,7 @@ def test_tts_run_evaluation_task_refreshes_evaluators_to_live():
         request = TTSEvaluationRequest(
             texts=["hi"], providers=["openai"], language="en"
         )
-        run_tts_evaluation_task(job_uuid, request, "bucket")
+        run_tts_evaluation_task(job_uuid, request, "bucket", "org-1")
 
     stored = db.get_job(job_uuid)["details"]["evaluators"][0]
     assert stored["evaluator_version_id"] == v2
@@ -407,7 +407,7 @@ def test_tts_run_evaluation_task_failure():
         request = TTSEvaluationRequest(
             texts=["hi"], providers=["openai"], language="en"
         )
-        run_tts_evaluation_task(job_uuid, request, "bucket")
+        run_tts_evaluation_task(job_uuid, request, "bucket", "org-1")
 
     job = db.get_job(job_uuid)
     assert job["status"] == "failed"

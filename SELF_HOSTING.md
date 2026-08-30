@@ -153,6 +153,14 @@ GOOGLE_API_KEY=
 GOOGLE_APPLICATION_CREDENTIALS=
 GOOGLE_CLOUD_PROJECT_ID=
 
+# Optional. Leave it empty and every run uses the provider keys above. Set it
+# and each workspace can save its own provider keys, which its runs use
+# instead. Generate one with:
+#   python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"
+# Once set, do not change it: every key a workspace already saved becomes
+# unreadable, and those workspaces quietly go back to the keys above.
+PROVIDER_KEY_ENCRYPTION_KEY=
+
 # Auth
 GOOGLE_CLIENT_ID=
 
@@ -252,6 +260,7 @@ Go to **GitHub → Repo settings → Environments → New environment** named `P
 | `VM_USER`                                     | `ubuntu` (or `ec2-user` for Amazon Linux)                                   |
 | `VM_SSH_KEY`                                  | Contents of the private key (`<your-key>.pem` or `~/.ssh/calibrate-deploy`) |
 | Provider API keys (`OPENROUTER_API_KEY` etc.) | As needed                                                                   |
+| `PROVIDER_KEY_ENCRYPTION_KEY`                 | Optional, see the `.env` file above                                         |
 | `SENTRY_*`, `LANGFUSE_*`, etc.                | Optional                                                                    |
 
 Leave `S3_ENDPOINT_URL`, `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY` empty (or unset) — the IAM instance role on the EC2 provides S3 credentials automatically.
@@ -437,6 +446,14 @@ GOOGLE_API_KEY=
 GOOGLE_APPLICATION_CREDENTIALS=
 GOOGLE_CLOUD_PROJECT_ID=
 
+# Optional. Leave it empty and every run uses the provider keys above. Set it
+# and each workspace can save its own provider keys, which its runs use
+# instead. Generate one with:
+#   python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"
+# Once set, do not change it: every key a workspace already saved becomes
+# unreadable, and those workspaces quietly go back to the keys above.
+PROVIDER_KEY_ENCRYPTION_KEY=
+
 # Auth
 GOOGLE_CLIENT_ID=
 
@@ -539,6 +556,7 @@ Go to **GitHub → Repo settings → Environments → New environment** named `P
 | `VM_USER`                                     | `ubuntu` (or whatever username matches the SSH key)         |
 | `VM_SSH_KEY`                                  | Contents of `~/.ssh/calibrate-deploy` (the **private** key) |
 | Provider API keys (`OPENROUTER_API_KEY` etc.) | As needed                                                   |
+| `PROVIDER_KEY_ENCRYPTION_KEY`                 | Optional, see the `.env` file above                         |
 | `SENTRY_*`, `LANGFUSE_*`, etc.                | Optional                                                    |
 
 ### 4. Trigger a deploy

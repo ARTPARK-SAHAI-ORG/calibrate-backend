@@ -32,6 +32,11 @@ def client(app):
             yield c
 
 
+@pytest.fixture(scope="module")
+def auth(client):
+    return {"Authorization": f"Bearer {_signup(client)['access_token']}"}
+
+
 def _signup(client: TestClient, *, suffix: Optional[str] = None) -> Dict:
     suffix = suffix or uuid.uuid4().hex[:8]
     resp = client.post(
@@ -476,17 +481,17 @@ def test_presigned_url_failure(client, monkeypatch):
 # ---------------------------------------------------------------------------
 
 
-def test_openrouter_providers_disabled(client, monkeypatch):
+def test_openrouter_providers_disabled(client, auth, monkeypatch):
     monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
-    resp = client.get("/openrouter/providers")
+    resp = client.get("/openrouter/providers", headers=auth)
     assert resp.status_code == 200
     assert resp.json() is None
 
 
-def test_openrouter_providers_all(client, monkeypatch):
+def test_openrouter_providers_all(client, auth, monkeypatch):
     monkeypatch.setenv("OPENROUTER_API_KEY", "key")
     monkeypatch.setenv("OPENROUTER_ALLOWED_PROVIDERS", "")
-    resp = client.get("/openrouter/providers")
+    resp = client.get("/openrouter/providers", headers=auth)
     assert resp.json() == {"providers": "all"}
 
 

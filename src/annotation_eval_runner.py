@@ -46,6 +46,7 @@ from llm_judge import (
     build_evaluator_cli_payload,
     build_evaluator_cli_payload_unrendered,
 )
+from provider_keys import provider_env
 from utils import (
     TaskStatus,
     capture_exception_to_sentry,
@@ -1112,6 +1113,7 @@ def _run_calibrate_eval_only(
     heartbeat_seconds: int = 2,
     job_uuid: Optional[str] = None,
     timeout_seconds: int = ANNOTATION_EVAL_TIMEOUT_SECONDS,
+    env: Optional[Dict[str, str]] = None,
 ) -> Tuple[int, str, str]:
     """Spawn the calibrate subprocess; redirect stdout/stderr to disk to avoid
     pipe-buffer deadlocks; poll until done; return (returncode, stdout, stderr).
@@ -1142,6 +1144,7 @@ def _run_calibrate_eval_only(
             text=True,
             start_new_session=True,
             cwd=str(cwd),
+            env=env,
         )
         # Notify caller of pid/pgid so it can be persisted (used for recovery
         # to kill an orphaned process if the backend restarts mid-run).
@@ -1423,6 +1426,8 @@ def _run_job(
                     on_started=lambda pid: _persist_pgid(job_uuid, pid),
                     on_progress=_flush_partial_runs,
                     job_uuid=job_uuid,
+                    # Written into tmp so a credentials file dies with the run.
+                    env=provider_env(task.get("org_uuid"), tmp),
                 )
                 if rc != 0:
                     logger.error(

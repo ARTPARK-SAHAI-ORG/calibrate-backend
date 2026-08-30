@@ -363,6 +363,33 @@ def init_db():
             "ON api_keys(key_prefix) WHERE deleted_at IS NULL"
         )
 
+        # One row per environment variable rather than per provider, so Google
+        # Cloud's credentials-plus-project pair needs no special case and building
+        # a run's environment stays a flat loop.
+        cursor.execute(
+            """
+            CREATE TABLE IF NOT EXISTS org_provider_keys (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                uuid TEXT NOT NULL UNIQUE,
+                org_uuid TEXT NOT NULL,
+                owner_user_id TEXT NOT NULL,
+                provider TEXT NOT NULL,
+                env_var TEXT NOT NULL,
+                value_encrypted TEXT NOT NULL,
+                display TEXT NOT NULL DEFAULT '',
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                deleted_at TIMESTAMP DEFAULT NULL,
+                FOREIGN KEY (org_uuid) REFERENCES organizations(uuid),
+                FOREIGN KEY (owner_user_id) REFERENCES users(uuid)
+            )
+        """
+        )
+        cursor.execute(
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_org_provider_keys_active "
+            "ON org_provider_keys(org_uuid, env_var) WHERE deleted_at IS NULL"
+        )
+
         cursor.execute(
             """
             CREATE TABLE IF NOT EXISTS agents (
@@ -10349,3 +10376,80 @@ def soft_delete_traces(org_uuid: str, *, trace_ids: List[str]) -> int:
             deleted += cursor.rowcount or 0
         conn.commit()
     return deleted
+
+
+def get_org_provider_keys(
+    org_uuid: str, provider: Optional[str] = None
+) -> List[Dict[str, Any]]:
+    """Live provider-key rows for a workspace, newest provider grouping last.
+
+    Values come back still encrypted — decryption lives in `provider_keys.py`.
+    """
+    sql = (
+        "SELECT * FROM org_provider_keys "
+        "WHERE org_uuid = ? AND deleted_at IS NULL"
+    )
+    params: List[Any] = [org_uuid]
+    if provider is not None:
+        sql += " AND provider = ?"
+        params.append(provider)
+    sql += " ORDER BY provider ASC, env_var ASC"
+    with get_db_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute(sql, params)
+        return [dict(row) for row in cursor.fetchall()]
+
+
+def set_org_provider_keys(
+    org_uuid: str,
+    owner_user_id: str,
+    provider: str,
+    rows: List[Dict[str, str]],
+) -> List[Dict[str, Any]]:
+    """Replace every stored value for one provider in one transaction.
+
+    Replacing wholesale rather than merging is what keeps a provider from ending
+    up half-configured: the caller validated the complete set, and the partial
+    unique index would otherwise reject re-adding a variable whose old row is
+    still live.
+    """
+    with get_db_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            "UPDATE org_provider_keys SET deleted_at = CURRENT_TIMESTAMP "
+            "WHERE org_uuid = ? AND provider = ? AND deleted_at IS NULL",
+            (org_uuid, provider),
+        )
+        for row in rows:
+            cursor.execute(
+                """
+                INSERT INTO org_provider_keys
+                    (uuid, org_uuid, owner_user_id, provider, env_var,
+                     value_encrypted, display)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    str(uuid.uuid4()),
+                    org_uuid,
+                    owner_user_id,
+                    provider,
+                    row["env_var"],
+                    row["value_encrypted"],
+                    row.get("display", ""),
+                ),
+            )
+        conn.commit()
+    return get_org_provider_keys(org_uuid, provider)
+
+
+def soft_delete_org_provider_keys(org_uuid: str, provider: str) -> int:
+    """Remove a workspace's values for one provider. Returns how many were removed."""
+    with get_db_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            "UPDATE org_provider_keys SET deleted_at = CURRENT_TIMESTAMP "
+            "WHERE org_uuid = ? AND provider = ? AND deleted_at IS NULL",
+            (org_uuid, provider),
+        )
+        conn.commit()
+        return cursor.rowcount or 0

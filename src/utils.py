@@ -951,7 +951,7 @@ def get_max_concurrent_jobs() -> int:
 
     Defaults to 2 if not set.
     """
-    return int(os.getenv("MAX_CONCURRENT_JOBS"))
+    return env_int("MAX_CONCURRENT_JOBS", 2)
 
 
 def get_max_concurrent_jobs_per_org() -> int:

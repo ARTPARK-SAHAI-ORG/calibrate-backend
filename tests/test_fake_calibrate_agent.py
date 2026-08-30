@@ -192,7 +192,7 @@ def test_run_stt_evaluation_task_end_to_end_with_fake_cli():
             providers=["deepgram", "openai"],
             language="en",
         )
-        run_evaluation_task(job_uuid, request, "bucket")
+        run_evaluation_task(job_uuid, request, "bucket", "org-1")
 
     job = db.get_job(job_uuid)
     assert job["status"] == "done", job.get("results")
@@ -235,7 +235,7 @@ def test_run_stt_evaluation_task_omits_sarvam_judges_when_disabled():
             language="en",
             sarvam_judges=False,
         )
-        run_evaluation_task(job_uuid, request, "bucket")
+        run_evaluation_task(job_uuid, request, "bucket", "org-1")
 
     job = db.get_job(job_uuid)
     assert job["status"] == "done", job.get("results")
@@ -268,7 +268,7 @@ def test_run_tts_evaluation_task_end_to_end_with_fake_cli():
         request = TTSEvaluationRequest(
             texts=["hi"], providers=["cartesia"], language="en"
         )
-        run_tts_evaluation_task(job_uuid, request, "bucket")
+        run_tts_evaluation_task(job_uuid, request, "bucket", "org-1")
 
     job = db.get_job(job_uuid)
     assert job["status"] == "done", job.get("results")

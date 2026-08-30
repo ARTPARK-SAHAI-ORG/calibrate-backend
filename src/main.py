@@ -44,7 +44,9 @@ from db import (
 )
 from auth_utils import (
     API_KEY_PREFIX,
+    OrgContext,
     resolve_api_key,
+    get_current_org,
     get_current_user_id,
     decode_token,
 )
@@ -70,6 +72,7 @@ from routers.annotation_agreement import router as annotation_agreement_router
 from routers.organizations import router as organizations_router
 from routers.api_keys import router as api_keys_router
 from routers.traces import router as traces_router
+from routers.provider_keys import router as provider_keys_router
 from utils import (
     LOCAL_ARTIFACTS_URL_PREFIX,
     generate_presigned_upload_url,
@@ -79,7 +82,8 @@ from utils import (
     PRESIGNED_URL_EXPIRY_SECONDS,
 )
 from job_recovery import recover_pending_jobs
-from provider_status import available_provider_names, provider_status_monitor
+from provider_keys import available_providers_for_org, workspace_env_values
+from provider_status import provider_status_monitor
 
 
 # Set up logger
@@ -525,6 +529,7 @@ app.include_router(annotation_agreement_router)
 app.include_router(organizations_router)
 app.include_router(api_keys_router)
 app.include_router(traces_router)
+app.include_router(provider_keys_router)
 # Public (no-auth) sharing endpoints — must be registered without any auth dependency
 app.include_router(public_router)
 
@@ -669,24 +674,29 @@ async def get_provider_status(request: Request, refresh: bool = False):
 
 
 @app.get("/providers")
-def list_available_providers() -> Dict[str, Any]:
+def list_available_providers(
+    ctx: OrgContext = Depends(get_current_org),
+) -> Dict[str, Any]:
     """
-    List providers enabled by the current environment's API keys.
+    List providers this workspace can run.
 
-    A provider is available when every environment variable it requires is set,
-    so the frontend can show only the providers it can actually run. This is a
-    cheap config check — it does not verify the keys work (see `/provider-status`
-    for live reachability).
+    A provider is available when the workspace has set every key it requires, or
+    the server has them, so the frontend can show only the providers it can
+    actually run. This is a cheap config check, it does not verify the keys work
+    (see `/provider-status` for live reachability).
     """
-    return {"providers": available_provider_names()}
+    return {"providers": available_providers_for_org(ctx.org_uuid)}
 
 
 @app.get("/openrouter/providers")
-async def list_openrouter_providers() -> Optional[Dict[str, Any]]:
+async def list_openrouter_providers(
+    ctx: OrgContext = Depends(get_current_org),
+) -> Optional[Dict[str, Any]]:
     """
     List model authors available on OpenRouter.
 
-    If `OPENROUTER_API_KEY` is not set, returns `null` (OpenRouter is disabled).
+    If neither the workspace nor the server has an OpenRouter key, returns
+    `null` (OpenRouter is disabled).
 
     Otherwise, if `OPENROUTER_ALLOWED_PROVIDERS` is set (comma-separated author
     slugs), fetches `https://openrouter.ai/api/v1/models`, derives each author from
@@ -699,7 +709,9 @@ async def list_openrouter_providers() -> Optional[Dict[str, Any]]:
     If `OPENROUTER_ALLOWED_PROVIDERS` is empty/unset, all authors are supported —
     returns `{"providers": "all"}`.
     """
-    api_key = os.getenv("OPENROUTER_API_KEY")
+    api_key = workspace_env_values(ctx.org_uuid).get("OPENROUTER_API_KEY") or os.getenv(
+        "OPENROUTER_API_KEY"
+    )
     if not api_key:
         return None
 
