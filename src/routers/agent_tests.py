@@ -412,6 +412,10 @@ class TestCaseResult(BaseModel):
         None,
         description="Cost of this case (USD)",
     )
+    unanswered: bool = Field(
+        False,
+        description="Whether this case produced no answer because the agent or the judge could not be reached, in which case `reasoning` carries the error and `passed` is not a verdict on the agent",
+    )
 
 
 class TestRunEvaluator(BaseModel):
@@ -489,6 +493,14 @@ class TestRunStatusResponse(BaseModel):
     results: Optional[List[TestCaseResult]] = Field(
         None, description="Results for each test case"
     )
+    unanswered_tests: Optional[int] = Field(
+        None,
+        description="Number of test cases that produced no answer because the agent or the judge could not be reached, which makes the pass rate an unfair measure of the agent",
+    )
+    stopped_early: bool = Field(
+        False,
+        description="Whether the run stopped before starting every test case, after too many failed in a row",
+    )
     error: bool = Field(False, description="True if the run failed")
     is_public: bool = Field(False, description="Whether the run is shared publicly")
     share_token: Optional[str] = Field(
@@ -507,7 +519,7 @@ class TestRunCaseSummary(BaseModel):
         None, description="Name of the test case"
     )
     passed: Optional[bool] = Field(
-        None, description="Whether the case passed (null if it errored or is still running)"
+        None, description="Whether the case passed (null while the case is still running)"
     )
 
 
@@ -605,6 +617,10 @@ class AgentTestRunListItem(BaseModel):
     model_results: Optional[List[ModelRunSummary]] = Field(
         None,
         description="Flat summary for each model in a benchmark run (fetch the benchmark detail for full results)",
+    )
+    unanswered_tests: Optional[int] = Field(
+        None,
+        description="Number of test cases that produced no answer because the agent or the judge could not be reached, which makes the pass rate an unfair measure of the agent",
     )
     error: bool = Field(False, description="True if the run failed")
     is_public: bool = Field(False, description="Whether the run is shared publicly")
@@ -978,6 +994,7 @@ def _build_agent_test_run_item_fields(
         "results": _slim_test_results(job_results.get("test_results")),
         # Benchmark results
         "model_results": _slim_model_results(job_results.get("model_results")),
+        "unanswered_tests": job_results.get("unanswered_tests"),
         # Common fields
         "error": bool(job_results.get("error")),
         "is_public": bool(job.get("is_public")),
@@ -1692,6 +1709,9 @@ def _parse_agent_test_results(
                 "test_case": test_case,
                 "inputs": effective_inputs or None,
                 "judge_results": metrics.get("judge_results"),
+                # calibrate marks a row that produced no answer at all, which
+                # is not the same failure as a wrong answer.
+                "unanswered": bool(r.get("error")),
                 # latency_ms is top-level on the calibrate result object (sibling of
                 # output/metrics); cost is nested inside output. Different depths by
                 # design — see CLAUDE.md. We lift cost up so the API surfaces both
@@ -1701,6 +1721,13 @@ def _parse_agent_test_results(
             }
         )
     return test_results
+
+
+def _unanswered_case_count(test_results: Optional[List[Dict[str, Any]]]) -> int:
+    """How many parsed rows produced no answer. Used when calibrate's own count
+    is not on disk yet, so a run in progress and a run that wrote no
+    ``metrics.json`` still report their gaps."""
+    return sum(1 for r in test_results or [] if r.get("unanswered"))
 
 
 def _pending_test_case_result_placeholder(name: str) -> Dict[str, Any]:
@@ -1716,6 +1743,7 @@ def _pending_test_case_result_placeholder(name: str) -> Dict[str, Any]:
         "judge_results": None,
         "latency_ms": None,
         "cost": None,
+        "unanswered": False,
     }
 
 
@@ -2249,6 +2277,14 @@ def _update_agent_test_intermediate_results(
             "total_tokens": (
                 metrics_data.get("total_tokens") if metrics_data else None
             ),
+            "unanswered_tests": (
+                (metrics_data or {}).get("errored")
+                if (metrics_data or {}).get("errored") is not None
+                else _unanswered_case_count(test_results)
+            ),
+            "stopped_early": (
+                bool(metrics_data.get("stopped_early")) if metrics_data else False
+            ),
             "test_results": intermediate_results,
         },
     )
@@ -2457,6 +2493,8 @@ def run_llm_test_task(
                 latency_ms = None
                 cost = None
                 total_tokens = None
+                unanswered_tests = None
+                stopped_early = False
 
                 if metrics_data and isinstance(metrics_data, dict):
                     total_tests = metrics_data.get("total", 0)
@@ -2465,6 +2503,8 @@ def run_llm_test_task(
                     latency_ms = metrics_data.get("latency_ms")
                     cost = metrics_data.get("cost")
                     total_tokens = metrics_data.get("total_tokens")
+                    unanswered_tests = metrics_data.get("errored")
+                    stopped_early = bool(metrics_data.get("stopped_early"))
                 elif results_data:
                     # Compute from results if metrics.json not found
                     total_tests = len(results_data)
@@ -2495,6 +2535,12 @@ def run_llm_test_task(
                         "latency_ms": latency_ms,
                         "cost": cost,
                         "total_tokens": total_tokens,
+                        "unanswered_tests": (
+                            unanswered_tests
+                            if unanswered_tests is not None
+                            else _unanswered_case_count(test_results)
+                        ),
+                        "stopped_early": stopped_early,
                         "test_results": test_results,
                         "results_s3_prefix": results_prefix,
                         "error": None,
@@ -3023,6 +3069,8 @@ def get_agent_test_run_status(
         total_tokens=results.get("total_tokens"),
         evaluators=evaluators_block or None,
         results=results.get("test_results"),
+        unanswered_tests=results.get("unanswered_tests"),
+        stopped_early=bool(results.get("stopped_early")),
         error=bool(results.get("error")),
         is_public=bool(job.get("is_public")),
         share_token=job.get("share_token"),
@@ -3855,7 +3903,7 @@ def get_benchmark_status(
             if isinstance(model, dict) and isinstance(
                 model.get("test_results"), list
             ):
-                # `passed is None` is pending, not a failure; errored is False.
+                # `passed is None` is pending, not a failure; unanswered is False.
                 model["test_results"] = [
                     r for r in model["test_results"] if r.get("passed") is False
                 ]

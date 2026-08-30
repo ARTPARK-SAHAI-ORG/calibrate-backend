@@ -75,6 +75,38 @@ def test_parse_agent_test_results():
     assert _parse_agent_test_results("not-a-list") == []
 
 
+def test_parse_agent_test_results_marks_cases_that_never_ran():
+    """calibrate marks a row it could not run at all with `error`. That must
+    survive as `unanswered` so the run page can separate a wrong answer from a
+    test that never reached the agent."""
+    from routers.agent_tests import (
+        _parse_agent_test_results,
+        _pending_test_case_result_placeholder,
+    )
+
+    out = _parse_agent_test_results(
+        [
+            {
+                "test_case_id": "t1",
+                "output": {"response": None, "tool_calls": []},
+                "metrics": {"passed": False, "reasoning": "Agent returned HTTP 500"},
+                "test_case": {"name": "T1", "id": "t1"},
+                "error": True,
+            },
+            {
+                "test_case_id": "t2",
+                "output": {"response": "nope", "tool_calls": []},
+                "metrics": {"passed": False, "reasoning": "wrong answer"},
+                "test_case": {"name": "T2", "id": "t2"},
+            },
+        ]
+    )
+    assert out[0]["unanswered"] is True
+    assert out[0]["reasoning"] == "Agent returned HTTP 500"
+    assert out[1]["unanswered"] is False
+    assert _pending_test_case_result_placeholder("T3")["unanswered"] is False
+
+
 def test_parse_agent_test_results_preserves_tool_call_output():
     """Tool-call entries from agent-connection runs may carry an `output`
     (the tool's execution result); it must survive parsing verbatim."""
