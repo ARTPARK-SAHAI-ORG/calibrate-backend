@@ -627,6 +627,59 @@ def test_agent_runs_list_surfaces_perf_aggregates(client):
     assert gruns[0]["results"] == [{"name": "tc1", "passed": True}]
 
 
+def test_run_reports_cases_that_never_ran(client):
+    """A finished run with gaps says so on the detail response, the shared
+    public view, and the runs list, so a pass rate is never read as clean."""
+    from db import create_agent_test_job, update_agent_test_job
+
+    h = _signup(client)["headers"]
+    agent = _create_agent(client, h)
+
+    job_id = create_agent_test_job(
+        agent_id=agent["uuid"],
+        job_type="llm-unit-test",
+        details={"test_uuids": ["tc1", "tc2"]},
+    )
+    update_agent_test_job(
+        job_id,
+        status="done",
+        results={
+            "total_tests": 2,
+            "passed": 1,
+            "failed": 1,
+            "errored": 1,
+            "stopped_early": True,
+            "test_results": [
+                {"name": "tc1", "test_case_id": "tc1", "passed": True},
+                {
+                    "name": "tc2",
+                    "test_case_id": "tc2",
+                    "passed": False,
+                    "reasoning": "Agent returned HTTP 500",
+                    "errored": True,
+                },
+            ],
+        },
+    )
+
+    detail = client.get(f"/agent-tests/run/{job_id}", headers=h).json()
+    assert detail["errored"] == 1
+    assert detail["stopped_early"] is True
+    assert [r["errored"] for r in detail["results"]] == [False, True]
+
+    listed = client.get(f"/agent-tests/agent/{agent['uuid']}/runs", headers=h).json()
+    assert listed["items"][0]["errored"] == 1
+
+    share = client.patch(
+        f"/agent-tests/run/{job_id}/visibility",
+        json={"is_public": True},
+        headers=h,
+    ).json()
+    public = client.get(f"/public/test-run/{share['share_token']}").json()
+    assert public["errored"] == 1
+    assert public["stopped_early"] is True
+
+
 def test_agent_runs_list_slims_benchmark_model_results(client):
     """A benchmark run in the runs-list drops each model's heavy nested
     `test_results`/`evaluator_summary`, keeping only flat scalar summaries. The

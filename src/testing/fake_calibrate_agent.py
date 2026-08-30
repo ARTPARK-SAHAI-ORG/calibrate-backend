@@ -256,6 +256,9 @@ def _write_llm_model_dir(
                     "max": FAKE_TOKENS,
                     "count": n,
                 },
+                # Every case answered, so no gaps and no early stop.
+                "errored": 0,
+                "stopped_early": False,
                 "criteria": criteria_agg,
             },
             f,

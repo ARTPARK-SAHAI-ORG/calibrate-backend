@@ -478,6 +478,61 @@ def test_run_llm_test_task_failure_propagates():
     assert job["status"] in ("failed", "done")  # either is acceptable failure path
 
 
+def test_run_llm_test_task_records_cases_that_never_ran():
+    """A run that finishes with gaps: the errored row keeps its real error, and
+    the two run-level counts from metrics.json are stored on the job."""
+    from routers.agent_tests import run_llm_test_task
+
+    _, agent_uuid, job_uuid = _make_agent_test_job()
+    process = _FakeProcess(returncode=0)
+
+    def fake_popen(cmd, *args, **kwargs):
+        out = Path(cmd[cmd.index("-o") + 1])
+        with open(out / "results.json", "w") as f:
+            json.dump(
+                [
+                    {
+                        "test_case_id": "t",
+                        "test_case": {"name": "T", "id": "t"},
+                        "output": {"response": None, "tool_calls": []},
+                        "metrics": {
+                            "passed": False,
+                            "reasoning": "Agent returned HTTP 500",
+                        },
+                        "error": True,
+                    }
+                ],
+                f,
+            )
+        with open(out / "metrics.json", "w") as f:
+            json.dump(
+                {"total": 1, "passed": 0, "errored": 1, "stopped_early": True}, f
+            )
+        return process
+
+    with patch(
+        "routers.agent_tests.subprocess.Popen", side_effect=fake_popen
+    ), patch(
+        "routers.agent_tests.get_s3_client", return_value=MagicMock()
+    ), patch("routers.agent_tests.try_start_queued_agent_test_job"), patch(
+        "routers.agent_tests.upload_directory_tree_to_s3"
+    ), patch(
+        "routers.agent_tests.upload_file_to_s3"
+    ), patch(
+        "routers.agent_tests.time.sleep"
+    ):
+        agent = {"uuid": agent_uuid, "name": "a", "config": {}}
+        tests = [{"uuid": "t", "name": "T", "config": {}}]
+        run_llm_test_task(job_uuid, agent, tests, "bucket")
+
+    results = db.get_agent_test_job(job_uuid)["results"]
+    assert results["errored"] == 1
+    assert results["stopped_early"] is True
+    row = results["test_results"][0]
+    assert row["errored"] is True
+    assert row["reasoning"] == "Agent returned HTTP 500"
+
+
 def test_run_benchmark_task_failure_path():
     """The benchmark task spawns multiple model subprocesses; force an exception
     early to exercise the outer error handler."""
