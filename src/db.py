@@ -10122,12 +10122,35 @@ TRACE_OUTPUT_TYPE_SQL = {
 }
 
 
+def _trace_text_clauses(
+    text: str, columns: Tuple[str, ...], params: List[Any]
+) -> List[str]:
+    """LIKE clauses matching `text` case-insensitively in any of `columns`."""
+    lowered = text.strip().lower()
+    # json.dumps escapes non-ASCII, so a Hindi word sits in the JSON columns
+    # as \uXXXX and the typed word alone would never find it.
+    escaped = json.dumps(lowered)[1:-1]
+    forms = [lowered] if escaped == lowered else [lowered, escaped]
+    clauses: List[str] = []
+    for column in columns:
+        # Matching the raw JSON text of input/output/metadata is a documented
+        # approximation: it also matches keys and quoting artifacts.
+        json_column = column in ("input", "output", "metadata")
+        for form in forms if json_column else [lowered]:
+            clauses.append(f"PY_LOWER({column}) LIKE ? ESCAPE '\\'")
+            params.append(f"%{_like_escape(form)}%")
+    return clauses
+
+
 def _trace_filters(
     org_uuid: str,
     agent_id: Optional[str] = None,
     q: Optional[str] = None,
     output_type: Optional[str] = None,
     labels: Optional[List[str]] = None,
+    input_contains: Optional[str] = None,
+    output_contains: Optional[str] = None,
+    metadata_keys: Optional[List[str]] = None,
 ) -> Tuple[str, List[Any]]:
     """Build the shared WHERE clause for every live-trace query."""
     where = ["org_uuid = ?", "deleted_at IS NULL"]
@@ -10142,22 +10165,30 @@ def _trace_filters(
             f"WHERE value IN ({placeholders}))"
         )
         params.extend(labels)
+    if metadata_keys:
+        placeholders = ",".join("?" * len(metadata_keys))
+        where.append(
+            "EXISTS (SELECT 1 FROM json_each(traces.metadata) "
+            f"WHERE json_extract(value, '$.key') IN ({placeholders}))"
+        )
+        params.extend(metadata_keys)
     if output_type:
         where.append("(" + TRACE_OUTPUT_TYPE_SQL[output_type] + ")")
     if q and q.strip():
-        lowered = q.strip().lower()
-        # json.dumps escapes non-ASCII, so a Hindi word sits in the JSON columns
-        # as \uXXXX and the typed word alone would never find it.
-        escaped = json.dumps(lowered)[1:-1]
-        forms = [lowered] if escaped == lowered else [lowered, escaped]
-        clauses: List[str] = []
-        for column in ("message_id", "conversation_id", "input", "output", "metadata"):
-            # Matching the raw JSON text of input/output/metadata is a documented
-            # approximation: it also matches keys and quoting artifacts.
-            for form in forms if column in ("input", "output", "metadata") else [lowered]:
-                clauses.append(f"PY_LOWER({column}) LIKE ? ESCAPE '\\'")
-                params.append(f"%{_like_escape(form)}%")
+        clauses = _trace_text_clauses(
+            q, ("message_id", "conversation_id", "input", "output", "metadata"), params
+        )
         where.append("(" + " OR ".join(clauses) + ")")
+    if input_contains and input_contains.strip():
+        where.append(
+            "(" + " OR ".join(_trace_text_clauses(input_contains, ("input",), params)) + ")"
+        )
+    if output_contains and output_contains.strip():
+        where.append(
+            "("
+            + " OR ".join(_trace_text_clauses(output_contains, ("output",), params))
+            + ")"
+        )
     return " AND ".join(where), params
 
 
@@ -10200,6 +10231,24 @@ def list_trace_labels(org_uuid: str, agent_id: Optional[str] = None) -> List[str
         rows = conn.execute(
             f"SELECT DISTINCT value FROM traces, json_each(traces.labels) "
             f"WHERE {where} ORDER BY value COLLATE NOCASE, value",
+            params,
+        ).fetchall()
+        return [row[0] for row in rows]
+
+
+def list_trace_metadata_keys(
+    org_uuid: str, agent_id: Optional[str] = None
+) -> List[str]:
+    """Every distinct metadata key on the workspace's live traces, A to Z, so a
+    filter menu can offer the whole set rather than the keys on the page on
+    screen. Sorted case-insensitively, or every capitalised key would sort
+    ahead of every lowercase one."""
+    where, params = _trace_filters(org_uuid, agent_id)
+    with get_db_connection() as conn:
+        rows = conn.execute(
+            "SELECT DISTINCT json_extract(value, '$.key') AS k "
+            f"FROM traces, json_each(traces.metadata) WHERE {where} "
+            "AND k IS NOT NULL ORDER BY k COLLATE NOCASE, k",
             params,
         ).fetchall()
         return [row[0] for row in rows]
@@ -10266,9 +10315,21 @@ def list_traces(
     q: Optional[str] = None,
     output_type: Optional[str] = None,
     labels: Optional[List[str]] = None,
+    input_contains: Optional[str] = None,
+    output_contains: Optional[str] = None,
+    metadata_keys: Optional[List[str]] = None,
 ) -> Tuple[List[Dict[str, Any]], int]:
     """Return `(page, total)` newest-first; filters and count run in SQL."""
-    where, params = _trace_filters(org_uuid, agent_id, q, output_type, labels)
+    where, params = _trace_filters(
+        org_uuid,
+        agent_id,
+        q,
+        output_type,
+        labels,
+        input_contains,
+        output_contains,
+        metadata_keys,
+    )
     with get_db_connection() as conn:
         total = conn.execute(
             f"SELECT COUNT(*) FROM traces WHERE {where}", params
@@ -10293,11 +10354,23 @@ def soft_delete_traces_matching(
     q: Optional[str] = None,
     output_type: Optional[str] = None,
     labels: Optional[List[str]] = None,
+    input_contains: Optional[str] = None,
+    output_contains: Optional[str] = None,
+    metadata_keys: Optional[List[str]] = None,
 ) -> int:
     """Soft-delete every live trace matching the list filters, returning the
     number of rows flipped. No UUID list, so a workspace-wide delete stays one
     statement however many traces it covers."""
-    where, params = _trace_filters(org_uuid, agent_id, q, output_type, labels)
+    where, params = _trace_filters(
+        org_uuid,
+        agent_id,
+        q,
+        output_type,
+        labels,
+        input_contains,
+        output_contains,
+        metadata_keys,
+    )
     with get_db_connection() as conn:
         cursor = conn.execute(
             f"UPDATE traces SET deleted_at = CURRENT_TIMESTAMP, "

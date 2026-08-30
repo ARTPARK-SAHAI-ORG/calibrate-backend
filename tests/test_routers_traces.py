@@ -7,7 +7,12 @@ from unittest.mock import patch
 
 import pytest
 
-from routers.traces import MAX_DELETE_IDS, MAX_LABELS, MAX_LIST_LIMIT
+from routers.traces import (
+    MAX_DELETE_IDS,
+    MAX_LABELS,
+    MAX_LIST_LIMIT,
+    MAX_METADATA_KEY_FILTERS,
+)
 from fastapi.testclient import TestClient
 
 
@@ -2117,3 +2122,194 @@ def test_label_list_sorts_regardless_of_case(client):
         "escalated",
         "Prod",
     ]
+
+
+def test_list_filters_by_input_contains(client):
+    h, agent_id = _signup_with_agent(client)
+    wanted = _post_trace(
+        client,
+        h,
+        _payload(
+            agent_id,
+            _mid(),
+            input=[{"role": "user", "content": "When is the polio dose?"}],
+            output={"response": "plain reply"},
+        ),
+    )
+    _post_trace(
+        client,
+        h,
+        _payload(
+            agent_id,
+            _mid(),
+            input=[{"role": "user", "content": "What time do you open?"}],
+            output={"response": "polio is in the reply, not the input"},
+        ),
+    )
+
+    found = client.get("/traces?input_contains=POLIO", headers=h).json()
+    assert [t["uuid"] for t in found["items"]] == [wanted["uuid"]]
+    assert client.get("/traces?input_contains=nowhere", headers=h).json()["total"] == 0
+
+
+def test_list_filters_by_output_contains(client):
+    h, agent_id = _signup_with_agent(client)
+    replied = _post_trace(
+        client, h, _payload(agent_id, _mid(), output={"response": "14 weeks pe hai"})
+    )
+    called = _post_trace(
+        client,
+        h,
+        _payload(
+            agent_id,
+            _mid(),
+            input=[{"role": "user", "content": "14 weeks pe hai"}],
+            output={"tool_calls": [{"tool": "book_appointment", "arguments": {}}]},
+        ),
+    )
+
+    by_reply = client.get("/traces?output_contains=14 weeks", headers=h).json()
+    assert [t["uuid"] for t in by_reply["items"]] == [replied["uuid"]]
+
+    by_tool = client.get("/traces?output_contains=book_appointment", headers=h).json()
+    assert [t["uuid"] for t in by_tool["items"]] == [called["uuid"]]
+
+
+def test_list_filters_by_metadata_key(client):
+    h, agent_id = _signup_with_agent(client)
+    tagged = _post_trace(
+        client,
+        h,
+        _payload(
+            agent_id, _mid(), metadata=[{"key": "session.id", "value": "abc"}]
+        ),
+    )
+    other = _post_trace(
+        client,
+        h,
+        _payload(agent_id, _mid(), metadata=[{"key": "region", "value": "in"}]),
+    )
+    _post_trace(client, h, _payload(agent_id, _mid(), metadata=None))
+
+    one = client.get("/traces?metadata_key=session.id", headers=h).json()
+    assert [t["uuid"] for t in one["items"]] == [tagged["uuid"]]
+
+    both = client.get(
+        "/traces?metadata_key=session.id&metadata_key=region", headers=h
+    ).json()
+    assert {t["uuid"] for t in both["items"]} == {tagged["uuid"], other["uuid"]}
+
+    # Key only: the value is reachable through the search box, not this filter.
+    assert client.get("/traces?metadata_key=abc", headers=h).json()["total"] == 0
+
+
+def test_metadata_keys_endpoint_lists_every_key_in_use(client):
+    h, agent_id = _signup_with_agent(client)
+    other_agent = _create_agent(client, h)["uuid"]
+    _post_trace(
+        client,
+        h,
+        _payload(
+            agent_id,
+            _mid(),
+            metadata=[{"key": "Region", "value": "in"}, {"key": "attempt", "value": "1"}],
+        ),
+    )
+    _post_trace(
+        client, h, _payload(agent_id, _mid(), metadata=[{"key": "attempt", "value": "2"}])
+    )
+    _post_trace(
+        client,
+        h,
+        _payload(other_agent, _mid(), metadata=[{"key": "session.id", "value": "z"}]),
+    )
+    _post_trace(client, h, _payload(agent_id, _mid(), metadata=None))
+
+    assert client.get("/traces/metadata-keys", headers=h).json()["keys"] == [
+        "attempt",
+        "Region",
+        "session.id",
+    ]
+    assert client.get(
+        f"/traces/metadata-keys?agent_id={agent_id}", headers=h
+    ).json()["keys"] == ["attempt", "Region"]
+    assert client.get("/traces/metadata-keys", headers=_signup(client)).json()[
+        "keys"
+    ] == []
+
+
+def test_bulk_delete_honours_the_new_filters(client):
+    h, agent_id = _signup_with_agent(client)
+    doomed = _post_trace(
+        client,
+        h,
+        _payload(
+            agent_id,
+            _mid(),
+            input=[{"role": "user", "content": "polio dose"}],
+            output={"response": "next week"},
+            metadata=[{"key": "session.id", "value": "abc"}],
+        ),
+    )
+    kept = _post_trace(
+        client,
+        h,
+        _payload(
+            agent_id,
+            _mid(),
+            input=[{"role": "user", "content": "opening hours"}],
+            output={"response": "next week"},
+            metadata=[{"key": "region", "value": "in"}],
+        ),
+    )
+
+    res = client.post(
+        "/traces/bulk-delete",
+        json={
+            "select_all": True,
+            "input_contains": "polio",
+            "output_contains": "next week",
+            "metadata_key": ["session.id"],
+        },
+        headers=h,
+    )
+    assert res.status_code == 200, res.text
+    assert res.json() == {"deleted": 1}
+    assert [t["uuid"] for t in client.get("/traces", headers=h).json()["items"]] == [
+        kept["uuid"]
+    ]
+    assert client.get(f"/traces/{doomed['uuid']}", headers=h).status_code == 404
+
+
+def test_every_filter_accepts_the_same_number_of_metadata_keys(client):
+    """One cap across listing and deleting: a set that lists must not be refused
+    by the delete that follows it."""
+    h, agent_id = _signup_with_agent(client)
+    _post_trace(
+        client, h, _payload(agent_id, _mid(), metadata=[{"key": "k7", "value": "v"}])
+    )
+    at_cap = [f"k{i}" for i in range(MAX_METADATA_KEY_FILTERS)]
+    over_cap = at_cap + ["one-too-many"]
+
+    listed = client.get(
+        "/traces", params=[("metadata_key", x) for x in at_cap], headers=h
+    )
+    assert listed.status_code == 200, listed.text
+    assert listed.json()["total"] == 1
+    assert (
+        client.get(
+            "/traces", params=[("metadata_key", x) for x in over_cap], headers=h
+        ).status_code
+        == 422
+    )
+
+    def delete(chosen):
+        return client.post(
+            "/traces/bulk-delete",
+            json={"select_all": True, "metadata_key": chosen},
+            headers=h,
+        )
+
+    assert delete(over_cap).status_code == 422
+    assert delete(at_cap).status_code == 200
+    assert delete(at_cap).json()["deleted"] == 0
