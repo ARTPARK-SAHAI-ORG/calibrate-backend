@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import time
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -187,6 +188,111 @@ def test_provider_status_timeout(client):
         asyncio.run(provider_status.provider_status_monitor.refresh_cache())
         resp = client.get("/provider-status")
     assert resp.status_code == 504
+
+
+@pytest.mark.parametrize(
+    "group_kill_lands", [True, False], ids=["kill-lands", "kill-refused"]
+)
+def test_cancelled_check_reaps_the_probe_without_stalling(
+    monkeypatch, group_kill_lands
+):
+    """A cancelled check must tear the probe down, promptly, either way.
+
+    Shape matters. `uv run calibrate-agent status` forks the CLI as a grandchild
+    that inherits stdout/stderr, and a `wait()` waiter registered while the
+    child is still alive only resolves once every pipe disconnects, so killing
+    just the direct child leaves the reap waiting on pipes the grandchild still
+    holds. We simulate this behavior without needing uv or the network by running
+    `sh -c 'sleep 30 & wait'`.
+
+    killpg takes the grandchild down; we parameterize both kill scenarios. When
+    killpg does not land, the transport close ahead of the wait keeps the reap
+    fast, avoiding a timeout.
+    """
+    monkeypatch.delenv("FAKE_AI_PROVIDERS", raising=False)
+    import os
+    import signal
+
+    import provider_status
+
+    spawned: list[asyncio.subprocess.Process] = []
+    # Bind before patching: we'll patch attributes of the asyncio and os
+    # modules, so calling them by name below would recurse into the mock.
+    real_create = asyncio.create_subprocess_exec
+    real_killpg = os.killpg
+
+    async def spawn_tree(*_args, **kwargs):
+        # The reap kills the process GROUP, which is only safe because the
+        # production spawn detaches (with start_new_session=True), otherwise
+        # killpg would signal pytest's own group.
+        assert kwargs.get("start_new_session") is True
+        process = await real_create(
+            "sh",
+            "-c",
+            "sleep 30 & wait",
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+            start_new_session=True,
+        )
+        spawned.append(process)
+        return process
+
+    def maybe_kill(pgid, sig):
+        if not group_kill_lands:
+            raise PermissionError("killpg refused")
+        return real_killpg(pgid, sig)
+
+    async def body():
+        monitor = provider_status.ProviderStatusMonitor(
+            refresh_interval_seconds=60,
+            cache_max_age_seconds=60,
+            check_timeout_seconds=60,
+        )
+        with patch(
+            "provider_status.asyncio.create_subprocess_exec", side_effect=spawn_tree
+        ):
+            task = asyncio.create_task(monitor.run_check())
+            for _ in range(500):
+                if spawned:
+                    break
+                await asyncio.sleep(0.01)
+            assert spawned, "status subprocess never started"
+            process = spawned[0]
+            assert os.getpgid(process.pid) == process.pid, "probe was not detached"
+
+            # Patched only for the reap, so the spawn above still detaches.
+            with patch("provider_status.os.killpg", side_effect=maybe_kill):
+                task.cancel()
+                started = time.monotonic()
+                # Generous outer bound so a regression fails this test instead
+                # of wedging CI; the elapsed assertion below is the real one.
+                with pytest.raises(asyncio.CancelledError):
+                    await asyncio.wait_for(task, timeout=30)
+                return process.pid, time.monotonic() - started
+
+    pgid, elapsed = asyncio.run(body())
+
+    if group_kill_lands:
+        # Verify that the grandchild went too, not just `sh`.
+        for _ in range(20):
+            try:
+                # Checks if any process in the group is still alive.
+                os.killpg(pgid, 0)
+            except ProcessLookupError:
+                break
+            time.sleep(0.1)
+        else:
+            pytest.fail(f"process group {pgid} survived the reap")
+    else:
+        # The tree outlives a kill that never lands; this test cleans it up.
+        try:
+            os.killpg(pgid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+
+    assert elapsed < provider_status._REAP_TIMEOUT_SECONDS / 2, (
+        f"reap took {elapsed:.2f}s; the transport close before wait() is missing"
+    )
 
 
 def test_provider_status_not_checked_yet(client):
