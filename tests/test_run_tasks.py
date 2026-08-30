@@ -533,6 +533,84 @@ def test_run_llm_test_task_records_cases_that_never_ran():
     assert row["reasoning"] == "Agent returned HTTP 500"
 
 
+def test_run_llm_test_task_counts_errored_without_metrics_file():
+    """calibrate wrote results but no metrics.json: the run still reports how
+    many produced no answer, counted from the rows."""
+    from routers.agent_tests import run_llm_test_task
+
+    _, agent_uuid, job_uuid = _make_agent_test_job()
+    process = _FakeProcess(returncode=0)
+
+    def fake_popen(cmd, *args, **kwargs):
+        out = Path(cmd[cmd.index("-o") + 1])
+        with open(out / "results.json", "w") as f:
+            json.dump(
+                [
+                    {
+                        "test_case_id": "t",
+                        "test_case": {"name": "T", "id": "t"},
+                        "output": {"response": None, "tool_calls": []},
+                        "metrics": {"passed": False, "reasoning": "Agent timed out"},
+                        "error": True,
+                    }
+                ],
+                f,
+            )
+        return process
+
+    with patch(
+        "routers.agent_tests.subprocess.Popen", side_effect=fake_popen
+    ), patch(
+        "routers.agent_tests.get_s3_client", return_value=MagicMock()
+    ), patch("routers.agent_tests.try_start_queued_agent_test_job"), patch(
+        "routers.agent_tests.upload_directory_tree_to_s3"
+    ), patch(
+        "routers.agent_tests.upload_file_to_s3"
+    ), patch(
+        "routers.agent_tests.time.sleep"
+    ):
+        agent = {"uuid": agent_uuid, "name": "a", "config": {}}
+        tests = [{"uuid": "t", "name": "T", "config": {}}]
+        run_llm_test_task(job_uuid, agent, tests, "bucket")
+
+    results = db.get_agent_test_job(job_uuid)["results"]
+    assert results["errored"] == 1
+    assert results["stopped_early"] is False
+
+
+def test_errored_count_falls_back_to_the_rows(tmp_path):
+    """calibrate writes metrics.json only at the end, so while a run is going
+    (and for a run that never wrote one) the count comes from the rows."""
+    from routers.agent_tests import _update_agent_test_intermediate_results
+
+    _, _, job_uuid = _make_agent_test_job()
+    with open(tmp_path / "results.json", "w") as f:
+        json.dump(
+            [
+                {
+                    "test_case_id": "t1",
+                    "test_case": {"name": "T1", "id": "t1"},
+                    "output": {"response": None, "tool_calls": []},
+                    "metrics": {"passed": False, "reasoning": "Agent timed out"},
+                    "error": True,
+                },
+                {
+                    "test_case_id": "t2",
+                    "test_case": {"name": "T2", "id": "t2"},
+                    "output": {"response": "hi", "tool_calls": []},
+                    "metrics": {"passed": True},
+                },
+            ],
+            f,
+        )
+
+    _update_agent_test_intermediate_results(job_uuid, tmp_path, ["T1", "T2"])
+
+    results = db.get_agent_test_job(job_uuid)["results"]
+    assert results["errored"] == 1
+    assert results["passed"] is None  # no metrics.json yet
+
+
 def test_run_benchmark_task_failure_path():
     """The benchmark task spawns multiple model subprocesses; force an exception
     early to exercise the outer error handler."""

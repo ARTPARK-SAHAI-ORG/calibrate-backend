@@ -1723,6 +1723,13 @@ def _parse_agent_test_results(
     return test_results
 
 
+def _errored_case_count(test_results: Optional[List[Dict[str, Any]]]) -> int:
+    """How many parsed rows produced no answer. Used when calibrate's own count
+    is not on disk yet, so a run in progress and a run that wrote no
+    ``metrics.json`` still report their gaps."""
+    return sum(1 for r in test_results or [] if r.get("errored"))
+
+
 def _pending_test_case_result_placeholder(name: str) -> Dict[str, Any]:
     """``TestCaseResult`` shape for rows not yet finished (explicit nulls for clients)."""
     return {
@@ -2270,7 +2277,11 @@ def _update_agent_test_intermediate_results(
             "total_tokens": (
                 metrics_data.get("total_tokens") if metrics_data else None
             ),
-            "errored": metrics_data.get("errored") if metrics_data else None,
+            "errored": (
+                (metrics_data or {}).get("errored")
+                if (metrics_data or {}).get("errored") is not None
+                else _errored_case_count(test_results)
+            ),
             "stopped_early": (
                 bool(metrics_data.get("stopped_early")) if metrics_data else False
             ),
@@ -2524,7 +2535,11 @@ def run_llm_test_task(
                         "latency_ms": latency_ms,
                         "cost": cost,
                         "total_tokens": total_tokens,
-                        "errored": errored,
+                        "errored": (
+                            errored
+                            if errored is not None
+                            else _errored_case_count(test_results)
+                        ),
                         "stopped_early": stopped_early,
                         "test_results": test_results,
                         "results_s3_prefix": results_prefix,
