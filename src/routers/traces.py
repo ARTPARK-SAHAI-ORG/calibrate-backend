@@ -35,6 +35,7 @@ from db import (
     get_trace,
     get_traces_by_uuids,
     list_trace_labels,
+    list_trace_metadata_keys,
     list_traces,
     set_test_evaluators,
     soft_delete_traces,
@@ -83,6 +84,8 @@ MAX_METADATA_ENTRIES = 100
 # so listing, deleting and converting all accept the same set.
 MAX_LABELS = 50
 MAX_LABEL_CHARS = 128
+# Matches MAX_METADATA_ENTRIES so a filter can name every key one trace carries.
+MAX_METADATA_KEY_FILTERS = MAX_METADATA_ENTRIES
 
 _EXAMPLE_TRACE_UUID = "f47ac10b-58cc-4372-a567-0e02b2c3d479"
 
@@ -102,6 +105,11 @@ TraceLabel = Annotated[
     StringConstraints(
         strip_whitespace=True, min_length=1, max_length=MAX_LABEL_CHARS
     ),
+]
+
+# Same bounds as a stored metadata key, so a filter can name any key that exists.
+TraceMetadataKey = Annotated[
+    str, StringConstraints(strip_whitespace=True, min_length=1, max_length=256)
 ]
 
 # Bounds each entry so a malformed list is rejected before it reaches the
@@ -322,6 +330,12 @@ class TraceLabelsResponse(BaseModel):
     )
 
 
+class TraceMetadataKeysResponse(BaseModel):
+    keys: List[str] = Field(
+        description="Every metadata key in use on your live traces, A to Z"
+    )
+
+
 _SELECT_ALL_DESCRIPTION = (
     "Act on every trace matching the filters below instead of a list of IDs. "
     "`trace_ids` is ignored when this is on"
@@ -342,6 +356,18 @@ _FILTER_OUTPUT_TYPE_DESCRIPTION = (
 
 _FILTER_LABELS_DESCRIPTION = (
     "With `select_all` on, act only on traces carrying at least one of these labels"
+)
+_FILTER_INPUT_CONTAINS_DESCRIPTION = (
+    "With `select_all` on, act only on traces containing this text in their "
+    "conversation history or standalone prompt"
+)
+_FILTER_OUTPUT_CONTAINS_DESCRIPTION = (
+    "With `select_all` on, act only on traces containing this text in their "
+    "reply or tool calls"
+)
+_FILTER_METADATA_KEYS_DESCRIPTION = (
+    "With `select_all` on, act only on traces carrying at least one of these "
+    "metadata keys"
 )
 
 
@@ -371,6 +397,17 @@ class _TraceSelection(BaseModel):
         default_factory=list,
         max_length=MAX_LABELS,
         description=_FILTER_LABELS_DESCRIPTION,
+    )
+    input_contains: Optional[str] = Field(
+        None, description=_FILTER_INPUT_CONTAINS_DESCRIPTION
+    )
+    output_contains: Optional[str] = Field(
+        None, description=_FILTER_OUTPUT_CONTAINS_DESCRIPTION
+    )
+    metadata_key: List[TraceMetadataKey] = Field(
+        default_factory=list,
+        max_length=MAX_METADATA_KEY_FILTERS,
+        description=_FILTER_METADATA_KEYS_DESCRIPTION,
     )
 
     @model_validator(mode="after")
@@ -558,6 +595,18 @@ async def list_traces_endpoint(
         None,
         description="Return only traces carrying at least one of these labels. Repeat the parameter for each label",
     ),
+    input_contains: Optional[str] = Query(
+        None,
+        description="Return only traces containing this text in their conversation history or standalone prompt",
+    ),
+    output_contains: Optional[str] = Query(
+        None,
+        description="Return only traces containing this text in their reply or tool calls",
+    ),
+    metadata_key: Optional[List[TraceMetadataKey]] = Query(
+        None,
+        description="Return only traces carrying at least one of these metadata keys. Repeat the parameter for each key",
+    ),
 ):
     """List ingested traces, newest first"""
     if pagination.limit > MAX_LIST_LIMIT:
@@ -567,6 +616,11 @@ async def list_traces_endpoint(
     if labels and len(labels) > MAX_LABELS:
         raise HTTPException(
             status_code=422, detail=f"labels accepts at most {MAX_LABELS} labels"
+        )
+    if metadata_key and len(metadata_key) > MAX_METADATA_KEY_FILTERS:
+        raise HTTPException(
+            status_code=422,
+            detail=f"metadata_key accepts at most {MAX_METADATA_KEY_FILTERS} keys",
         )
     # Search/filter/count run in SQL (db.list_traces), not the post-fetch
     # pagination helpers, and paging uses the bounded PaginationParams rather
@@ -580,6 +634,9 @@ async def list_traces_endpoint(
         q=q,
         output_type=output_type,
         labels=labels,
+        input_contains=input_contains,
+        output_contains=output_contains,
+        metadata_keys=metadata_key,
     )
     return page_envelope([_to_summary(row) for row in rows], total, pagination)
 
@@ -599,6 +656,21 @@ async def list_trace_labels_endpoint(
     return {"labels": list_trace_labels(ctx.org_uuid, agent_id=agent_id)}
 
 
+@router.get(
+    "/metadata-keys",
+    response_model=TraceMetadataKeysResponse,
+    summary="List trace metadata keys",
+)
+async def list_trace_metadata_keys_endpoint(
+    ctx: OrgContext = Depends(get_current_org),
+    agent_id: Optional[str] = Query(
+        None, description="Return only keys used by this agent's traces"
+    ),
+):
+    """List every metadata key in use, so a filter can offer the whole set"""
+    return {"keys": list_trace_metadata_keys(ctx.org_uuid, agent_id=agent_id)}
+
+
 @router.post(
     "/bulk-delete",
     response_model=BulkDeleteTracesResponse,
@@ -615,6 +687,9 @@ async def bulk_delete_traces(
             q=payload.q,
             output_type=payload.output_type,
             labels=payload.labels,
+            input_contains=payload.input_contains,
+            output_contains=payload.output_contains,
+            metadata_keys=payload.metadata_key,
         )
     else:
         deleted = soft_delete_traces(ctx.org_uuid, trace_ids=payload.trace_ids)
@@ -791,6 +866,9 @@ def convert_traces_to_tests(
             q=payload.q,
             output_type=payload.output_type,
             labels=payload.labels,
+            input_contains=payload.input_contains,
+            output_contains=payload.output_contains,
+            metadata_keys=payload.metadata_key,
         )
         if total > MAX_CONVERT_TRACES:
             raise HTTPException(
