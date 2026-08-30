@@ -2836,13 +2836,19 @@ def run_agent_test(
         # cross-org UUID must 404 identically to a missing one (existence-leak
         # parity), otherwise a leaked/guessed UUID from another org could be
         # run against this agent and its content read back via the result.
+        # Every listed uuid is checked, but a repeat is only run (and only
+        # counted against the row limit) once, matching the benchmark path.
         tests = []
+        seen_test_uuids: set = set()
         for test_uuid in request.test_uuids:
             test = get_test(test_uuid)
             if not test or test.get("org_uuid") != ctx.org_uuid:
                 raise HTTPException(
                     status_code=404, detail=f"Test {test_uuid} not found"
                 )
+            if test_uuid in seen_test_uuids:
+                continue
+            seen_test_uuids.add(test_uuid)
             tests.append(test)
         # Linking checks this, running by ID never did. It matters now that the
         # agent's interaction_type picks the request body: calibrate raises on

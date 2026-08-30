@@ -8,6 +8,8 @@ from unittest.mock import patch
 import pytest
 from fastapi.testclient import TestClient
 
+from conftest import NONEXISTENT_UUID
+
 
 @pytest.fixture(scope="module")
 def app():
@@ -332,3 +334,28 @@ def test_batch_run_skips_an_agent_over_the_limit(client, monkeypatch):
             "reason": "over_row_limit",
         }
     ]
+
+
+def test_run_counts_a_repeated_test_once(client, monkeypatch):
+    auth = _signup(client)
+    h = auth["headers"]
+    agent, tests = _agent_with_tests(client, h, 1)
+    monkeypatch.setenv("S3_OUTPUT_BUCKET", "test-bucket")
+
+    with patch("routers.agent_tests.can_start_agent_test_job", return_value=True), patch(
+        "threading.Thread"
+    ):
+        resp = client.post(
+            f"/agent-tests/agent/{agent['uuid']}/run",
+            json={"test_uuids": [tests[0]["uuid"], tests[0]["uuid"]]},
+            headers=h,
+        )
+    assert resp.status_code == 200
+
+    # An unknown uuid is still refused, repeat or not.
+    missing = client.post(
+        f"/agent-tests/agent/{agent['uuid']}/run",
+        json={"test_uuids": [tests[0]["uuid"], NONEXISTENT_UUID]},
+        headers=h,
+    )
+    assert missing.status_code == 404
