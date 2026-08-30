@@ -479,7 +479,7 @@ def test_run_llm_test_task_failure_propagates():
 
 
 def test_run_llm_test_task_records_cases_that_never_ran():
-    """A run that finishes with gaps: the errored row keeps its real error, and
+    """A run that finishes with gaps: the unanswered row keeps its real error, and
     the two run-level counts from metrics.json are stored on the job."""
     from routers.agent_tests import run_llm_test_task
 
@@ -506,7 +506,7 @@ def test_run_llm_test_task_records_cases_that_never_ran():
             )
         with open(out / "metrics.json", "w") as f:
             json.dump(
-                {"total": 1, "passed": 0, "errored": 1, "stopped_early": True}, f
+                {"total": 1, "passed": 0, "unanswered_tests": 1, "stopped_early": True}, f
             )
         return process
 
@@ -526,14 +526,14 @@ def test_run_llm_test_task_records_cases_that_never_ran():
         run_llm_test_task(job_uuid, agent, tests, "bucket")
 
     results = db.get_agent_test_job(job_uuid)["results"]
-    assert results["errored"] == 1
+    assert results["unanswered_tests"] == 1
     assert results["stopped_early"] is True
     row = results["test_results"][0]
-    assert row["errored"] is True
+    assert row["unanswered"] is True
     assert row["reasoning"] == "Agent returned HTTP 500"
 
 
-def test_run_llm_test_task_counts_errored_without_metrics_file():
+def test_run_llm_test_task_counts_unanswered_without_metrics_file():
     """calibrate wrote results but no metrics.json: the run still reports how
     many produced no answer, counted from the rows."""
     from routers.agent_tests import run_llm_test_task
@@ -574,11 +574,11 @@ def test_run_llm_test_task_counts_errored_without_metrics_file():
         run_llm_test_task(job_uuid, agent, tests, "bucket")
 
     results = db.get_agent_test_job(job_uuid)["results"]
-    assert results["errored"] == 1
+    assert results["unanswered_tests"] == 1
     assert results["stopped_early"] is False
 
 
-def test_errored_count_falls_back_to_the_rows(tmp_path):
+def test_unanswered_count_falls_back_to_the_rows(tmp_path):
     """calibrate writes metrics.json only at the end, so while a run is going
     (and for a run that never wrote one) the count comes from the rows."""
     from routers.agent_tests import _update_agent_test_intermediate_results
@@ -607,7 +607,7 @@ def test_errored_count_falls_back_to_the_rows(tmp_path):
     _update_agent_test_intermediate_results(job_uuid, tmp_path, ["T1", "T2"])
 
     results = db.get_agent_test_job(job_uuid)["results"]
-    assert results["errored"] == 1
+    assert results["unanswered_tests"] == 1
     assert results["passed"] is None  # no metrics.json yet
 
 

@@ -7297,7 +7297,7 @@ _AGENT_TEST_JOB_SUMMARY_COLUMNS = """
         json_extract(atj.results, '$.latency_ms') AS latency_ms,
         json_extract(atj.results, '$.cost') AS cost,
         json_extract(atj.results, '$.total_tokens') AS total_tokens,
-        json_extract(atj.results, '$.errored') AS errored,
+        json_extract(atj.results, '$.unanswered_tests') AS unanswered_tests,
         json_extract(atj.results, '$.error') AS error,
         (SELECT json_group_array(json_object(
             'name', COALESCE(json_extract(je.value, '$.name'),
@@ -7358,7 +7358,7 @@ def _row_to_agent_test_job_summary(row: sqlite3.Row) -> Dict[str, Any]:
             "latency_ms": _loads(row.get("latency_ms")),
             "cost": _loads(row.get("cost")),
             "total_tokens": _loads(row.get("total_tokens")),
-            "errored": row.get("errored"),
+            "unanswered_tests": row.get("unanswered_tests"),
             "error": row.get("error"),
             "test_results": _loads(row.get("test_results")),
             "model_results": _loads(row.get("model_results")),

@@ -185,7 +185,7 @@ class PublicTestRunResponse(BaseModel):
         None,
         description="Aggregated token usage (`{mean, min, max, count}`)",
     )
-    errored: Optional[int] = Field(
+    unanswered_tests: Optional[int] = Field(
         None,
         description="Number of test cases that produced no answer because the agent or the judge could not be reached, which makes the pass rate an unfair measure of the agent",
     )
@@ -625,7 +625,7 @@ def get_public_test_run(
         latency_ms=results.get("latency_ms"),
         cost=results.get("cost"),
         total_tokens=results.get("total_tokens"),
-        errored=results.get("errored"),
+        unanswered_tests=results.get("unanswered_tests"),
         stopped_early=bool(results.get("stopped_early")),
         error=bool(results.get("error")),
     )

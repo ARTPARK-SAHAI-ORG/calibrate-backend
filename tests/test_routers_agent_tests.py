@@ -647,7 +647,7 @@ def test_run_reports_cases_that_never_ran(client):
             "total_tests": 2,
             "passed": 1,
             "failed": 1,
-            "errored": 1,
+            "unanswered_tests": 1,
             "stopped_early": True,
             "test_results": [
                 {"name": "tc1", "test_case_id": "tc1", "passed": True},
@@ -656,19 +656,19 @@ def test_run_reports_cases_that_never_ran(client):
                     "test_case_id": "tc2",
                     "passed": False,
                     "reasoning": "Agent returned HTTP 500",
-                    "errored": True,
+                    "unanswered": True,
                 },
             ],
         },
     )
 
     detail = client.get(f"/agent-tests/run/{job_id}", headers=h).json()
-    assert detail["errored"] == 1
+    assert detail["unanswered_tests"] == 1
     assert detail["stopped_early"] is True
-    assert [r["errored"] for r in detail["results"]] == [False, True]
+    assert [r["unanswered"] for r in detail["results"]] == [False, True]
 
     listed = client.get(f"/agent-tests/agent/{agent['uuid']}/runs", headers=h).json()
-    assert listed["items"][0]["errored"] == 1
+    assert listed["items"][0]["unanswered_tests"] == 1
 
     share = client.patch(
         f"/agent-tests/run/{job_id}/visibility",
@@ -676,7 +676,7 @@ def test_run_reports_cases_that_never_ran(client):
         headers=h,
     ).json()
     public = client.get(f"/public/test-run/{share['share_token']}").json()
-    assert public["errored"] == 1
+    assert public["unanswered_tests"] == 1
     assert public["stopped_early"] is True
 
 

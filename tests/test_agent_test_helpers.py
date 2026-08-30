@@ -77,7 +77,7 @@ def test_parse_agent_test_results():
 
 def test_parse_agent_test_results_marks_cases_that_never_ran():
     """calibrate marks a row it could not run at all with `error`. That must
-    survive as `errored` so the run page can separate a wrong answer from a
+    survive as `unanswered` so the run page can separate a wrong answer from a
     test that never reached the agent."""
     from routers.agent_tests import (
         _parse_agent_test_results,
@@ -101,10 +101,10 @@ def test_parse_agent_test_results_marks_cases_that_never_ran():
             },
         ]
     )
-    assert out[0]["errored"] is True
+    assert out[0]["unanswered"] is True
     assert out[0]["reasoning"] == "Agent returned HTTP 500"
-    assert out[1]["errored"] is False
-    assert _pending_test_case_result_placeholder("T3")["errored"] is False
+    assert out[1]["unanswered"] is False
+    assert _pending_test_case_result_placeholder("T3")["unanswered"] is False
 
 
 def test_parse_agent_test_results_preserves_tool_call_output():
