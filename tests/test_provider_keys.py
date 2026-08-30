@@ -7,6 +7,8 @@ import os
 import uuid
 from pathlib import Path
 
+from unittest.mock import patch
+
 import pytest
 from cryptography.fernet import Fernet
 
@@ -126,7 +128,7 @@ def test_covered_providers_needs_every_value(org):
         "google",
         {
             "GOOGLE_APPLICATION_CREDENTIALS": SERVICE_ACCOUNT,
-            "GOOGLE_CLOUD_PROJECT_ID": "p",
+            "GOOGLE_CLOUD_PROJECT_ID": "my-project",
         },
     )
     assert pk.covered_providers(org) == {"sarvam", "google"}
@@ -217,7 +219,7 @@ def test_credentials_that_are_json_but_not_an_object_are_rejected():
             "google",
             {
                 "GOOGLE_APPLICATION_CREDENTIALS": "[1, 2]",
-                "GOOGLE_CLOUD_PROJECT_ID": "p",
+                "GOOGLE_CLOUD_PROJECT_ID": "my-project",
             },
         )
 
@@ -235,11 +237,16 @@ def test_a_very_short_secret_is_still_fully_masked():
     assert pk._display_for("SARVAM_API_KEY", "ab") == "••••"
 
 
-def test_a_credentials_file_that_cannot_be_written_leaves_the_key_out(
+def test_a_credentials_file_that_cannot_be_written_drops_the_whole_provider(
     org, monkeypatch, tmp_path
 ):
-    """A run must not be handed a path to a file that is not there."""
+    """Never pair the server's service account with the workspace's project.
+
+    Keeping the project while the credentials fall back to the server produces
+    a permission failure nobody can diagnose, so the provider moves as a unit.
+    """
     monkeypatch.setenv("GOOGLE_APPLICATION_CREDENTIALS", "/server/creds.json")
+    monkeypatch.setenv("GOOGLE_CLOUD_PROJECT_ID", "server-project")
     _store(
         org,
         "google",
@@ -248,6 +255,7 @@ def test_a_credentials_file_that_cannot_be_written_leaves_the_key_out(
             "GOOGLE_CLOUD_PROJECT_ID": "my-project",
         },
     )
+    _store(org, "sarvam", {"SARVAM_API_KEY": "workspace-sarvam"})
 
     def _refuse(*args, **kwargs):
         raise OSError("disk full")
@@ -256,4 +264,100 @@ def test_a_credentials_file_that_cannot_be_written_leaves_the_key_out(
     env = pk.provider_env(org, tmp_path)
 
     assert env["GOOGLE_APPLICATION_CREDENTIALS"] == "/server/creds.json"
-    assert env["GOOGLE_CLOUD_PROJECT_ID"] == "my-project"
+    assert env["GOOGLE_CLOUD_PROJECT_ID"] == "server-project"
+    # A failure for one provider must not disturb another.
+    assert env["SARVAM_API_KEY"] == "workspace-sarvam"
+
+
+def test_an_unreadable_value_does_not_half_apply_its_provider(org, monkeypatch):
+    """Google needs both values, so one unreadable row drops both."""
+    monkeypatch.setenv("GOOGLE_APPLICATION_CREDENTIALS", "/server/creds.json")
+    monkeypatch.setenv("GOOGLE_CLOUD_PROJECT_ID", "server-project")
+    _store(
+        org,
+        "google",
+        {
+            "GOOGLE_APPLICATION_CREDENTIALS": SERVICE_ACCOUNT,
+            "GOOGLE_CLOUD_PROJECT_ID": "my-project",
+        },
+    )
+    _store(org, "sarvam", {"SARVAM_API_KEY": "workspace-sarvam"})
+
+    readable = [
+        r
+        for r in db.get_org_provider_keys(org)
+        if r["env_var"] != "GOOGLE_APPLICATION_CREDENTIALS"
+    ]
+    with patch("provider_keys.get_org_provider_keys", return_value=readable):
+        env = pk.provider_env(org, "/tmp")
+
+    assert env["GOOGLE_CLOUD_PROJECT_ID"] == "server-project"
+    assert env["GOOGLE_APPLICATION_CREDENTIALS"] == "/server/creds.json"
+    assert env["SARVAM_API_KEY"] == "workspace-sarvam"
+
+
+def test_reporting_an_unreadable_key_does_not_block_every_row(org, monkeypatch):
+    """Sentry's flush blocks, and this runs per row on request paths."""
+    import provider_keys
+
+    for provider in ("sarvam", "openai", "deepgram"):
+        _store(
+            org, provider, {pk.provider_env_vars(provider)[0]: f"k-{provider}-1234"}
+        )
+    monkeypatch.setenv(pk.ENCRYPTION_KEY_ENV, Fernet.generate_key().decode())
+    monkeypatch.setattr(provider_keys, "_decrypt_failure_reported", False)
+
+    calls = []
+    monkeypatch.setattr(
+        provider_keys, "capture_exception_to_sentry", lambda exc: calls.append(exc)
+    )
+    pk.workspace_env_values(org)
+    pk.workspace_env_values(org)
+
+    assert len(calls) == 1
+
+
+def test_a_service_account_with_an_odd_account_field_still_saves():
+    """A non-text client_email must not reach the database as an object."""
+    rows = pk.encrypted_rows_for(
+        "google",
+        {
+            "GOOGLE_APPLICATION_CREDENTIALS": json.dumps({"client_email": {}}),
+            "GOOGLE_CLOUD_PROJECT_ID": "my-project",
+        },
+    )
+    display = {r["env_var"]: r["display"] for r in rows}
+    assert display["GOOGLE_APPLICATION_CREDENTIALS"] == "Service account JSON saved"
+    assert all(isinstance(r["display"], str) for r in rows)
+
+
+def test_a_key_pasted_into_the_project_field_is_refused():
+    with pytest.raises(pk.ProviderKeyError) as exc:
+        pk.encrypted_rows_for(
+            "google",
+            {
+                "GOOGLE_APPLICATION_CREDENTIALS": SERVICE_ACCOUNT,
+                "GOOGLE_CLOUD_PROJECT_ID": "-----BEGIN PRIVATE KEY-----\nMIIE",
+            },
+        )
+    assert "project id" in str(exc.value)
+
+
+def test_real_project_ids_are_accepted():
+    for project_id in ("my-project", "my-project-123", "abc123", "a" + "b" * 28 + "c"):
+        rows = pk.encrypted_rows_for(
+            "google",
+            {
+                "GOOGLE_APPLICATION_CREDENTIALS": SERVICE_ACCOUNT,
+                "GOOGLE_CLOUD_PROJECT_ID": project_id,
+            },
+        )
+        assert len(rows) == 2
+
+
+def test_a_value_too_long_for_the_environment_is_refused():
+    with pytest.raises(pk.ProviderKeyError) as exc:
+        pk.encrypted_rows_for(
+            "sarvam", {"SARVAM_API_KEY": "x" * (pk.MAX_VALUE_BYTES + 1)}
+        )
+    assert "too long" in str(exc.value)

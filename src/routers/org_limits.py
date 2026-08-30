@@ -10,7 +10,7 @@ site names the providers its run will actually use.
 
 import os
 import sqlite3
-from typing import Iterable, List, Optional
+from typing import Any, Dict, Iterable, List, Optional
 
 from fastapi import APIRouter, HTTPException, Depends, Path, Query
 from pydantic import BaseModel, Field
@@ -77,6 +77,26 @@ class OrgLimitsCreateResponse(BaseModel):
         description="ID of the newly created limits record",
     )
     message: str = Field(description="Status message")
+
+
+# The judge always runs on OpenRouter, whatever the flow: `calibrate_agent`'s
+# judges, and the Sarvam LLM-WER and intent bundles, all build an OpenRouter
+# client. Any run that scores anything bills this.
+JUDGE_PROVIDER = "openrouter"
+
+
+def providers_for_agent_run(agent: Dict[str, Any]) -> List[str]:
+    """Providers an agent test, benchmark, or text simulation bills.
+
+    Reads the model provider back out of the same `config["llm"]` the runners
+    hand the CLI, so the two cannot drift. A connection-type agent is the
+    customer's own endpoint and costs the server nothing, leaving just the judge.
+    """
+    config = agent.get("config") or {}
+    if config.get("agent_url"):
+        return [JUDGE_PROVIDER]
+    provider = (config.get("llm") or {}).get("provider") or JUDGE_PROVIDER
+    return [JUDGE_PROVIDER, provider]
 
 
 def _workspace_pays_for(org_uuid: str, providers: Iterable[str]) -> bool:

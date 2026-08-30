@@ -10,6 +10,7 @@ every workspace down.
 import json
 import logging
 import os
+import re
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Set
 
@@ -33,6 +34,14 @@ FILE_ENV_VARS = frozenset({"GOOGLE_APPLICATION_CREDENTIALS"})
 SECRET = "secret"
 PLAIN = "plain"
 FILE = "file"
+
+# Linux caps one environment variable at 128 KB, and every value here is handed
+# to the eval tool that way. Refuse a paste that would break every run instead.
+MAX_VALUE_BYTES = 64 * 1024
+
+# Google Cloud's own rule: 6 to 30 characters, starting with a lowercase letter,
+# lowercase letters, digits and hyphens, not ending in a hyphen.
+_PROJECT_ID = re.compile(r"[a-z][a-z0-9-]{4,28}[a-z0-9]")
 
 
 class ProviderKeyError(ValueError):
@@ -85,6 +94,25 @@ def encrypt_value(value: str) -> str:
     return fernet.encrypt(value.encode()).decode()
 
 
+_decrypt_failure_reported = False
+
+
+def _report_decrypt_failure(exc: Exception) -> None:
+    """Send the first unreadable key to Sentry, then stay quiet.
+
+    `capture_exception_to_sentry` blocks on a flush, and this runs once per
+    stored row on request paths, so reporting every row would add seconds to
+    every request and flood Sentry with one event per row per request. A lost
+    or rotated key produces identical events, so the first one says everything
+    the rest would.
+    """
+    global _decrypt_failure_reported
+    if _decrypt_failure_reported:
+        return
+    _decrypt_failure_reported = True
+    capture_exception_to_sentry(exc)
+
+
 def _decrypt_value(encrypted: str) -> Optional[str]:
     """Decrypted value, or None when it cannot be read.
 
@@ -98,7 +126,7 @@ def _decrypt_value(encrypted: str) -> Optional[str]:
         return fernet.decrypt(encrypted.encode()).decode()
     except (InvalidToken, ValueError) as exc:
         logger.error("Could not decrypt a stored provider key: %s", exc)
-        capture_exception_to_sentry(exc)
+        _report_decrypt_failure(exc)
         return None
 
 
@@ -114,7 +142,9 @@ def _display_for(env_var: str, value: str) -> str:
             email = json.loads(value).get("client_email")
         except (ValueError, AttributeError):
             email = None
-        return email or "Service account JSON saved"
+        if not isinstance(email, str) or not email:
+            return "Service account JSON saved"
+        return email
     return f"••••{value[-4:]}" if len(value) >= 4 else "••••"
 
 
@@ -140,6 +170,11 @@ def validate_values(provider: str, values: Dict[str, str]) -> Dict[str, str]:
         if not value:
             missing.append(env_var)
             continue
+        if len(value.encode()) > MAX_VALUE_BYTES:
+            raise ProviderKeyError(
+                f"{env_var} is too long. A run passes it to the eval tool as an "
+                "environment variable, which the operating system caps"
+            )
         if env_var_kind(env_var) == FILE:
             try:
                 parsed = json.loads(value)
@@ -147,6 +182,12 @@ def validate_values(provider: str, values: Dict[str, str]) -> Dict[str, str]:
                 raise ProviderKeyError(f"{env_var} must be the service account JSON")
             if not isinstance(parsed, dict):
                 raise ProviderKeyError(f"{env_var} must be the service account JSON")
+        if env_var == "GOOGLE_CLOUD_PROJECT_ID" and not _PROJECT_ID.fullmatch(value):
+            # This field is shown back in full, so a key pasted into it by mistake
+            # would be on screen in the clear. A project id has a fixed shape.
+            raise ProviderKeyError(
+                f"{env_var} must be a Google Cloud project id, such as my-project-123"
+            )
         cleaned[env_var] = value
     if missing:
         raise ProviderKeyError(
@@ -208,17 +249,32 @@ def provider_env(org_uuid: str, workdir: Any) -> Optional[Dict[str, str]]:
         return None
 
     env = dict(os.environ)
-    for env_var, value in values.items():
-        if env_var_kind(env_var) == FILE:
+    for provider, env_vars in PROVIDER_ENV_VARS.items():
+        # All of a provider's values move together or none do. Google Cloud
+        # otherwise pairs the server's service account with the workspace's
+        # project, which fails in a way nobody can diagnose.
+        if not all(values.get(var) for var in env_vars):
+            continue
+        overrides: Optional[Dict[str, str]] = {}
+        for env_var in env_vars:
+            if env_var_kind(env_var) != FILE:
+                overrides[env_var] = values[env_var]
+                continue
             path = Path(workdir) / f"{env_var.lower()}.json"
             try:
-                path.write_text(value)
+                path.write_text(values[env_var])
                 os.chmod(path, 0o600)
             except OSError as exc:
-                logger.error("Could not write %s for the run: %s", env_var, exc)
+                logger.error(
+                    "Could not write %s, falling back to the server's %s keys: %s",
+                    env_var,
+                    provider,
+                    exc,
+                )
                 capture_exception_to_sentry(exc)
-                continue
-            env[env_var] = str(path)
-        else:
-            env[env_var] = value
+                overrides = None
+                break
+            overrides[env_var] = str(path)
+        if overrides is not None:
+            env.update(overrides)
     return env

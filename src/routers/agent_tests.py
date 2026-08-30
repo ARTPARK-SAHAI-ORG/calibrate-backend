@@ -59,7 +59,11 @@ from llm_judge import (
 )
 from provider_keys import provider_env
 from routers.agents import AgentSummary, to_agent_summary
-from routers.org_limits import effective_max_rows_per_eval, enforce_max_rows_per_eval
+from routers.org_limits import (
+    effective_max_rows_per_eval,
+    enforce_max_rows_per_eval,
+    providers_for_agent_run,
+)
 from routers.tests import (
     AGENT_INTERACTION_TYPES,
     DEFAULT_AGENT_INTERACTION_TYPE,
@@ -2885,7 +2889,9 @@ def run_agent_test(
                 detail="No tests linked to this agent. Link tests first or provide test_uuids.",
             )
 
-    enforce_max_rows_per_eval(ctx.org_uuid, len(tests), ["openrouter"])
+    enforce_max_rows_per_eval(
+        ctx.org_uuid, len(tests), providers_for_agent_run(agent)
+    )
 
     # Get S3 configuration
     try:
@@ -2911,8 +2917,6 @@ def _run_tests_for_agents(
     """
     runs: List[BatchTestRun] = []
     skipped: List[BatchTestSkip] = []
-    max_rows = effective_max_rows_per_eval(org_uuid, ["openrouter"])
-
     for agent in agents:
         if _agent_connection_unverified(agent):
             skipped.append(
@@ -2935,6 +2939,9 @@ def _run_tests_for_agents(
             )
             continue
 
+        max_rows = effective_max_rows_per_eval(
+            org_uuid, providers_for_agent_run(agent)
+        )
         if max_rows is not None and len(tests) > max_rows:
             skipped.append(
                 BatchTestSkip(
@@ -3993,7 +4000,9 @@ def run_agent_benchmark(
         tests = linked_tests
 
     enforce_max_rows_per_eval(
-        ctx.org_uuid, len(tests) * len(request.models), ["openrouter"]
+        ctx.org_uuid,
+        len(tests) * len(request.models),
+        providers_for_agent_run(agent),
     )
 
     # Get S3 configuration

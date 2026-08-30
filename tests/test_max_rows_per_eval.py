@@ -366,6 +366,16 @@ def test_run_counts_a_repeated_test_once(client, monkeypatch):
 # ---------------------------------------------------------------------------
 
 
+def _cleanup_job(client, auth, task_id):
+    """Remove the job a launched run leaves behind. The session database is
+    shared, so a job left queued is picked up by the queue tests."""
+    client.delete(f"/jobs/{task_id}", headers=auth["headers"])
+
+
+def _cleanup_agent_test_job(client, auth, task_id):
+    client.delete(f"/agent-tests/job/{task_id}", headers=auth["headers"])
+
+
 @pytest.fixture
 def own_keys(monkeypatch):
     """Store this workspace's own keys for the providers a test names."""
@@ -381,6 +391,8 @@ def own_keys(monkeypatch):
                 env_var: (
                     '{"client_email": "r@p.iam.gserviceaccount.com"}'
                     if pk.env_var_kind(env_var) == pk.FILE
+                    else "wk-project-123"
+                    if pk.env_var_kind(env_var) == pk.PLAIN
                     else f"wk-{env_var.lower()}"
                 )
                 for env_var in pk.provider_env_vars(provider)
@@ -436,6 +448,7 @@ def test_stt_is_uncapped_once_every_provider_it_calls_is_paid_for(
         headers=auth["headers"],
     )
     assert resp.status_code == 200, resp.text
+    _cleanup_job(client, auth, resp.json()["task_id"])
 
 
 def test_tts_is_uncapped_once_its_providers_are_paid_for(client, monkeypatch, own_keys):
@@ -449,6 +462,8 @@ def test_tts_is_uncapped_once_its_providers_are_paid_for(client, monkeypatch, ow
         headers=auth["headers"],
     )
     assert resp.status_code == 200, resp.text
+    _cleanup_job(client, auth, resp.json()["task_id"])
+    _cleanup_job(client, auth, resp.json()["task_id"])
 
 
 def test_the_reported_cap_reflects_the_providers_a_run_would_call(
@@ -481,3 +496,79 @@ def test_an_empty_provider_list_never_lifts_the_cap(client, own_keys):
     assert org_limits.effective_max_rows_per_eval(org, [""]) == 1
     assert org_limits.effective_max_rows_per_eval(org, None) == 1
     assert org_limits.effective_max_rows_per_eval(org, ["sarvam"]) is None
+
+
+def test_an_agent_on_another_provider_stays_capped_with_only_an_openrouter_key(
+    client, own_keys
+):
+    """The run is charged to whatever provider the agent config names.
+
+    Reading the cap off OpenRouter alone let a workspace lift it while the run
+    was billed to the server's OpenAI key.
+    """
+    auth = _signup(client)
+    own_keys(client, auth, "openrouter")
+    agent = _create_agent(client, auth["headers"])
+    client.put(
+        f"/agents/{agent['uuid']}",
+        json={"config": {"llm": {"provider": "openai", "model": "gpt-4.1"}}},
+        headers=auth["headers"],
+    )
+    for _ in range(2):
+        test = _create_test(client, auth["headers"])
+        client.post(
+            "/agent-tests",
+            json={"agent_uuid": agent["uuid"], "test_uuids": [test["uuid"]]},
+            headers=auth["headers"],
+        )
+
+    resp = client.post(
+        f"/agent-tests/agent/{agent['uuid']}/run", json={}, headers=auth["headers"]
+    )
+    assert resp.status_code == 400
+
+    own_keys(client, auth, "openai")
+    resp = client.post(
+        f"/agent-tests/agent/{agent['uuid']}/run", json={}, headers=auth["headers"]
+    )
+    assert resp.status_code == 200, resp.text
+    _cleanup_agent_test_job(client, auth, resp.json()["task_id"])
+
+
+def test_a_voice_simulation_stays_capped_whatever_the_workspace_pays_for(
+    client, own_keys
+):
+    """The eval tool picks a voice simulation's own providers, so we cannot know them."""
+    import routers.simulations as simulations
+
+    auth = _signup(client)
+    own_keys(client, auth, "openrouter", "openai", "google", "elevenlabs", "deepgram")
+    org = client.get("/organizations", headers=auth["headers"]).json()[0]["uuid"]
+    agent = {"config": {"llm": {"provider": "openrouter"}}}
+
+    assert simulations._simulation_providers(agent, "voice") is None
+    assert org_limits_for(client, auth) == 1
+
+
+def org_limits_for(client, auth):
+    import routers.org_limits as org_limits
+
+    org = client.get("/organizations", headers=auth["headers"]).json()[0]["uuid"]
+    return org_limits.effective_max_rows_per_eval(org, None)
+
+
+def test_an_agent_you_host_yourself_only_needs_the_judge_paid_for():
+    """A connection agent is the customer's own endpoint, so it costs us nothing."""
+    import routers.org_limits as org_limits
+
+    hosted = {"config": {"agent_url": "https://mine.example.com", "llm": {"provider": "openai"}}}
+    assert org_limits.providers_for_agent_run(hosted) == ["openrouter"]
+
+    ours = {"config": {"llm": {"provider": "openai"}}}
+    assert org_limits.providers_for_agent_run(ours) == ["openrouter", "openai"]
+
+    no_provider_named = {"config": {}}
+    assert org_limits.providers_for_agent_run(no_provider_named) == [
+        "openrouter",
+        "openrouter",
+    ]

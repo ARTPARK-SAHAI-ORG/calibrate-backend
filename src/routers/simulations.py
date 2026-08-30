@@ -78,7 +78,7 @@ from utils import (
     env_str,
 )
 from auth_utils import get_current_org, OrgContext
-from routers.org_limits import enforce_max_rows_per_eval
+from routers.org_limits import enforce_max_rows_per_eval, providers_for_agent_run
 from provider_keys import provider_env
 from datetime import datetime
 
@@ -1311,21 +1311,21 @@ def _build_calibrate_simulation_config(
     return config
 
 
-def _simulation_providers(agent: Dict[str, Any], simulation_type: str) -> List[str]:
-    """Providers a run will call, for the row-limit check. A voice run drives the
-    agent's own speech-to-text and text-to-speech on top of the judge."""
-    providers = ["openrouter"]
+def _simulation_providers(
+    agent: Dict[str, Any], simulation_type: str
+) -> Optional[List[str]]:
+    """Providers a run bills, or None when they cannot be known.
+
+    A voice run is the one flow whose providers the CLI chooses for itself: it
+    speaks the simulated person with ElevenLabs or Google, thinks with OpenAI
+    directly, and falls back to Deepgram for transcription when the agent has no
+    speech-to-text block. None of that is visible from the config we send, and a
+    guess that comes up short lifts the row cap onto the server's own keys, so a
+    voice run stays capped.
+    """
     if simulation_type == "voice":
-        agent_config = agent.get("config") or {}
-        providers.append(
-            (agent_config.get("stt") or {}).get("provider")
-            or env_str("DEFAULT_AGENT_STT_PROVIDER", "google")
-        )
-        providers.append(
-            (agent_config.get("tts") or {}).get("provider")
-            or env_str("DEFAULT_AGENT_TTS_PROVIDER", "google")
-        )
-    return providers
+        return None
+    return providers_for_agent_run(agent)
 
 
 def _extract_persona_scenario_indices(sim_name: str) -> tuple:

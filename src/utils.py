@@ -949,9 +949,11 @@ def generate_presigned_upload_url(
 def get_max_concurrent_jobs() -> int:
     """Get the maximum number of concurrent jobs from environment variable.
 
-    Defaults to 2 if not set.
+    Defaults to 1 if not set, matching docker-compose and the sizing advice in
+    SELF_HOSTING.md. A server started without the variable should not quietly
+    run twice the work the docs describe.
     """
-    return env_int("MAX_CONCURRENT_JOBS", 2)
+    return env_int("MAX_CONCURRENT_JOBS", 1)
 
 
 def get_max_concurrent_jobs_per_org() -> int:
