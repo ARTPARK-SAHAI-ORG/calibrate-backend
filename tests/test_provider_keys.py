@@ -209,3 +209,51 @@ def test_every_known_provider_has_at_least_one_variable():
         assert pk.provider_env_vars(provider)
         for env_var in pk.provider_env_vars(provider):
             assert pk.env_var_kind(env_var) in {pk.SECRET, pk.PLAIN, pk.FILE}
+
+
+def test_credentials_that_are_json_but_not_an_object_are_rejected():
+    with pytest.raises(pk.ProviderKeyError):
+        pk.encrypted_rows_for(
+            "google",
+            {
+                "GOOGLE_APPLICATION_CREDENTIALS": "[1, 2]",
+                "GOOGLE_CLOUD_PROJECT_ID": "p",
+            },
+        )
+
+
+def test_credentials_with_no_account_name_still_show_something():
+    assert pk._display_for("GOOGLE_APPLICATION_CREDENTIALS", "{}") == (
+        "Service account JSON saved"
+    )
+    assert pk._display_for("GOOGLE_APPLICATION_CREDENTIALS", "123") == (
+        "Service account JSON saved"
+    )
+
+
+def test_a_very_short_secret_is_still_fully_masked():
+    assert pk._display_for("SARVAM_API_KEY", "ab") == "••••"
+
+
+def test_a_credentials_file_that_cannot_be_written_leaves_the_key_out(
+    org, monkeypatch, tmp_path
+):
+    """A run must not be handed a path to a file that is not there."""
+    monkeypatch.setenv("GOOGLE_APPLICATION_CREDENTIALS", "/server/creds.json")
+    _store(
+        org,
+        "google",
+        {
+            "GOOGLE_APPLICATION_CREDENTIALS": SERVICE_ACCOUNT,
+            "GOOGLE_CLOUD_PROJECT_ID": "my-project",
+        },
+    )
+
+    def _refuse(*args, **kwargs):
+        raise OSError("disk full")
+
+    monkeypatch.setattr(Path, "write_text", _refuse)
+    env = pk.provider_env(org, tmp_path)
+
+    assert env["GOOGLE_APPLICATION_CREDENTIALS"] == "/server/creds.json"
+    assert env["GOOGLE_CLOUD_PROJECT_ID"] == "my-project"

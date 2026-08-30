@@ -467,3 +467,17 @@ def test_the_reported_cap_reflects_the_providers_a_run_would_call(
     assert cap() == 1
     assert cap("sarvam") is None
     assert cap("sarvam", "openrouter") == 1
+
+
+def test_an_empty_provider_list_never_lifts_the_cap(client, own_keys):
+    """A call site that cannot name its providers must stay capped, not go free."""
+    import routers.org_limits as org_limits
+
+    auth = _signup(client)
+    own_keys(client, auth, "sarvam")
+    org = client.get("/organizations", headers=auth["headers"]).json()[0]["uuid"]
+
+    assert org_limits.effective_max_rows_per_eval(org, []) == 1
+    assert org_limits.effective_max_rows_per_eval(org, [""]) == 1
+    assert org_limits.effective_max_rows_per_eval(org, None) == 1
+    assert org_limits.effective_max_rows_per_eval(org, ["sarvam"]) is None
