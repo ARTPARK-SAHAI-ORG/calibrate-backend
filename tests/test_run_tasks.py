@@ -1249,11 +1249,15 @@ def test_run_llm_test_task_stops_when_the_run_is_aborted():
     job = db.get_agent_test_job(job_uuid)
     assert job["status"] == "done"
     assert job["details"]["aborted"] is True
-    rows = job["results"]["test_results"]
+    results = job["results"]
+    rows = results["test_results"]
     assert [r["name"] for r in rows] == ["T1", "T2"]
     assert rows[0]["passed"] is True  # judged before the stop, kept
-    assert rows[1]["passed"] is None  # never ran, counted neither way
-    assert job["results"].get("error") is None
+    assert not rows[0].get("not_run")
+    assert rows[1]["passed"] is None and rows[1]["not_run"] is True
+    # The one case that never started is in neither count.
+    assert (results["passed"], results["failed"]) == (1, 0)
+    assert results.get("error") is None
 
 
 def test_run_llm_test_task_never_starts_a_run_stopped_while_queued():
@@ -1326,6 +1330,10 @@ def test_run_benchmark_task_stops_when_the_run_is_aborted():
     # Neither model finished, so neither is left claiming to still be running.
     assert models["model-a"]["message"] == "Stopped"
     assert models["model-b"]["message"] == "Stopped"
+    # model-b never produced anything: every case marked, nothing counted.
+    assert (models["model-b"]["passed"], models["model-b"]["failed"]) == (0, 0)
+    assert all(r["not_run"] for r in models["model-b"]["test_results"])
+    assert models["model-b"]["total_tests"] == 1
 
 
 def _assert_stop_was_not_written_up_as_a_failure(job_uuid):

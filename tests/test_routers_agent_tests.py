@@ -3406,10 +3406,13 @@ def test_abort_run_keeps_everything_captured_so_far(client):
     )
     update_agent_test_job(
         job_id,
+        # Mid-run state as the poll loop actually leaves it: the counts stay
+        # null until calibrate writes them at the end, which a stopped run never
+        # reaches.
         results={
             "total_tests": 2,
-            "passed": 1,
-            "failed": 0,
+            "passed": None,
+            "failed": None,
             "test_results": [
                 {"name": "T1", "passed": True, "reasoning": "good"},
                 {"name": "T2", "passed": None},
@@ -3425,10 +3428,14 @@ def test_abort_run_keeps_everything_captured_so_far(client):
     assert detail["status"] == "done"
     assert detail["aborted"] is True
     assert detail["error"] is False
-    assert detail["passed"] == 1
     assert [r["name"] for r in detail["results"]] == ["T1", "T2"]
     assert detail["results"][0]["reasoning"] == "good"
+    assert detail["results"][0]["not_run"] is False
+    # T2 never started: marked as such, and in neither count.
     assert detail["results"][1]["passed"] is None
+    assert detail["results"][1]["not_run"] is True
+    assert (detail["passed"], detail["failed"]) == (1, 0)
+    assert detail["total_tests"] == 2
     # The frozen snapshot the detail view reads survived the abort write.
     assert detail["test_uuids"] == ["t1"]
 
@@ -3436,6 +3443,9 @@ def test_abort_run_keeps_everything_captured_so_far(client):
         "items"
     ][0]
     assert run["aborted"] is True
+    # The list shows the same honest counts, so a stopped run is not read as
+    # one failing test.
+    assert (run["passed"], run["failed"]) == (1, 0)
 
     client.patch(
         f"/agent-tests/run/{job_id}/visibility", json={"is_public": True}, headers=h
@@ -3444,6 +3454,7 @@ def test_abort_run_keeps_everything_captured_so_far(client):
     shared = client.get(f"/public/test-run/{token}").json()
     assert shared["aborted"] is True
     assert len(shared["results"]) == 2
+    assert shared["results"][1]["not_run"] is True
 
 
 def test_abort_queued_run_frees_the_slot(client):
@@ -3513,6 +3524,11 @@ def test_abort_benchmark_marks_unfinished_models_stopped(client):
     assert models["m1"]["message"] == "Completed"  # finished, left alone
     assert models["m2"]["message"] == "Stopped"
     assert len(models["m2"]["test_results"]) == 2
+    # m2 was mid-run with one case judged and one never started. Its `failed`
+    # was 1 while it ran (everything not yet passing counts as failing); the
+    # stop settles it to the real verdict.
+    assert (models["m2"]["passed"], models["m2"]["failed"]) == (1, 0)
+    assert models["m2"]["test_results"][1]["not_run"] is True
 
 
 def test_abort_rejects_a_run_that_already_ended(client):
