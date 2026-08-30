@@ -249,3 +249,58 @@ def test_evaluator_run_counts_items_times_evaluators(client):
     )
     assert resp.status_code == 400
     assert "would process 2 rows" in resp.json()["detail"]
+
+
+def _failed_eval_job(auth, *, job_type, details):
+    import db as db_mod
+
+    org_uuid = db_mod.get_personal_org_for_user(auth["user_uuid"])["uuid"]
+    return db_mod.create_job(
+        job_type=job_type,
+        org_uuid=org_uuid,
+        user_id=auth["user_uuid"],
+        status="failed",
+        details=details,
+        results={"error": "failed"},
+    )
+
+
+@pytest.mark.parametrize(
+    "prefix, job_type, details",
+    [
+        (
+            "stt",
+            "stt-eval",
+            {
+                "providers": ["openai"],
+                "language": "en",
+                "texts": ["one", "two"],
+                "audio_paths": ["s3://b/1.wav", "s3://b/2.wav"],
+            },
+        ),
+        (
+            "tts",
+            "tts-eval",
+            {"providers": ["openai"], "language": "en", "texts": ["one", "two"]},
+        ),
+    ],
+)
+def test_retry_counts_the_rows_it_would_rerun(
+    client, monkeypatch, prefix, job_type, details
+):
+    import db as db_mod
+
+    auth = _signup(client)
+    task_id = _failed_eval_job(auth, job_type=job_type, details=details)
+    monkeypatch.setenv("S3_OUTPUT_BUCKET", "test-bucket")
+
+    resp = client.post(
+        f"/{prefix}/evaluate/{task_id}/retry", headers=auth["headers"]
+    )
+    assert resp.status_code == 400
+    assert "limit of 1" in resp.json()["detail"]
+
+    # The refused retry leaves the original run as it was.
+    job = db_mod.get_job(task_id)
+    assert job["status"] == "failed"
+    assert job["results"] == {"error": "failed"}

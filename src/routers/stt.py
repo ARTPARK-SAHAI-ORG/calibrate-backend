@@ -799,6 +799,8 @@ def retry_stt_evaluation(
         expected_type="stt",
     )
 
+    enforce_max_rows_per_eval(ctx.org_uuid, len(resolved.texts))
+
     rerun_details = {
         "audio_paths": resolved.audio_paths or [],
         "texts": resolved.texts,

@@ -814,6 +814,8 @@ def retry_tts_evaluation(
         expected_type="tts",
     )
 
+    enforce_max_rows_per_eval(ctx.org_uuid, len(resolved.texts))
+
     rerun_details = {
         "texts": resolved.texts,
         "providers": providers,
