@@ -58,6 +58,7 @@ from llm_judge import (
     evaluator_value_name,
 )
 from routers.agents import AgentSummary, to_agent_summary
+from routers.org_limits import effective_max_rows_per_eval, enforce_max_rows_per_eval
 from routers.tests import (
     AGENT_INTERACTION_TYPES,
     DEFAULT_AGENT_INTERACTION_TYPE,
@@ -323,11 +324,14 @@ class BatchTestSkip(BaseModel):
         description="ID of the skipped agent",
         examples=[_EXAMPLE_AGENT_UUID],
     )
-    reason: Literal["no_linked_tests", "connection_not_verified"] = Field(
+    reason: Literal[
+        "no_linked_tests", "connection_not_verified", "over_row_limit"
+    ] = Field(
         description=(
             "Why this agent was not run:\n"
             "- `no_linked_tests`: the agent has no tests linked\n"
-            "- `connection_not_verified`: the agent's connection is not verified"
+            "- `connection_not_verified`: the agent's connection is not verified\n"
+            "- `over_row_limit`: the agent has more linked tests than this workspace allows in one run"
         )
     )
 
@@ -2832,13 +2836,19 @@ def run_agent_test(
         # cross-org UUID must 404 identically to a missing one (existence-leak
         # parity), otherwise a leaked/guessed UUID from another org could be
         # run against this agent and its content read back via the result.
+        # Every listed uuid is checked, but a repeat is only run (and only
+        # counted against the row limit) once, matching the benchmark path.
         tests = []
+        seen_test_uuids: set = set()
         for test_uuid in request.test_uuids:
             test = get_test(test_uuid)
             if not test or test.get("org_uuid") != ctx.org_uuid:
                 raise HTTPException(
                     status_code=404, detail=f"Test {test_uuid} not found"
                 )
+            if test_uuid in seen_test_uuids:
+                continue
+            seen_test_uuids.add(test_uuid)
             tests.append(test)
         # Linking checks this, running by ID never did. It matters now that the
         # agent's interaction_type picks the request body: calibrate raises on
@@ -2873,6 +2883,8 @@ def run_agent_test(
                 detail="No tests linked to this agent. Link tests first or provide test_uuids.",
             )
 
+    enforce_max_rows_per_eval(ctx.org_uuid, len(tests))
+
     # Get S3 configuration
     try:
         s3_bucket = get_s3_output_config()
@@ -2884,17 +2896,20 @@ def run_agent_test(
 
 
 def _run_tests_for_agents(
-    agents: List[Dict[str, Any]], s3_bucket: str
+    agents: List[Dict[str, Any]], s3_bucket: str, org_uuid: str
 ) -> BatchTestRunResponse:
     """Launch all linked tests for each agent in ``agents``, one job per agent.
 
-    Agents with no linked tests or an unverified connection are skipped and
-    reported under ``skipped`` rather than aborting the whole batch. Each launched
-    agent yields one ``llm-unit-test`` job (its task_id), subject to the normal
-    per-workspace concurrency queue — over-limit jobs come back ``queued``.
+    Agents with no linked tests, an unverified connection, or more linked tests
+    than the workspace's ``max_rows_per_eval`` are skipped and reported under
+    ``skipped`` rather than aborting the whole batch — a raised error would strand
+    the jobs already launched earlier in the loop. Each launched agent yields one
+    ``llm-unit-test`` job (its task_id), subject to the normal per-workspace
+    concurrency queue — over-limit jobs come back ``queued``.
     """
     runs: List[BatchTestRun] = []
     skipped: List[BatchTestSkip] = []
+    max_rows = effective_max_rows_per_eval(org_uuid)
 
     for agent in agents:
         if _agent_connection_unverified(agent):
@@ -2914,6 +2929,16 @@ def _run_tests_for_agents(
                     agent_name=agent.get("name", ""),
                     agent_uuid=agent["uuid"],
                     reason="no_linked_tests",
+                )
+            )
+            continue
+
+        if len(tests) > max_rows:
+            skipped.append(
+                BatchTestSkip(
+                    agent_name=agent.get("name", ""),
+                    agent_uuid=agent["uuid"],
+                    reason="over_row_limit",
                 )
             )
             continue
@@ -2975,7 +3000,7 @@ def run_tests_batch(
     except ValueError as e:
         raise HTTPException(status_code=500, detail=str(e))
 
-    return _run_tests_for_agents(selected, s3_bucket)
+    return _run_tests_for_agents(selected, s3_bucket, ctx.org_uuid)
 
 
 def _load_owned_agent_test_job(task_id: str, ctx: OrgContext) -> Dict[str, Any]:
@@ -3963,6 +3988,8 @@ def run_agent_benchmark(
                 tests.append(linked_by_uuid[u])
     else:
         tests = linked_tests
+
+    enforce_max_rows_per_eval(ctx.org_uuid, len(tests) * len(request.models))
 
     # Get S3 configuration
     try:

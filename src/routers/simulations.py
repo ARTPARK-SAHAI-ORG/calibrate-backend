@@ -78,6 +78,7 @@ from utils import (
     env_str,
 )
 from auth_utils import get_current_org, OrgContext
+from routers.org_limits import enforce_max_rows_per_eval
 from datetime import datetime
 
 # Job types that share the same queue
@@ -2494,6 +2495,8 @@ def run_simulation_endpoint(
             status_code=400,
             detail="Simulation has no scenarios. Add at least one scenario.",
         )
+
+    enforce_max_rows_per_eval(ctx.org_uuid, len(personas) * len(scenarios))
 
     # Get S3 configuration
     try:
