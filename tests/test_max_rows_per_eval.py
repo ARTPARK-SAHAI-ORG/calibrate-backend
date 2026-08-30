@@ -54,11 +54,11 @@ def _llm_ev(client, h):
 
 
 def _create_agent(client, h):
-    return client.post(
-        "/agents",
-        json={"name": f"a-{uuid.uuid4().hex[:6]}", "type": "agent"},
-        headers=h,
+    name = f"a-{uuid.uuid4().hex[:6]}"
+    created = client.post(
+        "/agents", json={"name": name, "type": "agent"}, headers=h
     ).json()
+    return {**created, "name": name}
 
 
 def _create_test(client, h):
@@ -304,3 +304,31 @@ def test_retry_counts_the_rows_it_would_rerun(
     job = db_mod.get_job(task_id)
     assert job["status"] == "failed"
     assert job["results"] == {"error": "failed"}
+
+
+def test_batch_run_skips_an_agent_over_the_limit(client, monkeypatch):
+    auth = _signup(client)
+    h = auth["headers"]
+    over, _ = _agent_with_tests(client, h, 2)
+    under, _ = _agent_with_tests(client, h, 1)
+    monkeypatch.setenv("S3_OUTPUT_BUCKET", "test-bucket")
+
+    with patch("routers.agent_tests.can_start_agent_test_job", return_value=True), patch(
+        "threading.Thread"
+    ):
+        resp = client.post(
+            "/agent-tests/run",
+            json={"agent_names": [over["name"], under["name"]]},
+            headers=h,
+        )
+    assert resp.status_code == 200
+    body = resp.json()
+    # The agent within the limit still runs; only the oversized one is skipped.
+    assert [r["agent_uuid"] for r in body["runs"]] == [under["uuid"]]
+    assert body["skipped"] == [
+        {
+            "agent_name": over["name"],
+            "agent_uuid": over["uuid"],
+            "reason": "over_row_limit",
+        }
+    ]
