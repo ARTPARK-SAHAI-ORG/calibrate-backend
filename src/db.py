@@ -7319,14 +7319,16 @@ _AGENT_TEST_JOB_SUMMARY_COLUMNS = """
         json_extract(atj.details, '$.evaluators_by_test_id') AS evaluators_by_test_id,
         json_extract(atj.details, '$.has_tool_call_test') AS has_tool_call_test,
         json_extract(atj.details, '$.tool_call_evaluator.name')
-            AS tool_call_evaluator_name
+            AS tool_call_evaluator_name,
+        json_extract(atj.details, '$.aborted') AS aborted
 """
 
 
 def _row_to_agent_test_job_summary(row: sqlite3.Row) -> Dict[str, Any]:
     """Shape a slim agent-test-job row into the same dict the run-list routers
-    consume: header fields, a reduced `results` sub-dict, and the two narrow
-    `details` slices (`evaluators_by_test_id`, `has_tool_call_test`)."""
+    consume: header fields, a reduced `results` sub-dict, and the narrow
+    `details` slices (`evaluators_by_test_id`, `has_tool_call_test`,
+    `tool_call_evaluator.name`, `aborted`)."""
     row = dict(row)
 
     def _loads(value: Any) -> Any:
@@ -7351,6 +7353,7 @@ def _row_to_agent_test_job_summary(row: sqlite3.Row) -> Dict[str, Any]:
         "evaluators_by_test_id": _loads(row.get("evaluators_by_test_id")),
         "has_tool_call_test": bool(row.get("has_tool_call_test")),
         "tool_call_evaluator_name": row.get("tool_call_evaluator_name"),
+        "aborted": bool(row.get("aborted")),
         "results": {
             "total_tests": row.get("total_tests"),
             "passed": row.get("passed"),
@@ -7370,8 +7373,8 @@ def get_agent_test_jobs_for_agent_summary(
     agent_id: str, job_type: Optional[str] = None
 ) -> List[Dict[str, Any]]:
     """Slim run-list headers for one agent's test jobs (see
-    `_AGENT_TEST_JOB_SUMMARY_COLUMNS`). Reads only two narrow `details` slices
-    (evaluator names, tool-call flag), never the full `details` blob nor the
+    `_AGENT_TEST_JOB_SUMMARY_COLUMNS`). Reads only narrow `details` slices
+    (evaluator names, tool-call flag, aborted), never the full `details` blob nor the
     heavy `results` sub-trees. Newest-created first (ties broken by `id`)."""
     select = (
         f"SELECT {_AGENT_TEST_JOB_SUMMARY_COLUMNS} FROM agent_test_jobs atj "
@@ -7397,8 +7400,8 @@ def get_agent_test_jobs_for_org_summary(
     org_uuid: str, job_type: Optional[str] = None
 ) -> List[Dict[str, Any]]:
     """Slim run-list headers for an org's test jobs across all its agents, with
-    `agent_name`/`agent_id` from the joined agent. Reads only two narrow
-    `details` slices (evaluator names, tool-call flag), never the full
+    `agent_name`/`agent_id` from the joined agent. Reads only narrow
+    `details` slices (evaluator names, tool-call flag, aborted), never the full
     `details` blob nor the heavy `results` sub-trees. Newest-updated first
     (ties broken by `id`)."""
     select = (
@@ -7508,8 +7511,14 @@ def update_agent_test_job(
     job_uuid: str,
     status: Optional[str] = None,
     results: Optional[Dict[str, Any]] = None,
+    details: Optional[Dict[str, Any]] = None,
 ) -> bool:
-    """Update an agent test job. Returns True if the job was found and updated."""
+    """Update an agent test job. Returns True if the job was found and updated.
+
+    `details` is merged into what is already stored, never replacing it — the
+    run's frozen calibrate config and evaluator snapshot live there and the
+    worker still needs them.
+    """
     updates = []
     params = []
 
@@ -7519,6 +7528,20 @@ def update_agent_test_job(
     if results is not None:
         updates.append("results = ?")
         params.append(json.dumps(results))
+
+    if details is not None:
+        with get_db_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                "SELECT details FROM agent_test_jobs WHERE uuid = ?", (job_uuid,)
+            )
+            row = cursor.fetchone()
+            if row and row[0]:
+                existing_details = json.loads(row[0])
+                existing_details.update(details)
+                details = existing_details
+        updates.append("details = ?")
+        params.append(json.dumps(details))
 
     if not updates:
         return False
