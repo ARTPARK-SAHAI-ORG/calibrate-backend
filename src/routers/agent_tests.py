@@ -519,7 +519,7 @@ class TestRunCaseSummary(BaseModel):
         None, description="Name of the test case"
     )
     passed: Optional[bool] = Field(
-        None, description="Whether the case passed (null if it never answered or is still running)"
+        None, description="Whether the case passed (null while the case is still running)"
     )
 
 
