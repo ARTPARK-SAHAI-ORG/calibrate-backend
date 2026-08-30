@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import uuid
 from pathlib import Path
 from unittest.mock import patch
 
@@ -756,3 +757,170 @@ def test_get_evaluator_cached_for_enrichment():
     # second call doesn't refetch
     ev2 = _get_evaluator_cached_for_enrichment("e", cache)
     assert ev2 is ev
+
+
+def test_settle_stopped_rows_counts_only_real_verdicts():
+    """Counting for a stopped run: a pass is a pass, a fail is a fail, and
+    everything else never started. Malformed entries are skipped, not fatal."""
+    from routers.agent_tests import _settle_stopped_rows
+
+    rows = [
+        {"name": "T1", "passed": True},
+        {"name": "T2", "passed": False},
+        {"name": "T3", "passed": None},
+        {"name": "T4"},
+        "not a row",
+        None,
+    ]
+    assert _settle_stopped_rows(rows) == (1, 1)
+    assert [r.get("not_run") for r in rows[:4]] == [None, None, True, True]
+
+
+def test_finish_stopped_run_tolerates_a_job_with_nothing_stored():
+    """A run stopped before the worker saved anything still ends terminal."""
+    import db
+    from routers.agent_tests import _finish_stopped_run
+
+    user_uuid = db.create_user("S", "R", f"sr-{uuid.uuid4().hex[:8]}@x.com")
+    org_uuid = db.get_personal_org_for_user(user_uuid)["uuid"]
+    agent_uuid = db.create_agent(
+        name=f"a-{uuid.uuid4().hex[:6]}", org_uuid=org_uuid, user_id=user_uuid
+    )
+    job_uuid = db.create_agent_test_job(
+        agent_id=agent_uuid, job_type="llm-unit-test", status="queued"
+    )
+
+    _finish_stopped_run(job_uuid)
+
+    job = db.get_agent_test_job(job_uuid)
+    assert job["status"] == "done"
+
+
+def test_finish_stopped_run_skips_malformed_model_entries():
+    """A benchmark whose stored models are the wrong shape still closes out."""
+    import db
+    from routers.agent_tests import _finish_stopped_run
+
+    user_uuid = db.create_user("S", "M", f"sm-{uuid.uuid4().hex[:8]}@x.com")
+    org_uuid = db.get_personal_org_for_user(user_uuid)["uuid"]
+    agent_uuid = db.create_agent(
+        name=f"a-{uuid.uuid4().hex[:6]}", org_uuid=org_uuid, user_id=user_uuid
+    )
+    job_uuid = db.create_agent_test_job(
+        agent_id=agent_uuid, job_type="llm-benchmark", status="in_progress"
+    )
+    db.update_agent_test_job(
+        job_uuid,
+        results={
+            "model_results": [
+                "not a model",
+                {"model": "m1", "success": None, "test_results": "not a list"},
+            ]
+        },
+    )
+
+    _finish_stopped_run(job_uuid)
+
+    models = db.get_agent_test_job(job_uuid)["results"]["model_results"]
+    assert models[0] == "not a model"
+    assert models[1]["message"] == "Stopped"
+
+
+def test_finish_stopped_run_leaves_a_finished_benchmark_model_alone():
+    """A model that completed keeps calibrate's numbers. Re-counting its rows
+    would drop any the name merge left as a placeholder, reporting a finished
+    model as short of a test it actually ran."""
+    import db
+    from routers.agent_tests import _finish_stopped_run
+
+    user_uuid = db.create_user("S", "F", f"sf-{uuid.uuid4().hex[:8]}@x.com")
+    org_uuid = db.get_personal_org_for_user(user_uuid)["uuid"]
+    agent_uuid = db.create_agent(
+        name=f"a-{uuid.uuid4().hex[:6]}", org_uuid=org_uuid, user_id=user_uuid
+    )
+    job_uuid = db.create_agent_test_job(
+        agent_id=agent_uuid, job_type="llm-benchmark", status="in_progress"
+    )
+    db.update_agent_test_job(
+        job_uuid,
+        results={
+            "model_results": [
+                {
+                    "model": "m1",
+                    "success": True,
+                    "message": "Completed",
+                    "total_tests": 5,
+                    "passed": 5,
+                    "failed": 0,
+                    "test_results": [
+                        {"name": f"T{i}", "passed": True} for i in range(4)
+                    ]
+                    + [{"name": "T5", "passed": None}],
+                },
+                {
+                    "model": "m2",
+                    "success": False,
+                    "message": "No output produced",
+                    "test_results": [{"name": "T1", "passed": False}],
+                },
+                {
+                    "model": "m3",
+                    "success": None,
+                    "message": "Running... (1 tests done)",
+                    "test_results": [
+                        {"name": "T1", "passed": True},
+                        {"name": "T2", "passed": None},
+                    ],
+                },
+            ]
+        },
+    )
+
+    _finish_stopped_run(job_uuid)
+
+    models = {
+        m["model"]: m
+        for m in db.get_agent_test_job(job_uuid)["results"]["model_results"]
+    }
+    # Untouched: calibrate said 5 of 5, and the placeholder row stays unmarked.
+    assert (models["m1"]["passed"], models["m1"]["failed"]) == (5, 0)
+    assert models["m1"]["message"] == "Completed"
+    assert models["m1"]["test_results"][4].get("not_run") is None
+    # A model that failed keeps its own message, and is not relabelled stopped.
+    assert models["m2"]["message"] == "No output produced"
+    assert (models["m2"]["passed"], models["m2"]["failed"]) == (0, 1)
+    # The model that was still going is settled.
+    assert (models["m3"]["passed"], models["m3"]["failed"]) == (1, 0)
+    assert models["m3"]["test_results"][1]["not_run"] is True
+    assert models["m3"]["total_tests"] == 2
+
+
+def test_finish_stopped_run_fills_the_total_for_a_run_stopped_while_queued():
+    """A queued run's stored results carry rows but no total. Without this the
+    window shows counts with nothing to divide by."""
+    import db
+    from routers.agent_tests import _finish_stopped_run
+
+    user_uuid = db.create_user("S", "Q", f"sq-{uuid.uuid4().hex[:8]}@x.com")
+    org_uuid = db.get_personal_org_for_user(user_uuid)["uuid"]
+    agent_uuid = db.create_agent(
+        name=f"a-{uuid.uuid4().hex[:6]}", org_uuid=org_uuid, user_id=user_uuid
+    )
+    job_uuid = db.create_agent_test_job(
+        agent_id=agent_uuid, job_type="llm-unit-test", status="queued"
+    )
+    db.update_agent_test_job(
+        job_uuid,
+        results={
+            "test_results": [
+                {"name": "T1", "passed": None},
+                {"name": "T2", "passed": None},
+            ]
+        },
+    )
+
+    _finish_stopped_run(job_uuid)
+
+    results = db.get_agent_test_job(job_uuid)["results"]
+    assert (results["total_tests"], results["passed"], results["failed"]) == (2, 0, 0)
+    assert all(r["not_run"] for r in results["test_results"])

@@ -86,6 +86,7 @@ from utils import (
     capture_exception_to_sentry,
     build_tool_configs,
     get_calibrate_agent_cli,
+    kill_process_group,
     upload_directory_tree_to_s3,
     upload_file_to_s3,
 )
@@ -94,6 +95,13 @@ _TEST_TYPES = get_args(TestTypeLiteral)
 
 # Job types that share the same queue
 AGENT_TEST_JOB_TYPES = ["llm-unit-test", "llm-benchmark"]
+
+
+def _is_job_aborted(task_id: str) -> bool:
+    """True once a user has stopped this run. Both workers poll it, so it must
+    stay a fresh read of the row rather than anything cached in the thread."""
+    job = get_agent_test_job(task_id)
+    return bool(job and (job.get("details") or {}).get("aborted"))
 
 
 def _start_llm_unit_test_job_from_queue(job: dict) -> bool:
@@ -178,6 +186,11 @@ _EXAMPLE_AGENT_UUID = "f47ac10b-58cc-4372-a567-0e02b2c3d479"
 _EXAMPLE_TASK_UUID = "a3b2c1d0-e5f4-3210-abcd-ef1234567890"
 
 _TASK_STATUS_DESCRIPTION = "Current status of the run"
+_ABORTED_DESCRIPTION = (
+    "Whether a user stopped this run before it finished. The results collected "
+    "up to that point are kept, and test cases that never ran are counted "
+    "neither as passed nor as failed"
+)
 
 # Shared so the benchmark leaderboard reads the same wherever it appears.
 LEADERBOARD_SUMMARY_DESCRIPTION = (
@@ -416,6 +429,10 @@ class TestCaseResult(BaseModel):
         False,
         description="Whether this case produced no answer because the agent or the judge could not be reached, in which case `reasoning` carries the error and `passed` is not a verdict on the agent",
     )
+    not_run: bool = Field(
+        False,
+        description="Whether this case never started, because a user stopped the run first. It is counted neither as passed nor as failed",
+    )
 
 
 class TestRunEvaluator(BaseModel):
@@ -501,6 +518,7 @@ class TestRunStatusResponse(BaseModel):
         False,
         description="Whether the run stopped before starting every test case, after too many failed in a row",
     )
+    aborted: bool = Field(False, description=_ABORTED_DESCRIPTION)
     error: bool = Field(False, description="True if the run failed")
     is_public: bool = Field(False, description="Whether the run is shared publicly")
     share_token: Optional[str] = Field(
@@ -622,6 +640,7 @@ class AgentTestRunListItem(BaseModel):
         None,
         description="Number of test cases that produced no answer because the agent or the judge could not be reached, which makes the pass rate an unfair measure of the agent",
     )
+    aborted: bool = Field(False, description=_ABORTED_DESCRIPTION)
     error: bool = Field(False, description="True if the run failed")
     is_public: bool = Field(False, description="Whether the run is shared publicly")
     share_token: Optional[str] = Field(
@@ -996,6 +1015,7 @@ def _build_agent_test_run_item_fields(
         "model_results": _slim_model_results(job_results.get("model_results")),
         "unanswered_tests": job_results.get("unanswered_tests"),
         # Common fields
+        "aborted": bool(job.get("aborted")),
         "error": bool(job_results.get("error")),
         "is_public": bool(job.get("is_public")),
         "share_token": job.get("share_token"),
@@ -1744,6 +1764,7 @@ def _pending_test_case_result_placeholder(name: str) -> Dict[str, Any]:
         "latency_ms": None,
         "cost": None,
         "unanswered": False,
+        "not_run": False,
     }
 
 
@@ -2325,6 +2346,11 @@ def run_llm_test_task(
         # Extract test names for progress tracking
         test_names = [test.get("name") for test in tests if test.get("name")]
 
+        # Stopped between being queued and being picked up: never start.
+        if _is_job_aborted(task_id):
+            logger.info(f"LLM test task {task_id} was stopped before starting")
+            return
+
         update_agent_test_job(
             task_id,
             status=TaskStatus.IN_PROGRESS.value,
@@ -2414,6 +2440,16 @@ def run_llm_test_task(
                     # Poll for process completion while updating intermediate results
                     prev_completed = 0
                     while process.poll() is None:
+                        if _is_job_aborted(task_id):
+                            logger.info(
+                                f"LLM test {task_id} stopped by user, killing process group"
+                            )
+                            kill_process_group(process.pid, task_id)
+                            _update_agent_test_intermediate_results(
+                                task_id, output_dir, test_names, default_inputs
+                            )
+                            _finish_stopped_run(task_id)
+                            return
                         completed = _update_agent_test_intermediate_results(
                             task_id, output_dir, test_names, default_inputs
                         )
@@ -2428,6 +2464,14 @@ def run_llm_test_task(
                     _update_agent_test_intermediate_results(
                         task_id, output_dir, test_names, default_inputs
                     )
+
+                # Stopped in the gap between the last poll and the CLI exiting.
+                # Falling through would read a killed process's exit code as a
+                # failure and overwrite the stopped run with `failed`.
+                if _is_job_aborted(task_id):
+                    logger.info(f"LLM test {task_id} stopped by user, keeping results")
+                    _finish_stopped_run(task_id)
+                    return
 
                 # Read stdout/stderr
                 with open(stdout_path, "r") as f:
@@ -2552,6 +2596,10 @@ def run_llm_test_task(
                 )
 
             except subprocess.CalledProcessError as e:
+                if _is_job_aborted(task_id):
+                    logger.info(f"LLM test {task_id} stopped by user, keeping results")
+                    _finish_stopped_run(task_id)
+                    return
                 traceback.print_exc()
                 capture_exception_to_sentry(e)
                 # Preserve any existing results from the job
@@ -2581,6 +2629,10 @@ def run_llm_test_task(
                     results=existing_results,
                 )
             except Exception as e:
+                if _is_job_aborted(task_id):
+                    logger.info(f"LLM test {task_id} stopped by user, keeping results")
+                    _finish_stopped_run(task_id)
+                    return
                 traceback.print_exc()
                 capture_exception_to_sentry(e)
                 # Preserve any existing results from the job
@@ -2611,6 +2663,10 @@ def run_llm_test_task(
                 )
 
     except Exception as e:
+        if _is_job_aborted(task_id):
+            logger.info(f"LLM test {task_id} stopped by user, keeping results")
+            _finish_stopped_run(task_id)
+            return
         traceback.print_exc()
         capture_exception_to_sentry(e)
         # Preserve any existing results from the job
@@ -2986,6 +3042,118 @@ def update_test_run_visibility(
     return VisibilityResponse(is_public=body.is_public, share_token=share_token)
 
 
+def _settle_stopped_rows(rows: List[Any]) -> tuple[int, int]:
+    """Mark every case that never started, and count the verdicts that did land.
+
+    Mid-run a case still waiting its turn and a case in flight look the same
+    (`passed` is None for both). Only once the run has ended does the first
+    reading become the true one.
+    """
+    passed = failed = 0
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        if row.get("passed") is True:
+            passed += 1
+        elif row.get("passed") is False:
+            failed += 1
+        else:
+            row["not_run"] = True
+    return passed, failed
+
+
+def _finish_stopped_run(task_id: str) -> None:
+    """Close out a stopped run: terminal status, honest counts, marked cases.
+
+    Called from the endpoint and from every worker exit on a stop. Re-asserting
+    `done` matters because a worker that passed its start guard a moment earlier
+    can write `in_progress` after the endpoint; nothing would move it on again
+    and `job_recovery` would keep restarting it on every boot.
+
+    The counts are computed here rather than read from calibrate's `metrics.json`
+    the way a finished run does, since that file is only written at the end.
+    """
+    job = get_agent_test_job(task_id)
+    results = (job or {}).get("results") or {}
+
+    rows = results.get("test_results")
+    if isinstance(rows, list):
+        results["passed"], results["failed"] = _settle_stopped_rows(rows)
+        if results.get("total_tests") is None:
+            results["total_tests"] = len(rows)
+
+    for model in results.get("model_results") or []:
+        if not isinstance(model, dict):
+            continue
+        # A model that finished keeps calibrate's own numbers. Re-counting its
+        # rows would drop any the name merge left as a placeholder, reporting a
+        # completed model as short of a test it did in fact run.
+        if model.get("success") is True:
+            continue
+        model_rows = model.get("test_results")
+        if isinstance(model_rows, list):
+            model["passed"], model["failed"] = _settle_stopped_rows(model_rows)
+            if model.get("total_tests") is None:
+                model["total_tests"] = len(model_rows)
+        # A model still reading "Running... (3 tests done)" on a run that has
+        # already ended reads as still going.
+        if model.get("success") is None:
+            model["message"] = "Stopped"
+
+    update_agent_test_job(
+        task_id, status=TaskStatus.DONE.value, results=results or None
+    )
+
+
+class AbortRunResponse(BaseModel):
+    task_id: str = Field(
+        min_length=36,
+        max_length=36,
+        description="The run that was stopped",
+        examples=[_EXAMPLE_TASK_UUID],
+    )
+    status: Literal["done"] = Field(description=_TASK_STATUS_DESCRIPTION)
+    aborted: bool = Field(description=_ABORTED_DESCRIPTION)
+
+
+@router.post(
+    "/run/{task_id}/abort",
+    response_model=AbortRunResponse,
+    summary="Stop test run",
+)
+def abort_agent_test_run(
+    task_id: str = PathParam(
+        description="The queued or running test or benchmark to stop",
+        examples=[_EXAMPLE_TASK_UUID],
+    ),
+    ctx: OrgContext = Depends(get_current_org),
+):
+    """Stop a queued or running test or benchmark, keeping the results collected so far.
+
+    Poll the run for those results: `GET /agent-tests/run/{task_id}` for a test
+    run, `GET /agent-tests/benchmark/{task_id}` for a benchmark.
+    """
+    job = _load_owned_agent_test_job(task_id, ctx)
+
+    if job["status"] not in (TaskStatus.QUEUED.value, TaskStatus.IN_PROGRESS.value):
+        raise HTTPException(
+            status_code=400,
+            detail="Can only stop a run that is queued or in progress",
+        )
+
+    # The flag first, so a worker mid-tick sees it; then the run is closed out.
+    # Whatever that worker last saved is kept — a running one sees the flag on
+    # its next poll tick, kills the CLI, saves once more and closes out again.
+    update_agent_test_job(task_id, details={"aborted": True})
+    _finish_stopped_run(task_id)
+
+    try_start_queued_agent_test_job(AGENT_TEST_JOB_TYPES)
+
+    return AbortRunResponse(
+        task_id=task_id, status=TaskStatus.DONE.value, aborted=True
+    )
+
+
 _RunProjection = make_projection_params(
     heavy_fields=[
         "results[].output",
@@ -3071,6 +3239,7 @@ def get_agent_test_run_status(
         results=results.get("test_results"),
         unanswered_tests=results.get("unanswered_tests"),
         stopped_early=bool(results.get("stopped_early")),
+        aborted=bool(details.get("aborted")),
         error=bool(results.get("error")),
         is_public=bool(job.get("is_public")),
         share_token=job.get("share_token"),
@@ -3166,6 +3335,7 @@ class BenchmarkStatusResponse(BaseModel):
         description=LEADERBOARD_SUMMARY_DESCRIPTION,
         examples=[LEADERBOARD_SUMMARY_EXAMPLE],
     )
+    aborted: bool = Field(False, description=_ABORTED_DESCRIPTION)
     error: bool = Field(False, description="True if the run failed")
     is_public: bool = Field(False, description="Whether the run is shared publicly")
     share_token: Optional[str] = Field(
@@ -3320,6 +3490,11 @@ def run_benchmark_task(
 
         test_names = [t.get("name") for t in tests if t.get("name")]
 
+        # Stopped between being queued and being picked up: never start.
+        if _is_job_aborted(task_id):
+            logger.info(f"Benchmark task {task_id} was stopped before starting")
+            return
+
         # Initialize with pending model results (per-model test list like unit tests)
         update_agent_test_job(
             task_id,
@@ -3412,6 +3587,17 @@ def run_benchmark_task(
                     # Poll for process completion while updating intermediate results
                     prev_completed = 0
                     while process.poll() is None:
+                        if _is_job_aborted(task_id):
+                            logger.info(
+                                f"Benchmark {task_id} stopped by user, killing process group"
+                            )
+                            kill_process_group(process.pid, task_id)
+                            _update_benchmark_intermediate_results(
+                                task_id, output_dir, models, test_names, cli_models,
+                                default_inputs,
+                            )
+                            _finish_stopped_run(task_id)
+                            return
                         completed = _update_benchmark_intermediate_results(
                             task_id, output_dir, models, test_names, cli_models,
                             default_inputs,
@@ -3428,6 +3614,14 @@ def run_benchmark_task(
                         task_id, output_dir, models, test_names, cli_models,
                         default_inputs,
                     )
+
+                # Stopped in the gap between the last poll and the CLI exiting.
+                # Falling through would read a killed process's exit code as a
+                # failure and overwrite the stopped run with `failed`.
+                if _is_job_aborted(task_id):
+                    logger.info(f"Benchmark {task_id} stopped by user, keeping results")
+                    _finish_stopped_run(task_id)
+                    return
 
                 # Read stdout/stderr
                 with open(stdout_path, "r") as f:
@@ -3624,6 +3818,10 @@ def run_benchmark_task(
                 )
 
             except subprocess.CalledProcessError as e:
+                if _is_job_aborted(task_id):
+                    logger.info(f"Benchmark {task_id} stopped by user, keeping results")
+                    _finish_stopped_run(task_id)
+                    return
                 traceback.print_exc()
                 capture_exception_to_sentry(e)
                 failed_results: Dict[str, Any] = {
@@ -3644,6 +3842,10 @@ def run_benchmark_task(
                     results=failed_results,
                 )
             except Exception as e:
+                if _is_job_aborted(task_id):
+                    logger.info(f"Benchmark {task_id} stopped by user, keeping results")
+                    _finish_stopped_run(task_id)
+                    return
                 traceback.print_exc()
                 capture_exception_to_sentry(e)
                 # Preserve any existing results from the job
@@ -3670,6 +3872,10 @@ def run_benchmark_task(
                 )
 
     except Exception as e:
+        if _is_job_aborted(task_id):
+            logger.info(f"Benchmark {task_id} stopped by user, keeping results")
+            _finish_stopped_run(task_id)
+            return
         traceback.print_exc()
         capture_exception_to_sentry(e)
         # Preserve any existing results from the job
@@ -3893,6 +4099,7 @@ def get_benchmark_status(
         evaluators=evaluators_block or None,
         model_results=results.get("model_results"),
         leaderboard_summary=results.get("leaderboard_summary"),
+        aborted=bool(details.get("aborted")),
         error=bool(results.get("error")),
         is_public=bool(job.get("is_public")),
         share_token=job.get("share_token"),
