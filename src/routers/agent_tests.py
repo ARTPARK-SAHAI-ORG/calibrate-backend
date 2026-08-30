@@ -3079,9 +3079,16 @@ def _finish_stopped_run(task_id: str) -> None:
     rows = results.get("test_results")
     if isinstance(rows, list):
         results["passed"], results["failed"] = _settle_stopped_rows(rows)
+        if results.get("total_tests") is None:
+            results["total_tests"] = len(rows)
 
     for model in results.get("model_results") or []:
         if not isinstance(model, dict):
+            continue
+        # A model that finished keeps calibrate's own numbers. Re-counting its
+        # rows would drop any the name merge left as a placeholder, reporting a
+        # completed model as short of a test it did in fact run.
+        if model.get("success") is True:
             continue
         model_rows = model.get("test_results")
         if isinstance(model_rows, list):
