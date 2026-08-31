@@ -6,6 +6,11 @@ index shows up in the plan (`SEARCH <table> USING INDEX <name>`).
 """
 
 import db
+import trace_scoring as ts
+
+_OPEN_TRACE_EVAL_SQL = ", ".join(
+    f"'{s.value}'" for s in ts.OPEN_TRACE_EVAL_RUN_STATUSES
+)
 
 EXPECTED_INDEXES = [
     "idx_annotation_items_task",
@@ -148,7 +153,7 @@ def test_traces_default_list_sorts_from_the_index():
 def test_trace_eval_active_lookup_uses_index():
     plan = _query_plan(
         "SELECT * FROM trace_eval_runs WHERE trace_uuid = ? "
-        "AND status IN ('pending', 'processing')",
+        f"AND status IN ({_OPEN_TRACE_EVAL_SQL})",
         ("trace",),
     )
     assert "ux_trace_eval_active" in plan, plan
@@ -156,7 +161,7 @@ def test_trace_eval_active_lookup_uses_index():
 
 def test_trace_eval_claim_uses_index():
     plan = _query_plan(
-        "SELECT * FROM trace_eval_runs WHERE status IN ('pending', 'processing') "
+        f"SELECT * FROM trace_eval_runs WHERE status IN ({_OPEN_TRACE_EVAL_SQL}) "
         "AND available_at <= ? ORDER BY available_at LIMIT 10",
         (0,),
     )

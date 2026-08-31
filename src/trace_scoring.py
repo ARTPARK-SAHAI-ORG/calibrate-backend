@@ -11,16 +11,20 @@ from enum import Enum
 from typing import Any, Literal
 
 from shared_enums import (
+    REQUIRED_EVALUATOR_TYPE_BY_TEST_TYPE,
     AgentInteractionType,
     EvaluatorType,
-    REQUIRED_EVALUATOR_TYPE_BY_TEST_TYPE,
 )
 
+# Stored on a skipped `trace_eval_runs.error` when ingest cannot build a plan.
+TraceEvalSkipReason = Literal["unsupported_interaction_type", "no_usable_evaluators"]
+
 # Subset of TestType that traces can score.
-EvaluationType = Literal["response", "general"]
+TraceScorableEvaluationType = Literal["response", "general"]
+
 TRACE_SCORING_MODE_BY_INTERACTION_TYPE: dict[
     AgentInteractionType,
-    tuple[EvaluationType, EvaluatorType],
+    tuple[TraceScorableEvaluationType, EvaluatorType],
 ] = {
     "conversation": ("response", REQUIRED_EVALUATOR_TYPE_BY_TEST_TYPE["response"]),
     "general": ("general", REQUIRED_EVALUATOR_TYPE_BY_TEST_TYPE["general"]),
@@ -35,6 +39,23 @@ class IneligibleReason(str, Enum):
     DECLARES_VARIABLES = "declares_variables"
 
 
+# Lifecycle of one `trace_eval_runs` row.
+class TraceEvalRunStatus(str, Enum):
+    PENDING = "pending"
+    PROCESSING = "processing"
+    COMPLETED = "completed"
+    FAILED = "failed"
+    SKIPPED = "skipped"
+
+
+# DB partial index ux_trace_eval_active is unique on trace_uuid for only these statuses, so a trace can have many
+# completed/failed/skipped runs but at most one still open.
+OPEN_TRACE_EVAL_RUN_STATUSES: tuple[TraceEvalRunStatus, ...] = (
+    TraceEvalRunStatus.PENDING,
+    TraceEvalRunStatus.PROCESSING,
+)
+
+
 @dataclass(frozen=True)
 class ScoringPlanPin:
     """One evaluator pin stored within a `trace_eval_runs.scoring_plan`."""
@@ -47,7 +68,7 @@ class ScoringPlanPin:
 class ScoringPlan:
     """JSON envelope pinning evaluators to use in a runnable `trace_eval_runs` row."""
 
-    evaluation_type: EvaluationType
+    evaluation_type: TraceScorableEvaluationType
     evaluators: list[ScoringPlanPin]
 
 
@@ -55,7 +76,7 @@ class ScoringPlan:
 class ScoringPlanSkip:
     """Why ingest wrote a `skipped` run instead of a runnable plan."""
 
-    skip: Literal["unsupported_interaction_type", "no_usable_evaluators"]
+    skip: TraceEvalSkipReason
 
 
 @dataclass(frozen=True)
@@ -75,7 +96,7 @@ class TraceScoringIneligible:
 
 @dataclass(frozen=True)
 class TraceScoringResolution:
-    evaluation_type: EvaluationType | None
+    evaluation_type: TraceScorableEvaluationType | None
     evaluator_type: EvaluatorType | None
     eligible: list[TraceScoringEligible] = field(default_factory=list)
     ineligible: list[TraceScoringIneligible] = field(default_factory=list)

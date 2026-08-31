@@ -8,6 +8,20 @@ import db
 import trace_scoring as ts
 
 
+def test_trace_eval_run_status_is_the_closed_set():
+    assert tuple(s.value for s in ts.TraceEvalRunStatus) == (
+        "pending",
+        "processing",
+        "completed",
+        "failed",
+        "skipped",
+    )
+    assert ts.OPEN_TRACE_EVAL_RUN_STATUSES == (
+        ts.TraceEvalRunStatus.PENDING,
+        ts.TraceEvalRunStatus.PROCESSING,
+    )
+
+
 def _ev(evaluator_type, *, live=None, name="ev", ev_uuid=None):
     return {
         "uuid": ev_uuid or str(uuid.uuid4()),

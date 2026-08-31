@@ -1558,19 +1558,22 @@ def init_db():
             pass
         conn.commit()
 
-        # Durable scoring runs. Status is the source of truth for "scored?"; a
-        # dead letter is just status='failed'. Initial scoring, a rescore, and a
-        # backfill are all rows here -- no kind column. A soft-deleted trace's
-        # open run is settled at claim, not via a delete trigger.
+        # Durable scoring runs. `status` is the source of truth for "scored?";
+        # allowed values are TraceEvalRunStatus. Pending runs of soft-deleted
+        # traces are settled at claim time with a status=skipped.
+        pending = trace_scoring.TraceEvalRunStatus.PENDING.value
+        open_status_sql = ", ".join(
+            f"'{s.value}'" for s in trace_scoring.OPEN_TRACE_EVAL_RUN_STATUSES
+        )
         cursor.execute(
-            """
+            f"""
             CREATE TABLE IF NOT EXISTS trace_eval_runs (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 uuid TEXT NOT NULL UNIQUE,
                 trace_uuid TEXT NOT NULL,
                 org_uuid TEXT NOT NULL,
                 agent_id TEXT NOT NULL,
-                status TEXT NOT NULL DEFAULT 'pending',
+                status TEXT NOT NULL DEFAULT '{pending}',
                 scoring_plan TEXT,
                 available_at INTEGER NOT NULL,
                 attempts INTEGER NOT NULL DEFAULT 0,
@@ -1587,12 +1590,12 @@ def init_db():
         cursor.execute(
             "CREATE UNIQUE INDEX IF NOT EXISTS ux_trace_eval_active "
             "ON trace_eval_runs (trace_uuid) "
-            "WHERE status IN ('pending', 'processing')"
+            f"WHERE status IN ({open_status_sql})"
         )
         cursor.execute(
             "CREATE INDEX IF NOT EXISTS ix_trace_eval_claim "
             "ON trace_eval_runs (available_at) "
-            "WHERE status IN ('pending', 'processing')"
+            f"WHERE status IN ({open_status_sql})"
         )
         cursor.execute(
             "CREATE INDEX IF NOT EXISTS ix_trace_eval_agent_status "
@@ -10395,7 +10398,7 @@ def _insert_trace_eval_run(
     trace_uuid: str,
     org_uuid: str,
     agent_id: str,
-    status: str,
+    status: trace_scoring.TraceEvalRunStatus,
     scoring_plan: Optional[str],
     error: Optional[str],
     now: int,
@@ -10412,7 +10415,7 @@ def _insert_trace_eval_run(
             trace_uuid,
             org_uuid,
             agent_id,
-            status,
+            status.value,
             scoring_plan,
             error,
             now,
@@ -10465,10 +10468,9 @@ def create_trace_with_eval_run(
     metadata: Optional[Any] = None,
     labels: Optional[List[str]] = None,
 ) -> Dict[str, Any]:
-    """Insert a trace and, when auto-scoring is on, its immutable run together.
+    """Insert a trace, and if auto-scoring is on, its scoring run plan.
 
-    Resolution (`resolve_live_evaluators` then
-    `trace_scoring.resolve_trace_scoring` / `as_plan`) runs before the
+    Resolution of Evaluators and their live versions to use is done before the
     write lock so evaluator reads do not hold it.
 
     Uses BEGIN IMMEDIATE rather than a bare BEGIN: a deferred transaction
@@ -10505,7 +10507,7 @@ def create_trace_with_eval_run(
                     trace_uuid=row["uuid"],
                     org_uuid=org_uuid,
                     agent_id=agent["uuid"],
-                    status="skipped",
+                    status=trace_scoring.TraceEvalRunStatus.SKIPPED,
                     scoring_plan=None,
                     error=(
                         plan.skip
@@ -10521,7 +10523,7 @@ def create_trace_with_eval_run(
                     trace_uuid=row["uuid"],
                     org_uuid=org_uuid,
                     agent_id=agent["uuid"],
-                    status="pending",
+                    status=trace_scoring.TraceEvalRunStatus.PENDING,
                     scoring_plan=json.dumps(asdict(plan)),
                     error=None,
                     now=now,
@@ -10607,16 +10609,17 @@ def _delete_pending_trace_eval_runs(
     org_uuid: Optional[str] = None,
 ) -> int:
     """Delete never-started runs for an agent. Leaves processing/terminal rows."""
+    pending = trace_scoring.TraceEvalRunStatus.PENDING.value
     if org_uuid:
         cursor.execute(
             "DELETE FROM trace_eval_runs "
-            "WHERE agent_id = ? AND org_uuid = ? AND status = 'pending'",
-            (agent_id, org_uuid),
+            "WHERE agent_id = ? AND org_uuid = ? AND status = ?",
+            (agent_id, org_uuid, pending),
         )
     else:
         cursor.execute(
-            "DELETE FROM trace_eval_runs WHERE agent_id = ? AND status = 'pending'",
-            (agent_id,),
+            "DELETE FROM trace_eval_runs WHERE agent_id = ? AND status = ?",
+            (agent_id, pending),
         )
     return cursor.rowcount or 0
 
