@@ -1,5 +1,7 @@
 import os
 import csv
+import tarfile
+import shutil
 import json
 import subprocess
 import tempfile
@@ -8,9 +10,17 @@ import traceback
 import threading
 import logging
 from pathlib import Path
-from typing import List, Optional
+from typing import Any, Dict, List, NamedTuple, Optional
 
-from fastapi import APIRouter, HTTPException, Depends, Path as PathParam
+from fastapi import (
+    APIRouter,
+    Depends,
+    File,
+    Form,
+    HTTPException,
+    Path as PathParam,
+    UploadFile,
+)
 from pydantic import BaseModel, ConfigDict, Field
 
 from db import (
@@ -169,6 +179,59 @@ router = APIRouter(prefix="/stt", tags=["stt"])
 _EXAMPLE_ID = "f47ac10b-58cc-4372-a567-0e02b2c3d479"
 
 
+class ProviderOutput(NamedTuple):
+    """One provider's folder, read once."""
+
+    provider: str
+    directory: Optional[Path]
+    results: Optional[List[dict]]
+    metrics: Optional[dict]
+    evaluator_runs: list
+
+
+def _read_provider_dir(
+    provider: str,
+    directory: Optional[Path],
+    evaluator_id_by_metric_key: Dict[str, str],
+) -> ProviderOutput:
+    """Read one provider's results and metrics."""
+    metrics_data = _read_metrics_json(directory)
+    return ProviderOutput(
+        provider=provider,
+        directory=directory,
+        results=_read_results_csv(directory),
+        metrics=metrics_data,
+        evaluator_runs=(
+            build_evaluator_runs_for_eval_job(metrics_data, evaluator_id_by_metric_key)
+            if metrics_data is not None
+            else []
+        ),
+    )
+
+
+def _read_provider_outputs(
+    output_dir: Path,
+    providers: List[str],
+    evaluator_id_by_metric_key: Optional[Dict[str, str]] = None,
+) -> List[ProviderOutput]:
+    """Read every provider folder under ``output_dir`` once.
+
+    Callers decide what a missing or partial read means, because that differs:
+    a finished run treats a present folder as success, the timeout path needs
+    a complete row count first, and an import has no run to be partway through.
+    """
+    if evaluator_id_by_metric_key is None:
+        evaluator_id_by_metric_key = read_evaluators_map_from_config(output_dir)
+    return [
+        _read_provider_dir(
+            provider,
+            _find_provider_output_dir(output_dir, provider),
+            evaluator_id_by_metric_key,
+        )
+        for provider in providers
+    ]
+
+
 def _collect_intermediate_results(
     output_dir: Path, providers: list, expected_total: int
 ) -> list:
@@ -182,19 +245,10 @@ def _collect_intermediate_results(
     means calibrate crashed mid-run for that provider, so we surface the
     partial rows but mark ``success=False`` to avoid lying to the FE.
     """
-    evaluator_id_by_metric_key = read_evaluators_map_from_config(output_dir)
     provider_results = []
-    for provider in providers:
-        provider_output_dir = _find_provider_output_dir(output_dir, provider)
-        results_data = _read_results_csv(provider_output_dir)
-        metrics_data = _read_metrics_json(provider_output_dir)
-        runs = (
-            build_evaluator_runs_for_eval_job(
-                metrics_data, evaluator_id_by_metric_key
-            )
-            if metrics_data is not None
-            else []
-        )
+    for provider, _dir, results_data, metrics_data, runs in _read_provider_outputs(
+        output_dir, providers
+    ):
         if results_data:
             provider_done = (
                 metrics_data is not None
@@ -480,52 +534,27 @@ def run_evaluation_task(
 
                 # Read results for each provider
                 provider_results = []
-                evaluator_id_by_metric_key = read_evaluators_map_from_config(output_dir)
-                for provider in request.providers:
-                    provider_output_dir = _find_provider_output_dir(
-                        output_dir, provider
+                for out in _read_provider_outputs(output_dir, request.providers):
+                    if not out.directory:
+                        provider_results.append(
+                            ProviderResult(provider=out.provider, success=False)
+                        )
+                        continue
+                    upload_directory_tree_to_s3(
+                        s3,
+                        out.directory,
+                        s3_bucket,
+                        f"stt/evals/{task_id}/outputs/{out.provider}",
                     )
-                    if provider_output_dir:
-                        metrics_data = _read_metrics_json(provider_output_dir)
-                        results_data = _read_results_csv(provider_output_dir)
-
-                        # Upload provider results to S3
-                        results_prefix = f"stt/evals/{task_id}/outputs/{provider}"
-                        for root, dirs, files in os.walk(provider_output_dir):
-                            for file in files:
-                                local_file_path = Path(root) / file
-                                relative_path = local_file_path.relative_to(
-                                    provider_output_dir
-                                )
-                                s3_key = f"{results_prefix}/{relative_path}"
-                                upload_file_to_s3(
-                                    s3, local_file_path, s3_bucket, s3_key
-                                )
-
-                        eruns = (
-                            build_evaluator_runs_for_eval_job(
-                                metrics_data,
-                                evaluator_id_by_metric_key,
-                            )
-                            if metrics_data is not None
-                            else []
+                    provider_results.append(
+                        ProviderResult(
+                            provider=out.provider,
+                            success=True,
+                            metrics=out.metrics,
+                            results=out.results,
+                            evaluator_runs=out.evaluator_runs or None,
                         )
-                        provider_results.append(
-                            ProviderResult(
-                                provider=provider,
-                                success=True,
-                                metrics=metrics_data,
-                                results=results_data,
-                                evaluator_runs=eruns or None,
-                            )
-                        )
-                    else:
-                        provider_results.append(
-                            ProviderResult(
-                                provider=provider,
-                                success=False,
-                            )
-                        )
+                    )
 
                 # Run-level artifacts (whole-run ``logs``, ``leaderboard.csv``, backend stdout/stderr)
                 upload_top_level_files_to_s3(
@@ -755,6 +784,266 @@ def evaluate_stt(
         status=initial_status,
         dataset_id=resolved_dataset_id,
         dataset_name=resolved_dataset_name,
+    )
+
+
+
+# A calibrate run folder carries a multi-megabyte `logs` file per provider that
+# nothing here reads, so only these are taken out of the archive.
+_IMPORT_RESULT_FILES = ("results.csv", "metrics.json")
+_MAX_IMPORT_ARCHIVE_BYTES = 200 * 1024 * 1024
+
+
+class STTImportResponse(BaseModel):
+    task_id: str = Field(
+        min_length=36,
+        max_length=36,
+        description="The evaluation this run was stored as",
+        examples=[_EXAMPLE_ID],
+    )
+    status: TaskStatus = Field(description="State of the stored evaluation")
+    dataset_id: Optional[str] = Field(
+        None,
+        min_length=36,
+        max_length=36,
+        description="Dataset the run was scored against",
+        examples=[_EXAMPLE_ID],
+    )
+    dataset_name: Optional[str] = Field(
+        None, description="Name of the dataset the run was scored against"
+    )
+    providers: List[str] = Field(
+        description="Providers found in the archive, in the order they are listed on the run"
+    )
+    row_count: int = Field(description="Rows stored for each provider")
+
+
+def _extract_run_archive(upload: UploadFile, dest: Path) -> None:
+    """Unpack a calibrate run archive's result files into `dest`.
+
+    Members are matched by name and rebuilt under `dest` rather than handed to
+    `extractall`, so a crafted archive cannot write outside it.
+    """
+    archive_path = dest / "archive.tar"
+    written = 0
+    with open(archive_path, "wb") as f:
+        while chunk := upload.file.read(1024 * 1024):
+            written += len(chunk)
+            if written > _MAX_IMPORT_ARCHIVE_BYTES:
+                raise HTTPException(
+                    status_code=413,
+                    detail=(
+                        f"Archive is larger than "
+                        f"{_MAX_IMPORT_ARCHIVE_BYTES // (1024 * 1024)} MB. Leave the "
+                        f"`logs` files out, they are not read."
+                    ),
+                )
+            f.write(chunk)
+
+    extracted = dest / "run"
+    try:
+        with tarfile.open(archive_path) as tar:
+            for member in tar.getmembers():
+                if not member.isfile():
+                    continue
+                name = member.name
+                if not (
+                    name.endswith(_IMPORT_RESULT_FILES)
+                    or (name.endswith(".xlsx") and "leaderboard/" in name)
+                ):
+                    continue
+                relative = Path(name)
+                if relative.is_absolute() or ".." in relative.parts:
+                    continue
+                source = tar.extractfile(member)
+                if source is None:
+                    continue
+                target = extracted / relative
+                target.parent.mkdir(parents=True, exist_ok=True)
+                with open(target, "wb") as out:
+                    shutil.copyfileobj(source, out)
+    except tarfile.TarError as exc:
+        raise HTTPException(
+            status_code=400, detail=f"Could not read the archive: {exc}"
+        )
+    archive_path.unlink(missing_ok=True)
+
+
+def _locate_run_root(extracted: Path) -> tuple[Path, List[str]]:
+    """Find the folder holding the provider folders, and name them.
+
+    A provider folder is one holding a `results.csv`, which is what separates
+    them from the `leaderboard` folder sitting alongside.
+    """
+    result_files = sorted(extracted.rglob("results.csv"))
+    if not result_files:
+        raise HTTPException(
+            status_code=400,
+            detail="No `results.csv` in the archive. Send the calibrate output folder.",
+        )
+    roots = {path.parent.parent for path in result_files}
+    if len(roots) > 1:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "The archive holds provider folders under more than one run folder. "
+                "Send one run at a time."
+            ),
+        )
+    return roots.pop(), [path.parent.name for path in result_files]
+
+
+def _check_rows_match_dataset(
+    outputs: List[ProviderOutput], texts: List[str]
+) -> None:
+    """Refuse a run whose rows do not sit in the dataset's own order.
+
+    Nothing records which uploaded audio file a row came from, so a row is
+    paired with the dataset item at the same position. Comparing every ground
+    truth is what turns a wrong upload order into a refusal instead of a run
+    that shows each score beside the wrong clip.
+    """
+    for out in outputs:
+        rows = out.results or []
+        if len(rows) != len(texts):
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    f"`{out.provider}` has {len(rows)} rows but the dataset has "
+                    f"{len(texts)} items. They must line up one to one."
+                ),
+            )
+        mismatched = [
+            index
+            for index, (row, text) in enumerate(zip(rows, texts))
+            if (row.get("gt") or "").strip() != (text or "").strip()
+        ]
+        if mismatched:
+            shown = ", ".join(str(i + 1) for i in mismatched[:5])
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    f"{len(mismatched)} of `{out.provider}`'s rows do not match the "
+                    f"ground truth of the dataset item at the same position, starting "
+                    f"at row {shown}. Add the audio to the dataset in the same order "
+                    f"as the rows in `results.csv`."
+                ),
+            )
+
+
+def _restamp_row_ids(outputs: List[ProviderOutput]) -> None:
+    """Renumber each row to the `audio_N` form the run page plays audio by.
+
+    The id calibrate wrote is whatever the local input named the clip, and is
+    kept as `source_id` so a row can still be traced back to that file.
+    """
+    for out in outputs:
+        for index, row in enumerate(out.results or []):
+            row["source_id"] = row.get("id")
+            row["id"] = f"audio_{index + 1}"
+
+
+@router.post(
+    "/evaluate/import",
+    response_model=STTImportResponse,
+    summary="Import a finished STT evaluation",
+)
+def import_stt_evaluation(
+    dataset_id: str = Form(
+        min_length=36,
+        max_length=36,
+        description="STT dataset the run was scored against. Its items must be in the same order as the rows in `results.csv`",
+        examples=[_EXAMPLE_ID],
+    ),
+    language: str = Form(
+        description='Spoken language of the audio, e.g. `"english"` or `"hindi"`'
+    ),
+    archive: UploadFile = File(
+        description="Tar of the calibrate output folder, holding one folder per provider with `results.csv` and `metrics.json`, plus `leaderboard`"
+    ),
+    ctx: OrgContext = Depends(get_current_org),
+):
+    """Store an STT evaluation already run by the calibrate CLI, without running it again"""
+    resolved = resolve_dataset_inputs(
+        dataset_id=dataset_id,
+        org_uuid=ctx.org_uuid,
+        expected_type="stt",
+    )
+
+    try:
+        s3_bucket = get_s3_output_config()
+    except ValueError as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+    with tempfile.TemporaryDirectory() as temp_dir:
+        temp_path = Path(temp_dir)
+        _extract_run_archive(archive, temp_path)
+        run_root, providers = _locate_run_root(temp_path / "run")
+
+        outputs = [
+            _read_provider_dir(provider, run_root / provider, {})
+            for provider in providers
+        ]
+        missing = [out.provider for out in outputs if not out.results]
+        if missing:
+            raise HTTPException(
+                status_code=400,
+                detail=f"No rows could be read for: {', '.join(missing)}",
+            )
+
+        _check_rows_match_dataset(outputs, resolved.texts)
+        _restamp_row_ids(outputs)
+
+        leaderboard_summary = read_leaderboard_xlsx(run_root / "leaderboard")
+
+    provider_results = [
+        ProviderResult(
+            provider=out.provider,
+            success=True,
+            metrics=out.metrics,
+            results=out.results,
+            evaluator_runs=None,
+        )
+        for out in outputs
+    ]
+
+    job_id = create_job(
+        job_type="stt-eval",
+        org_uuid=ctx.org_uuid,
+        user_id=ctx.user_id,
+        status=TaskStatus.DONE.value,
+        details={
+            "audio_paths": resolved.audio_paths,
+            "texts": resolved.texts,
+            "providers": providers,
+            "language": language,
+            "s3_bucket": s3_bucket,
+            "dataset_id": resolved.dataset_id,
+            "dataset_name": resolved.dataset_name,
+            "dataset_item_ids": resolved.item_ids,
+            # The CLI's own judges are built in and reported as plain metrics,
+            # so an import never links a Calibrate evaluator.
+            "evaluators": [],
+            "sarvam_judges": any(
+                key.startswith("sarvam_")
+                for out in outputs
+                for key in (out.metrics or {})
+            ),
+        },
+        results={
+            "provider_results": [r.model_dump() for r in provider_results],
+            "leaderboard_summary": leaderboard_summary,
+            "error": None,
+        },
+    )
+
+    return STTImportResponse(
+        task_id=job_id,
+        status=TaskStatus.DONE,
+        dataset_id=resolved.dataset_id,
+        dataset_name=resolved.dataset_name,
+        providers=providers,
+        row_count=len(resolved.texts),
     )
 
 
