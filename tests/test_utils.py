@@ -970,3 +970,172 @@ def test_read_leaderboard_xlsx(tmp_path):
     bad_lead.mkdir()
     wb2.save(bad_lead / "x.xlsx")
     assert read_leaderboard_xlsx(bad_lead) is None
+
+
+# ---------------------------------------------------------------------------
+# extract_uploaded_archive
+# ---------------------------------------------------------------------------
+
+
+def _tar_with(members):
+    """Build a tar in memory from {name: bytes}."""
+    import io
+    import tarfile
+
+    buf = io.BytesIO()
+    with tarfile.open(fileobj=buf, mode="w") as tar:
+        for name, data in members.items():
+            info = tarfile.TarInfo(name)
+            info.size = len(data)
+            tar.addfile(info, io.BytesIO(data))
+    buf.seek(0)
+    return buf
+
+
+def test_extract_uploaded_archive_keeps_only_wanted_files(tmp_path):
+    from utils import extract_uploaded_archive
+
+    archive = _tar_with(
+        {"run/a/results.csv": b"id\n1\n", "run/a/logs": b"x" * 100}
+    )
+    extracted = extract_uploaded_archive(
+        archive, tmp_path, keep=lambda n: n.endswith("results.csv"), max_bytes=1_000_000
+    )
+    assert (extracted / "run/a/results.csv").exists()
+    assert not (extracted / "run/a/logs").exists()
+    # The archive itself is not left behind next to what came out of it.
+    assert not (tmp_path / "upload.tar").exists()
+
+
+def test_extract_uploaded_archive_refuses_to_write_outside_the_folder(tmp_path):
+    """A crafted member must not escape, whether by climbing out or by naming
+    an absolute path."""
+    from utils import extract_uploaded_archive
+
+    archive = _tar_with(
+        {
+            "../escaped.csv": b"nope",
+            "/tmp/absolute.csv": b"nope",
+            "run/a/results.csv": b"id\n1\n",
+        }
+    )
+    extracted = extract_uploaded_archive(
+        archive, tmp_path, keep=lambda n: n.endswith(".csv"), max_bytes=1_000_000
+    )
+    assert (extracted / "run/a/results.csv").exists()
+    assert not (tmp_path.parent / "escaped.csv").exists()
+    assert sorted(p.name for p in extracted.rglob("*") if p.is_file()) == ["results.csv"]
+
+
+def test_extract_uploaded_archive_stops_past_the_byte_budget(tmp_path):
+    import pytest as _pytest
+
+    from utils import UploadTooLarge, extract_uploaded_archive
+
+    archive = _tar_with({"run/a/results.csv": b"x" * 5000})
+    with _pytest.raises(UploadTooLarge):
+        extract_uploaded_archive(
+            archive, tmp_path, keep=lambda n: True, max_bytes=64
+        )
+
+
+def test_extract_uploaded_archive_rejects_something_that_is_not_a_tar(tmp_path):
+    import io
+
+    import pytest as _pytest
+
+    from utils import extract_uploaded_archive
+
+    with _pytest.raises(ValueError):
+        extract_uploaded_archive(
+            io.BytesIO(b"not a tar at all"),
+            tmp_path,
+            keep=lambda n: True,
+            max_bytes=10_000,
+        )
+
+
+def test_locate_run_root_ignores_nested_working_folders(tmp_path):
+    from utils import locate_run_root
+
+    for folder in ("alpha", "beta"):
+        (tmp_path / folder).mkdir(parents=True)
+        (tmp_path / folder / "results.json").write_text("[]")
+    nested = tmp_path / "pending" / "runs" / "whatever"
+    nested.mkdir(parents=True)
+    (nested / "results.json").write_text("[]")
+
+    root, names = locate_run_root(tmp_path, "results.json", what="model")
+    assert root == tmp_path
+    assert sorted(names) == ["alpha", "beta"]
+
+
+def test_locate_run_root_reports_nothing_to_read(tmp_path):
+    import pytest as _pytest
+
+    from utils import locate_run_root
+
+    with _pytest.raises(ValueError, match="results.json"):
+        locate_run_root(tmp_path, "results.json", what="model")
+
+
+def test_locate_run_root_refuses_two_runs_at_the_same_depth(tmp_path):
+    import pytest as _pytest
+
+    from utils import locate_run_root
+
+    for run in ("run-one", "run-two"):
+        (tmp_path / run / "alpha").mkdir(parents=True)
+        (tmp_path / run / "alpha" / "results.json").write_text("[]")
+
+    with _pytest.raises(ValueError, match="more than one run"):
+        locate_run_root(tmp_path, "results.json", what="model")
+
+
+def test_extract_uploaded_archive_drops_macos_sidecar_files(tmp_path):
+    """macOS `tar` writes `._leaderboard.csv` beside `leaderboard.csv`. It matches
+    the same name patterns, holds binary metadata, and sorts first wherever a
+    reader globs by extension."""
+    from utils import extract_uploaded_archive
+
+    archive = _tar_with(
+        {
+            "run/._leaderboard.csv": b"\x00\x05\x16\x07\xa3binary",
+            "run/leaderboard.csv": b"model,passed\nalpha,1\n",
+        }
+    )
+    extracted = extract_uploaded_archive(
+        archive, tmp_path, keep=lambda n: n.endswith(".csv"), max_bytes=1_000_000
+    )
+    assert [p.name for p in sorted(extracted.rglob("*.csv"))] == ["leaderboard.csv"]
+
+
+def test_extract_uploaded_archive_stops_on_what_it_writes_not_what_it_reads(tmp_path):
+    """A tar is compressed, so bounding only the upload lets a small archive of
+    repetitive content unpack to hundreds of times its size."""
+    import io
+    import tarfile
+
+    import pytest as _pytest
+
+    from utils import UploadTooLarge, extract_uploaded_archive
+
+    payload = b"\x00" * (8 * 1024 * 1024)
+    buf = io.BytesIO()
+    with tarfile.open(fileobj=buf, mode="w:gz") as tar:
+        info = tarfile.TarInfo("run/a/results.json")
+        info.size = len(payload)
+        tar.addfile(info, io.BytesIO(payload))
+    buf.seek(0)
+    # Comfortably under the cap as uploaded, far over it once unpacked.
+    assert len(buf.getvalue()) < 1024 * 1024
+
+    with _pytest.raises(UploadTooLarge, match="unpacks to"):
+        extract_uploaded_archive(
+            buf,
+            tmp_path,
+            keep=lambda n: n.endswith("results.json"),
+            max_bytes=1024 * 1024,
+        )
+    written = sum(p.stat().st_size for p in tmp_path.rglob("*") if p.is_file())
+    assert written <= 2 * 1024 * 1024

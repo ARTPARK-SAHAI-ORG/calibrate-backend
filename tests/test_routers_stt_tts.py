@@ -59,6 +59,261 @@ def _failed_eval_job(db_mod, auth, *, job_type, details):
 
 
 # ---------------------------------------------------------------------------
+# STT /evaluate/import
+# ---------------------------------------------------------------------------
+
+
+def _run_archive(providers, *, root="output"):
+    """Tar a calibrate STT output folder. `providers` maps a name to its rows."""
+    import io
+    import json
+    import tarfile
+
+    buf = io.BytesIO()
+    with tarfile.open(fileobj=buf, mode="w") as tar:
+
+        def add(name, payload):
+            data = payload.encode("utf-8")
+            info = tarfile.TarInfo(f"{root}/{name}")
+            info.size = len(data)
+            tar.addfile(info, io.BytesIO(data))
+
+        for provider, rows in providers.items():
+            header = "id,gt,pred,wer,sarvam_intent_score\n"
+            body = "".join(
+                f"{r['id']},{r['gt']},{r['pred']},0.5,1\n" for r in rows
+            )
+            add(f"{provider}/results.csv", header + body)
+            add(f"{provider}/metrics.json", json.dumps({"wer": 0.5}))
+            # Never read, and the reason the endpoint filters members by name.
+            add(f"{provider}/logs", "x" * 2048)
+    return buf.getvalue()
+
+
+def _stt_dataset(db_mod, auth, texts, name="import-ds"):
+    org_uuid = db_mod.get_personal_org_for_user(auth["user_uuid"])["uuid"]
+    ds_uuid = db_mod.create_dataset(
+        name=name,
+        dataset_type="stt",
+        org_uuid=org_uuid,
+        user_id=auth["user_uuid"],
+    )
+    db_mod.add_dataset_items(
+        ds_uuid,
+        [
+            {"text": text, "audio_path": f"s3://bucket/stt/media/{i}.wav"}
+            for i, text in enumerate(texts)
+        ],
+    )
+    return ds_uuid
+
+
+def _post_import(client, auth, ds_uuid, archive, language="english"):
+    return client.post(
+        "/stt/evaluate/import",
+        headers=auth["headers"],
+        data={"dataset_id": ds_uuid, "language": language},
+        files={"archive": ("output.tar", archive, "application/x-tar")},
+    )
+
+
+def test_stt_import_stores_a_finished_run(client, monkeypatch):
+    import db as db_mod
+
+    auth = _signup(client)
+    monkeypatch.setenv("S3_OUTPUT_BUCKET", "test-bucket")
+    ds_uuid = _stt_dataset(db_mod, auth, ["hello there", "second line"])
+    archive = _run_archive(
+        {
+            "deepgram": [
+                {"id": "drive-a", "gt": "hello there", "pred": "hello their"},
+                {"id": "drive-b", "gt": "second line", "pred": "second lime"},
+            ],
+            "sarvam": [
+                {"id": "drive-a", "gt": "hello there", "pred": "hello there"},
+                {"id": "drive-b", "gt": "second line", "pred": "second line"},
+            ],
+        }
+    )
+
+    resp = _post_import(client, auth, ds_uuid, archive)
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["status"] == "done"
+    assert body["providers"] == ["deepgram", "sarvam"]
+    assert body["row_count"] == 2
+
+    job = db_mod.get_job(body["task_id"])
+    assert job["status"] == "done"
+    assert job["details"]["providers"] == ["deepgram", "sarvam"]
+    assert job["details"]["dataset_id"] == ds_uuid
+    assert job["details"]["evaluators"] == []
+    assert job["results"]["error"] is None
+
+    rows = job["results"]["provider_results"][0]["results"]
+    # Renumbered so the run page can pair each row with the dataset's audio,
+    # with the caller's own id kept alongside.
+    assert [r["id"] for r in rows] == ["audio_1", "audio_2"]
+    assert [r["source_id"] for r in rows] == ["drive-a", "drive-b"]
+
+
+def test_stt_import_run_reads_back_with_audio_and_numbers(client, monkeypatch):
+    import db as db_mod
+
+    auth = _signup(client)
+    monkeypatch.setenv("S3_OUTPUT_BUCKET", "test-bucket")
+    ds_uuid = _stt_dataset(db_mod, auth, ["only line"], name="import-read-ds")
+    archive = _run_archive(
+        {"deepgram": [{"id": "drive-a", "gt": "only line", "pred": "only lion"}]}
+    )
+    task_id = _post_import(client, auth, ds_uuid, archive).json()["task_id"]
+
+    with patch("routers.stt.presign_audio_path", return_value="https://signed/a.wav"):
+        resp = client.get(f"/stt/evaluate/{task_id}", headers=auth["headers"])
+
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["status"] == "done"
+    assert body["dataset_name"] == "import-read-ds"
+    row = body["provider_results"][0]["results"][0]
+    assert row["audio_url"] == "https://signed/a.wav"
+    # Both are text in the CSV and have to reach the page as numbers.
+    assert row["wer"] == 0.5
+    assert row["sarvam_intent_score"] == 1.0
+
+
+def test_stt_import_rejects_row_count_mismatch(client, monkeypatch):
+    import db as db_mod
+
+    auth = _signup(client)
+    monkeypatch.setenv("S3_OUTPUT_BUCKET", "test-bucket")
+    ds_uuid = _stt_dataset(db_mod, auth, ["a", "b"], name="import-count-ds")
+    archive = _run_archive({"deepgram": [{"id": "x", "gt": "a", "pred": "a"}]})
+
+    resp = _post_import(client, auth, ds_uuid, archive)
+    assert resp.status_code == 400
+    assert "1 rows but the dataset has 2 items" in resp.json()["detail"]
+
+
+def test_stt_import_rejects_rows_out_of_dataset_order(client, monkeypatch):
+    import db as db_mod
+
+    auth = _signup(client)
+    monkeypatch.setenv("S3_OUTPUT_BUCKET", "test-bucket")
+    ds_uuid = _stt_dataset(db_mod, auth, ["first", "second"], name="import-order-ds")
+    archive = _run_archive(
+        {
+            "deepgram": [
+                {"id": "x", "gt": "second", "pred": "second"},
+                {"id": "y", "gt": "first", "pred": "first"},
+            ]
+        }
+    )
+
+    resp = _post_import(client, auth, ds_uuid, archive)
+    assert resp.status_code == 400
+    detail = resp.json()["detail"]
+    assert "do not match the ground truth" in detail
+    assert "same order" in detail
+
+
+def test_stt_import_rejects_archive_without_results(client, monkeypatch):
+    import io
+    import tarfile
+
+    import db as db_mod
+
+    auth = _signup(client)
+    monkeypatch.setenv("S3_OUTPUT_BUCKET", "test-bucket")
+    ds_uuid = _stt_dataset(db_mod, auth, ["a"], name="import-empty-ds")
+
+    buf = io.BytesIO()
+    with tarfile.open(fileobj=buf, mode="w") as tar:
+        data = b"nothing useful"
+        info = tarfile.TarInfo("output/deepgram/logs")
+        info.size = len(data)
+        tar.addfile(info, io.BytesIO(data))
+
+    resp = _post_import(client, auth, ds_uuid, buf.getvalue())
+    assert resp.status_code == 400
+    assert "results.csv" in resp.json()["detail"]
+
+
+def test_stt_import_rejects_an_unreadable_archive(client, monkeypatch):
+    import db as db_mod
+
+    auth = _signup(client)
+    monkeypatch.setenv("S3_OUTPUT_BUCKET", "test-bucket")
+    ds_uuid = _stt_dataset(db_mod, auth, ["a"], name="import-bad-tar-ds")
+
+    resp = _post_import(client, auth, ds_uuid, b"this is not a tar")
+    assert resp.status_code == 400
+    assert "Could not read the archive" in resp.json()["detail"]
+
+
+def test_stt_import_rejects_an_oversized_archive(client, monkeypatch):
+    import db as db_mod
+    import routers.stt as stt_mod
+
+    auth = _signup(client)
+    monkeypatch.setenv("S3_OUTPUT_BUCKET", "test-bucket")
+    monkeypatch.setattr(stt_mod, "_MAX_IMPORT_ARCHIVE_BYTES", 16)
+    ds_uuid = _stt_dataset(db_mod, auth, ["a"], name="import-big-ds")
+    archive = _run_archive({"deepgram": [{"id": "x", "gt": "a", "pred": "a"}]})
+
+    resp = _post_import(client, auth, ds_uuid, archive)
+    assert resp.status_code == 413
+    assert "larger than" in resp.json()["detail"]
+
+
+def test_stt_import_unknown_dataset(client, monkeypatch):
+    monkeypatch.setenv("S3_OUTPUT_BUCKET", "test-bucket")
+    auth = _signup(client)
+    archive = _run_archive({"deepgram": [{"id": "x", "gt": "a", "pred": "a"}]})
+
+    resp = _post_import(client, auth, "00000000-0000-4000-8000-000000000001", archive)
+    assert resp.status_code == 404
+
+
+def test_stt_import_rejects_another_workspaces_dataset(client, monkeypatch):
+    import db as db_mod
+
+    monkeypatch.setenv("S3_OUTPUT_BUCKET", "test-bucket")
+    owner = _signup(client)
+    ds_uuid = _stt_dataset(db_mod, owner, ["a"], name="import-other-ds")
+    archive = _run_archive({"deepgram": [{"id": "x", "gt": "a", "pred": "a"}]})
+
+    outsider = _signup(client)
+    resp = _post_import(client, outsider, ds_uuid, archive)
+    assert resp.status_code == 404
+
+
+def test_stt_import_rejects_two_run_folders(client, monkeypatch):
+    import db as db_mod
+
+    auth = _signup(client)
+    monkeypatch.setenv("S3_OUTPUT_BUCKET", "test-bucket")
+    ds_uuid = _stt_dataset(db_mod, auth, ["a"], name="import-two-runs-ds")
+    rows = {"deepgram": [{"id": "x", "gt": "a", "pred": "a"}]}
+    first = _run_archive(rows, root="run-one")
+    second = _run_archive(rows, root="run-two")
+
+    import io
+    import tarfile
+
+    merged = io.BytesIO()
+    with tarfile.open(fileobj=merged, mode="w") as out:
+        for blob in (first, second):
+            with tarfile.open(fileobj=io.BytesIO(blob)) as src:
+                for member in src.getmembers():
+                    out.addfile(member, src.extractfile(member))
+
+    resp = _post_import(client, auth, ds_uuid, merged.getvalue())
+    assert resp.status_code == 400
+    assert "one run at a time" in resp.json()["detail"]
+
+
+# ---------------------------------------------------------------------------
 # STT /evaluate
 # ---------------------------------------------------------------------------
 
@@ -1164,3 +1419,43 @@ def test_stt_evaluate_holds_queue_lock_across_check_and_create(client, monkeypat
     )
     assert resp.status_code == 200
     assert held_during == {"check": True, "create": True}
+
+
+def test_stt_import_rejects_a_provider_folder_with_no_rows(client, monkeypatch):
+    import io
+    import json
+    import tarfile
+
+    import db as db_mod
+
+    auth = _signup(client)
+    monkeypatch.setenv("S3_OUTPUT_BUCKET", "test-bucket")
+    ds_uuid = _stt_dataset(db_mod, auth, ["a"], name="import-norows-ds")
+
+    buf = io.BytesIO()
+    with tarfile.open(fileobj=buf, mode="w") as tar:
+        for name, payload in (
+            ("output/deepgram/results.csv", "id,gt,pred\n"),
+            ("output/deepgram/metrics.json", json.dumps({"wer": 0.1})),
+        ):
+            data = payload.encode()
+            info = tarfile.TarInfo(name)
+            info.size = len(data)
+            tar.addfile(info, io.BytesIO(data))
+
+    resp = _post_import(client, auth, ds_uuid, buf.getvalue())
+    assert resp.status_code == 400
+    assert "No rows could be read for: deepgram" in resp.json()["detail"]
+
+
+def test_stt_import_needs_the_artifact_bucket(client, monkeypatch):
+    import db as db_mod
+
+    auth = _signup(client)
+    monkeypatch.setenv("S3_OUTPUT_BUCKET", "test-bucket")
+    ds_uuid = _stt_dataset(db_mod, auth, ["a"], name="import-nobucket-ds")
+    archive = _run_archive({"deepgram": [{"id": "x", "gt": "a", "pred": "a"}]})
+    monkeypatch.delenv("S3_OUTPUT_BUCKET", raising=False)
+
+    resp = _post_import(client, auth, ds_uuid, archive)
+    assert resp.status_code == 500

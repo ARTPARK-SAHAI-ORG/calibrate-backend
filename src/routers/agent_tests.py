@@ -11,7 +11,15 @@ import logging
 from pathlib import Path
 from typing import List, Dict, Any, Literal, Optional, Set, get_args
 
-from fastapi import APIRouter, HTTPException, Depends, Path as PathParam, Query
+from fastapi import (
+    APIRouter,
+    Depends,
+    File,
+    HTTPException,
+    Path as PathParam,
+    Query,
+    UploadFile,
+)
 from pagination import (
     OptionalPaginationParams,
     PaginatedResponse,
@@ -92,6 +100,9 @@ from utils import (
     kill_process_group,
     upload_directory_tree_to_s3,
     upload_file_to_s3,
+    extract_uploaded_archive,
+    locate_run_root,
+    UploadTooLarge,
 )
 
 _TEST_TYPES = get_args(TestTypeLiteral)
@@ -1991,10 +2002,13 @@ def _enrich_test_results_with_evaluators(
         test_id = r.get("test_case_id")
         snapshot = snapshot_map.get(test_id) if test_id else None
         uuid_to_meta: Dict[str, Dict[str, Any]] = {}
+        name_to_meta: Dict[str, Dict[str, Any]] = {}
         if isinstance(snapshot, list):
             for e in snapshot:
                 if isinstance(e, dict) and e.get("uuid"):
                     uuid_to_meta[e["uuid"]] = e
+                if isinstance(e, dict) and e.get("name"):
+                    name_to_meta.setdefault(e["name"], e)
 
         if isinstance(raw, list):
             for entry in raw:
@@ -2031,7 +2045,13 @@ def _enrich_test_results_with_evaluators(
                 continue
             echoed_uid = entry.get("evaluator_id")
             meta = (uuid_to_meta.get(echoed_uid) if echoed_uid else None) or {}
-            uid = echoed_uid
+            if not meta:
+                # A run carried out elsewhere echoes the evaluator id it ran
+                # under, which is not this workspace's id once the evaluator has
+                # been recreated. Calibrate keys each verdict by the evaluator's
+                # name, so that is the remaining handle back to the rubric.
+                meta = name_to_meta.get(cal_name) or {}
+            uid = meta.get("uuid") or echoed_uid
             # Warm the cache so the block builder can reuse it. Also use
             # the live evaluator's output_type as a fallback when the
             # snapshot lacks it (legacy jobs) — matches the list-path
@@ -4084,6 +4104,287 @@ def run_agent_benchmark(
         logger.info(f"Queued LLM benchmark job {job_id}")
 
     return AgentTestRunCreateResponse(task_id=job_id, status=initial_status)
+
+
+
+_BENCHMARK_IMPORT_FILES = ("results.json", "metrics.json")
+_MAX_BENCHMARK_ARCHIVE_BYTES = 500 * 1024 * 1024
+
+
+class BenchmarkImportResponse(BaseModel):
+    task_id: str = Field(
+        min_length=36,
+        max_length=36,
+        description="The benchmark this run was stored as",
+        examples=[_EXAMPLE_TASK_UUID],
+    )
+    status: TaskStatus = Field(description="State of the stored benchmark")
+    models: List[str] = Field(
+        description="Models found in the archive, in the order they are listed on the benchmark"
+    )
+    test_count: int = Field(description="Tests each model was scored on")
+    unresolved_evaluators: List[str] = Field(
+        description="Evaluators the results refer to that are not in this workspace. Their scores are stored, but the run shows them without a rubric"
+    )
+
+
+def _keep_benchmark_run_file(name: str) -> bool:
+    """Only the files the benchmark page needs. The rest of a run folder is logs.
+
+    A first-pass run puts its leaderboard in a `leaderboard` folder and a merged
+    re-judge writes it beside the model folders, so the name is matched rather
+    than the folder it sits in.
+    """
+    return name.endswith(_BENCHMARK_IMPORT_FILES) or (
+        name.endswith(".csv") and "leaderboard" in Path(name).name
+    )
+
+
+def _resolve_benchmark_tests(
+    rows_by_model: Dict[str, List[dict]], linked_tests: List[Dict[str, Any]]
+) -> List[Dict[str, Any]]:
+    """Pair every result row with the linked test whose name is its `test_case_id`.
+
+    Calibrate carries the id it was given rather than a Calibrate UUID, so the
+    test name is the only handle back. Every row must land on a test: a run
+    stored against a partial set would report a pass rate over tests it never
+    covered.
+    """
+    test_by_name = {t["name"]: t for t in linked_tests if t.get("name")}
+    ordered_ids: List[str] = []
+    seen: set = set()
+    for rows in rows_by_model.values():
+        for row in rows:
+            case_id = row.get("test_case_id") or (row.get("test_case") or {}).get("id")
+            if case_id and case_id not in seen:
+                seen.add(case_id)
+                ordered_ids.append(case_id)
+
+    unmatched = [case_id for case_id in ordered_ids if case_id not in test_by_name]
+    if unmatched:
+        shown = ", ".join(unmatched[:5])
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"{len(unmatched)} of the archive's test cases are not linked to this "
+                f"agent under that name, starting with: {shown}. Name each test after "
+                f"the `test_case_id` calibrate ran it under, and link it to the agent."
+            ),
+        )
+    return [test_by_name[case_id] for case_id in ordered_ids]
+
+
+def _unresolved_evaluator_ids(rows_by_model: Dict[str, List[dict]]) -> List[str]:
+    """Evaluator IDs the rows score against that this workspace does not hold.
+
+    Calibrate stamps each judge result with the evaluator it used, so identity
+    survives the import on its own. An ID that no longer resolves still stores
+    its score, it just renders without a name or rubric, which is worth saying
+    at import rather than leaving to be noticed on the run.
+    """
+    referenced = {
+        verdict["evaluator_id"]
+        for rows in rows_by_model.values()
+        for row in rows
+        for verdict in ((row.get("metrics") or {}).get("judge_results") or {}).values()
+        if isinstance(verdict, dict) and verdict.get("evaluator_id")
+    }
+    if not referenced:
+        return []
+    from db import get_evaluators_by_uuids
+
+    found = get_evaluators_by_uuids(list(referenced))
+    return sorted(referenced - set(found))
+
+
+def _benchmark_model_result(
+    model: str,
+    rows: List[dict],
+    metrics_data: Optional[dict],
+    test_names: List[str],
+    uuid_by_case_id: Dict[str, str],
+) -> Dict[str, Any]:
+    """Build one model's stored result, matching what `run_benchmark_task` writes.
+
+    Rows are stored as plain dicts on purpose. Calibrate emits `judge_results`
+    as a dict keyed by evaluator name and the read path reshapes it, so building
+    a `ModelResult` here would fail validation.
+    """
+    test_results = _parse_agent_test_results(rows)
+    for parsed in test_results:
+        # Calibrate leaves `test_case.name` unset, so the row arrives nameless and
+        # `_merge_test_results_by_test_names` would drop it. Every id resolved to a
+        # test of that name in `_resolve_benchmark_tests`, so the id is the name.
+        case_id = parsed.get("test_case_id")
+        parsed["name"] = case_id
+        # A run Calibrate carries out gives calibrate the test's own id, so every
+        # reader looks the frozen rubric up by it. A run carried out elsewhere
+        # carries whatever id that run used, so it is swapped for the test it
+        # matched, which is the whole reason the rubric resolves at all.
+        parsed["test_case_id"] = uuid_by_case_id.get(case_id, case_id)
+    test_results = _merge_test_results_by_test_names(test_names, test_results)
+
+    if metrics_data:
+        # A merged re-judge writes `turns` where a first-pass run writes `total`.
+        total = metrics_data.get("total")
+        if total is None:
+            total = metrics_data.get("turns")
+        if total is None:
+            total = len(rows)
+        passed = metrics_data.get("passed", 0)
+        return {
+            "model": model,
+            "success": True,
+            "message": f"Benchmark completed successfully for {model}",
+            "total_tests": total,
+            "passed": passed,
+            "failed": total - passed,
+            "evaluator_summary": _build_evaluator_summary(metrics_data),
+            "latency_ms": metrics_data.get("latency_ms"),
+            "cost": metrics_data.get("cost"),
+            "total_tokens": metrics_data.get("total_tokens"),
+            "test_results": test_results,
+        }
+
+    total = len(rows)
+    passed = sum(1 for r in test_results if r.get("passed"))
+    return {
+        "model": model,
+        "success": True,
+        "message": f"Benchmark completed for {model}",
+        "total_tests": total,
+        "passed": passed,
+        "failed": total - passed,
+        "evaluator_summary": None,
+        "test_results": test_results,
+    }
+
+
+@router.post(
+    "/agent/{agent_uuid}/benchmark/import",
+    response_model=BenchmarkImportResponse,
+    summary="Import a finished agent benchmark",
+)
+def import_agent_benchmark(
+    agent_uuid: str = PathParam(
+        description="Agent the benchmark was run against",
+        examples=[_EXAMPLE_AGENT_UUID],
+    ),
+    archive: UploadFile = File(
+        description="Tar of the calibrate output folder, holding one folder per model with `results.json` and `metrics.json`, plus `leaderboard`"
+    ),
+    ctx: OrgContext = Depends(get_current_org),
+):
+    """Store a benchmark already run by the calibrate CLI, without running it again"""
+    agent = get_agent(agent_uuid)
+    if not agent or agent.get("org_uuid") != ctx.org_uuid:
+        raise HTTPException(status_code=404, detail="Agent not found")
+
+    linked_tests = get_tests_for_agent(agent_uuid)
+    if not linked_tests:
+        raise HTTPException(
+            status_code=400,
+            detail="No tests linked to this agent. Link tests first.",
+        )
+
+    try:
+        s3_bucket = get_s3_output_config()
+    except ValueError as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+    with tempfile.TemporaryDirectory() as temp_dir:
+        temp_path = Path(temp_dir)
+        try:
+            extracted = extract_uploaded_archive(
+                archive.file,
+                temp_path,
+                keep=_keep_benchmark_run_file,
+                max_bytes=_MAX_BENCHMARK_ARCHIVE_BYTES,
+            )
+        except UploadTooLarge as exc:
+            raise HTTPException(
+                status_code=413,
+                detail=f"{exc} Leave the `results.log` files out, they are not read.",
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc))
+
+        try:
+            # Calibrate names each folder after the model with `/` written as
+            # `__`, so turning that back gives the name the leaderboard uses.
+            run_root, folders = locate_run_root(
+                extracted, "results.json", what="model"
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc))
+        models = [folder.replace("__", "/") for folder in folders]
+
+        rows_by_model: Dict[str, List[dict]] = {}
+        metrics_by_model: Dict[str, Optional[dict]] = {}
+        for folder, model in zip(folders, models):
+            rows = _read_agent_test_results_json(run_root / folder)
+            if not rows:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"No rows could be read for: {model}",
+                )
+            rows_by_model[model] = rows
+            metrics_path = run_root / folder / "metrics.json"
+            metrics_by_model[model] = (
+                json.loads(metrics_path.read_text(encoding="utf-8"))
+                if metrics_path.exists()
+                else None
+            )
+
+        tests = _resolve_benchmark_tests(rows_by_model, linked_tests)
+        unresolved_evaluators = _unresolved_evaluator_ids(rows_by_model)
+        # A first-pass run puts the leaderboard in its own folder; a merged
+        # re-judge writes it beside the model folders.
+        leaderboard_dir = run_root / "leaderboard"
+        leaderboard_summary = _read_leaderboard_csv(
+            leaderboard_dir if leaderboard_dir.is_dir() else run_root, models=models
+        )
+        if leaderboard_summary:
+            # Calibrate writes one leaderboard for the whole run, so an archive
+            # holding a subset of its model folders still carries rows for the
+            # models left out.
+            leaderboard_summary = [
+                row for row in leaderboard_summary if row.get("model") in set(models)
+            ]
+
+    test_names, details = _agent_test_job_details(agent, tests, s3_bucket)
+    details["models"] = models
+    uuid_by_case_id = {t["name"]: t["uuid"] for t in tests}
+    model_results = [
+        _benchmark_model_result(
+            model,
+            rows_by_model[model],
+            metrics_by_model[model],
+            test_names,
+            uuid_by_case_id,
+        )
+        for model in models
+    ]
+
+    task_id = create_agent_test_job(
+        agent_id=agent_uuid,
+        job_type="llm-benchmark",
+        status=TaskStatus.DONE.value,
+        details=details,
+        results={
+            "model_results": model_results,
+            "leaderboard_summary": leaderboard_summary,
+            "error": None,
+        },
+    )
+
+    return BenchmarkImportResponse(
+        task_id=task_id,
+        status=TaskStatus.DONE,
+        models=models,
+        test_count=len(tests),
+        unresolved_evaluators=unresolved_evaluators,
+    )
 
 
 @router.patch(
