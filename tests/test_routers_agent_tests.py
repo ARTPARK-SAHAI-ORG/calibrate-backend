@@ -3563,3 +3563,149 @@ def test_abort_is_workspace_scoped(client):
         client.post(f"/agent-tests/run/{NONEXISTENT_UUID}/abort", headers=h).status_code
         == 404
     )
+
+
+def test_rename_run_shows_everywhere_and_never_renumbers_the_others(client):
+    """A renamed run keeps its name on both run lists and on the run detail,
+    while the runs around it keep the numbers they already had."""
+    from db import create_agent_test_job, update_agent_test_job
+
+    h = _signup(client)["headers"]
+    agent = _create_agent(client, h)
+
+    jobs = []
+    for _ in range(3):
+        job_id = create_agent_test_job(
+            agent_id=agent["uuid"], job_type="llm-unit-test"
+        )
+        update_agent_test_job(job_id, status="done", results={"total_tests": 0})
+        jobs.append(job_id)
+
+    r = client.patch(
+        f"/agent-tests/run/{jobs[1]}/name",
+        json={"name": "  Nightly regression  "},
+        headers=h,
+    )
+    assert r.status_code == 200, r.text
+    assert r.json() == {"task_id": jobs[1], "name": "Nightly regression"}
+
+    def names(items):
+        return {i["uuid"]: i["name"] for i in items}
+
+    per_agent = client.get(
+        f"/agent-tests/agent/{agent['uuid']}/runs", headers=h
+    ).json()["items"]
+    assert names(per_agent) == {
+        jobs[0]: "Run 1",
+        jobs[1]: "Nightly regression",
+        jobs[2]: "Run 3",
+    }
+
+    workspace = client.get("/agent-tests/runs", headers=h).json()["items"]
+    assert names(workspace) == {
+        jobs[0]: "Run 1",
+        jobs[1]: "Nightly regression",
+        jobs[2]: "Run 3",
+    }
+
+    detail = client.get(f"/agent-tests/run/{jobs[1]}", headers=h)
+    assert detail.json()["name"] == "Nightly regression"
+    assert client.get(f"/agent-tests/run/{jobs[2]}", headers=h).json()["name"] == "Run 3"
+
+
+def test_clearing_a_run_name_returns_to_its_number(client):
+    from db import create_agent_test_job
+
+    h = _signup(client)["headers"]
+    agent = _create_agent(client, h)
+    create_agent_test_job(agent_id=agent["uuid"], job_type="llm-unit-test")
+    job_id = create_agent_test_job(agent_id=agent["uuid"], job_type="llm-unit-test")
+
+    client.patch(
+        f"/agent-tests/run/{job_id}/name", json={"name": "Temporary"}, headers=h
+    )
+    for body in ({"name": "   "}, {"name": None}, {}):
+        r = client.patch(f"/agent-tests/run/{job_id}/name", json=body, headers=h)
+        assert r.status_code == 200, r.text
+        assert r.json()["name"] == "Run 2"
+
+
+def test_rename_benchmark_uses_the_same_endpoint(client):
+    from db import create_agent_test_job
+
+    h = _signup(client)["headers"]
+    agent = _create_agent(client, h)
+    job_id = create_agent_test_job(agent_id=agent["uuid"], job_type="llm-benchmark")
+
+    assert client.get(f"/agent-tests/benchmark/{job_id}", headers=h).json()["name"] == (
+        "Benchmark 1"
+    )
+    r = client.patch(
+        f"/agent-tests/run/{job_id}/name", json={"name": "Model bake-off"}, headers=h
+    )
+    assert r.status_code == 200, r.text
+    assert r.json()["name"] == "Model bake-off"
+    assert client.get(f"/agent-tests/benchmark/{job_id}", headers=h).json()["name"] == (
+        "Model bake-off"
+    )
+
+
+def test_rename_run_rejects_long_names_and_other_workspaces(client):
+    from db import create_agent_test_job
+
+    h = _signup(client)["headers"]
+    agent = _create_agent(client, h)
+    job_id = create_agent_test_job(agent_id=agent["uuid"], job_type="llm-unit-test")
+
+    too_long = client.patch(
+        f"/agent-tests/run/{job_id}/name", json={"name": "x" * 201}, headers=h
+    )
+    assert too_long.status_code == 422
+
+    # Another workspace's run: denied, and the workspace is not named.
+    stranger = _signup(client)["headers"]
+    denied = client.patch(
+        f"/agent-tests/run/{job_id}/name", json={"name": "theirs"}, headers=stranger
+    )
+    assert denied.status_code == 403
+    assert "organization_uuid" not in denied.json()
+
+    assert (
+        client.patch(
+            f"/agent-tests/run/{NONEXISTENT_UUID}/name", json={"name": "x"}, headers=h
+        ).status_code
+        == 404
+    )
+
+
+def test_renaming_a_run_does_not_move_it_up_the_workspace_list(client):
+    """The workspace-wide list is ordered by when a run last changed, so a
+    rename must not lift a months-old run above runs that finished today."""
+    import time
+
+    from db import create_agent_test_job, update_agent_test_job
+
+    h = _signup(client)["headers"]
+    agent = _create_agent(client, h)
+
+    jobs = []
+    for _ in range(3):
+        job_id = create_agent_test_job(
+            agent_id=agent["uuid"], job_type="llm-unit-test"
+        )
+        update_agent_test_job(job_id, status="done", results={"total_tests": 0})
+        jobs.append(job_id)
+        time.sleep(1.1)  # `updated_at` is second-resolution
+
+    order = [
+        i["uuid"] for i in client.get("/agent-tests/runs", headers=h).json()["items"]
+    ]
+    assert order == [jobs[2], jobs[1], jobs[0]]
+
+    client.patch(
+        f"/agent-tests/run/{jobs[0]}/name", json={"name": "Oldest run"}, headers=h
+    )
+    after = [
+        i["uuid"] for i in client.get("/agent-tests/runs", headers=h).json()["items"]
+    ]
+    assert after == order

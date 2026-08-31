@@ -88,6 +88,7 @@ def test_run_llm_test_task_end_to_end_with_fake_cli():
 
     TestRunStatusResponse(
         task_id="t" * 36,
+        name="Run 1",
         status="done",
         test_name="x",
         latency_ms=results["latency_ms"],

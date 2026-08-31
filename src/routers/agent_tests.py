@@ -48,6 +48,8 @@ from db import (
     get_agent_test_job,
     update_agent_test_job,
     update_agent_test_job_visibility,
+    set_agent_test_job_name,
+    get_agent_test_job_position,
     get_agent_test_jobs_for_agent_summary,
     get_agent_test_jobs_for_org_summary,
     delete_agent_test_job,
@@ -187,6 +189,10 @@ _EXAMPLE_AGENT_UUID = "f47ac10b-58cc-4372-a567-0e02b2c3d479"
 _EXAMPLE_TASK_UUID = "a3b2c1d0-e5f4-3210-abcd-ef1234567890"
 
 _TASK_STATUS_DESCRIPTION = "Current status of the run"
+_RUN_NAME_DESCRIPTION = (
+    "Name of the run. A run nobody has renamed shows its number instead, such "
+    "as `Run 1` for a test run or `Benchmark 1` for a benchmark"
+)
 _ABORTED_DESCRIPTION = (
     "Whether a user stopped this run before it finished. The results collected "
     "up to that point are kept, and test cases that never ran are counted "
@@ -481,6 +487,7 @@ class TestRunStatusResponse(BaseModel):
         description="Test run job ID",
         examples=[_EXAMPLE_TASK_UUID],
     )
+    name: str = Field(description=_RUN_NAME_DESCRIPTION)
     status: TaskStatus = Field(description=_TASK_STATUS_DESCRIPTION)
     test_uuids: Optional[List[str]] = Field(
         None,
@@ -589,9 +596,7 @@ class AgentTestRunListItem(BaseModel):
         description="Test run job ID",
         examples=[_EXAMPLE_TASK_UUID],
     )
-    name: str = Field(
-        description="Display name, such as `Run 1` for a unit test or `Benchmark 1` for a benchmark"
-    )
+    name: str = Field(description=_RUN_NAME_DESCRIPTION)
     status: TaskStatus = Field(description=_TASK_STATUS_DESCRIPTION)
     type: AgentTestJobType = Field(
         description=(
@@ -978,6 +983,27 @@ def _prefetch_evaluator_cache(
     return {uid: found.get(uid) for uid in all_uuids}
 
 
+def _auto_run_name(job_type: str, position: int) -> str:
+    """The name a run displays when nobody has given it one."""
+    if job_type == "llm-unit-test":
+        return f"Run {position}"
+    if job_type == "llm-benchmark":
+        return f"Benchmark {position}"
+    return "Job"
+
+
+def run_display_name(job: Dict[str, Any]) -> str:
+    """The name of one run held on its own, for callers with no ordered list to
+    count against (run detail, benchmark detail, the shared-link views).
+
+    Falls back to a position query, so prefer the list endpoints' own counting
+    when a whole list is already in hand.
+    """
+    return job.get("name") or _auto_run_name(
+        job.get("type", ""), get_agent_test_job_position(job["uuid"])
+    )
+
+
 def _build_agent_test_run_item_fields(
     job: Dict[str, Any],
     name: str,
@@ -1091,20 +1117,17 @@ def get_agent_test_runs(
     # Name in chronological order (oldest = "Run 1") so a run's number never
     # shifts when a newer run is added, then build items newest-first. Names are
     # assigned before any filtering so they stay stable regardless of filters.
+    # A renamed run still consumes its number, so renaming one never renumbers
+    # the rest.
     jobs_asc = sorted(jobs, key=lambda j: (j.get("created_at", ""), j.get("id", 0)))
-    unit_test_count = 0
-    benchmark_count = 0
+    counts: Dict[str, int] = {}
     name_map: Dict[str, str] = {}
     for job in jobs_asc:
         job_type = job.get("type", "")
-        if job_type == "llm-unit-test":
-            unit_test_count += 1
-            name_map[job["uuid"]] = f"Run {unit_test_count}"
-        elif job_type == "llm-benchmark":
-            benchmark_count += 1
-            name_map[job["uuid"]] = f"Benchmark {benchmark_count}"
-        else:
-            name_map[job["uuid"]] = "Job"
+        counts[job_type] = counts.get(job_type, 0) + 1
+        name_map[job["uuid"]] = job.get("name") or _auto_run_name(
+            job_type, counts[job_type]
+        )
 
     runs = []
     evaluator_cache = _prefetch_evaluator_cache(jobs)
@@ -1167,24 +1190,16 @@ def get_all_test_runs_for_user(
 
     # Per-agent counters for naming ("Run 1", "Benchmark 2", …).
     # We need ascending order to assign names correctly, then flip back.
+    # A renamed run still consumes its number, so renaming one never renumbers
+    # the rest.
     jobs_asc = sorted(jobs, key=lambda j: (j.get("created_at", ""), j.get("id", 0)))
-    agent_unit_counts: Dict[str, int] = {}
-    agent_benchmark_counts: Dict[str, int] = {}
+    counts: Dict[tuple, int] = {}
     name_map: Dict[str, str] = {}  # job uuid → display name
 
     for job in jobs_asc:
-        agent_id = job.get("agent_id", "")
-        job_type = job.get("type", "")
-        if job_type == "llm-unit-test":
-            agent_unit_counts[agent_id] = agent_unit_counts.get(agent_id, 0) + 1
-            name_map[job["uuid"]] = f"Run {agent_unit_counts[agent_id]}"
-        elif job_type == "llm-benchmark":
-            agent_benchmark_counts[agent_id] = (
-                agent_benchmark_counts.get(agent_id, 0) + 1
-            )
-            name_map[job["uuid"]] = f"Benchmark {agent_benchmark_counts[agent_id]}"
-        else:
-            name_map[job["uuid"]] = "Job"
+        key = (job.get("agent_id", ""), job.get("type", ""))
+        counts[key] = counts.get(key, 0) + 1
+        name_map[job["uuid"]] = job.get("name") or _auto_run_name(key[1], counts[key])
 
     # Build every run item FIRST (before status/has_failures filtering) so the
     # "Run N"/"Benchmark N" names stay stable regardless of which filters apply.
@@ -3067,6 +3082,50 @@ def update_test_run_visibility(
     return VisibilityResponse(is_public=body.is_public, share_token=share_token)
 
 
+class RunNameRequest(BaseModel):
+    name: Optional[str] = Field(
+        None,
+        max_length=200,
+        description="New name for the run. Send an empty string or omit it to clear the name, and the run goes back to its number",
+    )
+
+
+class RunNameResponse(BaseModel):
+    task_id: str = Field(
+        min_length=36,
+        max_length=36,
+        description="Run that was renamed",
+        examples=[_EXAMPLE_TASK_UUID],
+    )
+    name: str = Field(
+        description="Name the run now displays. Clearing the name gives back its number, such as `Run 3`"
+    )
+
+
+@router.patch(
+    "/run/{task_id}/name",
+    response_model=RunNameResponse,
+    summary="Rename test run",
+)
+def rename_agent_test_run(
+    task_id: str = PathParam(
+        description="Test run or benchmark to rename",
+        examples=[_EXAMPLE_TASK_UUID],
+    ),
+    body: RunNameRequest = ...,
+    ctx: OrgContext = Depends(get_current_org),
+):
+    """Rename a test run or benchmark, or clear its name."""
+    # Runs and benchmarks are both rows in `agent_test_jobs`, so one endpoint
+    # renames either — same as the stop endpoint.
+    job = _load_owned_agent_test_job(task_id, ctx)
+
+    name = (body.name or "").strip() or None
+    set_agent_test_job_name(task_id, name)
+    job["name"] = name
+    return RunNameResponse(task_id=task_id, name=run_display_name(job))
+
+
 def _settle_stopped_rows(rows: List[Any]) -> tuple[int, int]:
     """Mark every case that never started, and count the verdicts that did land.
 
@@ -3252,6 +3311,7 @@ def get_agent_test_run_status(
 
     response = TestRunStatusResponse(
         task_id=task_id,
+        name=run_display_name(job),
         status=status,
         test_uuids=details.get("test_uuids") or None,
         total_tests=results.get("total_tests"),
@@ -3343,6 +3403,7 @@ class BenchmarkStatusResponse(BaseModel):
         description="Benchmark run job ID",
         examples=[_EXAMPLE_TASK_UUID],
     )
+    name: str = Field(description=_RUN_NAME_DESCRIPTION)
     status: TaskStatus = Field(description=_TASK_STATUS_DESCRIPTION)
     test_uuids: Optional[List[str]] = Field(
         None,
@@ -4121,6 +4182,7 @@ def get_benchmark_status(
 
     response = BenchmarkStatusResponse(
         task_id=task_id,
+        name=run_display_name(job),
         status=status,
         test_uuids=details.get("test_uuids") or None,
         evaluators=evaluators_block or None,
