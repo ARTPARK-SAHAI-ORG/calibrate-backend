@@ -1108,3 +1108,34 @@ def test_extract_uploaded_archive_drops_macos_sidecar_files(tmp_path):
         archive, tmp_path, keep=lambda n: n.endswith(".csv"), max_bytes=1_000_000
     )
     assert [p.name for p in sorted(extracted.rglob("*.csv"))] == ["leaderboard.csv"]
+
+
+def test_extract_uploaded_archive_stops_on_what_it_writes_not_what_it_reads(tmp_path):
+    """A tar is compressed, so bounding only the upload lets a small archive of
+    repetitive content unpack to hundreds of times its size."""
+    import io
+    import tarfile
+
+    import pytest as _pytest
+
+    from utils import UploadTooLarge, extract_uploaded_archive
+
+    payload = b"\x00" * (8 * 1024 * 1024)
+    buf = io.BytesIO()
+    with tarfile.open(fileobj=buf, mode="w:gz") as tar:
+        info = tarfile.TarInfo("run/a/results.json")
+        info.size = len(payload)
+        tar.addfile(info, io.BytesIO(payload))
+    buf.seek(0)
+    # Comfortably under the cap as uploaded, far over it once unpacked.
+    assert len(buf.getvalue()) < 1024 * 1024
+
+    with _pytest.raises(UploadTooLarge, match="unpacks to"):
+        extract_uploaded_archive(
+            buf,
+            tmp_path,
+            keep=lambda n: n.endswith("results.json"),
+            max_bytes=1024 * 1024,
+        )
+    written = sum(p.stat().st_size for p in tmp_path.rglob("*") if p.is_file())
+    assert written <= 2 * 1024 * 1024

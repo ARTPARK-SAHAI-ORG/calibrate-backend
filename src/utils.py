@@ -759,8 +759,14 @@ def extract_uploaded_archive(
 
     Members are matched by name and rebuilt one at a time rather than handed to
     ``extractall``, so a crafted archive cannot write outside `dest`. Raises
-    :class:`UploadTooLarge` past `max_bytes` and ``ValueError`` on an archive
-    that will not open. Returns the folder the files were written into.
+    :class:`UploadTooLarge` and ``ValueError`` on an archive that will not open.
+    Returns the folder the files were written into.
+
+    `max_bytes` bounds BOTH what is read from the caller and what is written to
+    disk. A tar is compressed, so bounding only the upload lets a small archive
+    of repetitive content unpack to hundreds of times its size and fill the disk
+    the database lives on. Written bytes are counted as they land rather than
+    taken from each member's header, which an archive is free to understate.
     """
     archive_path = dest / "upload.tar"
     written = 0
@@ -774,6 +780,7 @@ def extract_uploaded_archive(
             out.write(chunk)
 
     extracted = dest / "run"
+    unpacked = 0
     try:
         with tarfile.open(archive_path) as tar:
             for member in tar.getmembers():
@@ -794,7 +801,14 @@ def extract_uploaded_archive(
                 target = extracted / relative
                 target.parent.mkdir(parents=True, exist_ok=True)
                 with open(target, "wb") as handle:
-                    shutil.copyfileobj(source, handle)
+                    while chunk := source.read(1024 * 1024):
+                        unpacked += len(chunk)
+                        if unpacked > max_bytes:
+                            raise UploadTooLarge(
+                                f"Archive unpacks to more than "
+                                f"{max_bytes // (1024 * 1024)} MB."
+                            )
+                        handle.write(chunk)
     except tarfile.TarError as exc:
         raise ValueError(f"Could not read the archive: {exc}")
     finally:
