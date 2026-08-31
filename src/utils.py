@@ -780,6 +780,12 @@ def extract_uploaded_archive(
                 if not member.isfile() or not keep(member.name):
                     continue
                 relative = Path(member.name)
+                # macOS `tar` writes an AppleDouble sidecar beside each file,
+                # `._leaderboard.csv` next to `leaderboard.csv`. It matches the
+                # same name patterns but holds binary metadata, and sorts first
+                # wherever a reader globs for one of these by extension.
+                if relative.name.startswith("._"):
+                    continue
                 if relative.is_absolute() or ".." in relative.parts:
                     continue
                 source = tar.extractfile(member)

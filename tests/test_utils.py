@@ -1090,3 +1090,21 @@ def test_locate_run_root_refuses_two_runs_at_the_same_depth(tmp_path):
 
     with _pytest.raises(ValueError, match="more than one run"):
         locate_run_root(tmp_path, "results.json", what="model")
+
+
+def test_extract_uploaded_archive_drops_macos_sidecar_files(tmp_path):
+    """macOS `tar` writes `._leaderboard.csv` beside `leaderboard.csv`. It matches
+    the same name patterns, holds binary metadata, and sorts first wherever a
+    reader globs by extension."""
+    from utils import extract_uploaded_archive
+
+    archive = _tar_with(
+        {
+            "run/._leaderboard.csv": b"\x00\x05\x16\x07\xa3binary",
+            "run/leaderboard.csv": b"model,passed\nalpha,1\n",
+        }
+    )
+    extracted = extract_uploaded_archive(
+        archive, tmp_path, keep=lambda n: n.endswith(".csv"), max_bytes=1_000_000
+    )
+    assert [p.name for p in sorted(extracted.rglob("*.csv"))] == ["leaderboard.csv"]
