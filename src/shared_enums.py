@@ -1,6 +1,6 @@
 """Closed test, agent, and evaluator type sets, and the maps between them.
 
-Lives outside `routers/` so `db.py` and other modules can import them without a db→router cycle.
+Lives outside `routers/` so `db.py` can import them without a db→router cycle.
 """
 
 from __future__ import annotations

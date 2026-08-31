@@ -1,9 +1,7 @@
 """Trace-scoring eligibility and plan resolution.
 
-Shared by the agent opt-in API and ingest-time run creation. Lives outside
-`routers/` so `db.py` can call it without importing a router. Callers load
-`(evaluator, live_version)` pairs via `db.resolve_live_evaluators`; this
-module does not import `db`.
+Shared by agent opt-in and ingest-time run creation. Lives outside `routers/`
+so `db.py` can import it without a db→router cycle.
 """
 
 from __future__ import annotations
@@ -18,8 +16,7 @@ from shared_enums import (
     REQUIRED_EVALUATOR_TYPE_BY_TEST_TYPE,
 )
 
-# interaction_type → (evaluation.type, required evaluator_type). Evaluator
-# types come from REQUIRED_EVALUATOR_TYPE_BY_TEST_TYPE for `response`/`general`.
+# Subset of TestType that traces can score.
 EvaluationType = Literal["response", "general"]
 TRACE_SCORING_MODE_BY_INTERACTION_TYPE: dict[
     AgentInteractionType,
@@ -71,8 +68,6 @@ class TraceScoringEligible:
 
 @dataclass(frozen=True)
 class TraceScoringIneligible:
-    """One evaluator ineligible to score this agent's traces."""
-
     evaluator_uuid: str
     name: str
     reason: IneligibleReason
@@ -80,12 +75,7 @@ class TraceScoringIneligible:
 
 @dataclass(frozen=True)
 class TraceScoringResolution:
-    """The result of resolving a linked evaluator set for a particular agent."""
-
-    # Scoring subset of TestType. From TRACE_SCORING_MODE_BY_INTERACTION_TYPE
-    # (None if interaction_type is unsupported).
     evaluation_type: EvaluationType | None
-    # Required evaluator_type for that mode, from REQUIRED_EVALUATOR_TYPE_BY_TEST_TYPE.
     evaluator_type: EvaluatorType | None
     eligible: list[TraceScoringEligible] = field(default_factory=list)
     ineligible: list[TraceScoringIneligible] = field(default_factory=list)
@@ -106,18 +96,12 @@ def resolve_trace_scoring(
     interaction_type: AgentInteractionType | None,
     live_evaluators: list[tuple[dict[str, Any], dict[str, Any] | None]],
 ) -> TraceScoringResolution:
-    """Split linked evaluators into eligible pins and ineligible-with-reason.
+    """Partition linked evaluators for this interaction type.
 
-    Args:
-        interaction_type: `agents.interaction_type` (supports: `conversation` | `general`)
-        live_evaluators: each pair is an `evaluators` row (`_parse_evaluator_row`)
-            and its live `evaluator_versions` row (`_parse_evaluator_version_row`),
-            or `None` when `live_version_id` is unset or that version row is gone.
-            See also `db.resolve_live_evaluators`.
-        
-    Type is checked before live-version / variable checks so a mixed linked
-    set is never handed to `_validate_evaluators`, which raises on the first
-    mismatch. Never raises.
+    `live_evaluators` is `(evaluators row, live evaluator_versions row or None)`
+    from `resolve_live_evaluators`. Type is checked before live-version /
+    variable checks so a mixed set never reaches `_validate_evaluators`.
+    Never raises.
     """
     mode = TRACE_SCORING_MODE_BY_INTERACTION_TYPE.get(interaction_type) if interaction_type is not None else None
     if mode is None:

@@ -4813,14 +4813,10 @@ def get_evaluators_for_agent(agent_id: str) -> List[Dict[str, Any]]:
 def resolve_live_evaluators(
     agent_uuid: str,
 ) -> List[Tuple[Dict[str, Any], Optional[Dict[str, Any]]]]:
-    """Linked evaluators paired with their live version, if any.
+    """`(evaluator, live_version)` pairs in `get_evaluators_for_agent` order.
 
-    Each item is `(evaluator, live_version)`. `evaluator` is an `evaluators`
-    row (`_parse_evaluator_row`, same as `get_evaluators_for_agent`).
-    `live_version` is the `evaluator_versions` row for that evaluator's
-    `live_version_id` (`_parse_evaluator_version_row`), or `None` when the
-    id is unset or the version row is missing. Order matches
-    `get_evaluators_for_agent`.
+    `live_version` is None when `live_version_id` is unset or the version row
+    is gone.
     """
     evaluators = get_evaluators_for_agent(agent_uuid)
     versions = get_evaluator_versions_by_uuids(
@@ -10343,7 +10339,7 @@ def _insert_trace_eval_run(
     now: int,
     completed_at: Optional[int] = None,
 ) -> None:
-    """Insert one trace_eval_runs row on `cur`. Does not commit."""
+    """Insert one trace_eval_runs row. Caller owns the transaction."""
     cur.execute(
         "INSERT INTO trace_eval_runs "
         "(uuid, trace_uuid, org_uuid, agent_id, status, scoring_plan, "
@@ -10408,8 +10404,7 @@ def create_trace_with_eval_run(
 
     Resolution (`resolve_live_evaluators` then
     `trace_scoring.resolve_trace_scoring` / `as_plan`) runs before the
-    write lock so evaluator reads do not hold it. The inserts share one
-    transaction so a mid-write failure leaves neither row.
+    write lock so evaluator reads do not hold it.
 
     Uses BEGIN IMMEDIATE rather than a bare BEGIN: a deferred transaction
     starts as a reader and only upgrades at the first write, which can fail
@@ -10561,8 +10556,7 @@ def _delete_pending_trace_eval_runs(
 def delete_pending_trace_eval_runs_for_agent(
     agent_id: str, org_uuid: Optional[str] = None
 ) -> int:
-    """Delete this agent's pending trace-scoring runs. Processing and terminal
-    runs are left in place."""
+    """Commit a pending-run delete for this agent. See `_delete_pending_trace_eval_runs`."""
     with get_db_connection() as conn:
         deleted = _delete_pending_trace_eval_runs(conn.cursor(), agent_id, org_uuid)
         conn.commit()
