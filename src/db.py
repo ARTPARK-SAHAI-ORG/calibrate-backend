@@ -1,13 +1,16 @@
 import sqlite3
 import json
 import logging
+import time
 import uuid
+from dataclasses import asdict
 from os.path import join
 import os
 from pathlib import Path
 from typing import Optional, List, Dict, Any, Set, Tuple, TYPE_CHECKING
 from contextlib import contextmanager
 
+import trace_scoring
 from utils import is_tool_call_row
 
 if TYPE_CHECKING:
@@ -1204,6 +1207,13 @@ def init_db():
         except sqlite3.OperationalError:
             pass
 
+        try:
+            cursor.execute(
+                "ALTER TABLE agents ADD COLUMN auto_score_traces INTEGER NOT NULL DEFAULT 0"
+            )
+        except sqlite3.OperationalError:
+            pass
+
         # Add is_public and share_token columns for public sharing feature
         for table in ("jobs", "agent_test_jobs", "simulation_jobs"):
             try:
@@ -1546,6 +1556,83 @@ def init_db():
             cursor.execute("ALTER TABLE traces ADD COLUMN labels TEXT DEFAULT NULL")
         except sqlite3.OperationalError:
             pass
+        conn.commit()
+
+        # Durable scoring runs. `status` is the source of truth for "scored?";
+        # allowed values are TraceEvalRunStatus. Pending runs of soft-deleted
+        # traces are settled at claim time with a status=skipped.
+        pending = trace_scoring.TraceEvalRunStatus.PENDING.value
+        open_status_sql = ", ".join(
+            f"'{s.value}'" for s in trace_scoring.OPEN_TRACE_EVAL_RUN_STATUSES
+        )
+        cursor.execute(
+            f"""
+            CREATE TABLE IF NOT EXISTS trace_eval_runs (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                uuid TEXT NOT NULL UNIQUE,
+                trace_uuid TEXT NOT NULL,
+                org_uuid TEXT NOT NULL,
+                agent_id TEXT NOT NULL,
+                status TEXT NOT NULL DEFAULT '{pending}',
+                scoring_plan TEXT,
+                available_at INTEGER NOT NULL,
+                attempts INTEGER NOT NULL DEFAULT 0,
+                error TEXT,
+                created_at INTEGER NOT NULL,
+                updated_at INTEGER NOT NULL,
+                completed_at INTEGER,
+                FOREIGN KEY (trace_uuid) REFERENCES traces(uuid),
+                FOREIGN KEY (org_uuid) REFERENCES organizations(uuid),
+                FOREIGN KEY (agent_id) REFERENCES agents(uuid)
+            )
+            """
+        )
+        cursor.execute(
+            "CREATE UNIQUE INDEX IF NOT EXISTS ux_trace_eval_active "
+            "ON trace_eval_runs (trace_uuid) "
+            f"WHERE status IN ({open_status_sql})"
+        )
+        cursor.execute(
+            "CREATE INDEX IF NOT EXISTS ix_trace_eval_claim "
+            "ON trace_eval_runs (available_at) "
+            f"WHERE status IN ({open_status_sql})"
+        )
+        cursor.execute(
+            "CREATE INDEX IF NOT EXISTS ix_trace_eval_agent_status "
+            "ON trace_eval_runs (agent_id, status, completed_at)"
+        )
+        cursor.execute(
+            "CREATE INDEX IF NOT EXISTS ix_trace_eval_trace "
+            "ON trace_eval_runs (trace_uuid, created_at DESC)"
+        )
+
+        # One score per (run, evaluator). Keyed on the run so a same-version
+        # rescore never overwrites earlier history.
+        cursor.execute(
+            """
+            CREATE TABLE IF NOT EXISTS trace_eval_scores (
+                run_uuid TEXT NOT NULL,
+                trace_uuid TEXT NOT NULL,
+                evaluator_uuid TEXT NOT NULL,
+                evaluator_version_id TEXT NOT NULL,
+                org_uuid TEXT NOT NULL,
+                -- NUMERIC affinity: 0/1 and integer ratings store as integers;
+                -- a future float rating stores as real.
+                value NUMERIC NOT NULL,
+                -- Denormalized from evaluators.output_type.
+                output_type TEXT NOT NULL,
+                reasoning TEXT,
+                completed_at INTEGER,
+                UNIQUE (run_uuid, evaluator_uuid),
+                CHECK (output_type IN ('binary', 'rating')),
+                CHECK (output_type <> 'binary' OR value IN (0, 1)),
+                FOREIGN KEY (run_uuid) REFERENCES trace_eval_runs(uuid),
+                FOREIGN KEY (trace_uuid) REFERENCES traces(uuid),
+                FOREIGN KEY (evaluator_uuid) REFERENCES evaluators(uuid),
+                FOREIGN KEY (org_uuid) REFERENCES organizations(uuid)
+            )
+            """
+        )
         conn.commit()
 
         # ============ org_limits (renamed from user_limits) ============
@@ -3083,7 +3170,7 @@ def _link_default_correctness_evaluator(
     yet, then link it to `agent_uuid`. Picks `default-llm-general` for a
     `general` agent, `default-llm-next-reply` otherwise, matching the
     evaluator_type each interaction_type requires (see
-    REQUIRED_AGENT_INTERACTION_TYPE_BY_TEST_TYPE in routers/tests.py). Runs on
+    REQUIRED_AGENT_INTERACTION_TYPE_BY_TEST_TYPE in shared_enums.py). Runs on
     the caller's cursor and does not commit — callers own the transaction."""
     slug = _correctness_evaluator_slug_for_interaction_type(interaction_type)
     cursor.execute(
@@ -4219,6 +4306,7 @@ def _parse_agent_row(row: sqlite3.Row) -> Dict[str, Any]:
     # Deserialize config from JSON string
     if agent.get("config"):
         agent["config"] = json.loads(agent["config"])
+    agent["auto_score_traces"] = bool(agent.get("auto_score_traces"))
 
     return agent
 
@@ -4276,8 +4364,15 @@ def update_agent(
     name: Optional[str] = None,
     config: Optional[Dict[str, Any]] = None,
     interaction_type: Optional[str] = None,
+    auto_score_traces: Optional[bool] = None,
+    org_uuid: Optional[str] = None,
 ) -> bool:
-    """Update an agent. Returns True if the agent was found and updated."""
+    """Update an agent. Returns True if the agent was found and updated.
+
+    Turning `auto_score_traces` off deletes this agent's `pending`
+    `trace_eval_runs` in the same transaction. `processing` and terminal
+    runs are left alone so in-flight judge spend is not thrown away.
+    """
     # Build dynamic update query
     updates = []
     params = []
@@ -4292,6 +4387,9 @@ def update_agent(
     if interaction_type is not None:
         updates.append("interaction_type = ?")
         params.append(interaction_type)
+    if auto_score_traces is not None:
+        updates.append("auto_score_traces = ?")
+        params.append(1 if auto_score_traces else 0)
 
     if not updates:
         return False
@@ -4306,10 +4404,14 @@ def update_agent(
     with get_db_connection() as conn:
         cursor = conn.cursor()
         cursor.execute(query, params)
-        conn.commit()
         updated = cursor.rowcount > 0
+        if updated and auto_score_traces is False:
+            _delete_pending_trace_eval_runs(cursor, agent_uuid, org_uuid)
         if updated:
+            conn.commit()
             logger.info(f"Updated agent with UUID: {agent_uuid}")
+        else:
+            conn.rollback()
         return updated
 
 
@@ -4714,6 +4816,21 @@ def get_evaluators_for_agent(agent_id: str) -> List[Dict[str, Any]]:
             (agent_id,),
         )
         return [_parse_evaluator_row(row) for row in cursor.fetchall()]
+
+
+def resolve_live_evaluators(
+    agent_uuid: str,
+) -> List[Tuple[Dict[str, Any], Optional[Dict[str, Any]]]]:
+    """`(evaluator, live_version)` pairs in `get_evaluators_for_agent` order.
+
+    `live_version` is None when `live_version_id` is unset or the version row
+    is gone.
+    """
+    evaluators = get_evaluators_for_agent(agent_uuid)
+    versions = get_evaluator_versions_by_uuids(
+        [ev.get("live_version_id") for ev in evaluators if ev.get("live_version_id")]
+    )
+    return [(ev, versions.get(ev.get("live_version_id"))) for ev in evaluators]
 
 
 def get_agents_for_tool(tool_id: str) -> List[Dict[str, Any]]:
@@ -10237,6 +10354,78 @@ def count_live_traces(org_uuid: str) -> int:
         ).fetchone()[0]
 
 
+def _insert_trace_row(
+    cur: sqlite3.Cursor,
+    org_uuid: str,
+    agent_id: str,
+    input: Any,
+    output: Any,
+    message_id: Optional[str] = None,
+    conversation_id: Optional[str] = None,
+    metadata: Optional[Any] = None,
+    labels: Optional[List[str]] = None,
+) -> Dict[str, Any]:
+    """Insert one traces row on `cur` and return it. Does not commit."""
+    trace_uuid = str(uuid.uuid4())
+    cur.execute(
+        """
+        INSERT INTO traces
+            (uuid, org_uuid, agent_id, message_id, conversation_id,
+             input, output, metadata, labels)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            trace_uuid,
+            org_uuid,
+            agent_id,
+            message_id,
+            conversation_id,
+            json.dumps(input),
+            json.dumps(output),
+            json.dumps(metadata) if metadata is not None else None,
+            json.dumps(labels) if labels else None,
+        ),
+    )
+    row = cur.execute(
+        "SELECT * FROM traces WHERE uuid = ?", (trace_uuid,)
+    ).fetchone()
+    return _trace_row(row)
+
+
+def _insert_trace_eval_run(
+    cur: sqlite3.Cursor,
+    *,
+    trace_uuid: str,
+    org_uuid: str,
+    agent_id: str,
+    status: trace_scoring.TraceEvalRunStatus,
+    scoring_plan: Optional[str],
+    error: Optional[str],
+    now: int,
+    completed_at: Optional[int] = None,
+) -> None:
+    """Insert one trace_eval_runs row. Caller owns the transaction."""
+    cur.execute(
+        "INSERT INTO trace_eval_runs "
+        "(uuid, trace_uuid, org_uuid, agent_id, status, scoring_plan, "
+        "error, available_at, created_at, updated_at, completed_at) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        (
+            str(uuid.uuid4()),
+            trace_uuid,
+            org_uuid,
+            agent_id,
+            status.value,
+            scoring_plan,
+            error,
+            now,
+            now,
+            now,
+            completed_at,
+        ),
+    )
+
+
 def create_trace(
     org_uuid: str,
     agent_id: str,
@@ -10252,32 +10441,95 @@ def create_trace(
     Every call stores a new row. `message_id` is the caller's own label, not a
     key: matching on it meant a customer who reused one silently lost a turn.
     """
-    trace_uuid = str(uuid.uuid4())
     with get_db_connection() as conn:
-        conn.execute(
-            """
-            INSERT INTO traces
-                (uuid, org_uuid, agent_id, message_id, conversation_id,
-                 input, output, metadata, labels)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """,
-            (
-                trace_uuid,
-                org_uuid,
-                agent_id,
-                message_id,
-                conversation_id,
-                json.dumps(input),
-                json.dumps(output),
-                json.dumps(metadata) if metadata is not None else None,
-                json.dumps(labels) if labels else None,
-            ),
+        row = _insert_trace_row(
+            conn.cursor(),
+            org_uuid,
+            agent_id,
+            input,
+            output,
+            message_id,
+            conversation_id,
+            metadata,
+            labels,
         )
         conn.commit()
-        row = conn.execute(
-            "SELECT * FROM traces WHERE uuid = ?", (trace_uuid,)
-        ).fetchone()
-        return _trace_row(row)
+        return row
+
+
+def create_trace_with_eval_run(
+    *,
+    org_uuid: str,
+    agent: Dict[str, Any],
+    input: Any,
+    output: Any,
+    message_id: Optional[str] = None,
+    conversation_id: Optional[str] = None,
+    metadata: Optional[Any] = None,
+    labels: Optional[List[str]] = None,
+) -> Dict[str, Any]:
+    """Insert a trace, and if auto-scoring is on, its scoring run plan.
+
+    Resolution of Evaluators and their live versions to use is done before the
+    write lock so evaluator reads do not hold it.
+
+    Uses BEGIN IMMEDIATE rather than a bare BEGIN: a deferred transaction
+    starts as a reader and only upgrades at the first write, which can fail
+    with SQLITE_BUSY without honouring busy_timeout. Taking the write lock
+    up front means the timeout applies.
+    """
+    plan = None
+    if agent.get("auto_score_traces"):
+        plan = trace_scoring.resolve_trace_scoring(
+            agent.get("interaction_type"),
+            resolve_live_evaluators(agent["uuid"]),
+        ).as_plan()
+
+    now = int(time.time())
+    with get_db_connection() as conn:
+        cur = conn.cursor()
+        cur.execute("BEGIN IMMEDIATE")
+        row = _insert_trace_row(
+            cur,
+            org_uuid,
+            agent["uuid"],
+            input,
+            output,
+            message_id,
+            conversation_id,
+            metadata,
+            labels,
+        )
+        if plan is not None:
+            if isinstance(plan, trace_scoring.ScoringPlanSkip) or not plan.evaluators:
+                _insert_trace_eval_run(
+                    cur,
+                    trace_uuid=row["uuid"],
+                    org_uuid=org_uuid,
+                    agent_id=agent["uuid"],
+                    status=trace_scoring.TraceEvalRunStatus.SKIPPED,
+                    scoring_plan=None,
+                    error=(
+                        plan.skip
+                        if isinstance(plan, trace_scoring.ScoringPlanSkip)
+                        else "no_usable_evaluators"
+                    ),
+                    now=now,
+                    completed_at=now,
+                )
+            else:
+                _insert_trace_eval_run(
+                    cur,
+                    trace_uuid=row["uuid"],
+                    org_uuid=org_uuid,
+                    agent_id=agent["uuid"],
+                    status=trace_scoring.TraceEvalRunStatus.PENDING,
+                    scoring_plan=json.dumps(asdict(plan)),
+                    error=None,
+                    now=now,
+                )
+        conn.commit()
+        return row
 
 
 def list_traces(
@@ -10349,3 +10601,34 @@ def soft_delete_traces(org_uuid: str, *, trace_ids: List[str]) -> int:
             deleted += cursor.rowcount or 0
         conn.commit()
     return deleted
+
+
+def _delete_pending_trace_eval_runs(
+    cursor: sqlite3.Cursor,
+    agent_id: str,
+    org_uuid: Optional[str] = None,
+) -> int:
+    """Delete never-started runs for an agent. Leaves processing/terminal rows."""
+    pending = trace_scoring.TraceEvalRunStatus.PENDING.value
+    if org_uuid:
+        cursor.execute(
+            "DELETE FROM trace_eval_runs "
+            "WHERE agent_id = ? AND org_uuid = ? AND status = ?",
+            (agent_id, org_uuid, pending),
+        )
+    else:
+        cursor.execute(
+            "DELETE FROM trace_eval_runs WHERE agent_id = ? AND status = ?",
+            (agent_id, pending),
+        )
+    return cursor.rowcount or 0
+
+
+def delete_pending_trace_eval_runs_for_agent(
+    agent_id: str, org_uuid: Optional[str] = None
+) -> int:
+    """Commit a pending-run delete for this agent. See `_delete_pending_trace_eval_runs`."""
+    with get_db_connection() as conn:
+        deleted = _delete_pending_trace_eval_runs(conn.cursor(), agent_id, org_uuid)
+        conn.commit()
+        return deleted

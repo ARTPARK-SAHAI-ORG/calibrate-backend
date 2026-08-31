@@ -3,6 +3,7 @@ import ipaddress
 import json
 import logging
 import socket
+from dataclasses import asdict
 from datetime import datetime, timezone
 from typing import Optional, List, Dict, Any, Literal
 from urllib.parse import urlparse
@@ -29,7 +30,7 @@ from utils import (
     AGENT_INTERACTION_TYPE_DESCRIPTION,
     EvaluatorUuid,
 )
-from routers.tests import DEFAULT_AGENT_INTERACTION_TYPE
+from shared_enums import AgentInteractionType, DEFAULT_AGENT_INTERACTION_TYPE
 
 from db import (
     create_agent,
@@ -46,7 +47,9 @@ from db import (
     get_evaluators_for_agent,
     add_evaluator_to_agent,
     remove_evaluator_from_agent,
+    resolve_live_evaluators,
 )
+from trace_scoring import IneligibleReason, resolve_trace_scoring
 from auth_utils import get_current_org, get_org_jwt_or_api_key, OrgContext
 from org_scope import ensure_owned_agent, ensure_owned_evaluator
 
@@ -327,7 +330,7 @@ class AgentCreate(BaseModel):
         "agent",
         description=AGENT_TYPE_DESCRIPTION,
     )
-    interaction_type: Literal["conversation", "general"] = Field(
+    interaction_type: AgentInteractionType = Field(
         "conversation", description=AGENT_INTERACTION_TYPE_DESCRIPTION
     )
     config: Optional[Dict[str, Any]] = Field(
@@ -423,6 +426,10 @@ class AgentUpdate(BaseModel):
         description="Set the benchmark verification map, keyed by model, for a `type=connection` agent. Omit to leave it untouched",
         examples=[{"openai/gpt-4.1": {"verified": True, "verified_at": "2026-01-01T00:00:00Z", "error": None}}],
     )
+    auto_score_traces: Optional[bool] = Field(
+        None,
+        description="Whether newly ingested traces are scored automatically. Enabling requires at least one eligible linked evaluator. Omit to leave unchanged",
+    )
 
 
 class AgentResponse(BaseModel):
@@ -434,13 +441,16 @@ class AgentResponse(BaseModel):
     )
     name: str = Field(description="Name of the agent")
     type: Literal["agent", "connection"] = Field(description=AGENT_TYPE_DESCRIPTION)
-    interaction_type: Literal["conversation", "general"] = Field(
+    interaction_type: AgentInteractionType = Field(
         description=AGENT_INTERACTION_TYPE_DESCRIPTION
     )
     config: Optional[Dict[str, Any]] = Field(None, description="Agent configuration")
     created_at: str = Field(description="When the agent was created (ISO 8601 UTC)")
     updated_at: str = Field(
         description="When the agent was last updated (ISO 8601 UTC)"
+    )
+    auto_score_traces: bool = Field(
+        description="Whether newly ingested traces are scored automatically"
     )
 
 
@@ -453,7 +463,7 @@ class AgentSummary(BaseModel):
     )
     name: str = Field(description="Name of the agent")
     type: Literal["agent", "connection"] = Field(description=AGENT_TYPE_DESCRIPTION)
-    interaction_type: Literal["conversation", "general"] = Field(
+    interaction_type: AgentInteractionType = Field(
         description=AGENT_INTERACTION_TYPE_DESCRIPTION
     )
     created_at: str = Field(description="When the agent was created (ISO 8601 UTC)")
@@ -466,6 +476,9 @@ class AgentSummary(BaseModel):
     )
     has_default_inputs: bool = Field(
         description="Whether the agent has custom request fields configured",
+    )
+    auto_score_traces: bool = Field(
+        description="Whether newly ingested traces are scored automatically"
     )
 
 
@@ -489,6 +502,7 @@ def to_agent_summary(agent: Dict[str, Any]) -> AgentSummary:
         updated_at=agent["updated_at"],
         connection_verified=None if verified is None else bool(verified),
         has_default_inputs=bool(config.get("default_inputs")),
+        auto_score_traces=bool(agent.get("auto_score_traces")),
     )
 
 
@@ -516,6 +530,87 @@ class AgentDuplicateResponse(BaseModel):
         examples=["f47ac10b-58cc-4372-a567-0e02b2c3d479"],
     )
     message: str = Field(description="Confirmation message")
+
+
+class TraceScoringEligibleEvaluator(BaseModel):
+    evaluator_uuid: str = Field(
+        min_length=36,
+        max_length=36,
+        description="ID of the evaluator",
+        examples=["f47ac10b-58cc-4372-a567-0e02b2c3d479"],
+    )
+    evaluator_version_id: str = Field(
+        min_length=36,
+        max_length=36,
+        description="ID of the live version that would score traces",
+        examples=["6ba7b811-9dad-11d1-80b4-00c04fd430c8"],
+    )
+    name: str = Field(description="Name of the evaluator")
+
+
+class TraceScoringIneligibleEvaluator(BaseModel):
+    evaluator_uuid: str = Field(
+        min_length=36,
+        max_length=36,
+        description="ID of the evaluator",
+        examples=["f47ac10b-58cc-4372-a567-0e02b2c3d479"],
+    )
+    name: str = Field(description="Name of the evaluator")
+    reason: IneligibleReason = Field(
+        description=(
+            "Why this evaluator cannot score traces for this agent:\n\n"
+            f"- `{IneligibleReason.WRONG_TYPE}`: its type does not match the agent's interaction type\n"
+            f"- `{IneligibleReason.NO_LIVE_VERSION}`: it has no live version to run\n"
+            f"- `{IneligibleReason.DECLARES_VARIABLES}`: its live version defines prompt variables that cannot be filled"
+        )
+    )
+
+
+class TraceScoringEligibilityResponse(BaseModel):
+    eligible: List[TraceScoringEligibleEvaluator] = Field(
+        description="Linked evaluators that can score this agent's traces"
+    )
+    ineligible: List[TraceScoringIneligibleEvaluator] = Field(
+        description="Linked evaluators that cannot score this agent's traces, each with the reason"
+    )
+
+
+def _resolve_agent_scoring(agent: Dict[str, Any]):
+    return resolve_trace_scoring(
+        agent.get("interaction_type"),
+        resolve_live_evaluators(agent["uuid"]),
+    )
+
+
+def _eligibility_response(resolution) -> TraceScoringEligibilityResponse:
+    return TraceScoringEligibilityResponse(
+        eligible=[
+            TraceScoringEligibleEvaluator(
+                evaluator_uuid=item.pin.evaluator_uuid,
+                evaluator_version_id=item.pin.evaluator_version_id,
+                name=item.name,
+            )
+            for item in resolution.eligible
+        ],
+        ineligible=[
+            TraceScoringIneligibleEvaluator(
+                evaluator_uuid=item.evaluator_uuid,
+                name=item.name,
+                reason=item.reason,
+            )
+            for item in resolution.ineligible
+        ],
+    )
+
+
+def _enable_auto_score_rejected(resolution) -> HTTPException:
+    return HTTPException(
+        status_code=422,
+        detail={
+            "error": "There are no eligible evaluators configured for this agent",
+            "ineligible": [asdict(item) for item in resolution.ineligible],
+        },
+    )
 
 
 class EvaluatorLinkRequest(BaseModel):
@@ -604,7 +699,7 @@ class VerifyConnectionRequest(AgentVerifyRequest):
         description="Extra fields merged into every request to the agent, since no agent is stored yet",
         examples=[{"condition_area": "cardiology"}],
     )
-    interaction_type: Literal["conversation", "general"] = Field(
+    interaction_type: AgentInteractionType = Field(
         DEFAULT_AGENT_INTERACTION_TYPE,
         description=AGENT_INTERACTION_TYPE_DESCRIPTION
         + "\n\nOmit for a back-and-forth agent",
@@ -829,6 +924,25 @@ def get_agent_endpoint(
     return agent
 
 
+@router.get(
+    "/{agent_uuid}/trace-scoring-eligibility",
+    response_model=TraceScoringEligibilityResponse,
+    summary="Get trace scoring eligibility",
+)
+def get_trace_scoring_eligibility(
+    agent_uuid: str = Path(
+        description="The agent to inspect",
+        examples=["f47ac10b-58cc-4372-a567-0e02b2c3d479"],
+    ),
+    ctx: OrgContext = Depends(get_current_org),
+):
+    """Show which linked evaluators can score this agent's traces and why the rest cannot."""
+    agent = get_agent(agent_uuid)
+    if not agent or agent.get("org_uuid") != ctx.org_uuid:
+        raise HTTPException(status_code=404, detail="Agent not found")
+    return _eligibility_response(_resolve_agent_scoring(agent))
+
+
 @router.put(
     "/{agent_uuid}",
     response_model=AgentResponse,
@@ -875,6 +989,13 @@ def update_agent_endpoint(
         if agent.benchmark_models_verified is not None:
             agent.config["benchmark_models_verified"] = agent.benchmark_models_verified
 
+    # Only the off→on flip is blocked. An already-on agent whose evaluators
+    # later all become ineligible stays on; ingest skips those runs.
+    if agent.auto_score_traces is True and not existing_agent.get("auto_score_traces"):
+        resolution = _resolve_agent_scoring(existing_agent)
+        if not resolution.eligible:
+            raise _enable_auto_score_rejected(resolution)
+
     with ensure_name_unique(
         "agents", agent.name, ctx.org_uuid, entity="Agent", exclude_uuid=agent_uuid
     ):
@@ -882,6 +1003,8 @@ def update_agent_endpoint(
             agent_uuid=agent_uuid,
             name=agent.name,
             config=agent.config,
+            auto_score_traces=agent.auto_score_traces,
+            org_uuid=ctx.org_uuid,
         )
 
     if not updated:

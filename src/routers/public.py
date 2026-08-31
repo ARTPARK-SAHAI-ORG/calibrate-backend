@@ -32,12 +32,12 @@ from db import (
     get_evaluator_runs_for_job,
     get_eval_job_items,
 )
+from shared_enums import EvaluatorType
 from utils import (
     TaskStatus,
     AnnotationStatus,
     SimulationRunType,
     AnnotationTaskTypeLiteral,
-    EvaluatorTypeLiteral,
     OutputTypeLiteral,
     EVALUATOR_TYPE_DESCRIPTION,
     OUTPUT_TYPE_DESCRIPTION,
@@ -325,7 +325,7 @@ class PublicDefaultEvaluatorResponse(BaseModel):
     )
     name: str = Field(description="Evaluator display name")
     description: Optional[str] = Field(None, description="Evaluator description")
-    evaluator_type: EvaluatorTypeLiteral = Field(
+    evaluator_type: EvaluatorType = Field(
         description=EVALUATOR_TYPE_DESCRIPTION
     )
     output_type: OutputTypeLiteral = Field(description=OUTPUT_TYPE_DESCRIPTION)

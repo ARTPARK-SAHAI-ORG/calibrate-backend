@@ -59,9 +59,10 @@ from llm_judge import (
 )
 from routers.agents import AgentSummary, to_agent_summary
 from routers.org_limits import effective_max_rows_per_eval, enforce_max_rows_per_eval
-from routers.tests import (
+from shared_enums import (
     AGENT_INTERACTION_TYPES,
     DEFAULT_AGENT_INTERACTION_TYPE,
+    TestType,
     required_agent_interaction_type,
 )
 from auth_utils import get_current_org, get_org_jwt_or_api_key, OrgContext
@@ -73,7 +74,6 @@ from utils import (
     TaskCreateResponse,
     EXAMPLE_TEST_UUID,
     TestListResponse,
-    TestTypeLiteral,
     TestUuid,
     to_test_list_response,
     OutputTypeLiteral,
@@ -92,7 +92,7 @@ from utils import (
     upload_file_to_s3,
 )
 
-_TEST_TYPES = get_args(TestTypeLiteral)
+_TEST_TYPES = get_args(TestType)
 
 # Job types that share the same queue
 AGENT_TEST_JOB_TYPES = ["llm-unit-test", "llm-benchmark"]

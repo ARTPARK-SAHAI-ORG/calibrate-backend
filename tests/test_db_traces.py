@@ -2,9 +2,14 @@
 
 from __future__ import annotations
 
+import json
+import sqlite3
 import uuid
 
+import pytest
+
 import db
+import trace_scoring as ts
 
 
 def _org() -> str:
@@ -253,3 +258,203 @@ def test_create_allows_null_labels():
     assert row["message_id"] is None
     assert row["conversation_id"] is None
     assert db.get_trace(org, row["uuid"])["message_id"] is None
+
+
+def _insert_agent(org: str, *, interaction_type="conversation", auto_score=False):
+    agent_uuid = str(uuid.uuid4())
+    with db.get_db_connection() as conn:
+        conn.execute(
+            "INSERT INTO agents "
+            "(uuid, org_uuid, name, config, interaction_type, auto_score_traces) "
+            "VALUES (?, ?, ?, ?, ?, ?)",
+            (
+                agent_uuid,
+                org,
+                f"agent-{agent_uuid[:8]}",
+                "{}",
+                interaction_type,
+                1 if auto_score else 0,
+            ),
+        )
+        conn.commit()
+    return db.get_agent(agent_uuid)
+
+
+def _eligible_evaluator(org: str, evaluator_type="llm"):
+    ev = db.create_evaluator(
+        name=f"eval-{uuid.uuid4().hex[:6]}",
+        evaluator_type=evaluator_type,
+        org_uuid=org,
+        owner_user_id=str(uuid.uuid4()),
+    )
+    version = db.create_evaluator_version(ev, "openai/gpt-4.1", "Judge it.")
+    db.set_evaluator_live_version(ev, version["uuid"])
+    return ev, version["uuid"]
+
+
+def _combined_ingest(org: str, agent: dict, **overrides):
+    payload = {
+        "message_id": None,
+        "conversation_id": "conv-1",
+        "input": [{"role": "user", "content": "hi"}],
+        "output": {"response": "hello", "tool_calls": None},
+        "metadata": None,
+    }
+    payload.update(overrides)
+    return db.create_trace_with_eval_run(org_uuid=org, agent=agent, **payload)
+
+
+def _runs_for(trace_uuid: str):
+    with db.get_db_connection() as conn:
+        return conn.execute(
+            "SELECT * FROM trace_eval_runs WHERE trace_uuid = ?",
+            (trace_uuid,),
+        ).fetchall()
+
+
+def test_opted_out_agent_ingests_with_no_run():
+    org = _org()
+    agent = _insert_agent(org, auto_score=False)
+    trace = _combined_ingest(org, agent)
+    assert db.get_trace(org, trace["uuid"])["uuid"] == trace["uuid"]
+    assert _runs_for(trace["uuid"]) == []
+
+
+def test_opted_in_conversation_run_pins_response_snapshot():
+    org = _org()
+    agent = _insert_agent(org, interaction_type="conversation", auto_score=True)
+    ev, version_id = _eligible_evaluator(org, "llm")
+    db.add_evaluator_to_agent(agent["uuid"], ev)
+
+    trace = _combined_ingest(org, agent)
+    rows = _runs_for(trace["uuid"])
+    assert len(rows) == 1
+    run = rows[0]
+    assert run["status"] == "pending"
+    assert run["error"] is None
+    assert run["completed_at"] is None
+    assert run["org_uuid"] == org
+    assert run["agent_id"] == agent["uuid"]
+    assert run["scoring_plan"] is not None
+    snapshot = json.loads(run["scoring_plan"])
+    assert snapshot == {
+        "evaluation_type": "response",
+        "evaluators": [
+            {"evaluator_uuid": ev, "evaluator_version_id": version_id},
+        ],
+    }
+
+
+def test_opted_in_general_run_pins_general_snapshot():
+    org = _org()
+    agent = _insert_agent(org, interaction_type="general", auto_score=True)
+    ev, version_id = _eligible_evaluator(org, "llm-general")
+    db.add_evaluator_to_agent(agent["uuid"], ev)
+
+    trace = _combined_ingest(
+        org,
+        agent,
+        input="Summarize the schedule.",
+        output={"response": "Done.", "tool_calls": None},
+    )
+    rows = _runs_for(trace["uuid"])
+    assert len(rows) == 1
+    snapshot = json.loads(rows[0]["scoring_plan"])
+    assert snapshot["evaluation_type"] == "general"
+    assert snapshot["evaluators"] == [
+        {"evaluator_uuid": ev, "evaluator_version_id": version_id},
+    ]
+    assert rows[0]["status"] == "pending"
+    assert rows[0]["scoring_plan"] is not None
+
+
+def test_eligibility_drift_persists_skipped_run():
+    org = _org()
+    agent = _insert_agent(org, auto_score=True)
+    ev, _ = _eligible_evaluator(org, "llm")
+    db.add_evaluator_to_agent(agent["uuid"], ev)
+    db.remove_evaluator_from_agent(agent["uuid"], ev)
+
+    trace = _combined_ingest(org, agent)
+    rows = _runs_for(trace["uuid"])
+    assert len(rows) == 1
+    assert rows[0]["status"] == "skipped"
+    assert rows[0]["error"] == "no_usable_evaluators"
+    assert rows[0]["scoring_plan"] is None
+    assert rows[0]["completed_at"] is not None
+
+
+def test_unsupported_interaction_type_persists_skipped_run():
+    org = _org()
+    agent = _insert_agent(org, interaction_type="voice", auto_score=True)
+    ev, _ = _eligible_evaluator(org, "llm")
+    db.add_evaluator_to_agent(agent["uuid"], ev)
+
+    trace = _combined_ingest(org, agent)
+    rows = _runs_for(trace["uuid"])
+    assert len(rows) == 1
+    assert rows[0]["status"] == "skipped"
+    assert rows[0]["error"] == "unsupported_interaction_type"
+    assert rows[0]["scoring_plan"] is None
+    assert rows[0]["completed_at"] is not None
+
+
+def test_empty_evaluators_plan_is_skipped_not_pending(monkeypatch):
+    org = _org()
+    agent = _insert_agent(org, auto_score=True)
+
+    class _EmptyPlan:
+        def as_plan(self):
+            return ts.ScoringPlan(evaluation_type="response", evaluators=[])
+
+    monkeypatch.setattr(
+        "trace_scoring.resolve_trace_scoring",
+        lambda *_args, **_kwargs: _EmptyPlan(),
+    )
+
+    trace = _combined_ingest(org, agent)
+    rows = _runs_for(trace["uuid"])
+    assert len(rows) == 1
+    assert rows[0]["status"] == "skipped"
+    assert rows[0]["error"] == "no_usable_evaluators"
+    assert rows[0]["scoring_plan"] is None
+
+
+def test_trace_and_run_roll_back_together(monkeypatch):
+    org = _org()
+    agent = _insert_agent(org, auto_score=True)
+    ev, _ = _eligible_evaluator(org, "llm")
+    db.add_evaluator_to_agent(agent["uuid"], ev)
+
+    def _boom(*_args, **_kwargs):
+        raise sqlite3.IntegrityError("forced mid-transaction failure")
+
+    monkeypatch.setattr(db, "_insert_trace_eval_run", _boom)
+
+    with pytest.raises(sqlite3.IntegrityError):
+        _combined_ingest(org, agent, message_id="m-atomic")
+
+    with db.get_db_connection() as conn:
+        trace_count = conn.execute(
+            "SELECT COUNT(*) c FROM traces WHERE org_uuid = ?", (org,)
+        ).fetchone()["c"]
+        run_count = conn.execute(
+            "SELECT COUNT(*) c FROM trace_eval_runs WHERE org_uuid = ?", (org,)
+        ).fetchone()["c"]
+    assert trace_count == 0
+    assert run_count == 0
+
+
+def test_create_trace_still_inserts_without_a_run():
+    org = _org()
+    agent = _insert_agent(org, auto_score=True)
+    ev, _ = _eligible_evaluator(org, "llm")
+    db.add_evaluator_to_agent(agent["uuid"], ev)
+
+    row = db.create_trace(
+        org_uuid=org,
+        agent_id=agent["uuid"],
+        input=[{"role": "user", "content": "hi"}],
+        output={"response": "hello"},
+    )
+    assert _runs_for(row["uuid"]) == []

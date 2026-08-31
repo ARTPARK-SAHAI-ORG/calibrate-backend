@@ -27,7 +27,7 @@ from db import (
     add_test_to_agent,
     bulk_create_tests,
     count_live_traces,
-    create_trace,
+    create_trace_with_eval_run,
     get_agent,
     get_all_tests_summary,
     get_evaluator_versions_by_uuids,
@@ -45,11 +45,13 @@ from pagination import PaginatedResponse, PaginationParams, page_envelope
 
 # Reuse the tests router's validation so a converted test accepts exactly what
 # POST /tests does (evaluator visible to the workspace, evaluator_type matches).
-from routers.tests import (
+from shared_enums import (
     DEFAULT_AGENT_INTERACTION_TYPE,
+    required_agent_interaction_type,
+)
+from routers.tests import (
     EvaluatorRef,
     _validate_evaluators,
-    required_agent_interaction_type,
 )
 from utils import EXAMPLE_TEST_UUID, EvaluatorUuid
 
@@ -513,9 +515,9 @@ async def ingest_trace(
             },
         )
 
-    row = create_trace(
+    row = create_trace_with_eval_run(
         org_uuid=ctx.org_uuid,
-        agent_id=payload.agent_id,
+        agent=agent,
         message_id=payload.message_id,
         conversation_id=payload.conversation_id,
         input=(

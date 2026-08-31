@@ -6,6 +6,11 @@ index shows up in the plan (`SEARCH <table> USING INDEX <name>`).
 """
 
 import db
+import trace_scoring as ts
+
+_OPEN_TRACE_EVAL_SQL = ", ".join(
+    f"'{s.value}'" for s in ts.OPEN_TRACE_EVAL_RUN_STATUSES
+)
 
 EXPECTED_INDEXES = [
     "idx_annotation_items_task",
@@ -22,6 +27,10 @@ EXPECTED_INDEXES = [
     "idx_annotation_jobs_annotator",
     "idx_traces_org_agent_active",
     "idx_traces_org_created",
+    "ux_trace_eval_active",
+    "ix_trace_eval_claim",
+    "ix_trace_eval_agent_status",
+    "ix_trace_eval_trace",
 ]
 
 
@@ -138,4 +147,41 @@ def test_traces_default_list_sorts_from_the_index():
         ("org",),
     )
     assert "idx_traces_org_created" in plan, plan
+    assert "TEMP B-TREE" not in plan, plan
+
+
+def test_trace_eval_active_lookup_uses_index():
+    plan = _query_plan(
+        "SELECT * FROM trace_eval_runs WHERE trace_uuid = ? "
+        f"AND status IN ({_OPEN_TRACE_EVAL_SQL})",
+        ("trace",),
+    )
+    assert "ux_trace_eval_active" in plan, plan
+
+
+def test_trace_eval_claim_uses_index():
+    plan = _query_plan(
+        f"SELECT * FROM trace_eval_runs WHERE status IN ({_OPEN_TRACE_EVAL_SQL}) "
+        "AND available_at <= ? ORDER BY available_at LIMIT 10",
+        (0,),
+    )
+    assert "ix_trace_eval_claim" in plan, plan
+
+
+def test_trace_eval_agent_status_uses_index():
+    plan = _query_plan(
+        "SELECT * FROM trace_eval_runs WHERE agent_id = ? AND status = ? "
+        "ORDER BY completed_at",
+        ("agent", "failed"),
+    )
+    assert "ix_trace_eval_agent_status" in plan, plan
+
+
+def test_trace_eval_history_uses_index():
+    plan = _query_plan(
+        "SELECT * FROM trace_eval_runs WHERE trace_uuid = ? "
+        "ORDER BY created_at DESC",
+        ("trace",),
+    )
+    assert "ix_trace_eval_trace" in plan, plan
     assert "TEMP B-TREE" not in plan, plan
