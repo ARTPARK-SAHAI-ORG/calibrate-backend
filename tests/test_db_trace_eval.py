@@ -12,6 +12,7 @@ import uuid
 import pytest
 
 import db
+import trace_scoring as ts
 
 
 def _org() -> str:
@@ -133,6 +134,33 @@ def test_init_db_is_idempotent():
         "ix_trace_eval_trace",
     } <= indexes
     assert "auto_score_traces" in cols
+
+
+_OPEN_STATUS_IN_LIST = "status IN ('pending', 'processing')"
+
+
+def test_trace_eval_run_ddl_is_frozen_not_interpolated_from_the_enum():
+    """CREATE IF NOT EXISTS will not reshape; the birth DDL must stay literals
+    that still agree with TraceEvalRunStatus / OPEN_TRACE_EVAL_RUN_STATUSES."""
+    with db.get_db_connection() as conn:
+        table_sql = conn.execute(
+            "SELECT sql FROM sqlite_master WHERE type='table' AND name='trace_eval_runs'"
+        ).fetchone()["sql"]
+        index_sql = {
+            r["name"]: r["sql"]
+            for r in conn.execute(
+                "SELECT name, sql FROM sqlite_master WHERE type='index' "
+                "AND name IN ('ux_trace_eval_active', 'ix_trace_eval_claim')"
+            )
+        }
+    assert "DEFAULT 'pending'" in table_sql
+    assert _OPEN_STATUS_IN_LIST in index_sql["ux_trace_eval_active"]
+    assert _OPEN_STATUS_IN_LIST in index_sql["ix_trace_eval_claim"]
+    assert ts.TraceEvalRunStatus.PENDING.value == "pending"
+    assert tuple(s.value for s in ts.OPEN_TRACE_EVAL_RUN_STATUSES) == (
+        "pending",
+        "processing",
+    )
 
 
 def test_auto_score_traces_defaults_to_off():

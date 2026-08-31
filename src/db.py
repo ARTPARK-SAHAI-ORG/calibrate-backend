@@ -1561,19 +1561,18 @@ def init_db():
         # Durable scoring runs. `status` is the source of truth for "scored?";
         # allowed values are TraceEvalRunStatus. Pending runs of soft-deleted
         # traces are settled at claim time with a status=skipped.
-        pending = trace_scoring.TraceEvalRunStatus.PENDING.value
-        open_status_sql = ", ".join(
-            f"'{s.value}'" for s in trace_scoring.OPEN_TRACE_EVAL_RUN_STATUSES
-        )
+        # DEFAULT and the partial-index WHERE lists are frozen literals. Do not
+        # interpolate TraceEvalRunStatus / OPEN_TRACE_EVAL_RUN_STATUSES: CREATE
+        # IF NOT EXISTS will not reshape an existing table or index.
         cursor.execute(
-            f"""
+            """
             CREATE TABLE IF NOT EXISTS trace_eval_runs (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 uuid TEXT NOT NULL UNIQUE,
                 trace_uuid TEXT NOT NULL,
                 org_uuid TEXT NOT NULL,
                 agent_id TEXT NOT NULL,
-                status TEXT NOT NULL DEFAULT '{pending}',
+                status TEXT NOT NULL DEFAULT 'pending',
                 scoring_plan TEXT,
                 available_at INTEGER NOT NULL,
                 attempts INTEGER NOT NULL DEFAULT 0,
@@ -1590,12 +1589,12 @@ def init_db():
         cursor.execute(
             "CREATE UNIQUE INDEX IF NOT EXISTS ux_trace_eval_active "
             "ON trace_eval_runs (trace_uuid) "
-            f"WHERE status IN ({open_status_sql})"
+            "WHERE status IN ('pending', 'processing')"
         )
         cursor.execute(
             "CREATE INDEX IF NOT EXISTS ix_trace_eval_claim "
             "ON trace_eval_runs (available_at) "
-            f"WHERE status IN ({open_status_sql})"
+            "WHERE status IN ('pending', 'processing')"
         )
         cursor.execute(
             "CREATE INDEX IF NOT EXISTS ix_trace_eval_agent_status "
