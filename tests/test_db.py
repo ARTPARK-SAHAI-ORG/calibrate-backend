@@ -253,7 +253,8 @@ def test_agents_tools_and_pivot(user):
     # re-add restores the soft-deleted row
     relinked = db.add_tool_to_agent(agent_uuid, tool_uuid)
     assert relinked == link_id
-    assert db.get_all_agent_tools()
+    assert db.get_all_agent_tools(user["org_uuid"])
+    assert db.get_all_agent_tools(str(_uuid.uuid4())) == []
 
     # soft delete cascade — link already active from re-add above
     assert db.delete_agent(agent_uuid) is True
@@ -615,7 +616,8 @@ def test_agent_tests_pivot_and_test_evaluators(user):
     assert db.get_agent_test_link(agent_uuid, test_uuid)
     assert len(db.get_tests_for_agent(agent_uuid)) == 2
     assert any(a["uuid"] == agent_uuid for a in db.get_agents_for_test(test_uuid))
-    assert db.get_all_agent_tests()
+    assert db.get_all_agent_tests(user["org_uuid"])
+    assert db.get_all_agent_tests(str(_uuid.uuid4())) == []
 
     # remove one + bulk remove rest
     assert db.remove_test_from_agent(agent_uuid, test_uuid) is True

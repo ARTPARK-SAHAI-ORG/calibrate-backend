@@ -202,6 +202,36 @@ def test_run_with_api_key_bearer_and_header(client):
         client.delete(f"/agent-tests/job/{r.json()['task_id']}", headers=h)
 
 
+def test_bulk_unlink_with_api_key(client):
+    """Unlinking tests from an agent is on the key surface; the tests survive."""
+    h = _signup(client)
+    agent = _create_linked_agent(client, h)
+    key_h = {"X-API-Key": _raw_key(client, h)}
+    url = f"/agent-tests/agent/{agent['uuid']}/tests"
+    body = {"agent_uuid": agent["uuid"], "test_uuids": []}
+
+    linked = client.get(url, headers=key_h).json()["items"]
+    assert len(linked) == 1
+    body["test_uuids"] = [linked[0]["uuid"]]
+
+    unlinked = client.post("/agent-tests/bulk-unlink", json=body, headers=key_h)
+    assert unlinked.status_code == 200, unlinked.text
+    assert unlinked.json()["deleted_count"] == 1
+    assert client.get(url, headers=key_h).json()["items"] == []
+    # The test itself is untouched, and a second unlink removes nothing.
+    assert client.get(f"/tests/{linked[0]['uuid']}", headers=h).status_code == 200
+    again = client.post("/agent-tests/bulk-unlink", json=body, headers=key_h)
+    assert again.json()["deleted_count"] == 0
+
+    # Another workspace's key cannot unlink from this agent.
+    other_key = {"X-API-Key": _raw_key(client, _signup(client))}
+    assert (
+        client.post("/agent-tests/bulk-unlink", json=body, headers=other_key).status_code
+        == 404
+    )
+    assert client.post("/agent-tests/bulk-unlink", json=body).status_code in (401, 403)
+
+
 def test_invalid_api_key_rejected(client):
     h = _signup(client)
     agent = _create_linked_agent(client, h)

@@ -164,7 +164,9 @@ def test_agent_tests_link_crud(client):
     assert again.status_code == 200
 
     # List
-    assert client.get("/agent-tests").status_code == 200
+    assert client.get("/agent-tests", headers=h).status_code == 200
+    # The route is org-scoped now, so it rejects an anonymous caller.
+    assert client.get("/agent-tests").status_code == 403
     assert (
         client.get(
             f"/agent-tests/agent/{agent['uuid']}/tests", headers=h
@@ -208,11 +210,20 @@ def test_agent_tests_link_crud(client):
     empty = client.post(
         "/agent-tests/bulk-unlink",
         json={"agent_uuid": agent["uuid"], "test_uuids": []},
+        headers=h,
     )
     assert empty.status_code == 400
+    assert (
+        client.post(
+            "/agent-tests/bulk-unlink",
+            json={"agent_uuid": agent["uuid"], "test_uuids": [test_a["uuid"]]},
+        ).status_code
+        == 403
+    )
     bulk_unlink = client.post(
         "/agent-tests/bulk-unlink",
         json={"agent_uuid": agent["uuid"], "test_uuids": [test_a["uuid"]]},
+        headers=h,
     )
     assert bulk_unlink.status_code == 200
 
@@ -220,6 +231,7 @@ def test_agent_tests_link_crud(client):
     missing = client.post(
         "/agent-tests/bulk-unlink",
         json={"agent_uuid": NONEXISTENT_UUID, "test_uuids": [test_b["uuid"]]},
+        headers=h,
     )
     assert missing.status_code == 404
 
@@ -255,6 +267,204 @@ def test_agent_tests_link_crud(client):
         headers=other["headers"],
     )
     assert foreign.status_code == 404
+
+
+def test_agent_test_uuid_lists_reject_malformed_ids(client):
+    """A short id is rejected before any lookup, so a typo cannot come back as
+    a successful call that removed nothing."""
+    auth = _signup(client)
+    h = auth["headers"]
+    agent = _create_agent(client, h)
+
+    for path, body in (
+        ("/agent-tests", {"agent_uuid": agent["uuid"], "test_uuids": ["abc"]}),
+        ("/agent-tests/bulk-unlink", {"agent_uuid": agent["uuid"], "test_uuids": ["abc"]}),
+        (
+            "/agent-tests/bulk-delete-tests",
+            {"agent_uuid": agent["uuid"], "test_uuids": ["abc"]},
+        ),
+        (f"/agent-tests/agent/{agent['uuid']}/run", {"test_uuids": ["abc"]}),
+        (
+            f"/agent-tests/agent/{agent['uuid']}/benchmark",
+            {"models": ["openai/gpt-4.1"], "test_uuids": ["abc"]},
+        ),
+    ):
+        assert client.post(path, json=body, headers=h).status_code == 422, path
+
+
+def test_agent_test_unlink_routes_are_org_scoped(client):
+    """Unlinking and the raw link list stay inside the caller's workspace."""
+    auth = _signup(client)
+    h = auth["headers"]
+    agent = _create_agent(client, h)
+    test = _create_test(client, h)
+    client.post(
+        "/agent-tests",
+        json={"agent_uuid": agent["uuid"], "test_uuids": [test["uuid"]]},
+        headers=h,
+    )
+
+    other = _signup(client)["headers"]
+    body = {"agent_uuid": agent["uuid"], "test_uuid": test["uuid"]}
+
+    assert client.request("DELETE", "/agent-tests", json=body).status_code == 403
+    assert (
+        client.request("DELETE", "/agent-tests", json=body, headers=other).status_code
+        == 404
+    )
+    assert (
+        client.post(
+            "/agent-tests/bulk-unlink",
+            json={"agent_uuid": agent["uuid"], "test_uuids": [test["uuid"]]},
+            headers=other,
+        ).status_code
+        == 404
+    )
+    # The other workspace's link list never shows this link.
+    assert client.get("/agent-tests", headers=other).json() == []
+
+    links = client.get("/agent-tests", headers=h).json()
+    assert [link["agent_id"] for link in links] == [agent["uuid"]]
+
+    # The owner can unlink, and a second attempt finds nothing left.
+    assert (
+        client.request("DELETE", "/agent-tests", json=body, headers=h).status_code == 200
+    )
+    assert (
+        client.request("DELETE", "/agent-tests", json=body, headers=h).status_code == 404
+    )
+
+
+def _create_typed_test(client, h, name, type, config, evaluator_uuid=None):
+    body = {"name": name, "type": type, "config": config}
+    if evaluator_uuid:
+        body["evaluators"] = [{"evaluator_uuid": evaluator_uuid}]
+    return client.post("/tests", json=body, headers=h).json()
+
+
+def test_agent_tests_list_type_filter_and_search_modes(client):
+    """`?type=` narrows by test type (repeated or comma-separated) and
+    `?q_mode=` picks how `q` matches the name."""
+    auth = _signup(client)
+    h = auth["headers"]
+    agent = _create_agent(client, h)
+    conv_ev = _create_simulation_evaluator(client, h)
+
+    response_test = _create_test(client, h, name="alpha response")
+    tool_test = _create_typed_test(
+        client,
+        h,
+        "beta tool",
+        "tool_call",
+        {
+            "history": [{"role": "user", "content": "hi"}],
+            "evaluation": {
+                "type": "tool_call",
+                "tool_calls": [{"tool": "x", "accept_any_arguments": True}],
+            },
+        },
+    )
+    conv_test = _create_typed_test(
+        client,
+        h,
+        "gamma conversation",
+        "conversation",
+        {"history": [{"role": "user", "content": "hi"}]},
+        evaluator_uuid=conv_ev["uuid"],
+    )
+    client.post(
+        "/agent-tests",
+        json={
+            "agent_uuid": agent["uuid"],
+            "test_uuids": [
+                response_test["uuid"],
+                tool_test["uuid"],
+                conv_test["uuid"],
+            ],
+        },
+        headers=h,
+    )
+
+    url = f"/agent-tests/agent/{agent['uuid']}/tests"
+
+    def names(**params):
+        r = client.get(url, params=params, headers=h)
+        assert r.status_code == 200, r.text
+        body = r.json()
+        assert body["total"] == len(body["items"])
+        return sorted(i["name"] for i in body["items"])
+
+    assert names() == ["alpha response", "beta tool", "gamma conversation"]
+    assert names(type="tool_call") == ["beta tool"]
+    # Comma-separated and repeated forms agree.
+    assert names(type="response,conversation") == ["alpha response", "gamma conversation"]
+    assert names(type=["response", "conversation"]) == [
+        "alpha response",
+        "gamma conversation",
+    ]
+    # Blank value is treated as no filter.
+    assert len(names(type="")) == 3
+
+    bad = client.get(url, params={"type": "nope"}, headers=h)
+    assert bad.status_code == 422
+    assert "nope" in bad.text
+
+    # Search modes.
+    assert names(q="response") == ["alpha response"]
+    assert names(q="response", q_mode="contains") == ["alpha response"]
+    assert names(q="alpha", q_mode="starts_with") == ["alpha response"]
+    assert names(q="response", q_mode="starts_with") == []
+    assert names(q="tool", q_mode="ends_with") == ["beta tool"]
+    assert names(q="beta", q_mode="ends_with") == []
+    assert names(q="BETA TOOL", q_mode="exact") == ["beta tool"]
+    assert names(q="beta", q_mode="exact") == []
+    # A stray space is part of an exact query, and the other modes still trim it.
+    assert names(q="beta tool ", q_mode="exact") == []
+    assert names(q=" beta tool", q_mode="contains") == ["beta tool"]
+    # Type and search combine.
+    assert names(q="a", q_mode="contains", type="tool_call") == ["beta tool"]
+
+    assert client.get(url, params={"q_mode": "sideways"}, headers=h).status_code == 422
+
+    # A name that begins with a space is reachable in exact mode.
+    spaced = _create_test(client, h, name=" padded")
+    client.post(
+        "/agent-tests",
+        json={"agent_uuid": agent["uuid"], "test_uuids": [spaced["uuid"]]},
+        headers=h,
+    )
+    assert names(q=" padded", q_mode="exact") == [" padded"]
+    assert names(q="padded", q_mode="exact") == []
+
+
+def test_agent_tests_list_paging_is_stable_across_pages(client):
+    """Tests linked in one bulk call share a timestamp; paging must still
+    cover every test exactly once."""
+    auth = _signup(client)
+    h = auth["headers"]
+    agent = _create_agent(client, h)
+    test_uuids = [_create_test(client, h)["uuid"] for _ in range(6)]
+    client.post(
+        "/agent-tests",
+        json={"agent_uuid": agent["uuid"], "test_uuids": test_uuids},
+        headers=h,
+    )
+
+    url = f"/agent-tests/agent/{agent['uuid']}/tests"
+    full = client.get(url, params={"limit": 6}, headers=h).json()
+    assert full["total"] == 6
+
+    paged = []
+    for offset in (0, 2, 4):
+        page = client.get(url, params={"limit": 2, "offset": offset}, headers=h).json()
+        assert page["total"] == 6
+        paged.extend(i["uuid"] for i in page["items"])
+
+    assert paged == [i["uuid"] for i in full["items"]]
+    assert sorted(paged) == sorted(test_uuids)
+    # Newest link first, so the shared timestamp is broken by link id, not by
+    # whatever order sqlite happens to return.
+    assert paged == list(reversed(test_uuids))
 
 
 def test_agent_tests_list_returns_trimmed_shape(client):
@@ -415,6 +625,59 @@ def test_agent_runs_list_surfaces_perf_aggregates(client):
     gruns = [r for r in global_resp.json()["items"] if r["uuid"] == job_id]
     assert gruns and gruns[0]["total_tokens"]["count"] == 2
     assert gruns[0]["results"] == [{"name": "tc1", "passed": True}]
+
+
+def test_run_reports_cases_that_never_ran(client):
+    """A finished run with gaps says so on the detail response, the shared
+    public view, and the runs list, so a pass rate is never read as clean."""
+    from db import create_agent_test_job, update_agent_test_job
+
+    h = _signup(client)["headers"]
+    agent = _create_agent(client, h)
+
+    job_id = create_agent_test_job(
+        agent_id=agent["uuid"],
+        job_type="llm-unit-test",
+        details={"test_uuids": ["tc1", "tc2"]},
+    )
+    update_agent_test_job(
+        job_id,
+        status="done",
+        results={
+            "total_tests": 2,
+            "passed": 1,
+            "failed": 1,
+            "unanswered_tests": 1,
+            "stopped_early": True,
+            "test_results": [
+                {"name": "tc1", "test_case_id": "tc1", "passed": True},
+                {
+                    "name": "tc2",
+                    "test_case_id": "tc2",
+                    "passed": False,
+                    "reasoning": "Agent returned HTTP 500",
+                    "unanswered": True,
+                },
+            ],
+        },
+    )
+
+    detail = client.get(f"/agent-tests/run/{job_id}", headers=h).json()
+    assert detail["unanswered_tests"] == 1
+    assert detail["stopped_early"] is True
+    assert [r["unanswered"] for r in detail["results"]] == [False, True]
+
+    listed = client.get(f"/agent-tests/agent/{agent['uuid']}/runs", headers=h).json()
+    assert listed["items"][0]["unanswered_tests"] == 1
+
+    share = client.patch(
+        f"/agent-tests/run/{job_id}/visibility",
+        json={"is_public": True},
+        headers=h,
+    ).json()
+    public = client.get(f"/public/test-run/{share['share_token']}").json()
+    assert public["unanswered_tests"] == 1
+    assert public["stopped_early"] is True
 
 
 def test_agent_runs_list_slims_benchmark_model_results(client):
@@ -1259,6 +1522,7 @@ def test_agent_tests_delete_link_not_found(client):
         "DELETE",
         "/agent-tests",
         json={"agent_uuid": NONEXISTENT_UUID, "test_uuid": NONEXISTENT_UUID_2},
+        headers=h,
     )
     assert resp.status_code == 404
 
@@ -3118,3 +3382,184 @@ def test_launch_skips_the_wording_lookup_without_a_tool_call_test(client):
         )
     lookup.assert_not_called()
     assert details["tool_call_evaluator"] is None
+
+
+# ---------------------------------------------------------------------------
+# Stopping a run
+# ---------------------------------------------------------------------------
+
+
+def test_abort_run_keeps_everything_captured_so_far(client):
+    """Stopping a run ends it without wiping anything: the rows already judged
+    stay, rows that never ran stay uncounted, and the run reads as stopped
+    rather than failed on the detail, the runs list, and the shared link."""
+    from db import create_agent_test_job, update_agent_test_job
+
+    h = _signup(client)["headers"]
+    agent = _create_agent(client, h)
+
+    job_id = create_agent_test_job(
+        agent_id=agent["uuid"],
+        job_type="llm-unit-test",
+        status="in_progress",
+        details={"test_uuids": ["t1"], "evaluators_by_test_id": {"t1": []}},
+    )
+    update_agent_test_job(
+        job_id,
+        # Mid-run state as the poll loop actually leaves it: the counts stay
+        # null until calibrate writes them at the end, which a stopped run never
+        # reaches.
+        results={
+            "total_tests": 2,
+            "passed": None,
+            "failed": None,
+            "test_results": [
+                {"name": "T1", "passed": True, "reasoning": "good"},
+                {"name": "T2", "passed": None},
+            ],
+        },
+    )
+
+    resp = client.post(f"/agent-tests/run/{job_id}/abort", headers=h)
+    assert resp.status_code == 200
+    assert resp.json() == {"task_id": job_id, "status": "done", "aborted": True}
+
+    detail = client.get(f"/agent-tests/run/{job_id}", headers=h).json()
+    assert detail["status"] == "done"
+    assert detail["aborted"] is True
+    assert detail["error"] is False
+    assert [r["name"] for r in detail["results"]] == ["T1", "T2"]
+    assert detail["results"][0]["reasoning"] == "good"
+    assert detail["results"][0]["not_run"] is False
+    # T2 never started: marked as such, and in neither count.
+    assert detail["results"][1]["passed"] is None
+    assert detail["results"][1]["not_run"] is True
+    assert (detail["passed"], detail["failed"]) == (1, 0)
+    assert detail["total_tests"] == 2
+    # The frozen snapshot the detail view reads survived the abort write.
+    assert detail["test_uuids"] == ["t1"]
+
+    run = client.get(f"/agent-tests/agent/{agent['uuid']}/runs", headers=h).json()[
+        "items"
+    ][0]
+    assert run["aborted"] is True
+    # The list shows the same honest counts, so a stopped run is not read as
+    # one failing test.
+    assert (run["passed"], run["failed"]) == (1, 0)
+
+    client.patch(
+        f"/agent-tests/run/{job_id}/visibility", json={"is_public": True}, headers=h
+    )
+    token = client.get(f"/agent-tests/run/{job_id}", headers=h).json()["share_token"]
+    shared = client.get(f"/public/test-run/{token}").json()
+    assert shared["aborted"] is True
+    assert len(shared["results"]) == 2
+    assert shared["results"][1]["not_run"] is True
+
+
+def test_abort_queued_run_frees_the_slot(client):
+    """A run stopped before it ever started is marked done, so the queue moves on."""
+    from db import create_agent_test_job
+
+    h = _signup(client)["headers"]
+    agent = _create_agent(client, h)
+    job_id = create_agent_test_job(
+        agent_id=agent["uuid"], job_type="llm-unit-test", status="queued"
+    )
+
+    with patch("routers.agent_tests.try_start_queued_agent_test_job") as start_next:
+        assert client.post(f"/agent-tests/run/{job_id}/abort", headers=h).status_code == 200
+    start_next.assert_called_once()
+
+    detail = client.get(f"/agent-tests/run/{job_id}", headers=h).json()
+    assert detail["status"] == "done"
+    assert detail["aborted"] is True
+
+
+def test_abort_benchmark_marks_unfinished_models_stopped(client):
+    """A stopped benchmark keeps each model's partial results, and no model is
+    left showing live progress text on a run that has ended."""
+    from db import create_agent_test_job, update_agent_test_job
+
+    h = _signup(client)["headers"]
+    agent = _create_agent(client, h)
+    job_id = create_agent_test_job(
+        agent_id=agent["uuid"], job_type="llm-benchmark", status="in_progress"
+    )
+    update_agent_test_job(
+        job_id,
+        results={
+            "model_results": [
+                {
+                    "model": "m1",
+                    "success": True,
+                    "message": "Completed",
+                    "total_tests": 1,
+                    "passed": 1,
+                    "failed": 0,
+                    "test_results": [{"name": "T1", "passed": True}],
+                },
+                {
+                    "model": "m2",
+                    "success": None,
+                    "message": "Running... (1 tests done)",
+                    "total_tests": 2,
+                    "passed": 1,
+                    "failed": 1,
+                    "test_results": [
+                        {"name": "T1", "passed": True},
+                        {"name": "T2", "passed": None},
+                    ],
+                },
+            ]
+        },
+    )
+
+    assert client.post(f"/agent-tests/run/{job_id}/abort", headers=h).status_code == 200
+
+    detail = client.get(f"/agent-tests/benchmark/{job_id}", headers=h).json()
+    assert detail["status"] == "done"
+    assert detail["aborted"] is True
+    models = {m["model"]: m for m in detail["model_results"]}
+    assert models["m1"]["message"] == "Completed"  # finished, left alone
+    assert models["m2"]["message"] == "Stopped"
+    assert len(models["m2"]["test_results"]) == 2
+    # m2 was mid-run with one case judged and one never started. Its `failed`
+    # was 1 while it ran (everything not yet passing counts as failing); the
+    # stop settles it to the real verdict.
+    assert (models["m2"]["passed"], models["m2"]["failed"]) == (1, 0)
+    assert models["m2"]["test_results"][1]["not_run"] is True
+
+
+def test_abort_rejects_a_run_that_already_ended(client):
+    from db import create_agent_test_job
+
+    h = _signup(client)["headers"]
+    agent = _create_agent(client, h)
+    job_id = create_agent_test_job(
+        agent_id=agent["uuid"], job_type="llm-unit-test", status="done"
+    )
+
+    resp = client.post(f"/agent-tests/run/{job_id}/abort", headers=h)
+    assert resp.status_code == 400
+    assert "queued or in progress" in resp.json()["detail"]
+
+
+def test_abort_is_workspace_scoped(client):
+    from db import create_agent_test_job
+
+    h = _signup(client)["headers"]
+    other = _signup(client)["headers"]
+    agent = _create_agent(client, h)
+    job_id = create_agent_test_job(
+        agent_id=agent["uuid"], job_type="llm-unit-test", status="in_progress"
+    )
+
+    # Another workspace's run: denied, and the workspace is not named.
+    denied = client.post(f"/agent-tests/run/{job_id}/abort", headers=other)
+    assert denied.status_code == 403
+    assert "organization_uuid" not in denied.json()
+    assert (
+        client.post(f"/agent-tests/run/{NONEXISTENT_UUID}/abort", headers=h).status_code
+        == 404
+    )

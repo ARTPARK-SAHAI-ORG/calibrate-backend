@@ -1535,6 +1535,7 @@ def init_db():
                 input TEXT NOT NULL,
                 output TEXT NOT NULL,
                 metadata TEXT DEFAULT NULL,
+                labels TEXT DEFAULT NULL,
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                 updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                 deleted_at TIMESTAMP DEFAULT NULL,
@@ -1551,6 +1552,10 @@ def init_db():
             "CREATE INDEX IF NOT EXISTS idx_traces_org_created "
             "ON traces(org_uuid, deleted_at, created_at DESC, id DESC)"
         )
+        try:
+            cursor.execute("ALTER TABLE traces ADD COLUMN labels TEXT DEFAULT NULL")
+        except sqlite3.OperationalError:
+            pass
         conn.commit()
 
         # Durable scoring runs. Status is the source of truth for "scored?"; a
@@ -4694,7 +4699,7 @@ def get_tools_for_agent(agent_id: str) -> List[Dict[str, Any]]:
             SELECT t.* FROM tools t
             INNER JOIN agent_tools at ON t.uuid = at.tool_id
             WHERE at.agent_id = ? AND at.deleted_at IS NULL AND t.deleted_at IS NULL
-            ORDER BY at.created_at DESC
+            ORDER BY at.created_at DESC, at.id DESC
             """,
             (agent_id,),
         )
@@ -4834,7 +4839,7 @@ def get_agents_for_tool(tool_id: str) -> List[Dict[str, Any]]:
             SELECT a.* FROM agents a
             INNER JOIN agent_tools at ON a.uuid = at.agent_id
             WHERE at.tool_id = ? AND at.deleted_at IS NULL AND a.deleted_at IS NULL
-            ORDER BY at.created_at DESC
+            ORDER BY at.created_at DESC, at.id DESC
             """,
             (tool_id,),
         )
@@ -4856,29 +4861,23 @@ def get_agent_tool_link(agent_id: str, tool_id: str) -> Optional[Dict[str, Any]]
         return None
 
 
-def get_all_agent_tools(org_uuid: Optional[str] = None) -> List[Dict[str, Any]]:
-    """Get all agent-tool links, optionally scoped to one org via the
-    parent agent. Links are gated through the agent (the access-key entity);
-    the tool's org is verified separately at the router layer when creating."""
+def get_all_agent_tools(org_uuid: str) -> List[Dict[str, Any]]:
+    """Get all agent-tool links whose agent belongs to the given org. Links are
+    gated through the agent (the access-key entity); the tool's org is verified
+    separately at the router layer when creating."""
     with get_db_connection() as conn:
         cursor = conn.cursor()
-        if org_uuid is None:
-            cursor.execute(
-                "SELECT * FROM agent_tools WHERE deleted_at IS NULL "
-                "ORDER BY created_at DESC"
-            )
-        else:
-            cursor.execute(
-                """
-                SELECT at.* FROM agent_tools at
-                  JOIN agents a ON a.uuid = at.agent_id
-                 WHERE at.deleted_at IS NULL
-                   AND a.deleted_at IS NULL
-                   AND a.org_uuid = ?
-                 ORDER BY at.created_at DESC
-                """,
-                (org_uuid,),
-            )
+        cursor.execute(
+            """
+            SELECT at.* FROM agent_tools at
+              JOIN agents a ON a.uuid = at.agent_id
+             WHERE at.deleted_at IS NULL
+               AND a.deleted_at IS NULL
+               AND a.org_uuid = ?
+             ORDER BY at.created_at DESC, at.id DESC
+            """,
+            (org_uuid,),
+        )
         rows = cursor.fetchall()
         return [dict(row) for row in rows]
 
@@ -5038,7 +5037,10 @@ def get_all_tests_summary(org_uuid: Optional[str] = None) -> List[Dict[str, Any]
 def get_tests_for_agent_summary(agent_id: str) -> List[Dict[str, Any]]:
     """Slim tests-list headers for one agent's linked tests (see
     `_row_to_test_summary`). Never parses the full `config`. Ordering matches
-    `get_tests_for_agent`."""
+    `get_tests_for_agent`.
+
+    The `at.id` tiebreak keeps paging stable: `created_at` is second-resolution,
+    so a bulk link writes many rows with an identical timestamp."""
     with get_db_connection() as conn:
         cursor = conn.cursor()
         cursor.execute(
@@ -5046,7 +5048,7 @@ def get_tests_for_agent_summary(agent_id: str) -> List[Dict[str, Any]]:
             SELECT {_TEST_SUMMARY_COLUMNS} FROM tests t
             INNER JOIN agent_tests at ON t.uuid = at.test_id
             WHERE at.agent_id = ? AND at.deleted_at IS NULL AND t.deleted_at IS NULL
-            ORDER BY at.created_at DESC
+            ORDER BY at.created_at DESC, at.id DESC
             """,
             (agent_id,),
         )
@@ -6817,7 +6819,7 @@ def get_tests_for_agent(agent_id: str) -> List[Dict[str, Any]]:
             SELECT t.* FROM tests t
             INNER JOIN agent_tests at ON t.uuid = at.test_id
             WHERE at.agent_id = ? AND at.deleted_at IS NULL AND t.deleted_at IS NULL
-            ORDER BY at.created_at DESC
+            ORDER BY at.created_at DESC, at.id DESC
             """,
             (agent_id,),
         )
@@ -6834,7 +6836,7 @@ def get_agents_for_test(test_id: str) -> List[Dict[str, Any]]:
             SELECT a.* FROM agents a
             INNER JOIN agent_tests at ON a.uuid = at.agent_id
             WHERE at.test_id = ? AND at.deleted_at IS NULL AND a.deleted_at IS NULL
-            ORDER BY at.created_at DESC
+            ORDER BY at.created_at DESC, at.id DESC
             """,
             (test_id,),
         )
@@ -6856,12 +6858,20 @@ def get_agent_test_link(agent_id: str, test_id: str) -> Optional[Dict[str, Any]]
         return None
 
 
-def get_all_agent_tests() -> List[Dict[str, Any]]:
-    """Get all agent-test links."""
+def get_all_agent_tests(org_uuid: str) -> List[Dict[str, Any]]:
+    """Get all agent-test links whose agent belongs to the given org."""
     with get_db_connection() as conn:
         cursor = conn.cursor()
         cursor.execute(
-            "SELECT * FROM agent_tests WHERE deleted_at IS NULL ORDER BY created_at DESC"
+            """
+            SELECT at.* FROM agent_tests at
+            JOIN agents a ON a.uuid = at.agent_id
+            WHERE at.deleted_at IS NULL
+              AND a.deleted_at IS NULL
+              AND a.org_uuid = ?
+            ORDER BY at.created_at DESC, at.id DESC
+            """,
+            (org_uuid,),
         )
         rows = cursor.fetchall()
         return [dict(row) for row in rows]
@@ -7401,6 +7411,7 @@ _AGENT_TEST_JOB_SUMMARY_COLUMNS = """
         json_extract(atj.results, '$.latency_ms') AS latency_ms,
         json_extract(atj.results, '$.cost') AS cost,
         json_extract(atj.results, '$.total_tokens') AS total_tokens,
+        json_extract(atj.results, '$.unanswered_tests') AS unanswered_tests,
         json_extract(atj.results, '$.error') AS error,
         (SELECT json_group_array(json_object(
             'name', COALESCE(json_extract(je.value, '$.name'),
@@ -7422,14 +7433,16 @@ _AGENT_TEST_JOB_SUMMARY_COLUMNS = """
         json_extract(atj.details, '$.evaluators_by_test_id') AS evaluators_by_test_id,
         json_extract(atj.details, '$.has_tool_call_test') AS has_tool_call_test,
         json_extract(atj.details, '$.tool_call_evaluator.name')
-            AS tool_call_evaluator_name
+            AS tool_call_evaluator_name,
+        json_extract(atj.details, '$.aborted') AS aborted
 """
 
 
 def _row_to_agent_test_job_summary(row: sqlite3.Row) -> Dict[str, Any]:
     """Shape a slim agent-test-job row into the same dict the run-list routers
-    consume: header fields, a reduced `results` sub-dict, and the two narrow
-    `details` slices (`evaluators_by_test_id`, `has_tool_call_test`)."""
+    consume: header fields, a reduced `results` sub-dict, and the narrow
+    `details` slices (`evaluators_by_test_id`, `has_tool_call_test`,
+    `tool_call_evaluator.name`, `aborted`)."""
     row = dict(row)
 
     def _loads(value: Any) -> Any:
@@ -7454,6 +7467,7 @@ def _row_to_agent_test_job_summary(row: sqlite3.Row) -> Dict[str, Any]:
         "evaluators_by_test_id": _loads(row.get("evaluators_by_test_id")),
         "has_tool_call_test": bool(row.get("has_tool_call_test")),
         "tool_call_evaluator_name": row.get("tool_call_evaluator_name"),
+        "aborted": bool(row.get("aborted")),
         "results": {
             "total_tests": row.get("total_tests"),
             "passed": row.get("passed"),
@@ -7461,6 +7475,7 @@ def _row_to_agent_test_job_summary(row: sqlite3.Row) -> Dict[str, Any]:
             "latency_ms": _loads(row.get("latency_ms")),
             "cost": _loads(row.get("cost")),
             "total_tokens": _loads(row.get("total_tokens")),
+            "unanswered_tests": row.get("unanswered_tests"),
             "error": row.get("error"),
             "test_results": _loads(row.get("test_results")),
             "model_results": _loads(row.get("model_results")),
@@ -7472,8 +7487,8 @@ def get_agent_test_jobs_for_agent_summary(
     agent_id: str, job_type: Optional[str] = None
 ) -> List[Dict[str, Any]]:
     """Slim run-list headers for one agent's test jobs (see
-    `_AGENT_TEST_JOB_SUMMARY_COLUMNS`). Reads only two narrow `details` slices
-    (evaluator names, tool-call flag), never the full `details` blob nor the
+    `_AGENT_TEST_JOB_SUMMARY_COLUMNS`). Reads only narrow `details` slices
+    (evaluator names, tool-call flag, aborted), never the full `details` blob nor the
     heavy `results` sub-trees. Newest-created first (ties broken by `id`)."""
     select = (
         f"SELECT {_AGENT_TEST_JOB_SUMMARY_COLUMNS} FROM agent_test_jobs atj "
@@ -7499,8 +7514,8 @@ def get_agent_test_jobs_for_org_summary(
     org_uuid: str, job_type: Optional[str] = None
 ) -> List[Dict[str, Any]]:
     """Slim run-list headers for an org's test jobs across all its agents, with
-    `agent_name`/`agent_id` from the joined agent. Reads only two narrow
-    `details` slices (evaluator names, tool-call flag), never the full
+    `agent_name`/`agent_id` from the joined agent. Reads only narrow
+    `details` slices (evaluator names, tool-call flag, aborted), never the full
     `details` blob nor the heavy `results` sub-trees. Newest-updated first
     (ties broken by `id`)."""
     select = (
@@ -7610,8 +7625,14 @@ def update_agent_test_job(
     job_uuid: str,
     status: Optional[str] = None,
     results: Optional[Dict[str, Any]] = None,
+    details: Optional[Dict[str, Any]] = None,
 ) -> bool:
-    """Update an agent test job. Returns True if the job was found and updated."""
+    """Update an agent test job. Returns True if the job was found and updated.
+
+    `details` is merged into what is already stored, never replacing it — the
+    run's frozen calibrate config and evaluator snapshot live there and the
+    worker still needs them.
+    """
     updates = []
     params = []
 
@@ -7621,6 +7642,20 @@ def update_agent_test_job(
     if results is not None:
         updates.append("results = ?")
         params.append(json.dumps(results))
+
+    if details is not None:
+        with get_db_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                "SELECT details FROM agent_test_jobs WHERE uuid = ?", (job_uuid,)
+            )
+            row = cursor.fetchone()
+            if row and row[0]:
+                existing_details = json.loads(row[0])
+                existing_details.update(details)
+                details = existing_details
+        updates.append("details = ?")
+        params.append(json.dumps(details))
 
     if not updates:
         return False
@@ -10189,6 +10224,7 @@ def _trace_row(row: sqlite3.Row) -> Dict[str, Any]:
         "input": json.loads(row["input"]),
         "output": json.loads(row["output"]),
         "metadata": json.loads(row["metadata"]) if row["metadata"] else None,
+        "labels": json.loads(row["labels"]) if row["labels"] else [],
         "created_at": _trace_iso(row["created_at"]),
         "updated_at": _trace_iso(row["updated_at"]),
     }
@@ -10228,6 +10264,7 @@ def _trace_filters(
     agent_id: Optional[str] = None,
     q: Optional[str] = None,
     output_type: Optional[str] = None,
+    labels: Optional[List[str]] = None,
 ) -> Tuple[str, List[Any]]:
     """Build the shared WHERE clause for every live-trace query."""
     where = ["org_uuid = ?", "deleted_at IS NULL"]
@@ -10235,6 +10272,13 @@ def _trace_filters(
     if agent_id:
         where.append("agent_id = ?")
         params.append(agent_id)
+    if labels:
+        placeholders = ",".join("?" * len(labels))
+        where.append(
+            "EXISTS (SELECT 1 FROM json_each(traces.labels) "
+            f"WHERE value IN ({placeholders}))"
+        )
+        params.extend(labels)
     if output_type:
         where.append("(" + TRACE_OUTPUT_TYPE_SQL[output_type] + ")")
     if q and q.strip():
@@ -10282,6 +10326,22 @@ def get_traces_by_uuids(org_uuid: str, trace_uuids: List[str]) -> List[Dict[str,
     return [by_uuid[u] for u in unique if u in by_uuid]
 
 
+def list_trace_labels(org_uuid: str, agent_id: Optional[str] = None) -> List[str]:
+    """Every distinct label on the workspace's live traces, A to Z, so a filter
+    menu can offer the whole set rather than the labels on the page on screen.
+    Deliberately not narrowed by the label filter itself: picking one label must
+    not hide the rest. Sorted case-insensitively, or every capitalised label
+    would sort ahead of every lowercase one."""
+    where, params = _trace_filters(org_uuid, agent_id)
+    with get_db_connection() as conn:
+        rows = conn.execute(
+            f"SELECT DISTINCT value FROM traces, json_each(traces.labels) "
+            f"WHERE {where} ORDER BY value COLLATE NOCASE, value",
+            params,
+        ).fetchall()
+        return [row[0] for row in rows]
+
+
 def count_live_traces(org_uuid: str) -> int:
     """Live trace count for the workspace cap. Deliberately not agent-scoped."""
     with get_db_connection() as conn:
@@ -10300,6 +10360,7 @@ def _insert_trace_row(
     message_id: Optional[str] = None,
     conversation_id: Optional[str] = None,
     metadata: Optional[Any] = None,
+    labels: Optional[List[str]] = None,
 ) -> Dict[str, Any]:
     """Insert one traces row on `cur` and return it. Does not commit."""
     trace_uuid = str(uuid.uuid4())
@@ -10307,8 +10368,8 @@ def _insert_trace_row(
         """
         INSERT INTO traces
             (uuid, org_uuid, agent_id, message_id, conversation_id,
-             input, output, metadata)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+             input, output, metadata, labels)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             trace_uuid,
@@ -10319,6 +10380,7 @@ def _insert_trace_row(
             json.dumps(input),
             json.dumps(output),
             json.dumps(metadata) if metadata is not None else None,
+            json.dumps(labels) if labels else None,
         ),
     )
     row = cur.execute(
@@ -10369,6 +10431,7 @@ def create_trace(
     message_id: Optional[str] = None,
     conversation_id: Optional[str] = None,
     metadata: Optional[Any] = None,
+    labels: Optional[List[str]] = None,
 ) -> Dict[str, Any]:
     """Insert a trace and return it.
 
@@ -10385,6 +10448,7 @@ def create_trace(
             message_id,
             conversation_id,
             metadata,
+            labels,
         )
         conn.commit()
         return row
@@ -10399,6 +10463,7 @@ def create_trace_with_eval_run(
     message_id: Optional[str] = None,
     conversation_id: Optional[str] = None,
     metadata: Optional[Any] = None,
+    labels: Optional[List[str]] = None,
 ) -> Dict[str, Any]:
     """Insert a trace and, when auto-scoring is on, its immutable run together.
 
@@ -10431,6 +10496,7 @@ def create_trace_with_eval_run(
             message_id,
             conversation_id,
             metadata,
+            labels,
         )
         if plan is not None:
             if isinstance(plan, trace_scoring.ScoringPlanSkip) or not plan.evaluators:
@@ -10472,9 +10538,10 @@ def list_traces(
     agent_id: Optional[str] = None,
     q: Optional[str] = None,
     output_type: Optional[str] = None,
+    labels: Optional[List[str]] = None,
 ) -> Tuple[List[Dict[str, Any]], int]:
     """Return `(page, total)` newest-first; filters and count run in SQL."""
-    where, params = _trace_filters(org_uuid, agent_id, q, output_type)
+    where, params = _trace_filters(org_uuid, agent_id, q, output_type, labels)
     with get_db_connection() as conn:
         total = conn.execute(
             f"SELECT COUNT(*) FROM traces WHERE {where}", params
@@ -10498,11 +10565,12 @@ def soft_delete_traces_matching(
     agent_id: Optional[str] = None,
     q: Optional[str] = None,
     output_type: Optional[str] = None,
+    labels: Optional[List[str]] = None,
 ) -> int:
     """Soft-delete every live trace matching the list filters, returning the
     number of rows flipped. No UUID list, so a workspace-wide delete stays one
     statement however many traces it covers."""
-    where, params = _trace_filters(org_uuid, agent_id, q, output_type)
+    where, params = _trace_filters(org_uuid, agent_id, q, output_type, labels)
     with get_db_connection() as conn:
         cursor = conn.execute(
             f"UPDATE traces SET deleted_at = CURRENT_TIMESTAMP, "

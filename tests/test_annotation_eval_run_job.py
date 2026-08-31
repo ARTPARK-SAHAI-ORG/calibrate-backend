@@ -13,6 +13,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
+import annotation_eval_runner
 import db
 
 
@@ -99,14 +100,13 @@ def test_run_job_subprocess_failure(tmp_path):
         "annotation_eval_runner.get_annotation_task", return_value=task
     ), patch(
         "annotation_eval_runner.get_eval_job_items", return_value=items
-    ), patch(
-        "annotation_eval_runner.subprocess.Popen", return_value=FakeProcess()
+    ), patch.object(
+        annotation_eval_runner.subprocess, "Popen", return_value=FakeProcess()
     ), patch(
         "annotation_eval_runner.update_job"
     ), patch(
         "annotation_eval_runner.try_start_queued_job"
-    ), patch(
-        "annotation_eval_runner.time.sleep"
+    ), patch.object(annotation_eval_runner.time, "sleep"
     ), patch(
         "annotation_eval_runner.get_job",
         return_value={"updated_at": "2099-01-01 00:00:00"},
@@ -180,14 +180,13 @@ def test_run_job_backfill_snapshot(tmp_path):
         return_value=items,
     ), patch(
         "annotation_eval_runner.snapshot_eval_job_items"
-    ), patch(
-        "annotation_eval_runner.subprocess.Popen", return_value=FakeProcess()
+    ), patch.object(
+        annotation_eval_runner.subprocess, "Popen", return_value=FakeProcess()
     ), patch(
         "annotation_eval_runner.update_job"
     ), patch(
         "annotation_eval_runner.try_start_queued_job"
-    ), patch(
-        "annotation_eval_runner.time.sleep"
+    ), patch.object(annotation_eval_runner.time, "sleep"
     ), patch(
         "annotation_eval_runner.get_job",
         return_value={"updated_at": "2099-01-01 00:00:00"},
@@ -226,9 +225,9 @@ def test_run_calibrate_eval_only_success(tmp_path):
     def on_started(pid):
         callback_called.append(pid)
 
-    with patch(
-        "annotation_eval_runner.subprocess.Popen", return_value=FakeProcess()
-    ), patch("annotation_eval_runner.time.sleep"):
+    with patch.object(
+        annotation_eval_runner.subprocess, "Popen", return_value=FakeProcess()
+    ), patch.object(annotation_eval_runner.time, "sleep"):
         rc, _, _ = _run_calibrate_eval_only(
             ["calibrate-agent"],
             cwd=tmp_path,
@@ -264,9 +263,9 @@ def test_run_calibrate_eval_only_timeout(tmp_path):
         def wait(self, timeout=None):
             return None
 
-    with patch(
-        "annotation_eval_runner.subprocess.Popen", return_value=FakeProcess()
-    ), patch("annotation_eval_runner.time.sleep"), patch(
+    with patch.object(
+        annotation_eval_runner.subprocess, "Popen", return_value=FakeProcess()
+    ), patch.object(annotation_eval_runner.time, "sleep"), patch(
         "annotation_eval_runner.get_job",
         return_value={"updated_at": "2000-01-01 00:00:00"},
     ), patch(
@@ -302,9 +301,9 @@ def test_run_calibrate_eval_only_on_started_raises(tmp_path):
     def on_started_fail(pid):
         raise RuntimeError("boom")
 
-    with patch(
-        "annotation_eval_runner.subprocess.Popen", return_value=FakeProcess()
-    ), patch("annotation_eval_runner.time.sleep"):
+    with patch.object(
+        annotation_eval_runner.subprocess, "Popen", return_value=FakeProcess()
+    ), patch.object(annotation_eval_runner.time, "sleep"):
         rc, _, _ = _run_calibrate_eval_only(
             ["calibrate-agent"],
             cwd=tmp_path,
@@ -353,14 +352,13 @@ def test_run_job_failure_uploads_before_temp_dir_is_removed():
         "annotation_eval_runner.get_annotation_task", return_value={"type": "stt"}
     ), patch(
         "annotation_eval_runner.get_eval_job_items", return_value=items
-    ), patch(
-        "annotation_eval_runner.subprocess.Popen", return_value=FakeProcess()
+    ), patch.object(
+        annotation_eval_runner.subprocess, "Popen", return_value=FakeProcess()
     ), patch(
         "annotation_eval_runner.update_job"
     ) as mock_update, patch(
         "annotation_eval_runner.try_start_queued_job"
-    ), patch(
-        "annotation_eval_runner.time.sleep"
+    ), patch.object(annotation_eval_runner.time, "sleep"
     ), patch(
         "annotation_eval_runner.get_job",
         return_value={"updated_at": "2099-01-01 00:00:00"},
@@ -405,8 +403,8 @@ def _run_job_with(returncode, parsed_rows):
         "annotation_eval_runner.get_annotation_task", return_value={"type": "stt"}
     ), patch(
         "annotation_eval_runner.get_eval_job_items", return_value=items
-    ), patch(
-        "annotation_eval_runner.subprocess.Popen",
+    ), patch.object(
+        annotation_eval_runner.subprocess, "Popen",
         return_value=_FinishedProcess(returncode),
     ), patch(
         "annotation_eval_runner.parse_results_for_task_type",

@@ -9,7 +9,7 @@ import traceback
 import threading
 import logging
 from pathlib import Path
-from typing import List, Dict, Any, Literal, Optional, Set
+from typing import List, Dict, Any, Literal, Optional, Set, get_args
 
 from fastapi import APIRouter, HTTPException, Depends, Path as PathParam, Query
 from pagination import (
@@ -22,7 +22,7 @@ from pagination import (
     paginate_around,
 )
 
-_AgentTestSearch = make_search_params(searchable=["name"])
+_AgentTestSearch = make_search_params(searchable=["name"], with_modes=True)
 from pydantic import BaseModel, Field
 from sqlite3 import IntegrityError
 
@@ -58,19 +58,23 @@ from llm_judge import (
     evaluator_value_name,
 )
 from routers.agents import AgentSummary, to_agent_summary
+from routers.org_limits import effective_max_rows_per_eval, enforce_max_rows_per_eval
 from shared_enums import (
     AGENT_INTERACTION_TYPES,
     DEFAULT_AGENT_INTERACTION_TYPE,
+    TestType,
     required_agent_interaction_type,
 )
 from auth_utils import get_current_org, get_org_jwt_or_api_key, OrgContext
 from utils import (
     job_slot,
+    with_calibrate_eval_header,
     TaskStatus,
     InitialTaskStatus,
     TaskCreateResponse,
     EXAMPLE_TEST_UUID,
     TestListResponse,
+    TestUuid,
     to_test_list_response,
     OutputTypeLiteral,
     AgentTestJobType,
@@ -83,12 +87,22 @@ from utils import (
     capture_exception_to_sentry,
     build_tool_configs,
     get_calibrate_agent_cli,
+    kill_process_group,
     upload_directory_tree_to_s3,
     upload_file_to_s3,
 )
 
+_TEST_TYPES = get_args(TestType)
+
 # Job types that share the same queue
 AGENT_TEST_JOB_TYPES = ["llm-unit-test", "llm-benchmark"]
+
+
+def _is_job_aborted(task_id: str) -> bool:
+    """True once a user has stopped this run. Both workers poll it, so it must
+    stay a fresh read of the row rather than anything cached in the thread."""
+    job = get_agent_test_job(task_id)
+    return bool(job and (job.get("details") or {}).get("aborted"))
 
 
 def _start_llm_unit_test_job_from_queue(job: dict) -> bool:
@@ -173,6 +187,11 @@ _EXAMPLE_AGENT_UUID = "f47ac10b-58cc-4372-a567-0e02b2c3d479"
 _EXAMPLE_TASK_UUID = "a3b2c1d0-e5f4-3210-abcd-ef1234567890"
 
 _TASK_STATUS_DESCRIPTION = "Current status of the run"
+_ABORTED_DESCRIPTION = (
+    "Whether a user stopped this run before it finished. The results collected "
+    "up to that point are kept, and test cases that never ran are counted "
+    "neither as passed nor as failed"
+)
 
 # Shared so the benchmark leaderboard reads the same wherever it appears.
 LEADERBOARD_SUMMARY_DESCRIPTION = (
@@ -209,7 +228,7 @@ class AgentTestsCreate(BaseModel):
         description="Agent to link tests to",
         examples=[_EXAMPLE_AGENT_UUID],
     )
-    test_uuids: List[str] = Field(
+    test_uuids: List[TestUuid] = Field(
         description="Tests to link. Any that are already linked are skipped",
         examples=[[EXAMPLE_TEST_UUID]],
     )
@@ -255,7 +274,7 @@ class AgentTestsCreateResponse(BaseModel):
 
 
 class RunTestRequest(BaseModel):
-    test_uuids: Optional[List[str]] = Field(
+    test_uuids: Optional[List[TestUuid]] = Field(
         None,
         description="Tests to run. Omit to run all tests linked to the agent",
         examples=[[EXAMPLE_TEST_UUID]],
@@ -305,11 +324,14 @@ class BatchTestSkip(BaseModel):
         description="ID of the skipped agent",
         examples=[_EXAMPLE_AGENT_UUID],
     )
-    reason: Literal["no_linked_tests", "connection_not_verified"] = Field(
+    reason: Literal[
+        "no_linked_tests", "connection_not_verified", "over_row_limit"
+    ] = Field(
         description=(
             "Why this agent was not run:\n"
             "- `no_linked_tests`: the agent has no tests linked\n"
-            "- `connection_not_verified`: the agent's connection is not verified"
+            "- `connection_not_verified`: the agent's connection is not verified\n"
+            "- `over_row_limit`: the agent has more linked tests than this workspace allows in one run"
         )
     )
 
@@ -407,6 +429,14 @@ class TestCaseResult(BaseModel):
         None,
         description="Cost of this case (USD)",
     )
+    unanswered: bool = Field(
+        False,
+        description="Whether this case produced no answer because the agent or the judge could not be reached, in which case `reasoning` carries the error and `passed` is not a verdict on the agent",
+    )
+    not_run: bool = Field(
+        False,
+        description="Whether this case never started, because a user stopped the run first. It is counted neither as passed nor as failed",
+    )
 
 
 class TestRunEvaluator(BaseModel):
@@ -484,6 +514,15 @@ class TestRunStatusResponse(BaseModel):
     results: Optional[List[TestCaseResult]] = Field(
         None, description="Results for each test case"
     )
+    unanswered_tests: Optional[int] = Field(
+        None,
+        description="Number of test cases that produced no answer because the agent or the judge could not be reached, which makes the pass rate an unfair measure of the agent",
+    )
+    stopped_early: bool = Field(
+        False,
+        description="Whether the run stopped before starting every test case, after too many failed in a row",
+    )
+    aborted: bool = Field(False, description=_ABORTED_DESCRIPTION)
     error: bool = Field(False, description="True if the run failed")
     is_public: bool = Field(False, description="Whether the run is shared publicly")
     share_token: Optional[str] = Field(
@@ -502,7 +541,7 @@ class TestRunCaseSummary(BaseModel):
         None, description="Name of the test case"
     )
     passed: Optional[bool] = Field(
-        None, description="Whether the case passed (null if it errored or is still running)"
+        None, description="Whether the case passed (null while the case is still running)"
     )
 
 
@@ -601,6 +640,11 @@ class AgentTestRunListItem(BaseModel):
         None,
         description="Flat summary for each model in a benchmark run (fetch the benchmark detail for full results)",
     )
+    unanswered_tests: Optional[int] = Field(
+        None,
+        description="Number of test cases that produced no answer because the agent or the judge could not be reached, which makes the pass rate an unfair measure of the agent",
+    )
+    aborted: bool = Field(False, description=_ABORTED_DESCRIPTION)
     error: bool = Field(False, description="True if the run failed")
     is_public: bool = Field(False, description="Whether the run is shared publicly")
     share_token: Optional[str] = Field(
@@ -681,10 +725,27 @@ def create_agent_test_links(
 
 
 @router.get("", response_model=List[AgentTestResponse], summary="List agent-test links")
-def list_agent_tests():
+def list_agent_tests(ctx: OrgContext = Depends(get_current_org)):
     """List which tests are linked to which agents."""
-    links = get_all_agent_tests()
+    links = get_all_agent_tests(ctx.org_uuid)
     return links
+
+
+def _parse_test_type_filter(values: Optional[List[str]]) -> Optional[Set[str]]:
+    """Parse `?type=` into a set of test types, accepting both the repeated form
+    and one comma-separated value. Returns None when nothing was requested."""
+    wanted = {
+        part.strip() for value in values or [] for part in value.split(",") if part.strip()
+    }
+    if not wanted:
+        return None
+    unknown = sorted(wanted - set(_TEST_TYPES))
+    if unknown:
+        raise HTTPException(
+            status_code=422,
+            detail=f"type={unknown!r} not allowed; expected one of {list(_TEST_TYPES)!r}",
+        )
+    return wanted
 
 
 @router.get(
@@ -699,6 +760,13 @@ def get_agent_tests_endpoint(
         examples=[_EXAMPLE_AGENT_UUID],
     ),
     ctx: OrgContext = Depends(get_org_jwt_or_api_key),
+    type: Optional[List[str]] = Query(
+        None,
+        description=(
+            "Keep only tests of these types. Repeat the parameter or pass one "
+            f"comma-separated value. Accepts {', '.join(f'`{t}`' for t in _TEST_TYPES)}"
+        ),
+    ),
     search: _AgentTestSearch = Depends(),
     pagination: OptionalPaginationParams = Depends(),
 ):
@@ -714,6 +782,9 @@ def get_agent_tests_endpoint(
     # shape (uuid/name/type + config.description, no evaluator hydration);
     # the transform runs only on the returned page.
     tests = get_tests_for_agent_summary(agent_uuid)
+    wanted_types = _parse_test_type_filter(type)
+    if wanted_types is not None:
+        tests = [t for t in tests if t.get("type") in wanted_types]
     tests = search.apply(tests)
     page, total = count_and_page(tests, pagination)
     return page_envelope([to_test_list_response(t) for t in page], total, pagination)
@@ -946,7 +1017,9 @@ def _build_agent_test_run_item_fields(
         "results": _slim_test_results(job_results.get("test_results")),
         # Benchmark results
         "model_results": _slim_model_results(job_results.get("model_results")),
+        "unanswered_tests": job_results.get("unanswered_tests"),
         # Common fields
+        "aborted": bool(job.get("aborted")),
         "error": bool(job_results.get("error")),
         "is_public": bool(job.get("is_public")),
         "share_token": job.get("share_token"),
@@ -1162,8 +1235,15 @@ def get_test_agents(
 
 
 @router.delete("", summary="Unlink test from agent")
-def delete_agent_test_link(agent_test: AgentTestDelete):
+def delete_agent_test_link(
+    agent_test: AgentTestDelete,
+    ctx: OrgContext = Depends(get_current_org),
+):
     """Unlink a test from an agent so it no longer runs for that agent."""
+    agent = get_agent(agent_test.agent_uuid)
+    if not agent or agent.get("org_uuid") != ctx.org_uuid:
+        raise HTTPException(status_code=404, detail="Agent not found")
+
     deleted = remove_test_from_agent(agent_test.agent_uuid, agent_test.test_uuid)
     if not deleted:
         raise HTTPException(status_code=404, detail="Agent-test link not found")
@@ -1177,20 +1257,38 @@ class AgentTestBulkDelete(BaseModel):
         description="Agent to unlink tests from",
         examples=[_EXAMPLE_AGENT_UUID],
     )
-    test_uuids: List[str] = Field(
+    test_uuids: List[TestUuid] = Field(
         description="Tests to unlink from the agent",
         examples=[[EXAMPLE_TEST_UUID]],
     )
 
 
-@router.post("/bulk-unlink", summary="Bulk unlink tests from agent")
-def bulk_delete_agent_test_links(payload: AgentTestBulkDelete):
-    """Unlink multiple tests from an agent."""
+class AgentTestsBulkUnlinkResponse(BaseModel):
+    deleted_count: int = Field(
+        description="Number of links removed. Tests that were not linked are excluded"
+    )
+    message: str = Field(description="Confirmation message")
+
+
+@router.post(
+    "/bulk-unlink",
+    response_model=AgentTestsBulkUnlinkResponse,
+    summary="Bulk unlink tests from agent",
+    tags=["Public API"],
+)
+def bulk_delete_agent_test_links(
+    payload: AgentTestBulkDelete,
+    ctx: OrgContext = Depends(get_org_jwt_or_api_key),
+):
+    """Unlink one or more tests from an agent. Tests that are not linked are skipped."""
+    # Public API (auth via get_org_jwt_or_api_key). Verify the agent exists and
+    # belongs to the caller's workspace (404 otherwise). The tests themselves
+    # keep existing; only the links to this agent go.
     if not payload.test_uuids:
         raise HTTPException(status_code=400, detail="test_uuids must not be empty")
 
     agent = get_agent(payload.agent_uuid)
-    if not agent:
+    if not agent or agent.get("org_uuid") != ctx.org_uuid:
         raise HTTPException(status_code=404, detail="Agent not found")
 
     deleted_count = bulk_remove_tests_from_agent(
@@ -1211,7 +1309,7 @@ class AgentTestsBulkDeleteAll(BaseModel):
         description="Agent whose linked tests define the deletion scope",
         examples=[_EXAMPLE_AGENT_UUID],
     )
-    test_uuids: List[str] = Field(
+    test_uuids: List[TestUuid] = Field(
         description="Tests to delete. Only tests linked to this agent in your workspace are deleted. Others are skipped",
         examples=[[EXAMPLE_TEST_UUID]],
     )
@@ -1528,8 +1626,9 @@ def _build_calibrate_config(
         }
         if top_level_evaluators:
             config["evaluators"] = top_level_evaluators
-        if agent_config.get("agent_headers"):
-            config["agent_headers"] = agent_config["agent_headers"]
+        config["agent_headers"] = with_calibrate_eval_header(
+            agent_config.get("agent_headers")
+        )
         if agent_config.get("default_inputs"):
             config["agent_default_inputs"] = agent_config["default_inputs"]
         return config, evaluators_by_test_id
@@ -1634,6 +1733,9 @@ def _parse_agent_test_results(
                 "test_case": test_case,
                 "inputs": effective_inputs or None,
                 "judge_results": metrics.get("judge_results"),
+                # calibrate marks a row that produced no answer at all, which
+                # is not the same failure as a wrong answer.
+                "unanswered": bool(r.get("error")),
                 # latency_ms is top-level on the calibrate result object (sibling of
                 # output/metrics); cost is nested inside output. Different depths by
                 # design — see CLAUDE.md. We lift cost up so the API surfaces both
@@ -1643,6 +1745,13 @@ def _parse_agent_test_results(
             }
         )
     return test_results
+
+
+def _unanswered_case_count(test_results: Optional[List[Dict[str, Any]]]) -> int:
+    """How many parsed rows produced no answer. Used when calibrate's own count
+    is not on disk yet, so a run in progress and a run that wrote no
+    ``metrics.json`` still report their gaps."""
+    return sum(1 for r in test_results or [] if r.get("unanswered"))
 
 
 def _pending_test_case_result_placeholder(name: str) -> Dict[str, Any]:
@@ -1658,6 +1767,8 @@ def _pending_test_case_result_placeholder(name: str) -> Dict[str, Any]:
         "judge_results": None,
         "latency_ms": None,
         "cost": None,
+        "unanswered": False,
+        "not_run": False,
     }
 
 
@@ -2191,6 +2302,14 @@ def _update_agent_test_intermediate_results(
             "total_tokens": (
                 metrics_data.get("total_tokens") if metrics_data else None
             ),
+            "unanswered_tests": (
+                (metrics_data or {}).get("errored")
+                if (metrics_data or {}).get("errored") is not None
+                else _unanswered_case_count(test_results)
+            ),
+            "stopped_early": (
+                bool(metrics_data.get("stopped_early")) if metrics_data else False
+            ),
             "test_results": intermediate_results,
         },
     )
@@ -2230,6 +2349,11 @@ def run_llm_test_task(
 
         # Extract test names for progress tracking
         test_names = [test.get("name") for test in tests if test.get("name")]
+
+        # Stopped between being queued and being picked up: never start.
+        if _is_job_aborted(task_id):
+            logger.info(f"LLM test task {task_id} was stopped before starting")
+            return
 
         update_agent_test_job(
             task_id,
@@ -2320,6 +2444,16 @@ def run_llm_test_task(
                     # Poll for process completion while updating intermediate results
                     prev_completed = 0
                     while process.poll() is None:
+                        if _is_job_aborted(task_id):
+                            logger.info(
+                                f"LLM test {task_id} stopped by user, killing process group"
+                            )
+                            kill_process_group(process.pid, task_id)
+                            _update_agent_test_intermediate_results(
+                                task_id, output_dir, test_names, default_inputs
+                            )
+                            _finish_stopped_run(task_id)
+                            return
                         completed = _update_agent_test_intermediate_results(
                             task_id, output_dir, test_names, default_inputs
                         )
@@ -2334,6 +2468,14 @@ def run_llm_test_task(
                     _update_agent_test_intermediate_results(
                         task_id, output_dir, test_names, default_inputs
                     )
+
+                # Stopped in the gap between the last poll and the CLI exiting.
+                # Falling through would read a killed process's exit code as a
+                # failure and overwrite the stopped run with `failed`.
+                if _is_job_aborted(task_id):
+                    logger.info(f"LLM test {task_id} stopped by user, keeping results")
+                    _finish_stopped_run(task_id)
+                    return
 
                 # Read stdout/stderr
                 with open(stdout_path, "r") as f:
@@ -2399,6 +2541,8 @@ def run_llm_test_task(
                 latency_ms = None
                 cost = None
                 total_tokens = None
+                unanswered_tests = None
+                stopped_early = False
 
                 if metrics_data and isinstance(metrics_data, dict):
                     total_tests = metrics_data.get("total", 0)
@@ -2407,6 +2551,8 @@ def run_llm_test_task(
                     latency_ms = metrics_data.get("latency_ms")
                     cost = metrics_data.get("cost")
                     total_tokens = metrics_data.get("total_tokens")
+                    unanswered_tests = metrics_data.get("errored")
+                    stopped_early = bool(metrics_data.get("stopped_early"))
                 elif results_data:
                     # Compute from results if metrics.json not found
                     total_tests = len(results_data)
@@ -2437,6 +2583,12 @@ def run_llm_test_task(
                         "latency_ms": latency_ms,
                         "cost": cost,
                         "total_tokens": total_tokens,
+                        "unanswered_tests": (
+                            unanswered_tests
+                            if unanswered_tests is not None
+                            else _unanswered_case_count(test_results)
+                        ),
+                        "stopped_early": stopped_early,
                         "test_results": test_results,
                         "results_s3_prefix": results_prefix,
                         "error": None,
@@ -2448,6 +2600,10 @@ def run_llm_test_task(
                 )
 
             except subprocess.CalledProcessError as e:
+                if _is_job_aborted(task_id):
+                    logger.info(f"LLM test {task_id} stopped by user, keeping results")
+                    _finish_stopped_run(task_id)
+                    return
                 traceback.print_exc()
                 capture_exception_to_sentry(e)
                 # Preserve any existing results from the job
@@ -2477,6 +2633,10 @@ def run_llm_test_task(
                     results=existing_results,
                 )
             except Exception as e:
+                if _is_job_aborted(task_id):
+                    logger.info(f"LLM test {task_id} stopped by user, keeping results")
+                    _finish_stopped_run(task_id)
+                    return
                 traceback.print_exc()
                 capture_exception_to_sentry(e)
                 # Preserve any existing results from the job
@@ -2507,6 +2667,10 @@ def run_llm_test_task(
                 )
 
     except Exception as e:
+        if _is_job_aborted(task_id):
+            logger.info(f"LLM test {task_id} stopped by user, keeping results")
+            _finish_stopped_run(task_id)
+            return
         traceback.print_exc()
         capture_exception_to_sentry(e)
         # Preserve any existing results from the job
@@ -2672,13 +2836,19 @@ def run_agent_test(
         # cross-org UUID must 404 identically to a missing one (existence-leak
         # parity), otherwise a leaked/guessed UUID from another org could be
         # run against this agent and its content read back via the result.
+        # Every listed uuid is checked, but a repeat is only run (and only
+        # counted against the row limit) once, matching the benchmark path.
         tests = []
+        seen_test_uuids: set = set()
         for test_uuid in request.test_uuids:
             test = get_test(test_uuid)
             if not test or test.get("org_uuid") != ctx.org_uuid:
                 raise HTTPException(
                     status_code=404, detail=f"Test {test_uuid} not found"
                 )
+            if test_uuid in seen_test_uuids:
+                continue
+            seen_test_uuids.add(test_uuid)
             tests.append(test)
         # Linking checks this, running by ID never did. It matters now that the
         # agent's interaction_type picks the request body: calibrate raises on
@@ -2713,6 +2883,8 @@ def run_agent_test(
                 detail="No tests linked to this agent. Link tests first or provide test_uuids.",
             )
 
+    enforce_max_rows_per_eval(ctx.org_uuid, len(tests))
+
     # Get S3 configuration
     try:
         s3_bucket = get_s3_output_config()
@@ -2724,17 +2896,20 @@ def run_agent_test(
 
 
 def _run_tests_for_agents(
-    agents: List[Dict[str, Any]], s3_bucket: str
+    agents: List[Dict[str, Any]], s3_bucket: str, org_uuid: str
 ) -> BatchTestRunResponse:
     """Launch all linked tests for each agent in ``agents``, one job per agent.
 
-    Agents with no linked tests or an unverified connection are skipped and
-    reported under ``skipped`` rather than aborting the whole batch. Each launched
-    agent yields one ``llm-unit-test`` job (its task_id), subject to the normal
-    per-workspace concurrency queue — over-limit jobs come back ``queued``.
+    Agents with no linked tests, an unverified connection, or more linked tests
+    than the workspace's ``max_rows_per_eval`` are skipped and reported under
+    ``skipped`` rather than aborting the whole batch — a raised error would strand
+    the jobs already launched earlier in the loop. Each launched agent yields one
+    ``llm-unit-test`` job (its task_id), subject to the normal per-workspace
+    concurrency queue — over-limit jobs come back ``queued``.
     """
     runs: List[BatchTestRun] = []
     skipped: List[BatchTestSkip] = []
+    max_rows = effective_max_rows_per_eval(org_uuid)
 
     for agent in agents:
         if _agent_connection_unverified(agent):
@@ -2754,6 +2929,16 @@ def _run_tests_for_agents(
                     agent_name=agent.get("name", ""),
                     agent_uuid=agent["uuid"],
                     reason="no_linked_tests",
+                )
+            )
+            continue
+
+        if len(tests) > max_rows:
+            skipped.append(
+                BatchTestSkip(
+                    agent_name=agent.get("name", ""),
+                    agent_uuid=agent["uuid"],
+                    reason="over_row_limit",
                 )
             )
             continue
@@ -2815,7 +3000,7 @@ def run_tests_batch(
     except ValueError as e:
         raise HTTPException(status_code=500, detail=str(e))
 
-    return _run_tests_for_agents(selected, s3_bucket)
+    return _run_tests_for_agents(selected, s3_bucket, ctx.org_uuid)
 
 
 def _load_owned_agent_test_job(task_id: str, ctx: OrgContext) -> Dict[str, Any]:
@@ -2880,6 +3065,118 @@ def update_test_run_visibility(
 
     update_agent_test_job_visibility(task_id, body.is_public, share_token)
     return VisibilityResponse(is_public=body.is_public, share_token=share_token)
+
+
+def _settle_stopped_rows(rows: List[Any]) -> tuple[int, int]:
+    """Mark every case that never started, and count the verdicts that did land.
+
+    Mid-run a case still waiting its turn and a case in flight look the same
+    (`passed` is None for both). Only once the run has ended does the first
+    reading become the true one.
+    """
+    passed = failed = 0
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        if row.get("passed") is True:
+            passed += 1
+        elif row.get("passed") is False:
+            failed += 1
+        else:
+            row["not_run"] = True
+    return passed, failed
+
+
+def _finish_stopped_run(task_id: str) -> None:
+    """Close out a stopped run: terminal status, honest counts, marked cases.
+
+    Called from the endpoint and from every worker exit on a stop. Re-asserting
+    `done` matters because a worker that passed its start guard a moment earlier
+    can write `in_progress` after the endpoint; nothing would move it on again
+    and `job_recovery` would keep restarting it on every boot.
+
+    The counts are computed here rather than read from calibrate's `metrics.json`
+    the way a finished run does, since that file is only written at the end.
+    """
+    job = get_agent_test_job(task_id)
+    results = (job or {}).get("results") or {}
+
+    rows = results.get("test_results")
+    if isinstance(rows, list):
+        results["passed"], results["failed"] = _settle_stopped_rows(rows)
+        if results.get("total_tests") is None:
+            results["total_tests"] = len(rows)
+
+    for model in results.get("model_results") or []:
+        if not isinstance(model, dict):
+            continue
+        # A model that finished keeps calibrate's own numbers. Re-counting its
+        # rows would drop any the name merge left as a placeholder, reporting a
+        # completed model as short of a test it did in fact run.
+        if model.get("success") is True:
+            continue
+        model_rows = model.get("test_results")
+        if isinstance(model_rows, list):
+            model["passed"], model["failed"] = _settle_stopped_rows(model_rows)
+            if model.get("total_tests") is None:
+                model["total_tests"] = len(model_rows)
+        # A model still reading "Running... (3 tests done)" on a run that has
+        # already ended reads as still going.
+        if model.get("success") is None:
+            model["message"] = "Stopped"
+
+    update_agent_test_job(
+        task_id, status=TaskStatus.DONE.value, results=results or None
+    )
+
+
+class AbortRunResponse(BaseModel):
+    task_id: str = Field(
+        min_length=36,
+        max_length=36,
+        description="The run that was stopped",
+        examples=[_EXAMPLE_TASK_UUID],
+    )
+    status: Literal["done"] = Field(description=_TASK_STATUS_DESCRIPTION)
+    aborted: bool = Field(description=_ABORTED_DESCRIPTION)
+
+
+@router.post(
+    "/run/{task_id}/abort",
+    response_model=AbortRunResponse,
+    summary="Stop test run",
+)
+def abort_agent_test_run(
+    task_id: str = PathParam(
+        description="The queued or running test or benchmark to stop",
+        examples=[_EXAMPLE_TASK_UUID],
+    ),
+    ctx: OrgContext = Depends(get_current_org),
+):
+    """Stop a queued or running test or benchmark, keeping the results collected so far.
+
+    Poll the run for those results: `GET /agent-tests/run/{task_id}` for a test
+    run, `GET /agent-tests/benchmark/{task_id}` for a benchmark.
+    """
+    job = _load_owned_agent_test_job(task_id, ctx)
+
+    if job["status"] not in (TaskStatus.QUEUED.value, TaskStatus.IN_PROGRESS.value):
+        raise HTTPException(
+            status_code=400,
+            detail="Can only stop a run that is queued or in progress",
+        )
+
+    # The flag first, so a worker mid-tick sees it; then the run is closed out.
+    # Whatever that worker last saved is kept — a running one sees the flag on
+    # its next poll tick, kills the CLI, saves once more and closes out again.
+    update_agent_test_job(task_id, details={"aborted": True})
+    _finish_stopped_run(task_id)
+
+    try_start_queued_agent_test_job(AGENT_TEST_JOB_TYPES)
+
+    return AbortRunResponse(
+        task_id=task_id, status=TaskStatus.DONE.value, aborted=True
+    )
 
 
 _RunProjection = make_projection_params(
@@ -2965,6 +3262,9 @@ def get_agent_test_run_status(
         total_tokens=results.get("total_tokens"),
         evaluators=evaluators_block or None,
         results=results.get("test_results"),
+        unanswered_tests=results.get("unanswered_tests"),
+        stopped_early=bool(results.get("stopped_early")),
+        aborted=bool(details.get("aborted")),
         error=bool(results.get("error")),
         is_public=bool(job.get("is_public")),
         share_token=job.get("share_token"),
@@ -2987,7 +3287,7 @@ class BenchmarkRequest(BaseModel):
         description="Model names to benchmark",
         examples=[["openai/gpt-4.1", "anthropic/claude-sonnet-4"]],
     )
-    test_uuids: Optional[List[str]] = Field(
+    test_uuids: Optional[List[TestUuid]] = Field(
         None,
         description="A subset of the agent's linked tests to benchmark. Each ID must be linked to the agent. Omit to run all linked tests",
         examples=[[EXAMPLE_TEST_UUID]],
@@ -3060,6 +3360,7 @@ class BenchmarkStatusResponse(BaseModel):
         description=LEADERBOARD_SUMMARY_DESCRIPTION,
         examples=[LEADERBOARD_SUMMARY_EXAMPLE],
     )
+    aborted: bool = Field(False, description=_ABORTED_DESCRIPTION)
     error: bool = Field(False, description="True if the run failed")
     is_public: bool = Field(False, description="Whether the run is shared publicly")
     share_token: Optional[str] = Field(
@@ -3214,6 +3515,11 @@ def run_benchmark_task(
 
         test_names = [t.get("name") for t in tests if t.get("name")]
 
+        # Stopped between being queued and being picked up: never start.
+        if _is_job_aborted(task_id):
+            logger.info(f"Benchmark task {task_id} was stopped before starting")
+            return
+
         # Initialize with pending model results (per-model test list like unit tests)
         update_agent_test_job(
             task_id,
@@ -3306,6 +3612,17 @@ def run_benchmark_task(
                     # Poll for process completion while updating intermediate results
                     prev_completed = 0
                     while process.poll() is None:
+                        if _is_job_aborted(task_id):
+                            logger.info(
+                                f"Benchmark {task_id} stopped by user, killing process group"
+                            )
+                            kill_process_group(process.pid, task_id)
+                            _update_benchmark_intermediate_results(
+                                task_id, output_dir, models, test_names, cli_models,
+                                default_inputs,
+                            )
+                            _finish_stopped_run(task_id)
+                            return
                         completed = _update_benchmark_intermediate_results(
                             task_id, output_dir, models, test_names, cli_models,
                             default_inputs,
@@ -3322,6 +3639,14 @@ def run_benchmark_task(
                         task_id, output_dir, models, test_names, cli_models,
                         default_inputs,
                     )
+
+                # Stopped in the gap between the last poll and the CLI exiting.
+                # Falling through would read a killed process's exit code as a
+                # failure and overwrite the stopped run with `failed`.
+                if _is_job_aborted(task_id):
+                    logger.info(f"Benchmark {task_id} stopped by user, keeping results")
+                    _finish_stopped_run(task_id)
+                    return
 
                 # Read stdout/stderr
                 with open(stdout_path, "r") as f:
@@ -3518,6 +3843,10 @@ def run_benchmark_task(
                 )
 
             except subprocess.CalledProcessError as e:
+                if _is_job_aborted(task_id):
+                    logger.info(f"Benchmark {task_id} stopped by user, keeping results")
+                    _finish_stopped_run(task_id)
+                    return
                 traceback.print_exc()
                 capture_exception_to_sentry(e)
                 failed_results: Dict[str, Any] = {
@@ -3538,6 +3867,10 @@ def run_benchmark_task(
                     results=failed_results,
                 )
             except Exception as e:
+                if _is_job_aborted(task_id):
+                    logger.info(f"Benchmark {task_id} stopped by user, keeping results")
+                    _finish_stopped_run(task_id)
+                    return
                 traceback.print_exc()
                 capture_exception_to_sentry(e)
                 # Preserve any existing results from the job
@@ -3564,6 +3897,10 @@ def run_benchmark_task(
                 )
 
     except Exception as e:
+        if _is_job_aborted(task_id):
+            logger.info(f"Benchmark {task_id} stopped by user, keeping results")
+            _finish_stopped_run(task_id)
+            return
         traceback.print_exc()
         capture_exception_to_sentry(e)
         # Preserve any existing results from the job
@@ -3651,6 +3988,8 @@ def run_agent_benchmark(
                 tests.append(linked_by_uuid[u])
     else:
         tests = linked_tests
+
+    enforce_max_rows_per_eval(ctx.org_uuid, len(tests) * len(request.models))
 
     # Get S3 configuration
     try:
@@ -3787,6 +4126,7 @@ def get_benchmark_status(
         evaluators=evaluators_block or None,
         model_results=results.get("model_results"),
         leaderboard_summary=results.get("leaderboard_summary"),
+        aborted=bool(details.get("aborted")),
         error=bool(results.get("error")),
         is_public=bool(job.get("is_public")),
         share_token=job.get("share_token"),
@@ -3797,7 +4137,7 @@ def get_benchmark_status(
             if isinstance(model, dict) and isinstance(
                 model.get("test_results"), list
             ):
-                # `passed is None` is pending, not a failure; errored is False.
+                # `passed is None` is pending, not a failure; unanswered is False.
                 model["test_results"] = [
                     r for r in model["test_results"] if r.get("passed") is False
                 ]

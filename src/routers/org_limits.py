@@ -73,14 +73,31 @@ class OrgLimitsCreateResponse(BaseModel):
     message: str = Field(description="Status message")
 
 
+def effective_max_rows_per_eval(org_uuid: str) -> int:
+    """Workspace cap on rows per eval run, falling back to the server default."""
+    limits = get_org_limits(org_uuid)
+    if limits and "max_rows_per_eval" in limits.get("limits", {}):
+        return limits["limits"]["max_rows_per_eval"]
+    return DEFAULT_MAX_ROWS_PER_EVAL
+
+
+def enforce_max_rows_per_eval(org_uuid: str, rows: int) -> None:
+    """Reject a run that would process more rows than the workspace allows."""
+    cap = effective_max_rows_per_eval(org_uuid)
+    if rows > cap:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"This run would process {rows} rows, above this workspace's "
+                f"limit of {cap}. Run fewer rows, or ask an admin to raise the limit."
+            ),
+        )
+
+
 @router.get("/me/max-rows-per-eval", summary="Get own max rows per eval")
 def get_max_rows_per_eval(ctx: OrgContext = Depends(get_current_org)):
     """Get the max rows per eval"""
-    # Falls back to DEFAULT_MAX_ROWS_PER_EVAL when no workspace-specific limit is set.
-    limits = get_org_limits(ctx.org_uuid)
-    if limits and "max_rows_per_eval" in limits.get("limits", {}):
-        return {"max_rows_per_eval": limits["limits"]["max_rows_per_eval"]}
-    return {"max_rows_per_eval": DEFAULT_MAX_ROWS_PER_EVAL}
+    return {"max_rows_per_eval": effective_max_rows_per_eval(ctx.org_uuid)}
 
 
 @router.post("", response_model=OrgLimitsCreateResponse, summary="Create workspace limits")

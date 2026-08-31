@@ -27,6 +27,7 @@ from dataset_utils import (
     resolve_eval_rerun_inputs_from_job_details,
 )
 from auth_utils import get_current_org, OrgContext
+from routers.org_limits import enforce_max_rows_per_eval
 from llm_judge import build_evaluator_cli_payload, refresh_evaluators_to_live
 from utils import (
     job_slot,
@@ -703,6 +704,8 @@ def evaluate_stt(
     request.audio_paths = audio_paths
     request.texts = texts
 
+    enforce_max_rows_per_eval(ctx.org_uuid, len(texts))
+
     try:
         s3_bucket = get_s3_output_config()
     except ValueError as e:
@@ -795,6 +798,8 @@ def retry_stt_evaluation(
         org_uuid=ctx.org_uuid,
         expected_type="stt",
     )
+
+    enforce_max_rows_per_eval(ctx.org_uuid, len(resolved.texts))
 
     rerun_details = {
         "audio_paths": resolved.audio_paths or [],

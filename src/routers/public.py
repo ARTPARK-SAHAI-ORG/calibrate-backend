@@ -148,6 +148,13 @@ class PublicTTSResponse(BaseModel):
     error: Optional[str] = Field(None, description="Failure message")
 
 
+_ABORTED_DESCRIPTION = (
+    "Whether a user stopped this run before it finished. The results collected "
+    "up to that point are kept, and test cases that never ran are counted "
+    "neither as passed nor as failed"
+)
+
+
 class PublicTestRunResponse(BaseModel):
     task_id: str = Field(
         min_length=36,
@@ -185,6 +192,15 @@ class PublicTestRunResponse(BaseModel):
         None,
         description="Aggregated token usage (`{mean, min, max, count}`)",
     )
+    unanswered_tests: Optional[int] = Field(
+        None,
+        description="Number of test cases that produced no answer because the agent or the judge could not be reached, which makes the pass rate an unfair measure of the agent",
+    )
+    stopped_early: bool = Field(
+        False,
+        description="Whether the run stopped before starting every test case, after too many failed in a row",
+    )
+    aborted: bool = Field(False, description=_ABORTED_DESCRIPTION)
     error: bool = Field(False, description="`true` if the run failed")
 
 
@@ -210,6 +226,7 @@ class PublicBenchmarkResponse(BaseModel):
         description=LEADERBOARD_SUMMARY_DESCRIPTION,
         examples=[LEADERBOARD_SUMMARY_EXAMPLE],
     )
+    aborted: bool = Field(False, description=_ABORTED_DESCRIPTION)
     error: bool = Field(False, description="`true` if the run failed")
 
 
@@ -617,6 +634,9 @@ def get_public_test_run(
         latency_ms=results.get("latency_ms"),
         cost=results.get("cost"),
         total_tokens=results.get("total_tokens"),
+        unanswered_tests=results.get("unanswered_tests"),
+        stopped_early=bool(results.get("stopped_early")),
+        aborted=bool(details.get("aborted")),
         error=bool(results.get("error")),
     )
 
@@ -652,6 +672,7 @@ def get_public_benchmark(
         evaluators=evaluators_block or None,
         model_results=results.get("model_results"),
         leaderboard_summary=results.get("leaderboard_summary"),
+        aborted=bool(details.get("aborted")),
         error=bool(results.get("error")),
     )
 

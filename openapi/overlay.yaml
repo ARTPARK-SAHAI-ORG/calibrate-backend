@@ -39,6 +39,25 @@ actions:
           name resolves to at most one agent; unknown names are returned under
           not_found. Use this before run-agent-tests when you have names instead
           of UUIDs. Does not create or modify agents.
+  - target: $.paths['/agent-tests/bulk-unlink'].post
+    update:
+      x-speakeasy-group: agent_tests
+      x-speakeasy-name-override: bulk_unlink
+      x-speakeasy-mcp:
+        name: bulk-unlink-agent-tests
+        title: Unlink tests from an agent
+        scopes: [write]
+        readOnlyHint: false
+        destructiveHint: true
+        idempotentHint: true
+        openWorldHint: true
+        description: |
+          Remove one or more tests from an agent in a single call. The tests
+          themselves are kept and stay available to other agents; only the links
+          to this agent go. Tests that were not linked are skipped, so
+          deleted_count can be lower than the number of ids sent. Fails with 404
+          when the agent is not in the caller's org and 400 when test_uuids is
+          empty.
   - target: $.paths['/agent-tests/agent/{agent_uuid}/run'].post
     update:
       x-speakeasy-group: agent_tests
