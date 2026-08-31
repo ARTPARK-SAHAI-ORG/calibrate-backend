@@ -2,6 +2,7 @@ import asyncio
 import json
 import logging
 import os
+import signal
 from datetime import datetime
 from typing import Any, Dict, Optional
 
@@ -12,6 +13,10 @@ from utils import env_bool, get_calibrate_agent_cli
 
 
 logger = logging.getLogger(__name__)
+
+# Grace period for the killed probe to be reaped. Only a safety net: with the
+# group killed and the pipes closed, wait() resolves immediately.
+_REAP_TIMEOUT_SECONDS = 5
 
 # Providers reported healthy during integration testing: the union of the STT +
 # TTS integrations (docs.calibrate.artpark.ai/docs/integrations), minus groq —
@@ -193,12 +198,57 @@ class ProviderStatusMonitor:
             stdout_bytes, stderr_bytes, _ = await asyncio.gather(
                 stdout_task, stderr_task, wait_task
             )
-        except Exception:
+        finally:
+            # The lifespan cancels this check on shutdown with a CancelledError
+            # (a BaseException), so `except Exception` would let the readers and
+            # wait() outlive the loop. On the success path all three tasks are
+            # done and cancel() is a no-op, so this drain covers every exit.
             for task in (stdout_task, stderr_task, wait_task):
                 task.cancel()
-            raise
+            await asyncio.gather(
+                stdout_task, stderr_task, wait_task, return_exceptions=True
+            )
 
         return stdout_bytes, stderr_bytes
+
+    async def _reap_subprocess(self, process: asyncio.subprocess.Process) -> None:
+        """Kill the probe's whole process tree, close its pipes, then reap it.
+
+        Motivation: `uv run` forks the CLI as a grandchild that inherits
+        stdout/stderr, so killing only the direct child would leave the
+        grandchild holding the pipes open and the CLI calling provider APIs with
+        live keys. killpg takes both down at once.
+
+        Close the transport before wait() to disconnect the pipes, not after.
+        `wait()` returns at once for a child already reaped, but a waiter
+        registered while one is still alive only resolves after every pipe
+        disconnects. That is what the `wait()` below registers whenever the kill
+        did not land (both errors are swallowed), so closing lets the reap
+        resolve without timing out. This synchronous close() runs even if the
+        task running this check is cancelled, preventing
+        `BaseSubprocessTransport.__del__` from raising a
+        RuntimeError('Event loop is closed').
+        """
+        if process.returncode is None:
+            try:
+                # pid == pgid because the spawn passes start_new_session=True.
+                # SIGKILL directly: a status probe has no results to flush, so
+                # no need for a SIGTERM grace period.
+                os.killpg(process.pid, signal.SIGKILL)
+            except (ProcessLookupError, PermissionError):
+                pass
+
+        # Private because asyncio.subprocess.Process exposes no close(). Already
+        # a no-op on the happy path, where the protocol closes the transport
+        # itself once every pipe has hit EOF and the process has exited.
+        transport = getattr(process, "_transport", None)
+        if transport is not None:
+            transport.close()
+
+        try:
+            await asyncio.wait_for(process.wait(), timeout=_REAP_TIMEOUT_SECONDS)
+        except asyncio.TimeoutError:
+            logger.warning("Provider status subprocess did not exit after SIGKILL")
 
     async def run_check(self) -> Dict[str, Any]:
         # Integration testing: skip the CLI probe and report every provider
@@ -213,24 +263,28 @@ class ProviderStatusMonitor:
                 "status",
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
+                # Give it its process group, so we can killpg it and not the
+                # server (matching behavior of other subprocess spawns).
+                start_new_session=True,
             )
-            try:
-                stdout_bytes, stderr_bytes = await asyncio.wait_for(
-                    self._collect_process_output(process),
-                    timeout=self.check_timeout_seconds,
-                )
-            except asyncio.TimeoutError:
-                process.kill()
-                await process.wait()
-                raise HTTPException(
-                    status_code=504,
-                    detail="Provider status check timed out",
-                )
         except FileNotFoundError:
             raise HTTPException(
                 status_code=500,
                 detail="calibrate-agent CLI not found",
             )
+
+        try:
+            stdout_bytes, stderr_bytes = await asyncio.wait_for(
+                self._collect_process_output(process),
+                timeout=self.check_timeout_seconds,
+            )
+        except asyncio.TimeoutError:
+            raise HTTPException(
+                status_code=504,
+                detail="Provider status check timed out",
+            )
+        finally:
+            await self._reap_subprocess(process)
 
         stdout = stdout_bytes.decode()
         stderr = stderr_bytes.decode()
