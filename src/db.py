@@ -1204,6 +1204,13 @@ def init_db():
         except sqlite3.OperationalError:
             pass
 
+        # User-chosen run name. NULL means the run falls back to its position
+        # ("Run 3"), which is what every run read as before this column existed.
+        try:
+            cursor.execute("ALTER TABLE agent_test_jobs ADD COLUMN name TEXT")
+        except sqlite3.OperationalError:
+            pass
+
         # Add is_public and share_token columns for public sharing feature
         for table in ("jobs", "agent_test_jobs", "simulation_jobs"):
             try:
@@ -7289,7 +7296,7 @@ def get_all_agent_test_jobs(job_type: Optional[str] = None) -> List[Dict[str, An
 # read as `has_tool_call_test = NULL` (→ False), same legacy-empty behavior
 # already accepted for `evaluators_by_test_id`.
 _AGENT_TEST_JOB_SUMMARY_COLUMNS = """
-        atj.uuid, atj.type, atj.status, atj.agent_id,
+        atj.uuid, atj.type, atj.status, atj.agent_id, atj.name,
         atj.is_public, atj.share_token, atj.created_at, atj.updated_at, atj.id,
         json_extract(atj.results, '$.total_tests') AS total_tests,
         json_extract(atj.results, '$.passed') AS passed,
@@ -7343,6 +7350,7 @@ def _row_to_agent_test_job_summary(row: sqlite3.Row) -> Dict[str, Any]:
         "uuid": row["uuid"],
         "type": row["type"],
         "status": row["status"],
+        "name": row.get("name"),
         "agent_id": row.get("agent_id"),
         "agent_name": row.get("agent_name"),
         "is_public": row.get("is_public"),
@@ -7573,6 +7581,42 @@ def update_agent_test_job_visibility(
         )
         conn.commit()
         return cursor.rowcount > 0
+
+
+def set_agent_test_job_name(job_uuid: str, name: Optional[str]) -> bool:
+    """Set (or clear, with None) an agent test job's name. Returns True if found."""
+    with get_db_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            "UPDATE agent_test_jobs SET name = ?, updated_at = CURRENT_TIMESTAMP WHERE uuid = ?",
+            (name, job_uuid),
+        )
+        conn.commit()
+        return cursor.rowcount > 0
+
+
+def get_agent_test_job_position(job_uuid: str) -> int:
+    """How many of the agent's jobs of this job's type were created at or before
+    it, counting from 1 — the N a run without a stored name displays as ("Run N").
+
+    Ordered by `(created_at, id)`, the same order the run-list endpoints number
+    in, so a job resolves to the same number whether it is read on its own or in
+    a list. Returns 0 when the job is gone.
+    """
+    with get_db_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            """
+            SELECT COUNT(*) FROM agent_test_jobs prior
+            JOIN agent_test_jobs me ON me.uuid = ?
+            WHERE prior.agent_id = me.agent_id
+              AND prior.type = me.type
+              AND (prior.created_at < me.created_at
+                   OR (prior.created_at = me.created_at AND prior.id <= me.id))
+            """,
+            (job_uuid,),
+        )
+        return cursor.fetchone()[0]
 
 
 def get_agent_test_job_by_share_token(

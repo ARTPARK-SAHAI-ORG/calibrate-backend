@@ -65,6 +65,8 @@ from routers.agent_tests import (
     _build_evaluators_block_for_test_run,
     LEADERBOARD_SUMMARY_DESCRIPTION,
     LEADERBOARD_SUMMARY_EXAMPLE,
+    _RUN_NAME_DESCRIPTION as RUN_NAME_DESCRIPTION,
+    run_display_name,
 )
 from routers.annotation_tasks import (
     _build_evaluators_block_for_eval_job,
@@ -162,6 +164,7 @@ class PublicTestRunResponse(BaseModel):
         description="LLM test run job ID",
         examples=[_EXAMPLE_TASK_UUID],
     )
+    name: str = Field(description=RUN_NAME_DESCRIPTION)
     status: TaskStatus = Field(description="Run status")
     total_tests: Optional[int] = Field(None, description="Total test cases in the run")
     passed: Optional[int] = Field(None, description="Test cases that passed")
@@ -211,6 +214,7 @@ class PublicBenchmarkResponse(BaseModel):
         description="LLM benchmark job ID",
         examples=[_EXAMPLE_TASK_UUID],
     )
+    name: str = Field(description=RUN_NAME_DESCRIPTION)
     status: TaskStatus = Field(description="Run status")
     # Same as PublicTestRunResponse.evaluators — shared by every model's
     # test_results inside model_results[] (all models run the same suite).
@@ -625,6 +629,7 @@ def get_public_test_run(
 
     return PublicTestRunResponse(
         task_id=task_id,
+        name=run_display_name(job),
         status=status,
         total_tests=results.get("total_tests"),
         passed=results.get("passed"),
@@ -668,6 +673,7 @@ def get_public_benchmark(
 
     return PublicBenchmarkResponse(
         task_id=task_id,
+        name=run_display_name(job),
         status=status,
         evaluators=evaluators_block or None,
         model_results=results.get("model_results"),

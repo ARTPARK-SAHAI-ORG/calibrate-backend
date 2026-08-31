@@ -218,6 +218,11 @@ def test_public_test_run_valid_token(client):
     db_mod.update_agent_test_job_visibility(job_uuid, True, token)
     resp = client.get(f"/public/test-run/{token}")
     assert resp.status_code == 200
+    assert resp.json()["name"] == "Run 1"
+
+    db_mod.set_agent_test_job_name(job_uuid, "Nightly regression")
+    shared = client.get(f"/public/test-run/{token}")
+    assert shared.json()["name"] == "Nightly regression"
 
 
 def test_public_benchmark_valid_token(client):
@@ -236,6 +241,11 @@ def test_public_benchmark_valid_token(client):
     db_mod.update_agent_test_job_visibility(job_uuid, True, token)
     resp = client.get(f"/public/benchmark/{token}")
     assert resp.status_code == 200
+    assert resp.json()["name"] == "Benchmark 1"
+
+    db_mod.set_agent_test_job_name(job_uuid, "Model bake-off")
+    shared = client.get(f"/public/benchmark/{token}")
+    assert shared.json()["name"] == "Model bake-off"
 
 
 def test_public_simulation_run_valid_token(client):
