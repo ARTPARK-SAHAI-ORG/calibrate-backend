@@ -4120,9 +4120,14 @@ class BenchmarkImportResponse(BaseModel):
 
 
 def _keep_benchmark_run_file(name: str) -> bool:
-    """Only the files the benchmark page needs. The rest of a run folder is logs."""
+    """Only the files the benchmark page needs. The rest of a run folder is logs.
+
+    A first-pass run puts its leaderboard in a `leaderboard` folder and a merged
+    re-judge writes it beside the model folders, so the name is matched rather
+    than the folder it sits in.
+    """
     return name.endswith(_BENCHMARK_IMPORT_FILES) or (
-        name.endswith(".csv") and "leaderboard/" in name
+        name.endswith(".csv") and "leaderboard" in Path(name).name
     )
 
 
@@ -4204,7 +4209,12 @@ def _benchmark_model_result(
     test_results = _merge_test_results_by_test_names(test_names, test_results)
 
     if metrics_data:
-        total = metrics_data.get("total", 0)
+        # A merged re-judge writes `turns` where a first-pass run writes `total`.
+        total = metrics_data.get("total")
+        if total is None:
+            total = metrics_data.get("turns")
+        if total is None:
+            total = len(rows)
         passed = metrics_data.get("passed", 0)
         return {
             "model": model,
@@ -4312,8 +4322,11 @@ def import_agent_benchmark(
 
         tests = _resolve_benchmark_tests(rows_by_model, linked_tests)
         unresolved_evaluators = _unresolved_evaluator_ids(rows_by_model)
+        # A first-pass run puts the leaderboard in its own folder; a merged
+        # re-judge writes it beside the model folders.
+        leaderboard_dir = run_root / "leaderboard"
         leaderboard_summary = _read_leaderboard_csv(
-            run_root / "leaderboard", models=models
+            leaderboard_dir if leaderboard_dir.is_dir() else run_root, models=models
         )
 
     test_names, details = _agent_test_job_details(agent, tests, s3_bucket)

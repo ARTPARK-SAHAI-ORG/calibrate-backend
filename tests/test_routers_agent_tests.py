@@ -3927,3 +3927,52 @@ def test_benchmark_import_rejects_another_workspaces_agent(client):
     # Same answer the other per-agent routes give: the agent is never touched,
     # and the caller is told which workspace holds it rather than nothing.
     assert resp.status_code == 403
+
+
+def test_benchmark_import_reads_a_merged_rejudge(client):
+    """A merged re-judge counts `turns` instead of `total` and writes its
+    leaderboard beside the model folders rather than inside one."""
+    import io
+    import json
+    import tarfile
+
+    h = _signup(client)["headers"]
+    names = ["case-a", "case-b"]
+    agent = _agent_with_named_tests(client, h, names)
+
+    buf = io.BytesIO()
+    with tarfile.open(fileobj=buf, mode="w") as tar:
+
+        def add(name, payload):
+            data = payload.encode("utf-8")
+            info = tarfile.TarInfo(f"merged/{name}")
+            info.size = len(data)
+            tar.addfile(info, io.BytesIO(data))
+
+        rows = [
+            {
+                "test_case_id": case_id,
+                "test_case": {"id": case_id, "history": []},
+                "output": {"response": "hi", "tool_calls": []},
+                "metrics": {"passed": True, "reasoning": "r", "judge_results": None},
+            }
+            for case_id in names
+        ]
+        add("openai__gpt-4.1/results.json", json.dumps(rows))
+        add(
+            "openai__gpt-4.1/metrics.json",
+            json.dumps({"model": "openai__gpt-4.1", "turns": 2, "passed": 2}),
+        )
+        add("leaderboard.csv", "model,passed,total\nopenai__gpt-4.1,2,2\n")
+
+    resp = _post_benchmark_import(client, h, agent, buf.getvalue())
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["models"] == ["openai/gpt-4.1"]
+
+    detail = client.get(f"/agent-tests/benchmark/{body['task_id']}", headers=h).json()
+    model = detail["model_results"][0]
+    assert model["total_tests"] == 2
+    assert model["passed"] == 2
+    assert model["failed"] == 0
+    assert [r["model"] for r in detail["leaderboard_summary"]] == ["openai/gpt-4.1"]
