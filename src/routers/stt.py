@@ -1,7 +1,5 @@
 import os
 import csv
-import tarfile
-import shutil
 import json
 import subprocess
 import tempfile
@@ -67,6 +65,9 @@ from utils import (
     upload_directory_tree_to_s3,
     upload_file_to_s3,
     upload_top_level_files_to_s3,
+    extract_uploaded_archive,
+    locate_run_root,
+    UploadTooLarge,
 )
 
 # Job types that share the same queue
@@ -818,79 +819,11 @@ class STTImportResponse(BaseModel):
     row_count: int = Field(description="Rows stored for each provider")
 
 
-def _extract_run_archive(upload: UploadFile, dest: Path) -> None:
-    """Unpack a calibrate run archive's result files into `dest`.
-
-    Members are matched by name and rebuilt under `dest` rather than handed to
-    `extractall`, so a crafted archive cannot write outside it.
-    """
-    archive_path = dest / "archive.tar"
-    written = 0
-    with open(archive_path, "wb") as f:
-        while chunk := upload.file.read(1024 * 1024):
-            written += len(chunk)
-            if written > _MAX_IMPORT_ARCHIVE_BYTES:
-                raise HTTPException(
-                    status_code=413,
-                    detail=(
-                        f"Archive is larger than "
-                        f"{_MAX_IMPORT_ARCHIVE_BYTES // (1024 * 1024)} MB. Leave the "
-                        f"`logs` files out, they are not read."
-                    ),
-                )
-            f.write(chunk)
-
-    extracted = dest / "run"
-    try:
-        with tarfile.open(archive_path) as tar:
-            for member in tar.getmembers():
-                if not member.isfile():
-                    continue
-                name = member.name
-                if not (
-                    name.endswith(_IMPORT_RESULT_FILES)
-                    or (name.endswith(".xlsx") and "leaderboard/" in name)
-                ):
-                    continue
-                relative = Path(name)
-                if relative.is_absolute() or ".." in relative.parts:
-                    continue
-                source = tar.extractfile(member)
-                if source is None:
-                    continue
-                target = extracted / relative
-                target.parent.mkdir(parents=True, exist_ok=True)
-                with open(target, "wb") as out:
-                    shutil.copyfileobj(source, out)
-    except tarfile.TarError as exc:
-        raise HTTPException(
-            status_code=400, detail=f"Could not read the archive: {exc}"
-        )
-    archive_path.unlink(missing_ok=True)
-
-
-def _locate_run_root(extracted: Path) -> tuple[Path, List[str]]:
-    """Find the folder holding the provider folders, and name them.
-
-    A provider folder is one holding a `results.csv`, which is what separates
-    them from the `leaderboard` folder sitting alongside.
-    """
-    result_files = sorted(extracted.rglob("results.csv"))
-    if not result_files:
-        raise HTTPException(
-            status_code=400,
-            detail="No `results.csv` in the archive. Send the calibrate output folder.",
-        )
-    roots = {path.parent.parent for path in result_files}
-    if len(roots) > 1:
-        raise HTTPException(
-            status_code=400,
-            detail=(
-                "The archive holds provider folders under more than one run folder. "
-                "Send one run at a time."
-            ),
-        )
-    return roots.pop(), [path.parent.name for path in result_files]
+def _keep_stt_run_file(name: str) -> bool:
+    """Only the files the run page needs. The rest of a run folder is logs."""
+    return name.endswith(_IMPORT_RESULT_FILES) or (
+        name.endswith(".xlsx") and "leaderboard/" in name
+    )
 
 
 def _check_rows_match_dataset(
@@ -977,8 +910,26 @@ def import_stt_evaluation(
 
     with tempfile.TemporaryDirectory() as temp_dir:
         temp_path = Path(temp_dir)
-        _extract_run_archive(archive, temp_path)
-        run_root, providers = _locate_run_root(temp_path / "run")
+        try:
+            extracted = extract_uploaded_archive(
+                archive.file,
+                temp_path,
+                keep=_keep_stt_run_file,
+                max_bytes=_MAX_IMPORT_ARCHIVE_BYTES,
+            )
+        except UploadTooLarge as exc:
+            raise HTTPException(
+                status_code=413,
+                detail=f"{exc} Leave the `logs` files out, they are not read.",
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc))
+        try:
+            run_root, providers = locate_run_root(
+                extracted, "results.csv", what="provider"
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc))
 
         outputs = [
             _read_provider_dir(provider, run_root / provider, {})

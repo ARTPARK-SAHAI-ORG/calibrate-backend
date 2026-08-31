@@ -2,6 +2,7 @@ import mimetypes
 import os
 import signal
 import shutil
+import tarfile
 import logging
 import threading
 import time
@@ -11,7 +12,17 @@ from datetime import datetime, timedelta
 from enum import Enum
 from functools import lru_cache
 from pathlib import Path
-from typing import Annotated, List, Literal, Optional, Dict, Any, Union, Tuple
+from typing import (
+    Annotated,
+    Any,
+    Callable,
+    Dict,
+    List,
+    Literal,
+    Optional,
+    Tuple,
+    Union,
+)
 from urllib.parse import quote
 
 import boto3
@@ -731,6 +742,83 @@ def upload_directory_tree_to_s3(
             relative_path = local_file_path.relative_to(local_root)
             s3_key = f"{prefix}/{relative_path.as_posix()}"
             upload_file_to_s3(s3_client, local_file_path, bucket, s3_key)
+
+
+class UploadTooLarge(ValueError):
+    """An uploaded archive ran past the byte budget it was read with."""
+
+
+def extract_uploaded_archive(
+    fileobj,
+    dest: Path,
+    *,
+    keep: Callable[[str], bool],
+    max_bytes: int,
+) -> Path:
+    """Unpack the files `keep` accepts out of an uploaded tar, into `dest/run`.
+
+    Members are matched by name and rebuilt one at a time rather than handed to
+    ``extractall``, so a crafted archive cannot write outside `dest`. Raises
+    :class:`UploadTooLarge` past `max_bytes` and ``ValueError`` on an archive
+    that will not open. Returns the folder the files were written into.
+    """
+    archive_path = dest / "upload.tar"
+    written = 0
+    with open(archive_path, "wb") as out:
+        while chunk := fileobj.read(1024 * 1024):
+            written += len(chunk)
+            if written > max_bytes:
+                raise UploadTooLarge(
+                    f"Archive is larger than {max_bytes // (1024 * 1024)} MB."
+                )
+            out.write(chunk)
+
+    extracted = dest / "run"
+    try:
+        with tarfile.open(archive_path) as tar:
+            for member in tar.getmembers():
+                if not member.isfile() or not keep(member.name):
+                    continue
+                relative = Path(member.name)
+                if relative.is_absolute() or ".." in relative.parts:
+                    continue
+                source = tar.extractfile(member)
+                if source is None:
+                    continue
+                target = extracted / relative
+                target.parent.mkdir(parents=True, exist_ok=True)
+                with open(target, "wb") as handle:
+                    shutil.copyfileobj(source, handle)
+    except tarfile.TarError as exc:
+        raise ValueError(f"Could not read the archive: {exc}")
+    finally:
+        archive_path.unlink(missing_ok=True)
+    return extracted
+
+
+def locate_run_root(extracted: Path, marker: str, *, what: str) -> Tuple[Path, List[str]]:
+    """Find the folder holding a calibrate run's result folders, and name them.
+
+    A result folder is one holding `marker`, which is what separates it from the
+    `leaderboard` folder sitting alongside. Only the shallowest matches count:
+    calibrate leaves working folders whose own nested runs would otherwise read
+    as extra results. Raises ``ValueError`` when there are none, or when they
+    sit under more than one run.
+    """
+    matches = sorted(extracted.rglob(marker))
+    if not matches:
+        raise ValueError(
+            f"No `{marker}` in the archive. Send the calibrate output folder."
+        )
+    shallowest = min(len(match.parts) for match in matches)
+    matches = [match for match in matches if len(match.parts) == shallowest]
+    roots = {match.parent.parent for match in matches}
+    if len(roots) > 1:
+        raise ValueError(
+            f"The archive holds {what} folders under more than one run folder. "
+            f"Send one run at a time."
+        )
+    return roots.pop(), [match.parent.name for match in matches]
 
 
 def list_object_keys(s3_client, bucket: str, prefix: str = "") -> List[str]:
