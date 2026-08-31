@@ -3715,7 +3715,9 @@ def test_renaming_a_run_does_not_move_it_up_the_workspace_list(client):
 # ---------------------------------------------------------------------------
 
 
-def _benchmark_archive(models, case_ids, *, root="output", judge_evaluator_id=None):
+def _benchmark_archive(
+    models, case_ids, *, root="output", judge_evaluator_id=None, judge_name="Correctness"
+):
     """Tar a calibrate benchmark output folder, one folder per model."""
     import io
     import json
@@ -3736,7 +3738,7 @@ def _benchmark_archive(models, case_ids, *, root="output", judge_evaluator_id=No
             for case_id in case_ids:
                 judge = (
                     {
-                        "Correctness": {
+                        judge_name: {
                             "reasoning": "ok",
                             "match": case_id in passed_ids,
                             "evaluator_id": judge_evaluator_id,
@@ -4007,3 +4009,168 @@ def test_benchmark_import_drops_leaderboard_rows_for_models_not_sent(client):
         f"/agent-tests/benchmark/{resp.json()['task_id']}", headers=h
     ).json()
     assert [r["model"] for r in detail["leaderboard_summary"]] == ["openai/gpt-4.1"]
+
+
+def test_benchmark_import_resolves_evaluators_recreated_since_the_run(client):
+    """A run carried out elsewhere echoes the evaluator id it ran under. Once the
+    evaluator has been recreated here that id is gone, and the name is the only
+    handle back to the rubric."""
+    h = _signup(client)["headers"]
+    names = ["case-a"]
+    evaluators = client.get("/evaluators", headers=h).json()["items"]
+    llm_ev = next(e for e in evaluators if e.get("evaluator_type") == "llm")
+
+    agent = _create_agent(client, h)["uuid"]
+    test = client.post(
+        "/tests",
+        headers=h,
+        json={
+            "name": "case-a",
+            "type": "response",
+            "config": {"history": [], "evaluation": {"type": "response"}},
+            "evaluators": [{"evaluator_uuid": llm_ev["uuid"]}],
+        },
+    ).json()
+    client.post(
+        "/agent-tests",
+        json={"agent_uuid": agent, "test_uuids": [test["uuid"]]},
+        headers=h,
+    )
+
+    archive = _benchmark_archive(
+        {"openai/gpt-4.1": {"case-a"}},
+        names,
+        judge_evaluator_id=NONEXISTENT_UUID,
+        judge_name=llm_ev["name"],
+    )
+    resp = _post_benchmark_import(client, h, agent, archive)
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["unresolved_evaluators"] == [NONEXISTENT_UUID]
+
+    detail = client.get(
+        f"/agent-tests/benchmark/{resp.json()['task_id']}", headers=h
+    ).json()
+    row = detail["model_results"][0]["test_results"][0]
+    # The stale id is replaced by this workspace's evaluator, so the run shows a
+    # name and a rubric rather than an unnamed verdict.
+    assert [v["evaluator_uuid"] for v in row["judge_results"]] == [llm_ev["uuid"]]
+    assert row["judge_results"][0]["value_name"] is not None
+    assert any(e["uuid"] == llm_ev["uuid"] for e in detail["evaluators"])
+
+
+def test_benchmark_import_counts_rows_when_a_model_has_no_metrics(client):
+    import io
+    import json
+    import tarfile
+
+    h = _signup(client)["headers"]
+    names = ["case-a", "case-b"]
+    agent = _agent_with_named_tests(client, h, names)
+    base = _benchmark_archive({"openai/gpt-4.1": {"case-a"}}, names)
+
+    stripped = io.BytesIO()
+    with tarfile.open(fileobj=stripped, mode="w") as out:
+        with tarfile.open(fileobj=io.BytesIO(base)) as src:
+            for member in src.getmembers():
+                if member.name.endswith("metrics.json"):
+                    continue
+                out.addfile(member, src.extractfile(member))
+
+    resp = _post_benchmark_import(client, h, agent, stripped.getvalue())
+    assert resp.status_code == 200, resp.text
+    model = client.get(
+        f"/agent-tests/benchmark/{resp.json()['task_id']}", headers=h
+    ).json()["model_results"][0]
+    assert model["total_tests"] == 2
+    assert model["passed"] == 1
+    assert model["failed"] == 1
+
+
+def test_benchmark_import_rejects_an_unreadable_archive(client):
+    h = _signup(client)["headers"]
+    agent = _agent_with_named_tests(client, h, ["case-a"])
+
+    resp = _post_benchmark_import(client, h, agent, b"this is not a tar")
+    assert resp.status_code == 400
+    assert "Could not read the archive" in resp.json()["detail"]
+
+
+def test_benchmark_import_rejects_an_oversized_archive(client, monkeypatch):
+    import routers.agent_tests as mod
+
+    h = _signup(client)["headers"]
+    agent = _agent_with_named_tests(client, h, ["case-a"])
+    monkeypatch.setattr(mod, "_MAX_BENCHMARK_ARCHIVE_BYTES", 16)
+
+    archive = _benchmark_archive({"openai/gpt-4.1": {"case-a"}}, ["case-a"])
+    resp = _post_benchmark_import(client, h, agent, archive)
+    assert resp.status_code == 413
+    assert "larger than" in resp.json()["detail"]
+
+
+def test_benchmark_import_rejects_a_model_folder_with_no_rows(client):
+    import io
+    import json
+    import tarfile
+
+    h = _signup(client)["headers"]
+    agent = _agent_with_named_tests(client, h, ["case-a"])
+
+    buf = io.BytesIO()
+    with tarfile.open(fileobj=buf, mode="w") as tar:
+        for name, payload in (
+            ("output/openai__gpt-4.1/results.json", json.dumps([])),
+            ("output/openai__gpt-4.1/metrics.json", json.dumps({"total": 0})),
+        ):
+            data = payload.encode()
+            info = tarfile.TarInfo(name)
+            info.size = len(data)
+            tar.addfile(info, io.BytesIO(data))
+
+    resp = _post_benchmark_import(client, h, agent, buf.getvalue())
+    assert resp.status_code == 400
+    assert "No rows could be read for: openai/gpt-4.1" in resp.json()["detail"]
+
+
+def test_benchmark_import_needs_the_artifact_bucket(client, monkeypatch):
+    h = _signup(client)["headers"]
+    agent = _agent_with_named_tests(client, h, ["case-a"])
+    monkeypatch.delenv("S3_OUTPUT_BUCKET", raising=False)
+
+    archive = _benchmark_archive({"openai/gpt-4.1": {"case-a"}}, ["case-a"])
+    resp = _post_benchmark_import(client, h, agent, archive)
+    assert resp.status_code == 500
+
+
+def test_benchmark_import_counts_rows_when_metrics_omits_the_total(client):
+    """A metrics file that names neither `total` nor `turns` still has to give
+    the model a row count."""
+    import io
+    import json
+    import tarfile
+
+    h = _signup(client)["headers"]
+    names = ["case-a", "case-b"]
+    agent = _agent_with_named_tests(client, h, names)
+    base = _benchmark_archive({"openai/gpt-4.1": {"case-a"}}, names)
+
+    rebuilt = io.BytesIO()
+    with tarfile.open(fileobj=rebuilt, mode="w") as out:
+        with tarfile.open(fileobj=io.BytesIO(base)) as src:
+            for member in src.getmembers():
+                if member.name.endswith("metrics.json"):
+                    continue
+                out.addfile(member, src.extractfile(member))
+        data = json.dumps({"passed": 1}).encode()
+        info = tarfile.TarInfo("output/openai__gpt-4.1/metrics.json")
+        info.size = len(data)
+        out.addfile(info, io.BytesIO(data))
+
+    resp = _post_benchmark_import(client, h, agent, rebuilt.getvalue())
+    assert resp.status_code == 200, resp.text
+    model = client.get(
+        f"/agent-tests/benchmark/{resp.json()['task_id']}", headers=h
+    ).json()["model_results"][0]
+    assert model["total_tests"] == 2
+    assert model["passed"] == 1
+    assert model["failed"] == 1

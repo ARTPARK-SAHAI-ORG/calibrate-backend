@@ -426,3 +426,94 @@ def test_provider_status_run_check_short_circuits_under_flag():
 
     assert providers, "expected a non-empty healthy provider set"
     assert all(info.get("status") == "pass" for info in providers.values())
+
+
+def test_run_stt_evaluation_task_marks_a_provider_that_wrote_nothing():
+    """calibrate writes a folder per provider it managed to run. One that wrote
+    none has to come back failed rather than be dropped from the comparison."""
+    from routers.stt import (
+        run_evaluation_task,
+        STTEvaluationRequest,
+        _find_provider_output_dir as _real_find,
+    )
+
+    details = {
+        "audio_paths": ["s3://bucket/key.wav"],
+        "texts": ["hi"],
+        "providers": ["deepgram", "nosuchprovider"],
+        "language": "en",
+        "s3_bucket": "bucket",
+        "evaluators": [],
+    }
+    job_uuid = _make_eval_job("stt-eval", details)
+
+    with patch.dict(os.environ, {"FAKE_AI_PROVIDERS": "1"}), patch(
+        "routers.stt.get_s3_client", return_value=MagicMock()
+    ), patch("routers.stt.download_file_from_s3"), patch(
+        "routers.stt.upload_file_to_s3"
+    ), patch("routers.stt.upload_top_level_files_to_s3"), patch(
+        "routers.stt.upload_directory_tree_to_s3"
+    ), patch("routers.stt.try_start_queued_job"), patch(
+        "routers.stt.time.sleep"
+    ), patch(
+        "routers.stt._find_provider_output_dir",
+        side_effect=lambda output_dir, provider: (
+            None if provider == "nosuchprovider" else _real_find(output_dir, provider)
+        ),
+    ):
+        run_evaluation_task(
+            job_uuid,
+            STTEvaluationRequest(
+                audio_paths=["s3://bucket/key.wav"],
+                texts=["hi"],
+                providers=["deepgram", "nosuchprovider"],
+                language="en",
+            ),
+            "bucket",
+        )
+
+    job = db.get_job(job_uuid)
+    by_provider = {r["provider"]: r for r in job["results"]["provider_results"]}
+    assert by_provider["deepgram"]["success"] is True
+    assert by_provider["nosuchprovider"]["success"] is False
+    assert by_provider["nosuchprovider"]["results"] is None
+
+
+def test_collect_intermediate_results_reports_partial_and_missing_providers(tmp_path):
+    """The timeout path keeps whatever landed on disk. A provider is only a
+    success once it has both every row and its aggregate metrics."""
+    import csv
+    import json
+
+    from routers.stt import _collect_intermediate_results
+
+    done = tmp_path / "deepgram"
+    done.mkdir()
+    with open(done / "results.csv", "w", newline="", encoding="utf-8") as f:
+        writer = csv.writer(f)
+        writer.writerow(["id", "gt", "pred"])
+        writer.writerow(["audio_1", "hi", "hi"])
+        writer.writerow(["audio_2", "there", "there"])
+    (done / "metrics.json").write_text(json.dumps({"wer": 0.0}))
+
+    partial = tmp_path / "openai"
+    partial.mkdir()
+    with open(partial / "results.csv", "w", newline="", encoding="utf-8") as f:
+        writer = csv.writer(f)
+        writer.writerow(["id", "gt", "pred"])
+        writer.writerow(["audio_1", "hi", "hi"])
+
+    results = {
+        r.provider: r
+        for r in _collect_intermediate_results(
+            tmp_path, ["deepgram", "openai", "sarvam"], expected_total=2
+        )
+    }
+    assert results["deepgram"].success is True
+    assert len(results["deepgram"].results) == 2
+    # Rows on disk but no metrics and a short count: calibrate died mid-run.
+    assert results["openai"].success is False
+    assert len(results["openai"].results) == 1
+    # Never started, so nothing to keep.
+    assert results["sarvam"].success is False
+    assert results["sarvam"].results is None

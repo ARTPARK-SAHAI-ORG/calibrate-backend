@@ -239,6 +239,33 @@ def test_stt_import_rejects_archive_without_results(client, monkeypatch):
     assert "results.csv" in resp.json()["detail"]
 
 
+def test_stt_import_rejects_an_unreadable_archive(client, monkeypatch):
+    import db as db_mod
+
+    auth = _signup(client)
+    monkeypatch.setenv("S3_OUTPUT_BUCKET", "test-bucket")
+    ds_uuid = _stt_dataset(db_mod, auth, ["a"], name="import-bad-tar-ds")
+
+    resp = _post_import(client, auth, ds_uuid, b"this is not a tar")
+    assert resp.status_code == 400
+    assert "Could not read the archive" in resp.json()["detail"]
+
+
+def test_stt_import_rejects_an_oversized_archive(client, monkeypatch):
+    import db as db_mod
+    import routers.stt as stt_mod
+
+    auth = _signup(client)
+    monkeypatch.setenv("S3_OUTPUT_BUCKET", "test-bucket")
+    monkeypatch.setattr(stt_mod, "_MAX_IMPORT_ARCHIVE_BYTES", 16)
+    ds_uuid = _stt_dataset(db_mod, auth, ["a"], name="import-big-ds")
+    archive = _run_archive({"deepgram": [{"id": "x", "gt": "a", "pred": "a"}]})
+
+    resp = _post_import(client, auth, ds_uuid, archive)
+    assert resp.status_code == 413
+    assert "larger than" in resp.json()["detail"]
+
+
 def test_stt_import_unknown_dataset(client, monkeypatch):
     monkeypatch.setenv("S3_OUTPUT_BUCKET", "test-bucket")
     auth = _signup(client)
@@ -1392,3 +1419,43 @@ def test_stt_evaluate_holds_queue_lock_across_check_and_create(client, monkeypat
     )
     assert resp.status_code == 200
     assert held_during == {"check": True, "create": True}
+
+
+def test_stt_import_rejects_a_provider_folder_with_no_rows(client, monkeypatch):
+    import io
+    import json
+    import tarfile
+
+    import db as db_mod
+
+    auth = _signup(client)
+    monkeypatch.setenv("S3_OUTPUT_BUCKET", "test-bucket")
+    ds_uuid = _stt_dataset(db_mod, auth, ["a"], name="import-norows-ds")
+
+    buf = io.BytesIO()
+    with tarfile.open(fileobj=buf, mode="w") as tar:
+        for name, payload in (
+            ("output/deepgram/results.csv", "id,gt,pred\n"),
+            ("output/deepgram/metrics.json", json.dumps({"wer": 0.1})),
+        ):
+            data = payload.encode()
+            info = tarfile.TarInfo(name)
+            info.size = len(data)
+            tar.addfile(info, io.BytesIO(data))
+
+    resp = _post_import(client, auth, ds_uuid, buf.getvalue())
+    assert resp.status_code == 400
+    assert "No rows could be read for: deepgram" in resp.json()["detail"]
+
+
+def test_stt_import_needs_the_artifact_bucket(client, monkeypatch):
+    import db as db_mod
+
+    auth = _signup(client)
+    monkeypatch.setenv("S3_OUTPUT_BUCKET", "test-bucket")
+    ds_uuid = _stt_dataset(db_mod, auth, ["a"], name="import-nobucket-ds")
+    archive = _run_archive({"deepgram": [{"id": "x", "gt": "a", "pred": "a"}]})
+    monkeypatch.delenv("S3_OUTPUT_BUCKET", raising=False)
+
+    resp = _post_import(client, auth, ds_uuid, archive)
+    assert resp.status_code == 500

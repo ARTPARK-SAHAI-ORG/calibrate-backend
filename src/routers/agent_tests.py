@@ -2002,10 +2002,13 @@ def _enrich_test_results_with_evaluators(
         test_id = r.get("test_case_id")
         snapshot = snapshot_map.get(test_id) if test_id else None
         uuid_to_meta: Dict[str, Dict[str, Any]] = {}
+        name_to_meta: Dict[str, Dict[str, Any]] = {}
         if isinstance(snapshot, list):
             for e in snapshot:
                 if isinstance(e, dict) and e.get("uuid"):
                     uuid_to_meta[e["uuid"]] = e
+                if isinstance(e, dict) and e.get("name"):
+                    name_to_meta.setdefault(e["name"], e)
 
         if isinstance(raw, list):
             for entry in raw:
@@ -2042,7 +2045,13 @@ def _enrich_test_results_with_evaluators(
                 continue
             echoed_uid = entry.get("evaluator_id")
             meta = (uuid_to_meta.get(echoed_uid) if echoed_uid else None) or {}
-            uid = echoed_uid
+            if not meta:
+                # A run carried out elsewhere echoes the evaluator id it ran
+                # under, which is not this workspace's id once the evaluator has
+                # been recreated. Calibrate keys each verdict by the evaluator's
+                # name, so that is the remaining handle back to the rubric.
+                meta = name_to_meta.get(cal_name) or {}
+            uid = meta.get("uuid") or echoed_uid
             # Warm the cache so the block builder can reuse it. Also use
             # the live evaluator's output_type as a fallback when the
             # snapshot lacks it (legacy jobs) — matches the list-path
@@ -4193,6 +4202,7 @@ def _benchmark_model_result(
     rows: List[dict],
     metrics_data: Optional[dict],
     test_names: List[str],
+    uuid_by_case_id: Dict[str, str],
 ) -> Dict[str, Any]:
     """Build one model's stored result, matching what `run_benchmark_task` writes.
 
@@ -4205,7 +4215,13 @@ def _benchmark_model_result(
         # Calibrate leaves `test_case.name` unset, so the row arrives nameless and
         # `_merge_test_results_by_test_names` would drop it. Every id resolved to a
         # test of that name in `_resolve_benchmark_tests`, so the id is the name.
-        parsed["name"] = parsed.get("test_case_id")
+        case_id = parsed.get("test_case_id")
+        parsed["name"] = case_id
+        # A run Calibrate carries out gives calibrate the test's own id, so every
+        # reader looks the frozen rubric up by it. A run carried out elsewhere
+        # carries whatever id that run used, so it is swapped for the test it
+        # matched, which is the whole reason the rubric resolves at all.
+        parsed["test_case_id"] = uuid_by_case_id.get(case_id, case_id)
     test_results = _merge_test_results_by_test_names(test_names, test_results)
 
     if metrics_data:
@@ -4338,12 +4354,14 @@ def import_agent_benchmark(
 
     test_names, details = _agent_test_job_details(agent, tests, s3_bucket)
     details["models"] = models
+    uuid_by_case_id = {t["name"]: t["uuid"] for t in tests}
     model_results = [
         _benchmark_model_result(
             model,
             rows_by_model[model],
             metrics_by_model[model],
             test_names,
+            uuid_by_case_id,
         )
         for model in models
     ]

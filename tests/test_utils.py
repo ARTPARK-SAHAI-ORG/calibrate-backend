@@ -970,3 +970,123 @@ def test_read_leaderboard_xlsx(tmp_path):
     bad_lead.mkdir()
     wb2.save(bad_lead / "x.xlsx")
     assert read_leaderboard_xlsx(bad_lead) is None
+
+
+# ---------------------------------------------------------------------------
+# extract_uploaded_archive
+# ---------------------------------------------------------------------------
+
+
+def _tar_with(members):
+    """Build a tar in memory from {name: bytes}."""
+    import io
+    import tarfile
+
+    buf = io.BytesIO()
+    with tarfile.open(fileobj=buf, mode="w") as tar:
+        for name, data in members.items():
+            info = tarfile.TarInfo(name)
+            info.size = len(data)
+            tar.addfile(info, io.BytesIO(data))
+    buf.seek(0)
+    return buf
+
+
+def test_extract_uploaded_archive_keeps_only_wanted_files(tmp_path):
+    from utils import extract_uploaded_archive
+
+    archive = _tar_with(
+        {"run/a/results.csv": b"id\n1\n", "run/a/logs": b"x" * 100}
+    )
+    extracted = extract_uploaded_archive(
+        archive, tmp_path, keep=lambda n: n.endswith("results.csv"), max_bytes=1_000_000
+    )
+    assert (extracted / "run/a/results.csv").exists()
+    assert not (extracted / "run/a/logs").exists()
+    # The archive itself is not left behind next to what came out of it.
+    assert not (tmp_path / "upload.tar").exists()
+
+
+def test_extract_uploaded_archive_refuses_to_write_outside_the_folder(tmp_path):
+    """A crafted member must not escape, whether by climbing out or by naming
+    an absolute path."""
+    from utils import extract_uploaded_archive
+
+    archive = _tar_with(
+        {
+            "../escaped.csv": b"nope",
+            "/tmp/absolute.csv": b"nope",
+            "run/a/results.csv": b"id\n1\n",
+        }
+    )
+    extracted = extract_uploaded_archive(
+        archive, tmp_path, keep=lambda n: n.endswith(".csv"), max_bytes=1_000_000
+    )
+    assert (extracted / "run/a/results.csv").exists()
+    assert not (tmp_path.parent / "escaped.csv").exists()
+    assert sorted(p.name for p in extracted.rglob("*") if p.is_file()) == ["results.csv"]
+
+
+def test_extract_uploaded_archive_stops_past_the_byte_budget(tmp_path):
+    import pytest as _pytest
+
+    from utils import UploadTooLarge, extract_uploaded_archive
+
+    archive = _tar_with({"run/a/results.csv": b"x" * 5000})
+    with _pytest.raises(UploadTooLarge):
+        extract_uploaded_archive(
+            archive, tmp_path, keep=lambda n: True, max_bytes=64
+        )
+
+
+def test_extract_uploaded_archive_rejects_something_that_is_not_a_tar(tmp_path):
+    import io
+
+    import pytest as _pytest
+
+    from utils import extract_uploaded_archive
+
+    with _pytest.raises(ValueError):
+        extract_uploaded_archive(
+            io.BytesIO(b"not a tar at all"),
+            tmp_path,
+            keep=lambda n: True,
+            max_bytes=10_000,
+        )
+
+
+def test_locate_run_root_ignores_nested_working_folders(tmp_path):
+    from utils import locate_run_root
+
+    for folder in ("alpha", "beta"):
+        (tmp_path / folder).mkdir(parents=True)
+        (tmp_path / folder / "results.json").write_text("[]")
+    nested = tmp_path / "pending" / "runs" / "whatever"
+    nested.mkdir(parents=True)
+    (nested / "results.json").write_text("[]")
+
+    root, names = locate_run_root(tmp_path, "results.json", what="model")
+    assert root == tmp_path
+    assert sorted(names) == ["alpha", "beta"]
+
+
+def test_locate_run_root_reports_nothing_to_read(tmp_path):
+    import pytest as _pytest
+
+    from utils import locate_run_root
+
+    with _pytest.raises(ValueError, match="results.json"):
+        locate_run_root(tmp_path, "results.json", what="model")
+
+
+def test_locate_run_root_refuses_two_runs_at_the_same_depth(tmp_path):
+    import pytest as _pytest
+
+    from utils import locate_run_root
+
+    for run in ("run-one", "run-two"):
+        (tmp_path / run / "alpha").mkdir(parents=True)
+        (tmp_path / run / "alpha" / "results.json").write_text("[]")
+
+    with _pytest.raises(ValueError, match="more than one run"):
+        locate_run_root(tmp_path, "results.json", what="model")
