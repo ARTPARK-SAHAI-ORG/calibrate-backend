@@ -3976,3 +3976,34 @@ def test_benchmark_import_reads_a_merged_rejudge(client):
     assert model["passed"] == 2
     assert model["failed"] == 0
     assert [r["model"] for r in detail["leaderboard_summary"]] == ["openai/gpt-4.1"]
+
+
+def test_benchmark_import_drops_leaderboard_rows_for_models_not_sent(client):
+    """One leaderboard covers the whole run, so a subset archive still carries
+    rows for the models left out of it."""
+    h = _signup(client)["headers"]
+    names = ["case-a"]
+    agent = _agent_with_named_tests(client, h, names)
+    archive = _benchmark_archive({"openai/gpt-4.1": {"case-a"}}, names)
+
+    import io
+    import tarfile
+
+    rebuilt = io.BytesIO()
+    with tarfile.open(fileobj=rebuilt, mode="w") as out:
+        with tarfile.open(fileobj=io.BytesIO(archive)) as src:
+            for member in src.getmembers():
+                if member.name.endswith("llm_leaderboard.csv"):
+                    continue
+                out.addfile(member, src.extractfile(member))
+        data = b"model,passed,total\nopenai__gpt-4.1,1,1\nz-ai__glm-5.1,0,1\n"
+        info = tarfile.TarInfo("output/leaderboard/llm_leaderboard.csv")
+        info.size = len(data)
+        out.addfile(info, io.BytesIO(data))
+
+    resp = _post_benchmark_import(client, h, agent, rebuilt.getvalue())
+    assert resp.status_code == 200, resp.text
+    detail = client.get(
+        f"/agent-tests/benchmark/{resp.json()['task_id']}", headers=h
+    ).json()
+    assert [r["model"] for r in detail["leaderboard_summary"]] == ["openai/gpt-4.1"]

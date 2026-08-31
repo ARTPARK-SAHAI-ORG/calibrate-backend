@@ -4328,6 +4328,13 @@ def import_agent_benchmark(
         leaderboard_summary = _read_leaderboard_csv(
             leaderboard_dir if leaderboard_dir.is_dir() else run_root, models=models
         )
+        if leaderboard_summary:
+            # Calibrate writes one leaderboard for the whole run, so an archive
+            # holding a subset of its model folders still carries rows for the
+            # models left out.
+            leaderboard_summary = [
+                row for row in leaderboard_summary if row.get("model") in set(models)
+            ]
 
     test_names, details = _agent_test_job_details(agent, tests, s3_bucket)
     details["models"] = models
