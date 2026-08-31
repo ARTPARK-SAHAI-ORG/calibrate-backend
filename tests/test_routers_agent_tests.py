@@ -3676,3 +3676,36 @@ def test_rename_run_rejects_long_names_and_other_workspaces(client):
         ).status_code
         == 404
     )
+
+
+def test_renaming_a_run_does_not_move_it_up_the_workspace_list(client):
+    """The workspace-wide list is ordered by when a run last changed, so a
+    rename must not lift a months-old run above runs that finished today."""
+    import time
+
+    from db import create_agent_test_job, update_agent_test_job
+
+    h = _signup(client)["headers"]
+    agent = _create_agent(client, h)
+
+    jobs = []
+    for _ in range(3):
+        job_id = create_agent_test_job(
+            agent_id=agent["uuid"], job_type="llm-unit-test"
+        )
+        update_agent_test_job(job_id, status="done", results={"total_tests": 0})
+        jobs.append(job_id)
+        time.sleep(1.1)  # `updated_at` is second-resolution
+
+    order = [
+        i["uuid"] for i in client.get("/agent-tests/runs", headers=h).json()["items"]
+    ]
+    assert order == [jobs[2], jobs[1], jobs[0]]
+
+    client.patch(
+        f"/agent-tests/run/{jobs[0]}/name", json={"name": "Oldest run"}, headers=h
+    )
+    after = [
+        i["uuid"] for i in client.get("/agent-tests/runs", headers=h).json()["items"]
+    ]
+    assert after == order

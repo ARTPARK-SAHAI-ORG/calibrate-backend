@@ -7584,11 +7584,16 @@ def update_agent_test_job_visibility(
 
 
 def set_agent_test_job_name(job_uuid: str, name: Optional[str]) -> bool:
-    """Set (or clear, with None) an agent test job's name. Returns True if found."""
+    """Set (or clear, with None) an agent test job's name. Returns True if found.
+
+    Deliberately leaves `updated_at` alone: the workspace-wide run list orders by
+    it, so bumping it would lift a months-old run to the top the moment someone
+    renamed it.
+    """
     with get_db_connection() as conn:
         cursor = conn.cursor()
         cursor.execute(
-            "UPDATE agent_test_jobs SET name = ?, updated_at = CURRENT_TIMESTAMP WHERE uuid = ?",
+            "UPDATE agent_test_jobs SET name = ? WHERE uuid = ?",
             (name, job_uuid),
         )
         conn.commit()
