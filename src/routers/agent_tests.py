@@ -1,5 +1,6 @@
 import copy
 import csv
+import re
 import os
 import json
 import subprocess
@@ -417,6 +418,11 @@ class TestCaseResult(BaseModel):
         None, description="ID of the test case within the run"
     )
     name: Optional[str] = Field(None, description="Name of the test")
+    test_uuid: Optional[str] = Field(
+        None,
+        description="ID of the test this case ran, which is what you pass to read the case on its own",
+        examples=[EXAMPLE_TEST_UUID],
+    )
     test_type: Optional[TestTypeLiteral] = Field(
         None,
         description="What the test asks of the agent, which decides how a reader draws the case",
@@ -884,6 +890,81 @@ def _tool_call_evaluator(org_uuid: Optional[str]) -> Optional[Dict[str, Any]]:
         "scale_max": None,
         "version_number": version.get("version_number"),
     }
+
+
+def _uuid_by_unique_name(pairs: List[tuple]) -> Dict[str, str]:
+    """Each name mapped to its test's ID, minus any name used more than once.
+
+    Nothing stops two tests in one run sharing a name, and calibrate echoes
+    that one name for both rows. Keeping either ID would pin one case to the
+    other's test, so it would show the other's frozen rubric and answer the
+    other's per-case URL. An ambiguous name resolves to nothing instead.
+    """
+    by_name: Dict[str, str] = {}
+    ambiguous = set()
+    for name, uuid in pairs:
+        if not isinstance(name, str) or not isinstance(uuid, str):
+            continue
+        if name in by_name and by_name[name] != uuid:
+            ambiguous.add(name)
+        by_name[name] = uuid
+    for name in ambiguous:
+        by_name.pop(name, None)
+    return by_name
+
+
+def test_uuid_by_calibrate_id(details: Dict[str, Any]) -> Dict[str, str]:
+    """Map what calibrate echoes as ``test_case_id`` back to the test's own ID.
+
+    Calibrate replaces the ID it is given with the test's NAME, so a stored row
+    identifies its test by name. ``details.test_uuids`` and ``details.test_names``
+    are frozen at launch in the same order as the config's test cases, which is
+    what makes the name resolvable. Empty for a run that froze neither.
+    """
+    uuids = details.get("test_uuids") or []
+    names = details.get("test_names") or []
+    if not isinstance(uuids, list) or not isinstance(names, list):
+        return {}
+    return _uuid_by_unique_name(list(zip(names, uuids)))
+
+
+def _test_uuid_by_name(tests: List[Dict[str, Any]]) -> Dict[str, str]:
+    """Each test's own ID keyed by the name calibrate will echo back for it."""
+    return _uuid_by_unique_name(
+        [
+            (t.get("name"), t.get("uuid"))
+            for t in tests
+            if isinstance(t, dict)
+        ]
+    )
+
+
+_UUID_SHAPE = re.compile(
+    r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-"
+    r"[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$"
+)
+
+
+def resolve_test_uuid(
+    case_id: Any, test_uuid_by_name: Optional[Dict[str, str]]
+) -> Optional[str]:
+    """The test's own ID for a result row, or None when it cannot be worked out.
+
+    Calibrate replaces the ID it is given with the test's name, so a row
+    identifies its test by name and has to be mapped back.
+
+    The name is tried FIRST, and a row is only taken at face value when it
+    looks like a real ID. Counting characters instead would read a 36-character
+    test name as its own ID, and that answer gets written into the stored row,
+    where nothing later can correct it.
+    """
+    if not isinstance(case_id, str):
+        return None
+    mapped = (test_uuid_by_name or {}).get(case_id)
+    if mapped:
+        return mapped
+    # An imported run rewrites the row to the test's own ID, so it needs no map.
+    return case_id if _UUID_SHAPE.match(case_id) else None
 
 
 def _row_test_type(row: Dict[str, Any]) -> Optional[str]:
@@ -1754,6 +1835,7 @@ def _read_agent_test_metrics_json(output_dir: Path) -> Optional[dict]:
 def _parse_agent_test_results(
     results_data: Optional[List[dict]],
     default_inputs: Optional[Dict[str, Any]] = None,
+    test_uuid_by_name: Optional[Dict[str, str]] = None,
 ) -> List[dict]:
     """Parse results.json data into the format expected by the API.
 
@@ -1772,10 +1854,12 @@ def _parse_agent_test_results(
         test_case = r.get("test_case", {})
         case_inputs = test_case.get("inputs") or {}
         effective_inputs = {**(default_inputs or {}), **case_inputs}
+        case_id = r.get("test_case_id") or test_case.get("id")
         test_results.append(
             {
                 "name": test_case.get("name"),
-                "test_case_id": r.get("test_case_id") or test_case.get("id"),
+                "test_case_id": case_id,
+                "test_uuid": resolve_test_uuid(case_id, test_uuid_by_name),
                 "passed": metrics.get("passed", False),
                 "reasoning": metrics.get("reasoning"),
                 "output": {
@@ -1812,6 +1896,7 @@ def _pending_test_case_result_placeholder(name: str) -> Dict[str, Any]:
         "test_case_id": None,
         "name": name,
         "test_type": None,
+        "test_uuid": None,
         "passed": None,
         "reasoning": None,
         "output": None,
@@ -1983,6 +2068,7 @@ def _enrich_test_results_with_evaluators(
     evaluators_by_test_id: Optional[Dict[str, List[Dict[str, Any]]]],
     evaluator_cache: Optional[Dict[str, Optional[Dict[str, Any]]]] = None,
     tool_call_evaluator: Optional[Dict[str, Any]] = None,
+    test_uuid_by_name: Optional[Dict[str, str]] = None,
 ) -> None:
     """Mutate ``test_results`` in place: convert each row's raw ``judge_results``
     dict (keyed by calibrate evaluator name) into a structured list of
@@ -2015,6 +2101,12 @@ def _enrich_test_results_with_evaluators(
         if not isinstance(r, dict):
             continue
         r["test_type"] = _row_test_type(r)
+        # Written at run time since this shipped. Runs older than that resolve
+        # here, every read.
+        if not r.get("test_uuid"):
+            r["test_uuid"] = resolve_test_uuid(
+                r.get("test_case_id"), test_uuid_by_name
+            )
         raw = r.get("judge_results")
         if raw is None:
             if (
@@ -2027,7 +2119,7 @@ def _enrich_test_results_with_evaluators(
                 ]
             continue
 
-        test_id = r.get("test_case_id")
+        test_id = r.get("test_uuid") or r.get("test_case_id")
         snapshot = snapshot_map.get(test_id) if test_id else None
         uuid_to_meta: Dict[str, Dict[str, Any]] = {}
         name_to_meta: Dict[str, Dict[str, Any]] = {}
@@ -2116,6 +2208,7 @@ def _enrich_model_results_with_evaluators(
     evaluators_by_test_id: Optional[Dict[str, List[Dict[str, Any]]]],
     evaluator_cache: Optional[Dict[str, Optional[Dict[str, Any]]]] = None,
     tool_call_evaluator: Optional[Dict[str, Any]] = None,
+    test_uuid_by_name: Optional[Dict[str, str]] = None,
 ) -> None:
     """Run ``_enrich_test_results_with_evaluators`` for each model's nested
     ``test_results`` list. The same snapshot applies to every model in a
@@ -2132,6 +2225,7 @@ def _enrich_model_results_with_evaluators(
                 evaluators_by_test_id,
                 cache,
                 tool_call_evaluator,
+                test_uuid_by_name,
             )
             _enrich_evaluator_summary(mr.get("evaluator_summary"), cache)
 
@@ -2414,6 +2508,7 @@ def _update_agent_test_intermediate_results(
     output_dir: Path,
     test_names: List[str],
     default_inputs: Optional[Dict[str, Any]] = None,
+    test_uuid_by_name: Optional[Dict[str, str]] = None,
 ) -> int:
     """
     Update intermediate results for an agent test job.
@@ -2424,7 +2519,9 @@ def _update_agent_test_intermediate_results(
         return 0
 
     # Parse results
-    test_results = _parse_agent_test_results(results_data, default_inputs)
+    test_results = _parse_agent_test_results(
+        results_data, default_inputs, test_uuid_by_name
+    )
     completed_count = len(test_results)
 
     # Build intermediate results: show completed tests with results, pending tests with just name
@@ -2490,6 +2587,7 @@ def run_llm_test_task(
 
     Handles response, tool_call, and conversation test cases uniformly — the
     calibrate CLI dispatches per row on each test case's `evaluation.type`."""
+    test_uuid_by_name = _test_uuid_by_name(tests)
     try:
         logger.info(
             f"Running LLM test task {task_id} for agent {agent['uuid']} with {len(tests)} test(s)"
@@ -2598,12 +2696,14 @@ def run_llm_test_task(
                             )
                             kill_process_group(process.pid, task_id)
                             _update_agent_test_intermediate_results(
-                                task_id, output_dir, test_names, default_inputs
+                                task_id, output_dir, test_names, default_inputs,
+                                test_uuid_by_name,
                             )
                             _finish_stopped_run(task_id)
                             return
                         completed = _update_agent_test_intermediate_results(
-                            task_id, output_dir, test_names, default_inputs
+                            task_id, output_dir, test_names, default_inputs,
+                            test_uuid_by_name,
                         )
                         if completed != prev_completed:
                             logger.info(
@@ -2614,7 +2714,8 @@ def run_llm_test_task(
 
                     # Final update after process completes
                     _update_agent_test_intermediate_results(
-                        task_id, output_dir, test_names, default_inputs
+                        task_id, output_dir, test_names, default_inputs,
+                        test_uuid_by_name,
                     )
 
                 # Stopped in the gap between the last poll and the CLI exiting.
@@ -2674,7 +2775,9 @@ def run_llm_test_task(
                     raise subprocess.CalledProcessError(0, run_cmd, stdout, stderr)
 
                 # Parse results
-                test_results = _parse_agent_test_results(results_data, default_inputs)
+                test_results = _parse_agent_test_results(
+                    results_data, default_inputs, test_uuid_by_name
+                )
 
                 # Add name field for consistency
                 for i, r in enumerate(test_results):
@@ -3378,7 +3481,7 @@ _SUMMARY_MODE_DESCRIPTION = (
     "case. `summary` returns one light row per case, with its ID, name, "
     "verdict and short reason, leaving out the conversation, the agent's output "
     "and the evaluator verdicts. Read those one case at a time from "
-    "`GET /agent-tests/run/{task_id}/results/{test_case_id}`"
+    "`GET /agent-tests/run/{task_id}/results/{test_uuid}`"
 )
 
 
@@ -3459,6 +3562,7 @@ def get_agent_test_run_status(
         evaluators_snapshot,
         evaluator_cache,
         tool_call_evaluator,
+        test_uuid_by_calibrate_id(details),
     )
     evaluators_block = _build_evaluators_block_for_test_run(
         evaluators_snapshot,
@@ -3503,7 +3607,7 @@ def get_agent_test_run_status(
 
 
 def find_case_result(
-    job: Dict[str, Any], test_case_id: str, model: Optional[str]
+    job: Dict[str, Any], test_uuid: str, model: Optional[str]
 ) -> Dict[str, Any]:
     """One case's full result from a run or benchmark job, evaluators resolved.
 
@@ -3538,11 +3642,20 @@ def find_case_result(
     else:
         rows = results.get("test_results")
 
+    # The test's own ID is what a caller holds. The name calibrate echoed back
+    # is still accepted, so a link made before this shipped keeps working.
+    by_name = test_uuid_by_calibrate_id(details)
     row = next(
         (
             r
             for r in rows or []
-            if isinstance(r, dict) and r.get("test_case_id") == test_case_id
+            if isinstance(r, dict)
+            and test_uuid
+            in (
+                r.get("test_uuid"),
+                r.get("test_case_id"),
+                resolve_test_uuid(r.get("test_case_id"), by_name),
+            )
         ),
         None,
     )
@@ -3554,12 +3667,13 @@ def find_case_result(
         details.get("evaluators_by_test_id") or {},
         {},
         _tool_call_evaluator_for_run(details),
+        by_name,
     )
     return row
 
 
 @router.get(
-    "/run/{task_id}/results/{test_case_id}",
+    "/run/{task_id}/results/{test_uuid}",
     response_model=TestCaseResult,
     tags=["Public API"],
     summary="Get test case result",
@@ -3569,8 +3683,8 @@ def get_agent_test_case_result(
         description="Test run or benchmark the case was run in",
         examples=[_EXAMPLE_TASK_UUID],
     ),
-    test_case_id: str = PathParam(
-        description="The test whose result to read",
+    test_uuid: str = PathParam(
+        description="The test whose result to read, as `test_uuid` on the case",
         examples=[EXAMPLE_TEST_UUID],
     ),
     ctx: OrgContext = Depends(get_org_jwt_or_api_key),
@@ -3584,7 +3698,7 @@ def get_agent_test_case_result(
     # Serves runs and benchmarks alike, as the abort and rename endpoints do,
     # since both are rows in `agent_test_jobs`.
     return find_case_result(
-        _load_owned_agent_test_job(task_id, ctx), test_case_id, model
+        _load_owned_agent_test_job(task_id, ctx), test_uuid, model
     )
 
 
@@ -3685,6 +3799,7 @@ def _update_benchmark_intermediate_results(
     test_names: List[str],
     cli_models: Optional[List[str]] = None,
     default_inputs: Optional[Dict[str, Any]] = None,
+    test_uuid_by_name: Optional[Dict[str, str]] = None,
 ) -> int:
     """
     Update intermediate results for a benchmark job.
@@ -3711,7 +3826,9 @@ def _update_benchmark_intermediate_results(
             results_data, metrics_data = all_results[matched_folder]
 
             # Parse results
-            test_results = _parse_agent_test_results(results_data, default_inputs)
+            test_results = _parse_agent_test_results(
+                results_data, default_inputs, test_uuid_by_name
+            )
 
             # Add name field for consistency
             for i, r in enumerate(test_results):
@@ -3817,6 +3934,7 @@ def run_benchmark_task(
 
     The calibrate CLI handles parallelization internally and generates the leaderboard.
     """
+    test_uuid_by_name = _test_uuid_by_name(tests)
     try:
         logger.info(
             f"Running benchmark task {task_id} for agent {agent['uuid']} "
@@ -3929,13 +4047,13 @@ def run_benchmark_task(
                             kill_process_group(process.pid, task_id)
                             _update_benchmark_intermediate_results(
                                 task_id, output_dir, models, test_names, cli_models,
-                                default_inputs,
+                                default_inputs, test_uuid_by_name,
                             )
                             _finish_stopped_run(task_id)
                             return
                         completed = _update_benchmark_intermediate_results(
                             task_id, output_dir, models, test_names, cli_models,
-                            default_inputs,
+                            default_inputs, test_uuid_by_name,
                         )
                         if completed != prev_completed:
                             logger.info(
@@ -3947,7 +4065,7 @@ def run_benchmark_task(
                     # Final update after process completes
                     _update_benchmark_intermediate_results(
                         task_id, output_dir, models, test_names, cli_models,
-                        default_inputs,
+                        default_inputs, test_uuid_by_name,
                     )
 
                 # Stopped in the gap between the last poll and the CLI exiting.
@@ -4003,7 +4121,9 @@ def run_benchmark_task(
                         results_data, metrics_data = all_results[matched_folder]
 
                         # Parse results
-                        test_results = _parse_agent_test_results(results_data)
+                        test_results = _parse_agent_test_results(
+                            results_data, None, test_uuid_by_name
+                        )
 
                         # Add name field for consistency
                         for i, r in enumerate(test_results):
@@ -4704,6 +4824,7 @@ def get_benchmark_status(
         evaluators_snapshot,
         evaluator_cache,
         tool_call_evaluator,
+        test_uuid_by_calibrate_id(details),
     )
     evaluators_block = _build_evaluators_block_for_test_run(
         evaluators_snapshot,

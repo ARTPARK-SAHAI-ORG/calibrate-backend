@@ -967,3 +967,83 @@ def test_evaluator_totals_from_rows_needs_both_rows_and_evaluators():
 
     assert evaluator_totals_from_rows(None, [{"uuid": "e"}]) is None
     assert evaluator_totals_from_rows([{"judge_results": []}], None) is None
+
+
+def test_test_uuid_by_calibrate_id_reads_the_frozen_arrays():
+    """Calibrate echoes the test's name, so the name has to map back to the
+    test's own ID. A run that froze nothing usable maps nothing."""
+    from routers.agent_tests import test_uuid_by_calibrate_id
+
+    assert test_uuid_by_calibrate_id(
+        {"test_names": ["a", "b"], "test_uuids": ["u1", "u2"]}
+    ) == {"a": "u1", "b": "u2"}
+    assert test_uuid_by_calibrate_id({}) == {}
+    assert test_uuid_by_calibrate_id({"test_names": "a", "test_uuids": "u"}) == {}
+    # Only the pairs that line up survive a run that froze a short list.
+    assert test_uuid_by_calibrate_id(
+        {"test_names": ["a", "b"], "test_uuids": ["u1"]}
+    ) == {"a": "u1"}
+
+
+def test_resolve_test_uuid_takes_a_real_id_as_its_own_answer():
+    """An imported run rewrites the row to the test's own ID, so there is
+    nothing to map."""
+    from routers.agent_tests import resolve_test_uuid
+
+    real = "e8760a74-7d95-4413-b4b6-b3f9cf57c927"
+    assert resolve_test_uuid(real, {}) == real
+    assert resolve_test_uuid("a name", {"a name": real}) == real
+    assert resolve_test_uuid("a name", {}) is None
+    assert resolve_test_uuid(None, {"x": real}) is None
+
+
+def test_test_uuid_by_name_skips_a_test_missing_either_half():
+    from routers.agent_tests import _test_uuid_by_name
+
+    assert _test_uuid_by_name(
+        [
+            {"name": "a", "uuid": "u1"},
+            {"name": "b"},
+            {"uuid": "u3"},
+            "junk",
+        ]
+    ) == {"a": "u1"}
+
+
+def test_resolve_test_uuid_does_not_read_a_36_character_name_as_an_id():
+    """A test name that happens to be 36 characters long is still a name. The
+    answer is written into the stored row, so getting it wrong is permanent."""
+    from routers.agent_tests import resolve_test_uuid
+
+    name = "v4_ex__pruned__p1__namex__654856af5c"
+    assert len(name) == 36
+    real = "e8760a74-7d95-4413-b4b6-b3f9cf57c927"
+
+    assert resolve_test_uuid(name, {name: real}) == real
+    # With nothing to map it to, it is unknown rather than its own answer.
+    assert resolve_test_uuid(name, {}) is None
+    # A real ID still needs no map.
+    assert resolve_test_uuid(real, {}) == real
+
+
+def test_uuid_maps_drop_a_name_two_tests_share():
+    """Calibrate echoes one name for both rows, so keeping either ID would pin
+    one case to the other's test."""
+    from routers.agent_tests import _test_uuid_by_name, test_uuid_by_calibrate_id
+
+    u1, u2 = "e8760a74-7d95-4413-b4b6-b3f9cf57c927", "2d1afd12-1409-4a58-930a-ebe14cc0d682"
+    tests = [
+        {"name": "greeting", "uuid": u1},
+        {"name": "greeting", "uuid": u2},
+        {"name": "farewell", "uuid": u1},
+    ]
+    assert _test_uuid_by_name(tests) == {"farewell": u1}
+
+    assert test_uuid_by_calibrate_id(
+        {"test_names": ["greeting", "greeting", "farewell"], "test_uuids": [u1, u2, u1]}
+    ) == {"farewell": u1}
+
+    # The same test listed twice is not ambiguous.
+    assert _test_uuid_by_name(
+        [{"name": "a", "uuid": u1}, {"name": "a", "uuid": u1}]
+    ) == {"a": u1}

@@ -110,7 +110,7 @@ actions:
           completed, includes per-test-case pass/fail results and evaluator
           judgments. Use the task_id from run-agent-tests or
           run-agent-tests-batch.
-  - target: $.paths['/agent-tests/run/{task_id}/results/{test_case_id}'].get
+  - target: $.paths['/agent-tests/run/{task_id}/results/{test_uuid}'].get
     update:
       x-speakeasy-group: agent_tests
       x-speakeasy-name-override: get_run_case
