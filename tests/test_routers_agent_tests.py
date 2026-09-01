@@ -1712,6 +1712,122 @@ def test_run_detail_has_no_totals_before_anything_is_judged(client):
     assert body["evaluator_summary"] is None
 
 
+def _seed_run_keyed_by_name(client, h, agent, stamped):
+    """A run whose rows carry the test's NAME as calibrate echoes it, with the
+    frozen rubric filed under the test's own ID. `stamped` writes `test_uuid`
+    onto the row the way a run does since that shipped."""
+    from db import create_agent_test_job, update_agent_test_job
+
+    test_uuid, evaluator_uuid = str(uuid.uuid4()), str(uuid.uuid4())
+    name = "v4_ex__pruned__p1__district__1fba341de0"
+    job_id = create_agent_test_job(
+        agent_id=agent["uuid"],
+        job_type="llm-unit-test",
+        details={
+            "test_uuids": [test_uuid],
+            "test_names": [name],
+            "evaluators_by_test_id": {
+                test_uuid: [
+                    {
+                        "uuid": evaluator_uuid,
+                        "name": "Correctness as it ran",
+                        "output_type": "rating",
+                        "scale_min": 1,
+                        "scale_max": 5,
+                        "output_config": {
+                            "scale": [
+                                {"value": 1, "name": "Poor"},
+                                {"value": 5, "name": "Excellent"},
+                            ]
+                        },
+                    }
+                ]
+            },
+        },
+    )
+    row = {
+        "name": name,
+        "test_case_id": name,
+        "passed": True,
+        "output": {"response": "hi"},
+        "test_case": {"name": name, "evaluation": {"type": "response"}},
+        "judge_results": [{"evaluator_uuid": evaluator_uuid, "score": 5}],
+    }
+    if stamped:
+        row["test_uuid"] = test_uuid
+    update_agent_test_job(job_id, status="done", results={"test_results": [row]})
+    return job_id, test_uuid, name
+
+
+@pytest.mark.parametrize("stamped", [True, False])
+def test_run_detail_reports_the_tests_own_id(client, stamped):
+    """Calibrate echoes the test's name back, so the row is keyed by name. The
+    response must still carry the test's own ID: written at run time for a new
+    run, worked out on every read for one that predates that."""
+    h = _signup(client)["headers"]
+    agent = _create_agent(client, h)
+    job_id, test_uuid, name = _seed_run_keyed_by_name(client, h, agent, stamped)
+
+    case = client.get(f"/agent-tests/run/{job_id}", headers=h).json()["results"][0]
+    assert case["test_case_id"] == name
+    assert case["test_uuid"] == test_uuid
+
+
+@pytest.mark.parametrize("stamped", [True, False])
+def test_run_case_opens_by_the_tests_own_id(client, stamped):
+    h = _signup(client)["headers"]
+    agent = _create_agent(client, h)
+    job_id, test_uuid, name = _seed_run_keyed_by_name(client, h, agent, stamped)
+
+    by_uuid = client.get(f"/agent-tests/run/{job_id}/results/{test_uuid}", headers=h)
+    assert by_uuid.status_code == 200
+    assert by_uuid.json()["test_uuid"] == test_uuid
+
+    # The echoed name still opens it, so a link made before this keeps working.
+    by_name = client.get(f"/agent-tests/run/{job_id}/results/{name}", headers=h)
+    assert by_name.status_code == 200
+
+
+def test_run_detail_finds_the_frozen_rubric_for_a_name_keyed_row(client):
+    """The rubric is filed under the test's own ID while the row is keyed by
+    name. Without resolving the two, a finished run redraws against whatever the
+    evaluator says today instead of what it was judged by."""
+    h = _signup(client)["headers"]
+    agent = _create_agent(client, h)
+    job_id, _, _ = _seed_run_keyed_by_name(client, h, agent, stamped=False)
+
+    case = client.get(f"/agent-tests/run/{job_id}", headers=h).json()["results"][0]
+    # The label for a score comes from the rubric the run froze. Miss the
+    # lookup and the verdict shows a bare number with no word for it.
+    assert case["judge_results"][0]["value_name"] == "Excellent"
+
+
+def test_run_detail_leaves_the_id_absent_when_it_cannot_be_worked_out(client):
+    """A run that froze no names has nothing to map back, so the field is null
+    and the case still opens by what the row does carry."""
+    from db import create_agent_test_job, update_agent_test_job
+
+    h = _signup(client)["headers"]
+    agent = _create_agent(client, h)
+    job_id = create_agent_test_job(
+        agent_id=agent["uuid"], job_type="llm-unit-test", details={}
+    )
+    update_agent_test_job(
+        job_id,
+        status="done",
+        results={
+            "test_results": [
+                {"name": "some name", "test_case_id": "some name", "passed": True}
+            ]
+        },
+    )
+
+    case = client.get(f"/agent-tests/run/{job_id}", headers=h).json()["results"][0]
+    assert case["test_uuid"] is None
+    opened = client.get(f"/agent-tests/run/{job_id}/results/some name", headers=h)
+    assert opened.status_code == 200
+
+
 _HEAVY_CASE_FIELDS = ("test_case", "output", "judge_results", "inputs")
 
 

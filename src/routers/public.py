@@ -65,6 +65,7 @@ from routers.agent_tests import (
     _build_evaluators_block_for_test_run,
     _summarize_case_rows,
     evaluator_totals_from_rows,
+    test_uuid_by_calibrate_id,
     _tool_call_evaluator_for_run,
     _RunDetailMode,
     find_case_result,
@@ -617,8 +618,8 @@ _SHARED_SUMMARY_MODE_DESCRIPTION = (
     "case. `summary` returns one light row per case, with its ID, name, "
     "verdict and short reason, leaving out the conversation, the agent's output "
     "and the evaluator verdicts. Read those one case at a time from the same "
-    "share token, at `/public/test-run/{share_token}/results/{test_case_id}` "
-    "for a run or `/public/benchmark/{share_token}/results/{test_case_id}` for "
+    "share token, at `/public/test-run/{share_token}/results/{test_uuid}` "
+    "for a run or `/public/benchmark/{share_token}/results/{test_uuid}` for "
     "a benchmark"
 )
 
@@ -646,6 +647,7 @@ def get_public_test_run(
         evaluators_snapshot,
         evaluator_cache,
         tool_call_evaluator,
+        test_uuid_by_calibrate_id(details),
     )
     evaluators_block = _build_evaluators_block_for_test_run(
         evaluators_snapshot,
@@ -704,6 +706,7 @@ def get_public_benchmark(
         evaluators_snapshot,
         evaluator_cache,
         tool_call_evaluator,
+        test_uuid_by_calibrate_id(details),
     )
     evaluators_block = _build_evaluators_block_for_test_run(
         evaluators_snapshot,
@@ -729,29 +732,33 @@ def get_public_benchmark(
 
 
 @router.get(
-    "/test-run/{share_token}/results/{test_case_id}",
+    "/test-run/{share_token}/results/{test_uuid}",
     response_model=TestCaseResult,
     summary="Get shared test case result",
 )
 def get_public_test_run_case(
     share_token: str = Path(description="Share token for the LLM test run"),
-    test_case_id: str = Path(description="The test whose result to read"),
+    test_uuid: str = Path(
+        description="The test whose result to read, as `test_uuid` on the case"
+    ),
 ):
     """Get the full result of one test case in a shared run"""
     job = get_agent_test_job_by_share_token(share_token, job_type="llm-unit-test")
     if not job:
         raise HTTPException(status_code=404, detail="Not found")
-    return find_case_result(job, test_case_id, None)
+    return find_case_result(job, test_uuid, None)
 
 
 @router.get(
-    "/benchmark/{share_token}/results/{test_case_id}",
+    "/benchmark/{share_token}/results/{test_uuid}",
     response_model=TestCaseResult,
     summary="Get shared benchmark case result",
 )
 def get_public_benchmark_case(
     share_token: str = Path(description="Share token for the LLM benchmark run"),
-    test_case_id: str = Path(description="The test whose result to read"),
+    test_uuid: str = Path(
+        description="The test whose result to read, as `test_uuid` on the case"
+    ),
     model: Optional[str] = Query(
         None,
         description="Which model's answer to read",
@@ -762,7 +769,7 @@ def get_public_benchmark_case(
     job = get_agent_test_job_by_share_token(share_token, job_type="llm-benchmark")
     if not job:
         raise HTTPException(status_code=404, detail="Not found")
-    return find_case_result(job, test_case_id, model)
+    return find_case_result(job, test_uuid, model)
 
 
 @router.get("/simulation-run/{share_token}", response_model=PublicSimulationRunResponse, summary="Get shared simulation run")
