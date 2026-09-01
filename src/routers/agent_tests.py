@@ -820,18 +820,6 @@ def get_agent_tests_endpoint(
     return page_envelope([to_test_list_response(t) for t in page], total, pagination)
 
 
-def _stored_or_row_count(total: Any, rows: Any) -> Optional[int]:
-    """The number of tests a run covers, falling back to the rows it holds.
-
-    A run stores its count only once calibrate writes `metrics.json` at the end,
-    but from launch it holds one row per test (pending ones as placeholders), so
-    counting them is the same number the finished run reports.
-    """
-    if total is not None:
-        return total
-    return len(rows) if isinstance(rows, list) else None
-
-
 def _slim_test_results(test_results: Any) -> Optional[List[Dict[str, Any]]]:
     """Flatten stored per-case results into `{name, passed}` rows for the run-list.
     Lifts the nested `test_case.name` up onto `name` so the row carries no nested
@@ -852,10 +840,13 @@ def _slim_test_results(test_results: Any) -> Optional[List[Dict[str, Any]]]:
     return slim or None
 
 
-def _slim_model_results(model_results: Any) -> Optional[List[Dict[str, Any]]]:
+def _slim_model_results(
+    model_results: Any, test_count: Optional[int]
+) -> Optional[List[Dict[str, Any]]]:
     """Flatten stored per-model benchmark results into scalar-only rows for the
     run-list, dropping each model's per-case `test_results`. Full per-case detail
-    stays on the benchmark-detail endpoint."""
+    stays on the benchmark-detail endpoint. A model that has not finished has no
+    count of its own; every model runs the whole set, so ``test_count`` fills in."""
     if not model_results:
         return None
     slim = []
@@ -867,8 +858,8 @@ def _slim_model_results(model_results: Any) -> Optional[List[Dict[str, Any]]]:
                 "model": m.get("model", ""),
                 "success": m.get("success"),
                 "message": m.get("message", ""),
-                "total_tests": _stored_or_row_count(
-                    m.get("total_tests"), m.get("test_results")
+                "total_tests": (
+                    test_count if m.get("total_tests") is None else m["total_tests"]
                 ),
                 "passed": m.get("passed"),
                 "failed": m.get("failed"),
@@ -1156,6 +1147,11 @@ def _build_agent_test_run_item_fields(
     ``_run_evaluators``).
     """
     job_results = job.get("results") or {}
+    # A run stores its own count only when calibrate writes its metrics at the
+    # end, and a benchmark never stores one at all, so both read as unknown
+    # while they are going. The test set frozen at launch is the same number.
+    test_count = job.get("test_count")
+    stored_total = job_results.get("total_tests")
 
     return {
         "uuid": job["uuid"],
@@ -1165,9 +1161,7 @@ def _build_agent_test_run_item_fields(
         "created_at": job.get("created_at", ""),
         "updated_at": job.get("updated_at", job.get("created_at", "")),
         # Unit test results
-        "total_tests": _stored_or_row_count(
-            job_results.get("total_tests"), job_results.get("test_results")
-        ),
+        "total_tests": test_count if stored_total is None else stored_total,
         "passed": job_results.get("passed"),
         "failed": job_results.get("failed"),
         "evaluators": _run_evaluators(job, evaluator_cache),
@@ -1176,7 +1170,9 @@ def _build_agent_test_run_item_fields(
         "total_tokens": job_results.get("total_tokens"),
         "results": _slim_test_results(job_results.get("test_results")),
         # Benchmark results
-        "model_results": _slim_model_results(job_results.get("model_results")),
+        "model_results": _slim_model_results(
+            job_results.get("model_results"), test_count
+        ),
         "unanswered_tests": job_results.get("unanswered_tests"),
         # Common fields
         "aborted": bool(job.get("aborted")),

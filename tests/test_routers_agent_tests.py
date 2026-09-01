@@ -1145,11 +1145,11 @@ def test_slim_run_list_helpers_guard_edge_cases():
     # Falsy input → None
     assert _slim_test_results(None) is None
     assert _slim_test_results([]) is None
-    assert _slim_model_results(None) is None
+    assert _slim_model_results(None, None) is None
 
     # Non-dict rows are skipped; an all-junk list collapses to None
     assert _slim_test_results(["x", None]) is None
-    assert _slim_model_results([42]) is None
+    assert _slim_model_results([42], None) is None
 
     # `test_case.name` is lifted onto `name` when the row has no own name
     assert _slim_test_results([{"test_case": {"name": "tc"}, "passed": False}]) == [
@@ -4784,59 +4784,89 @@ def test_benchmark_import_counts_rows_when_metrics_omits_the_total(client):
 
 
 
-def test_run_list_counts_rows_when_a_run_has_no_stored_total():
-    """A run that has not stored its count yet reports the number of test rows
-    it holds, so the list's Tests column matches the run detail instead of
-    reading as a dash until the run finishes."""
-    from routers.agent_tests import (
-        _build_agent_test_run_item_fields,
-        _slim_model_results,
-        _stored_or_row_count,
-    )
+def test_run_list_reports_the_launched_test_count_before_a_run_stores_one(client):
+    """A run and a benchmark both show how many tests they cover from launch,
+    instead of a dash until they finish. A benchmark never stores a run-level
+    count at all, and neither stores one until calibrate writes its metrics, so
+    both fall back to the test set the job was launched over. A stored count
+    always wins, and a job that froze no test set stays blank rather than
+    reporting zero tests."""
+    from db import create_agent_test_job, update_agent_test_job
 
-    job = {
-        "uuid": "job-1",
-        "status": "in_progress",
-        "type": "llm-unit-test",
-        "created_at": "2026-01-01T00:00:00",
-        "results": {
-            "test_results": [
-                {"name": "a", "passed": None},
-                {"name": "b", "passed": None},
+    h = _signup(client)["headers"]
+    agent = _create_agent(client, h)
+    names = [f"tc{i}" for i in range(3)]
+    test_uuids = [_create_test(client, h, name=n)["uuid"] for n in names]
+
+    # A run and a benchmark, both mid-flight with no count stored yet.
+    run_id = create_agent_test_job(
+        agent_id=agent["uuid"],
+        job_type="llm-unit-test",
+        status="in_progress",
+        details={"test_uuids": test_uuids},
+        results={"test_results": [{"name": n} for n in names]},
+    )
+    bench_id = create_agent_test_job(
+        agent_id=agent["uuid"],
+        job_type="llm-benchmark",
+        status="in_progress",
+        details={"test_uuids": test_uuids},
+        results={
+            "model_results": [
+                {"model": "m1", "success": None, "message": "Queued..."}
             ]
         },
-    }
-    assert _build_agent_test_run_item_fields(job, "Run 1")["total_tests"] == 2
+    )
+    # A job that froze no test set: nothing to fall back to.
+    bare_id = create_agent_test_job(
+        agent_id=agent["uuid"], job_type="llm-unit-test", status="in_progress"
+    )
 
-    # A stored count always wins, even when it disagrees with the rows on hand.
-    job["results"]["total_tests"] = 5
-    assert _build_agent_test_run_item_fields(job, "Run 1")["total_tests"] == 5
+    def _by_uuid():
+        resp = client.get(f"/agent-tests/agent/{agent['uuid']}/runs", headers=h)
+        assert resp.status_code == 200
+        return {r["uuid"]: r for r in resp.json()["items"]}
 
-    # Same fallback per benchmark model: a queued model stores no count.
-    assert _slim_model_results(
-        [
-            {"model": "m1", "test_results": [{"name": "a"}, {"name": "b"}]},
-            {"model": "m2", "total_tests": 7, "test_results": [{"name": "a"}]},
-        ]
-    ) == [
-        {
-            "model": "m1",
-            "success": None,
-            "message": "",
-            "total_tests": 2,
-            "passed": None,
-            "failed": None,
+    runs = _by_uuid()
+    assert runs[run_id]["total_tests"] == 3
+    # The benchmark's own column, and its one model's, both read the same set.
+    assert runs[bench_id]["total_tests"] == 3
+    assert runs[bench_id]["model_results"][0]["total_tests"] == 3
+    # No frozen test set stays null, not 0 — a dash, not "0 tests".
+    assert runs[bare_id]["total_tests"] is None
+
+    # A stored count wins over the launched set.
+    update_agent_test_job(run_id, results={"total_tests": 2, "test_results": []})
+    update_agent_test_job(
+        bench_id,
+        results={
+            "model_results": [
+                {"model": "m1", "success": True, "message": "ok", "total_tests": 2}
+            ]
         },
-        {
-            "model": "m2",
-            "success": None,
-            "message": "",
-            "total_tests": 7,
-            "passed": None,
-            "failed": None,
-        },
-    ]
+    )
+    runs = _by_uuid()
+    assert runs[run_id]["total_tests"] == 2
+    assert runs[bench_id]["model_results"][0]["total_tests"] == 2
 
-    # No count and no rows stays null rather than reporting zero tests.
-    assert _stored_or_row_count(None, None) is None
-    assert _stored_or_row_count(0, [{"name": "a"}]) == 0
+
+def test_global_run_list_reports_the_launched_test_count(client):
+    """The workspace-wide runs list reads the same launched test count as the
+    per-agent one, so a run shows the same number in both."""
+    from db import create_agent_test_job
+
+    h = _signup(client)["headers"]
+    agent = _create_agent(client, h)
+    test_uuids = [_create_test(client, h, name=f"gtc{i}")["uuid"] for i in range(2)]
+
+    job_id = create_agent_test_job(
+        agent_id=agent["uuid"],
+        job_type="llm-unit-test",
+        status="in_progress",
+        details={"test_uuids": test_uuids},
+    )
+
+    resp = client.get("/agent-tests/runs", headers=h)
+    assert resp.status_code == 200
+    run = next(r for r in resp.json()["items"] if r["uuid"] == job_id)
+    assert run["total_tests"] == 2

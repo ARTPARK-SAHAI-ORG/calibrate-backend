@@ -7323,6 +7323,7 @@ _AGENT_TEST_JOB_SUMMARY_COLUMNS = """
          )) FROM json_each(COALESCE(atj.results, '{}'), '$.model_results') je
          WHERE je.type = 'object'
         ) AS model_results,
+        json_array_length(atj.details, '$.test_uuids') AS test_count,
         json_extract(atj.details, '$.evaluators_by_test_id') AS evaluators_by_test_id,
         json_extract(atj.details, '$.has_tool_call_test') AS has_tool_call_test,
         json_extract(atj.details, '$.tool_call_evaluator.name')
@@ -7358,6 +7359,7 @@ def _row_to_agent_test_job_summary(row: sqlite3.Row) -> Dict[str, Any]:
         "created_at": row["created_at"],
         "updated_at": row["updated_at"],
         "id": row.get("id"),
+        "test_count": row.get("test_count"),
         "evaluators_by_test_id": _loads(row.get("evaluators_by_test_id")),
         "has_tool_call_test": bool(row.get("has_tool_call_test")),
         "tool_call_evaluator_name": row.get("tool_call_evaluator_name"),
