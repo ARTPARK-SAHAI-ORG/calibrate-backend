@@ -4447,3 +4447,4 @@ def test_benchmark_import_counts_rows_when_metrics_omits_the_total(client):
     assert model["total_tests"] == 2
     assert model["passed"] == 1
     assert model["failed"] == 1
+

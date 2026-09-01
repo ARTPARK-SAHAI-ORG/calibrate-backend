@@ -3386,32 +3386,14 @@ def get_agent_test_run_status(
     return projection.apply(data)
 
 
-@router.get(
-    "/run/{task_id}/results/{test_case_id}",
-    response_model=TestCaseResult,
-    tags=["Public API"],
-    summary="Get test case result",
-)
-def get_agent_test_case_result(
-    task_id: str = PathParam(
-        description="Test run or benchmark the case was run in",
-        examples=[_EXAMPLE_TASK_UUID],
-    ),
-    test_case_id: str = PathParam(
-        description="The test whose result to read",
-        examples=[EXAMPLE_TEST_UUID],
-    ),
-    ctx: OrgContext = Depends(get_org_jwt_or_api_key),
-    model: Optional[str] = Query(
-        None,
-        description="Which model's answer to read. Required for a benchmark, which runs every test once per model",
-        examples=["openai/gpt-4.1"],
-    ),
-):
-    """Get the full result of one test case in a run"""
-    # Serves runs and benchmarks alike, as the abort and rename endpoints do,
-    # since both are rows in `agent_test_jobs`.
-    job = _load_owned_agent_test_job(task_id, ctx)
+def find_case_result(
+    job: Dict[str, Any], test_case_id: str, model: Optional[str]
+) -> Dict[str, Any]:
+    """One case's full result from a run or benchmark job, evaluators resolved.
+
+    Raises the 400/404 the caller should answer with, so the JWT route and the
+    shared-link routes give the same answers.
+    """
     results = job.get("results") or {}
     details = job.get("details") or {}
 
@@ -3458,6 +3440,36 @@ def get_agent_test_case_result(
         _tool_call_evaluator_for_run(details),
     )
     return row
+
+
+@router.get(
+    "/run/{task_id}/results/{test_case_id}",
+    response_model=TestCaseResult,
+    tags=["Public API"],
+    summary="Get test case result",
+)
+def get_agent_test_case_result(
+    task_id: str = PathParam(
+        description="Test run or benchmark the case was run in",
+        examples=[_EXAMPLE_TASK_UUID],
+    ),
+    test_case_id: str = PathParam(
+        description="The test whose result to read",
+        examples=[EXAMPLE_TEST_UUID],
+    ),
+    ctx: OrgContext = Depends(get_org_jwt_or_api_key),
+    model: Optional[str] = Query(
+        None,
+        description="Which model's answer to read. Required for a benchmark, which runs every test once per model",
+        examples=["openai/gpt-4.1"],
+    ),
+):
+    """Get the full result of one test case in a run"""
+    # Serves runs and benchmarks alike, as the abort and rename endpoints do,
+    # since both are rows in `agent_test_jobs`.
+    return find_case_result(
+        _load_owned_agent_test_job(task_id, ctx), test_case_id, model
+    )
 
 
 # ============ Benchmark API ============
