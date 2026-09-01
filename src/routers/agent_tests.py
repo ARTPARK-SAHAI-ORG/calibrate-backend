@@ -417,6 +417,10 @@ class TestCaseResult(BaseModel):
         None, description="ID of the test case within the run"
     )
     name: Optional[str] = Field(None, description="Name of the test")
+    test_type: Optional[TestTypeLiteral] = Field(
+        None,
+        description="What the test asks of the agent, which decides how a reader draws the case",
+    )
     passed: Optional[bool] = Field(
         None, description="Whether the case passed"
     )
@@ -528,6 +532,10 @@ class TestRunStatusResponse(BaseModel):
     evaluators: Optional[List[TestRunEvaluator]] = Field(
         None,
         description="The evaluators used in this run. Each verdict in `judge_results` links to one of these by `evaluator_uuid`",
+    )
+    evaluator_summary: Optional[List[Dict[str, Any]]] = Field(
+        None,
+        description="Totals for each evaluator over the whole run, matching the shape a benchmark reports for each model. Only evaluators that returned a verdict appear",
     )
     results: Optional[List[TestCaseResult]] = Field(
         None, description="Results for each test case"
@@ -876,6 +884,24 @@ def _tool_call_evaluator(org_uuid: Optional[str]) -> Optional[Dict[str, Any]]:
         "scale_max": None,
         "version_number": version.get("version_number"),
     }
+
+
+def _row_test_type(row: Dict[str, Any]) -> Optional[str]:
+    """What the test asked of the agent, lifted off the stored case.
+
+    Read here rather than stored at write time so a run that finished before
+    this field existed still reports it. An imported run can carry any string
+    in that slot, so anything outside the known set reads as absent instead of
+    failing the response model.
+    """
+    test_case = row.get("test_case")
+    if not isinstance(test_case, dict):
+        return None
+    evaluation = test_case.get("evaluation")
+    if not isinstance(evaluation, dict):
+        return None
+    test_type = evaluation.get("type")
+    return test_type if test_type in _TEST_TYPES else None
 
 
 def _is_tool_call_row(row: Any) -> bool:
@@ -1785,6 +1811,7 @@ def _pending_test_case_result_placeholder(name: str) -> Dict[str, Any]:
     return {
         "test_case_id": None,
         "name": name,
+        "test_type": None,
         "passed": None,
         "reasoning": None,
         "output": None,
@@ -1987,6 +2014,7 @@ def _enrich_test_results_with_evaluators(
     for r in test_results:
         if not isinstance(r, dict):
             continue
+        r["test_type"] = _row_test_type(r)
         raw = r.get("judge_results")
         if raw is None:
             if (
@@ -2153,6 +2181,91 @@ def _build_evaluator_summary(
                 }
             )
 
+        summary.append(entry)
+
+    return summary or None
+
+
+def evaluator_totals_from_rows(
+    test_results: Optional[List[Dict[str, Any]]],
+    evaluators_block: Optional[List[Dict[str, Any]]],
+    evaluators_by_test_id: Optional[Dict[str, List[Dict[str, Any]]]] = None,
+) -> Optional[List[Dict[str, Any]]]:
+    """Per-evaluator totals over a single run's cases, in the shape a benchmark
+    reports for each model.
+
+    Counted from the rows rather than read from calibrate's `metrics.json`,
+    which a single run has never stored, so a run that finished long ago
+    reports its totals too. Only evaluators that returned at least one verdict
+    appear, so a run still going reports what has landed.
+    """
+    if not test_results or not evaluators_block:
+        return None
+
+    # A benchmark reports calibrate's own key, which carries a suffix when two
+    # evaluators share a display name. That key is the name frozen into the
+    # snapshot, so read it there rather than using the current name, which two
+    # evaluators can share.
+    calibrate_key: Dict[str, str] = {}
+    for snapshot in (evaluators_by_test_id or {}).values():
+        for e in snapshot if isinstance(snapshot, list) else []:
+            if isinstance(e, dict) and e.get("uuid") and e.get("name"):
+                calibrate_key.setdefault(e["uuid"], e["name"])
+
+    verdicts: Dict[str, List[Any]] = {}
+    for row in test_results:
+        if not isinstance(row, dict):
+            continue
+        for entry in row.get("judge_results") or []:
+            if not isinstance(entry, dict):
+                continue
+            uid = entry.get("evaluator_uuid")
+            if not uid:
+                continue
+            value = entry.get("match")
+            if value is None:
+                value = entry.get("score")
+            if value is not None:
+                verdicts.setdefault(uid, []).append(value)
+
+    summary: List[Dict[str, Any]] = []
+    for evaluator in evaluators_block:
+        values = verdicts.get(evaluator.get("uuid"))
+        if not values:
+            continue
+        uid = evaluator.get("uuid")
+        entry = {
+            "metric_key": calibrate_key.get(uid) or evaluator.get("name"),
+            "name": evaluator.get("name"),
+            "type": evaluator.get("output_type"),
+            "evaluator_uuid": uid,
+            "description": evaluator.get("description"),
+        }
+        if evaluator.get("output_type") == "rating":
+            numbers = [v for v in values if isinstance(v, (int, float))]
+            if not numbers:
+                continue
+            entry.update(
+                {
+                    "mean": sum(numbers) / len(numbers),
+                    "min": min(numbers),
+                    "max": max(numbers),
+                    "count": len(numbers),
+                    "scale_min": evaluator.get("scale_min"),
+                    "scale_max": evaluator.get("scale_max"),
+                }
+            )
+        else:
+            passed = sum(1 for v in values if v is True)
+            entry.update(
+                {
+                    "passed": passed,
+                    "total": len(values),
+                    # Out of 100, the scale calibrate itself writes into
+                    # metrics.json, so a run and a benchmark read alike.
+                    "pass_rate": passed / len(values) * 100,
+                }
+            )
         summary.append(entry)
 
     return summary or None
@@ -3258,6 +3371,29 @@ def abort_agent_test_run(
     )
 
 
+_RunDetailMode = Literal["full", "summary"]
+
+_SUMMARY_MODE_DESCRIPTION = (
+    "How much of each test case to return. `full` returns every field of every "
+    "case. `summary` returns one light row per case, with its ID, name, "
+    "verdict and short reason, leaving out the conversation, the agent's output "
+    "and the evaluator verdicts. Read those one case at a time from "
+    "`GET /agent-tests/run/{task_id}/results/{test_case_id}`"
+)
+
+
+def _summarize_case_rows(rows: Any) -> None:
+    """Drop the heavy fields from each case row in place.
+
+    Removed rather than set to null, so a run of many cases stays small.
+    `response_model_exclude_unset=True` on the routes is what lets a missing
+    key drop out of the response.
+    """
+    for row in rows or []:
+        for field in ("test_case", "output", "judge_results", "inputs"):
+            row.pop(field, None)
+
+
 _RunProjection = make_projection_params(
     heavy_fields=[
         "results[].output",
@@ -3272,6 +3408,7 @@ _RunProjection = make_projection_params(
 @router.get(
     "/run/{task_id}",
     response_model=TestRunStatusResponse,
+    response_model_exclude_unset=True,
     tags=["Public API"],
     summary="Get test run status",
 )
@@ -3285,6 +3422,7 @@ def get_agent_test_run_status(
         False,
         description="Return only failing test cases. Omit to return every case",
     ),
+    mode: _RunDetailMode = Query("full", description=_SUMMARY_MODE_DESCRIPTION),
     projection: _RunProjection = Depends(),
 ):
     """Poll a test run for its status and evaluation results."""
@@ -3341,6 +3479,9 @@ def get_agent_test_run_status(
         cost=results.get("cost"),
         total_tokens=results.get("total_tokens"),
         evaluators=evaluators_block or None,
+        evaluator_summary=evaluator_totals_from_rows(
+            results.get("test_results"), evaluators_block, evaluators_snapshot
+        ),
         results=results.get("test_results"),
         unanswered_tests=results.get("unanswered_tests"),
         stopped_early=bool(results.get("stopped_early")),
@@ -3356,7 +3497,95 @@ def get_agent_test_run_status(
         data["results"] = [
             r for r in data["results"] if r.get("passed") is False
         ]
+    if mode == "summary":
+        _summarize_case_rows(data.get("results"))
     return projection.apply(data)
+
+
+def find_case_result(
+    job: Dict[str, Any], test_case_id: str, model: Optional[str]
+) -> Dict[str, Any]:
+    """One case's full result from a run or benchmark job, evaluators resolved.
+
+    Raises the 400/404 the caller should answer with, so the JWT route and the
+    shared-link routes give the same answers.
+    """
+    results = job.get("results") or {}
+    details = job.get("details") or {}
+
+    if job.get("type") == "llm-benchmark":
+        if not model:
+            raise HTTPException(
+                status_code=400,
+                detail="Name the model whose answer to read, as a benchmark runs every test once per model",
+            )
+        # Resolve the model first: a model that has not started yet carries a
+        # null `test_results`, which must read as a missing case rather than a
+        # missing model.
+        matched = next(
+            (
+                m
+                for m in results.get("model_results") or []
+                if isinstance(m, dict) and m.get("model") == model
+            ),
+            None,
+        )
+        if matched is None:
+            raise HTTPException(
+                status_code=404, detail="Model not found in this benchmark"
+            )
+        rows = matched.get("test_results")
+    else:
+        rows = results.get("test_results")
+
+    row = next(
+        (
+            r
+            for r in rows or []
+            if isinstance(r, dict) and r.get("test_case_id") == test_case_id
+        ),
+        None,
+    )
+    if row is None:
+        raise HTTPException(status_code=404, detail="Test case result not found")
+
+    _enrich_test_results_with_evaluators(
+        [row],
+        details.get("evaluators_by_test_id") or {},
+        {},
+        _tool_call_evaluator_for_run(details),
+    )
+    return row
+
+
+@router.get(
+    "/run/{task_id}/results/{test_case_id}",
+    response_model=TestCaseResult,
+    tags=["Public API"],
+    summary="Get test case result",
+)
+def get_agent_test_case_result(
+    task_id: str = PathParam(
+        description="Test run or benchmark the case was run in",
+        examples=[_EXAMPLE_TASK_UUID],
+    ),
+    test_case_id: str = PathParam(
+        description="The test whose result to read",
+        examples=[EXAMPLE_TEST_UUID],
+    ),
+    ctx: OrgContext = Depends(get_org_jwt_or_api_key),
+    model: Optional[str] = Query(
+        None,
+        description="Which model's answer to read. Required for a benchmark, which runs every test once per model",
+        examples=["openai/gpt-4.1"],
+    ),
+):
+    """Get the full result of one test case in a run"""
+    # Serves runs and benchmarks alike, as the abort and rename endpoints do,
+    # since both are rows in `agent_test_jobs`.
+    return find_case_result(
+        _load_owned_agent_test_job(task_id, ctx), test_case_id, model
+    )
 
 
 # ============ Benchmark API ============
@@ -4425,6 +4654,7 @@ _BenchmarkProjection = make_projection_params(
 @router.get(
     "/benchmark/{task_id}",
     response_model=BenchmarkStatusResponse,
+    response_model_exclude_unset=True,
     summary="Get benchmark status",
     tags=["Public API"],
 )
@@ -4438,6 +4668,7 @@ def get_benchmark_status(
         False,
         description="Return only failing test cases for each model. Omit to return every case",
     ),
+    mode: _RunDetailMode = Query("full", description=_SUMMARY_MODE_DESCRIPTION),
     projection: _BenchmarkProjection = Depends(),
 ):
     """Get the results of a benchmark run"""
@@ -4504,6 +4735,9 @@ def get_benchmark_status(
                 model["test_results"] = [
                     r for r in model["test_results"] if r.get("passed") is False
                 ]
+    if mode == "summary":
+        for model in data.get("model_results") or []:
+            _summarize_case_rows(model.get("test_results"))
     return projection.apply(data)
 
 

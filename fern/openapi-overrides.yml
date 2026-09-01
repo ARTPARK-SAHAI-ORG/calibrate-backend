@@ -84,6 +84,10 @@ paths:
     get:
       x-fern-sdk-group-name: agent_tests
       x-fern-sdk-method-name: get_run
+  /agent-tests/run/{task_id}/results/{test_case_id}:
+    get:
+      x-fern-sdk-group-name: agent_tests
+      x-fern-sdk-method-name: get_run_case
   /agent-tests/agent/{agent_uuid}/benchmark:
     post:
       x-fern-sdk-group-name: agent_tests

@@ -110,6 +110,22 @@ actions:
           completed, includes per-test-case pass/fail results and evaluator
           judgments. Use the task_id from run-agent-tests or
           run-agent-tests-batch.
+  - target: $.paths['/agent-tests/run/{task_id}/results/{test_case_id}'].get
+    update:
+      x-speakeasy-group: agent_tests
+      x-speakeasy-name-override: get_run_case
+      x-speakeasy-mcp:
+        name: get-agent-test-case-result
+        title: Get agent test case result
+        scopes: [read]
+        readOnlyHint: true
+        openWorldHint: true
+        description: |
+          Fetch the full result of one test case in a run, including the
+          conversation, the agent's output and each evaluator's reasoning. Pass
+          the model query param for a benchmark, which runs every test once per
+          model. Use with mode=summary on get-agent-test-run, which returns
+          light rows without this detail.
   - target: $.paths['/agents'].post
     update:
       x-speakeasy-group: agents

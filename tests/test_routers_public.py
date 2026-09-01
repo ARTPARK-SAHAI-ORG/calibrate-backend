@@ -248,6 +248,253 @@ def test_public_benchmark_valid_token(client):
     assert shared.json()["name"] == "Model bake-off"
 
 
+def _shared_run(client, job_type="llm-unit-test"):
+    """A shared run (or benchmark) holding one pass and one fail, returning its
+    share token."""
+    import db as db_mod
+
+    auth = _user(client)
+    agent_uuid = db_mod.create_agent(
+        name=f"a-{uuid.uuid4().hex[:6]}",
+        org_uuid=auth["org_uuid"],
+        user_id=auth["user_uuid"],
+    )
+    job_uuid = db_mod.create_agent_test_job(
+        agent_id=agent_uuid, job_type=job_type, status="done"
+    )
+    rows = [
+        {
+            "name": "tc_pass",
+            "test_case_id": "tc_pass",
+            "passed": True,
+            "reasoning": "looks good",
+            "output": {"response": "hi"},
+            "test_case": {"name": "tc_pass", "history": []},
+            "judge_results": None,
+        },
+        {
+            "name": "tc_fail",
+            "test_case_id": "tc_fail",
+            "passed": False,
+            "reasoning": "wrong answer",
+            "output": {"response": "nope"},
+            "test_case": {"name": "tc_fail", "history": []},
+            "judge_results": None,
+        },
+    ]
+    results = (
+        {"total_tests": 2, "passed": 1, "failed": 1, "test_results": rows}
+        if job_type == "llm-unit-test"
+        else {
+            "model_results": [
+                {
+                    "model": "openai/gpt-4.1",
+                    "success": True,
+                    "message": "Completed",
+                    "total_tests": 2,
+                    "passed": 1,
+                    "failed": 1,
+                    "test_results": rows,
+                }
+            ]
+        }
+    )
+    db_mod.update_agent_test_job(job_uuid, status="done", results=results)
+    token = uuid.uuid4().hex
+    db_mod.update_agent_test_job_visibility(job_uuid, True, token)
+    return token
+
+
+_SHARED_HEAVY_FIELDS = ("test_case", "output", "judge_results", "inputs")
+
+
+def test_public_test_run_summary_mode_drops_heavy_keys(client):
+    """A shared link carries the same payload a run detail does, so it trims the
+    same way."""
+    token = _shared_run(client)
+
+    full = client.get(f"/public/test-run/{token}").json()
+    assert full["results"][0]["output"] == {"response": "hi"}
+
+    body = client.get(f"/public/test-run/{token}", params={"mode": "summary"}).json()
+    assert len(body["results"]) == 2
+    for case in body["results"]:
+        for field in _SHARED_HEAVY_FIELDS:
+            assert field not in case
+        assert "test_case_id" in case and "passed" in case
+    assert body["results"][1]["reasoning"] == "wrong answer"
+    assert body["total_tests"] == 2
+
+
+def test_public_benchmark_summary_mode_drops_heavy_keys(client):
+    token = _shared_run(client, job_type="llm-benchmark")
+
+    model = client.get(
+        f"/public/benchmark/{token}", params={"mode": "summary"}
+    ).json()["model_results"][0]
+    for case in model["test_results"]:
+        for field in _SHARED_HEAVY_FIELDS:
+            assert field not in case
+    assert model["passed"] == 1
+
+
+def test_public_test_run_reports_totals_and_test_type(client):
+    """A shared link opens on the same Summary tab, so it carries the same
+    per-evaluator totals and case types."""
+    import db as db_mod
+
+    auth = _user(client)
+    agent_uuid = db_mod.create_agent(
+        name=f"a-{uuid.uuid4().hex[:6]}",
+        org_uuid=auth["org_uuid"],
+        user_id=auth["user_uuid"],
+    )
+    evaluator_uuid = str(uuid.uuid4())
+    snapshot = [
+        {"uuid": evaluator_uuid, "name": "Correctness", "output_type": "binary"}
+    ]
+    job_uuid = db_mod.create_agent_test_job(
+        agent_id=agent_uuid,
+        job_type="llm-unit-test",
+        details={"evaluators_by_test_id": {"tc_a": snapshot, "tc_b": snapshot}},
+    )
+    db_mod.update_agent_test_job(
+        job_uuid,
+        status="done",
+        results={
+            "test_results": [
+                {
+                    "name": "tc_a",
+                    "test_case_id": "tc_a",
+                    "passed": True,
+                    "test_case": {"evaluation": {"type": "response"}},
+                    "judge_results": [
+                        {"evaluator_uuid": evaluator_uuid, "match": True}
+                    ],
+                },
+                {
+                    "name": "tc_b",
+                    "test_case_id": "tc_b",
+                    "passed": False,
+                    "test_case": {"evaluation": {"type": "general"}},
+                    "judge_results": [
+                        {"evaluator_uuid": evaluator_uuid, "match": False}
+                    ],
+                },
+            ]
+        },
+    )
+    token = uuid.uuid4().hex
+    db_mod.update_agent_test_job_visibility(job_uuid, True, token)
+
+    body = client.get(
+        f"/public/test-run/{token}", params={"mode": "summary"}
+    ).json()
+    assert [c["test_type"] for c in body["results"]] == ["response", "general"]
+    totals = body["evaluator_summary"][0]
+    assert (totals["passed"], totals["total"], totals["pass_rate"]) == (1, 2, 50.0)
+
+
+def test_public_test_run_case_returns_one_case_in_full(client):
+    token = _shared_run(client)
+
+    resp = client.get(f"/public/test-run/{token}/results/tc_fail")
+    assert resp.status_code == 200
+    case = resp.json()
+    assert case["output"]["response"] == "nope"
+    assert case["test_case"] == {"name": "tc_fail", "history": []}
+    assert case["reasoning"] == "wrong answer"
+
+    assert client.get(f"/public/test-run/{token}/results/nope").status_code == 404
+    assert client.get("/public/test-run/bad-token/results/tc_fail").status_code == 404
+
+
+def test_public_benchmark_case_needs_a_model(client):
+    token = _shared_run(client, job_type="llm-benchmark")
+
+    assert (
+        client.get(f"/public/benchmark/{token}/results/tc_fail").status_code == 400
+    )
+
+    ok = client.get(
+        f"/public/benchmark/{token}/results/tc_fail",
+        params={"model": "openai/gpt-4.1"},
+    )
+    assert ok.status_code == 200
+    assert ok.json()["output"]["response"] == "nope"
+
+    missing = client.get(
+        f"/public/benchmark/{token}/results/tc_fail", params={"model": "openai/gpt-9"}
+    )
+    assert missing.status_code == 404
+
+
+def test_public_run_case_does_not_cross_job_types(client):
+    """A benchmark token must not open the run route, or a share link would read
+    a job it was not minted for."""
+    token = _shared_run(client, job_type="llm-benchmark")
+
+    assert client.get(f"/public/test-run/{token}/results/tc_fail").status_code == 404
+
+
+def test_public_test_run_shows_a_tool_call_verdict(client):
+    """A tool-call test is judged by diffing the calls, so its verdict is built
+    at read time from the evaluator frozen onto the run. A shared link must show
+    the same verdict the owner sees, not a blank."""
+    import db as db_mod
+
+    auth = _user(client)
+    agent_uuid = db_mod.create_agent(
+        name=f"a-{uuid.uuid4().hex[:6]}",
+        org_uuid=auth["org_uuid"],
+        user_id=auth["user_uuid"],
+    )
+    evaluator_uuid = str(uuid.uuid4())
+    job_uuid = db_mod.create_agent_test_job(
+        agent_id=agent_uuid,
+        job_type="llm-unit-test",
+        status="done",
+        details={
+            "tool_call_evaluator": {
+                "uuid": evaluator_uuid,
+                "name": "Tool call correctness",
+                "output_type": "binary",
+                "output_config": {
+                    "scale": [
+                        {"value": False, "name": "Wrong"},
+                        {"value": True, "name": "Correct"},
+                    ]
+                },
+            }
+        },
+    )
+    db_mod.update_agent_test_job(
+        job_uuid,
+        status="done",
+        results={
+            "test_results": [
+                {
+                    "name": "tc_tool",
+                    "test_case_id": "tc_tool",
+                    "passed": True,
+                    "reasoning": "calls match",
+                    "output": {"tool_calls": [{"tool": "search"}]},
+                    "test_case": {"evaluation": {"type": "tool_call"}},
+                    "judge_results": None,
+                }
+            ]
+        },
+    )
+    token = uuid.uuid4().hex
+    db_mod.update_agent_test_job_visibility(job_uuid, True, token)
+
+    body = client.get(f"/public/test-run/{token}").json()
+    verdict = body["results"][0]["judge_results"][0]
+    assert verdict["evaluator_uuid"] == evaluator_uuid
+    assert verdict["value_name"] == "Correct"
+    assert [e["name"] for e in body["evaluators"]] == ["Tool call correctness"]
+
+
 def test_public_simulation_run_valid_token(client):
     import db as db_mod
 
