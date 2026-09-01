@@ -151,6 +151,12 @@ def test_run_benchmark_task_multi_model_end_to_end_with_fake_cli():
         assert set(by_model[m]["cost"]) == {"mean", "min", "max", "count"}
         assert set(by_model[m]["total_tokens"]) == {"mean", "min", "max", "count"}
     assert job["results"]["leaderboard_summary"], "leaderboard should be populated"
+    # The real CLI writes `(passed / total) * 100`, so an all-pass run is 100.0.
+    # A fake on a 0-1 scale would show a full pass rate as 1% in the UI.
+    for m in models:
+        for aggregate in by_model[m]["evaluator_summary"] or []:
+            if aggregate.get("type") == "binary":
+                assert aggregate["pass_rate"] == 100.0
 
 
 def _make_eval_job(job_type, details):

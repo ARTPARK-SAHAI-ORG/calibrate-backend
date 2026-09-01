@@ -655,7 +655,7 @@ def get_public_test_run(
     )
 
     evaluator_summary = evaluator_totals_from_rows(
-        results.get("test_results"), evaluators_block
+        results.get("test_results"), evaluators_block, evaluators_snapshot
     )
 
     if mode == "summary":

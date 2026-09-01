@@ -1638,6 +1638,54 @@ def test_run_detail_reports_per_evaluator_totals(client):
         assert (rating["scale_min"], rating["scale_max"]) == (1, 5)
 
 
+def test_run_detail_totals_key_two_same_named_evaluators_apart(client):
+    """`metric_key` is calibrate's own key, which carries a suffix when two
+    evaluators share a display name. Reading the current name instead would give
+    both entries the same key and collapse them into one card."""
+    from db import create_agent_test_job, update_agent_test_job
+
+    h = _signup(client)["headers"]
+    agent = _create_agent(client, h)
+    first, second = str(uuid.uuid4()), str(uuid.uuid4())
+    job_id = create_agent_test_job(
+        agent_id=agent["uuid"],
+        job_type="llm-unit-test",
+        details={
+            "evaluators_by_test_id": {
+                "tc_a": [
+                    {"uuid": first, "name": "Correctness", "output_type": "binary"},
+                    {
+                        "uuid": second,
+                        "name": "Correctness-a1b2c3d4",
+                        "output_type": "binary",
+                    },
+                ]
+            }
+        },
+    )
+    update_agent_test_job(
+        job_id,
+        status="done",
+        results={
+            "test_results": [
+                {
+                    "name": "tc_a",
+                    "test_case_id": "tc_a",
+                    "passed": True,
+                    "judge_results": [
+                        {"evaluator_uuid": first, "match": True},
+                        {"evaluator_uuid": second, "match": False},
+                    ],
+                }
+            ]
+        },
+    )
+
+    body = client.get(f"/agent-tests/run/{job_id}", headers=h).json()
+    keys = sorted(e["metric_key"] for e in body["evaluator_summary"])
+    assert keys == ["Correctness", "Correctness-a1b2c3d4"]
+
+
 def test_run_detail_totals_skip_an_evaluator_with_no_verdict(client):
     """A run still going has evaluators that have judged nothing yet. They stay
     out of the totals rather than showing as a zero."""

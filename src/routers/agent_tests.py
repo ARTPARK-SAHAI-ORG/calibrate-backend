@@ -419,7 +419,7 @@ class TestCaseResult(BaseModel):
     name: Optional[str] = Field(None, description="Name of the test")
     test_type: Optional[TestTypeLiteral] = Field(
         None,
-        description="What the test asks of the agent, which decides how a reader draws the case. Absent on a run whose stored case does not record it",
+        description="What the test asks of the agent, which decides how a reader draws the case",
     )
     passed: Optional[bool] = Field(
         None, description="Whether the case passed"
@@ -2189,6 +2189,7 @@ def _build_evaluator_summary(
 def evaluator_totals_from_rows(
     test_results: Optional[List[Dict[str, Any]]],
     evaluators_block: Optional[List[Dict[str, Any]]],
+    evaluators_by_test_id: Optional[Dict[str, List[Dict[str, Any]]]] = None,
 ) -> Optional[List[Dict[str, Any]]]:
     """Per-evaluator totals over a single run's cases, in the shape a benchmark
     reports for each model.
@@ -2200,6 +2201,16 @@ def evaluator_totals_from_rows(
     """
     if not test_results or not evaluators_block:
         return None
+
+    # A benchmark reports calibrate's own key, which carries a suffix when two
+    # evaluators share a display name. That key is the name frozen into the
+    # snapshot, so read it there rather than using the current name, which two
+    # evaluators can share.
+    calibrate_key: Dict[str, str] = {}
+    for snapshot in (evaluators_by_test_id or {}).values():
+        for e in snapshot if isinstance(snapshot, list) else []:
+            if isinstance(e, dict) and e.get("uuid") and e.get("name"):
+                calibrate_key.setdefault(e["uuid"], e["name"])
 
     verdicts: Dict[str, List[Any]] = {}
     for row in test_results:
@@ -2222,11 +2233,12 @@ def evaluator_totals_from_rows(
         values = verdicts.get(evaluator.get("uuid"))
         if not values:
             continue
+        uid = evaluator.get("uuid")
         entry = {
-            "metric_key": evaluator.get("name"),
+            "metric_key": calibrate_key.get(uid) or evaluator.get("name"),
             "name": evaluator.get("name"),
             "type": evaluator.get("output_type"),
-            "evaluator_uuid": evaluator.get("uuid"),
+            "evaluator_uuid": uid,
             "description": evaluator.get("description"),
         }
         if evaluator.get("output_type") == "rating":
@@ -3468,7 +3480,7 @@ def get_agent_test_run_status(
         total_tokens=results.get("total_tokens"),
         evaluators=evaluators_block or None,
         evaluator_summary=evaluator_totals_from_rows(
-            results.get("test_results"), evaluators_block
+            results.get("test_results"), evaluators_block, evaluators_snapshot
         ),
         results=results.get("test_results"),
         unanswered_tests=results.get("unanswered_tests"),

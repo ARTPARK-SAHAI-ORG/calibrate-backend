@@ -146,10 +146,11 @@ def _metrics_aggregate(ev: Dict[str, Any], n: int) -> Dict[str, Any]:
         }
     return {
         "type": "binary",
+        # Out of 100, as the real CLI writes it: (passed / total) * 100.
+        "pass_rate": 100.0,
         "evaluator_id": uid,
         "passed": n,
         "total": n,
-        "pass_rate": 1.0,
     }
 
 
