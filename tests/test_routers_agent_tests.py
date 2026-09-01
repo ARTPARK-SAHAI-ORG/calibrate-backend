@@ -4782,3 +4782,61 @@ def test_benchmark_import_counts_rows_when_metrics_omits_the_total(client):
     assert model["passed"] == 1
     assert model["failed"] == 1
 
+
+
+def test_run_list_counts_rows_when_a_run_has_no_stored_total():
+    """A run that has not stored its count yet reports the number of test rows
+    it holds, so the list's Tests column matches the run detail instead of
+    reading as a dash until the run finishes."""
+    from routers.agent_tests import (
+        _build_agent_test_run_item_fields,
+        _slim_model_results,
+        _stored_or_row_count,
+    )
+
+    job = {
+        "uuid": "job-1",
+        "status": "in_progress",
+        "type": "llm-unit-test",
+        "created_at": "2026-01-01T00:00:00",
+        "results": {
+            "test_results": [
+                {"name": "a", "passed": None},
+                {"name": "b", "passed": None},
+            ]
+        },
+    }
+    assert _build_agent_test_run_item_fields(job, "Run 1")["total_tests"] == 2
+
+    # A stored count always wins, even when it disagrees with the rows on hand.
+    job["results"]["total_tests"] = 5
+    assert _build_agent_test_run_item_fields(job, "Run 1")["total_tests"] == 5
+
+    # Same fallback per benchmark model: a queued model stores no count.
+    assert _slim_model_results(
+        [
+            {"model": "m1", "test_results": [{"name": "a"}, {"name": "b"}]},
+            {"model": "m2", "total_tests": 7, "test_results": [{"name": "a"}]},
+        ]
+    ) == [
+        {
+            "model": "m1",
+            "success": None,
+            "message": "",
+            "total_tests": 2,
+            "passed": None,
+            "failed": None,
+        },
+        {
+            "model": "m2",
+            "success": None,
+            "message": "",
+            "total_tests": 7,
+            "passed": None,
+            "failed": None,
+        },
+    ]
+
+    # No count and no rows stays null rather than reporting zero tests.
+    assert _stored_or_row_count(None, None) is None
+    assert _stored_or_row_count(0, [{"name": "a"}]) == 0

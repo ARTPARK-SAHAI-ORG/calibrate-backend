@@ -820,6 +820,18 @@ def get_agent_tests_endpoint(
     return page_envelope([to_test_list_response(t) for t in page], total, pagination)
 
 
+def _stored_or_row_count(total: Any, rows: Any) -> Optional[int]:
+    """The number of tests a run covers, falling back to the rows it holds.
+
+    A run stores its count only once calibrate writes `metrics.json` at the end,
+    but from launch it holds one row per test (pending ones as placeholders), so
+    counting them is the same number the finished run reports.
+    """
+    if total is not None:
+        return total
+    return len(rows) if isinstance(rows, list) else None
+
+
 def _slim_test_results(test_results: Any) -> Optional[List[Dict[str, Any]]]:
     """Flatten stored per-case results into `{name, passed}` rows for the run-list.
     Lifts the nested `test_case.name` up onto `name` so the row carries no nested
@@ -855,7 +867,9 @@ def _slim_model_results(model_results: Any) -> Optional[List[Dict[str, Any]]]:
                 "model": m.get("model", ""),
                 "success": m.get("success"),
                 "message": m.get("message", ""),
-                "total_tests": m.get("total_tests"),
+                "total_tests": _stored_or_row_count(
+                    m.get("total_tests"), m.get("test_results")
+                ),
                 "passed": m.get("passed"),
                 "failed": m.get("failed"),
             }
@@ -1151,7 +1165,9 @@ def _build_agent_test_run_item_fields(
         "created_at": job.get("created_at", ""),
         "updated_at": job.get("updated_at", job.get("created_at", "")),
         # Unit test results
-        "total_tests": job_results.get("total_tests"),
+        "total_tests": _stored_or_row_count(
+            job_results.get("total_tests"), job_results.get("test_results")
+        ),
         "passed": job_results.get("passed"),
         "failed": job_results.get("failed"),
         "evaluators": _run_evaluators(job, evaluator_cache),
