@@ -1,5 +1,6 @@
 import copy
 import csv
+import re
 import os
 import json
 import subprocess
@@ -891,6 +892,27 @@ def _tool_call_evaluator(org_uuid: Optional[str]) -> Optional[Dict[str, Any]]:
     }
 
 
+def _uuid_by_unique_name(pairs: List[tuple]) -> Dict[str, str]:
+    """Each name mapped to its test's ID, minus any name used more than once.
+
+    Nothing stops two tests in one run sharing a name, and calibrate echoes
+    that one name for both rows. Keeping either ID would pin one case to the
+    other's test, so it would show the other's frozen rubric and answer the
+    other's per-case URL. An ambiguous name resolves to nothing instead.
+    """
+    by_name: Dict[str, str] = {}
+    ambiguous = set()
+    for name, uuid in pairs:
+        if not isinstance(name, str) or not isinstance(uuid, str):
+            continue
+        if name in by_name and by_name[name] != uuid:
+            ambiguous.add(name)
+        by_name[name] = uuid
+    for name in ambiguous:
+        by_name.pop(name, None)
+    return by_name
+
+
 def test_uuid_by_calibrate_id(details: Dict[str, Any]) -> Dict[str, str]:
     """Map what calibrate echoes as ``test_case_id`` back to the test's own ID.
 
@@ -903,20 +925,24 @@ def test_uuid_by_calibrate_id(details: Dict[str, Any]) -> Dict[str, str]:
     names = details.get("test_names") or []
     if not isinstance(uuids, list) or not isinstance(names, list):
         return {}
-    return {
-        name: uuid
-        for name, uuid in zip(names, uuids)
-        if isinstance(name, str) and isinstance(uuid, str)
-    }
+    return _uuid_by_unique_name(list(zip(names, uuids)))
 
 
 def _test_uuid_by_name(tests: List[Dict[str, Any]]) -> Dict[str, str]:
     """Each test's own ID keyed by the name calibrate will echo back for it."""
-    return {
-        t["name"]: t["uuid"]
-        for t in tests
-        if isinstance(t, dict) and t.get("name") and t.get("uuid")
-    }
+    return _uuid_by_unique_name(
+        [
+            (t.get("name"), t.get("uuid"))
+            for t in tests
+            if isinstance(t, dict)
+        ]
+    )
+
+
+_UUID_SHAPE = re.compile(
+    r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-"
+    r"[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$"
+)
 
 
 def resolve_test_uuid(
@@ -925,15 +951,20 @@ def resolve_test_uuid(
     """The test's own ID for a result row, or None when it cannot be worked out.
 
     Calibrate replaces the ID it is given with the test's name, so a row
-    identifies its test by name and has to be mapped back. A row that already
-    carries a 36-character ID (an imported run, which rewrites it) is its own
-    answer.
+    identifies its test by name and has to be mapped back.
+
+    The name is tried FIRST, and a row is only taken at face value when it
+    looks like a real ID. Counting characters instead would read a 36-character
+    test name as its own ID, and that answer gets written into the stored row,
+    where nothing later can correct it.
     """
     if not isinstance(case_id, str):
         return None
-    if len(case_id) == 36:
-        return case_id
-    return (test_uuid_by_name or {}).get(case_id)
+    mapped = (test_uuid_by_name or {}).get(case_id)
+    if mapped:
+        return mapped
+    # An imported run rewrites the row to the test's own ID, so it needs no map.
+    return case_id if _UUID_SHAPE.match(case_id) else None
 
 
 def _row_test_type(row: Dict[str, Any]) -> Optional[str]:
@@ -2745,8 +2776,8 @@ def run_llm_test_task(
 
                 # Parse results
                 test_results = _parse_agent_test_results(
-                results_data, default_inputs, test_uuid_by_name
-            )
+                    results_data, default_inputs, test_uuid_by_name
+                )
 
                 # Add name field for consistency
                 for i, r in enumerate(test_results):
