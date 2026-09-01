@@ -3258,6 +3258,29 @@ def abort_agent_test_run(
     )
 
 
+_RunDetailMode = Literal["full", "summary"]
+
+_SUMMARY_MODE_DESCRIPTION = (
+    "How much of each test case to return. `full` returns every field of every "
+    "case. `summary` returns one light row per case, with its ID, name, "
+    "verdict and short reason, leaving out the conversation, the agent's output "
+    "and the evaluator verdicts. Read those one case at a time from "
+    "`GET /agent-tests/run/{task_id}/results/{test_case_id}`"
+)
+
+
+def _summarize_case_rows(rows: Any) -> None:
+    """Drop the heavy fields from each case row in place.
+
+    Removed rather than set to null, so a run of many cases stays small.
+    `response_model_exclude_unset=True` on the routes is what lets a missing
+    key drop out of the response.
+    """
+    for row in rows or []:
+        for field in ("test_case", "output", "judge_results", "inputs"):
+            row.pop(field, None)
+
+
 _RunProjection = make_projection_params(
     heavy_fields=[
         "results[].output",
@@ -3272,6 +3295,7 @@ _RunProjection = make_projection_params(
 @router.get(
     "/run/{task_id}",
     response_model=TestRunStatusResponse,
+    response_model_exclude_unset=True,
     tags=["Public API"],
     summary="Get test run status",
 )
@@ -3285,6 +3309,7 @@ def get_agent_test_run_status(
         False,
         description="Return only failing test cases. Omit to return every case",
     ),
+    mode: _RunDetailMode = Query("full", description=_SUMMARY_MODE_DESCRIPTION),
     projection: _RunProjection = Depends(),
 ):
     """Poll a test run for its status and evaluation results."""
@@ -3356,7 +3381,83 @@ def get_agent_test_run_status(
         data["results"] = [
             r for r in data["results"] if r.get("passed") is False
         ]
+    if mode == "summary":
+        _summarize_case_rows(data.get("results"))
     return projection.apply(data)
+
+
+@router.get(
+    "/run/{task_id}/results/{test_case_id}",
+    response_model=TestCaseResult,
+    tags=["Public API"],
+    summary="Get test case result",
+)
+def get_agent_test_case_result(
+    task_id: str = PathParam(
+        description="Test run or benchmark the case was run in",
+        examples=[_EXAMPLE_TASK_UUID],
+    ),
+    test_case_id: str = PathParam(
+        description="The test whose result to read",
+        examples=[EXAMPLE_TEST_UUID],
+    ),
+    ctx: OrgContext = Depends(get_org_jwt_or_api_key),
+    model: Optional[str] = Query(
+        None,
+        description="Which model's answer to read. Required for a benchmark, which runs every test once per model",
+        examples=["openai/gpt-4.1"],
+    ),
+):
+    """Get the full result of one test case in a run"""
+    # Serves runs and benchmarks alike, as the abort and rename endpoints do,
+    # since both are rows in `agent_test_jobs`.
+    job = _load_owned_agent_test_job(task_id, ctx)
+    results = job.get("results") or {}
+    details = job.get("details") or {}
+
+    if job.get("type") == "llm-benchmark":
+        if not model:
+            raise HTTPException(
+                status_code=400,
+                detail="Name the model whose answer to read, as a benchmark runs every test once per model",
+            )
+        # Resolve the model first: a model that has not started yet carries a
+        # null `test_results`, which must read as a missing case rather than a
+        # missing model.
+        matched = next(
+            (
+                m
+                for m in results.get("model_results") or []
+                if isinstance(m, dict) and m.get("model") == model
+            ),
+            None,
+        )
+        if matched is None:
+            raise HTTPException(
+                status_code=404, detail="Model not found in this benchmark"
+            )
+        rows = matched.get("test_results")
+    else:
+        rows = results.get("test_results")
+
+    row = next(
+        (
+            r
+            for r in rows or []
+            if isinstance(r, dict) and r.get("test_case_id") == test_case_id
+        ),
+        None,
+    )
+    if row is None:
+        raise HTTPException(status_code=404, detail="Test case result not found")
+
+    _enrich_test_results_with_evaluators(
+        [row],
+        details.get("evaluators_by_test_id") or {},
+        {},
+        _tool_call_evaluator_for_run(details),
+    )
+    return row
 
 
 # ============ Benchmark API ============
@@ -4425,6 +4526,7 @@ _BenchmarkProjection = make_projection_params(
 @router.get(
     "/benchmark/{task_id}",
     response_model=BenchmarkStatusResponse,
+    response_model_exclude_unset=True,
     summary="Get benchmark status",
     tags=["Public API"],
 )
@@ -4438,6 +4540,7 @@ def get_benchmark_status(
         False,
         description="Return only failing test cases for each model. Omit to return every case",
     ),
+    mode: _RunDetailMode = Query("full", description=_SUMMARY_MODE_DESCRIPTION),
     projection: _BenchmarkProjection = Depends(),
 ):
     """Get the results of a benchmark run"""
@@ -4504,6 +4607,9 @@ def get_benchmark_status(
                 model["test_results"] = [
                     r for r in model["test_results"] if r.get("passed") is False
                 ]
+    if mode == "summary":
+        for model in data.get("model_results") or []:
+            _summarize_case_rows(model.get("test_results"))
     return projection.apply(data)
 
 

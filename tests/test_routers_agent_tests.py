@@ -1494,6 +1494,279 @@ def test_benchmark_detail_only_failed_narrows_each_model(client):
     assert model["total_tests"] == 3
 
 
+_HEAVY_CASE_FIELDS = ("test_case", "output", "judge_results", "inputs")
+
+
+def test_run_detail_full_mode_keeps_every_key(client):
+    """`response_model_exclude_unset=True` must not drop anything in full mode:
+    every field the response model declares is still on each case, including the
+    ones that are null for this row."""
+    h = _signup(client)["headers"]
+    agent = _create_agent(client, h)
+    job_id = _seed_run_job(client, h, agent)
+
+    body = client.get(f"/agent-tests/run/{job_id}", headers=h).json()
+    for case in body["results"]:
+        for field in _HEAVY_CASE_FIELDS:
+            assert field in case
+        assert "latency_ms" in case and "cost" in case and "not_run" in case
+    # The pending row carries explicit nulls rather than missing keys.
+    assert body["results"][2]["output"] is None
+
+
+def test_run_detail_summary_mode_drops_heavy_keys(client):
+    """`?mode=summary` removes the four heavy keys from every case and keeps the
+    light row: id, name, verdict, unanswered and the short reason."""
+    h = _signup(client)["headers"]
+    agent = _create_agent(client, h)
+    job_id = _seed_run_job(client, h, agent)
+
+    resp = client.get(
+        f"/agent-tests/run/{job_id}", params={"mode": "summary"}, headers=h
+    )
+    assert resp.status_code == 200
+    body = resp.json()
+    assert len(body["results"]) == 3
+    for case in body["results"]:
+        for field in _HEAVY_CASE_FIELDS:
+            assert field not in case
+        assert "test_case_id" in case
+        assert "name" in case
+        assert "passed" in case
+        assert case["unanswered"] is False
+    assert body["results"][0]["reasoning"] == "looks good"
+    # Run-level fields are untouched, so a client keeps the rubric it needs to
+    # read a verdict fetched case by case.
+    assert body["total_tests"] == 3
+    assert body["evaluators"][0]["output_config"] is not None
+
+
+def test_run_detail_summary_mode_combines_with_only_failed(client):
+    h = _signup(client)["headers"]
+    agent = _create_agent(client, h)
+    job_id = _seed_run_job(client, h, agent)
+
+    body = client.get(
+        f"/agent-tests/run/{job_id}",
+        params={"mode": "summary", "only_failed": "true"},
+        headers=h,
+    ).json()
+    assert [c["name"] for c in body["results"]] == ["tc_fail"]
+    assert "output" not in body["results"][0]
+    assert body["results"][0]["reasoning"] == "wrong answer"
+
+
+def test_run_detail_rejects_unknown_mode(client):
+    h = _signup(client)["headers"]
+    agent = _create_agent(client, h)
+    job_id = _seed_run_job(client, h, agent)
+
+    resp = client.get(
+        f"/agent-tests/run/{job_id}", params={"mode": "slim"}, headers=h
+    )
+    assert resp.status_code == 422
+
+
+def test_benchmark_detail_summary_mode_drops_heavy_keys(client):
+    """`?mode=summary` trims every model's cases the same way the run does, and
+    leaves the model-level scalars alone."""
+    h = _signup(client)["headers"]
+    agent = _create_agent(client, h)
+    job_id = _seed_benchmark_job(client, h, agent)
+
+    resp = client.get(
+        f"/agent-tests/benchmark/{job_id}", params={"mode": "summary"}, headers=h
+    )
+    assert resp.status_code == 200
+    model = resp.json()["model_results"][0]
+    assert len(model["test_results"]) == 3
+    for case in model["test_results"]:
+        for field in _HEAVY_CASE_FIELDS:
+            assert field not in case
+        assert "passed" in case
+    assert model["passed"] == 1
+    assert model["total_tests"] == 3
+
+
+def test_benchmark_detail_full_mode_keeps_every_key(client):
+    h = _signup(client)["headers"]
+    agent = _create_agent(client, h)
+    job_id = _seed_benchmark_job(client, h, agent)
+
+    model = client.get(f"/agent-tests/benchmark/{job_id}", headers=h).json()[
+        "model_results"
+    ][0]
+    for case in model["test_results"]:
+        for field in _HEAVY_CASE_FIELDS:
+            assert field in case
+
+
+def test_run_case_result_returns_one_case_in_full(client):
+    """The per-case endpoint returns the detail `mode=summary` leaves out."""
+    h = _signup(client)["headers"]
+    agent = _create_agent(client, h)
+    job_id = _seed_run_job(client, h, agent)
+
+    resp = client.get(f"/agent-tests/run/{job_id}/results/tc_fail", headers=h)
+    assert resp.status_code == 200
+    case = resp.json()
+    assert case["test_case_id"] == "tc_fail"
+    assert case["output"]["response"] == "nope"
+    assert case["test_case"] == {"name": "tc_fail", "history": []}
+    assert case["judge_results"][0]["match"] is False
+    assert case["reasoning"] == "wrong answer"
+
+
+def test_run_case_result_unknown_case_is_404(client):
+    h = _signup(client)["headers"]
+    agent = _create_agent(client, h)
+    job_id = _seed_run_job(client, h, agent)
+
+    resp = client.get(f"/agent-tests/run/{job_id}/results/nope", headers=h)
+    assert resp.status_code == 404
+    assert resp.json()["detail"] == "Test case result not found"
+
+
+def test_run_case_result_unknown_run_is_404(client):
+    h = _signup(client)["headers"]
+    resp = client.get(
+        f"/agent-tests/run/{NONEXISTENT_UUID}/results/tc_fail", headers=h
+    )
+    assert resp.status_code == 404
+
+
+def test_run_case_result_hidden_from_another_workspace(client):
+    """Refused for a caller outside the owning workspace, and told nothing
+    about which workspace owns it (the shared handler in main.py sends the
+    owning ID only to a member)."""
+    h = _signup(client)["headers"]
+    agent = _create_agent(client, h)
+    job_id = _seed_run_job(client, h, agent)
+
+    other = _signup(client)["headers"]
+    resp = client.get(f"/agent-tests/run/{job_id}/results/tc_fail", headers=other)
+    assert resp.status_code == 403
+    assert "organization_uuid" not in resp.json()
+
+
+def test_run_case_result_for_benchmark_needs_a_model(client):
+    """A benchmark runs every test once per model, so the case is ambiguous
+    without one."""
+    h = _signup(client)["headers"]
+    agent = _create_agent(client, h)
+    job_id = _seed_benchmark_job(client, h, agent)
+
+    resp = client.get(f"/agent-tests/run/{job_id}/results/tc_fail", headers=h)
+    assert resp.status_code == 400
+    assert "model" in resp.json()["detail"]
+
+    ok = client.get(
+        f"/agent-tests/run/{job_id}/results/tc_fail",
+        params={"model": "openai/gpt-4.1"},
+        headers=h,
+    )
+    assert ok.status_code == 200
+    assert ok.json()["output"]["response"] == "no"
+
+    missing = client.get(
+        f"/agent-tests/run/{job_id}/results/tc_fail",
+        params={"model": "openai/gpt-9"},
+        headers=h,
+    )
+    assert missing.status_code == 404
+    assert missing.json()["detail"] == "Model not found in this benchmark"
+
+
+def test_run_case_result_for_a_model_that_has_not_started(client):
+    """A model still queued carries no results at all. That is a missing case,
+    not a missing model, or the client reads its own model name as wrong."""
+    from db import create_agent_test_job, update_agent_test_job
+
+    h = _signup(client)["headers"]
+    agent = _create_agent(client, h)
+    job_id = create_agent_test_job(
+        agent_id=agent["uuid"], job_type="llm-benchmark", details={}
+    )
+    update_agent_test_job(
+        job_id,
+        status="in_progress",
+        results={
+            "model_results": [
+                {
+                    "model": "openai/gpt-4.1",
+                    "success": None,
+                    "message": "Queued...",
+                    "test_results": None,
+                }
+            ]
+        },
+    )
+
+    resp = client.get(
+        f"/agent-tests/run/{job_id}/results/tc_fail",
+        params={"model": "openai/gpt-4.1"},
+        headers=h,
+    )
+    assert resp.status_code == 404
+    assert resp.json()["detail"] == "Test case result not found"
+
+
+def test_run_case_result_synthesizes_a_tool_call_verdict(client):
+    """A tool-call row carries no judge_results from calibrate, so the frozen
+    tool-call evaluator supplies the verdict at read time, here as much as on
+    the run detail."""
+    from db import create_agent_test_job, update_agent_test_job
+
+    h = _signup(client)["headers"]
+    agent = _create_agent(client, h)
+    job_id = create_agent_test_job(
+        agent_id=agent["uuid"],
+        job_type="llm-unit-test",
+        details={
+            "tool_call_evaluator": {
+                "uuid": NONEXISTENT_UUID,
+                "name": "Tool call correctness",
+                "output_type": "binary",
+                "output_config": {
+                    "scale": [
+                        {"value": False, "name": "Wrong"},
+                        {"value": True, "name": "Correct"},
+                    ]
+                },
+            }
+        },
+    )
+    update_agent_test_job(
+        job_id,
+        status="done",
+        results={
+            "test_results": [
+                {
+                    "name": "tc_tool",
+                    "test_case_id": "tc_tool",
+                    "passed": True,
+                    "reasoning": "calls match",
+                    "output": {"tool_calls": [{"tool": "search"}]},
+                    "test_case": {
+                        "expected_tool_calls": [{"tool": "search"}],
+                        "evaluation": {"type": "tool_call"},
+                    },
+                    "judge_results": None,
+                }
+            ]
+        },
+    )
+
+    case = client.get(
+        f"/agent-tests/run/{job_id}/results/tc_tool", headers=h
+    ).json()
+    verdict = case["judge_results"][0]
+    assert verdict["evaluator_uuid"] == NONEXISTENT_UUID
+    assert verdict["match"] is True
+    assert verdict["value_name"] == "Correct"
+    assert verdict["reasoning"] == "calls match"
+
+
 def test_agent_tests_link_with_missing(client):
     auth = _signup(client)
     h = auth["headers"]
