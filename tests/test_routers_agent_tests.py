@@ -1494,6 +1494,176 @@ def test_benchmark_detail_only_failed_narrows_each_model(client):
     assert model["total_tests"] == 3
 
 
+def _seed_summary_tab_job(client, h, agent):
+    """A finished run with a binary and a rating evaluator, and one case of each
+    test type, for the fields the Summary tab reads."""
+    from db import create_agent_test_job, update_agent_test_job
+
+    binary_uuid, rating_uuid = str(uuid.uuid4()), str(uuid.uuid4())
+    snapshot = [
+        {
+            "uuid": binary_uuid,
+            "name": "Correctness",
+            "output_type": "binary",
+            "output_config": {
+                "scale": [
+                    {"value": False, "name": "Wrong"},
+                    {"value": True, "name": "Right"},
+                ]
+            },
+        },
+        {
+            "uuid": rating_uuid,
+            "name": "Helpfulness",
+            "output_type": "rating",
+            "scale_min": 1,
+            "scale_max": 5,
+        },
+    ]
+    job_id = create_agent_test_job(
+        agent_id=agent["uuid"],
+        job_type="llm-unit-test",
+        details={
+            "evaluators_by_test_id": {
+                "tc_a": snapshot,
+                "tc_b": snapshot,
+                "tc_c": snapshot,
+            }
+        },
+    )
+
+    def case(case_id, test_type, match, score):
+        return {
+            "name": case_id,
+            "test_case_id": case_id,
+            "passed": match,
+            "reasoning": "because",
+            "output": {"response": "hi"},
+            "test_case": {"name": case_id, "evaluation": {"type": test_type}},
+            "judge_results": [
+                {"evaluator_uuid": binary_uuid, "match": match},
+                {"evaluator_uuid": rating_uuid, "score": score},
+            ],
+        }
+
+    update_agent_test_job(
+        job_id,
+        status="done",
+        results={
+            "total_tests": 3,
+            "passed": 2,
+            "failed": 1,
+            "test_results": [
+                case("tc_a", "response", True, 5),
+                case("tc_b", "general", True, 3),
+                case("tc_c", "tool_call", False, 1),
+            ],
+        },
+    )
+    return job_id, binary_uuid, rating_uuid
+
+
+def test_run_detail_reports_each_case_test_type(client):
+    """The Summary tab groups by what the test asked of the agent, which summary
+    mode must carry since it drops the case body the type used to be read from."""
+    h = _signup(client)["headers"]
+    agent = _create_agent(client, h)
+    job_id, _, _ = _seed_summary_tab_job(client, h, agent)
+
+    for params in ({}, {"mode": "summary"}):
+        body = client.get(
+            f"/agent-tests/run/{job_id}", params=params, headers=h
+        ).json()
+        assert [c["test_type"] for c in body["results"]] == [
+            "response",
+            "general",
+            "tool_call",
+        ]
+
+
+def test_run_detail_test_type_absent_when_the_case_does_not_record_it(client):
+    """An imported run can carry anything in that slot, so an unknown value
+    reads as absent rather than failing the response."""
+    from db import create_agent_test_job, update_agent_test_job
+
+    h = _signup(client)["headers"]
+    agent = _create_agent(client, h)
+    job_id = create_agent_test_job(
+        agent_id=agent["uuid"], job_type="llm-unit-test", details={}
+    )
+    update_agent_test_job(
+        job_id,
+        status="done",
+        results={
+            "test_results": [
+                {"name": "a", "test_case_id": "a", "passed": True, "test_case": None},
+                {
+                    "name": "b",
+                    "test_case_id": "b",
+                    "passed": True,
+                    "test_case": {"evaluation": {"type": "something-else"}},
+                },
+            ]
+        },
+    )
+
+    body = client.get(f"/agent-tests/run/{job_id}", headers=h).json()
+    assert [c["test_type"] for c in body["results"]] == [None, None]
+
+
+def test_run_detail_reports_per_evaluator_totals(client):
+    """A single run has never stored calibrate's per-evaluator block, so the
+    totals are counted from the rows and are there in both modes."""
+    h = _signup(client)["headers"]
+    agent = _create_agent(client, h)
+    job_id, binary_uuid, rating_uuid = _seed_summary_tab_job(client, h, agent)
+
+    for params in ({}, {"mode": "summary"}):
+        body = client.get(
+            f"/agent-tests/run/{job_id}", params=params, headers=h
+        ).json()
+        by_uuid = {e["evaluator_uuid"]: e for e in body["evaluator_summary"]}
+
+        binary = by_uuid[binary_uuid]
+        assert binary["type"] == "binary"
+        assert binary["name"] == "Correctness"
+        assert (binary["passed"], binary["total"]) == (2, 3)
+        # Out of 100, matching what calibrate writes for a benchmark.
+        assert binary["pass_rate"] == 2 / 3 * 100
+
+        rating = by_uuid[rating_uuid]
+        assert rating["type"] == "rating"
+        assert (rating["mean"], rating["min"], rating["max"]) == (3.0, 1, 5)
+        assert rating["count"] == 3
+        assert (rating["scale_min"], rating["scale_max"]) == (1, 5)
+
+
+def test_run_detail_totals_skip_an_evaluator_with_no_verdict(client):
+    """A run still going has evaluators that have judged nothing yet. They stay
+    out of the totals rather than showing as a zero."""
+    h = _signup(client)["headers"]
+    agent = _create_agent(client, h)
+    job_id = _seed_run_job(client, h, agent)
+
+    body = client.get(f"/agent-tests/run/{job_id}", headers=h).json()
+    # The seeded rows judge one evaluator; the pending row judges none.
+    assert len(body["evaluator_summary"]) == 1
+    assert body["evaluator_summary"][0]["total"] == 2
+
+
+def test_run_detail_has_no_totals_before_anything_is_judged(client):
+    from db import create_agent_test_job
+
+    h = _signup(client)["headers"]
+    agent = _create_agent(client, h)
+    job_id = create_agent_test_job(
+        agent_id=agent["uuid"], job_type="llm-unit-test", details={}
+    )
+
+    body = client.get(f"/agent-tests/run/{job_id}", headers=h).json()
+    assert body["evaluator_summary"] is None
+
+
 _HEAVY_CASE_FIELDS = ("test_case", "output", "judge_results", "inputs")
 
 

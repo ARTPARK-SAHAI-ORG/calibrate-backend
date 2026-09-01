@@ -338,6 +338,63 @@ def test_public_benchmark_summary_mode_drops_heavy_keys(client):
     assert model["passed"] == 1
 
 
+def test_public_test_run_reports_totals_and_test_type(client):
+    """A shared link opens on the same Summary tab, so it carries the same
+    per-evaluator totals and case types."""
+    import db as db_mod
+
+    auth = _user(client)
+    agent_uuid = db_mod.create_agent(
+        name=f"a-{uuid.uuid4().hex[:6]}",
+        org_uuid=auth["org_uuid"],
+        user_id=auth["user_uuid"],
+    )
+    evaluator_uuid = str(uuid.uuid4())
+    snapshot = [
+        {"uuid": evaluator_uuid, "name": "Correctness", "output_type": "binary"}
+    ]
+    job_uuid = db_mod.create_agent_test_job(
+        agent_id=agent_uuid,
+        job_type="llm-unit-test",
+        details={"evaluators_by_test_id": {"tc_a": snapshot, "tc_b": snapshot}},
+    )
+    db_mod.update_agent_test_job(
+        job_uuid,
+        status="done",
+        results={
+            "test_results": [
+                {
+                    "name": "tc_a",
+                    "test_case_id": "tc_a",
+                    "passed": True,
+                    "test_case": {"evaluation": {"type": "response"}},
+                    "judge_results": [
+                        {"evaluator_uuid": evaluator_uuid, "match": True}
+                    ],
+                },
+                {
+                    "name": "tc_b",
+                    "test_case_id": "tc_b",
+                    "passed": False,
+                    "test_case": {"evaluation": {"type": "general"}},
+                    "judge_results": [
+                        {"evaluator_uuid": evaluator_uuid, "match": False}
+                    ],
+                },
+            ]
+        },
+    )
+    token = uuid.uuid4().hex
+    db_mod.update_agent_test_job_visibility(job_uuid, True, token)
+
+    body = client.get(
+        f"/public/test-run/{token}", params={"mode": "summary"}
+    ).json()
+    assert [c["test_type"] for c in body["results"]] == ["response", "general"]
+    totals = body["evaluator_summary"][0]
+    assert (totals["passed"], totals["total"], totals["pass_rate"]) == (1, 2, 50.0)
+
+
 def test_public_test_run_case_returns_one_case_in_full(client):
     token = _shared_run(client)
 

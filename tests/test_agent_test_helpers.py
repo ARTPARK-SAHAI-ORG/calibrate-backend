@@ -933,3 +933,37 @@ def test_auto_run_name_falls_back_for_an_unknown_job_type():
     assert _auto_run_name("llm-unit-test", 3) == "Run 3"
     assert _auto_run_name("llm-benchmark", 2) == "Benchmark 2"
     assert _auto_run_name("something-else", 1) == "Job"
+
+
+def test_evaluator_totals_from_rows_ignores_malformed_verdicts():
+    """Rows come from stored JSON, so an old or imported run can hold anything.
+    Junk is skipped rather than counted or crashed on."""
+    from routers.agent_tests import evaluator_totals_from_rows
+
+    block = [
+        {"uuid": "ev-bin", "name": "Correctness", "output_type": "binary"},
+        {"uuid": "ev-rate", "name": "Helpfulness", "output_type": "rating"},
+    ]
+    rows = [
+        "junk",
+        {"judge_results": ["junk", {"match": True}]},
+        {"judge_results": [{"evaluator_uuid": "ev-bin", "match": True}]},
+        {"judge_results": [{"evaluator_uuid": "ev-bin", "match": False}]},
+        {"judge_results": [{"evaluator_uuid": "ev-rate", "score": "high"}]},
+        # Judged by nothing yet: no verdict either way, so it counts for neither.
+        {"judge_results": [{"evaluator_uuid": "ev-bin", "match": None}]},
+    ]
+
+    totals = evaluator_totals_from_rows(rows, block)
+
+    # The entry with no evaluator id and the non-dict entry are skipped, and the
+    # rating evaluator drops out because nothing it collected is a number.
+    assert [t["evaluator_uuid"] for t in totals] == ["ev-bin"]
+    assert (totals[0]["passed"], totals[0]["total"]) == (1, 2)
+
+
+def test_evaluator_totals_from_rows_needs_both_rows_and_evaluators():
+    from routers.agent_tests import evaluator_totals_from_rows
+
+    assert evaluator_totals_from_rows(None, [{"uuid": "e"}]) is None
+    assert evaluator_totals_from_rows([{"judge_results": []}], None) is None

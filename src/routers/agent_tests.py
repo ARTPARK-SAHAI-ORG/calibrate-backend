@@ -417,6 +417,10 @@ class TestCaseResult(BaseModel):
         None, description="ID of the test case within the run"
     )
     name: Optional[str] = Field(None, description="Name of the test")
+    test_type: Optional[TestTypeLiteral] = Field(
+        None,
+        description="What the test asks of the agent, which decides how a reader draws the case. Absent on a run whose stored case does not record it",
+    )
     passed: Optional[bool] = Field(
         None, description="Whether the case passed"
     )
@@ -528,6 +532,10 @@ class TestRunStatusResponse(BaseModel):
     evaluators: Optional[List[TestRunEvaluator]] = Field(
         None,
         description="The evaluators used in this run. Each verdict in `judge_results` links to one of these by `evaluator_uuid`",
+    )
+    evaluator_summary: Optional[List[Dict[str, Any]]] = Field(
+        None,
+        description="Totals for each evaluator over the whole run, matching the shape a benchmark reports for each model. Only evaluators that returned a verdict appear",
     )
     results: Optional[List[TestCaseResult]] = Field(
         None, description="Results for each test case"
@@ -876,6 +884,24 @@ def _tool_call_evaluator(org_uuid: Optional[str]) -> Optional[Dict[str, Any]]:
         "scale_max": None,
         "version_number": version.get("version_number"),
     }
+
+
+def _row_test_type(row: Dict[str, Any]) -> Optional[str]:
+    """What the test asked of the agent, lifted off the stored case.
+
+    Read here rather than stored at write time so a run that finished before
+    this field existed still reports it. An imported run can carry any string
+    in that slot, so anything outside the known set reads as absent instead of
+    failing the response model.
+    """
+    test_case = row.get("test_case")
+    if not isinstance(test_case, dict):
+        return None
+    evaluation = test_case.get("evaluation")
+    if not isinstance(evaluation, dict):
+        return None
+    test_type = evaluation.get("type")
+    return test_type if test_type in _TEST_TYPES else None
 
 
 def _is_tool_call_row(row: Any) -> bool:
@@ -1785,6 +1811,7 @@ def _pending_test_case_result_placeholder(name: str) -> Dict[str, Any]:
     return {
         "test_case_id": None,
         "name": name,
+        "test_type": None,
         "passed": None,
         "reasoning": None,
         "output": None,
@@ -1987,6 +2014,7 @@ def _enrich_test_results_with_evaluators(
     for r in test_results:
         if not isinstance(r, dict):
             continue
+        r["test_type"] = _row_test_type(r)
         raw = r.get("judge_results")
         if raw is None:
             if (
@@ -2153,6 +2181,79 @@ def _build_evaluator_summary(
                 }
             )
 
+        summary.append(entry)
+
+    return summary or None
+
+
+def evaluator_totals_from_rows(
+    test_results: Optional[List[Dict[str, Any]]],
+    evaluators_block: Optional[List[Dict[str, Any]]],
+) -> Optional[List[Dict[str, Any]]]:
+    """Per-evaluator totals over a single run's cases, in the shape a benchmark
+    reports for each model.
+
+    Counted from the rows rather than read from calibrate's `metrics.json`,
+    which a single run has never stored, so a run that finished long ago
+    reports its totals too. Only evaluators that returned at least one verdict
+    appear, so a run still going reports what has landed.
+    """
+    if not test_results or not evaluators_block:
+        return None
+
+    verdicts: Dict[str, List[Any]] = {}
+    for row in test_results:
+        if not isinstance(row, dict):
+            continue
+        for entry in row.get("judge_results") or []:
+            if not isinstance(entry, dict):
+                continue
+            uid = entry.get("evaluator_uuid")
+            if not uid:
+                continue
+            value = entry.get("match")
+            if value is None:
+                value = entry.get("score")
+            if value is not None:
+                verdicts.setdefault(uid, []).append(value)
+
+    summary: List[Dict[str, Any]] = []
+    for evaluator in evaluators_block:
+        values = verdicts.get(evaluator.get("uuid"))
+        if not values:
+            continue
+        entry = {
+            "metric_key": evaluator.get("name"),
+            "name": evaluator.get("name"),
+            "type": evaluator.get("output_type"),
+            "evaluator_uuid": evaluator.get("uuid"),
+            "description": evaluator.get("description"),
+        }
+        if evaluator.get("output_type") == "rating":
+            numbers = [v for v in values if isinstance(v, (int, float))]
+            if not numbers:
+                continue
+            entry.update(
+                {
+                    "mean": sum(numbers) / len(numbers),
+                    "min": min(numbers),
+                    "max": max(numbers),
+                    "count": len(numbers),
+                    "scale_min": evaluator.get("scale_min"),
+                    "scale_max": evaluator.get("scale_max"),
+                }
+            )
+        else:
+            passed = sum(1 for v in values if v is True)
+            entry.update(
+                {
+                    "passed": passed,
+                    "total": len(values),
+                    # Out of 100, the scale calibrate itself writes into
+                    # metrics.json, so a run and a benchmark read alike.
+                    "pass_rate": passed / len(values) * 100,
+                }
+            )
         summary.append(entry)
 
     return summary or None
@@ -3366,6 +3467,9 @@ def get_agent_test_run_status(
         cost=results.get("cost"),
         total_tokens=results.get("total_tokens"),
         evaluators=evaluators_block or None,
+        evaluator_summary=evaluator_totals_from_rows(
+            results.get("test_results"), evaluators_block
+        ),
         results=results.get("test_results"),
         unanswered_tests=results.get("unanswered_tests"),
         stopped_early=bool(results.get("stopped_early")),

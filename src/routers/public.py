@@ -64,6 +64,7 @@ from routers.agent_tests import (
     _enrich_model_results_with_evaluators,
     _build_evaluators_block_for_test_run,
     _summarize_case_rows,
+    evaluator_totals_from_rows,
     _tool_call_evaluator_for_run,
     _RunDetailMode,
     find_case_result,
@@ -180,6 +181,10 @@ class PublicTestRunResponse(BaseModel):
     evaluators: Optional[List[Dict[str, Any]]] = Field(
         None,
         description="Shared evaluator definitions, each with its name, description, output type, and rubric. Rows reference these by evaluator ID",
+    )
+    evaluator_summary: Optional[List[Dict[str, Any]]] = Field(
+        None,
+        description="Totals for each evaluator over the whole run, matching the shape a benchmark reports for each model. Only evaluators that returned a verdict appear",
     )
     results: Optional[List[Dict[str, Any]]] = Field(
         None, description="Results for each test case"
@@ -649,6 +654,10 @@ def get_public_test_run(
         tool_call_evaluator=tool_call_evaluator,
     )
 
+    evaluator_summary = evaluator_totals_from_rows(
+        results.get("test_results"), evaluators_block
+    )
+
     if mode == "summary":
         _summarize_case_rows(results.get("test_results"))
 
@@ -660,6 +669,7 @@ def get_public_test_run(
         passed=results.get("passed"),
         failed=results.get("failed"),
         evaluators=evaluators_block or None,
+        evaluator_summary=evaluator_summary,
         results=results.get("test_results"),
         latency_ms=results.get("latency_ms"),
         cost=results.get("cost"),
