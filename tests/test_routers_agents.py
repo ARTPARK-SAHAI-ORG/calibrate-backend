@@ -446,13 +446,13 @@ def test_update_agent_with_api_key_cannot_self_attest_verification(client):
 # ============ Agent <-> Evaluator association ============
 
 
-def _create_evaluator(client, h, name=None):
-    """Create a minimal LLM evaluator owned by the caller's org."""
+def _create_evaluator(client, h, name=None, evaluator_type="llm"):
+    """Create a minimal evaluator owned by the caller's org."""
     resp = client.post(
         "/evaluators",
         json={
             "name": name or f"ev-{uuid.uuid4().hex[:6]}",
-            "evaluator_type": "llm",
+            "evaluator_type": evaluator_type,
             "output_type": "binary",
             "version": {
                 "judge_model": "openai/gpt-4.1",
@@ -744,6 +744,175 @@ def test_duplicate_agent_does_not_resurrect_unlinked_default_evaluator(client):
     assert dup.status_code == 200, dup.text
     dup_uuid = dup.json()["uuid"]
     assert client.get(f"/agents/{dup_uuid}/evaluators", headers=h).json()["total"] == 0
+
+
+def test_duplicate_agent_does_not_copy_linked_tests(client):
+    h = _signup(client)
+    agent = _create_agent(client, h, f"t-dup-{uuid.uuid4().hex[:6]}")
+    llm_ev = _create_evaluator(client, h)
+    test_uuid = client.post(
+        "/tests",
+        json={
+            "name": f"t-{uuid.uuid4().hex[:6]}",
+            "type": "response",
+            "config": {"history": [], "evaluation": {"type": "response"}},
+            "evaluators": [{"evaluator_uuid": llm_ev}],
+        },
+        headers=h,
+    ).json()["uuid"]
+    link = client.post(
+        "/agent-tests",
+        json={"agent_uuid": agent["uuid"], "test_uuids": [test_uuid]},
+        headers=h,
+    )
+    assert link.status_code == 200, link.text
+
+    dup = client.post(
+        f"/agents/{agent['uuid']}/duplicate",
+        json={"name": f"t-dup-copy-{uuid.uuid4().hex[:6]}"},
+        headers=h,
+    )
+    assert dup.status_code == 200, dup.text
+    dup_uuid = dup.json()["uuid"]
+
+    listed = client.get(f"/agent-tests/agent/{dup_uuid}/tests", headers=h)
+    assert listed.status_code == 200, listed.text
+    assert listed.json()["total"] == 0
+
+
+def test_duplicate_agent_uses_requested_interaction_type(client):
+    h = _signup(client)
+    agent = _create_agent(client, h, f"it-req-{uuid.uuid4().hex[:6]}")
+
+    dup = client.post(
+        f"/agents/{agent['uuid']}/duplicate",
+        json={
+            "name": f"it-req-copy-{uuid.uuid4().hex[:6]}",
+            "interaction_type": "general",
+        },
+        headers=h,
+    )
+    assert dup.status_code == 200, dup.text
+
+    r = client.get(f"/agents/{dup.json()['uuid']}", headers=h)
+    assert r.json()["interaction_type"] == "general"
+
+
+def test_duplicate_agent_rejects_unknown_interaction_type(client):
+    h = _signup(client)
+    agent = _create_agent(client, h, f"it-bad-{uuid.uuid4().hex[:6]}")
+    r = client.post(
+        f"/agents/{agent['uuid']}/duplicate",
+        json={"name": f"it-bad-copy-{uuid.uuid4().hex[:6]}", "interaction_type": "nope"},
+        headers=h,
+    )
+    assert r.status_code == 422, r.text
+
+
+def test_duplicate_agent_to_general_drops_conversation_only_evaluators(client):
+    """A conversation agent copied as a one-shot agent keeps every evaluator
+    except the next-reply judges, which have no conversation to read."""
+    h = _signup(client)
+    agent = _create_agent(client, h, f"it-ev-{uuid.uuid4().hex[:6]}")
+    llm_ev = _create_evaluator(client, h)
+    general_ev = _create_evaluator(client, h, evaluator_type="llm-general")
+    conversation_ev = _create_evaluator(client, h, evaluator_type="conversation")
+    link = client.post(
+        f"/agents/{agent['uuid']}/evaluators",
+        json={"evaluator_ids": [llm_ev, general_ev, conversation_ev]},
+        headers=h,
+    )
+    assert link.status_code == 200, link.text
+
+    dup = client.post(
+        f"/agents/{agent['uuid']}/duplicate",
+        json={
+            "name": f"it-ev-copy-{uuid.uuid4().hex[:6]}",
+            "interaction_type": "general",
+        },
+        headers=h,
+    )
+    assert dup.status_code == 200, dup.text
+    dup_uuid = dup.json()["uuid"]
+
+    listed = client.get(f"/agents/{dup_uuid}/evaluators", headers=h).json()["items"]
+    copied = {e["uuid"] for e in listed}
+    assert general_ev in copied
+    assert conversation_ev in copied
+    assert llm_ev not in copied
+    # The org's auto-linked default correctness judge is an `llm` one, so it goes too.
+    assert all(e["evaluator_type"] != "llm" for e in listed)
+
+
+def test_duplicate_agent_to_conversation_drops_general_only_evaluators(client):
+    h = _signup(client)
+    r = client.post(
+        "/agents",
+        json={
+            "name": f"it-gen-{uuid.uuid4().hex[:6]}",
+            "type": "agent",
+            "interaction_type": "general",
+        },
+        headers=h,
+    )
+    agent_uuid = r.json()["uuid"]
+    llm_ev = _create_evaluator(client, h)
+    general_ev = _create_evaluator(client, h, evaluator_type="llm-general")
+    client.post(
+        f"/agents/{agent_uuid}/evaluators",
+        json={"evaluator_ids": [llm_ev, general_ev]},
+        headers=h,
+    )
+
+    dup = client.post(
+        f"/agents/{agent_uuid}/duplicate",
+        json={
+            "name": f"it-gen-copy-{uuid.uuid4().hex[:6]}",
+            "interaction_type": "conversation",
+        },
+        headers=h,
+    )
+    assert dup.status_code == 200, dup.text
+
+    copied = {
+        e["uuid"]
+        for e in client.get(
+            f"/agents/{dup.json()['uuid']}/evaluators", headers=h
+        ).json()["items"]
+    }
+    assert llm_ev in copied
+    assert general_ev not in copied
+
+
+def test_duplicate_agent_keeps_mismatched_evaluators_when_type_unchanged(client):
+    """Nothing stops an `llm-general` judge being linked to a conversation
+    agent, and a same-type duplicate must not quietly drop it."""
+    h = _signup(client)
+    agent = _create_agent(client, h, f"it-same-{uuid.uuid4().hex[:6]}")
+    general_ev = _create_evaluator(client, h, evaluator_type="llm-general")
+    client.post(
+        f"/agents/{agent['uuid']}/evaluators",
+        json={"evaluator_ids": [general_ev]},
+        headers=h,
+    )
+
+    dup = client.post(
+        f"/agents/{agent['uuid']}/duplicate",
+        json={
+            "name": f"it-same-copy-{uuid.uuid4().hex[:6]}",
+            "interaction_type": "conversation",
+        },
+        headers=h,
+    )
+    assert dup.status_code == 200, dup.text
+
+    copied = {
+        e["uuid"]
+        for e in client.get(
+            f"/agents/{dup.json()['uuid']}/evaluators", headers=h
+        ).json()["items"]
+    }
+    assert general_ev in copied
 
 
 def test_delete_agent_removes_evaluator_links(client):

@@ -40,9 +40,7 @@ from db import (
     delete_agent,
     bulk_delete_agents,
     get_tools_for_agent,
-    get_tests_for_agent,
     add_tool_to_agent,
-    add_test_to_agent,
     get_evaluators_for_agent,
     add_evaluator_to_agent,
     remove_evaluator_from_agent,
@@ -57,6 +55,11 @@ from org_scope import ensure_owned_agent, ensure_owned_evaluator
 from routers.evaluators import EvaluatorResponse, build_evaluator_page
 
 logger = logging.getLogger(__name__)
+
+# An `llm` judge scores a reply inside a conversation and an `llm-general` judge
+# scores a standalone input/output pair, so each only suits one agent
+# `interaction_type`. Every other evaluator type suits both.
+_EVALUATOR_AGENT_INTERACTION_TYPE = {"llm": "conversation", "llm-general": "general"}
 
 BLOCKED_HEADERS = frozenset(
     {
@@ -506,6 +509,11 @@ class AgentDuplicateRequest(BaseModel):
     name: str = Field(
         description="Name for the duplicated agent, unique within the workspace"
     )
+    interaction_type: Optional[Literal["conversation", "general"]] = Field(
+        None,
+        description=AGENT_INTERACTION_TYPE_DESCRIPTION
+        + "\n\nOmit to keep what the original agent expects",
+    )
 
 
 class AgentDuplicateResponse(BaseModel):
@@ -954,12 +962,16 @@ def duplicate_agent_endpoint(
     request: AgentDuplicateRequest = ...,
     ctx: OrgContext = Depends(get_current_org),
 ):
-    """Duplicate an agent along with its linked tools and tests. Verification flags are not copied"""
+    """Duplicate an agent along with its linked tools and evaluators. Verification flags are not copied"""
     original_agent = get_agent(agent_uuid)
     if not original_agent or original_agent.get("org_uuid") != ctx.org_uuid:
         raise HTTPException(status_code=404, detail="Agent not found")
 
     new_name = request.name
+    original_interaction_type = (
+        original_agent.get("interaction_type") or DEFAULT_AGENT_INTERACTION_TYPE
+    )
+    new_interaction_type = request.interaction_type or original_interaction_type
 
     new_config = original_agent.get("config")
     if new_config:
@@ -975,9 +987,7 @@ def duplicate_agent_endpoint(
             org_uuid=ctx.org_uuid,
             user_id=ctx.user_id,
             link_default_evaluator=False,  # copied below from the original instead
-            interaction_type=original_agent.get(
-                "interaction_type", DEFAULT_AGENT_INTERACTION_TYPE
-            ),
+            interaction_type=new_interaction_type,
         )
 
     # Copy all linked tools
@@ -991,20 +1001,16 @@ def duplicate_agent_endpoint(
                 f"Failed to link tool {tool['uuid']} to duplicated agent: {e}"
             )
 
-    # Copy all linked tests
-    linked_tests = get_tests_for_agent(agent_uuid)
-    for test in linked_tests:
-        try:
-            add_test_to_agent(new_agent_uuid, test["uuid"])
-        except Exception as e:
-            # Log but continue - don't fail the entire duplication
-            logger.warning(
-                f"Failed to link test {test['uuid']} to duplicated agent: {e}"
-            )
-
-    # Copy all linked evaluators
+    # Copy the linked evaluators that suit what the duplicate expects
     linked_evaluators = get_evaluators_for_agent(agent_uuid)
     for evaluator in linked_evaluators:
+        suits = _EVALUATOR_AGENT_INTERACTION_TYPE.get(evaluator.get("evaluator_type"))
+        if (
+            new_interaction_type != original_interaction_type
+            and suits is not None
+            and suits != new_interaction_type
+        ):
+            continue
         try:
             add_evaluator_to_agent(new_agent_uuid, evaluator["uuid"])
         except Exception as e:
@@ -1015,7 +1021,7 @@ def duplicate_agent_endpoint(
 
     return AgentDuplicateResponse(
         uuid=new_agent_uuid,
-        message="Agent duplicated successfully with all linked tools, tests, and evaluators",
+        message="Agent duplicated successfully with its linked tools and evaluators",
     )
 
 
