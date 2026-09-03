@@ -56,10 +56,15 @@ from routers.evaluators import EvaluatorResponse, build_evaluator_page
 
 logger = logging.getLogger(__name__)
 
-# An `llm` judge scores a reply inside a conversation and an `llm-general` judge
-# scores a standalone input/output pair, so each only suits one agent
-# `interaction_type`. Every other evaluator type suits both.
-_EVALUATOR_AGENT_INTERACTION_TYPE = {"llm": "conversation", "llm-general": "general"}
+# An `llm` judge scores a reply inside a conversation and a `conversation` judge
+# the whole exchange, so neither has anything to read on a `general` agent. An
+# `llm-general` judge scores a standalone input/output pair, which a
+# `conversation` agent never produces. A `tool-call` judge suits both.
+_EVALUATOR_AGENT_INTERACTION_TYPE = {
+    "llm": "conversation",
+    "conversation": "conversation",
+    "llm-general": "general",
+}
 
 BLOCKED_HEADERS = frozenset(
     {

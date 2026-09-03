@@ -810,16 +810,19 @@ def test_duplicate_agent_rejects_unknown_interaction_type(client):
 
 
 def test_duplicate_agent_to_general_drops_conversation_only_evaluators(client):
-    """A conversation agent copied as a one-shot agent keeps every evaluator
-    except the next-reply judges, which have no conversation to read."""
+    """A conversation agent copied as a one-shot agent drops the judges that
+    need a conversation to read, and keeps the rest."""
     h = _signup(client)
     agent = _create_agent(client, h, f"it-ev-{uuid.uuid4().hex[:6]}")
     llm_ev = _create_evaluator(client, h)
     general_ev = _create_evaluator(client, h, evaluator_type="llm-general")
     conversation_ev = _create_evaluator(client, h, evaluator_type="conversation")
+    tool_call_ev = _create_evaluator(client, h, evaluator_type="tool-call")
     link = client.post(
         f"/agents/{agent['uuid']}/evaluators",
-        json={"evaluator_ids": [llm_ev, general_ev, conversation_ev]},
+        json={
+            "evaluator_ids": [llm_ev, general_ev, conversation_ev, tool_call_ev]
+        },
         headers=h,
     )
     assert link.status_code == 200, link.text
@@ -838,10 +841,11 @@ def test_duplicate_agent_to_general_drops_conversation_only_evaluators(client):
     listed = client.get(f"/agents/{dup_uuid}/evaluators", headers=h).json()["items"]
     copied = {e["uuid"] for e in listed}
     assert general_ev in copied
-    assert conversation_ev in copied
+    assert tool_call_ev in copied
     assert llm_ev not in copied
+    assert conversation_ev not in copied
     # The org's auto-linked default correctness judge is an `llm` one, so it goes too.
-    assert all(e["evaluator_type"] != "llm" for e in listed)
+    assert all(e["evaluator_type"] not in ("llm", "conversation") for e in listed)
 
 
 def test_duplicate_agent_to_conversation_drops_general_only_evaluators(client):
@@ -858,9 +862,10 @@ def test_duplicate_agent_to_conversation_drops_general_only_evaluators(client):
     agent_uuid = r.json()["uuid"]
     llm_ev = _create_evaluator(client, h)
     general_ev = _create_evaluator(client, h, evaluator_type="llm-general")
+    conversation_ev = _create_evaluator(client, h, evaluator_type="conversation")
     client.post(
         f"/agents/{agent_uuid}/evaluators",
-        json={"evaluator_ids": [llm_ev, general_ev]},
+        json={"evaluator_ids": [llm_ev, general_ev, conversation_ev]},
         headers=h,
     )
 
@@ -881,6 +886,7 @@ def test_duplicate_agent_to_conversation_drops_general_only_evaluators(client):
         ).json()["items"]
     }
     assert llm_ev in copied
+    assert conversation_ev in copied
     assert general_ev not in copied
 
 
