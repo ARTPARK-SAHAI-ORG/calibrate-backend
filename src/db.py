@@ -4213,7 +4213,6 @@ def get_org_invite(org_uuid: str) -> Optional[Dict[str, str]]:
 
 def create_org_invite(org_uuid: str) -> Optional[Dict[str, str]]:
     """Mint a fresh invite link, replacing any existing one. None if no such org."""
-    token = str(uuid.uuid4())
     with get_db_connection() as conn:
         cursor = conn.cursor()
         cursor.execute(
@@ -4221,13 +4220,18 @@ def create_org_invite(org_uuid: str) -> Optional[Dict[str, str]]:
             UPDATE organizations
                SET invite_token = ?, invite_token_created_at = CURRENT_TIMESTAMP
              WHERE uuid = ? AND deleted_at IS NULL
+         RETURNING invite_token, invite_token_created_at
             """,
-            (token, org_uuid),
+            (str(uuid.uuid4()), org_uuid),
         )
+        row = cursor.fetchone()
         conn.commit()
-        if cursor.rowcount == 0:
+        if row is None:
             return None
-    return get_org_invite(org_uuid)
+        return {
+            "token": row["invite_token"],
+            "created_at": row["invite_token_created_at"],
+        }
 
 
 def revoke_org_invite(org_uuid: str) -> None:

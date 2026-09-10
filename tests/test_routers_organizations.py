@@ -451,7 +451,8 @@ def test_invite_link_create_read_replace_and_revoke(client):
     assert created.json()["created_at"]
 
     read = client.get(f"/organizations/{org_uuid}/invite-link", headers=owner["headers"])
-    assert read.status_code == 200 and read.json()["token"] == token
+    # What create returned must be what the workspace actually stored.
+    assert read.status_code == 200 and read.json() == created.json()
 
     replaced = client.post(f"/organizations/{org_uuid}/invite-link", headers=owner["headers"]).json()["token"]
     assert replaced != token
