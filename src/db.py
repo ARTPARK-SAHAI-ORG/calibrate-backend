@@ -1211,6 +1211,18 @@ def init_db():
         except sqlite3.OperationalError:
             pass
 
+        # Workspace invite link. One live token per workspace: creating a new
+        # one overwrites the old, revoking sets both back to NULL.
+        for col in ("invite_token TEXT DEFAULT NULL", "invite_token_created_at TIMESTAMP DEFAULT NULL"):
+            try:
+                cursor.execute(f"ALTER TABLE organizations ADD COLUMN {col}")
+            except sqlite3.OperationalError:
+                pass
+        cursor.execute(
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_organizations_invite_token "
+            "ON organizations(invite_token) WHERE invite_token IS NOT NULL"
+        )
+
         # Add is_public and share_token columns for public sharing feature
         for table in ("jobs", "agent_test_jobs", "simulation_jobs"):
             try:
@@ -4090,47 +4102,64 @@ def add_organization_member(
             )
             _create_personal_org_for_user(cursor, user_uuid, email, None)
 
-        # Check for existing active membership.
-        cursor.execute(
-            """
-            SELECT id FROM organization_members
-             WHERE org_uuid = ? AND user_id = ? AND deleted_at IS NULL
-            """,
-            (org_uuid, user_uuid),
-        )
-        if cursor.fetchone() is not None:
+        if not _link_member(cursor, org_uuid, user_uuid, role):
             raise ValueError("user is already a member of this organization")
-
-        # Reactivate a soft-deleted membership if present, else insert fresh.
-        cursor.execute(
-            """
-            SELECT id FROM organization_members
-             WHERE org_uuid = ? AND user_id = ? AND deleted_at IS NOT NULL
-             ORDER BY id DESC LIMIT 1
-            """,
-            (org_uuid, user_uuid),
-        )
-        prev = cursor.fetchone()
-        if prev is not None:
-            cursor.execute(
-                """
-                UPDATE organization_members
-                   SET role = ?, deleted_at = NULL, created_at = CURRENT_TIMESTAMP
-                 WHERE id = ?
-                """,
-                (role, prev["id"]),
-            )
-        else:
-            cursor.execute(
-                """
-                INSERT INTO organization_members (org_uuid, user_id, role)
-                VALUES (?, ?, ?)
-                """,
-                (org_uuid, user_uuid, role),
-            )
 
         conn.commit()
         return {"user_id": user_uuid, "email": email, "role": role}
+
+
+def _link_member(cursor, org_uuid: str, user_uuid: str, role: str) -> bool:
+    """Make `user_uuid` an active member of `org_uuid`. False if already one."""
+    cursor.execute(
+        """
+        SELECT id FROM organization_members
+         WHERE org_uuid = ? AND user_id = ? AND deleted_at IS NULL
+        """,
+        (org_uuid, user_uuid),
+    )
+    if cursor.fetchone() is not None:
+        return False
+
+    # Reactivate a soft-deleted membership if present, else insert fresh.
+    cursor.execute(
+        """
+        SELECT id FROM organization_members
+         WHERE org_uuid = ? AND user_id = ? AND deleted_at IS NOT NULL
+         ORDER BY id DESC LIMIT 1
+        """,
+        (org_uuid, user_uuid),
+    )
+    prev = cursor.fetchone()
+    if prev is not None:
+        cursor.execute(
+            """
+            UPDATE organization_members
+               SET role = ?, deleted_at = NULL, created_at = CURRENT_TIMESTAMP
+             WHERE id = ?
+            """,
+            (role, prev["id"]),
+        )
+    else:
+        cursor.execute(
+            """
+            INSERT INTO organization_members (org_uuid, user_id, role)
+            VALUES (?, ?, ?)
+            """,
+            (org_uuid, user_uuid, role),
+        )
+    return True
+
+
+def add_organization_member_by_user_id(
+    org_uuid: str, user_id: str, role: str = "admin"
+) -> bool:
+    """Add an existing user to an org. False if they were already a member."""
+    with get_db_connection() as conn:
+        cursor = conn.cursor()
+        linked = _link_member(cursor, org_uuid, user_id, role)
+        conn.commit()
+        return linked
 
 
 def remove_organization_member(org_uuid: str, user_id: str) -> bool:
@@ -4160,6 +4189,72 @@ def remove_organization_member(org_uuid: str, user_id: str) -> bool:
         )
         conn.commit()
         return True
+
+
+def get_org_invite(org_uuid: str) -> Optional[Dict[str, str]]:
+    """Return the workspace's live invite link, or None if it has none."""
+    with get_db_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            """
+            SELECT invite_token, invite_token_created_at FROM organizations
+             WHERE uuid = ? AND deleted_at IS NULL AND invite_token IS NOT NULL
+            """,
+            (org_uuid,),
+        )
+        row = cursor.fetchone()
+        if row is None:
+            return None
+        return {
+            "token": row["invite_token"],
+            "created_at": row["invite_token_created_at"],
+        }
+
+
+def create_org_invite(org_uuid: str) -> Optional[Dict[str, str]]:
+    """Mint a fresh invite link, replacing any existing one. None if no such org."""
+    token = str(uuid.uuid4())
+    with get_db_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            """
+            UPDATE organizations
+               SET invite_token = ?, invite_token_created_at = CURRENT_TIMESTAMP
+             WHERE uuid = ? AND deleted_at IS NULL
+            """,
+            (token, org_uuid),
+        )
+        conn.commit()
+        if cursor.rowcount == 0:
+            return None
+    return get_org_invite(org_uuid)
+
+
+def revoke_org_invite(org_uuid: str) -> None:
+    """Turn off the workspace's invite link. Members already added keep access."""
+    with get_db_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            """
+            UPDATE organizations
+               SET invite_token = NULL, invite_token_created_at = NULL
+             WHERE uuid = ? AND deleted_at IS NULL
+            """,
+            (org_uuid,),
+        )
+        conn.commit()
+
+
+def get_org_by_invite_token(token: str) -> Optional[Dict[str, Any]]:
+    """Resolve an invite token to its workspace, or None if it is dead."""
+    with get_db_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            "SELECT * FROM organizations WHERE invite_token = ? AND deleted_at IS NULL",
+            (token,),
+        )
+        row = cursor.fetchone()
+        return _parse_org_row(row) if row else None
 
 
 # ============ Agents Functions ============

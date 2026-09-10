@@ -22,6 +22,7 @@ from db import (
     get_annotation_job_by_token,
     get_annotation_job_by_view_token,
     get_annotation_task,
+    get_org_by_invite_token,
     get_evaluator_ids_for_job,
     get_evaluators_for_job,
     get_annotator,
@@ -1132,3 +1133,25 @@ def upsert_public_annotations(
         "count": len(saved_uuids),
         "status": final_status,
     }
+
+
+class PublicInviteResponse(BaseModel):
+    organization_name: str = Field(description="Name of the workspace you were invited to")
+
+
+@router.get(
+    "/invite/{token}",
+    response_model=PublicInviteResponse,
+    summary="Get invite",
+)
+def get_public_invite(
+    token: str = Path(
+        description="Token from the invite link you were sent",
+        examples=["f47ac10b-58cc-4372-a567-0e02b2c3d479"],
+    ),
+):
+    """Get the name of the workspace an invite link points at"""
+    org = get_org_by_invite_token(token)
+    if org is None:
+        raise HTTPException(status_code=404, detail="Invite not found")
+    return PublicInviteResponse(organization_name=org["name"])

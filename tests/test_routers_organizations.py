@@ -433,3 +433,121 @@ def test_init_db_backfill_is_idempotent(client):
     after = db.list_organizations_for_user(auth["user_uuid"])
     assert len(after) == 1
     assert after[0]["uuid"] == before[0]["uuid"]
+
+
+def _new_org(client, auth, name="Invite Co"):
+    return client.post("/organizations", json={"name": name}, headers=auth["headers"]).json()["uuid"]
+
+
+def test_invite_link_create_read_replace_and_revoke(client):
+    owner = _signup(client, "inv-owner")
+    org_uuid = _new_org(client, owner)
+
+    assert client.get(f"/organizations/{org_uuid}/invite-link", headers=owner["headers"]).status_code == 404
+
+    created = client.post(f"/organizations/{org_uuid}/invite-link", headers=owner["headers"])
+    assert created.status_code == 201
+    token = created.json()["token"]
+    assert created.json()["created_at"]
+
+    read = client.get(f"/organizations/{org_uuid}/invite-link", headers=owner["headers"])
+    assert read.status_code == 200 and read.json()["token"] == token
+
+    replaced = client.post(f"/organizations/{org_uuid}/invite-link", headers=owner["headers"]).json()["token"]
+    assert replaced != token
+    assert client.get(f"/public/invite/{token}").status_code == 404
+    assert client.get(f"/public/invite/{replaced}").json() == {"organization_name": "Invite Co"}
+
+    assert client.delete(f"/organizations/{org_uuid}/invite-link", headers=owner["headers"]).status_code == 204
+    assert client.get(f"/organizations/{org_uuid}/invite-link", headers=owner["headers"]).status_code == 404
+    assert client.get(f"/public/invite/{replaced}").status_code == 404
+
+
+def test_invite_link_requires_membership(client):
+    owner = _signup(client, "inv-owner2")
+    stranger = _signup(client, "inv-stranger")
+    org_uuid = _new_org(client, owner)
+    client.post(f"/organizations/{org_uuid}/invite-link", headers=owner["headers"])
+
+    for call in (
+        lambda: client.get(f"/organizations/{org_uuid}/invite-link", headers=stranger["headers"]),
+        lambda: client.post(f"/organizations/{org_uuid}/invite-link", headers=stranger["headers"]),
+        lambda: client.delete(f"/organizations/{org_uuid}/invite-link", headers=stranger["headers"]),
+    ):
+        assert call().status_code == 404
+
+
+def test_accept_invite_adds_admin_and_is_idempotent(client):
+    owner = _signup(client, "inv-owner3")
+    joiner = _signup(client, "inv-joiner")
+    org_uuid = _new_org(client, owner, name="Joinable")
+    token = client.post(f"/organizations/{org_uuid}/invite-link", headers=owner["headers"]).json()["token"]
+
+    resp = client.post(f"/invites/{token}/accept", headers=joiner["headers"])
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["uuid"] == org_uuid and body["name"] == "Joinable"
+    assert body["member_role"] == "admin" and body["is_personal"] is False
+
+    again = client.post(f"/invites/{token}/accept", headers=joiner["headers"])
+    assert again.status_code == 200 and again.json()["member_role"] == "admin"
+
+    members = client.get(f"/organizations/{org_uuid}/members", headers=owner["headers"]).json()
+    assert sum(1 for m in members if m["user_id"] == joiner["user_uuid"]) == 1
+
+
+def test_accept_invite_rejects_dead_token_and_keeps_members_after_revoke(client):
+    owner = _signup(client, "inv-owner4")
+    joiner = _signup(client, "inv-joiner2")
+    latecomer = _signup(client, "inv-late")
+    org_uuid = _new_org(client, owner)
+    token = client.post(f"/organizations/{org_uuid}/invite-link", headers=owner["headers"]).json()["token"]
+    client.post(f"/invites/{token}/accept", headers=joiner["headers"])
+
+    client.delete(f"/organizations/{org_uuid}/invite-link", headers=owner["headers"])
+    assert client.post(f"/invites/{token}/accept", headers=latecomer["headers"]).status_code == 404
+    assert client.post(f"/invites/{uuid.uuid4()}/accept", headers=latecomer["headers"]).status_code == 404
+
+    # Revoking the link does not remove anyone who already joined through it.
+    assert client.get(f"/organizations/{org_uuid}/members", headers=joiner["headers"]).status_code == 200
+
+
+def test_accept_invite_restores_a_removed_member(client):
+    owner = _signup(client, "inv-owner5")
+    joiner = _signup(client, "inv-rejoin")
+    org_uuid = _new_org(client, owner)
+    token = client.post(f"/organizations/{org_uuid}/invite-link", headers=owner["headers"]).json()["token"]
+
+    client.post(f"/invites/{token}/accept", headers=joiner["headers"])
+    client.delete(
+        f"/organizations/{org_uuid}/members/{joiner['user_uuid']}", headers=owner["headers"]
+    )
+    assert client.get(f"/organizations/{org_uuid}/members", headers=joiner["headers"]).status_code == 404
+
+    assert client.post(f"/invites/{token}/accept", headers=joiner["headers"]).status_code == 200
+    assert client.get(f"/organizations/{org_uuid}/members", headers=joiner["headers"]).status_code == 200
+
+
+def test_invite_link_is_never_exposed_on_the_workspace_response(client):
+    owner = _signup(client, "inv-owner6")
+    org_uuid = _new_org(client, owner)
+    client.post(f"/organizations/{org_uuid}/invite-link", headers=owner["headers"])
+    for org in client.get("/organizations", headers=owner["headers"]).json():
+        assert "invite_token" not in org
+
+
+def test_create_invite_link_404s_when_the_workspace_vanished(client, monkeypatch):
+    owner = _signup(client, "inv-owner7")
+    org_uuid = _new_org(client, owner)
+    monkeypatch.setattr("routers.organizations.create_org_invite", lambda _: None)
+    resp = client.post(f"/organizations/{org_uuid}/invite-link", headers=owner["headers"])
+    assert resp.status_code == 404
+
+
+def test_create_org_invite_returns_nothing_for_an_unknown_workspace():
+    from db import create_org_invite, get_org_invite, revoke_org_invite
+
+    missing = str(uuid.uuid4())
+    assert create_org_invite(missing) is None
+    assert get_org_invite(missing) is None
+    revoke_org_invite(missing)
