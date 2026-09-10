@@ -3,11 +3,15 @@
 Create workspaces, rename them, and add or remove members.
 """
 
+from html import escape
+from urllib.parse import quote
+
 from fastapi import APIRouter, Depends, HTTPException, Path
 from pydantic import BaseModel, Field
 from typing import List, Optional
 
 from auth_utils import get_current_user_id, is_superadmin_user
+from mailer import frontend_url, send_email
 from utils import MemberRoleLiteral
 from db import (
     add_organization_member,
@@ -18,6 +22,8 @@ from db import (
     get_org_by_invite_token,
     get_org_invite,
     get_organization,
+    get_user,
+    get_user_by_email,
     list_organization_members,
     list_organizations_for_user,
     remove_organization_member,
@@ -86,6 +92,45 @@ class MemberResponse(BaseModel):
         description="Member's role in the workspace"
     )
     created_at: str = Field(description="When the member was added (ISO 8601 UTC)")
+
+
+def _has_account(user: Optional[dict]) -> bool:
+    """A stub row left by an earlier invite has no password and no name, so it is not an account."""
+    if not user:
+        return False
+    return bool(
+        user.get("password_hash")
+        or (user.get("first_name") or "").strip()
+        or (user.get("last_name") or "").strip()
+    )
+
+
+def _send_added_to_workspace_email(
+    email: str, org_name: str, inviter: dict, has_account: bool
+) -> None:
+    who = (
+        f"{inviter.get('first_name') or ''} {inviter.get('last_name') or ''}".strip()
+        or inviter.get("email")
+        or ""
+    )
+    added_by = escape(who)
+    safe_org = escape(org_name)
+    if has_account:
+        link = escape(frontend_url())
+        subject = f"You were added to {org_name} on Calibrate"
+        body = (
+            f"<p>{added_by} added you to the workspace {safe_org} on Calibrate.</p>"
+            f'<p><a href="{link}">Open Calibrate</a></p>'
+        )
+    else:
+        link = escape(f"{frontend_url()}/signup?email={quote(email)}")
+        subject = f"You are invited to {org_name} on Calibrate"
+        body = (
+            f"<p>{added_by} invited you to the workspace {safe_org} on Calibrate. "
+            "Create an account to join.</p>"
+            f'<p><a href="{link}">Create your account</a></p>'
+        )
+    send_email(to=email, subject=subject, html=body)
 
 
 def _require_membership(org_uuid: str, user_id: str) -> str:
@@ -164,12 +209,21 @@ def add_member(
     """Add a member to a workspace as admin"""
     # Stub accounts are hydrated when the invitee signs up; they then see this workspace immediately.
     _require_membership(org_uuid, user_id)
+    # add_organization_member creates a stub row, so read the account state before it runs.
+    had_account = _has_account(get_user_by_email(request.email))
     try:
         member = add_organization_member(
             org_uuid=org_uuid, email=request.email, role="admin"
         )
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
+
+    _send_added_to_workspace_email(
+        email=member["email"],
+        org_name=get_organization(org_uuid)["name"],
+        inviter=get_user(user_id),
+        has_account=had_account,
+    )
 
     # Re-read the full member row so the response has the joined user fields.
     for m in list_organization_members(org_uuid):

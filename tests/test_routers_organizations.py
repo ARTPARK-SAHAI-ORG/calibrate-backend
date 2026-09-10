@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import uuid
 from unittest.mock import patch
+from urllib.parse import quote
 
 import pytest
 from fastapi.testclient import TestClient
@@ -552,3 +553,166 @@ def test_create_org_invite_returns_nothing_for_an_unknown_workspace():
     assert create_org_invite(missing) is None
     assert get_org_invite(missing) is None
     revoke_org_invite(missing)
+
+
+@pytest.fixture
+def sent_emails(monkeypatch):
+    sent = []
+    monkeypatch.setattr(
+        "routers.organizations.send_email",
+        lambda to, subject, html: sent.append({"to": to, "subject": subject, "html": html}),
+    )
+    monkeypatch.setattr("routers.organizations.frontend_url", lambda: "https://app.example.com")
+    return sent
+
+
+def test_adding_someone_without_an_account_emails_them_a_signup_link(client, sent_emails):
+    owner = _signup(client, "mail-owner")
+    org_uuid = _new_org(client, owner, name="Mail Co")
+    invitee = f"nobody-{uuid.uuid4().hex[:8]}@example.com"
+
+    resp = client.post(
+        f"/organizations/{org_uuid}/members",
+        json={"email": invitee},
+        headers=owner["headers"],
+    )
+    assert resp.status_code == 201, resp.text
+
+    assert len(sent_emails) == 1
+    mail = sent_emails[0]
+    assert mail["to"] == invitee
+    assert "Mail Co" in mail["subject"]
+    assert "Mail Co" in mail["html"]
+    assert "Create an account" in mail["html"]
+    assert f"https://app.example.com/signup?email={quote(invitee)}" in mail["html"]
+    # The inviter is named.
+    assert "O U" in mail["html"]
+
+
+def test_adding_someone_who_already_has_an_account_emails_them_the_added_message(
+    client, sent_emails
+):
+    owner = _signup(client, "mail-owner2")
+    member = _signup(client, "mail-invitee")
+    org_uuid = _new_org(client, owner, name="Mail Co Two")
+
+    resp = client.post(
+        f"/organizations/{org_uuid}/members",
+        json={"email": member["email"]},
+        headers=owner["headers"],
+    )
+    assert resp.status_code == 201, resp.text
+
+    assert len(sent_emails) == 1
+    mail = sent_emails[0]
+    assert mail["to"] == member["email"]
+    assert "added" in mail["subject"].lower()
+    assert "Mail Co Two" in mail["html"]
+    assert "signup" not in mail["html"]
+    assert '<a href="https://app.example.com">' in mail["html"]
+
+
+def test_a_stub_row_from_an_earlier_invite_still_gets_the_signup_email(client, sent_emails):
+    """The second workspace also emails a create-an-account message: the stub row
+    left by the first invite is not an account."""
+    first = _signup(client, "mail-owner3")
+    second = _signup(client, "mail-owner4")
+    invitee = f"stubmail-{uuid.uuid4().hex[:8]}@example.com"
+
+    client.post(
+        f"/organizations/{_new_org(client, first, name='First Co')}/members",
+        json={"email": invitee},
+        headers=first["headers"],
+    )
+    client.post(
+        f"/organizations/{_new_org(client, second, name='Second Co')}/members",
+        json={"email": invitee},
+        headers=second["headers"],
+    )
+
+    assert len(sent_emails) == 2
+    assert "Create an account" in sent_emails[1]["html"]
+    assert "Second Co" in sent_emails[1]["html"]
+
+
+def test_a_failed_add_sends_nothing(client, sent_emails):
+    owner = _signup(client, "mail-owner5")
+    member = _signup(client, "mail-invitee2")
+    org_uuid = _new_org(client, owner, name="Dup Co")
+
+    client.post(
+        f"/organizations/{org_uuid}/members",
+        json={"email": member["email"]},
+        headers=owner["headers"],
+    )
+    sent_emails.clear()
+
+    dup = client.post(
+        f"/organizations/{org_uuid}/members",
+        json={"email": member["email"]},
+        headers=owner["headers"],
+    )
+    assert dup.status_code == 400
+    assert sent_emails == []
+
+
+def test_workspace_names_and_inviter_names_are_escaped_in_the_email(client, sent_emails, monkeypatch):
+    """A name carrying `&` must not break the HTML, and the invitee's email must
+    be url-encoded into the signup link."""
+    owner = _signup(client, "mail-owner6")
+    org_uuid = _new_org(client, owner, name="Tom & Jerry <Labs>")
+    monkeypatch.setattr(
+        "routers.organizations.get_user",
+        lambda _: {"first_name": "Ann & <b>Bo</b>", "last_name": "O'Neil"},
+    )
+    invitee = f"plus+tag-{uuid.uuid4().hex[:8]}@example.com"
+
+    resp = client.post(
+        f"/organizations/{org_uuid}/members",
+        json={"email": invitee},
+        headers=owner["headers"],
+    )
+    assert resp.status_code == 201, resp.text
+
+    html = sent_emails[0]["html"]
+    assert "Tom &amp; Jerry &lt;Labs&gt;" in html
+    assert "<Labs>" not in html
+    assert "Ann &amp; &lt;b&gt;Bo&lt;/b&gt;" in html
+    assert "<b>Bo</b>" not in html
+    assert f"email={quote(invitee)}" in html
+    assert "%2B" in html
+
+
+def test_the_invite_goes_to_the_tidied_up_address(client, sent_emails):
+    """A stray space or capital letter must not reach the mail provider."""
+    owner = _signup(client, "mail-owner7")
+    org_uuid = _new_org(client, owner, name="Padded")
+    invitee = f"Mixed-{uuid.uuid4().hex[:8]}@Example.COM"
+
+    resp = client.post(
+        f"/organizations/{org_uuid}/members",
+        json={"email": f"  {invitee}  "},
+        headers=owner["headers"],
+    )
+    assert resp.status_code == 201, resp.text
+
+    assert [m["to"] for m in sent_emails] == [invitee.lower()]
+    assert f"email={quote(invitee.lower())}" in sent_emails[0]["html"]
+
+
+def test_inviter_falls_back_to_their_email_when_they_have_no_name(
+    client, sent_emails, monkeypatch
+):
+    owner = _signup(client, "mail-owner8")
+    org_uuid = _new_org(client, owner, name="Nameless")
+    monkeypatch.setattr(
+        "routers.organizations.get_user", lambda _: {"email": "boss@example.com"}
+    )
+
+    resp = client.post(
+        f"/organizations/{org_uuid}/members",
+        json={"email": f"fallback-{uuid.uuid4().hex[:8]}@example.com"},
+        headers=owner["headers"],
+    )
+    assert resp.status_code == 201, resp.text
+    assert "boss@example.com" in sent_emails[0]["html"]

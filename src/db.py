@@ -1,6 +1,9 @@
 import sqlite3
+import datetime
+import hashlib
 import json
 import logging
+import secrets
 import uuid
 from os.path import join
 import os
@@ -1169,6 +1172,16 @@ def init_db():
             )
         except sqlite3.OperationalError:
             pass
+
+        # Add password reset columns to users table (migration)
+        for _reset_column in (
+            "password_reset_token_hash TEXT DEFAULT NULL",
+            "password_reset_expires_at TIMESTAMP DEFAULT NULL",
+        ):
+            try:
+                cursor.execute(f"ALTER TABLE users ADD COLUMN {_reset_column}")
+            except sqlite3.OperationalError:
+                pass
 
         # Add user_id column to all relevant tables if not present (migration)
         tables_with_user_id = [
@@ -3756,6 +3769,89 @@ def create_user_with_password(
         conn.commit()
         logger.info(f"Created user (email/password auth) with UUID: {user_uuid}")
         return user_uuid
+
+
+def _hash_reset_token(token: str) -> str:
+    return hashlib.sha256(token.encode()).hexdigest()
+
+
+def create_password_reset_token(email: str) -> Optional[str]:
+    """Issue a password reset token for the email, or None if no such user.
+
+    Only the token's hash is stored, so a copy of the database does not hand
+    someone every live reset link.
+    """
+    email = normalize_email(email)
+    if not email:
+        return None
+    token = secrets.token_urlsafe(32)
+    expires_at = (datetime.datetime.utcnow() + datetime.timedelta(hours=1)).strftime(
+        "%Y-%m-%d %H:%M:%S"
+    )
+    with get_db_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            """
+            UPDATE users
+               SET password_reset_token_hash = ?,
+                   password_reset_expires_at = ?,
+                   updated_at = CURRENT_TIMESTAMP
+             WHERE email = ?
+            """,
+            (_hash_reset_token(token), expires_at, email),
+        )
+        if cursor.rowcount == 0:
+            return None
+        conn.commit()
+        return token
+
+
+def _live_reset_token_user(cursor: sqlite3.Cursor, token: str) -> Optional[str]:
+    """UUID of the user holding this unexpired token, else None."""
+    cursor.execute(
+        """
+        SELECT uuid, password_reset_expires_at FROM users
+         WHERE password_reset_token_hash = ?
+        """,
+        (_hash_reset_token(token),),
+    )
+    row = cursor.fetchone()
+    if row is None or not row["password_reset_expires_at"]:
+        return None
+    expires_at = datetime.datetime.strptime(
+        row["password_reset_expires_at"], "%Y-%m-%d %H:%M:%S"
+    )
+    if expires_at < datetime.datetime.utcnow():
+        return None
+    return row["uuid"]
+
+
+def password_reset_token_is_valid(token: str) -> bool:
+    """Whether this reset token exists and has not expired."""
+    with get_db_connection() as conn:
+        return _live_reset_token_user(conn.cursor(), token) is not None
+
+
+def reset_password_with_token(token: str, password_hash: str) -> bool:
+    """Set the password for the user holding this token. False if unknown or expired."""
+    with get_db_connection() as conn:
+        cursor = conn.cursor()
+        user_uuid = _live_reset_token_user(cursor, token)
+        if user_uuid is None:
+            return False
+        cursor.execute(
+            """
+            UPDATE users
+               SET password_hash = ?,
+                   password_reset_token_hash = NULL,
+                   password_reset_expires_at = NULL,
+                   updated_at = CURRENT_TIMESTAMP
+             WHERE uuid = ?
+            """,
+            (password_hash, user_uuid),
+        )
+        conn.commit()
+        return True
 
 
 # ============ Organizations (multi-tenant) ============

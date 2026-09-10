@@ -156,6 +156,12 @@ GOOGLE_CLOUD_PROJECT_ID=
 # Auth
 GOOGLE_CLIENT_ID=
 
+# Email. Leave RESEND_API_KEY empty to send nothing.
+# FRONTEND_URL is the address of your frontend, used for links inside emails.
+RESEND_API_KEY=
+EMAIL_FROM=Calibrate <onboarding@resend.dev>
+FRONTEND_URL=http://localhost:3000
+
 # Tracing
 SENTRY_DSN=
 SENTRY_ENVIRONMENT=production
@@ -177,7 +183,7 @@ chmod 600 .env
 openssl rand -base64 32
 ```
 
-Update the default values given above as needed. For example, you might want to set the `SUPERADMIN_EMAIL` to an email address you own. Set the API keys for different providers (e.g. OpenRouter, OpenAI, etc.). Set the `GOOGLE_CLIENT_ID` to the same value as the one used for self-hosting the frontend.
+Update the default values given above as needed. For example, you might want to set the `SUPERADMIN_EMAIL` to an email address you own. Set the API keys for different providers (e.g. OpenRouter, OpenAI, etc.). Set the `GOOGLE_CLIENT_ID` to the same value as the one used for self-hosting the frontend. Set `FRONTEND_URL` to the address your frontend runs on, or the links in invite and password reset emails will point at localhost.
 
 If you used a different name other than `/appdata` in the `SSH and create the root directory for the database` step, update `APP_FOLDER_PATH` and `DB_ROOT_DIR` in the `.env` file accordingly.
 
@@ -440,6 +446,12 @@ GOOGLE_CLOUD_PROJECT_ID=
 # Auth
 GOOGLE_CLIENT_ID=
 
+# Email. Leave RESEND_API_KEY empty to send nothing.
+# FRONTEND_URL is the address of your frontend, used for links inside emails.
+RESEND_API_KEY=
+EMAIL_FROM=Calibrate <onboarding@resend.dev>
+FRONTEND_URL=http://localhost:3000
+
 # Tracing
 SENTRY_DSN=
 SENTRY_ENVIRONMENT=production
@@ -461,7 +473,7 @@ chmod 600 .env
 openssl rand -base64 32
 ```
 
-Update the default values given above as needed. For example, you might want to set the `SUPERADMIN_EMAIL` to an email address you own. Set the API keys for different providers (e.g. OpenRouter, OpenAI, etc.). Set the `GOOGLE_CLIENT_ID` to the same value as the one used for self-hosting the frontend.
+Update the default values given above as needed. For example, you might want to set the `SUPERADMIN_EMAIL` to an email address you own. Set the API keys for different providers (e.g. OpenRouter, OpenAI, etc.). Set the `GOOGLE_CLIENT_ID` to the same value as the one used for self-hosting the frontend. Set `FRONTEND_URL` to the address your frontend runs on, or the links in invite and password reset emails will point at localhost.
 
 `AWS_ACCESS_KEY_ID` and `AWS_SECRET_ACCESS_KEY` need to be set as the HMAC secret and access keys from step 2. Let `S3_ENDPOINT_URL` be as it is.
 
