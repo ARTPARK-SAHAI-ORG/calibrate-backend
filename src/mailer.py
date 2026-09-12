@@ -16,13 +16,22 @@ logger = logging.getLogger(__name__)
 RESEND_ENDPOINT = "https://api.resend.com/emails"
 SEND_TIMEOUT_SECONDS = 10
 
+WELCOME_TEMPLATE = "calibrate-welcome"
+WORKSPACE_INVITE_TEMPLATE = "calibrate-workspace-invite"
+
 # Bounded, and its threads are joined at interpreter exit, so an unauthenticated
 # endpoint cannot spawn threads without limit and a shutdown does not drop a
 # message mid-send.
 _SENDER = ThreadPoolExecutor(max_workers=4, thread_name_prefix="mailer")
 
 
-def send_email(to: str, subject: str, html: str) -> None:
+def _strip_markup(value: str) -> str:
+    # Resend does not escape variable values, and one value can land in an HTML
+    # body or a plain-text subject, where HTML escaping would show as `&amp;`.
+    return str(value).replace("<", "").replace(">", "")
+
+
+def send_email(to: str, template: str, variables: dict[str, str]) -> None:
     """Send one email, off the request thread so a slow provider never delays a response."""
     api_key = env_str("RESEND_API_KEY", "")
     if not api_key:
@@ -30,13 +39,18 @@ def send_email(to: str, subject: str, html: str) -> None:
         return
 
     sender = env_str("EMAIL_FROM", "Calibrate <onboarding@resend.dev>")
+    safe = {key: _strip_markup(value) for key, value in variables.items()}
 
     def _send() -> None:
         try:
             response = httpx.post(
                 RESEND_ENDPOINT,
                 headers={"Authorization": f"Bearer {api_key}"},
-                json={"from": sender, "to": [to], "subject": subject, "html": html},
+                json={
+                    "from": sender,
+                    "to": [to],
+                    "template": {"id": template, "variables": safe},
+                },
                 timeout=SEND_TIMEOUT_SECONDS,
             )
             response.raise_for_status()

@@ -13,10 +13,11 @@ from __future__ import annotations
 
 import uuid
 from unittest.mock import patch
-from urllib.parse import quote
 
 import pytest
 from fastapi.testclient import TestClient
+
+from mailer import WORKSPACE_INVITE_TEMPLATE
 
 
 @pytest.fixture(scope="module")
@@ -560,13 +561,15 @@ def sent_emails(monkeypatch):
     sent = []
     monkeypatch.setattr(
         "routers.organizations.send_email",
-        lambda to, subject, html: sent.append({"to": to, "subject": subject, "html": html}),
+        lambda to, template, variables: sent.append(
+            {"to": to, "template": template, "variables": variables}
+        ),
     )
     monkeypatch.setattr("routers.organizations.frontend_url", lambda: "https://app.example.com")
     return sent
 
 
-def test_adding_someone_without_an_account_emails_them_a_signup_link(client, sent_emails):
+def test_adding_someone_emails_them_a_link_into_the_workspace(client, sent_emails):
     owner = _signup(client, "mail-owner")
     org_uuid = _new_org(client, owner, name="Mail Co")
     invitee = f"nobody-{uuid.uuid4().hex[:8]}@example.com"
@@ -581,17 +584,14 @@ def test_adding_someone_without_an_account_emails_them_a_signup_link(client, sen
     assert len(sent_emails) == 1
     mail = sent_emails[0]
     assert mail["to"] == invitee
-    assert "Mail Co" in mail["subject"]
-    assert "Mail Co" in mail["html"]
-    assert "Create an account" in mail["html"]
-    assert f"https://app.example.com/signup?email={quote(invitee)}" in mail["html"]
-    # The inviter is named.
-    assert "O U" in mail["html"]
+    assert mail["template"] == WORKSPACE_INVITE_TEMPLATE
+    assert mail["variables"]["WORKSPACE"] == "Mail Co"
+    assert mail["variables"]["URL"] == f"https://app.example.com/{org_uuid}/agents"
+    assert mail["variables"]["INVITER"] == "O U"
 
 
-def test_adding_someone_who_already_has_an_account_emails_them_the_added_message(
-    client, sent_emails
-):
+def test_someone_who_already_has_an_account_gets_the_same_email(client, sent_emails):
+    """The person is a member either way, so both cases read alike and land alike."""
     owner = _signup(client, "mail-owner2")
     member = _signup(client, "mail-invitee")
     org_uuid = _new_org(client, owner, name="Mail Co Two")
@@ -606,33 +606,33 @@ def test_adding_someone_who_already_has_an_account_emails_them_the_added_message
     assert len(sent_emails) == 1
     mail = sent_emails[0]
     assert mail["to"] == member["email"]
-    assert "added" in mail["subject"].lower()
-    assert "Mail Co Two" in mail["html"]
-    assert "signup" not in mail["html"]
-    assert '<a href="https://app.example.com">' in mail["html"]
+    assert mail["template"] == WORKSPACE_INVITE_TEMPLATE
+    assert mail["variables"]["WORKSPACE"] == "Mail Co Two"
+    assert mail["variables"]["URL"] == f"https://app.example.com/{org_uuid}/agents"
 
 
-def test_a_stub_row_from_an_earlier_invite_still_gets_the_signup_email(client, sent_emails):
-    """The second workspace also emails a create-an-account message: the stub row
-    left by the first invite is not an account."""
+def test_a_second_workspace_links_to_that_second_workspace(client, sent_emails):
     first = _signup(client, "mail-owner3")
     second = _signup(client, "mail-owner4")
     invitee = f"stubmail-{uuid.uuid4().hex[:8]}@example.com"
 
+    first_org = _new_org(client, first, name="First Co")
+    second_org = _new_org(client, second, name="Second Co")
     client.post(
-        f"/organizations/{_new_org(client, first, name='First Co')}/members",
+        f"/organizations/{first_org}/members",
         json={"email": invitee},
         headers=first["headers"],
     )
     client.post(
-        f"/organizations/{_new_org(client, second, name='Second Co')}/members",
+        f"/organizations/{second_org}/members",
         json={"email": invitee},
         headers=second["headers"],
     )
 
     assert len(sent_emails) == 2
-    assert "Create an account" in sent_emails[1]["html"]
-    assert "Second Co" in sent_emails[1]["html"]
+    assert sent_emails[0]["variables"]["URL"] == f"https://app.example.com/{first_org}/agents"
+    assert sent_emails[1]["variables"]["WORKSPACE"] == "Second Co"
+    assert sent_emails[1]["variables"]["URL"] == f"https://app.example.com/{second_org}/agents"
 
 
 def test_a_failed_add_sends_nothing(client, sent_emails):
@@ -656,9 +656,9 @@ def test_a_failed_add_sends_nothing(client, sent_emails):
     assert sent_emails == []
 
 
-def test_workspace_names_and_inviter_names_are_escaped_in_the_email(client, sent_emails, monkeypatch):
-    """A name carrying `&` must not break the HTML, and the invitee's email must
-    be url-encoded into the signup link."""
+def test_names_reach_the_mailer_unescaped(client, sent_emails, monkeypatch):
+    """The mailer strips markup itself, so escaping here would put `&amp;` in the
+    subject the template renders."""
     owner = _signup(client, "mail-owner6")
     org_uuid = _new_org(client, owner, name="Tom & Jerry <Labs>")
     monkeypatch.setattr(
@@ -674,13 +674,12 @@ def test_workspace_names_and_inviter_names_are_escaped_in_the_email(client, sent
     )
     assert resp.status_code == 201, resp.text
 
-    html = sent_emails[0]["html"]
-    assert "Tom &amp; Jerry &lt;Labs&gt;" in html
-    assert "<Labs>" not in html
-    assert "Ann &amp; &lt;b&gt;Bo&lt;/b&gt;" in html
-    assert "<b>Bo</b>" not in html
-    assert f"email={quote(invitee)}" in html
-    assert "%2B" in html
+    variables = sent_emails[0]["variables"]
+    assert variables["WORKSPACE"] == "Tom & Jerry <Labs>"
+    assert variables["INVITER"] == "Ann & <b>Bo</b> O'Neil"
+    assert "&amp;" not in variables["WORKSPACE"]
+    assert "&amp;" not in variables["INVITER"]
+    assert variables["URL"] == f"https://app.example.com/{org_uuid}/agents"
 
 
 def test_the_invite_goes_to_the_tidied_up_address(client, sent_emails):
@@ -697,7 +696,6 @@ def test_the_invite_goes_to_the_tidied_up_address(client, sent_emails):
     assert resp.status_code == 201, resp.text
 
     assert [m["to"] for m in sent_emails] == [invitee.lower()]
-    assert f"email={quote(invitee.lower())}" in sent_emails[0]["html"]
 
 
 def test_inviter_falls_back_to_their_email_when_they_have_no_name(
@@ -715,4 +713,4 @@ def test_inviter_falls_back_to_their_email_when_they_have_no_name(
         headers=owner["headers"],
     )
     assert resp.status_code == 201, resp.text
-    assert "boss@example.com" in sent_emails[0]["html"]
+    assert sent_emails[0]["variables"]["INVITER"] == "boss@example.com"

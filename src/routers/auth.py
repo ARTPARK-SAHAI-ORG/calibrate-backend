@@ -1,5 +1,4 @@
 import os
-import html
 import logging
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
@@ -11,13 +10,9 @@ from db import (
     get_user_by_email,
     create_user_with_password,
     get_user,
-    create_password_reset_token,
-    normalize_email,
-    password_reset_token_is_valid,
-    reset_password_with_token,
 )
 from auth_utils import create_access_token
-from mailer import send_email, frontend_url
+from mailer import send_email, frontend_url, WELCOME_TEMPLATE
 
 logger = logging.getLogger(__name__)
 
@@ -53,16 +48,13 @@ class LoginResponse(BaseModel):
 
 
 def _send_welcome_email(email: str, first_name: str) -> None:
-    name = html.escape(first_name.strip()) or "there"
-    url = frontend_url()
     send_email(
         to=email,
-        subject="Welcome to Calibrate",
-        html=(
-            f"<p>Hi {name},</p>"
-            f"<p>Your Calibrate account is ready. "
-            f'Sign in at <a href="{url}">{url}</a> to get started.</p>'
-        ),
+        template=WELCOME_TEMPLATE,
+        variables={
+            "NAME": first_name.strip() or "there",
+            "URL": frontend_url(),
+        },
     )
 
 
@@ -193,7 +185,10 @@ def signup(request: SignupRequest):
     access_token = create_access_token(user["uuid"], user["email"])
     logger.info(f"User signed up: {request.email} (UUID: {user['uuid']})")
 
-    _send_welcome_email(user["email"], user["first_name"])
+    # A stub row means an invite already emailed them; only a brand-new account
+    # gets the welcome, matching the Google path.
+    if existing is None:
+        _send_welcome_email(user["email"], user["first_name"])
 
     return LoginResponse(
         access_token=access_token,
@@ -239,73 +234,3 @@ def login(request: CredentialLoginRequest):
         ),
         message="Login successful",
     )
-
-
-class ForgotPasswordRequest(BaseModel):
-    email: str = Field(
-        ..., min_length=3, description="Email address of the account to reset"
-    )
-
-
-class ResetPasswordRequest(BaseModel):
-    token: str = Field(..., description="Reset token from the email link")
-    password: str = Field(..., min_length=6, description="New account password")
-
-
-class MessageResponse(BaseModel):
-    message: str = Field(description="Status message")
-
-
-@router.post(
-    "/forgot-password",
-    response_model=MessageResponse,
-    summary="Send a password reset link",
-)
-def forgot_password(request: ForgotPasswordRequest):
-    """Email a one-hour link for setting a new password.
-
-    The reply is the same whether or not an account exists for that address,
-    so nobody can use this to find out who has an account.
-    """
-    email = normalize_email(request.email)
-    token = create_password_reset_token(email)
-    if token:
-        link = f"{frontend_url()}/reset-password?token={token}"
-        send_email(
-            to=email,
-            subject="Reset your Calibrate password",
-            html=(
-                f'<p>Set a new password here: <a href="{link}">{link}</a></p>'
-                "<p>The link stops working in one hour. "
-                "If you did not ask for this, ignore this email.</p>"
-            ),
-        )
-
-    return MessageResponse(
-        message="If an account exists for that email, a reset link is on its way"
-    )
-
-
-@router.post(
-    "/reset-password",
-    response_model=MessageResponse,
-    summary="Set a new password with a reset token",
-)
-def reset_password(request: ResetPasswordRequest):
-    """Set a new password using the token from the reset email"""
-    # Checked before hashing: bcrypt is deliberately slow, and this route takes
-    # no sign-in, so hashing first would let anyone burn CPU with junk tokens.
-    invalid = HTTPException(
-        status_code=400, detail="This reset link is invalid or has expired"
-    )
-    if not password_reset_token_is_valid(request.token):
-        raise invalid
-
-    password_hash = bcrypt.hashpw(
-        request.password.encode("utf-8"), bcrypt.gensalt()
-    ).decode("utf-8")
-
-    if not reset_password_with_token(request.token, password_hash):
-        raise invalid
-
-    return MessageResponse(message="Password updated")

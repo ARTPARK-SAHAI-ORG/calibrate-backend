@@ -33,6 +33,10 @@ os.environ.setdefault("SUPERADMIN_EMAIL", "admin@example.com")
 # relies on. setdefault is intentional — explicit env wins.
 os.environ.setdefault("DOCS_USERNAME", "admin")
 os.environ.setdefault("DOCS_PASSWORD", "changeme")
+# Force-clear, not setdefault: a developer's src/.env holds a real key, and every
+# test that signs a user up or adds a member would otherwise post to Resend and
+# send mail to the made-up addresses the tests invent.
+os.environ["RESEND_API_KEY"] = ""
 
 _SRC = str(Path(__file__).resolve().parents[1] / "src")
 if _SRC not in sys.path:
