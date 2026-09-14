@@ -663,6 +663,33 @@ def test_agent_verify_marks_the_probe_as_an_evaluation(client):
     }
 
 
+def test_agent_verify_websocket_voice_connection(client):
+    """Voice connections use the Pipecat WebSocket verifier, not HTTP probes."""
+    auth = _signup(client)
+    h = auth["headers"]
+    fake_agent = MagicMock()
+    fake_agent.verify = AsyncMock(return_value={"ok": True, "error": None})
+    fake_addr = [(0, 0, 0, "", ("93.184.216.34", 0))]
+    with patch("routers.agents.WebSocketAgentConnection", return_value=fake_agent) as ctor, patch(
+        "routers.agents.socket.getaddrinfo", return_value=fake_addr
+    ):
+        response = client.post(
+            "/agents/verify-connection",
+            json={
+                "connection_type": "websocket_voice",
+                "agent_url": "wss://voice.example.com/ws",
+            },
+            headers=h,
+        )
+    assert response.status_code == 200
+    assert response.json() == {
+        "success": True,
+        "error": None,
+        "sample_response": None,
+    }
+    assert ctor.call_args.kwargs == {"url": "wss://voice.example.com/ws"}
+
+
 def test_agent_verify_saved_with_model_persists(client):
     auth = _signup(client)
     h = auth["headers"]
