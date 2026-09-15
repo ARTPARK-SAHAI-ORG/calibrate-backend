@@ -568,8 +568,8 @@ def test_simulation_runs_does_not_ship_heavy_blobs(client):
     assert len(resp.json()["runs"]) == 3
 
 
-def test_run_simulation_voice_connection_blocked(client, monkeypatch):
-    """An agent_url-mode (connection) agent cannot run voice sims."""
+def test_run_simulation_voice_websocket_connection_queues(client, monkeypatch):
+    """A verified Pipecat WebSocket connection can run a voice simulation."""
     auth = _signup(client)
     h = auth["headers"]
     # Create connection-mode agent with verified flag and agent_url
@@ -579,6 +579,50 @@ def test_run_simulation_voice_connection_blocked(client, monkeypatch):
             "name": f"conn-{uuid.uuid4().hex[:6]}",
             "type": "connection",
             "config": {
+                "connection_type": "websocket_voice",
+                "agent_url": "wss://voice.example.com/ws",
+                "connection_verified": True,
+            },
+        },
+        headers=h,
+    ).json()
+    persona = _create_persona(client, h)
+    scenario = _create_scenario(client, h)
+    create = client.post(
+        "/simulations",
+        json={
+            "name": f"sim-{uuid.uuid4().hex[:6]}",
+            "agent_uuid": agent["uuid"],
+            "persona_uuids": [persona["uuid"]],
+            "scenario_uuids": [scenario["uuid"]],
+        },
+        headers=h,
+    ).json()
+
+    monkeypatch.setenv("S3_OUTPUT_BUCKET", "test-bucket")
+    with patch("routers.simulations.can_start_simulation_job", return_value=False), patch(
+        "threading.Thread"
+    ):
+        resp = client.post(
+            f"/simulations/{create['uuid']}/run",
+            json={"type": "voice"},
+            headers=h,
+        )
+    assert resp.status_code == 200
+    assert resp.json()["status"] == "queued"
+
+
+def test_run_simulation_voice_http_connection_blocked(client, monkeypatch):
+    """HTTP chat connections remain unavailable to the voice runner."""
+    auth = _signup(client)
+    h = auth["headers"]
+    agent = client.post(
+        "/agents",
+        json={
+            "name": f"conn-{uuid.uuid4().hex[:6]}",
+            "type": "connection",
+            "config": {
+                "connection_type": "http_chat",
                 "agent_url": "https://example.com/agent",
                 "connection_verified": True,
             },
@@ -605,6 +649,7 @@ def test_run_simulation_voice_connection_blocked(client, monkeypatch):
         headers=h,
     )
     assert resp.status_code == 400
+    assert resp.json()["detail"] == "Voice simulations require a websocket_voice agent connection."
 
 
 def test_run_simulation_text_default_inputs_blocked(client, monkeypatch):
