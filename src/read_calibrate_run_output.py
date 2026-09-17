@@ -30,7 +30,7 @@ def cli_error_line(stdout: str, stderr: str, returncode: int) -> str:
     for lines in (err, out):
         if lines:
             return lines[-1]
-    return f"The eval tool stopped before it produced any result (exit code {returncode})."
+    return "The eval tool stopped before it produced any result."
 
 
 def run_counts(

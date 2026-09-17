@@ -476,8 +476,8 @@ def test_run_llm_test_task_failure_propagates():
 
     job = db.get_agent_test_job(job_uuid)
     assert job["status"] == "failed"
-    # Nothing on stdout or stderr: the exit code is all there is to show.
-    assert job["results"]["error"] == "The eval tool stopped before it produced any result (exit code 1)."
+    # Nothing on stdout or stderr: a fixed sentence, the exit code stays in the log.
+    assert job["results"]["error"] == "The eval tool stopped before it produced any result."
 
 
 def _run_plain_with_exit_code(
@@ -622,8 +622,8 @@ def test_cli_error_line_picks_the_line_worth_reading():
     assert cli_error_line("Running\nError: bad key\nbye\n", "", 1) == "Error: bad key"
     # Nothing that looks like an error: the last stderr line.
     assert cli_error_line("all fine\n", "warn one\nwarn two\n", 1) == "warn two"
-    # Nothing at all: the exit code.
-    assert cli_error_line("", "\n", 3) == "The eval tool stopped before it produced any result (exit code 3)."
+    # Nothing at all: a fixed sentence.
+    assert cli_error_line("", "\n", 3) == "The eval tool stopped before it produced any result."
 
 
 def test_run_llm_test_task_records_cases_that_never_ran():
