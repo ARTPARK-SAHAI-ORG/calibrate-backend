@@ -1609,7 +1609,7 @@ def run_task(task_id: str, request: TaskRequest):
 
 **Preserving Results on Failure**: When a job fails due to an exception, ALL exception handlers (including `CalledProcessError`) fetch existing results from the database and preserve them (e.g., `total_tests`, `test_results`, `model_results`) while adding the error string. This ensures that partial results from intermediate updates — including `total_tests` — are still available to clients even when the job ultimately fails.
 
-**Agent test `error` field is a boolean in the API**: The `error` field in `TestRunStatusResponse`, `BenchmarkStatusResponse`, and `AgentTestRunListItem` is `bool` (not a string). The full error string is stored internally in the DB for debugging/Sentry, but the API endpoints convert it to `true`/`false` via `bool(results.get("error"))`. This keeps the client interface clean while preserving diagnostic detail server-side.
+**Agent test `error` field**: `AgentTestRunListItem` (the runs list) keeps `error` as a `bool`. The detail responses (`TestRunStatusResponse`, `BenchmarkStatusResponse`, `PublicTestRunResponse`, `PublicBenchmarkResponse`) return `error` as text or `null`: the stored `results["error"]` is written to be shown to a reader (the eval tool's own `❌`/`✗` line, "The eval tool produced no results.", or "The run hit an unexpected problem."), and the detailed message with paths and exceptions goes to the log and Sentry only.
 
 **Sentry Error Logging**: All job failures are logged to Sentry using the `capture_exception_to_sentry()` utility function from `utils.py`. This function:
 
@@ -1623,13 +1623,13 @@ This applies to:
 - Simulation failures (text and voice)
 - CLI command failures (non-zero exit codes OR tracebacks in stderr) - logged with full stderr output
 
-**CLI Failure Detection**: All CLI wrapper functions (agent tests, benchmarks, text simulations, voice simulations) use a two-layer approach:
+**CLI Failure Detection**: Simulations (text/voice) use a two-layer approach: a non-zero return code is an immediate failure with stderr logged to Sentry, and exit code 0 with no `simulation_persona_*` directories holding completed results is a failure with a descriptive error.
 
-1. **Exit code**: Non-zero return code → immediate failure with stderr logged to Sentry
-2. **Output file validation**: Exit code 0 but expected structured output missing → failure with descriptive error
-   - Agent tests: `results.json` and `metrics.json` both absent
-   - Benchmarks: `_find_all_results_in_output()` returns empty (no per-model result folders)
-   - Simulations (text/voice): no `simulation_persona_*` directories with completed results
+Agent tests and benchmarks read the output directory before deciding, because calibrate exits 1 after writing its results when a run stopped early or every case errored:
+
+1. `metrics.json` present (for a benchmark, any model's `metrics.json`) → the run finished whatever the exit code; results are kept and reported as done with `stopped_early` / `unanswered_tests`.
+2. Non-zero exit with no `metrics.json` → a crash mid-run (calibrate writes `metrics.json` last). The run is marked failed and the rows `results.json` collected so far, already stored by the intermediate updates, are kept. `_no_output_failure` logs, reports to Sentry and raises `CliRunFailed` with the reader-facing `error_line` from `_cli_error_line`.
+3. Exit code 0 with neither `results.json` nor `metrics.json` (benchmarks: `_find_all_results_in_output()` empty) → failure, stored as "The eval tool produced no results."
 
 Stderr is logged for debugging but **never** used for failure detection. The calibrate CLI's subprocess may emit benign cleanup tracebacks (e.g., httpx `AsyncClient.aclose()` "Event loop is closed" errors) that are not real failures. Relying on exit code + structured output avoids false positives from noisy stderr.
 

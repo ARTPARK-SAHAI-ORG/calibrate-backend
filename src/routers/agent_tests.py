@@ -555,7 +555,10 @@ class TestRunStatusResponse(BaseModel):
         description="Whether the run stopped before starting every test case, after too many failed in a row",
     )
     aborted: bool = Field(False, description=_ABORTED_DESCRIPTION)
-    error: bool = Field(False, description="True if the run failed")
+    error: Optional[str] = Field(
+        None,
+        description="Why the run could not be carried out, when it failed before producing any result",
+    )
     is_public: bool = Field(False, description="Whether the run is shared publicly")
     share_token: Optional[str] = Field(
         None, description="Token for building the public share URL"
@@ -1902,6 +1905,64 @@ def _unanswered_case_count(test_results: Optional[List[Dict[str, Any]]]) -> int:
     return sum(1 for r in test_results or [] if r.get("unanswered"))
 
 
+def _cli_error_line(stdout: str, stderr: str, returncode: int) -> str:
+    """The one line worth showing a reader when the eval tool wrote nothing."""
+    ansi = re.compile(r"\x1b\[[0-9;]*m")
+    out = [l.strip() for l in ansi.sub("", stdout or "").splitlines() if l.strip()]
+    err = [l.strip() for l in ansi.sub("", stderr or "").splitlines() if l.strip()]
+    # calibrate prints the failure it stopped on as its last ❌ or ✗ line.
+    for line in reversed(out):
+        if line.startswith(("❌", "✗")):
+            return line
+    for lines in (out, err):
+        for line in reversed(lines):
+            if re.search(r"\berror\b", line, re.I):
+                return line
+    for lines in (err, out):
+        if lines:
+            return lines[-1]
+    return f"exit code {returncode}"
+
+
+def _run_counts(
+    metrics_data: Optional[Dict[str, Any]], test_results: List[Dict[str, Any]]
+) -> Dict[str, Any]:
+    """``unanswered_tests`` / ``stopped_early`` for a run's results, from metrics.json when present."""
+    metrics_data = metrics_data or {}
+    return {
+        "unanswered_tests": (
+            metrics_data["errored"]
+            if metrics_data.get("errored") is not None
+            else _unanswered_case_count(test_results)
+        ),
+        "stopped_early": bool(metrics_data.get("stopped_early")),
+    }
+
+
+class CliRunFailed(subprocess.CalledProcessError):
+    """A CLI run that left no finished results. ``error_line`` is what a reader may see."""
+
+    error_line: str = ""
+
+
+def _no_output_failure(
+    process, run_cmd, stdout: str, stderr: str, output_dir: Path, noun: str
+) -> CliRunFailed:
+    """Log, report to Sentry and build the failure for a run that wrote no metrics.json."""
+    if process.returncode != 0:
+        error_line = _cli_error_line(stdout, stderr, process.returncode)
+        error_msg = f"{noun} failed with exit code {process.returncode}: {error_line}"
+    else:
+        # The path is for the log only; the reader sees the short line.
+        error_line = "The eval tool produced no results."
+        error_msg = f"{noun} produced no output files (results.json/metrics.json not found in {output_dir})"
+    logger.error(error_msg)
+    capture_exception_to_sentry(RuntimeError(error_msg))
+    err = CliRunFailed(process.returncode, run_cmd, stdout, stderr)
+    err.error_line = error_line
+    return err
+
+
 def _pending_test_case_result_placeholder(name: str) -> Dict[str, Any]:
     """``TestCaseResult`` shape for rows not yet finished (explicit nulls for clients)."""
     return {
@@ -2559,14 +2620,7 @@ def _update_agent_test_intermediate_results(
             "total_tokens": (
                 metrics_data.get("total_tokens") if metrics_data else None
             ),
-            "unanswered_tests": (
-                (metrics_data or {}).get("errored")
-                if (metrics_data or {}).get("errored") is not None
-                else _unanswered_case_count(test_results)
-            ),
-            "stopped_early": (
-                bool(metrics_data.get("stopped_early")) if metrics_data else False
-            ),
+            **_run_counts(metrics_data, test_results),
             "test_results": intermediate_results,
         },
     )
@@ -2749,17 +2803,9 @@ def run_llm_test_task(
                 if stderr:
                     logger.info(f"LLM test stderr: {stderr}")
 
-                if process.returncode != 0:
-                    error_msg = (
-                        f"LLM test failed with exit code {process.returncode}: {stderr}"
-                    )
-                    logger.error(error_msg)
-                    capture_exception_to_sentry(RuntimeError(error_msg))
-                    raise subprocess.CalledProcessError(
-                        process.returncode, run_cmd, stdout, stderr
-                    )
-
-                logger.info("LLM test command completed successfully")
+                # Results on disk mean a finished run, whatever the exit code:
+                # calibrate exits 1 after writing them when the run stopped early.
+                logger.info(f"LLM test command exited with {process.returncode}")
 
                 # Log output directory contents for debugging
                 logger.info(
@@ -2780,11 +2826,14 @@ def run_llm_test_task(
                             with open(file_path, "r", encoding="utf-8") as f:
                                 metrics_data = json.load(f)
 
-                if results_data is None and metrics_data is None:
-                    error_msg = f"LLM test produced no output files (results.json/metrics.json not found in {output_dir})"
-                    logger.error(error_msg)
-                    capture_exception_to_sentry(RuntimeError(error_msg))
-                    raise subprocess.CalledProcessError(0, run_cmd, stdout, stderr)
+                # metrics.json is written last, so a nonzero exit without it is a
+                # crash mid-run, not a run that stopped early.
+                if (results_data is None and metrics_data is None) or (
+                    process.returncode != 0 and metrics_data is None
+                ):
+                    raise _no_output_failure(
+                        process, run_cmd, stdout, stderr, output_dir, "LLM test"
+                    )
 
                 # Parse results
                 test_results = _parse_agent_test_results(
@@ -2804,8 +2853,6 @@ def run_llm_test_task(
                 latency_ms = None
                 cost = None
                 total_tokens = None
-                unanswered_tests = None
-                stopped_early = False
 
                 if metrics_data and isinstance(metrics_data, dict):
                     total_tests = metrics_data.get("total", 0)
@@ -2814,8 +2861,6 @@ def run_llm_test_task(
                     latency_ms = metrics_data.get("latency_ms")
                     cost = metrics_data.get("cost")
                     total_tokens = metrics_data.get("total_tokens")
-                    unanswered_tests = metrics_data.get("errored")
-                    stopped_early = bool(metrics_data.get("stopped_early"))
                 elif results_data:
                     # Compute from results if metrics.json not found
                     total_tests = len(results_data)
@@ -2846,12 +2891,7 @@ def run_llm_test_task(
                         "latency_ms": latency_ms,
                         "cost": cost,
                         "total_tokens": total_tokens,
-                        "unanswered_tests": (
-                            unanswered_tests
-                            if unanswered_tests is not None
-                            else _unanswered_case_count(test_results)
-                        ),
-                        "stopped_early": stopped_early,
+                        **_run_counts(metrics_data, test_results),
                         "test_results": test_results,
                         "results_s3_prefix": results_prefix,
                         "error": None,
@@ -2868,14 +2908,14 @@ def run_llm_test_task(
                     _finish_stopped_run(task_id)
                     return
                 traceback.print_exc()
-                capture_exception_to_sentry(e)
+                # Already sent to Sentry with the readable message where it was raised.
                 # Preserve any existing results from the job
                 existing_job = get_agent_test_job(task_id)
                 existing_results = (
                     (existing_job.get("results") or {}) if existing_job else {}
                 )
                 existing_results["error"] = (
-                    f"LLM test failed: {e.stderr if hasattr(e, 'stderr') else str(e)}"
+                    e.error_line if isinstance(e, CliRunFailed) else str(e)
                 )
                 try:
                     if output_dir.exists():
@@ -2907,9 +2947,7 @@ def run_llm_test_task(
                 existing_results = (
                     (existing_job.get("results") or {}) if existing_job else {}
                 )
-                existing_results["error"] = (
-                    f"Unexpected error during LLM test: {str(e)}"
-                )
+                existing_results["error"] = "The run hit an unexpected problem."
                 try:
                     if output_dir.exists():
                         upload_directory_tree_to_s3(
@@ -3602,7 +3640,7 @@ def get_agent_test_run_status(
         unanswered_tests=results.get("unanswered_tests"),
         stopped_early=bool(results.get("stopped_early")),
         aborted=bool(details.get("aborted")),
-        error=bool(results.get("error")),
+        error=str(results["error"]) if results.get("error") else None,
         is_public=bool(job.get("is_public")),
         share_token=job.get("share_token"),
     )
@@ -3771,8 +3809,14 @@ class ModelResult(BaseModel):
         None,
         description="Aggregated token usage as `{mean, min, max, count}`",
     )
-
-
+    unanswered_tests: Optional[int] = Field(
+        None,
+        description="Number of test cases that produced no answer because the agent or the judge could not be reached, which makes the pass rate an unfair measure of the agent",
+    )
+    stopped_early: bool = Field(
+        False,
+        description="Whether this model's run stopped before starting every test case, after too many failed in a row",
+    )
 
 
 class BenchmarkStatusResponse(BaseModel):
@@ -3800,8 +3844,15 @@ class BenchmarkStatusResponse(BaseModel):
         description=LEADERBOARD_SUMMARY_DESCRIPTION,
         examples=[LEADERBOARD_SUMMARY_EXAMPLE],
     )
+    stopped_early: bool = Field(
+        False,
+        description="Whether any model's run stopped before starting every test case, after too many failed in a row",
+    )
     aborted: bool = Field(False, description=_ABORTED_DESCRIPTION)
-    error: bool = Field(False, description="True if the run failed")
+    error: Optional[str] = Field(
+        None,
+        description="Why the run could not be carried out, when it failed before producing any result",
+    )
     is_public: bool = Field(False, description="Whether the run is shared publicly")
     share_token: Optional[str] = Field(
         None, description="Token for building the public share URL"
@@ -3874,6 +3925,7 @@ def _update_benchmark_intermediate_results(
                         "latency_ms": metrics_data.get("latency_ms"),
                         "cost": metrics_data.get("cost"),
                         "total_tokens": metrics_data.get("total_tokens"),
+                        **_run_counts(metrics_data, test_results),
                         "test_results": merged,
                     }
                 )
@@ -4106,15 +4158,8 @@ def run_benchmark_task(
                 if stderr:
                     logger.info(f"Benchmark stderr: {stderr}")
 
-                if process.returncode != 0:
-                    error_msg = f"Benchmark failed with exit code {process.returncode}: {stderr}"
-                    logger.error(error_msg)
-                    capture_exception_to_sentry(RuntimeError(error_msg))
-                    raise subprocess.CalledProcessError(
-                        process.returncode, run_cmd, stdout, stderr
-                    )
-
-                logger.info("Benchmark command completed successfully")
+                # Results on disk mean a finished run, whatever the exit code.
+                logger.info(f"Benchmark command exited with {process.returncode}")
 
                 # Log output directory contents for debugging
                 logger.info(
@@ -4124,11 +4169,15 @@ def run_benchmark_task(
                 # Read results for each model from output directory
                 all_results = _find_all_results_in_output(output_dir)
 
-                if not all_results:
-                    error_msg = f"Benchmark produced no output files (no results.json/metrics.json found in {output_dir})"
-                    logger.error(error_msg)
-                    capture_exception_to_sentry(RuntimeError(error_msg))
-                    raise subprocess.CalledProcessError(0, run_cmd, stdout, stderr)
+                # metrics.json is written last, so a nonzero exit with no model
+                # finished is a crash mid-run, not a run that stopped early.
+                if not all_results or (
+                    process.returncode != 0
+                    and not any(metrics for _, metrics in all_results.values())
+                ):
+                    raise _no_output_failure(
+                        process, run_cmd, stdout, stderr, output_dir, "Benchmark"
+                    )
                 folder_names = list(all_results.keys())
                 logger.info(f"Found result folders: {folder_names}")
 
@@ -4181,6 +4230,7 @@ def run_benchmark_task(
                                     "latency_ms": metrics_data.get("latency_ms"),
                                     "cost": metrics_data.get("cost"),
                                     "total_tokens": metrics_data.get("total_tokens"),
+                                    **_run_counts(metrics_data, test_results),
                                     "test_results": test_results,
                                 }
                             )
@@ -4283,6 +4333,9 @@ def run_benchmark_task(
                         "model_results": model_results,
                         "leaderboard_summary": leaderboard_summary,
                         "results_s3_prefix": results_prefix,
+                        "stopped_early": any(
+                            r.get("stopped_early") for r in model_results
+                        ),
                         "error": error_msg,
                     },
                 )
@@ -4297,23 +4350,28 @@ def run_benchmark_task(
                     _finish_stopped_run(task_id)
                     return
                 traceback.print_exc()
-                capture_exception_to_sentry(e)
-                failed_results: Dict[str, Any] = {
-                    "error": f"Benchmark failed: {e.stderr if hasattr(e, 'stderr') else str(e)}",
-                }
+                # Already sent to Sentry with the readable message where it was raised.
+                # Keep the model results the intermediate updates wrote so far.
+                existing_job = get_agent_test_job(task_id)
+                existing_results = (
+                    (existing_job.get("results") or {}) if existing_job else {}
+                )
+                existing_results["error"] = (
+                    e.error_line if isinstance(e, CliRunFailed) else str(e)
+                )
                 try:
                     if output_dir.exists():
                         bp = f"agent-tests/benchmarks/{task_id}"
                         upload_directory_tree_to_s3(
                             s3, output_dir, s3_bucket, f"{bp}/outputs"
                         )
-                        failed_results["results_s3_prefix"] = bp
+                        existing_results["results_s3_prefix"] = bp
                 except Exception:
                     pass
                 update_agent_test_job(
                     task_id,
                     status=TaskStatus.FAILED.value,
-                    results=failed_results,
+                    results=existing_results,
                 )
             except Exception as e:
                 if _is_job_aborted(task_id):
@@ -4327,9 +4385,7 @@ def run_benchmark_task(
                 existing_results = (
                     (existing_job.get("results") or {}) if existing_job else {}
                 )
-                existing_results["error"] = (
-                    f"Unexpected error during benchmark: {str(e)}"
-                )
+                existing_results["error"] = "The run hit an unexpected problem."
                 try:
                     if output_dir.exists():
                         bp = f"agent-tests/benchmarks/{task_id}"
@@ -4861,8 +4917,9 @@ def get_benchmark_status(
         evaluators=evaluators_block or None,
         model_results=results.get("model_results"),
         leaderboard_summary=results.get("leaderboard_summary"),
+        stopped_early=bool(results.get("stopped_early")),
         aborted=bool(details.get("aborted")),
-        error=bool(results.get("error")),
+        error=str(results["error"]) if results.get("error") else None,
         is_public=bool(job.get("is_public")),
         share_token=job.get("share_token"),
     )

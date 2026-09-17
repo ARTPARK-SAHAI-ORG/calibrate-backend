@@ -475,7 +475,155 @@ def test_run_llm_test_task_failure_propagates():
         run_llm_test_task(job_uuid, agent, tests, "bucket")
 
     job = db.get_agent_test_job(job_uuid)
-    assert job["status"] in ("failed", "done")  # either is acceptable failure path
+    assert job["status"] == "failed"
+    # Nothing on stdout or stderr: the exit code is all there is to show.
+    assert job["results"]["error"] == "exit code 1"
+
+
+def _run_plain_with_exit_code(
+    returncode, write_files, stdout="", stderr="", write_metrics=True
+):
+    from routers.agent_tests import run_llm_test_task
+
+    _, agent_uuid, job_uuid = _make_agent_test_job()
+    process = _FakeProcess(returncode=returncode)
+
+    def fake_popen(cmd, *args, **kwargs):
+        out = Path(cmd[cmd.index("-o") + 1])
+        with open(out / "stdout.log", "w") as f:
+            f.write(stdout)
+        with open(out / "stderr.log", "w") as f:
+            f.write(stderr)
+        if write_files:
+            with open(out / "results.json", "w") as f:
+                json.dump(
+                    [
+                        {
+                            "test_case_id": "t",
+                            "test_case": {"name": "T", "id": "t"},
+                            "output": {"response": "hi", "tool_calls": []},
+                            "metrics": {"passed": True, "reasoning": "ok"},
+                        }
+                    ],
+                    f,
+                )
+        if write_files and write_metrics:
+            with open(out / "metrics.json", "w") as f:
+                json.dump(
+                    {"total": 2, "passed": 1, "errored": 1, "stopped_early": True}, f
+                )
+        return process
+
+    sentry = MagicMock()
+    with patch(
+        "routers.agent_tests.subprocess.Popen", side_effect=fake_popen
+    ), patch(
+        "routers.agent_tests.get_s3_client", return_value=MagicMock()
+    ), patch("routers.agent_tests.try_start_queued_agent_test_job"), patch(
+        "routers.agent_tests.upload_directory_tree_to_s3"
+    ), patch(
+        "routers.agent_tests.upload_file_to_s3"
+    ), patch(
+        "routers.agent_tests.time.sleep"
+    ), patch(
+        "routers.agent_tests.capture_exception_to_sentry", sentry
+    ):
+        agent = {"uuid": agent_uuid, "name": "a", "config": {}}
+        tests = [{"uuid": "t", "name": "T", "config": {}}]
+        run_llm_test_task(job_uuid, agent, tests, "bucket")
+
+    return db.get_agent_test_job(job_uuid), sentry
+
+
+def test_run_llm_test_task_keeps_results_when_cli_exits_nonzero_after_stopping_early():
+    """calibrate exits 1 after writing results.json and metrics.json when the
+    run stopped early. The results on disk are the run: done, not failed, and
+    nothing goes to Sentry."""
+    job, sentry = _run_plain_with_exit_code(1, write_files=True)
+
+    assert job["status"] == "done", job.get("results")
+    results = job["results"]
+    assert results["stopped_early"] is True
+    assert results["unanswered_tests"] == 1
+    assert results["error"] is None
+    sentry.assert_not_called()
+
+
+def test_run_llm_test_task_without_results_stores_the_cli_error_line():
+    """No results and a nonzero exit: the stored error is the one line the eval
+    tool printed about it, taken from stdout with colour codes stripped, not
+    the harmless warning on stderr."""
+    job, sentry = _run_plain_with_exit_code(
+        1,
+        write_files=False,
+        stdout="\x1b[92mheader\x1b[0m\n❌ Test case 1 errored: Could not connect to agent at http://x (after 4 attempts)\n",
+        stderr="UserWarning: no GPU found\n",
+    )
+
+    assert job["status"] == "failed"
+    assert (
+        job["results"]["error"]
+        == "❌ Test case 1 errored: Could not connect to agent at http://x (after 4 attempts)"
+    )
+    assert sentry.call_count == 1
+
+
+def test_run_llm_test_task_crash_after_some_results_is_a_failure_that_keeps_them():
+    """metrics.json is written last. A nonzero exit with results.json but no
+    metrics.json is a crash mid-run: the run fails, the rows collected so far
+    stay, and the stored error is the eval tool's line."""
+    job, sentry = _run_plain_with_exit_code(
+        1,
+        write_files=True,
+        write_metrics=False,
+        stdout="❌ Test case 2 errored: judge unreachable\n",
+    )
+
+    assert job["status"] == "failed"
+    assert job["results"]["error"] == "❌ Test case 2 errored: judge unreachable"
+    assert [r["name"] for r in job["results"]["test_results"]] == ["T"]
+    assert sentry.call_count == 1
+
+
+def test_run_llm_test_task_exit_zero_without_files_is_a_failure():
+    """Exit 0 and nothing written: failed, with a reason a reader can see."""
+    job, _ = _run_plain_with_exit_code(0, write_files=False)
+
+    assert job["status"] == "failed"
+    assert job["results"]["error"] == "The eval tool produced no results."
+
+
+def test_cli_error_line_picks_the_line_worth_reading():
+    from routers.agent_tests import _cli_error_line
+
+    # The last ❌ or ✗ line on stdout wins.
+    assert (
+        _cli_error_line("❌ agent down\n✗ Verification failed: bad url\n", "", 1)
+        == "✗ Verification failed: bad url"
+    )
+    # A count line like "2 errored" is not the reason.
+    assert (
+        _cli_error_line("❌ Test 1 errored: agent down\nTotal: 2 errored\n", "", 1)
+        == "❌ Test 1 errored: agent down"
+    )
+    # "errored" is not the word "error": with no ❌ line, fall through to stderr.
+    assert _cli_error_line("Running\nTotal: 2 errored\n", "warn\n", 1) == "warn"
+    # A harmless stderr traceback does not beat the ❌ line on stdout.
+    assert (
+        _cli_error_line("❌ agent down\n", "RuntimeError: Event loop is closed\n", 1)
+        == "❌ agent down"
+    )
+    # The ❌ line wins over a later plain line, and colour codes are stripped.
+    assert (
+        _cli_error_line("\x1b[1m❌ agent down\x1b[0m\nDone.\n", "", 1)
+        == "❌ agent down"
+    )
+    # A line mentioning an error is enough.
+    assert _cli_error_line("Running\nError: bad key\nbye\n", "", 1) == "Error: bad key"
+    # Nothing that looks like an error: the last stderr line.
+    assert _cli_error_line("all fine\n", "warn one\nwarn two\n", 1) == "warn two"
+    # Nothing at all: the exit code.
+    assert _cli_error_line("", "\n", 3) == "exit code 3"
 
 
 def test_run_llm_test_task_records_cases_that_never_ran():
@@ -1541,3 +1689,27 @@ def test_run_benchmark_task_stopped_before_the_temp_dir_is_not_a_failure():
         )
 
     _assert_stop_was_not_written_up_as_a_failure(job_uuid)
+
+
+def test_update_benchmark_intermediate_results_carries_stopped_early(tmp_path):
+    """While a model comparison is still going, a model whose metrics.json says
+    it stopped early already reports that and its unanswered count."""
+    from routers.agent_tests import _update_benchmark_intermediate_results
+
+    job_id = db.create_agent_test_job(agent_id="agent-y", job_type="llm-benchmark")
+    model_dir = tmp_path / "gpt-4o"
+    model_dir.mkdir()
+    (model_dir / "results.json").write_text(
+        json.dumps(
+            [{"output": {"response": "hi"}, "metrics": {"passed": True}, "test_case": {"name": "T1"}}]
+        )
+    )
+    (model_dir / "metrics.json").write_text(
+        json.dumps({"total": 2, "passed": 1, "errored": 1, "stopped_early": True})
+    )
+
+    _update_benchmark_intermediate_results(job_id, tmp_path, ["gpt-4o"], ["T1", "T2"])
+
+    model = db.get_agent_test_job(job_id)["results"]["model_results"][0]
+    assert model["stopped_early"] is True
+    assert model["unanswered_tests"] == 1
