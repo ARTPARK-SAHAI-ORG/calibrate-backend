@@ -1,6 +1,6 @@
 """Manage workspaces and membership.
 
-Create workspaces, rename them, and add or remove members.
+Create workspaces, update them, and add or remove members.
 """
 
 from fastapi import APIRouter, Depends, HTTPException, Path
@@ -24,7 +24,7 @@ from db import (
     list_organizations_for_user,
     remove_organization_member,
     revoke_org_invite,
-    update_organization_name,
+    update_organization,
 )
 
 router = APIRouter(prefix="/organizations", tags=["organizations"])
@@ -40,6 +40,12 @@ class OrganizationResponse(BaseModel):
     name: str = Field(description="Workspace display name")
     is_personal: bool = Field(
         description="`true` for your auto-created personal workspace, `false` for shared workspaces"
+    )
+    benchmark_parallel_models: bool = Field(
+        description=(
+            "This workspace's default when comparing models. `true` runs the models at "
+            "the same time, `false` runs them one after another"
+        )
     )
     created_by_user_id: str = Field(
         min_length=36,
@@ -59,7 +65,16 @@ class CreateOrganizationRequest(BaseModel):
 
 
 class UpdateOrganizationRequest(BaseModel):
-    name: str = Field(..., min_length=1, description="New display name for the workspace")
+    name: Optional[str] = Field(
+        None, min_length=1, description="New display name for the workspace"
+    )
+    benchmark_parallel_models: Optional[bool] = Field(
+        None,
+        description=(
+            "New default when comparing models. `true` runs the models at the same "
+            "time, `false` runs them one after another"
+        ),
+    )
 
 
 class AddMemberRequest(BaseModel):
@@ -142,17 +157,25 @@ def create_org(
 
 
 @router.patch("/{org_uuid}", response_model=OrganizationResponse, summary="Update workspace")
-def rename_org(
+def update_org(
     org_uuid: str = Path(
-        description="The workspace to rename. You must be a member",
+        description="The workspace to update. You must be a member",
         examples=["f47ac10b-58cc-4372-a567-0e02b2c3d479"],
     ),
     request: UpdateOrganizationRequest = ...,
     user_id: str = Depends(get_current_user_id),
 ):
-    """Rename a workspace you belong to"""
+    """Update a workspace you belong to. Send only the fields you want to change"""
     role = _require_membership(org_uuid, user_id)
-    update_organization_name(org_uuid, request.name)
+    fields = {
+        k: v for k, v in request.model_dump(exclude_unset=True).items() if v is not None
+    }
+    if not fields:
+        raise HTTPException(
+            status_code=400,
+            detail="Provide name or benchmark_parallel_models to update",
+        )
+    update_organization(org_uuid, **fields)
     org = get_organization(org_uuid)
     return OrganizationResponse(**org, member_role=role)
 

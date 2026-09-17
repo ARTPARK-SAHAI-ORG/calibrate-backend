@@ -1223,6 +1223,17 @@ def init_db():
             "ON organizations(invite_token) WHERE invite_token IS NOT NULL"
         )
 
+        # Workspace default for a model comparison: 1 runs the models at the
+        # same time, 0 runs them one after another. 1 is what every comparison
+        # did before this column existed.
+        try:
+            cursor.execute(
+                "ALTER TABLE organizations "
+                "ADD COLUMN benchmark_parallel_models INTEGER NOT NULL DEFAULT 1"
+            )
+        except sqlite3.OperationalError:
+            pass
+
         # Add is_public and share_token columns for public sharing feature
         for table in ("jobs", "agent_test_jobs", "simulation_jobs"):
             try:
@@ -3764,6 +3775,7 @@ def create_user_with_password(
 def _parse_org_row(row: sqlite3.Row) -> Dict[str, Any]:
     d = dict(row)
     d["is_personal"] = bool(d.get("is_personal"))
+    d["benchmark_parallel_models"] = bool(d.get("benchmark_parallel_models", 1))
     return d
 
 
@@ -3806,19 +3818,35 @@ def get_organization(org_uuid: str) -> Optional[Dict[str, Any]]:
         return _parse_org_row(row) if row else None
 
 
-def update_organization_name(org_uuid: str, name: str) -> bool:
-    name = (name or "").strip()
-    if not name:
-        raise ValueError("organization name required")
+def update_organization(
+    org_uuid: str,
+    name: Optional[str] = None,
+    benchmark_parallel_models: Optional[bool] = None,
+) -> bool:
+    """Update whichever fields are given. Anything left out stays as it was."""
+    sets: List[str] = []
+    params: List[Any] = []
+    if name is not None:
+        name = name.strip()
+        if not name:
+            raise ValueError("organization name required")
+        sets.append("name = ?")
+        params.append(name)
+    if benchmark_parallel_models is not None:
+        sets.append("benchmark_parallel_models = ?")
+        params.append(1 if benchmark_parallel_models else 0)
+    if not sets:
+        return False
+    sets.append("updated_at = CURRENT_TIMESTAMP")
     with get_db_connection() as conn:
         cursor = conn.cursor()
         cursor.execute(
-            """
+            f"""
             UPDATE organizations
-               SET name = ?, updated_at = CURRENT_TIMESTAMP
+               SET {", ".join(sets)}
              WHERE uuid = ? AND deleted_at IS NULL
             """,
-            (name, org_uuid),
+            (*params, org_uuid),
         )
         conn.commit()
         return cursor.rowcount > 0

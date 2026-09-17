@@ -119,6 +119,83 @@ def test_create_and_rename_org(client):
     assert other_resp.status_code == 404
 
 
+def test_benchmark_parallel_models_defaults_to_true(client):
+    """Every comparison ran its models at the same time before the workspace
+    could remember a choice, so that is what a new workspace starts with."""
+    auth = _signup(client)
+    org = client.post(
+        "/organizations", json={"name": "Parallel"}, headers=auth["headers"]
+    ).json()
+    assert org["benchmark_parallel_models"] is True
+
+    listed = client.get("/organizations", headers=auth["headers"]).json()
+    assert all(o["benchmark_parallel_models"] is True for o in listed)
+
+
+def test_benchmark_parallel_models_can_be_turned_off(client):
+    auth = _signup(client)
+    h = auth["headers"]
+    org = client.post("/organizations", json={"name": "Serial"}, headers=h).json()
+
+    resp = client.patch(
+        f"/organizations/{org['uuid']}",
+        json={"benchmark_parallel_models": False},
+        headers=h,
+    )
+    assert resp.status_code == 200
+    assert resp.json()["benchmark_parallel_models"] is False
+    # Untouched by a write that only named the setting.
+    assert resp.json()["name"] == "Serial"
+
+    reread = client.get("/organizations", headers=h).json()
+    saved = next(o for o in reread if o["uuid"] == org["uuid"])
+    assert saved["benchmark_parallel_models"] is False
+    assert saved["name"] == "Serial"
+
+
+def test_renaming_leaves_the_comparison_default_alone(client):
+    auth = _signup(client)
+    h = auth["headers"]
+    org = client.post("/organizations", json={"name": "Keep"}, headers=h).json()
+    client.patch(
+        f"/organizations/{org['uuid']}",
+        json={"benchmark_parallel_models": False},
+        headers=h,
+    )
+
+    renamed = client.patch(
+        f"/organizations/{org['uuid']}", json={"name": "Kept"}, headers=h
+    )
+    assert renamed.status_code == 200
+    assert renamed.json()["name"] == "Kept"
+    assert renamed.json()["benchmark_parallel_models"] is False
+
+
+def test_update_workspace_with_nothing_to_change_is_rejected(client):
+    auth = _signup(client)
+    h = auth["headers"]
+    org = client.post("/organizations", json={"name": "Empty"}, headers=h).json()
+
+    resp = client.patch(f"/organizations/{org['uuid']}", json={}, headers=h)
+    assert resp.status_code == 400
+    assert "benchmark_parallel_models" in resp.json()["detail"]
+
+
+def test_non_member_cannot_change_the_comparison_default(client):
+    owner = _signup(client)
+    org = client.post(
+        "/organizations", json={"name": "Private"}, headers=owner["headers"]
+    ).json()
+
+    other = _signup(client)
+    resp = client.patch(
+        f"/organizations/{org['uuid']}",
+        json={"benchmark_parallel_models": False},
+        headers=other["headers"],
+    )
+    assert resp.status_code == 404
+
+
 def test_personal_org_lookup_is_implicit_default(client):
     """No `current_org_uuid` is persisted; the personal org is resolved
     on-demand via `get_personal_org_for_user`. Verify it returns the auto-
