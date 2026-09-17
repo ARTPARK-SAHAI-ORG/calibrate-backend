@@ -2975,7 +2975,11 @@ def test_benchmark_detail_parallel_models_is_none_when_never_recorded(client):
     )
 
     data = client.get(f"/agent-tests/benchmark/{job_uuid}", headers=h).json()
-    assert data.get("parallel_models") is None
+    # Present and null, not missing: this route returns a full model_dump, so
+    # every top-level key is sent even with no value. `.get(...) is None`
+    # alone passes either way and would let that drift unnoticed.
+    assert "parallel_models" in data
+    assert data["parallel_models"] is None
 
 
 def test_run_agent_benchmark_queued_path(client, monkeypatch):

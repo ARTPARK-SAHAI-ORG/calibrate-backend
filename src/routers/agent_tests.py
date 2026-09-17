@@ -3721,7 +3721,7 @@ class BenchmarkRequest(BaseModel):
     )
     parallel_models: bool = Field(
         True,
-        description="Whether to run the models at the same time. Set false to run them one after another",
+        description="How to run the models. `true` runs several at a time, `false` runs each one only after the one before it has finished. Use `false` to keep the load on your own agent down",
     )
 
 
@@ -3788,7 +3788,7 @@ class BenchmarkStatusResponse(BaseModel):
     )
     parallel_models: Optional[bool] = Field(
         None,
-        description="Whether the models ran at the same time. False means they ran one after another. Absent on benchmarks started before this was recorded",
+        description="How the models were run. `true` means several ran at a time, `false` means each one ran only after the one before it had finished",
     )
     evaluators: Optional[List[TestRunEvaluator]] = Field(
         None,
