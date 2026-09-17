@@ -607,7 +607,10 @@ def test_cli_error_line_picks_the_line_worth_reading():
         == "❌ Test 1 errored: agent down"
     )
     # "errored" is not the word "error": with no ❌ line, fall through to stderr.
-    assert cli_error_line("Running\nTotal: 2 errored\n", "warn\n", 1) == "warn"
+    assert (
+        cli_error_line("Running\nTotal: 2 errored\n", "warn\n", 1)
+        == "The eval tool stopped before it produced any result."
+    )
     # A harmless stderr traceback does not beat the ❌ line on stdout.
     assert (
         cli_error_line("❌ agent down\n", "RuntimeError: Event loop is closed\n", 1)
@@ -621,7 +624,10 @@ def test_cli_error_line_picks_the_line_worth_reading():
     # A line mentioning an error is enough.
     assert cli_error_line("Running\nError: bad key\nbye\n", "", 1) == "Error: bad key"
     # Nothing that looks like an error: the last stderr line.
-    assert cli_error_line("all fine\n", "warn one\nwarn two\n", 1) == "warn two"
+    assert (
+        cli_error_line("----\n", "warn one\nwarn two\n", 1)
+        == "The eval tool stopped before it produced any result."
+    )
     # Nothing at all: a fixed sentence.
     assert cli_error_line("", "\n", 3) == "The eval tool stopped before it produced any result."
 

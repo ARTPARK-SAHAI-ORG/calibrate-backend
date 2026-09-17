@@ -27,9 +27,7 @@ def cli_error_line(stdout: str, stderr: str, returncode: int) -> str:
         for line in reversed(lines):
             if re.search(r"\berror\b", line, re.I):
                 return line
-    for lines in (err, out):
-        if lines:
-            return lines[-1]
+    # Anything else the tool printed last (a separator, a warning) is noise.
     return "The eval tool stopped before it produced any result."
 
 
