@@ -2950,6 +2950,14 @@ def test_benchmark_detail_returns_the_parallel_models_choice(
     data = client.get(f"/agent-tests/benchmark/{task_id}", headers=h).json()
     assert data["parallel_models"] is parallel
 
+    # The app polls with mode=summary, which strips the heavy per-case fields.
+    # If it stripped this too, a rerun of a one-at-a-time comparison would
+    # quietly go back to running every model at once.
+    summary = client.get(
+        f"/agent-tests/benchmark/{task_id}?mode=summary", headers=h
+    ).json()
+    assert summary["parallel_models"] is parallel
+
 
 def test_benchmark_detail_parallel_models_is_none_when_never_recorded(client):
     """A comparison made before the choice was stored has no answer to give."""
