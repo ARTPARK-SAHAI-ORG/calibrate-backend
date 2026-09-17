@@ -78,7 +78,6 @@ from routers.tests import (
 from auth_utils import get_current_org, get_org_jwt_or_api_key, OrgContext
 from read_calibrate_run_output import (
     CliRunFailed,
-    cli_error_line,
     no_output_failure,
     run_counts,
     unanswered_case_count,
@@ -684,6 +683,10 @@ class AgentTestRunListItem(BaseModel):
         None,
         description="Number of test cases that produced no answer because the agent or the judge could not be reached, which makes the pass rate an unfair measure of the agent",
     )
+    stopped_early: bool = Field(
+        False,
+        description="Whether the run stopped before starting every test case, after too many failed in a row",
+    )
     aborted: bool = Field(False, description=_ABORTED_DESCRIPTION)
     error: bool = Field(False, description="True if the run failed")
     is_public: bool = Field(False, description="Whether the run is shared publicly")
@@ -1184,6 +1187,7 @@ def _build_agent_test_run_item_fields(
             job_results.get("model_results"), test_count
         ),
         "unanswered_tests": job_results.get("unanswered_tests"),
+        "stopped_early": bool(job_results.get("stopped_early")),
         # Common fields
         "aborted": bool(job.get("aborted")),
         "error": bool(job_results.get("error")),
@@ -2862,6 +2866,7 @@ def run_llm_test_task(
                 existing_results["error"] = (
                     e.error_line if isinstance(e, CliRunFailed) else str(e)
                 )
+                _settle_unfinished_results(existing_results, "Failed")
                 try:
                     if output_dir.exists():
                         upload_directory_tree_to_s3(
@@ -2892,7 +2897,7 @@ def run_llm_test_task(
                 existing_results = (
                     (existing_job.get("results") or {}) if existing_job else {}
                 )
-                existing_results["error"] = "The run hit an unexpected problem."
+                existing_results["error"] = f"{type(e).__name__}: {e}"
                 try:
                     if output_dir.exists():
                         upload_directory_tree_to_s3(
@@ -3390,7 +3395,15 @@ def _finish_stopped_run(task_id: str) -> None:
     """
     job = get_agent_test_job(task_id)
     results = (job or {}).get("results") or {}
+    _settle_unfinished_results(results, "Stopped")
+    update_agent_test_job(
+        task_id, status=TaskStatus.DONE.value, results=results or None
+    )
 
+
+def _settle_unfinished_results(results: Dict[str, Any], message: str) -> None:
+    """Mark every case a run never reached, so a run that ended (stopped, or
+    failed part way) does not keep rows that read as still going."""
     rows = results.get("test_results")
     if isinstance(rows, list):
         results["passed"], results["failed"] = _settle_stopped_rows(rows)
@@ -3413,11 +3426,7 @@ def _finish_stopped_run(task_id: str) -> None:
         # A model still reading "Running... (3 tests done)" on a run that has
         # already ended reads as still going.
         if model.get("success") is None:
-            model["message"] = "Stopped"
-
-    update_agent_test_job(
-        task_id, status=TaskStatus.DONE.value, results=results or None
-    )
+            model["message"] = message
 
 
 class AbortRunResponse(BaseModel):
@@ -4307,6 +4316,7 @@ def run_benchmark_task(
                 existing_results["error"] = (
                     e.error_line if isinstance(e, CliRunFailed) else str(e)
                 )
+                _settle_unfinished_results(existing_results, "Failed")
                 try:
                     if output_dir.exists():
                         bp = f"agent-tests/benchmarks/{task_id}"
@@ -4333,7 +4343,7 @@ def run_benchmark_task(
                 existing_results = (
                     (existing_job.get("results") or {}) if existing_job else {}
                 )
-                existing_results["error"] = "The run hit an unexpected problem."
+                existing_results["error"] = f"{type(e).__name__}: {e}"
                 try:
                     if output_dir.exists():
                         bp = f"agent-tests/benchmarks/{task_id}"

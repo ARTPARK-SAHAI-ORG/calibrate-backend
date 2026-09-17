@@ -669,6 +669,7 @@ def test_run_reports_cases_that_never_ran(client):
 
     listed = client.get(f"/agent-tests/agent/{agent['uuid']}/runs", headers=h).json()
     assert listed["items"][0]["unanswered_tests"] == 1
+    assert listed["items"][0]["stopped_early"] is True
 
     share = client.patch(
         f"/agent-tests/run/{job_id}/visibility",
@@ -678,6 +679,23 @@ def test_run_reports_cases_that_never_ran(client):
     public = client.get(f"/public/test-run/{share['share_token']}").json()
     assert public["unanswered_tests"] == 1
     assert public["stopped_early"] is True
+
+
+def test_agent_runs_list_stopped_early_false_when_not_stored(client):
+    """A run whose results carry no stopped_early lists it as false, not null."""
+    from db import create_agent_test_job, update_agent_test_job
+
+    h = _signup(client)["headers"]
+    agent = _create_agent(client, h)
+    job_id = create_agent_test_job(agent_id=agent["uuid"], job_type="llm-unit-test")
+    update_agent_test_job(
+        job_id,
+        status="done",
+        results={"total_tests": 1, "passed": 1, "failed": 0, "test_results": []},
+    )
+
+    listed = client.get(f"/agent-tests/agent/{agent['uuid']}/runs", headers=h).json()
+    assert listed["items"][0]["stopped_early"] is False
 
 
 def test_agent_runs_list_slims_benchmark_model_results(client):
@@ -2489,10 +2507,11 @@ def test_benchmark_response_test_judge_results_completes(client, monkeypatch):
 
 
 def _run_benchmark_with_exit_code(
-    client, returncode, write_files, stdout="", write_metrics=True
+    client, returncode, write_files, stdout="", write_metrics=True, extra_tests=()
 ):
     """Drive one benchmark of one model through the worker with a fake CLI
-    process. Returns (headers, job_uuid)."""
+    process. extra_tests: names of linked tests calibrate never writes a row
+    for. Returns (headers, job_uuid)."""
     import json
     from pathlib import Path
 
@@ -2509,6 +2528,15 @@ def _run_benchmark_with_exit_code(
         json={"agent_uuid": agent["uuid"], "test_uuids": [test["uuid"]]},
         headers=h,
     )
+    extra_rows = []
+    for name in extra_tests:
+        extra = _create_test(client, h, name=name)
+        client.post(
+            "/agent-tests",
+            json={"agent_uuid": agent["uuid"], "test_uuids": [extra["uuid"]]},
+            headers=h,
+        )
+        extra_rows.append(db.get_test(extra["uuid"]))
     agent_row = db.get_agent(agent["uuid"])
     test_row = db.get_test(test["uuid"])
     job_uuid = db.create_agent_test_job(
@@ -2565,7 +2593,9 @@ def _run_benchmark_with_exit_code(
     ), patch(
         "routers.agent_tests.time.sleep"
     ):
-        run_benchmark_task(job_uuid, agent_row, [test_row], ["gpt-4.1"], "bucket")
+        run_benchmark_task(
+            job_uuid, agent_row, [test_row] + extra_rows, ["gpt-4.1"], "bucket"
+        )
     return h, job_uuid
 
 
@@ -2628,6 +2658,34 @@ def test_benchmark_crash_after_some_results_is_a_failure_that_keeps_them(client)
     assert data["model_results"][0]["model"] == "gpt-4.1"
 
 
+def test_benchmark_crash_marks_unreached_rows_not_run(client):
+    """A crash mid-run leaves the model's unreached rows with no verdict. They
+    are marked not_run and the model's message says Failed, and the detail
+    endpoint returns both."""
+    import db
+
+    h, job_uuid = _run_benchmark_with_exit_code(
+        client, 1, write_files=True, write_metrics=False, extra_tests=("never-ran",)
+    )
+
+    job = db.get_agent_test_job(job_uuid)
+    assert job["status"] == "failed"
+    model = job["results"]["model_results"][0]
+    assert model["message"] == "Failed"
+    rows = {r["name"]: r for r in model["test_results"]}
+    assert rows["never-ran"]["passed"] is None
+    assert rows["never-ran"]["not_run"] is True
+    assert model["passed"] == 1
+    assert model["failed"] == 0
+
+    data = client.get(f"/agent-tests/benchmark/{job_uuid}", headers=h).json()
+    model = data["model_results"][0]
+    assert model["message"] == "Failed"
+    rows = {r["name"]: r for r in model["test_results"]}
+    assert rows["never-ran"]["not_run"] is True
+    assert rows["never-ran"]["passed"] is None
+
+
 def test_benchmark_exit_zero_without_files_is_a_failure(client):
     import db
 
@@ -2635,7 +2693,24 @@ def test_benchmark_exit_zero_without_files_is_a_failure(client):
 
     assert db.get_agent_test_job(job_uuid)["status"] == "failed"
     data = client.get(f"/agent-tests/benchmark/{job_uuid}", headers=h).json()
-    assert data["error"] == "The eval tool produced no results."
+    assert data["error"] == "calibrate-agent exited with code 0 but wrote no results.json or metrics.json"
+
+
+def test_benchmark_unexpected_exception_stores_its_type_and_message(
+    client, monkeypatch
+):
+    import db
+    from routers import agent_tests
+
+    def boom(*_args, **_kwargs):
+        raise ValueError("boom")
+
+    monkeypatch.setattr(agent_tests, "_find_all_results_in_output", boom)
+    _h, job_uuid = _run_benchmark_with_exit_code(client, 0, write_files=True)
+
+    job = db.get_agent_test_job(job_uuid)
+    assert job["status"] == "failed"
+    assert job["results"]["error"] == "ValueError: boom"
 
 
 def test_unverified_connection_blocks_all_test_types(client, monkeypatch):

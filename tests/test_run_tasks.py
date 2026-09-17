@@ -477,12 +477,13 @@ def test_run_llm_test_task_failure_propagates():
     job = db.get_agent_test_job(job_uuid)
     assert job["status"] == "failed"
     # Nothing on stdout or stderr: a fixed sentence, the exit code stays in the log.
-    assert job["results"]["error"] == "The eval tool stopped before it produced any result."
+    assert job["results"]["error"] == "calibrate-agent exited with code 1"
 
 
 def _run_plain_with_exit_code(
-    returncode, write_files, stdout="", stderr="", write_metrics=True
+    returncode, write_files, stdout="", stderr="", write_metrics=True, extra_tests=()
 ):
+    """extra_tests: names of linked tests that calibrate never writes a row for."""
     from routers.agent_tests import run_llm_test_task
 
     _, agent_uuid, job_uuid = _make_agent_test_job()
@@ -529,7 +530,9 @@ def _run_plain_with_exit_code(
         "routers.agent_tests.capture_exception_to_sentry", sentry
     ):
         agent = {"uuid": agent_uuid, "name": "a", "config": {}}
-        tests = [{"uuid": "t", "name": "T", "config": {}}]
+        tests = [{"uuid": "t", "name": "T", "config": {}}] + [
+            {"uuid": name.lower(), "name": name, "config": {}} for name in extra_tests
+        ]
         run_llm_test_task(job_uuid, agent, tests, "bucket")
 
     return db.get_agent_test_job(job_uuid), sentry
@@ -549,7 +552,7 @@ def test_run_llm_test_task_keeps_results_when_cli_exits_nonzero_after_stopping_e
     sentry.assert_not_called()
 
 
-def test_run_llm_test_task_without_results_stores_thecli_error_line():
+def test_run_llm_test_task_without_results_stores_the_cli_error_line():
     """No results and a nonzero exit: the stored error is the one line the eval
     tool printed about it, taken from stdout with colour codes stripped, not
     the harmless warning on stderr."""
@@ -585,12 +588,61 @@ def test_run_llm_test_task_crash_after_some_results_is_a_failure_that_keeps_them
     assert sentry.call_count == 1
 
 
+def test_run_llm_test_task_crash_marks_unreached_rows_not_run():
+    """A crash mid-run leaves the rows calibrate never reached with no verdict.
+    Those are marked not_run, the same as a stopped run, and the counts come
+    from the rows that did land."""
+    job, _ = _run_plain_with_exit_code(
+        1, write_files=True, write_metrics=False, extra_tests=("U",)
+    )
+
+    assert job["status"] == "failed"
+    rows = {r["name"]: r for r in job["results"]["test_results"]}
+    assert rows["T"]["passed"] is True
+    assert rows["T"].get("not_run") is not True
+    assert rows["U"]["passed"] is None
+    assert rows["U"]["not_run"] is True
+    assert job["results"]["passed"] == 1
+    assert job["results"]["failed"] == 0
+
+
+def test_run_llm_test_task_unexpected_exception_stores_its_type_and_message():
+    """Anything that is not the CLI failing stores the exception as it is,
+    "ValueError: boom", not a sentence written for a reader."""
+    from routers.agent_tests import run_llm_test_task
+
+    _, agent_uuid, job_uuid = _make_agent_test_job()
+    process = _FakeProcess(returncode=0)
+
+    with patch(
+        "routers.agent_tests.subprocess.Popen", return_value=process
+    ), patch(
+        "routers.agent_tests._update_agent_test_intermediate_results",
+        side_effect=ValueError("boom"),
+    ), patch(
+        "routers.agent_tests.get_s3_client", return_value=MagicMock()
+    ), patch("routers.agent_tests.try_start_queued_agent_test_job"), patch(
+        "routers.agent_tests.upload_directory_tree_to_s3"
+    ), patch(
+        "routers.agent_tests.time.sleep"
+    ), patch(
+        "routers.agent_tests.capture_exception_to_sentry"
+    ):
+        agent = {"uuid": agent_uuid, "name": "a", "config": {}}
+        tests = [{"uuid": "t", "name": "T", "config": {}}]
+        run_llm_test_task(job_uuid, agent, tests, "bucket")
+
+    job = db.get_agent_test_job(job_uuid)
+    assert job["status"] == "failed"
+    assert job["results"]["error"] == "ValueError: boom"
+
+
 def test_run_llm_test_task_exit_zero_without_files_is_a_failure():
     """Exit 0 and nothing written: failed, with a reason a reader can see."""
     job, _ = _run_plain_with_exit_code(0, write_files=False)
 
     assert job["status"] == "failed"
-    assert job["results"]["error"] == "The eval tool produced no results."
+    assert job["results"]["error"] == "calibrate-agent exited with code 0 but wrote no results.json or metrics.json"
 
 
 def test_cli_error_line_picks_the_line_worth_reading():
@@ -609,7 +661,7 @@ def test_cli_error_line_picks_the_line_worth_reading():
     # "errored" is not the word "error": with no ❌ line, fall through to stderr.
     assert (
         cli_error_line("Running\nTotal: 2 errored\n", "warn\n", 1)
-        == "The eval tool stopped before it produced any result."
+        == "calibrate-agent exited with code 1"
     )
     # A harmless stderr traceback does not beat the ❌ line on stdout.
     assert (
@@ -618,7 +670,7 @@ def test_cli_error_line_picks_the_line_worth_reading():
     )
     # The ❌ line wins over a later plain line, and colour codes are stripped.
     assert (
-        cli_error_line("\x1b[1m❌ agent down\x1b[0m\nDone.\n", "", 1)
+        cli_error_line("\x1b[2K\x1b[1m❌ agent down\x1b[0m\nDone.\n", "", 1)
         == "❌ agent down"
     )
     # A line mentioning an error is enough.
@@ -626,10 +678,33 @@ def test_cli_error_line_picks_the_line_worth_reading():
     # Nothing that looks like an error: the last stderr line.
     assert (
         cli_error_line("----\n", "warn one\nwarn two\n", 1)
-        == "The eval tool stopped before it produced any result."
+        == "calibrate-agent exited with code 1"
     )
-    # Nothing at all: a fixed sentence.
-    assert cli_error_line("", "\n", 3) == "The eval tool stopped before it produced any result."
+    # Nothing at all: only how the process ended.
+    assert cli_error_line("", "\n", 3) == "calibrate-agent exited with code 3"
+    # Printed lines that are neither ❌ nor "error" are not tacked on.
+    assert (
+        cli_error_line("Running 3 tests\nDone.\n", "", 2)
+        == "calibrate-agent exited with code 2"
+    )
+    # A negative exit code is a signal, named by the OS.
+    assert cli_error_line("", "", -999) == "calibrate-agent process killed by signal 999"
+    assert cli_error_line("", "", -15) == (
+        "calibrate-agent process killed by signal 15 (SIGTERM: Terminated)"
+    )
+    assert cli_error_line("", "", -9) == (
+        "calibrate-agent process killed by signal 9 (SIGKILL: Killed)"
+    )
+
+
+def test_no_output_failure_exit_zero_names_the_missing_files(tmp_path):
+    from read_calibrate_run_output import no_output_failure
+
+    err = no_output_failure(_FakeProcess(returncode=0), ["calibrate"], "", "", tmp_path, "LLM test")
+    assert err.error_line == (
+        "calibrate-agent exited with code 0 but wrote no results.json or metrics.json"
+    )
+    assert str(tmp_path) in err.log_message
 
 
 def test_run_llm_test_task_records_cases_that_never_ran():

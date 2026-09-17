@@ -1,6 +1,7 @@
 """Reads what a calibrate run left in its output directory and stdout: did it finish, how many tests got no answer, did it stop early, and which line says why it failed."""
 
 import re
+import signal
 import subprocess
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -15,11 +16,15 @@ def unanswered_case_count(test_results: Optional[List[Dict[str, Any]]]) -> int:
 
 
 def cli_error_line(stdout: str, stderr: str, returncode: int) -> str:
-    """The one line worth showing a reader when the eval tool wrote nothing."""
-    ansi = re.compile(r"\x1b\[[0-9;]*m")
+    """What calibrate itself said about a run that wrote nothing: its last
+    ❌ or ✗ line, else its last line naming an error, else how the process
+    ended. Nothing here is worded for a reader; the app puts its own sentence
+    in front of it."""
+    # Every terminal control sequence, not only colours: a progress bar clears
+    # the line before printing, and that prefix would hide a ❌ line.
+    ansi = re.compile(r"\x1b\[[0-9;?]*[A-Za-z]")
     out = [l.strip() for l in ansi.sub("", stdout or "").splitlines() if l.strip()]
     err = [l.strip() for l in ansi.sub("", stderr or "").splitlines() if l.strip()]
-    # calibrate prints the failure it stopped on as its last ❌ or ✗ line.
     for line in reversed(out):
         if line.startswith(("❌", "✗")):
             return line
@@ -27,8 +32,18 @@ def cli_error_line(stdout: str, stderr: str, returncode: int) -> str:
         for line in reversed(lines):
             if re.search(r"\berror\b", line, re.I):
                 return line
-    # Anything else the tool printed last (a separator, a warning) is noise.
-    return "The eval tool stopped before it produced any result."
+    if returncode < 0:
+        # The OS names its signals; SIGTERM is what `kill` and a shutdown send.
+        try:
+            sig = signal.Signals(-returncode)
+            # macOS appends ": 15" to the description; the number is already said.
+            desc = (signal.strsignal(sig) or "").split(":")[0]
+            ended = f"process killed by signal {-returncode} ({sig.name}: {desc})"
+        except ValueError:
+            ended = f"process killed by signal {-returncode}"
+    else:
+        ended = f"exited with code {returncode}"
+    return f"calibrate-agent {ended}"
 
 
 def run_counts(
@@ -47,7 +62,7 @@ def run_counts(
 
 
 class CliRunFailed(subprocess.CalledProcessError):
-    """A CLI run that left no finished results. ``error_line`` is what a reader may see."""
+    """A CLI run that left no finished results. ``error_line`` is calibrate's own account of it."""
 
     error_line: str = ""
     log_message: str = ""
@@ -61,8 +76,7 @@ def no_output_failure(
         error_line = cli_error_line(stdout, stderr, process.returncode)
         error_msg = f"{noun} failed with exit code {process.returncode}: {error_line}"
     else:
-        # The path is for the log only; the reader sees the short line.
-        error_line = "The eval tool produced no results."
+        error_line = "calibrate-agent exited with code 0 but wrote no results.json or metrics.json"
         error_msg = f"{noun} produced no output files (results.json/metrics.json not found in {output_dir})"
     err = CliRunFailed(process.returncode, run_cmd, stdout, stderr)
     err.error_line = error_line
