@@ -3102,3 +3102,25 @@ def test_tool_call_item_condition_matches_python_rule():
         assert sql_result[item_uuid] == is_tool_call_row(item) == item["is_tool_call"], (
             payload,
         )
+
+
+def test_update_organization_refuses_a_name_that_is_only_spaces(user):
+    """A name of nothing but spaces is not a name. The API rejects an empty
+    one before it gets here, so this is the layer's own last word on it."""
+    with pytest.raises(ValueError):
+        db.update_organization(user["org_uuid"], name="   ")
+
+    # Nothing was written: the workspace keeps the name it had.
+    assert db.get_organization(user["org_uuid"])["name"] is not None
+
+
+def test_update_organization_given_nothing_touches_nothing(user):
+    """Asked to change nothing, it says so rather than writing a row whose
+    only change is the time it was updated."""
+    before = db.get_organization(user["org_uuid"])
+
+    assert db.update_organization(user["org_uuid"]) is False
+
+    after = db.get_organization(user["org_uuid"])
+    assert after["name"] == before["name"]
+    assert after["updated_at"] == before["updated_at"]
