@@ -2656,6 +2656,34 @@ def test_run_agent_benchmark_subset_scoping(client, monkeypatch):
     assert resp.status_code == 200
     job = get_agent_test_job(resp.json()["task_id"])
     assert job["details"]["test_uuids"] == [t2["uuid"]]
+    assert job["details"]["parallel_models"] is True
+
+
+def test_run_agent_benchmark_stores_sequential_choice(client, monkeypatch):
+    from db import get_agent_test_job
+
+    auth = _signup(client)
+    h = auth["headers"]
+    agent = _create_agent(client, h)
+    test = _create_test(client, h)
+    client.post(
+        "/agent-tests",
+        json={"agent_uuid": agent["uuid"], "test_uuids": [test["uuid"]]},
+        headers=h,
+    )
+
+    monkeypatch.setenv("S3_OUTPUT_BUCKET", "test-bucket")
+    with patch(
+        "routers.agent_tests.can_start_agent_test_job", return_value=False
+    ), patch("threading.Thread"):
+        resp = client.post(
+            f"/agent-tests/agent/{agent['uuid']}/benchmark",
+            json={"models": ["openai/gpt-4"], "parallel_models": False},
+            headers=h,
+        )
+    assert resp.status_code == 200
+    job = get_agent_test_job(resp.json()["task_id"])
+    assert job["details"]["parallel_models"] is False
 
 
 def test_run_agent_benchmark_queued_path(client, monkeypatch):

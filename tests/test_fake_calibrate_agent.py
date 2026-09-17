@@ -119,6 +119,49 @@ def test_run_llm_test_task_agent_connection_mode_with_fake_cli():
     assert job["results"]["passed"] == job["results"]["total_tests"] == 1
 
 
+@pytest.mark.parametrize(
+    "parallel_models, expect_flag", [(True, False), (False, True), (None, False)]
+)
+def test_run_benchmark_task_sequential_passes_max_parallel_one(
+    parallel_models, expect_flag
+):
+    """`parallel_models: false` on the job adds `--max-parallel 1` so calibrate
+    runs the models one after another; true or absent leaves the CLI default."""
+    import subprocess
+
+    from routers.agent_tests import run_benchmark_task
+
+    agent, test, _ = _make_agent_with_response_test()
+    details = {} if parallel_models is None else {"parallel_models": parallel_models}
+    job_uuid = db.create_agent_test_job(
+        agent_id=agent["uuid"],
+        job_type="llm-benchmark",
+        status="in_progress",
+        details=details,
+    )
+    models = ["openai/gpt-4.1", "openai/gpt-4o-mini"]
+    spawned: list = []
+    real_popen = subprocess.Popen
+
+    def spy(cmd, *a, **kw):
+        spawned.append(list(cmd))
+        return real_popen(cmd, *a, **kw)
+
+    with patch.dict(os.environ, {"FAKE_AI_PROVIDERS": "1"}), patch(
+        "routers.agent_tests.get_s3_client", return_value=MagicMock()
+    ), patch("routers.agent_tests.upload_directory_tree_to_s3"), patch(
+        "routers.agent_tests.upload_file_to_s3"
+    ), patch("routers.agent_tests.try_start_queued_agent_test_job"), patch(
+        "routers.agent_tests.time.sleep"
+    ), patch("routers.agent_tests.subprocess.Popen", side_effect=spy):
+        run_benchmark_task(job_uuid, agent, [test], models, "bucket")
+
+    assert db.get_agent_test_job(job_uuid)["status"] == "done"
+    (cmd,) = spawned
+    has_flag = "--max-parallel" in cmd and cmd[cmd.index("--max-parallel") + 1] == "1"
+    assert has_flag is expect_flag
+
+
 def test_run_benchmark_task_multi_model_end_to_end_with_fake_cli():
     """Benchmark path: multiple ``-m`` models → per-model folders + leaderboard,
     all matched back via ``_match_model_to_folder`` / leaderboard normalization."""
