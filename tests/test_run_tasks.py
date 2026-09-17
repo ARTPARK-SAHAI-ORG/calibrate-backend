@@ -594,7 +594,7 @@ def test_run_llm_test_task_exit_zero_without_files_is_a_failure():
 
 
 def test_cli_error_line_picks_the_line_worth_reading():
-    from cli_run import cli_error_line
+    from read_calibrate_run_output import cli_error_line
 
     # The last ❌ or ✗ line on stdout wins.
     assert (

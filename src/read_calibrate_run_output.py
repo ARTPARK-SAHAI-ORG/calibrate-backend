@@ -1,4 +1,4 @@
-"""What a finished or failed calibrate CLI run left behind, read for the agent-test runners."""
+"""Reads what a calibrate run left in its output directory and stdout: did it finish, how many tests got no answer, did it stop early, and which line says why it failed."""
 
 import re
 import subprocess
