@@ -2911,6 +2911,65 @@ def test_run_agent_benchmark_stores_sequential_choice(client, monkeypatch):
     assert job["details"]["parallel_models"] is False
 
 
+def _start_benchmark(client, headers, agent_uuid, monkeypatch, body):
+    monkeypatch.setenv("S3_OUTPUT_BUCKET", "test-bucket")
+    with patch(
+        "routers.agent_tests.can_start_agent_test_job", return_value=False
+    ), patch("threading.Thread"):
+        resp = client.post(
+            f"/agent-tests/agent/{agent_uuid}/benchmark", json=body, headers=headers
+        )
+    assert resp.status_code == 200
+    return resp.json()["task_id"]
+
+
+@pytest.mark.parametrize("parallel", [True, False])
+def test_benchmark_detail_returns_the_parallel_models_choice(
+    client, monkeypatch, parallel
+):
+    """The detail endpoint hands back how the models were run, so a rerun can
+    repeat it. False must survive as False, not come back as unknown."""
+    auth = _signup(client)
+    h = auth["headers"]
+    agent = _create_agent(client, h)
+    test = _create_test(client, h)
+    client.post(
+        "/agent-tests",
+        json={"agent_uuid": agent["uuid"], "test_uuids": [test["uuid"]]},
+        headers=h,
+    )
+
+    task_id = _start_benchmark(
+        client,
+        h,
+        agent["uuid"],
+        monkeypatch,
+        {"models": ["openai/gpt-4"], "parallel_models": parallel},
+    )
+
+    data = client.get(f"/agent-tests/benchmark/{task_id}", headers=h).json()
+    assert data["parallel_models"] is parallel
+
+
+def test_benchmark_detail_parallel_models_is_none_when_never_recorded(client):
+    """A comparison made before the choice was stored has no answer to give."""
+    import db
+
+    auth = _signup(client)
+    h = auth["headers"]
+    agent = _create_agent(client, h)
+    job_uuid = db.create_agent_test_job(
+        agent_id=agent["uuid"],
+        job_type="llm-benchmark",
+        status="done",
+        details={"models": ["openai/gpt-4"]},
+        results={"model_results": [], "leaderboard_summary": []},
+    )
+
+    data = client.get(f"/agent-tests/benchmark/{job_uuid}", headers=h).json()
+    assert data.get("parallel_models") is None
+
+
 def test_run_agent_benchmark_queued_path(client, monkeypatch):
     auth = _signup(client)
     h = auth["headers"]

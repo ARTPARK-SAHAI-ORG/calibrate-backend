@@ -3786,6 +3786,10 @@ class BenchmarkStatusResponse(BaseModel):
         None,
         description="IDs of the tests this benchmark executed, in run order",
     )
+    parallel_models: Optional[bool] = Field(
+        None,
+        description="Whether the models ran at the same time. False means they ran one after another. Absent on benchmarks started before this was recorded",
+    )
     evaluators: Optional[List[TestRunEvaluator]] = Field(
         None,
         description="The evaluators used in this run. Each verdict in `judge_results` links to one of these by `evaluator_uuid`",
@@ -4871,6 +4875,8 @@ def get_benchmark_status(
         name=run_display_name(job),
         status=status,
         test_uuids=details.get("test_uuids") or None,
+        # Not `or None`: a stored False means "one after another", not "unknown".
+        parallel_models=details.get("parallel_models"),
         evaluators=evaluators_block or None,
         model_results=results.get("model_results"),
         leaderboard_summary=results.get("leaderboard_summary"),
