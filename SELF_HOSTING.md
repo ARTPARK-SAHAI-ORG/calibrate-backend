@@ -156,6 +156,12 @@ GOOGLE_CLOUD_PROJECT_ID=
 # Auth
 GOOGLE_CLIENT_ID=
 
+# Email. Leave RESEND_API_KEY empty to send nothing.
+# FRONTEND_URL is the address of your frontend, used for links inside emails.
+RESEND_API_KEY=
+EMAIL_FROM=Calibrate <onboarding@resend.dev>
+FRONTEND_URL=http://localhost:3000
+
 # Tracing
 SENTRY_DSN=
 SENTRY_ENVIRONMENT=production
@@ -177,11 +183,26 @@ chmod 600 .env
 openssl rand -base64 32
 ```
 
-Update the default values given above as needed. For example, you might want to set the `SUPERADMIN_EMAIL` to an email address you own. Set the API keys for different providers (e.g. OpenRouter, OpenAI, etc.). Set the `GOOGLE_CLIENT_ID` to the same value as the one used for self-hosting the frontend.
+Update the default values given above as needed. For example, you might want to set the `SUPERADMIN_EMAIL` to an email address you own. Set the API keys for different providers (e.g. OpenRouter, OpenAI, etc.). Set the `GOOGLE_CLIENT_ID` to the same value as the one used for self-hosting the frontend. Set `FRONTEND_URL` to the address your frontend runs on, or the links in invite emails will point at localhost. If you want email at all, you also have to create the three Resend templates once: see [Set up the email templates](#set-up-the-email-templates).
 
 If you used a different name other than `/appdata` in the `SSH and create the root directory for the database` step, update `APP_FOLDER_PATH` and `DB_ROOT_DIR` in the `.env` file accordingly.
 
 Refer to [ENV.md](./ENV.md) for the full list of environment variables and their description.
+
+
+## Set up the email templates
+
+The wording of every email lives in Resend, not in this repo, so you can edit it in Resend's dashboard without a deploy. A fresh Resend account has none of them, and an email whose template is missing is never sent.
+
+Create them once, with a **full access** API key (the key you deploy with only needs to send):
+
+```bash
+RESEND_API_KEY=<full access key> uv run python scripts/create_email_templates.py
+```
+
+That creates and publishes three templates: the welcome email and the two workspace invites. Running it again changes nothing, so it will not overwrite wording you have since edited in the dashboard.
+
+To change any of the wording afterwards, edit the template in Resend and press Publish. A draft does not go out until you publish it.
 
 ## Start the app
 
@@ -440,6 +461,12 @@ GOOGLE_CLOUD_PROJECT_ID=
 # Auth
 GOOGLE_CLIENT_ID=
 
+# Email. Leave RESEND_API_KEY empty to send nothing.
+# FRONTEND_URL is the address of your frontend, used for links inside emails.
+RESEND_API_KEY=
+EMAIL_FROM=Calibrate <onboarding@resend.dev>
+FRONTEND_URL=http://localhost:3000
+
 # Tracing
 SENTRY_DSN=
 SENTRY_ENVIRONMENT=production
@@ -461,7 +488,7 @@ chmod 600 .env
 openssl rand -base64 32
 ```
 
-Update the default values given above as needed. For example, you might want to set the `SUPERADMIN_EMAIL` to an email address you own. Set the API keys for different providers (e.g. OpenRouter, OpenAI, etc.). Set the `GOOGLE_CLIENT_ID` to the same value as the one used for self-hosting the frontend.
+Update the default values given above as needed. For example, you might want to set the `SUPERADMIN_EMAIL` to an email address you own. Set the API keys for different providers (e.g. OpenRouter, OpenAI, etc.). Set the `GOOGLE_CLIENT_ID` to the same value as the one used for self-hosting the frontend. Set `FRONTEND_URL` to the address your frontend runs on, or the links in invite emails will point at localhost. If you want email at all, you also have to create the three Resend templates once: see [Set up the email templates](#set-up-the-email-templates).
 
 `AWS_ACCESS_KEY_ID` and `AWS_SECRET_ACCESS_KEY` need to be set as the HMAC secret and access keys from step 2. Let `S3_ENDPOINT_URL` be as it is.
 

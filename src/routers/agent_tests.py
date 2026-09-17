@@ -1,5 +1,6 @@
 import copy
 import csv
+import re
 import os
 import json
 import subprocess
@@ -11,7 +12,15 @@ import logging
 from pathlib import Path
 from typing import List, Dict, Any, Literal, Optional, Set, get_args
 
-from fastapi import APIRouter, HTTPException, Depends, Path as PathParam, Query
+from fastapi import (
+    APIRouter,
+    Depends,
+    File,
+    HTTPException,
+    Path as PathParam,
+    Query,
+    UploadFile,
+)
 from pagination import (
     OptionalPaginationParams,
     PaginatedResponse,
@@ -48,6 +57,8 @@ from db import (
     get_agent_test_job,
     update_agent_test_job,
     update_agent_test_job_visibility,
+    set_agent_test_job_name,
+    get_agent_test_job_position,
     get_agent_test_jobs_for_agent_summary,
     get_agent_test_jobs_for_org_summary,
     delete_agent_test_job,
@@ -66,6 +77,12 @@ from shared_enums import (
     required_agent_interaction_type,
 )
 from auth_utils import get_current_org, get_org_jwt_or_api_key, OrgContext
+from read_calibrate_run_output import (
+    CliRunFailed,
+    no_output_failure,
+    run_counts,
+    unanswered_case_count,
+)
 from utils import (
     job_slot,
     with_calibrate_eval_header,
@@ -90,6 +107,9 @@ from utils import (
     kill_process_group,
     upload_directory_tree_to_s3,
     upload_file_to_s3,
+    extract_uploaded_archive,
+    locate_run_root,
+    UploadTooLarge,
 )
 
 _TEST_TYPES = get_args(TestType)
@@ -187,6 +207,10 @@ _EXAMPLE_AGENT_UUID = "f47ac10b-58cc-4372-a567-0e02b2c3d479"
 _EXAMPLE_TASK_UUID = "a3b2c1d0-e5f4-3210-abcd-ef1234567890"
 
 _TASK_STATUS_DESCRIPTION = "Current status of the run"
+_RUN_NAME_DESCRIPTION = (
+    "Name of the run. A run nobody has renamed shows its number instead, such "
+    "as `Run 1` for a test run or `Benchmark 1` for a benchmark"
+)
 _ABORTED_DESCRIPTION = (
     "Whether a user stopped this run before it finished. The results collected "
     "up to that point are kept, and test cases that never ran are counted "
@@ -400,6 +424,15 @@ class TestCaseResult(BaseModel):
         None, description="ID of the test case within the run"
     )
     name: Optional[str] = Field(None, description="Name of the test")
+    test_uuid: Optional[str] = Field(
+        None,
+        description="ID of the test this case ran, which is what you pass to read the case on its own",
+        examples=[EXAMPLE_TEST_UUID],
+    )
+    test_type: Optional[TestTypeLiteral] = Field(
+        None,
+        description="What the test asks of the agent, which decides how a reader draws the case",
+    )
     passed: Optional[bool] = Field(
         None, description="Whether the case passed"
     )
@@ -481,6 +514,7 @@ class TestRunStatusResponse(BaseModel):
         description="Test run job ID",
         examples=[_EXAMPLE_TASK_UUID],
     )
+    name: str = Field(description=_RUN_NAME_DESCRIPTION)
     status: TaskStatus = Field(description=_TASK_STATUS_DESCRIPTION)
     test_uuids: Optional[List[str]] = Field(
         None,
@@ -511,6 +545,10 @@ class TestRunStatusResponse(BaseModel):
         None,
         description="The evaluators used in this run. Each verdict in `judge_results` links to one of these by `evaluator_uuid`",
     )
+    evaluator_summary: Optional[List[Dict[str, Any]]] = Field(
+        None,
+        description="Totals for each evaluator over the whole run, matching the shape a benchmark reports for each model. Only evaluators that returned a verdict appear",
+    )
     results: Optional[List[TestCaseResult]] = Field(
         None, description="Results for each test case"
     )
@@ -523,7 +561,10 @@ class TestRunStatusResponse(BaseModel):
         description="Whether the run stopped before starting every test case, after too many failed in a row",
     )
     aborted: bool = Field(False, description=_ABORTED_DESCRIPTION)
-    error: bool = Field(False, description="True if the run failed")
+    error: Optional[str] = Field(
+        None,
+        description="Why the run could not be carried out, when it failed before producing any result",
+    )
     is_public: bool = Field(False, description="Whether the run is shared publicly")
     share_token: Optional[str] = Field(
         None, description="Token for building the public share URL"
@@ -589,9 +630,7 @@ class AgentTestRunListItem(BaseModel):
         description="Test run job ID",
         examples=[_EXAMPLE_TASK_UUID],
     )
-    name: str = Field(
-        description="Display name, such as `Run 1` for a unit test or `Benchmark 1` for a benchmark"
-    )
+    name: str = Field(description=_RUN_NAME_DESCRIPTION)
     status: TaskStatus = Field(description=_TASK_STATUS_DESCRIPTION)
     type: AgentTestJobType = Field(
         description=(
@@ -643,6 +682,10 @@ class AgentTestRunListItem(BaseModel):
     unanswered_tests: Optional[int] = Field(
         None,
         description="Number of test cases that produced no answer because the agent or the judge could not be reached, which makes the pass rate an unfair measure of the agent",
+    )
+    stopped_early: bool = Field(
+        False,
+        description="Whether the run stopped before starting every test case, after too many failed in a row",
     )
     aborted: bool = Field(False, description=_ABORTED_DESCRIPTION)
     error: bool = Field(False, description="True if the run failed")
@@ -810,10 +853,13 @@ def _slim_test_results(test_results: Any) -> Optional[List[Dict[str, Any]]]:
     return slim or None
 
 
-def _slim_model_results(model_results: Any) -> Optional[List[Dict[str, Any]]]:
+def _slim_model_results(
+    model_results: Any, test_count: Optional[int]
+) -> Optional[List[Dict[str, Any]]]:
     """Flatten stored per-model benchmark results into scalar-only rows for the
     run-list, dropping each model's per-case `test_results`. Full per-case detail
-    stays on the benchmark-detail endpoint."""
+    stays on the benchmark-detail endpoint. A model that has not finished has no
+    count of its own; every model runs the whole set, so ``test_count`` fills in."""
     if not model_results:
         return None
     slim = []
@@ -825,7 +871,9 @@ def _slim_model_results(model_results: Any) -> Optional[List[Dict[str, Any]]]:
                 "model": m.get("model", ""),
                 "success": m.get("success"),
                 "message": m.get("message", ""),
-                "total_tests": m.get("total_tests"),
+                "total_tests": (
+                    test_count if m.get("total_tests") is None else m["total_tests"]
+                ),
                 "passed": m.get("passed"),
                 "failed": m.get("failed"),
             }
@@ -860,6 +908,99 @@ def _tool_call_evaluator(org_uuid: Optional[str]) -> Optional[Dict[str, Any]]:
         "scale_max": None,
         "version_number": version.get("version_number"),
     }
+
+
+def _uuid_by_unique_name(pairs: List[tuple]) -> Dict[str, str]:
+    """Each name mapped to its test's ID, minus any name used more than once.
+
+    Nothing stops two tests in one run sharing a name, and calibrate echoes
+    that one name for both rows. Keeping either ID would pin one case to the
+    other's test, so it would show the other's frozen rubric and answer the
+    other's per-case URL. An ambiguous name resolves to nothing instead.
+    """
+    by_name: Dict[str, str] = {}
+    ambiguous = set()
+    for name, uuid in pairs:
+        if not isinstance(name, str) or not isinstance(uuid, str):
+            continue
+        if name in by_name and by_name[name] != uuid:
+            ambiguous.add(name)
+        by_name[name] = uuid
+    for name in ambiguous:
+        by_name.pop(name, None)
+    return by_name
+
+
+def test_uuid_by_calibrate_id(details: Dict[str, Any]) -> Dict[str, str]:
+    """Map what calibrate echoes as ``test_case_id`` back to the test's own ID.
+
+    Calibrate replaces the ID it is given with the test's NAME, so a stored row
+    identifies its test by name. ``details.test_uuids`` and ``details.test_names``
+    are frozen at launch in the same order as the config's test cases, which is
+    what makes the name resolvable. Empty for a run that froze neither.
+    """
+    uuids = details.get("test_uuids") or []
+    names = details.get("test_names") or []
+    if not isinstance(uuids, list) or not isinstance(names, list):
+        return {}
+    return _uuid_by_unique_name(list(zip(names, uuids)))
+
+
+def _test_uuid_by_name(tests: List[Dict[str, Any]]) -> Dict[str, str]:
+    """Each test's own ID keyed by the name calibrate will echo back for it."""
+    return _uuid_by_unique_name(
+        [
+            (t.get("name"), t.get("uuid"))
+            for t in tests
+            if isinstance(t, dict)
+        ]
+    )
+
+
+_UUID_SHAPE = re.compile(
+    r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-"
+    r"[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$"
+)
+
+
+def resolve_test_uuid(
+    case_id: Any, test_uuid_by_name: Optional[Dict[str, str]]
+) -> Optional[str]:
+    """The test's own ID for a result row, or None when it cannot be worked out.
+
+    Calibrate replaces the ID it is given with the test's name, so a row
+    identifies its test by name and has to be mapped back.
+
+    The name is tried FIRST, and a row is only taken at face value when it
+    looks like a real ID. Counting characters instead would read a 36-character
+    test name as its own ID, and that answer gets written into the stored row,
+    where nothing later can correct it.
+    """
+    if not isinstance(case_id, str):
+        return None
+    mapped = (test_uuid_by_name or {}).get(case_id)
+    if mapped:
+        return mapped
+    # An imported run rewrites the row to the test's own ID, so it needs no map.
+    return case_id if _UUID_SHAPE.match(case_id) else None
+
+
+def _row_test_type(row: Dict[str, Any]) -> Optional[str]:
+    """What the test asked of the agent, lifted off the stored case.
+
+    Read here rather than stored at write time so a run that finished before
+    this field existed still reports it. An imported run can carry any string
+    in that slot, so anything outside the known set reads as absent instead of
+    failing the response model.
+    """
+    test_case = row.get("test_case")
+    if not isinstance(test_case, dict):
+        return None
+    evaluation = test_case.get("evaluation")
+    if not isinstance(evaluation, dict):
+        return None
+    test_type = evaluation.get("type")
+    return test_type if test_type in _TEST_TYPES else None
 
 
 def _is_tool_call_row(row: Any) -> bool:
@@ -978,6 +1119,27 @@ def _prefetch_evaluator_cache(
     return {uid: found.get(uid) for uid in all_uuids}
 
 
+def _auto_run_name(job_type: str, position: int) -> str:
+    """The name a run displays when nobody has given it one."""
+    if job_type == "llm-unit-test":
+        return f"Run {position}"
+    if job_type == "llm-benchmark":
+        return f"Benchmark {position}"
+    return "Job"
+
+
+def run_display_name(job: Dict[str, Any]) -> str:
+    """The name of one run held on its own, for callers with no ordered list to
+    count against (run detail, benchmark detail, the shared-link views).
+
+    Falls back to a position query, so prefer the list endpoints' own counting
+    when a whole list is already in hand.
+    """
+    return job.get("name") or _auto_run_name(
+        job.get("type", ""), get_agent_test_job_position(job["uuid"])
+    )
+
+
 def _build_agent_test_run_item_fields(
     job: Dict[str, Any],
     name: str,
@@ -998,6 +1160,11 @@ def _build_agent_test_run_item_fields(
     ``_run_evaluators``).
     """
     job_results = job.get("results") or {}
+    # A run stores its own count only when calibrate writes its metrics at the
+    # end, and a benchmark never stores one at all, so both read as unknown
+    # while they are going. The test set frozen at launch is the same number.
+    test_count = job.get("test_count")
+    stored_total = job_results.get("total_tests")
 
     return {
         "uuid": job["uuid"],
@@ -1007,7 +1174,7 @@ def _build_agent_test_run_item_fields(
         "created_at": job.get("created_at", ""),
         "updated_at": job.get("updated_at", job.get("created_at", "")),
         # Unit test results
-        "total_tests": job_results.get("total_tests"),
+        "total_tests": test_count if stored_total is None else stored_total,
         "passed": job_results.get("passed"),
         "failed": job_results.get("failed"),
         "evaluators": _run_evaluators(job, evaluator_cache),
@@ -1016,8 +1183,11 @@ def _build_agent_test_run_item_fields(
         "total_tokens": job_results.get("total_tokens"),
         "results": _slim_test_results(job_results.get("test_results")),
         # Benchmark results
-        "model_results": _slim_model_results(job_results.get("model_results")),
+        "model_results": _slim_model_results(
+            job_results.get("model_results"), test_count
+        ),
         "unanswered_tests": job_results.get("unanswered_tests"),
+        "stopped_early": bool(job_results.get("stopped_early")),
         # Common fields
         "aborted": bool(job.get("aborted")),
         "error": bool(job_results.get("error")),
@@ -1091,20 +1261,17 @@ def get_agent_test_runs(
     # Name in chronological order (oldest = "Run 1") so a run's number never
     # shifts when a newer run is added, then build items newest-first. Names are
     # assigned before any filtering so they stay stable regardless of filters.
+    # A renamed run still consumes its number, so renaming one never renumbers
+    # the rest.
     jobs_asc = sorted(jobs, key=lambda j: (j.get("created_at", ""), j.get("id", 0)))
-    unit_test_count = 0
-    benchmark_count = 0
+    counts: Dict[str, int] = {}
     name_map: Dict[str, str] = {}
     for job in jobs_asc:
         job_type = job.get("type", "")
-        if job_type == "llm-unit-test":
-            unit_test_count += 1
-            name_map[job["uuid"]] = f"Run {unit_test_count}"
-        elif job_type == "llm-benchmark":
-            benchmark_count += 1
-            name_map[job["uuid"]] = f"Benchmark {benchmark_count}"
-        else:
-            name_map[job["uuid"]] = "Job"
+        counts[job_type] = counts.get(job_type, 0) + 1
+        name_map[job["uuid"]] = job.get("name") or _auto_run_name(
+            job_type, counts[job_type]
+        )
 
     runs = []
     evaluator_cache = _prefetch_evaluator_cache(jobs)
@@ -1167,24 +1334,16 @@ def get_all_test_runs_for_user(
 
     # Per-agent counters for naming ("Run 1", "Benchmark 2", …).
     # We need ascending order to assign names correctly, then flip back.
+    # A renamed run still consumes its number, so renaming one never renumbers
+    # the rest.
     jobs_asc = sorted(jobs, key=lambda j: (j.get("created_at", ""), j.get("id", 0)))
-    agent_unit_counts: Dict[str, int] = {}
-    agent_benchmark_counts: Dict[str, int] = {}
+    counts: Dict[tuple, int] = {}
     name_map: Dict[str, str] = {}  # job uuid → display name
 
     for job in jobs_asc:
-        agent_id = job.get("agent_id", "")
-        job_type = job.get("type", "")
-        if job_type == "llm-unit-test":
-            agent_unit_counts[agent_id] = agent_unit_counts.get(agent_id, 0) + 1
-            name_map[job["uuid"]] = f"Run {agent_unit_counts[agent_id]}"
-        elif job_type == "llm-benchmark":
-            agent_benchmark_counts[agent_id] = (
-                agent_benchmark_counts.get(agent_id, 0) + 1
-            )
-            name_map[job["uuid"]] = f"Benchmark {agent_benchmark_counts[agent_id]}"
-        else:
-            name_map[job["uuid"]] = "Job"
+        key = (job.get("agent_id", ""), job.get("type", ""))
+        counts[key] = counts.get(key, 0) + 1
+        name_map[job["uuid"]] = job.get("name") or _auto_run_name(key[1], counts[key])
 
     # Build every run item FIRST (before status/has_failures filtering) so the
     # "Run N"/"Benchmark N" names stay stable regardless of which filters apply.
@@ -1702,6 +1861,7 @@ def _read_agent_test_metrics_json(output_dir: Path) -> Optional[dict]:
 def _parse_agent_test_results(
     results_data: Optional[List[dict]],
     default_inputs: Optional[Dict[str, Any]] = None,
+    test_uuid_by_name: Optional[Dict[str, str]] = None,
 ) -> List[dict]:
     """Parse results.json data into the format expected by the API.
 
@@ -1720,10 +1880,12 @@ def _parse_agent_test_results(
         test_case = r.get("test_case", {})
         case_inputs = test_case.get("inputs") or {}
         effective_inputs = {**(default_inputs or {}), **case_inputs}
+        case_id = r.get("test_case_id") or test_case.get("id")
         test_results.append(
             {
                 "name": test_case.get("name"),
-                "test_case_id": r.get("test_case_id") or test_case.get("id"),
+                "test_case_id": case_id,
+                "test_uuid": resolve_test_uuid(case_id, test_uuid_by_name),
                 "passed": metrics.get("passed", False),
                 "reasoning": metrics.get("reasoning"),
                 "output": {
@@ -1747,18 +1909,13 @@ def _parse_agent_test_results(
     return test_results
 
 
-def _unanswered_case_count(test_results: Optional[List[Dict[str, Any]]]) -> int:
-    """How many parsed rows produced no answer. Used when calibrate's own count
-    is not on disk yet, so a run in progress and a run that wrote no
-    ``metrics.json`` still report their gaps."""
-    return sum(1 for r in test_results or [] if r.get("unanswered"))
-
-
 def _pending_test_case_result_placeholder(name: str) -> Dict[str, Any]:
     """``TestCaseResult`` shape for rows not yet finished (explicit nulls for clients)."""
     return {
         "test_case_id": None,
         "name": name,
+        "test_type": None,
+        "test_uuid": None,
         "passed": None,
         "reasoning": None,
         "output": None,
@@ -1930,6 +2087,7 @@ def _enrich_test_results_with_evaluators(
     evaluators_by_test_id: Optional[Dict[str, List[Dict[str, Any]]]],
     evaluator_cache: Optional[Dict[str, Optional[Dict[str, Any]]]] = None,
     tool_call_evaluator: Optional[Dict[str, Any]] = None,
+    test_uuid_by_name: Optional[Dict[str, str]] = None,
 ) -> None:
     """Mutate ``test_results`` in place: convert each row's raw ``judge_results``
     dict (keyed by calibrate evaluator name) into a structured list of
@@ -1961,6 +2119,13 @@ def _enrich_test_results_with_evaluators(
     for r in test_results:
         if not isinstance(r, dict):
             continue
+        r["test_type"] = _row_test_type(r)
+        # Written at run time since this shipped. Runs older than that resolve
+        # here, every read.
+        if not r.get("test_uuid"):
+            r["test_uuid"] = resolve_test_uuid(
+                r.get("test_case_id"), test_uuid_by_name
+            )
         raw = r.get("judge_results")
         if raw is None:
             if (
@@ -1973,13 +2138,16 @@ def _enrich_test_results_with_evaluators(
                 ]
             continue
 
-        test_id = r.get("test_case_id")
+        test_id = r.get("test_uuid") or r.get("test_case_id")
         snapshot = snapshot_map.get(test_id) if test_id else None
         uuid_to_meta: Dict[str, Dict[str, Any]] = {}
+        name_to_meta: Dict[str, Dict[str, Any]] = {}
         if isinstance(snapshot, list):
             for e in snapshot:
                 if isinstance(e, dict) and e.get("uuid"):
                     uuid_to_meta[e["uuid"]] = e
+                if isinstance(e, dict) and e.get("name"):
+                    name_to_meta.setdefault(e["name"], e)
 
         if isinstance(raw, list):
             for entry in raw:
@@ -2016,7 +2184,13 @@ def _enrich_test_results_with_evaluators(
                 continue
             echoed_uid = entry.get("evaluator_id")
             meta = (uuid_to_meta.get(echoed_uid) if echoed_uid else None) or {}
-            uid = echoed_uid
+            if not meta:
+                # A run carried out elsewhere echoes the evaluator id it ran
+                # under, which is not this workspace's id once the evaluator has
+                # been recreated. Calibrate keys each verdict by the evaluator's
+                # name, so that is the remaining handle back to the rubric.
+                meta = name_to_meta.get(cal_name) or {}
+            uid = meta.get("uuid") or echoed_uid
             # Warm the cache so the block builder can reuse it. Also use
             # the live evaluator's output_type as a fallback when the
             # snapshot lacks it (legacy jobs) — matches the list-path
@@ -2053,6 +2227,7 @@ def _enrich_model_results_with_evaluators(
     evaluators_by_test_id: Optional[Dict[str, List[Dict[str, Any]]]],
     evaluator_cache: Optional[Dict[str, Optional[Dict[str, Any]]]] = None,
     tool_call_evaluator: Optional[Dict[str, Any]] = None,
+    test_uuid_by_name: Optional[Dict[str, str]] = None,
 ) -> None:
     """Run ``_enrich_test_results_with_evaluators`` for each model's nested
     ``test_results`` list. The same snapshot applies to every model in a
@@ -2069,6 +2244,7 @@ def _enrich_model_results_with_evaluators(
                 evaluators_by_test_id,
                 cache,
                 tool_call_evaluator,
+                test_uuid_by_name,
             )
             _enrich_evaluator_summary(mr.get("evaluator_summary"), cache)
 
@@ -2118,6 +2294,91 @@ def _build_evaluator_summary(
                 }
             )
 
+        summary.append(entry)
+
+    return summary or None
+
+
+def evaluator_totals_from_rows(
+    test_results: Optional[List[Dict[str, Any]]],
+    evaluators_block: Optional[List[Dict[str, Any]]],
+    evaluators_by_test_id: Optional[Dict[str, List[Dict[str, Any]]]] = None,
+) -> Optional[List[Dict[str, Any]]]:
+    """Per-evaluator totals over a single run's cases, in the shape a benchmark
+    reports for each model.
+
+    Counted from the rows rather than read from calibrate's `metrics.json`,
+    which a single run has never stored, so a run that finished long ago
+    reports its totals too. Only evaluators that returned at least one verdict
+    appear, so a run still going reports what has landed.
+    """
+    if not test_results or not evaluators_block:
+        return None
+
+    # A benchmark reports calibrate's own key, which carries a suffix when two
+    # evaluators share a display name. That key is the name frozen into the
+    # snapshot, so read it there rather than using the current name, which two
+    # evaluators can share.
+    calibrate_key: Dict[str, str] = {}
+    for snapshot in (evaluators_by_test_id or {}).values():
+        for e in snapshot if isinstance(snapshot, list) else []:
+            if isinstance(e, dict) and e.get("uuid") and e.get("name"):
+                calibrate_key.setdefault(e["uuid"], e["name"])
+
+    verdicts: Dict[str, List[Any]] = {}
+    for row in test_results:
+        if not isinstance(row, dict):
+            continue
+        for entry in row.get("judge_results") or []:
+            if not isinstance(entry, dict):
+                continue
+            uid = entry.get("evaluator_uuid")
+            if not uid:
+                continue
+            value = entry.get("match")
+            if value is None:
+                value = entry.get("score")
+            if value is not None:
+                verdicts.setdefault(uid, []).append(value)
+
+    summary: List[Dict[str, Any]] = []
+    for evaluator in evaluators_block:
+        values = verdicts.get(evaluator.get("uuid"))
+        if not values:
+            continue
+        uid = evaluator.get("uuid")
+        entry = {
+            "metric_key": calibrate_key.get(uid) or evaluator.get("name"),
+            "name": evaluator.get("name"),
+            "type": evaluator.get("output_type"),
+            "evaluator_uuid": uid,
+            "description": evaluator.get("description"),
+        }
+        if evaluator.get("output_type") == "rating":
+            numbers = [v for v in values if isinstance(v, (int, float))]
+            if not numbers:
+                continue
+            entry.update(
+                {
+                    "mean": sum(numbers) / len(numbers),
+                    "min": min(numbers),
+                    "max": max(numbers),
+                    "count": len(numbers),
+                    "scale_min": evaluator.get("scale_min"),
+                    "scale_max": evaluator.get("scale_max"),
+                }
+            )
+        else:
+            passed = sum(1 for v in values if v is True)
+            entry.update(
+                {
+                    "passed": passed,
+                    "total": len(values),
+                    # Out of 100, the scale calibrate itself writes into
+                    # metrics.json, so a run and a benchmark read alike.
+                    "pass_rate": passed / len(values) * 100,
+                }
+            )
         summary.append(entry)
 
     return summary or None
@@ -2266,6 +2527,7 @@ def _update_agent_test_intermediate_results(
     output_dir: Path,
     test_names: List[str],
     default_inputs: Optional[Dict[str, Any]] = None,
+    test_uuid_by_name: Optional[Dict[str, str]] = None,
 ) -> int:
     """
     Update intermediate results for an agent test job.
@@ -2276,7 +2538,9 @@ def _update_agent_test_intermediate_results(
         return 0
 
     # Parse results
-    test_results = _parse_agent_test_results(results_data, default_inputs)
+    test_results = _parse_agent_test_results(
+        results_data, default_inputs, test_uuid_by_name
+    )
     completed_count = len(test_results)
 
     # Build intermediate results: show completed tests with results, pending tests with just name
@@ -2302,14 +2566,7 @@ def _update_agent_test_intermediate_results(
             "total_tokens": (
                 metrics_data.get("total_tokens") if metrics_data else None
             ),
-            "unanswered_tests": (
-                (metrics_data or {}).get("errored")
-                if (metrics_data or {}).get("errored") is not None
-                else _unanswered_case_count(test_results)
-            ),
-            "stopped_early": (
-                bool(metrics_data.get("stopped_early")) if metrics_data else False
-            ),
+            **run_counts(metrics_data, test_results),
             "test_results": intermediate_results,
         },
     )
@@ -2342,6 +2599,7 @@ def run_llm_test_task(
 
     Handles response, tool_call, and conversation test cases uniformly — the
     calibrate CLI dispatches per row on each test case's `evaluation.type`."""
+    test_uuid_by_name = _test_uuid_by_name(tests)
     try:
         logger.info(
             f"Running LLM test task {task_id} for agent {agent['uuid']} with {len(tests)} test(s)"
@@ -2450,12 +2708,14 @@ def run_llm_test_task(
                             )
                             kill_process_group(process.pid, task_id)
                             _update_agent_test_intermediate_results(
-                                task_id, output_dir, test_names, default_inputs
+                                task_id, output_dir, test_names, default_inputs,
+                                test_uuid_by_name,
                             )
                             _finish_stopped_run(task_id)
                             return
                         completed = _update_agent_test_intermediate_results(
-                            task_id, output_dir, test_names, default_inputs
+                            task_id, output_dir, test_names, default_inputs,
+                            test_uuid_by_name,
                         )
                         if completed != prev_completed:
                             logger.info(
@@ -2466,7 +2726,8 @@ def run_llm_test_task(
 
                     # Final update after process completes
                     _update_agent_test_intermediate_results(
-                        task_id, output_dir, test_names, default_inputs
+                        task_id, output_dir, test_names, default_inputs,
+                        test_uuid_by_name,
                     )
 
                 # Stopped in the gap between the last poll and the CLI exiting.
@@ -2488,17 +2749,9 @@ def run_llm_test_task(
                 if stderr:
                     logger.info(f"LLM test stderr: {stderr}")
 
-                if process.returncode != 0:
-                    error_msg = (
-                        f"LLM test failed with exit code {process.returncode}: {stderr}"
-                    )
-                    logger.error(error_msg)
-                    capture_exception_to_sentry(RuntimeError(error_msg))
-                    raise subprocess.CalledProcessError(
-                        process.returncode, run_cmd, stdout, stderr
-                    )
-
-                logger.info("LLM test command completed successfully")
+                # Results on disk mean a finished run, whatever the exit code:
+                # calibrate exits 1 after writing them when the run stopped early.
+                logger.info(f"LLM test command exited with {process.returncode}")
 
                 # Log output directory contents for debugging
                 logger.info(
@@ -2519,14 +2772,22 @@ def run_llm_test_task(
                             with open(file_path, "r", encoding="utf-8") as f:
                                 metrics_data = json.load(f)
 
-                if results_data is None and metrics_data is None:
-                    error_msg = f"LLM test produced no output files (results.json/metrics.json not found in {output_dir})"
-                    logger.error(error_msg)
-                    capture_exception_to_sentry(RuntimeError(error_msg))
-                    raise subprocess.CalledProcessError(0, run_cmd, stdout, stderr)
+                # metrics.json is written last, so a nonzero exit without it is a
+                # crash mid-run, not a run that stopped early.
+                if (results_data is None and metrics_data is None) or (
+                    process.returncode != 0 and metrics_data is None
+                ):
+                    failure = no_output_failure(
+                        process, run_cmd, stdout, stderr, output_dir, "LLM test"
+                    )
+                    logger.error(failure.log_message)
+                    capture_exception_to_sentry(RuntimeError(failure.log_message))
+                    raise failure
 
                 # Parse results
-                test_results = _parse_agent_test_results(results_data, default_inputs)
+                test_results = _parse_agent_test_results(
+                    results_data, default_inputs, test_uuid_by_name
+                )
 
                 # Add name field for consistency
                 for i, r in enumerate(test_results):
@@ -2541,8 +2802,6 @@ def run_llm_test_task(
                 latency_ms = None
                 cost = None
                 total_tokens = None
-                unanswered_tests = None
-                stopped_early = False
 
                 if metrics_data and isinstance(metrics_data, dict):
                     total_tests = metrics_data.get("total", 0)
@@ -2551,8 +2810,6 @@ def run_llm_test_task(
                     latency_ms = metrics_data.get("latency_ms")
                     cost = metrics_data.get("cost")
                     total_tokens = metrics_data.get("total_tokens")
-                    unanswered_tests = metrics_data.get("errored")
-                    stopped_early = bool(metrics_data.get("stopped_early"))
                 elif results_data:
                     # Compute from results if metrics.json not found
                     total_tests = len(results_data)
@@ -2583,12 +2840,7 @@ def run_llm_test_task(
                         "latency_ms": latency_ms,
                         "cost": cost,
                         "total_tokens": total_tokens,
-                        "unanswered_tests": (
-                            unanswered_tests
-                            if unanswered_tests is not None
-                            else _unanswered_case_count(test_results)
-                        ),
-                        "stopped_early": stopped_early,
+                        **run_counts(metrics_data, test_results),
                         "test_results": test_results,
                         "results_s3_prefix": results_prefix,
                         "error": None,
@@ -2605,15 +2857,16 @@ def run_llm_test_task(
                     _finish_stopped_run(task_id)
                     return
                 traceback.print_exc()
-                capture_exception_to_sentry(e)
+                # Already sent to Sentry with the readable message where it was raised.
                 # Preserve any existing results from the job
                 existing_job = get_agent_test_job(task_id)
                 existing_results = (
                     (existing_job.get("results") or {}) if existing_job else {}
                 )
                 existing_results["error"] = (
-                    f"LLM test failed: {e.stderr if hasattr(e, 'stderr') else str(e)}"
+                    e.error_line if isinstance(e, CliRunFailed) else str(e)
                 )
+                _settle_unfinished_results(existing_results, "Failed")
                 try:
                     if output_dir.exists():
                         upload_directory_tree_to_s3(
@@ -2644,9 +2897,7 @@ def run_llm_test_task(
                 existing_results = (
                     (existing_job.get("results") or {}) if existing_job else {}
                 )
-                existing_results["error"] = (
-                    f"Unexpected error during LLM test: {str(e)}"
-                )
+                existing_results["error"] = f"{type(e).__name__}: {e}"
                 try:
                     if output_dir.exists():
                         upload_directory_tree_to_s3(
@@ -3067,6 +3318,50 @@ def update_test_run_visibility(
     return VisibilityResponse(is_public=body.is_public, share_token=share_token)
 
 
+class RunNameRequest(BaseModel):
+    name: Optional[str] = Field(
+        None,
+        max_length=200,
+        description="New name for the run. Send an empty string or omit it to clear the name, and the run goes back to its number",
+    )
+
+
+class RunNameResponse(BaseModel):
+    task_id: str = Field(
+        min_length=36,
+        max_length=36,
+        description="Run that was renamed",
+        examples=[_EXAMPLE_TASK_UUID],
+    )
+    name: str = Field(
+        description="Name the run now displays. Clearing the name gives back its number, such as `Run 3`"
+    )
+
+
+@router.patch(
+    "/run/{task_id}/name",
+    response_model=RunNameResponse,
+    summary="Rename test run",
+)
+def rename_agent_test_run(
+    task_id: str = PathParam(
+        description="Test run or benchmark to rename",
+        examples=[_EXAMPLE_TASK_UUID],
+    ),
+    body: RunNameRequest = ...,
+    ctx: OrgContext = Depends(get_current_org),
+):
+    """Rename a test run or benchmark, or clear its name."""
+    # Runs and benchmarks are both rows in `agent_test_jobs`, so one endpoint
+    # renames either — same as the stop endpoint.
+    job = _load_owned_agent_test_job(task_id, ctx)
+
+    name = (body.name or "").strip() or None
+    set_agent_test_job_name(task_id, name)
+    job["name"] = name
+    return RunNameResponse(task_id=task_id, name=run_display_name(job))
+
+
 def _settle_stopped_rows(rows: List[Any]) -> tuple[int, int]:
     """Mark every case that never started, and count the verdicts that did land.
 
@@ -3100,7 +3395,15 @@ def _finish_stopped_run(task_id: str) -> None:
     """
     job = get_agent_test_job(task_id)
     results = (job or {}).get("results") or {}
+    _settle_unfinished_results(results, "Stopped")
+    update_agent_test_job(
+        task_id, status=TaskStatus.DONE.value, results=results or None
+    )
 
+
+def _settle_unfinished_results(results: Dict[str, Any], message: str) -> None:
+    """Mark every case a run never reached, so a run that ended (stopped, or
+    failed part way) does not keep rows that read as still going."""
     rows = results.get("test_results")
     if isinstance(rows, list):
         results["passed"], results["failed"] = _settle_stopped_rows(rows)
@@ -3123,11 +3426,7 @@ def _finish_stopped_run(task_id: str) -> None:
         # A model still reading "Running... (3 tests done)" on a run that has
         # already ended reads as still going.
         if model.get("success") is None:
-            model["message"] = "Stopped"
-
-    update_agent_test_job(
-        task_id, status=TaskStatus.DONE.value, results=results or None
-    )
+            model["message"] = message
 
 
 class AbortRunResponse(BaseModel):
@@ -3179,6 +3478,29 @@ def abort_agent_test_run(
     )
 
 
+_RunDetailMode = Literal["full", "summary"]
+
+_SUMMARY_MODE_DESCRIPTION = (
+    "How much of each test case to return. `full` returns every field of every "
+    "case. `summary` returns one light row per case, with its ID, name, "
+    "verdict and short reason, leaving out the conversation, the agent's output "
+    "and the evaluator verdicts. Read those one case at a time from "
+    "`GET /agent-tests/run/{task_id}/results/{test_uuid}`"
+)
+
+
+def _summarize_case_rows(rows: Any) -> None:
+    """Drop the heavy fields from each case row in place.
+
+    Removed rather than set to null, so a run of many cases stays small.
+    `response_model_exclude_unset=True` on the routes is what lets a missing
+    key drop out of the response.
+    """
+    for row in rows or []:
+        for field in ("test_case", "output", "judge_results", "inputs"):
+            row.pop(field, None)
+
+
 _RunProjection = make_projection_params(
     heavy_fields=[
         "results[].output",
@@ -3193,6 +3515,7 @@ _RunProjection = make_projection_params(
 @router.get(
     "/run/{task_id}",
     response_model=TestRunStatusResponse,
+    response_model_exclude_unset=True,
     tags=["Public API"],
     summary="Get test run status",
 )
@@ -3206,6 +3529,7 @@ def get_agent_test_run_status(
         False,
         description="Return only failing test cases. Omit to return every case",
     ),
+    mode: _RunDetailMode = Query("full", description=_SUMMARY_MODE_DESCRIPTION),
     projection: _RunProjection = Depends(),
 ):
     """Poll a test run for its status and evaluation results."""
@@ -3242,6 +3566,7 @@ def get_agent_test_run_status(
         evaluators_snapshot,
         evaluator_cache,
         tool_call_evaluator,
+        test_uuid_by_calibrate_id(details),
     )
     evaluators_block = _build_evaluators_block_for_test_run(
         evaluators_snapshot,
@@ -3252,6 +3577,7 @@ def get_agent_test_run_status(
 
     response = TestRunStatusResponse(
         task_id=task_id,
+        name=run_display_name(job),
         status=status,
         test_uuids=details.get("test_uuids") or None,
         total_tests=results.get("total_tests"),
@@ -3261,11 +3587,14 @@ def get_agent_test_run_status(
         cost=results.get("cost"),
         total_tokens=results.get("total_tokens"),
         evaluators=evaluators_block or None,
+        evaluator_summary=evaluator_totals_from_rows(
+            results.get("test_results"), evaluators_block, evaluators_snapshot
+        ),
         results=results.get("test_results"),
         unanswered_tests=results.get("unanswered_tests"),
         stopped_early=bool(results.get("stopped_early")),
         aborted=bool(details.get("aborted")),
-        error=bool(results.get("error")),
+        error=str(results["error"]) if results.get("error") else None,
         is_public=bool(job.get("is_public")),
         share_token=job.get("share_token"),
     )
@@ -3276,7 +3605,105 @@ def get_agent_test_run_status(
         data["results"] = [
             r for r in data["results"] if r.get("passed") is False
         ]
+    if mode == "summary":
+        _summarize_case_rows(data.get("results"))
     return projection.apply(data)
+
+
+def find_case_result(
+    job: Dict[str, Any], test_uuid: str, model: Optional[str]
+) -> Dict[str, Any]:
+    """One case's full result from a run or benchmark job, evaluators resolved.
+
+    Raises the 400/404 the caller should answer with, so the JWT route and the
+    shared-link routes give the same answers.
+    """
+    results = job.get("results") or {}
+    details = job.get("details") or {}
+
+    if job.get("type") == "llm-benchmark":
+        if not model:
+            raise HTTPException(
+                status_code=400,
+                detail="Name the model whose answer to read, as a benchmark runs every test once per model",
+            )
+        # Resolve the model first: a model that has not started yet carries a
+        # null `test_results`, which must read as a missing case rather than a
+        # missing model.
+        matched = next(
+            (
+                m
+                for m in results.get("model_results") or []
+                if isinstance(m, dict) and m.get("model") == model
+            ),
+            None,
+        )
+        if matched is None:
+            raise HTTPException(
+                status_code=404, detail="Model not found in this benchmark"
+            )
+        rows = matched.get("test_results")
+    else:
+        rows = results.get("test_results")
+
+    # The test's own ID is what a caller holds. The name calibrate echoed back
+    # is still accepted, so a link made before this shipped keeps working.
+    by_name = test_uuid_by_calibrate_id(details)
+    row = next(
+        (
+            r
+            for r in rows or []
+            if isinstance(r, dict)
+            and test_uuid
+            in (
+                r.get("test_uuid"),
+                r.get("test_case_id"),
+                resolve_test_uuid(r.get("test_case_id"), by_name),
+            )
+        ),
+        None,
+    )
+    if row is None:
+        raise HTTPException(status_code=404, detail="Test case result not found")
+
+    _enrich_test_results_with_evaluators(
+        [row],
+        details.get("evaluators_by_test_id") or {},
+        {},
+        _tool_call_evaluator_for_run(details),
+        by_name,
+    )
+    return row
+
+
+@router.get(
+    "/run/{task_id}/results/{test_uuid}",
+    response_model=TestCaseResult,
+    tags=["Public API"],
+    summary="Get test case result",
+)
+def get_agent_test_case_result(
+    task_id: str = PathParam(
+        description="Test run or benchmark the case was run in",
+        examples=[_EXAMPLE_TASK_UUID],
+    ),
+    test_uuid: str = PathParam(
+        description="The test whose result to read, as `test_uuid` on the case",
+        examples=[EXAMPLE_TEST_UUID],
+    ),
+    ctx: OrgContext = Depends(get_org_jwt_or_api_key),
+    model: Optional[str] = Query(
+        None,
+        description="Which model's answer to read. Required for a benchmark, which runs every test once per model",
+        examples=["openai/gpt-4.1"],
+    ),
+):
+    """Get the full result of one test case in a run"""
+    # Serves runs and benchmarks alike, as the abort and rename endpoints do,
+    # since both are rows in `agent_test_jobs`.
+    return find_case_result(
+        _load_owned_agent_test_job(task_id, ctx), test_uuid, model
+    )
 
 
 # ============ Benchmark API ============
@@ -3291,6 +3718,10 @@ class BenchmarkRequest(BaseModel):
         None,
         description="A subset of the agent's linked tests to benchmark. Each ID must be linked to the agent. Omit to run all linked tests",
         examples=[[EXAMPLE_TEST_UUID]],
+    )
+    parallel_models: bool = Field(
+        True,
+        description="Whether to run the models at the same time. Set false to run them one after another",
     )
 
 
@@ -3332,8 +3763,14 @@ class ModelResult(BaseModel):
         None,
         description="Aggregated token usage as `{mean, min, max, count}`",
     )
-
-
+    unanswered_tests: Optional[int] = Field(
+        None,
+        description="Number of test cases that produced no answer because the agent or the judge could not be reached, which makes the pass rate an unfair measure of the agent",
+    )
+    stopped_early: bool = Field(
+        False,
+        description="Whether this model's run stopped before starting every test case, after too many failed in a row",
+    )
 
 
 class BenchmarkStatusResponse(BaseModel):
@@ -3343,6 +3780,7 @@ class BenchmarkStatusResponse(BaseModel):
         description="Benchmark run job ID",
         examples=[_EXAMPLE_TASK_UUID],
     )
+    name: str = Field(description=_RUN_NAME_DESCRIPTION)
     status: TaskStatus = Field(description=_TASK_STATUS_DESCRIPTION)
     test_uuids: Optional[List[str]] = Field(
         None,
@@ -3360,8 +3798,15 @@ class BenchmarkStatusResponse(BaseModel):
         description=LEADERBOARD_SUMMARY_DESCRIPTION,
         examples=[LEADERBOARD_SUMMARY_EXAMPLE],
     )
+    stopped_early: bool = Field(
+        False,
+        description="Whether any model's run stopped before starting every test case, after too many failed in a row",
+    )
     aborted: bool = Field(False, description=_ABORTED_DESCRIPTION)
-    error: bool = Field(False, description="True if the run failed")
+    error: Optional[str] = Field(
+        None,
+        description="Why the run could not be carried out, when it failed before producing any result",
+    )
     is_public: bool = Field(False, description="Whether the run is shared publicly")
     share_token: Optional[str] = Field(
         None, description="Token for building the public share URL"
@@ -3375,6 +3820,7 @@ def _update_benchmark_intermediate_results(
     test_names: List[str],
     cli_models: Optional[List[str]] = None,
     default_inputs: Optional[Dict[str, Any]] = None,
+    test_uuid_by_name: Optional[Dict[str, str]] = None,
 ) -> int:
     """
     Update intermediate results for a benchmark job.
@@ -3401,7 +3847,9 @@ def _update_benchmark_intermediate_results(
             results_data, metrics_data = all_results[matched_folder]
 
             # Parse results
-            test_results = _parse_agent_test_results(results_data, default_inputs)
+            test_results = _parse_agent_test_results(
+                results_data, default_inputs, test_uuid_by_name
+            )
 
             # Add name field for consistency
             for i, r in enumerate(test_results):
@@ -3431,6 +3879,7 @@ def _update_benchmark_intermediate_results(
                         "latency_ms": metrics_data.get("latency_ms"),
                         "cost": metrics_data.get("cost"),
                         "total_tokens": metrics_data.get("total_tokens"),
+                        **run_counts(metrics_data, test_results),
                         "test_results": merged,
                     }
                 )
@@ -3507,6 +3956,7 @@ def run_benchmark_task(
 
     The calibrate CLI handles parallelization internally and generates the leaderboard.
     """
+    test_uuid_by_name = _test_uuid_by_name(tests)
     try:
         logger.info(
             f"Running benchmark task {task_id} for agent {agent['uuid']} "
@@ -3589,6 +4039,9 @@ def run_benchmark_task(
 
                 # Test-case parallelism is left to calibrate (CALIBRATE_TEST_PARALLEL
                 # env / default 4); the subprocess inherits this process's env.
+                job_details = (get_agent_test_job(task_id) or {}).get("details") or {}
+                if not job_details.get("parallel_models", True):
+                    run_cmd += ["--max-parallel", "1"]
 
                 logger.info(f"Running benchmark command: {' '.join(run_cmd)}")
 
@@ -3619,13 +4072,13 @@ def run_benchmark_task(
                             kill_process_group(process.pid, task_id)
                             _update_benchmark_intermediate_results(
                                 task_id, output_dir, models, test_names, cli_models,
-                                default_inputs,
+                                default_inputs, test_uuid_by_name,
                             )
                             _finish_stopped_run(task_id)
                             return
                         completed = _update_benchmark_intermediate_results(
                             task_id, output_dir, models, test_names, cli_models,
-                            default_inputs,
+                            default_inputs, test_uuid_by_name,
                         )
                         if completed != prev_completed:
                             logger.info(
@@ -3637,7 +4090,7 @@ def run_benchmark_task(
                     # Final update after process completes
                     _update_benchmark_intermediate_results(
                         task_id, output_dir, models, test_names, cli_models,
-                        default_inputs,
+                        default_inputs, test_uuid_by_name,
                     )
 
                 # Stopped in the gap between the last poll and the CLI exiting.
@@ -3659,15 +4112,8 @@ def run_benchmark_task(
                 if stderr:
                     logger.info(f"Benchmark stderr: {stderr}")
 
-                if process.returncode != 0:
-                    error_msg = f"Benchmark failed with exit code {process.returncode}: {stderr}"
-                    logger.error(error_msg)
-                    capture_exception_to_sentry(RuntimeError(error_msg))
-                    raise subprocess.CalledProcessError(
-                        process.returncode, run_cmd, stdout, stderr
-                    )
-
-                logger.info("Benchmark command completed successfully")
+                # Results on disk mean a finished run, whatever the exit code.
+                logger.info(f"Benchmark command exited with {process.returncode}")
 
                 # Log output directory contents for debugging
                 logger.info(
@@ -3677,11 +4123,18 @@ def run_benchmark_task(
                 # Read results for each model from output directory
                 all_results = _find_all_results_in_output(output_dir)
 
-                if not all_results:
-                    error_msg = f"Benchmark produced no output files (no results.json/metrics.json found in {output_dir})"
-                    logger.error(error_msg)
-                    capture_exception_to_sentry(RuntimeError(error_msg))
-                    raise subprocess.CalledProcessError(0, run_cmd, stdout, stderr)
+                # metrics.json is written last, so a nonzero exit with no model
+                # finished is a crash mid-run, not a run that stopped early.
+                if not all_results or (
+                    process.returncode != 0
+                    and not any(metrics for _, metrics in all_results.values())
+                ):
+                    failure = no_output_failure(
+                        process, run_cmd, stdout, stderr, output_dir, "Benchmark"
+                    )
+                    logger.error(failure.log_message)
+                    capture_exception_to_sentry(RuntimeError(failure.log_message))
+                    raise failure
                 folder_names = list(all_results.keys())
                 logger.info(f"Found result folders: {folder_names}")
 
@@ -3693,7 +4146,9 @@ def run_benchmark_task(
                         results_data, metrics_data = all_results[matched_folder]
 
                         # Parse results
-                        test_results = _parse_agent_test_results(results_data)
+                        test_results = _parse_agent_test_results(
+                            results_data, None, test_uuid_by_name
+                        )
 
                         # Add name field for consistency
                         for i, r in enumerate(test_results):
@@ -3732,6 +4187,7 @@ def run_benchmark_task(
                                     "latency_ms": metrics_data.get("latency_ms"),
                                     "cost": metrics_data.get("cost"),
                                     "total_tokens": metrics_data.get("total_tokens"),
+                                    **run_counts(metrics_data, test_results),
                                     "test_results": test_results,
                                 }
                             )
@@ -3834,6 +4290,9 @@ def run_benchmark_task(
                         "model_results": model_results,
                         "leaderboard_summary": leaderboard_summary,
                         "results_s3_prefix": results_prefix,
+                        "stopped_early": any(
+                            r.get("stopped_early") for r in model_results
+                        ),
                         "error": error_msg,
                     },
                 )
@@ -3848,23 +4307,29 @@ def run_benchmark_task(
                     _finish_stopped_run(task_id)
                     return
                 traceback.print_exc()
-                capture_exception_to_sentry(e)
-                failed_results: Dict[str, Any] = {
-                    "error": f"Benchmark failed: {e.stderr if hasattr(e, 'stderr') else str(e)}",
-                }
+                # Already sent to Sentry with the readable message where it was raised.
+                # Keep the model results the intermediate updates wrote so far.
+                existing_job = get_agent_test_job(task_id)
+                existing_results = (
+                    (existing_job.get("results") or {}) if existing_job else {}
+                )
+                existing_results["error"] = (
+                    e.error_line if isinstance(e, CliRunFailed) else str(e)
+                )
+                _settle_unfinished_results(existing_results, "Failed")
                 try:
                     if output_dir.exists():
                         bp = f"agent-tests/benchmarks/{task_id}"
                         upload_directory_tree_to_s3(
                             s3, output_dir, s3_bucket, f"{bp}/outputs"
                         )
-                        failed_results["results_s3_prefix"] = bp
+                        existing_results["results_s3_prefix"] = bp
                 except Exception:
                     pass
                 update_agent_test_job(
                     task_id,
                     status=TaskStatus.FAILED.value,
-                    results=failed_results,
+                    results=existing_results,
                 )
             except Exception as e:
                 if _is_job_aborted(task_id):
@@ -3878,9 +4343,7 @@ def run_benchmark_task(
                 existing_results = (
                     (existing_job.get("results") or {}) if existing_job else {}
                 )
-                existing_results["error"] = (
-                    f"Unexpected error during benchmark: {str(e)}"
-                )
+                existing_results["error"] = f"{type(e).__name__}: {e}"
                 try:
                     if output_dir.exists():
                         bp = f"agent-tests/benchmarks/{task_id}"
@@ -3999,6 +4462,7 @@ def run_agent_benchmark(
 
     test_names, details = _agent_test_job_details(agent, tests, s3_bucket)
     details["models"] = request.models
+    details["parallel_models"] = request.parallel_models
     job_id, initial_status = _create_agent_test_job_in_slot(
         agent,
         "llm-benchmark",
@@ -4023,6 +4487,286 @@ def run_agent_benchmark(
         logger.info(f"Queued LLM benchmark job {job_id}")
 
     return AgentTestRunCreateResponse(task_id=job_id, status=initial_status)
+
+
+_BENCHMARK_IMPORT_FILES = ("results.json", "metrics.json")
+_MAX_BENCHMARK_ARCHIVE_BYTES = 500 * 1024 * 1024
+
+
+class BenchmarkImportResponse(BaseModel):
+    task_id: str = Field(
+        min_length=36,
+        max_length=36,
+        description="The benchmark this run was stored as",
+        examples=[_EXAMPLE_TASK_UUID],
+    )
+    status: TaskStatus = Field(description="State of the stored benchmark")
+    models: List[str] = Field(
+        description="Models found in the archive, in the order they are listed on the benchmark"
+    )
+    test_count: int = Field(description="Tests each model was scored on")
+    unresolved_evaluators: List[str] = Field(
+        description="Evaluators the results refer to that are not in this workspace. Their scores are stored, but the run shows them without a rubric"
+    )
+
+
+def _keep_benchmark_run_file(name: str) -> bool:
+    """Only the files the benchmark page needs. The rest of a run folder is logs.
+
+    A first-pass run puts its leaderboard in a `leaderboard` folder and a merged
+    re-judge writes it beside the model folders, so the name is matched rather
+    than the folder it sits in.
+    """
+    return name.endswith(_BENCHMARK_IMPORT_FILES) or (
+        name.endswith(".csv") and "leaderboard" in Path(name).name
+    )
+
+
+def _resolve_benchmark_tests(
+    rows_by_model: Dict[str, List[dict]], linked_tests: List[Dict[str, Any]]
+) -> List[Dict[str, Any]]:
+    """Pair every result row with the linked test whose name is its `test_case_id`.
+
+    Calibrate carries the id it was given rather than a Calibrate UUID, so the
+    test name is the only handle back. Every row must land on a test: a run
+    stored against a partial set would report a pass rate over tests it never
+    covered.
+    """
+    test_by_name = {t["name"]: t for t in linked_tests if t.get("name")}
+    ordered_ids: List[str] = []
+    seen: set = set()
+    for rows in rows_by_model.values():
+        for row in rows:
+            case_id = row.get("test_case_id") or (row.get("test_case") or {}).get("id")
+            if case_id and case_id not in seen:
+                seen.add(case_id)
+                ordered_ids.append(case_id)
+
+    unmatched = [case_id for case_id in ordered_ids if case_id not in test_by_name]
+    if unmatched:
+        shown = ", ".join(unmatched[:5])
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"{len(unmatched)} of the archive's test cases are not linked to this "
+                f"agent under that name, starting with: {shown}. Name each test after "
+                f"the `test_case_id` calibrate ran it under, and link it to the agent."
+            ),
+        )
+    return [test_by_name[case_id] for case_id in ordered_ids]
+
+
+def _unresolved_evaluator_ids(rows_by_model: Dict[str, List[dict]]) -> List[str]:
+    """Evaluator IDs the rows score against that this workspace does not hold.
+
+    Calibrate stamps each judge result with the evaluator it used, so identity
+    survives the import on its own. An ID that no longer resolves still stores
+    its score, it just renders without a name or rubric, which is worth saying
+    at import rather than leaving to be noticed on the run.
+    """
+    referenced = {
+        verdict["evaluator_id"]
+        for rows in rows_by_model.values()
+        for row in rows
+        for verdict in ((row.get("metrics") or {}).get("judge_results") or {}).values()
+        if isinstance(verdict, dict) and verdict.get("evaluator_id")
+    }
+    if not referenced:
+        return []
+    from db import get_evaluators_by_uuids
+
+    found = get_evaluators_by_uuids(list(referenced))
+    return sorted(referenced - set(found))
+
+
+def _benchmark_model_result(
+    model: str,
+    rows: List[dict],
+    metrics_data: Optional[dict],
+    test_names: List[str],
+    uuid_by_case_id: Dict[str, str],
+) -> Dict[str, Any]:
+    """Build one model's stored result, matching what `run_benchmark_task` writes.
+
+    Rows are stored as plain dicts on purpose. Calibrate emits `judge_results`
+    as a dict keyed by evaluator name and the read path reshapes it, so building
+    a `ModelResult` here would fail validation.
+    """
+    test_results = _parse_agent_test_results(rows)
+    for parsed in test_results:
+        # Calibrate leaves `test_case.name` unset, so the row arrives nameless and
+        # `_merge_test_results_by_test_names` would drop it. Every id resolved to a
+        # test of that name in `_resolve_benchmark_tests`, so the id is the name.
+        case_id = parsed.get("test_case_id")
+        parsed["name"] = case_id
+        # A run Calibrate carries out gives calibrate the test's own id, so every
+        # reader looks the frozen rubric up by it. A run carried out elsewhere
+        # carries whatever id that run used, so it is swapped for the test it
+        # matched, which is the whole reason the rubric resolves at all.
+        parsed["test_case_id"] = uuid_by_case_id.get(case_id, case_id)
+    test_results = _merge_test_results_by_test_names(test_names, test_results)
+
+    if metrics_data:
+        # A merged re-judge writes `turns` where a first-pass run writes `total`.
+        total = metrics_data.get("total")
+        if total is None:
+            total = metrics_data.get("turns")
+        if total is None:
+            total = len(rows)
+        passed = metrics_data.get("passed", 0)
+        return {
+            "model": model,
+            "success": True,
+            "message": f"Benchmark completed successfully for {model}",
+            "total_tests": total,
+            "passed": passed,
+            "failed": total - passed,
+            "evaluator_summary": _build_evaluator_summary(metrics_data),
+            "latency_ms": metrics_data.get("latency_ms"),
+            "cost": metrics_data.get("cost"),
+            "total_tokens": metrics_data.get("total_tokens"),
+            "test_results": test_results,
+        }
+
+    total = len(rows)
+    passed = sum(1 for r in test_results if r.get("passed"))
+    return {
+        "model": model,
+        "success": True,
+        "message": f"Benchmark completed for {model}",
+        "total_tests": total,
+        "passed": passed,
+        "failed": total - passed,
+        "evaluator_summary": None,
+        "test_results": test_results,
+    }
+
+
+@router.post(
+    "/agent/{agent_uuid}/benchmark/import",
+    response_model=BenchmarkImportResponse,
+    summary="Import a finished agent benchmark",
+)
+def import_agent_benchmark(
+    agent_uuid: str = PathParam(
+        description="Agent the benchmark was run against",
+        examples=[_EXAMPLE_AGENT_UUID],
+    ),
+    archive: UploadFile = File(
+        description="Tar of the calibrate output folder, holding one folder per model with `results.json` and `metrics.json`, plus `leaderboard`"
+    ),
+    ctx: OrgContext = Depends(get_current_org),
+):
+    """Store a benchmark already run by the calibrate CLI, without running it again"""
+    agent = get_agent(agent_uuid)
+    if not agent or agent.get("org_uuid") != ctx.org_uuid:
+        raise HTTPException(status_code=404, detail="Agent not found")
+
+    linked_tests = get_tests_for_agent(agent_uuid)
+    if not linked_tests:
+        raise HTTPException(
+            status_code=400,
+            detail="No tests linked to this agent. Link tests first.",
+        )
+
+    try:
+        s3_bucket = get_s3_output_config()
+    except ValueError as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+    with tempfile.TemporaryDirectory() as temp_dir:
+        temp_path = Path(temp_dir)
+        try:
+            extracted = extract_uploaded_archive(
+                archive.file,
+                temp_path,
+                keep=_keep_benchmark_run_file,
+                max_bytes=_MAX_BENCHMARK_ARCHIVE_BYTES,
+            )
+        except UploadTooLarge as exc:
+            raise HTTPException(
+                status_code=413,
+                detail=f"{exc} Leave the `results.log` files out, they are not read.",
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc))
+
+        try:
+            # Calibrate names each folder after the model with `/` written as
+            # `__`, so turning that back gives the name the leaderboard uses.
+            run_root, folders = locate_run_root(
+                extracted, "results.json", what="model"
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc))
+        models = [folder.replace("__", "/") for folder in folders]
+
+        rows_by_model: Dict[str, List[dict]] = {}
+        metrics_by_model: Dict[str, Optional[dict]] = {}
+        for folder, model in zip(folders, models):
+            rows = _read_agent_test_results_json(run_root / folder)
+            if not rows:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"No rows could be read for: {model}",
+                )
+            rows_by_model[model] = rows
+            metrics_path = run_root / folder / "metrics.json"
+            metrics_by_model[model] = (
+                json.loads(metrics_path.read_text(encoding="utf-8"))
+                if metrics_path.exists()
+                else None
+            )
+
+        tests = _resolve_benchmark_tests(rows_by_model, linked_tests)
+        unresolved_evaluators = _unresolved_evaluator_ids(rows_by_model)
+        # A first-pass run puts the leaderboard in its own folder; a merged
+        # re-judge writes it beside the model folders.
+        leaderboard_dir = run_root / "leaderboard"
+        leaderboard_summary = _read_leaderboard_csv(
+            leaderboard_dir if leaderboard_dir.is_dir() else run_root, models=models
+        )
+        if leaderboard_summary:
+            # Calibrate writes one leaderboard for the whole run, so an archive
+            # holding a subset of its model folders still carries rows for the
+            # models left out.
+            leaderboard_summary = [
+                row for row in leaderboard_summary if row.get("model") in set(models)
+            ]
+
+    test_names, details = _agent_test_job_details(agent, tests, s3_bucket)
+    details["models"] = models
+    uuid_by_case_id = {t["name"]: t["uuid"] for t in tests}
+    model_results = [
+        _benchmark_model_result(
+            model,
+            rows_by_model[model],
+            metrics_by_model[model],
+            test_names,
+            uuid_by_case_id,
+        )
+        for model in models
+    ]
+
+    task_id = create_agent_test_job(
+        agent_id=agent_uuid,
+        job_type="llm-benchmark",
+        status=TaskStatus.DONE.value,
+        details=details,
+        results={
+            "model_results": model_results,
+            "leaderboard_summary": leaderboard_summary,
+            "error": None,
+        },
+    )
+
+    return BenchmarkImportResponse(
+        task_id=task_id,
+        status=TaskStatus.DONE,
+        models=models,
+        test_count=len(tests),
+        unresolved_evaluators=unresolved_evaluators,
+    )
 
 
 @router.patch(
@@ -4063,6 +4807,7 @@ _BenchmarkProjection = make_projection_params(
 @router.get(
     "/benchmark/{task_id}",
     response_model=BenchmarkStatusResponse,
+    response_model_exclude_unset=True,
     summary="Get benchmark status",
     tags=["Public API"],
 )
@@ -4076,6 +4821,7 @@ def get_benchmark_status(
         False,
         description="Return only failing test cases for each model. Omit to return every case",
     ),
+    mode: _RunDetailMode = Query("full", description=_SUMMARY_MODE_DESCRIPTION),
     projection: _BenchmarkProjection = Depends(),
 ):
     """Get the results of a benchmark run"""
@@ -4111,6 +4857,7 @@ def get_benchmark_status(
         evaluators_snapshot,
         evaluator_cache,
         tool_call_evaluator,
+        test_uuid_by_calibrate_id(details),
     )
     evaluators_block = _build_evaluators_block_for_test_run(
         evaluators_snapshot,
@@ -4121,13 +4868,15 @@ def get_benchmark_status(
 
     response = BenchmarkStatusResponse(
         task_id=task_id,
+        name=run_display_name(job),
         status=status,
         test_uuids=details.get("test_uuids") or None,
         evaluators=evaluators_block or None,
         model_results=results.get("model_results"),
         leaderboard_summary=results.get("leaderboard_summary"),
+        stopped_early=bool(results.get("stopped_early")),
         aborted=bool(details.get("aborted")),
-        error=bool(results.get("error")),
+        error=str(results["error"]) if results.get("error") else None,
         is_public=bool(job.get("is_public")),
         share_token=job.get("share_token"),
     )
@@ -4141,6 +4890,9 @@ def get_benchmark_status(
                 model["test_results"] = [
                     r for r in model["test_results"] if r.get("passed") is False
                 ]
+    if mode == "summary":
+        for model in data.get("model_results") or []:
+            _summarize_case_rows(model.get("test_results"))
     return projection.apply(data)
 
 

@@ -8,19 +8,27 @@ from pydantic import BaseModel, Field
 from typing import List, Optional
 
 from auth_utils import get_current_user_id, is_superadmin_user
+from mailer import WORKSPACE_INVITE_TEMPLATE, frontend_url, send_email
 from utils import MemberRoleLiteral
 from db import (
     add_organization_member,
+    add_organization_member_by_user_id,
+    create_org_invite,
     create_organization,
     get_member_role,
+    get_org_by_invite_token,
+    get_org_invite,
     get_organization,
+    get_user,
     list_organization_members,
     list_organizations_for_user,
     remove_organization_member,
+    revoke_org_invite,
     update_organization_name,
 )
 
 router = APIRouter(prefix="/organizations", tags=["organizations"])
+invites_router = APIRouter(prefix="/invites", tags=["organizations"])
 
 
 class OrganizationResponse(BaseModel):
@@ -62,6 +70,11 @@ class AddMemberRequest(BaseModel):
     )
 
 
+class InviteLinkResponse(BaseModel):
+    token: str = Field(description="Token that identifies the invite link")
+    created_at: str = Field(description="When the link was created (ISO 8601 UTC)")
+
+
 class MemberResponse(BaseModel):
     user_id: str = Field(
         min_length=36,
@@ -75,6 +88,27 @@ class MemberResponse(BaseModel):
         description="Member's role in the workspace"
     )
     created_at: str = Field(description="When the member was added (ISO 8601 UTC)")
+
+
+def _send_added_to_workspace_email(
+    email: str, org_uuid: str, org_name: str, inviter: dict
+) -> None:
+    """Tell someone they are in. They are already a member, so the link lands
+    them in the workspace; a signed-out reader is bounced to login and back."""
+    who = (
+        f"{inviter.get('first_name') or ''} {inviter.get('last_name') or ''}".strip()
+        or inviter.get("email")
+        or ""
+    )
+    send_email(
+        to=email,
+        template=WORKSPACE_INVITE_TEMPLATE,
+        variables={
+            "INVITER": who,
+            "WORKSPACE": org_name,
+            "URL": f"{frontend_url()}/{org_uuid}/agents",
+        },
+    )
 
 
 def _require_membership(org_uuid: str, user_id: str) -> str:
@@ -160,6 +194,13 @@ def add_member(
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
 
+    _send_added_to_workspace_email(
+        email=member["email"],
+        org_uuid=org_uuid,
+        org_name=get_organization(org_uuid)["name"],
+        inviter=get_user(user_id),
+    )
+
     # Re-read the full member row so the response has the joined user fields.
     for m in list_organization_members(org_uuid):
         if m["user_id"] == member["user_id"]:
@@ -188,3 +229,83 @@ def remove_member(
     if not removed:
         raise HTTPException(status_code=404, detail="Member not found")
     return None
+
+
+@router.get(
+    "/{org_uuid}/invite-link",
+    response_model=InviteLinkResponse,
+    summary="Get invite link",
+)
+def get_invite_link(
+    org_uuid: str = Path(
+        description="The workspace whose invite link to read. You must be a member",
+        examples=["f47ac10b-58cc-4372-a567-0e02b2c3d479"],
+    ),
+    user_id: str = Depends(get_current_user_id),
+):
+    """Get the invite link anyone can use to join a workspace you belong to"""
+    _require_membership(org_uuid, user_id)
+    invite = get_org_invite(org_uuid)
+    if invite is None:
+        raise HTTPException(status_code=404, detail="Invite link not found")
+    return InviteLinkResponse(**invite)
+
+
+@router.post(
+    "/{org_uuid}/invite-link",
+    response_model=InviteLinkResponse,
+    status_code=201,
+    summary="Create invite link",
+)
+def create_invite_link(
+    org_uuid: str = Path(
+        description="The workspace to create an invite link for. You must be a member",
+        examples=["f47ac10b-58cc-4372-a567-0e02b2c3d479"],
+    ),
+    user_id: str = Depends(get_current_user_id),
+):
+    """Create an invite link that lets anyone with it join the workspace as admin"""
+    # Replaces any existing link, so the address it had before stops working.
+    _require_membership(org_uuid, user_id)
+    invite = create_org_invite(org_uuid)
+    if invite is None:
+        raise HTTPException(status_code=404, detail="Organization not found")
+    return InviteLinkResponse(**invite)
+
+
+@router.delete(
+    "/{org_uuid}/invite-link",
+    status_code=204,
+    summary="Delete invite link",
+)
+def delete_invite_link(
+    org_uuid: str = Path(
+        description="The workspace whose invite link to delete. You must be a member",
+        examples=["f47ac10b-58cc-4372-a567-0e02b2c3d479"],
+    ),
+    user_id: str = Depends(get_current_user_id),
+):
+    """Delete the invite link for a workspace you belong to. Anyone who already joined stays a member"""
+    _require_membership(org_uuid, user_id)
+    revoke_org_invite(org_uuid)
+    return None
+
+
+@invites_router.post(
+    "/{token}/accept",
+    response_model=OrganizationResponse,
+    summary="Accept invite",
+)
+def accept_invite(
+    token: str = Path(
+        description="Token from the invite link you were sent",
+        examples=["f47ac10b-58cc-4372-a567-0e02b2c3d479"],
+    ),
+    user_id: str = Depends(get_current_user_id),
+):
+    """Join the workspace an invite link points at, as admin"""
+    org = get_org_by_invite_token(token)
+    if org is None:
+        raise HTTPException(status_code=404, detail="Invite not found")
+    add_organization_member_by_user_id(org["uuid"], user_id, role="admin")
+    return OrganizationResponse(**org, member_role=get_member_role(org["uuid"], user_id))

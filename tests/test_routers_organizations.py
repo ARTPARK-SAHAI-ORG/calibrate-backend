@@ -17,6 +17,8 @@ from unittest.mock import patch
 import pytest
 from fastapi.testclient import TestClient
 
+from mailer import WORKSPACE_INVITE_TEMPLATE
+
 
 @pytest.fixture(scope="module")
 def app():
@@ -433,3 +435,282 @@ def test_init_db_backfill_is_idempotent(client):
     after = db.list_organizations_for_user(auth["user_uuid"])
     assert len(after) == 1
     assert after[0]["uuid"] == before[0]["uuid"]
+
+
+def _new_org(client, auth, name="Invite Co"):
+    return client.post("/organizations", json={"name": name}, headers=auth["headers"]).json()["uuid"]
+
+
+def test_invite_link_create_read_replace_and_revoke(client):
+    owner = _signup(client, "inv-owner")
+    org_uuid = _new_org(client, owner)
+
+    assert client.get(f"/organizations/{org_uuid}/invite-link", headers=owner["headers"]).status_code == 404
+
+    created = client.post(f"/organizations/{org_uuid}/invite-link", headers=owner["headers"])
+    assert created.status_code == 201
+    token = created.json()["token"]
+    assert created.json()["created_at"]
+
+    read = client.get(f"/organizations/{org_uuid}/invite-link", headers=owner["headers"])
+    # What create returned must be what the workspace actually stored.
+    assert read.status_code == 200 and read.json() == created.json()
+
+    replaced = client.post(f"/organizations/{org_uuid}/invite-link", headers=owner["headers"]).json()["token"]
+    assert replaced != token
+    assert client.get(f"/public/invite/{token}").status_code == 404
+    assert client.get(f"/public/invite/{replaced}").json() == {"organization_name": "Invite Co"}
+
+    assert client.delete(f"/organizations/{org_uuid}/invite-link", headers=owner["headers"]).status_code == 204
+    assert client.get(f"/organizations/{org_uuid}/invite-link", headers=owner["headers"]).status_code == 404
+    assert client.get(f"/public/invite/{replaced}").status_code == 404
+
+
+def test_invite_link_requires_membership(client):
+    owner = _signup(client, "inv-owner2")
+    stranger = _signup(client, "inv-stranger")
+    org_uuid = _new_org(client, owner)
+    client.post(f"/organizations/{org_uuid}/invite-link", headers=owner["headers"])
+
+    for call in (
+        lambda: client.get(f"/organizations/{org_uuid}/invite-link", headers=stranger["headers"]),
+        lambda: client.post(f"/organizations/{org_uuid}/invite-link", headers=stranger["headers"]),
+        lambda: client.delete(f"/organizations/{org_uuid}/invite-link", headers=stranger["headers"]),
+    ):
+        assert call().status_code == 404
+
+
+def test_accept_invite_adds_admin_and_is_idempotent(client):
+    owner = _signup(client, "inv-owner3")
+    joiner = _signup(client, "inv-joiner")
+    org_uuid = _new_org(client, owner, name="Joinable")
+    token = client.post(f"/organizations/{org_uuid}/invite-link", headers=owner["headers"]).json()["token"]
+
+    resp = client.post(f"/invites/{token}/accept", headers=joiner["headers"])
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["uuid"] == org_uuid and body["name"] == "Joinable"
+    assert body["member_role"] == "admin" and body["is_personal"] is False
+
+    again = client.post(f"/invites/{token}/accept", headers=joiner["headers"])
+    assert again.status_code == 200 and again.json()["member_role"] == "admin"
+
+    members = client.get(f"/organizations/{org_uuid}/members", headers=owner["headers"]).json()
+    assert sum(1 for m in members if m["user_id"] == joiner["user_uuid"]) == 1
+
+
+def test_accept_invite_rejects_dead_token_and_keeps_members_after_revoke(client):
+    owner = _signup(client, "inv-owner4")
+    joiner = _signup(client, "inv-joiner2")
+    latecomer = _signup(client, "inv-late")
+    org_uuid = _new_org(client, owner)
+    token = client.post(f"/organizations/{org_uuid}/invite-link", headers=owner["headers"]).json()["token"]
+    client.post(f"/invites/{token}/accept", headers=joiner["headers"])
+
+    client.delete(f"/organizations/{org_uuid}/invite-link", headers=owner["headers"])
+    assert client.post(f"/invites/{token}/accept", headers=latecomer["headers"]).status_code == 404
+    assert client.post(f"/invites/{uuid.uuid4()}/accept", headers=latecomer["headers"]).status_code == 404
+
+    # Revoking the link does not remove anyone who already joined through it.
+    assert client.get(f"/organizations/{org_uuid}/members", headers=joiner["headers"]).status_code == 200
+
+
+def test_accept_invite_restores_a_removed_member(client):
+    owner = _signup(client, "inv-owner5")
+    joiner = _signup(client, "inv-rejoin")
+    org_uuid = _new_org(client, owner)
+    token = client.post(f"/organizations/{org_uuid}/invite-link", headers=owner["headers"]).json()["token"]
+
+    client.post(f"/invites/{token}/accept", headers=joiner["headers"])
+    client.delete(
+        f"/organizations/{org_uuid}/members/{joiner['user_uuid']}", headers=owner["headers"]
+    )
+    assert client.get(f"/organizations/{org_uuid}/members", headers=joiner["headers"]).status_code == 404
+
+    assert client.post(f"/invites/{token}/accept", headers=joiner["headers"]).status_code == 200
+    assert client.get(f"/organizations/{org_uuid}/members", headers=joiner["headers"]).status_code == 200
+
+
+def test_invite_link_is_never_exposed_on_the_workspace_response(client):
+    owner = _signup(client, "inv-owner6")
+    org_uuid = _new_org(client, owner)
+    client.post(f"/organizations/{org_uuid}/invite-link", headers=owner["headers"])
+    for org in client.get("/organizations", headers=owner["headers"]).json():
+        assert "invite_token" not in org
+
+
+def test_create_invite_link_404s_when_the_workspace_vanished(client, monkeypatch):
+    owner = _signup(client, "inv-owner7")
+    org_uuid = _new_org(client, owner)
+    monkeypatch.setattr("routers.organizations.create_org_invite", lambda _: None)
+    resp = client.post(f"/organizations/{org_uuid}/invite-link", headers=owner["headers"])
+    assert resp.status_code == 404
+
+
+def test_create_org_invite_returns_nothing_for_an_unknown_workspace():
+    from db import create_org_invite, get_org_invite, revoke_org_invite
+
+    missing = str(uuid.uuid4())
+    assert create_org_invite(missing) is None
+    assert get_org_invite(missing) is None
+    revoke_org_invite(missing)
+
+
+@pytest.fixture
+def sent_emails(monkeypatch):
+    sent = []
+    monkeypatch.setattr(
+        "routers.organizations.send_email",
+        lambda to, template, variables: sent.append(
+            {"to": to, "template": template, "variables": variables}
+        ),
+    )
+    monkeypatch.setattr("routers.organizations.frontend_url", lambda: "https://app.example.com")
+    return sent
+
+
+def test_adding_someone_emails_them_a_link_into_the_workspace(client, sent_emails):
+    owner = _signup(client, "mail-owner")
+    org_uuid = _new_org(client, owner, name="Mail Co")
+    invitee = f"nobody-{uuid.uuid4().hex[:8]}@example.com"
+
+    resp = client.post(
+        f"/organizations/{org_uuid}/members",
+        json={"email": invitee},
+        headers=owner["headers"],
+    )
+    assert resp.status_code == 201, resp.text
+
+    assert len(sent_emails) == 1
+    mail = sent_emails[0]
+    assert mail["to"] == invitee
+    assert mail["template"] == WORKSPACE_INVITE_TEMPLATE
+    assert mail["variables"]["WORKSPACE"] == "Mail Co"
+    assert mail["variables"]["URL"] == f"https://app.example.com/{org_uuid}/agents"
+    assert mail["variables"]["INVITER"] == "O U"
+
+
+def test_someone_who_already_has_an_account_gets_the_same_email(client, sent_emails):
+    """The person is a member either way, so both cases read alike and land alike."""
+    owner = _signup(client, "mail-owner2")
+    member = _signup(client, "mail-invitee")
+    org_uuid = _new_org(client, owner, name="Mail Co Two")
+
+    resp = client.post(
+        f"/organizations/{org_uuid}/members",
+        json={"email": member["email"]},
+        headers=owner["headers"],
+    )
+    assert resp.status_code == 201, resp.text
+
+    assert len(sent_emails) == 1
+    mail = sent_emails[0]
+    assert mail["to"] == member["email"]
+    assert mail["template"] == WORKSPACE_INVITE_TEMPLATE
+    assert mail["variables"]["WORKSPACE"] == "Mail Co Two"
+    assert mail["variables"]["URL"] == f"https://app.example.com/{org_uuid}/agents"
+
+
+def test_a_second_workspace_links_to_that_second_workspace(client, sent_emails):
+    first = _signup(client, "mail-owner3")
+    second = _signup(client, "mail-owner4")
+    invitee = f"stubmail-{uuid.uuid4().hex[:8]}@example.com"
+
+    first_org = _new_org(client, first, name="First Co")
+    second_org = _new_org(client, second, name="Second Co")
+    client.post(
+        f"/organizations/{first_org}/members",
+        json={"email": invitee},
+        headers=first["headers"],
+    )
+    client.post(
+        f"/organizations/{second_org}/members",
+        json={"email": invitee},
+        headers=second["headers"],
+    )
+
+    assert len(sent_emails) == 2
+    assert sent_emails[0]["variables"]["URL"] == f"https://app.example.com/{first_org}/agents"
+    assert sent_emails[1]["variables"]["WORKSPACE"] == "Second Co"
+    assert sent_emails[1]["variables"]["URL"] == f"https://app.example.com/{second_org}/agents"
+
+
+def test_a_failed_add_sends_nothing(client, sent_emails):
+    owner = _signup(client, "mail-owner5")
+    member = _signup(client, "mail-invitee2")
+    org_uuid = _new_org(client, owner, name="Dup Co")
+
+    client.post(
+        f"/organizations/{org_uuid}/members",
+        json={"email": member["email"]},
+        headers=owner["headers"],
+    )
+    sent_emails.clear()
+
+    dup = client.post(
+        f"/organizations/{org_uuid}/members",
+        json={"email": member["email"]},
+        headers=owner["headers"],
+    )
+    assert dup.status_code == 400
+    assert sent_emails == []
+
+
+def test_names_reach_the_mailer_unescaped(client, sent_emails, monkeypatch):
+    """The mailer strips markup itself, so escaping here would put `&amp;` in the
+    subject the template renders."""
+    owner = _signup(client, "mail-owner6")
+    org_uuid = _new_org(client, owner, name="Tom & Jerry <Labs>")
+    monkeypatch.setattr(
+        "routers.organizations.get_user",
+        lambda _: {"first_name": "Ann & <b>Bo</b>", "last_name": "O'Neil"},
+    )
+    invitee = f"plus+tag-{uuid.uuid4().hex[:8]}@example.com"
+
+    resp = client.post(
+        f"/organizations/{org_uuid}/members",
+        json={"email": invitee},
+        headers=owner["headers"],
+    )
+    assert resp.status_code == 201, resp.text
+
+    variables = sent_emails[0]["variables"]
+    assert variables["WORKSPACE"] == "Tom & Jerry <Labs>"
+    assert variables["INVITER"] == "Ann & <b>Bo</b> O'Neil"
+    assert "&amp;" not in variables["WORKSPACE"]
+    assert "&amp;" not in variables["INVITER"]
+    assert variables["URL"] == f"https://app.example.com/{org_uuid}/agents"
+
+
+def test_the_invite_goes_to_the_tidied_up_address(client, sent_emails):
+    """A stray space or capital letter must not reach the mail provider."""
+    owner = _signup(client, "mail-owner7")
+    org_uuid = _new_org(client, owner, name="Padded")
+    invitee = f"Mixed-{uuid.uuid4().hex[:8]}@Example.COM"
+
+    resp = client.post(
+        f"/organizations/{org_uuid}/members",
+        json={"email": f"  {invitee}  "},
+        headers=owner["headers"],
+    )
+    assert resp.status_code == 201, resp.text
+
+    assert [m["to"] for m in sent_emails] == [invitee.lower()]
+
+
+def test_inviter_falls_back_to_their_email_when_they_have_no_name(
+    client, sent_emails, monkeypatch
+):
+    owner = _signup(client, "mail-owner8")
+    org_uuid = _new_org(client, owner, name="Nameless")
+    monkeypatch.setattr(
+        "routers.organizations.get_user", lambda _: {"email": "boss@example.com"}
+    )
+
+    resp = client.post(
+        f"/organizations/{org_uuid}/members",
+        json={"email": f"fallback-{uuid.uuid4().hex[:8]}@example.com"},
+        headers=owner["headers"],
+    )
+    assert resp.status_code == 201, resp.text
+    assert sent_emails[0]["variables"]["INVITER"] == "boss@example.com"

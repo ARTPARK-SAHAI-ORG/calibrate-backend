@@ -1228,6 +1228,25 @@ def init_db():
         except sqlite3.OperationalError:
             pass
 
+        # User-chosen run name. NULL means the run falls back to its position
+        # ("Run 3"), which is what every run read as before this column existed.
+        try:
+            cursor.execute("ALTER TABLE agent_test_jobs ADD COLUMN name TEXT")
+        except sqlite3.OperationalError:
+            pass
+
+        # Workspace invite link. One live token per workspace: creating a new
+        # one overwrites the old, revoking sets both back to NULL.
+        for col in ("invite_token TEXT DEFAULT NULL", "invite_token_created_at TIMESTAMP DEFAULT NULL"):
+            try:
+                cursor.execute(f"ALTER TABLE organizations ADD COLUMN {col}")
+            except sqlite3.OperationalError:
+                pass
+        cursor.execute(
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_organizations_invite_token "
+            "ON organizations(invite_token) WHERE invite_token IS NOT NULL"
+        )
+
         # Add is_public and share_token columns for public sharing feature
         for table in ("jobs", "agent_test_jobs", "simulation_jobs"):
             try:
@@ -4183,47 +4202,64 @@ def add_organization_member(
             )
             _create_personal_org_for_user(cursor, user_uuid, email, None)
 
-        # Check for existing active membership.
-        cursor.execute(
-            """
-            SELECT id FROM organization_members
-             WHERE org_uuid = ? AND user_id = ? AND deleted_at IS NULL
-            """,
-            (org_uuid, user_uuid),
-        )
-        if cursor.fetchone() is not None:
+        if not _link_member(cursor, org_uuid, user_uuid, role):
             raise ValueError("user is already a member of this organization")
-
-        # Reactivate a soft-deleted membership if present, else insert fresh.
-        cursor.execute(
-            """
-            SELECT id FROM organization_members
-             WHERE org_uuid = ? AND user_id = ? AND deleted_at IS NOT NULL
-             ORDER BY id DESC LIMIT 1
-            """,
-            (org_uuid, user_uuid),
-        )
-        prev = cursor.fetchone()
-        if prev is not None:
-            cursor.execute(
-                """
-                UPDATE organization_members
-                   SET role = ?, deleted_at = NULL, created_at = CURRENT_TIMESTAMP
-                 WHERE id = ?
-                """,
-                (role, prev["id"]),
-            )
-        else:
-            cursor.execute(
-                """
-                INSERT INTO organization_members (org_uuid, user_id, role)
-                VALUES (?, ?, ?)
-                """,
-                (org_uuid, user_uuid, role),
-            )
 
         conn.commit()
         return {"user_id": user_uuid, "email": email, "role": role}
+
+
+def _link_member(cursor, org_uuid: str, user_uuid: str, role: str) -> bool:
+    """Make `user_uuid` an active member of `org_uuid`. False if already one."""
+    cursor.execute(
+        """
+        SELECT id FROM organization_members
+         WHERE org_uuid = ? AND user_id = ? AND deleted_at IS NULL
+        """,
+        (org_uuid, user_uuid),
+    )
+    if cursor.fetchone() is not None:
+        return False
+
+    # Reactivate a soft-deleted membership if present, else insert fresh.
+    cursor.execute(
+        """
+        SELECT id FROM organization_members
+         WHERE org_uuid = ? AND user_id = ? AND deleted_at IS NOT NULL
+         ORDER BY id DESC LIMIT 1
+        """,
+        (org_uuid, user_uuid),
+    )
+    prev = cursor.fetchone()
+    if prev is not None:
+        cursor.execute(
+            """
+            UPDATE organization_members
+               SET role = ?, deleted_at = NULL, created_at = CURRENT_TIMESTAMP
+             WHERE id = ?
+            """,
+            (role, prev["id"]),
+        )
+    else:
+        cursor.execute(
+            """
+            INSERT INTO organization_members (org_uuid, user_id, role)
+            VALUES (?, ?, ?)
+            """,
+            (org_uuid, user_uuid, role),
+        )
+    return True
+
+
+def add_organization_member_by_user_id(
+    org_uuid: str, user_id: str, role: str = "admin"
+) -> bool:
+    """Add an existing user to an org. False if they were already a member."""
+    with get_db_connection() as conn:
+        cursor = conn.cursor()
+        linked = _link_member(cursor, org_uuid, user_id, role)
+        conn.commit()
+        return linked
 
 
 def remove_organization_member(org_uuid: str, user_id: str) -> bool:
@@ -4253,6 +4289,76 @@ def remove_organization_member(org_uuid: str, user_id: str) -> bool:
         )
         conn.commit()
         return True
+
+
+def get_org_invite(org_uuid: str) -> Optional[Dict[str, str]]:
+    """Return the workspace's live invite link, or None if it has none."""
+    with get_db_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            """
+            SELECT invite_token, invite_token_created_at FROM organizations
+             WHERE uuid = ? AND deleted_at IS NULL AND invite_token IS NOT NULL
+            """,
+            (org_uuid,),
+        )
+        row = cursor.fetchone()
+        if row is None:
+            return None
+        return {
+            "token": row["invite_token"],
+            "created_at": row["invite_token_created_at"],
+        }
+
+
+def create_org_invite(org_uuid: str) -> Optional[Dict[str, str]]:
+    """Mint a fresh invite link, replacing any existing one. None if no such org."""
+    with get_db_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            """
+            UPDATE organizations
+               SET invite_token = ?, invite_token_created_at = CURRENT_TIMESTAMP
+             WHERE uuid = ? AND deleted_at IS NULL
+         RETURNING invite_token, invite_token_created_at
+            """,
+            (str(uuid.uuid4()), org_uuid),
+        )
+        row = cursor.fetchone()
+        conn.commit()
+        if row is None:
+            return None
+        return {
+            "token": row["invite_token"],
+            "created_at": row["invite_token_created_at"],
+        }
+
+
+def revoke_org_invite(org_uuid: str) -> None:
+    """Turn off the workspace's invite link. Members already added keep access."""
+    with get_db_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            """
+            UPDATE organizations
+               SET invite_token = NULL, invite_token_created_at = NULL
+             WHERE uuid = ? AND deleted_at IS NULL
+            """,
+            (org_uuid,),
+        )
+        conn.commit()
+
+
+def get_org_by_invite_token(token: str) -> Optional[Dict[str, Any]]:
+    """Resolve an invite token to its workspace, or None if it is dead."""
+    with get_db_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            "SELECT * FROM organizations WHERE invite_token = ? AND deleted_at IS NULL",
+            (token,),
+        )
+        row = cursor.fetchone()
+        return _parse_org_row(row) if row else None
 
 
 # ============ Agents Functions ============
@@ -7422,7 +7528,7 @@ def get_all_agent_test_jobs(job_type: Optional[str] = None) -> List[Dict[str, An
 # read as `has_tool_call_test = NULL` (→ False), same legacy-empty behavior
 # already accepted for `evaluators_by_test_id`.
 _AGENT_TEST_JOB_SUMMARY_COLUMNS = """
-        atj.uuid, atj.type, atj.status, atj.agent_id,
+        atj.uuid, atj.type, atj.status, atj.agent_id, atj.name,
         atj.is_public, atj.share_token, atj.created_at, atj.updated_at, atj.id,
         json_extract(atj.results, '$.total_tests') AS total_tests,
         json_extract(atj.results, '$.passed') AS passed,
@@ -7431,6 +7537,7 @@ _AGENT_TEST_JOB_SUMMARY_COLUMNS = """
         json_extract(atj.results, '$.cost') AS cost,
         json_extract(atj.results, '$.total_tokens') AS total_tokens,
         json_extract(atj.results, '$.unanswered_tests') AS unanswered_tests,
+        json_extract(atj.results, '$.stopped_early') AS stopped_early,
         json_extract(atj.results, '$.error') AS error,
         (SELECT json_group_array(json_object(
             'name', COALESCE(json_extract(je.value, '$.name'),
@@ -7449,6 +7556,7 @@ _AGENT_TEST_JOB_SUMMARY_COLUMNS = """
          )) FROM json_each(COALESCE(atj.results, '{}'), '$.model_results') je
          WHERE je.type = 'object'
         ) AS model_results,
+        json_array_length(atj.details, '$.test_uuids') AS test_count,
         json_extract(atj.details, '$.evaluators_by_test_id') AS evaluators_by_test_id,
         json_extract(atj.details, '$.has_tool_call_test') AS has_tool_call_test,
         json_extract(atj.details, '$.tool_call_evaluator.name')
@@ -7476,6 +7584,7 @@ def _row_to_agent_test_job_summary(row: sqlite3.Row) -> Dict[str, Any]:
         "uuid": row["uuid"],
         "type": row["type"],
         "status": row["status"],
+        "name": row.get("name"),
         "agent_id": row.get("agent_id"),
         "agent_name": row.get("agent_name"),
         "is_public": row.get("is_public"),
@@ -7483,6 +7592,7 @@ def _row_to_agent_test_job_summary(row: sqlite3.Row) -> Dict[str, Any]:
         "created_at": row["created_at"],
         "updated_at": row["updated_at"],
         "id": row.get("id"),
+        "test_count": row.get("test_count"),
         "evaluators_by_test_id": _loads(row.get("evaluators_by_test_id")),
         "has_tool_call_test": bool(row.get("has_tool_call_test")),
         "tool_call_evaluator_name": row.get("tool_call_evaluator_name"),
@@ -7495,6 +7605,7 @@ def _row_to_agent_test_job_summary(row: sqlite3.Row) -> Dict[str, Any]:
             "cost": _loads(row.get("cost")),
             "total_tokens": _loads(row.get("total_tokens")),
             "unanswered_tests": row.get("unanswered_tests"),
+            "stopped_early": bool(row.get("stopped_early")),
             "error": row.get("error"),
             "test_results": _loads(row.get("test_results")),
             "model_results": _loads(row.get("model_results")),
@@ -7706,6 +7817,47 @@ def update_agent_test_job_visibility(
         )
         conn.commit()
         return cursor.rowcount > 0
+
+
+def set_agent_test_job_name(job_uuid: str, name: Optional[str]) -> bool:
+    """Set (or clear, with None) an agent test job's name. Returns True if found.
+
+    Deliberately leaves `updated_at` alone: the workspace-wide run list orders by
+    it, so bumping it would lift a months-old run to the top the moment someone
+    renamed it.
+    """
+    with get_db_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            "UPDATE agent_test_jobs SET name = ? WHERE uuid = ?",
+            (name, job_uuid),
+        )
+        conn.commit()
+        return cursor.rowcount > 0
+
+
+def get_agent_test_job_position(job_uuid: str) -> int:
+    """How many of the agent's jobs of this job's type were created at or before
+    it, counting from 1 — the N a run without a stored name displays as ("Run N").
+
+    Ordered by `(created_at, id)`, the same order the run-list endpoints number
+    in, so a job resolves to the same number whether it is read on its own or in
+    a list. Returns 0 when the job is gone.
+    """
+    with get_db_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            """
+            SELECT COUNT(*) FROM agent_test_jobs prior
+            JOIN agent_test_jobs me ON me.uuid = ?
+            WHERE prior.agent_id = me.agent_id
+              AND prior.type = me.type
+              AND (prior.created_at < me.created_at
+                   OR (prior.created_at = me.created_at AND prior.id <= me.id))
+            """,
+            (job_uuid,),
+        )
+        return cursor.fetchone()[0]
 
 
 def get_agent_test_job_by_share_token(

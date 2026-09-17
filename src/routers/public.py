@@ -22,6 +22,7 @@ from db import (
     get_annotation_job_by_token,
     get_annotation_job_by_view_token,
     get_annotation_task,
+    get_org_by_invite_token,
     get_evaluator_ids_for_job,
     get_evaluators_for_job,
     get_annotator,
@@ -63,8 +64,17 @@ from routers.agent_tests import (
     _enrich_test_results_with_evaluators,
     _enrich_model_results_with_evaluators,
     _build_evaluators_block_for_test_run,
+    _summarize_case_rows,
+    evaluator_totals_from_rows,
+    test_uuid_by_calibrate_id,
+    _tool_call_evaluator_for_run,
+    _RunDetailMode,
+    find_case_result,
     LEADERBOARD_SUMMARY_DESCRIPTION,
     LEADERBOARD_SUMMARY_EXAMPLE,
+    TestCaseResult,
+    _RUN_NAME_DESCRIPTION as RUN_NAME_DESCRIPTION,
+    run_display_name,
 )
 from routers.annotation_tasks import (
     _build_evaluators_block_for_eval_job,
@@ -162,6 +172,7 @@ class PublicTestRunResponse(BaseModel):
         description="LLM test run job ID",
         examples=[_EXAMPLE_TASK_UUID],
     )
+    name: str = Field(description=RUN_NAME_DESCRIPTION)
     status: TaskStatus = Field(description="Run status")
     total_tests: Optional[int] = Field(None, description="Total test cases in the run")
     passed: Optional[int] = Field(None, description="Test cases that passed")
@@ -172,6 +183,10 @@ class PublicTestRunResponse(BaseModel):
     evaluators: Optional[List[Dict[str, Any]]] = Field(
         None,
         description="Shared evaluator definitions, each with its name, description, output type, and rubric. Rows reference these by evaluator ID",
+    )
+    evaluator_summary: Optional[List[Dict[str, Any]]] = Field(
+        None,
+        description="Totals for each evaluator over the whole run, matching the shape a benchmark reports for each model. Only evaluators that returned a verdict appear",
     )
     results: Optional[List[Dict[str, Any]]] = Field(
         None, description="Results for each test case"
@@ -201,7 +216,10 @@ class PublicTestRunResponse(BaseModel):
         description="Whether the run stopped before starting every test case, after too many failed in a row",
     )
     aborted: bool = Field(False, description=_ABORTED_DESCRIPTION)
-    error: bool = Field(False, description="`true` if the run failed")
+    error: Optional[str] = Field(
+        None,
+        description="Why the run could not be carried out, when it failed before producing any result",
+    )
 
 
 class PublicBenchmarkResponse(BaseModel):
@@ -211,6 +229,7 @@ class PublicBenchmarkResponse(BaseModel):
         description="LLM benchmark job ID",
         examples=[_EXAMPLE_TASK_UUID],
     )
+    name: str = Field(description=RUN_NAME_DESCRIPTION)
     status: TaskStatus = Field(description="Run status")
     # Same as PublicTestRunResponse.evaluators — shared by every model's
     # test_results inside model_results[] (all models run the same suite).
@@ -226,8 +245,15 @@ class PublicBenchmarkResponse(BaseModel):
         description=LEADERBOARD_SUMMARY_DESCRIPTION,
         examples=[LEADERBOARD_SUMMARY_EXAMPLE],
     )
+    stopped_early: bool = Field(
+        False,
+        description="Whether any model's run stopped before starting every test case, after too many failed in a row",
+    )
     aborted: bool = Field(False, description=_ABORTED_DESCRIPTION)
-    error: bool = Field(False, description="`true` if the run failed")
+    error: Optional[str] = Field(
+        None,
+        description="Why the run could not be carried out, when it failed before producing any result",
+    )
 
 
 class PublicSimulationRunResponse(BaseModel):
@@ -598,9 +624,21 @@ def get_public_tts(
     )
 
 
+_SHARED_SUMMARY_MODE_DESCRIPTION = (
+    "How much of each test case to return. `full` returns every field of every "
+    "case. `summary` returns one light row per case, with its ID, name, "
+    "verdict and short reason, leaving out the conversation, the agent's output "
+    "and the evaluator verdicts. Read those one case at a time from the same "
+    "share token, at `/public/test-run/{share_token}/results/{test_uuid}` "
+    "for a run or `/public/benchmark/{share_token}/results/{test_uuid}` for "
+    "a benchmark"
+)
+
+
 @router.get("/test-run/{share_token}", response_model=PublicTestRunResponse, summary="Get shared test run")
 def get_public_test_run(
     share_token: str = Path(description="Share token for the LLM test run"),
+    mode: _RunDetailMode = Query("full", description=_SHARED_SUMMARY_MODE_DESCRIPTION),
 ):
     """Get a shared LLM test run result"""
     job = get_agent_test_job_by_share_token(share_token, job_type="llm-unit-test")
@@ -614,22 +652,37 @@ def get_public_test_run(
 
     evaluators_snapshot = details.get("evaluators_by_test_id") or {}
     evaluator_cache: Dict[str, Optional[Dict[str, Any]]] = {}
+    tool_call_evaluator = _tool_call_evaluator_for_run(details)
     _enrich_test_results_with_evaluators(
-        results.get("test_results"), evaluators_snapshot, evaluator_cache
+        results.get("test_results"),
+        evaluators_snapshot,
+        evaluator_cache,
+        tool_call_evaluator,
+        test_uuid_by_calibrate_id(details),
     )
     evaluators_block = _build_evaluators_block_for_test_run(
         evaluators_snapshot,
         test_results=results.get("test_results"),
         evaluator_cache=evaluator_cache,
+        tool_call_evaluator=tool_call_evaluator,
     )
+
+    evaluator_summary = evaluator_totals_from_rows(
+        results.get("test_results"), evaluators_block, evaluators_snapshot
+    )
+
+    if mode == "summary":
+        _summarize_case_rows(results.get("test_results"))
 
     return PublicTestRunResponse(
         task_id=task_id,
+        name=run_display_name(job),
         status=status,
         total_tests=results.get("total_tests"),
         passed=results.get("passed"),
         failed=results.get("failed"),
         evaluators=evaluators_block or None,
+        evaluator_summary=evaluator_summary,
         results=results.get("test_results"),
         latency_ms=results.get("latency_ms"),
         cost=results.get("cost"),
@@ -637,13 +690,14 @@ def get_public_test_run(
         unanswered_tests=results.get("unanswered_tests"),
         stopped_early=bool(results.get("stopped_early")),
         aborted=bool(details.get("aborted")),
-        error=bool(results.get("error")),
+        error=str(results["error"]) if results.get("error") else None,
     )
 
 
 @router.get("/benchmark/{share_token}", response_model=PublicBenchmarkResponse, summary="Get shared benchmark")
 def get_public_benchmark(
     share_token: str = Path(description="Share token for the LLM benchmark run"),
+    mode: _RunDetailMode = Query("full", description=_SHARED_SUMMARY_MODE_DESCRIPTION),
 ):
     """Get a shared LLM benchmark result"""
     job = get_agent_test_job_by_share_token(share_token, job_type="llm-benchmark")
@@ -657,24 +711,77 @@ def get_public_benchmark(
 
     evaluators_snapshot = details.get("evaluators_by_test_id") or {}
     evaluator_cache: Dict[str, Optional[Dict[str, Any]]] = {}
+    tool_call_evaluator = _tool_call_evaluator_for_run(details)
     _enrich_model_results_with_evaluators(
-        results.get("model_results"), evaluators_snapshot, evaluator_cache
+        results.get("model_results"),
+        evaluators_snapshot,
+        evaluator_cache,
+        tool_call_evaluator,
+        test_uuid_by_calibrate_id(details),
     )
     evaluators_block = _build_evaluators_block_for_test_run(
         evaluators_snapshot,
         model_results=results.get("model_results"),
         evaluator_cache=evaluator_cache,
+        tool_call_evaluator=tool_call_evaluator,
     )
+
+    if mode == "summary":
+        for model in results.get("model_results") or []:
+            _summarize_case_rows(model.get("test_results"))
 
     return PublicBenchmarkResponse(
         task_id=task_id,
+        name=run_display_name(job),
         status=status,
         evaluators=evaluators_block or None,
         model_results=results.get("model_results"),
         leaderboard_summary=results.get("leaderboard_summary"),
+        stopped_early=bool(results.get("stopped_early")),
         aborted=bool(details.get("aborted")),
-        error=bool(results.get("error")),
+        error=str(results["error"]) if results.get("error") else None,
     )
+
+
+@router.get(
+    "/test-run/{share_token}/results/{test_uuid}",
+    response_model=TestCaseResult,
+    summary="Get shared test case result",
+)
+def get_public_test_run_case(
+    share_token: str = Path(description="Share token for the LLM test run"),
+    test_uuid: str = Path(
+        description="The test whose result to read, as `test_uuid` on the case"
+    ),
+):
+    """Get the full result of one test case in a shared run"""
+    job = get_agent_test_job_by_share_token(share_token, job_type="llm-unit-test")
+    if not job:
+        raise HTTPException(status_code=404, detail="Not found")
+    return find_case_result(job, test_uuid, None)
+
+
+@router.get(
+    "/benchmark/{share_token}/results/{test_uuid}",
+    response_model=TestCaseResult,
+    summary="Get shared benchmark case result",
+)
+def get_public_benchmark_case(
+    share_token: str = Path(description="Share token for the LLM benchmark run"),
+    test_uuid: str = Path(
+        description="The test whose result to read, as `test_uuid` on the case"
+    ),
+    model: Optional[str] = Query(
+        None,
+        description="Which model's answer to read",
+        examples=["openai/gpt-4.1"],
+    ),
+):
+    """Get the full result of one test case in a shared benchmark"""
+    job = get_agent_test_job_by_share_token(share_token, job_type="llm-benchmark")
+    if not job:
+        raise HTTPException(status_code=404, detail="Not found")
+    return find_case_result(job, test_uuid, model)
 
 
 @router.get("/simulation-run/{share_token}", response_model=PublicSimulationRunResponse, summary="Get shared simulation run")
@@ -1037,3 +1144,25 @@ def upsert_public_annotations(
         "count": len(saved_uuids),
         "status": final_status,
     }
+
+
+class PublicInviteResponse(BaseModel):
+    organization_name: str = Field(description="Name of the workspace you were invited to")
+
+
+@router.get(
+    "/invite/{token}",
+    response_model=PublicInviteResponse,
+    summary="Get invite",
+)
+def get_public_invite(
+    token: str = Path(
+        description="Token from the invite link you were sent",
+        examples=["f47ac10b-58cc-4372-a567-0e02b2c3d479"],
+    ),
+):
+    """Get the name of the workspace an invite link points at"""
+    org = get_org_by_invite_token(token)
+    if org is None:
+        raise HTTPException(status_code=404, detail="Invite not found")
+    return PublicInviteResponse(organization_name=org["name"])

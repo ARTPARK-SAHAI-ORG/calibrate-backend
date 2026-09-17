@@ -669,6 +669,7 @@ def test_run_reports_cases_that_never_ran(client):
 
     listed = client.get(f"/agent-tests/agent/{agent['uuid']}/runs", headers=h).json()
     assert listed["items"][0]["unanswered_tests"] == 1
+    assert listed["items"][0]["stopped_early"] is True
 
     share = client.patch(
         f"/agent-tests/run/{job_id}/visibility",
@@ -678,6 +679,23 @@ def test_run_reports_cases_that_never_ran(client):
     public = client.get(f"/public/test-run/{share['share_token']}").json()
     assert public["unanswered_tests"] == 1
     assert public["stopped_early"] is True
+
+
+def test_agent_runs_list_stopped_early_false_when_not_stored(client):
+    """A run whose results carry no stopped_early lists it as false, not null."""
+    from db import create_agent_test_job, update_agent_test_job
+
+    h = _signup(client)["headers"]
+    agent = _create_agent(client, h)
+    job_id = create_agent_test_job(agent_id=agent["uuid"], job_type="llm-unit-test")
+    update_agent_test_job(
+        job_id,
+        status="done",
+        results={"total_tests": 1, "passed": 1, "failed": 0, "test_results": []},
+    )
+
+    listed = client.get(f"/agent-tests/agent/{agent['uuid']}/runs", headers=h).json()
+    assert listed["items"][0]["stopped_early"] is False
 
 
 def test_agent_runs_list_slims_benchmark_model_results(client):
@@ -1145,11 +1163,11 @@ def test_slim_run_list_helpers_guard_edge_cases():
     # Falsy input → None
     assert _slim_test_results(None) is None
     assert _slim_test_results([]) is None
-    assert _slim_model_results(None) is None
+    assert _slim_model_results(None, None) is None
 
     # Non-dict rows are skipped; an all-junk list collapses to None
     assert _slim_test_results(["x", None]) is None
-    assert _slim_model_results([42]) is None
+    assert _slim_model_results([42], None) is None
 
     # `test_case.name` is lifted onto `name` when the row has no own name
     assert _slim_test_results([{"test_case": {"name": "tc"}, "passed": False}]) == [
@@ -1492,6 +1510,613 @@ def test_benchmark_detail_only_failed_narrows_each_model(client):
     # Model-level fields untouched.
     assert model["passed"] == 1
     assert model["total_tests"] == 3
+
+
+def _seed_summary_tab_job(client, h, agent):
+    """A finished run with a binary and a rating evaluator, and one case of each
+    test type, for the fields the Summary tab reads."""
+    from db import create_agent_test_job, update_agent_test_job
+
+    binary_uuid, rating_uuid = str(uuid.uuid4()), str(uuid.uuid4())
+    snapshot = [
+        {
+            "uuid": binary_uuid,
+            "name": "Correctness",
+            "output_type": "binary",
+            "output_config": {
+                "scale": [
+                    {"value": False, "name": "Wrong"},
+                    {"value": True, "name": "Right"},
+                ]
+            },
+        },
+        {
+            "uuid": rating_uuid,
+            "name": "Helpfulness",
+            "output_type": "rating",
+            "scale_min": 1,
+            "scale_max": 5,
+        },
+    ]
+    job_id = create_agent_test_job(
+        agent_id=agent["uuid"],
+        job_type="llm-unit-test",
+        details={
+            "evaluators_by_test_id": {
+                "tc_a": snapshot,
+                "tc_b": snapshot,
+                "tc_c": snapshot,
+            }
+        },
+    )
+
+    def case(case_id, test_type, match, score):
+        return {
+            "name": case_id,
+            "test_case_id": case_id,
+            "passed": match,
+            "reasoning": "because",
+            "output": {"response": "hi"},
+            "test_case": {"name": case_id, "evaluation": {"type": test_type}},
+            "judge_results": [
+                {"evaluator_uuid": binary_uuid, "match": match},
+                {"evaluator_uuid": rating_uuid, "score": score},
+            ],
+        }
+
+    update_agent_test_job(
+        job_id,
+        status="done",
+        results={
+            "total_tests": 3,
+            "passed": 2,
+            "failed": 1,
+            "test_results": [
+                case("tc_a", "response", True, 5),
+                case("tc_b", "general", True, 3),
+                case("tc_c", "tool_call", False, 1),
+            ],
+        },
+    )
+    return job_id, binary_uuid, rating_uuid
+
+
+def test_run_detail_reports_each_case_test_type(client):
+    """The Summary tab groups by what the test asked of the agent, which summary
+    mode must carry since it drops the case body the type used to be read from."""
+    h = _signup(client)["headers"]
+    agent = _create_agent(client, h)
+    job_id, _, _ = _seed_summary_tab_job(client, h, agent)
+
+    for params in ({}, {"mode": "summary"}):
+        body = client.get(
+            f"/agent-tests/run/{job_id}", params=params, headers=h
+        ).json()
+        assert [c["test_type"] for c in body["results"]] == [
+            "response",
+            "general",
+            "tool_call",
+        ]
+
+
+def test_run_detail_test_type_absent_when_the_case_does_not_record_it(client):
+    """An imported run can carry anything in that slot, so an unknown value
+    reads as absent rather than failing the response."""
+    from db import create_agent_test_job, update_agent_test_job
+
+    h = _signup(client)["headers"]
+    agent = _create_agent(client, h)
+    job_id = create_agent_test_job(
+        agent_id=agent["uuid"], job_type="llm-unit-test", details={}
+    )
+    update_agent_test_job(
+        job_id,
+        status="done",
+        results={
+            "test_results": [
+                {"name": "a", "test_case_id": "a", "passed": True, "test_case": None},
+                {
+                    "name": "b",
+                    "test_case_id": "b",
+                    "passed": True,
+                    "test_case": {"evaluation": {"type": "something-else"}},
+                },
+            ]
+        },
+    )
+
+    body = client.get(f"/agent-tests/run/{job_id}", headers=h).json()
+    assert [c["test_type"] for c in body["results"]] == [None, None]
+
+
+def test_run_detail_reports_per_evaluator_totals(client):
+    """A single run has never stored calibrate's per-evaluator block, so the
+    totals are counted from the rows and are there in both modes."""
+    h = _signup(client)["headers"]
+    agent = _create_agent(client, h)
+    job_id, binary_uuid, rating_uuid = _seed_summary_tab_job(client, h, agent)
+
+    for params in ({}, {"mode": "summary"}):
+        body = client.get(
+            f"/agent-tests/run/{job_id}", params=params, headers=h
+        ).json()
+        by_uuid = {e["evaluator_uuid"]: e for e in body["evaluator_summary"]}
+
+        binary = by_uuid[binary_uuid]
+        assert binary["type"] == "binary"
+        assert binary["name"] == "Correctness"
+        assert (binary["passed"], binary["total"]) == (2, 3)
+        # Out of 100, matching what calibrate writes for a benchmark.
+        assert binary["pass_rate"] == 2 / 3 * 100
+
+        rating = by_uuid[rating_uuid]
+        assert rating["type"] == "rating"
+        assert (rating["mean"], rating["min"], rating["max"]) == (3.0, 1, 5)
+        assert rating["count"] == 3
+        assert (rating["scale_min"], rating["scale_max"]) == (1, 5)
+
+
+def test_run_detail_totals_key_two_same_named_evaluators_apart(client):
+    """`metric_key` is calibrate's own key, which carries a suffix when two
+    evaluators share a display name. Reading the current name instead would give
+    both entries the same key and collapse them into one card."""
+    from db import create_agent_test_job, update_agent_test_job
+
+    h = _signup(client)["headers"]
+    agent = _create_agent(client, h)
+    first, second = str(uuid.uuid4()), str(uuid.uuid4())
+    job_id = create_agent_test_job(
+        agent_id=agent["uuid"],
+        job_type="llm-unit-test",
+        details={
+            "evaluators_by_test_id": {
+                "tc_a": [
+                    {"uuid": first, "name": "Correctness", "output_type": "binary"},
+                    {
+                        "uuid": second,
+                        "name": "Correctness-a1b2c3d4",
+                        "output_type": "binary",
+                    },
+                ]
+            }
+        },
+    )
+    update_agent_test_job(
+        job_id,
+        status="done",
+        results={
+            "test_results": [
+                {
+                    "name": "tc_a",
+                    "test_case_id": "tc_a",
+                    "passed": True,
+                    "judge_results": [
+                        {"evaluator_uuid": first, "match": True},
+                        {"evaluator_uuid": second, "match": False},
+                    ],
+                }
+            ]
+        },
+    )
+
+    body = client.get(f"/agent-tests/run/{job_id}", headers=h).json()
+    keys = sorted(e["metric_key"] for e in body["evaluator_summary"])
+    assert keys == ["Correctness", "Correctness-a1b2c3d4"]
+
+
+def test_run_detail_totals_skip_an_evaluator_with_no_verdict(client):
+    """A run still going has evaluators that have judged nothing yet. They stay
+    out of the totals rather than showing as a zero."""
+    h = _signup(client)["headers"]
+    agent = _create_agent(client, h)
+    job_id = _seed_run_job(client, h, agent)
+
+    body = client.get(f"/agent-tests/run/{job_id}", headers=h).json()
+    # The seeded rows judge one evaluator; the pending row judges none.
+    assert len(body["evaluator_summary"]) == 1
+    assert body["evaluator_summary"][0]["total"] == 2
+
+
+def test_run_detail_has_no_totals_before_anything_is_judged(client):
+    from db import create_agent_test_job
+
+    h = _signup(client)["headers"]
+    agent = _create_agent(client, h)
+    job_id = create_agent_test_job(
+        agent_id=agent["uuid"], job_type="llm-unit-test", details={}
+    )
+
+    body = client.get(f"/agent-tests/run/{job_id}", headers=h).json()
+    assert body["evaluator_summary"] is None
+
+
+def _seed_run_keyed_by_name(client, h, agent, stamped):
+    """A run whose rows carry the test's NAME as calibrate echoes it, with the
+    frozen rubric filed under the test's own ID. `stamped` writes `test_uuid`
+    onto the row the way a run does since that shipped."""
+    from db import create_agent_test_job, update_agent_test_job
+
+    test_uuid, evaluator_uuid = str(uuid.uuid4()), str(uuid.uuid4())
+    name = "v4_ex__pruned__p1__district__1fba341de0"
+    job_id = create_agent_test_job(
+        agent_id=agent["uuid"],
+        job_type="llm-unit-test",
+        details={
+            "test_uuids": [test_uuid],
+            "test_names": [name],
+            "evaluators_by_test_id": {
+                test_uuid: [
+                    {
+                        "uuid": evaluator_uuid,
+                        "name": "Correctness as it ran",
+                        "output_type": "rating",
+                        "scale_min": 1,
+                        "scale_max": 5,
+                        "output_config": {
+                            "scale": [
+                                {"value": 1, "name": "Poor"},
+                                {"value": 5, "name": "Excellent"},
+                            ]
+                        },
+                    }
+                ]
+            },
+        },
+    )
+    row = {
+        "name": name,
+        "test_case_id": name,
+        "passed": True,
+        "output": {"response": "hi"},
+        "test_case": {"name": name, "evaluation": {"type": "response"}},
+        "judge_results": [{"evaluator_uuid": evaluator_uuid, "score": 5}],
+    }
+    if stamped:
+        row["test_uuid"] = test_uuid
+    update_agent_test_job(job_id, status="done", results={"test_results": [row]})
+    return job_id, test_uuid, name
+
+
+@pytest.mark.parametrize("stamped", [True, False])
+def test_run_detail_reports_the_tests_own_id(client, stamped):
+    """Calibrate echoes the test's name back, so the row is keyed by name. The
+    response must still carry the test's own ID: written at run time for a new
+    run, worked out on every read for one that predates that."""
+    h = _signup(client)["headers"]
+    agent = _create_agent(client, h)
+    job_id, test_uuid, name = _seed_run_keyed_by_name(client, h, agent, stamped)
+
+    case = client.get(f"/agent-tests/run/{job_id}", headers=h).json()["results"][0]
+    assert case["test_case_id"] == name
+    assert case["test_uuid"] == test_uuid
+
+
+@pytest.mark.parametrize("stamped", [True, False])
+def test_run_case_opens_by_the_tests_own_id(client, stamped):
+    h = _signup(client)["headers"]
+    agent = _create_agent(client, h)
+    job_id, test_uuid, name = _seed_run_keyed_by_name(client, h, agent, stamped)
+
+    by_uuid = client.get(f"/agent-tests/run/{job_id}/results/{test_uuid}", headers=h)
+    assert by_uuid.status_code == 200
+    assert by_uuid.json()["test_uuid"] == test_uuid
+
+    # The echoed name still opens it, so a link made before this keeps working.
+    by_name = client.get(f"/agent-tests/run/{job_id}/results/{name}", headers=h)
+    assert by_name.status_code == 200
+
+
+def test_run_detail_finds_the_frozen_rubric_for_a_name_keyed_row(client):
+    """The rubric is filed under the test's own ID while the row is keyed by
+    name. Without resolving the two, a finished run redraws against whatever the
+    evaluator says today instead of what it was judged by."""
+    h = _signup(client)["headers"]
+    agent = _create_agent(client, h)
+    job_id, _, _ = _seed_run_keyed_by_name(client, h, agent, stamped=False)
+
+    case = client.get(f"/agent-tests/run/{job_id}", headers=h).json()["results"][0]
+    # The label for a score comes from the rubric the run froze. Miss the
+    # lookup and the verdict shows a bare number with no word for it.
+    assert case["judge_results"][0]["value_name"] == "Excellent"
+
+
+def test_run_detail_leaves_the_id_absent_when_it_cannot_be_worked_out(client):
+    """A run that froze no names has nothing to map back, so the field is null
+    and the case still opens by what the row does carry."""
+    from db import create_agent_test_job, update_agent_test_job
+
+    h = _signup(client)["headers"]
+    agent = _create_agent(client, h)
+    job_id = create_agent_test_job(
+        agent_id=agent["uuid"], job_type="llm-unit-test", details={}
+    )
+    update_agent_test_job(
+        job_id,
+        status="done",
+        results={
+            "test_results": [
+                {"name": "some name", "test_case_id": "some name", "passed": True}
+            ]
+        },
+    )
+
+    case = client.get(f"/agent-tests/run/{job_id}", headers=h).json()["results"][0]
+    assert case["test_uuid"] is None
+    opened = client.get(f"/agent-tests/run/{job_id}/results/some name", headers=h)
+    assert opened.status_code == 200
+
+
+_HEAVY_CASE_FIELDS = ("test_case", "output", "judge_results", "inputs")
+
+
+def test_run_detail_full_mode_keeps_every_key(client):
+    """`response_model_exclude_unset=True` must not drop anything in full mode:
+    every field the response model declares is still on each case, including the
+    ones that are null for this row."""
+    h = _signup(client)["headers"]
+    agent = _create_agent(client, h)
+    job_id = _seed_run_job(client, h, agent)
+
+    body = client.get(f"/agent-tests/run/{job_id}", headers=h).json()
+    for case in body["results"]:
+        for field in _HEAVY_CASE_FIELDS:
+            assert field in case
+        assert "latency_ms" in case and "cost" in case and "not_run" in case
+    # The pending row carries explicit nulls rather than missing keys.
+    assert body["results"][2]["output"] is None
+
+
+def test_run_detail_summary_mode_drops_heavy_keys(client):
+    """`?mode=summary` removes the four heavy keys from every case and keeps the
+    light row: id, name, verdict, unanswered and the short reason."""
+    h = _signup(client)["headers"]
+    agent = _create_agent(client, h)
+    job_id = _seed_run_job(client, h, agent)
+
+    resp = client.get(
+        f"/agent-tests/run/{job_id}", params={"mode": "summary"}, headers=h
+    )
+    assert resp.status_code == 200
+    body = resp.json()
+    assert len(body["results"]) == 3
+    for case in body["results"]:
+        for field in _HEAVY_CASE_FIELDS:
+            assert field not in case
+        assert "test_case_id" in case
+        assert "name" in case
+        assert "passed" in case
+        assert case["unanswered"] is False
+    assert body["results"][0]["reasoning"] == "looks good"
+    # Run-level fields are untouched, so a client keeps the rubric it needs to
+    # read a verdict fetched case by case.
+    assert body["total_tests"] == 3
+    assert body["evaluators"][0]["output_config"] is not None
+
+
+def test_run_detail_summary_mode_combines_with_only_failed(client):
+    h = _signup(client)["headers"]
+    agent = _create_agent(client, h)
+    job_id = _seed_run_job(client, h, agent)
+
+    body = client.get(
+        f"/agent-tests/run/{job_id}",
+        params={"mode": "summary", "only_failed": "true"},
+        headers=h,
+    ).json()
+    assert [c["name"] for c in body["results"]] == ["tc_fail"]
+    assert "output" not in body["results"][0]
+    assert body["results"][0]["reasoning"] == "wrong answer"
+
+
+def test_run_detail_rejects_unknown_mode(client):
+    h = _signup(client)["headers"]
+    agent = _create_agent(client, h)
+    job_id = _seed_run_job(client, h, agent)
+
+    resp = client.get(
+        f"/agent-tests/run/{job_id}", params={"mode": "slim"}, headers=h
+    )
+    assert resp.status_code == 422
+
+
+def test_benchmark_detail_summary_mode_drops_heavy_keys(client):
+    """`?mode=summary` trims every model's cases the same way the run does, and
+    leaves the model-level scalars alone."""
+    h = _signup(client)["headers"]
+    agent = _create_agent(client, h)
+    job_id = _seed_benchmark_job(client, h, agent)
+
+    resp = client.get(
+        f"/agent-tests/benchmark/{job_id}", params={"mode": "summary"}, headers=h
+    )
+    assert resp.status_code == 200
+    model = resp.json()["model_results"][0]
+    assert len(model["test_results"]) == 3
+    for case in model["test_results"]:
+        for field in _HEAVY_CASE_FIELDS:
+            assert field not in case
+        assert "passed" in case
+    assert model["passed"] == 1
+    assert model["total_tests"] == 3
+
+
+def test_benchmark_detail_full_mode_keeps_every_key(client):
+    h = _signup(client)["headers"]
+    agent = _create_agent(client, h)
+    job_id = _seed_benchmark_job(client, h, agent)
+
+    model = client.get(f"/agent-tests/benchmark/{job_id}", headers=h).json()[
+        "model_results"
+    ][0]
+    for case in model["test_results"]:
+        for field in _HEAVY_CASE_FIELDS:
+            assert field in case
+
+
+def test_run_case_result_returns_one_case_in_full(client):
+    """The per-case endpoint returns the detail `mode=summary` leaves out."""
+    h = _signup(client)["headers"]
+    agent = _create_agent(client, h)
+    job_id = _seed_run_job(client, h, agent)
+
+    resp = client.get(f"/agent-tests/run/{job_id}/results/tc_fail", headers=h)
+    assert resp.status_code == 200
+    case = resp.json()
+    assert case["test_case_id"] == "tc_fail"
+    assert case["output"]["response"] == "nope"
+    assert case["test_case"] == {"name": "tc_fail", "history": []}
+    assert case["judge_results"][0]["match"] is False
+    assert case["reasoning"] == "wrong answer"
+
+
+def test_run_case_result_unknown_case_is_404(client):
+    h = _signup(client)["headers"]
+    agent = _create_agent(client, h)
+    job_id = _seed_run_job(client, h, agent)
+
+    resp = client.get(f"/agent-tests/run/{job_id}/results/nope", headers=h)
+    assert resp.status_code == 404
+    assert resp.json()["detail"] == "Test case result not found"
+
+
+def test_run_case_result_unknown_run_is_404(client):
+    h = _signup(client)["headers"]
+    resp = client.get(
+        f"/agent-tests/run/{NONEXISTENT_UUID}/results/tc_fail", headers=h
+    )
+    assert resp.status_code == 404
+
+
+def test_run_case_result_hidden_from_another_workspace(client):
+    """Refused for a caller outside the owning workspace, and told nothing
+    about which workspace owns it (the shared handler in main.py sends the
+    owning ID only to a member)."""
+    h = _signup(client)["headers"]
+    agent = _create_agent(client, h)
+    job_id = _seed_run_job(client, h, agent)
+
+    other = _signup(client)["headers"]
+    resp = client.get(f"/agent-tests/run/{job_id}/results/tc_fail", headers=other)
+    assert resp.status_code == 403
+    assert "organization_uuid" not in resp.json()
+
+
+def test_run_case_result_for_benchmark_needs_a_model(client):
+    """A benchmark runs every test once per model, so the case is ambiguous
+    without one."""
+    h = _signup(client)["headers"]
+    agent = _create_agent(client, h)
+    job_id = _seed_benchmark_job(client, h, agent)
+
+    resp = client.get(f"/agent-tests/run/{job_id}/results/tc_fail", headers=h)
+    assert resp.status_code == 400
+    assert "model" in resp.json()["detail"]
+
+    ok = client.get(
+        f"/agent-tests/run/{job_id}/results/tc_fail",
+        params={"model": "openai/gpt-4.1"},
+        headers=h,
+    )
+    assert ok.status_code == 200
+    assert ok.json()["output"]["response"] == "no"
+
+    missing = client.get(
+        f"/agent-tests/run/{job_id}/results/tc_fail",
+        params={"model": "openai/gpt-9"},
+        headers=h,
+    )
+    assert missing.status_code == 404
+    assert missing.json()["detail"] == "Model not found in this benchmark"
+
+
+def test_run_case_result_for_a_model_that_has_not_started(client):
+    """A model still queued carries no results at all. That is a missing case,
+    not a missing model, or the client reads its own model name as wrong."""
+    from db import create_agent_test_job, update_agent_test_job
+
+    h = _signup(client)["headers"]
+    agent = _create_agent(client, h)
+    job_id = create_agent_test_job(
+        agent_id=agent["uuid"], job_type="llm-benchmark", details={}
+    )
+    update_agent_test_job(
+        job_id,
+        status="in_progress",
+        results={
+            "model_results": [
+                {
+                    "model": "openai/gpt-4.1",
+                    "success": None,
+                    "message": "Queued...",
+                    "test_results": None,
+                }
+            ]
+        },
+    )
+
+    resp = client.get(
+        f"/agent-tests/run/{job_id}/results/tc_fail",
+        params={"model": "openai/gpt-4.1"},
+        headers=h,
+    )
+    assert resp.status_code == 404
+    assert resp.json()["detail"] == "Test case result not found"
+
+
+def test_run_case_result_synthesizes_a_tool_call_verdict(client):
+    """A tool-call row carries no judge_results from calibrate, so the frozen
+    tool-call evaluator supplies the verdict at read time, here as much as on
+    the run detail."""
+    from db import create_agent_test_job, update_agent_test_job
+
+    h = _signup(client)["headers"]
+    agent = _create_agent(client, h)
+    job_id = create_agent_test_job(
+        agent_id=agent["uuid"],
+        job_type="llm-unit-test",
+        details={
+            "tool_call_evaluator": {
+                "uuid": NONEXISTENT_UUID,
+                "name": "Tool call correctness",
+                "output_type": "binary",
+                "output_config": {
+                    "scale": [
+                        {"value": False, "name": "Wrong"},
+                        {"value": True, "name": "Correct"},
+                    ]
+                },
+            }
+        },
+    )
+    update_agent_test_job(
+        job_id,
+        status="done",
+        results={
+            "test_results": [
+                {
+                    "name": "tc_tool",
+                    "test_case_id": "tc_tool",
+                    "passed": True,
+                    "reasoning": "calls match",
+                    "output": {"tool_calls": [{"tool": "search"}]},
+                    "test_case": {
+                        "expected_tool_calls": [{"tool": "search"}],
+                        "evaluation": {"type": "tool_call"},
+                    },
+                    "judge_results": None,
+                }
+            ]
+        },
+    )
+
+    case = client.get(
+        f"/agent-tests/run/{job_id}/results/tc_tool", headers=h
+    ).json()
+    verdict = case["judge_results"][0]
+    assert verdict["evaluator_uuid"] == NONEXISTENT_UUID
+    assert verdict["match"] is True
+    assert verdict["value_name"] == "Correct"
+    assert verdict["reasoning"] == "calls match"
 
 
 def test_agent_tests_link_with_missing(client):
@@ -1881,6 +2506,213 @@ def test_benchmark_response_test_judge_results_completes(client, monkeypatch):
     assert judge_results[0]["match"] is True
 
 
+def _run_benchmark_with_exit_code(
+    client, returncode, write_files, stdout="", write_metrics=True, extra_tests=()
+):
+    """Drive one benchmark of one model through the worker with a fake CLI
+    process. extra_tests: names of linked tests calibrate never writes a row
+    for. Returns (headers, job_uuid)."""
+    import json
+    from pathlib import Path
+
+    import db
+    from routers.agent_tests import run_benchmark_task
+
+    auth = _signup(client)
+    h = auth["headers"]
+    agent = _create_agent(client, h)
+    test_name = f"t-{uuid.uuid4().hex[:6]}"
+    test = _create_test(client, h, name=test_name)
+    client.post(
+        "/agent-tests",
+        json={"agent_uuid": agent["uuid"], "test_uuids": [test["uuid"]]},
+        headers=h,
+    )
+    extra_rows = []
+    for name in extra_tests:
+        extra = _create_test(client, h, name=name)
+        client.post(
+            "/agent-tests",
+            json={"agent_uuid": agent["uuid"], "test_uuids": [extra["uuid"]]},
+            headers=h,
+        )
+        extra_rows.append(db.get_test(extra["uuid"]))
+    agent_row = db.get_agent(agent["uuid"])
+    test_row = db.get_test(test["uuid"])
+    job_uuid = db.create_agent_test_job(
+        agent_id=agent["uuid"], job_type="llm-benchmark", status="in_progress"
+    )
+
+    class _P:
+        def __init__(self):
+            self.returncode = returncode
+            self.pid = 4242
+            self._poll = [None, returncode]
+
+        def poll(self):
+            return self._poll.pop(0) if self._poll else returncode
+
+        def wait(self, *a, **k):
+            return returncode
+
+    def fake_popen(*args, **kwargs):
+        out = Path(kwargs["cwd"]) / "output"
+        with open(out / "stdout.log", "w") as f:
+            f.write(stdout)
+        if write_files:
+            model_dir = out / "gpt-4.1"
+            model_dir.mkdir(parents=True, exist_ok=True)
+            with open(model_dir / "results.json", "w") as f:
+                json.dump(
+                    [
+                        {
+                            "output": {"response": "Yes.", "tool_calls": []},
+                            "metrics": {"passed": True, "reasoning": "ok"},
+                            "test_case": {"id": test["uuid"], "name": test_name},
+                            "test_case_id": test["uuid"],
+                        }
+                    ],
+                    f,
+                )
+        if write_files and write_metrics:
+            with open(model_dir / "metrics.json", "w") as f:
+                json.dump(
+                    {"total": 2, "passed": 1, "errored": 1, "stopped_early": True},
+                    f,
+                )
+        return _P()
+
+    with patch(
+        "routers.agent_tests.subprocess.Popen", side_effect=fake_popen
+    ), patch(
+        "routers.agent_tests.get_s3_client", return_value=MagicMock()
+    ), patch("routers.agent_tests.upload_directory_tree_to_s3"), patch(
+        "routers.agent_tests.upload_file_to_s3"
+    ), patch(
+        "routers.agent_tests.try_start_queued_agent_test_job"
+    ), patch(
+        "routers.agent_tests.time.sleep"
+    ):
+        run_benchmark_task(
+            job_uuid, agent_row, [test_row] + extra_rows, ["gpt-4.1"], "bucket"
+        )
+    return h, job_uuid
+
+
+def test_benchmark_keeps_results_when_cli_exits_nonzero_after_stopping_early(client):
+    """calibrate exits 1 after writing results when a run stops early. The
+    results on disk are the run: status done, the model's stopped_early and
+    unanswered count come from metrics.json, and the detail carries them."""
+    import db
+
+    h, job_uuid = _run_benchmark_with_exit_code(client, 1, write_files=True)
+
+    job = db.get_agent_test_job(job_uuid)
+    assert job["status"] == "done", job.get("results")
+    model = job["results"]["model_results"][0]
+    assert model["stopped_early"] is True
+    assert model["unanswered_tests"] == 1
+
+    data = client.get(f"/agent-tests/benchmark/{job_uuid}", headers=h).json()
+    assert data["stopped_early"] is True
+    assert data["error"] is None
+    assert data["model_results"][0]["stopped_early"] is True
+    assert data["model_results"][0]["unanswered_tests"] == 1
+
+
+def test_benchmark_without_results_reports_the_cli_error_line(client):
+    """No results on disk and a nonzero exit: the run failed, and the detail
+    says why with the line the eval tool printed."""
+    import db
+
+    h, job_uuid = _run_benchmark_with_exit_code(
+        client,
+        1,
+        write_files=False,
+        stdout="header\n❌ Could not connect to agent at http://x (after 4 attempts)\n",
+    )
+
+    assert db.get_agent_test_job(job_uuid)["status"] == "failed"
+    data = client.get(f"/agent-tests/benchmark/{job_uuid}", headers=h).json()
+    assert data["status"] == "failed"
+    assert data["error"] == "❌ Could not connect to agent at http://x (after 4 attempts)"
+    assert data["stopped_early"] is False
+
+
+def test_benchmark_crash_after_some_results_is_a_failure_that_keeps_them(client):
+    """A nonzero exit with results.json but no metrics.json for any model is a
+    crash mid-run: failed, with the rows the last intermediate write kept."""
+    import db
+
+    h, job_uuid = _run_benchmark_with_exit_code(
+        client, 1, write_files=True, write_metrics=False, stdout="❌ judge unreachable\n"
+    )
+
+    job = db.get_agent_test_job(job_uuid)
+    assert job["status"] == "failed"
+    assert job["results"]["error"] == "❌ judge unreachable"
+    assert job["results"]["model_results"][0]["model"] == "gpt-4.1"
+    assert job["results"]["model_results"][0]["test_results"][0]["passed"] is True
+    data = client.get(f"/agent-tests/benchmark/{job_uuid}", headers=h).json()
+    assert data["error"] == "❌ judge unreachable"
+    assert data["model_results"][0]["model"] == "gpt-4.1"
+
+
+def test_benchmark_crash_marks_unreached_rows_not_run(client):
+    """A crash mid-run leaves the model's unreached rows with no verdict. They
+    are marked not_run and the model's message says Failed, and the detail
+    endpoint returns both."""
+    import db
+
+    h, job_uuid = _run_benchmark_with_exit_code(
+        client, 1, write_files=True, write_metrics=False, extra_tests=("never-ran",)
+    )
+
+    job = db.get_agent_test_job(job_uuid)
+    assert job["status"] == "failed"
+    model = job["results"]["model_results"][0]
+    assert model["message"] == "Failed"
+    rows = {r["name"]: r for r in model["test_results"]}
+    assert rows["never-ran"]["passed"] is None
+    assert rows["never-ran"]["not_run"] is True
+    assert model["passed"] == 1
+    assert model["failed"] == 0
+
+    data = client.get(f"/agent-tests/benchmark/{job_uuid}", headers=h).json()
+    model = data["model_results"][0]
+    assert model["message"] == "Failed"
+    rows = {r["name"]: r for r in model["test_results"]}
+    assert rows["never-ran"]["not_run"] is True
+    assert rows["never-ran"]["passed"] is None
+
+
+def test_benchmark_exit_zero_without_files_is_a_failure(client):
+    import db
+
+    h, job_uuid = _run_benchmark_with_exit_code(client, 0, write_files=False)
+
+    assert db.get_agent_test_job(job_uuid)["status"] == "failed"
+    data = client.get(f"/agent-tests/benchmark/{job_uuid}", headers=h).json()
+    assert data["error"] == "calibrate-agent exited with code 0 but wrote no results.json or metrics.json"
+
+
+def test_benchmark_unexpected_exception_stores_its_type_and_message(
+    client, monkeypatch
+):
+    import db
+    from routers import agent_tests
+
+    def boom(*_args, **_kwargs):
+        raise ValueError("boom")
+
+    monkeypatch.setattr(agent_tests, "_find_all_results_in_output", boom)
+    _h, job_uuid = _run_benchmark_with_exit_code(client, 0, write_files=True)
+
+    job = db.get_agent_test_job(job_uuid)
+    assert job["status"] == "failed"
+    assert job["results"]["error"] == "ValueError: boom"
+
+
 def test_unverified_connection_blocks_all_test_types(client, monkeypatch):
     """Every test type runs the agent (conversation tests are live too), so an
     unverified agent-connection agent blocks response AND conversation runs."""
@@ -2049,6 +2881,34 @@ def test_run_agent_benchmark_subset_scoping(client, monkeypatch):
     assert resp.status_code == 200
     job = get_agent_test_job(resp.json()["task_id"])
     assert job["details"]["test_uuids"] == [t2["uuid"]]
+    assert job["details"]["parallel_models"] is True
+
+
+def test_run_agent_benchmark_stores_sequential_choice(client, monkeypatch):
+    from db import get_agent_test_job
+
+    auth = _signup(client)
+    h = auth["headers"]
+    agent = _create_agent(client, h)
+    test = _create_test(client, h)
+    client.post(
+        "/agent-tests",
+        json={"agent_uuid": agent["uuid"], "test_uuids": [test["uuid"]]},
+        headers=h,
+    )
+
+    monkeypatch.setenv("S3_OUTPUT_BUCKET", "test-bucket")
+    with patch(
+        "routers.agent_tests.can_start_agent_test_job", return_value=False
+    ), patch("threading.Thread"):
+        resp = client.post(
+            f"/agent-tests/agent/{agent['uuid']}/benchmark",
+            json={"models": ["openai/gpt-4"], "parallel_models": False},
+            headers=h,
+        )
+    assert resp.status_code == 200
+    job = get_agent_test_job(resp.json()["task_id"])
+    assert job["details"]["parallel_models"] is False
 
 
 def test_run_agent_benchmark_queued_path(client, monkeypatch):
@@ -3427,7 +4287,7 @@ def test_abort_run_keeps_everything_captured_so_far(client):
     detail = client.get(f"/agent-tests/run/{job_id}", headers=h).json()
     assert detail["status"] == "done"
     assert detail["aborted"] is True
-    assert detail["error"] is False
+    assert detail["error"] is None
     assert [r["name"] for r in detail["results"]] == ["T1", "T2"]
     assert detail["results"][0]["reasoning"] == "good"
     assert detail["results"][0]["not_run"] is False
@@ -3563,3 +4423,703 @@ def test_abort_is_workspace_scoped(client):
         client.post(f"/agent-tests/run/{NONEXISTENT_UUID}/abort", headers=h).status_code
         == 404
     )
+
+
+def test_rename_run_shows_everywhere_and_never_renumbers_the_others(client):
+    """A renamed run keeps its name on both run lists and on the run detail,
+    while the runs around it keep the numbers they already had."""
+    from db import create_agent_test_job, update_agent_test_job
+
+    h = _signup(client)["headers"]
+    agent = _create_agent(client, h)
+
+    jobs = []
+    for _ in range(3):
+        job_id = create_agent_test_job(
+            agent_id=agent["uuid"], job_type="llm-unit-test"
+        )
+        update_agent_test_job(job_id, status="done", results={"total_tests": 0})
+        jobs.append(job_id)
+
+    r = client.patch(
+        f"/agent-tests/run/{jobs[1]}/name",
+        json={"name": "  Nightly regression  "},
+        headers=h,
+    )
+    assert r.status_code == 200, r.text
+    assert r.json() == {"task_id": jobs[1], "name": "Nightly regression"}
+
+    def names(items):
+        return {i["uuid"]: i["name"] for i in items}
+
+    per_agent = client.get(
+        f"/agent-tests/agent/{agent['uuid']}/runs", headers=h
+    ).json()["items"]
+    assert names(per_agent) == {
+        jobs[0]: "Run 1",
+        jobs[1]: "Nightly regression",
+        jobs[2]: "Run 3",
+    }
+
+    workspace = client.get("/agent-tests/runs", headers=h).json()["items"]
+    assert names(workspace) == {
+        jobs[0]: "Run 1",
+        jobs[1]: "Nightly regression",
+        jobs[2]: "Run 3",
+    }
+
+    detail = client.get(f"/agent-tests/run/{jobs[1]}", headers=h)
+    assert detail.json()["name"] == "Nightly regression"
+    assert client.get(f"/agent-tests/run/{jobs[2]}", headers=h).json()["name"] == "Run 3"
+
+
+def test_clearing_a_run_name_returns_to_its_number(client):
+    from db import create_agent_test_job
+
+    h = _signup(client)["headers"]
+    agent = _create_agent(client, h)
+    create_agent_test_job(agent_id=agent["uuid"], job_type="llm-unit-test")
+    job_id = create_agent_test_job(agent_id=agent["uuid"], job_type="llm-unit-test")
+
+    client.patch(
+        f"/agent-tests/run/{job_id}/name", json={"name": "Temporary"}, headers=h
+    )
+    for body in ({"name": "   "}, {"name": None}, {}):
+        r = client.patch(f"/agent-tests/run/{job_id}/name", json=body, headers=h)
+        assert r.status_code == 200, r.text
+        assert r.json()["name"] == "Run 2"
+
+
+def test_rename_benchmark_uses_the_same_endpoint(client):
+    from db import create_agent_test_job
+
+    h = _signup(client)["headers"]
+    agent = _create_agent(client, h)
+    job_id = create_agent_test_job(agent_id=agent["uuid"], job_type="llm-benchmark")
+
+    assert client.get(f"/agent-tests/benchmark/{job_id}", headers=h).json()["name"] == (
+        "Benchmark 1"
+    )
+    r = client.patch(
+        f"/agent-tests/run/{job_id}/name", json={"name": "Model bake-off"}, headers=h
+    )
+    assert r.status_code == 200, r.text
+    assert r.json()["name"] == "Model bake-off"
+    assert client.get(f"/agent-tests/benchmark/{job_id}", headers=h).json()["name"] == (
+        "Model bake-off"
+    )
+
+
+def test_rename_run_rejects_long_names_and_other_workspaces(client):
+    from db import create_agent_test_job
+
+    h = _signup(client)["headers"]
+    agent = _create_agent(client, h)
+    job_id = create_agent_test_job(agent_id=agent["uuid"], job_type="llm-unit-test")
+
+    too_long = client.patch(
+        f"/agent-tests/run/{job_id}/name", json={"name": "x" * 201}, headers=h
+    )
+    assert too_long.status_code == 422
+
+    # Another workspace's run: denied, and the workspace is not named.
+    stranger = _signup(client)["headers"]
+    denied = client.patch(
+        f"/agent-tests/run/{job_id}/name", json={"name": "theirs"}, headers=stranger
+    )
+    assert denied.status_code == 403
+    assert "organization_uuid" not in denied.json()
+
+    assert (
+        client.patch(
+            f"/agent-tests/run/{NONEXISTENT_UUID}/name", json={"name": "x"}, headers=h
+        ).status_code
+        == 404
+    )
+
+
+def test_renaming_a_run_does_not_move_it_up_the_workspace_list(client):
+    """The workspace-wide list is ordered by when a run last changed, so a
+    rename must not lift a months-old run above runs that finished today."""
+    import time
+
+    from db import create_agent_test_job, update_agent_test_job
+
+    h = _signup(client)["headers"]
+    agent = _create_agent(client, h)
+
+    jobs = []
+    for _ in range(3):
+        job_id = create_agent_test_job(
+            agent_id=agent["uuid"], job_type="llm-unit-test"
+        )
+        update_agent_test_job(job_id, status="done", results={"total_tests": 0})
+        jobs.append(job_id)
+        time.sleep(1.1)  # `updated_at` is second-resolution
+
+    order = [
+        i["uuid"] for i in client.get("/agent-tests/runs", headers=h).json()["items"]
+    ]
+    assert order == [jobs[2], jobs[1], jobs[0]]
+
+    client.patch(
+        f"/agent-tests/run/{jobs[0]}/name", json={"name": "Oldest run"}, headers=h
+    )
+    after = [
+        i["uuid"] for i in client.get("/agent-tests/runs", headers=h).json()["items"]
+    ]
+    assert after == order
+
+# ---------------------------------------------------------------------------
+# /agent-tests/agent/{uuid}/benchmark/import
+# ---------------------------------------------------------------------------
+
+
+def _benchmark_archive(
+    models, case_ids, *, root="output", judge_evaluator_id=None, judge_name="Correctness"
+):
+    """Tar a calibrate benchmark output folder, one folder per model."""
+    import io
+    import json
+    import tarfile
+
+    buf = io.BytesIO()
+    with tarfile.open(fileobj=buf, mode="w") as tar:
+
+        def add(name, payload):
+            data = payload.encode("utf-8")
+            info = tarfile.TarInfo(f"{root}/{name}")
+            info.size = len(data)
+            tar.addfile(info, io.BytesIO(data))
+
+        for model, passed_ids in models.items():
+            folder = model.replace("/", "__")
+            rows = []
+            for case_id in case_ids:
+                judge = (
+                    {
+                        judge_name: {
+                            "reasoning": "ok",
+                            "match": case_id in passed_ids,
+                            "evaluator_id": judge_evaluator_id,
+                        }
+                    }
+                    if judge_evaluator_id
+                    else None
+                )
+                rows.append(
+                    {
+                        "test_case_id": case_id,
+                        "test_case": {"id": case_id, "history": []},
+                        "output": {"response": "hi", "tool_calls": [], "cost": 0.1},
+                        "metrics": {
+                            "passed": case_id in passed_ids,
+                            "reasoning": "r",
+                            "judge_results": judge,
+                        },
+                        "latency_ms": 12.5,
+                    }
+                )
+            add(f"{folder}/results.json", json.dumps(rows))
+            add(
+                f"{folder}/metrics.json",
+                json.dumps({"total": len(case_ids), "passed": len(passed_ids)}),
+            )
+            # Never read, and the reason the endpoint filters members by name.
+            add(f"{folder}/results.log", "x" * 512)
+
+        header = "model,passed,total\n"
+        body = "".join(
+            f"{m.replace('/', '__')},{len(p)},{len(case_ids)}\n"
+            for m, p in models.items()
+        )
+        add("leaderboard/llm_leaderboard.csv", header + body)
+    return buf.getvalue()
+
+
+def _agent_with_named_tests(client, h, names):
+    agent = _create_agent(client, h)["uuid"]
+    for name in names:
+        test = _create_test(client, h, name=name)
+        client.post(
+            "/agent-tests",
+            json={"agent_uuid": agent, "test_uuids": [test["uuid"]]},
+            headers=h,
+        )
+    return agent
+
+
+def _post_benchmark_import(client, h, agent, archive):
+    return client.post(
+        f"/agent-tests/agent/{agent}/benchmark/import",
+        headers=h,
+        files={"archive": ("out.tar", archive, "application/x-tar")},
+    )
+
+
+def test_benchmark_import_stores_a_finished_run(client):
+    h = _signup(client)["headers"]
+    names = ["case-a", "case-b"]
+    agent = _agent_with_named_tests(client, h, names)
+    archive = _benchmark_archive(
+        {"openai/gpt-4.1": {"case-a", "case-b"}, "z-ai/glm-5.1": {"case-a"}}, names
+    )
+
+    resp = _post_benchmark_import(client, h, agent, archive)
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["status"] == "done"
+    # Folder names are turned back into the slash form the leaderboard uses.
+    assert body["models"] == ["openai/gpt-4.1", "z-ai/glm-5.1"]
+    assert body["test_count"] == 2
+    assert body["unresolved_evaluators"] == []
+
+    detail = client.get(
+        f"/agent-tests/benchmark/{body['task_id']}", headers=h
+    ).json()
+    assert detail["status"] == "done"
+    by_model = {m["model"]: m for m in detail["model_results"]}
+    assert by_model["openai/gpt-4.1"]["passed"] == 2
+    assert by_model["z-ai/glm-5.1"]["passed"] == 1
+    assert by_model["z-ai/glm-5.1"]["failed"] == 1
+    # Calibrate leaves test_case.name unset, so rows are named from their id.
+    assert [r["name"] for r in by_model["openai/gpt-4.1"]["test_results"]] == names
+    assert [r["model"] for r in detail["leaderboard_summary"]] == [
+        "openai/gpt-4.1",
+        "z-ai/glm-5.1",
+    ]
+
+
+def test_benchmark_import_reports_evaluators_missing_from_workspace(client):
+    h = _signup(client)["headers"]
+    names = ["case-a"]
+    agent = _agent_with_named_tests(client, h, names)
+    archive = _benchmark_archive(
+        {"openai/gpt-4.1": {"case-a"}}, names, judge_evaluator_id=NONEXISTENT_UUID
+    )
+
+    resp = _post_benchmark_import(client, h, agent, archive)
+    assert resp.status_code == 200, resp.text
+    # Stored either way: the score survives, it just renders without a rubric.
+    assert resp.json()["unresolved_evaluators"] == [NONEXISTENT_UUID]
+
+
+def test_benchmark_import_rejects_rows_with_no_matching_test(client):
+    h = _signup(client)["headers"]
+    agent = _agent_with_named_tests(client, h, ["case-a"])
+    archive = _benchmark_archive({"openai/gpt-4.1": {"case-z"}}, ["case-z"])
+
+    resp = _post_benchmark_import(client, h, agent, archive)
+    assert resp.status_code == 400
+    detail = resp.json()["detail"]
+    assert "case-z" in detail
+    assert "not linked to this agent" in detail
+
+
+def test_benchmark_import_ignores_nested_working_folders(client):
+    """calibrate leaves folders whose own nested runs would read as extra models."""
+    import io
+    import json
+    import tarfile
+
+    h = _signup(client)["headers"]
+    names = ["case-a"]
+    agent = _agent_with_named_tests(client, h, names)
+    base = _benchmark_archive({"openai/gpt-4.1": {"case-a"}}, names)
+
+    buf = io.BytesIO()
+    with tarfile.open(fileobj=buf, mode="w") as out:
+        with tarfile.open(fileobj=io.BytesIO(base)) as src:
+            for member in src.getmembers():
+                out.addfile(member, src.extractfile(member))
+        data = json.dumps([{"test_case_id": "junk", "test_case": {"id": "junk"}}]).encode()
+        info = tarfile.TarInfo("output/pending_judges/runs/whatever/results.json")
+        info.size = len(data)
+        out.addfile(info, io.BytesIO(data))
+
+    resp = _post_benchmark_import(client, h, agent, buf.getvalue())
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["models"] == ["openai/gpt-4.1"]
+
+
+def test_benchmark_import_rejects_archive_without_results(client):
+    import io
+    import tarfile
+
+    h = _signup(client)["headers"]
+    agent = _agent_with_named_tests(client, h, ["case-a"])
+
+    buf = io.BytesIO()
+    with tarfile.open(fileobj=buf, mode="w") as tar:
+        data = b"nothing useful"
+        info = tarfile.TarInfo("output/openai__gpt-4.1/results.log")
+        info.size = len(data)
+        tar.addfile(info, io.BytesIO(data))
+
+    resp = _post_benchmark_import(client, h, agent, buf.getvalue())
+    assert resp.status_code == 400
+    assert "results.json" in resp.json()["detail"]
+
+
+def test_benchmark_import_requires_linked_tests(client):
+    h = _signup(client)["headers"]
+    agent = _create_agent(client, h)["uuid"]
+    archive = _benchmark_archive({"openai/gpt-4.1": {"case-a"}}, ["case-a"])
+
+    resp = _post_benchmark_import(client, h, agent, archive)
+    assert resp.status_code == 400
+    assert "No tests linked" in resp.json()["detail"]
+
+
+def test_benchmark_import_unknown_agent(client):
+    h = _signup(client)["headers"]
+    archive = _benchmark_archive({"openai/gpt-4.1": {"case-a"}}, ["case-a"])
+
+    resp = _post_benchmark_import(client, h, NONEXISTENT_UUID, archive)
+    assert resp.status_code == 404
+
+
+def test_benchmark_import_rejects_another_workspaces_agent(client):
+    owner = _signup(client)["headers"]
+    agent = _agent_with_named_tests(client, owner, ["case-a"])
+    archive = _benchmark_archive({"openai/gpt-4.1": {"case-a"}}, ["case-a"])
+
+    outsider = _signup(client)["headers"]
+    resp = _post_benchmark_import(client, outsider, agent, archive)
+    # Same answer the other per-agent routes give: the agent is never touched,
+    # and the caller is told which workspace holds it rather than nothing.
+    assert resp.status_code == 403
+
+
+def test_benchmark_import_reads_a_merged_rejudge(client):
+    """A merged re-judge counts `turns` instead of `total` and writes its
+    leaderboard beside the model folders rather than inside one."""
+    import io
+    import json
+    import tarfile
+
+    h = _signup(client)["headers"]
+    names = ["case-a", "case-b"]
+    agent = _agent_with_named_tests(client, h, names)
+
+    buf = io.BytesIO()
+    with tarfile.open(fileobj=buf, mode="w") as tar:
+
+        def add(name, payload):
+            data = payload.encode("utf-8")
+            info = tarfile.TarInfo(f"merged/{name}")
+            info.size = len(data)
+            tar.addfile(info, io.BytesIO(data))
+
+        rows = [
+            {
+                "test_case_id": case_id,
+                "test_case": {"id": case_id, "history": []},
+                "output": {"response": "hi", "tool_calls": []},
+                "metrics": {"passed": True, "reasoning": "r", "judge_results": None},
+            }
+            for case_id in names
+        ]
+        add("openai__gpt-4.1/results.json", json.dumps(rows))
+        add(
+            "openai__gpt-4.1/metrics.json",
+            json.dumps({"model": "openai__gpt-4.1", "turns": 2, "passed": 2}),
+        )
+        add("leaderboard.csv", "model,passed,total\nopenai__gpt-4.1,2,2\n")
+
+    resp = _post_benchmark_import(client, h, agent, buf.getvalue())
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["models"] == ["openai/gpt-4.1"]
+
+    detail = client.get(f"/agent-tests/benchmark/{body['task_id']}", headers=h).json()
+    model = detail["model_results"][0]
+    assert model["total_tests"] == 2
+    assert model["passed"] == 2
+    assert model["failed"] == 0
+    assert [r["model"] for r in detail["leaderboard_summary"]] == ["openai/gpt-4.1"]
+
+
+def test_benchmark_import_drops_leaderboard_rows_for_models_not_sent(client):
+    """One leaderboard covers the whole run, so a subset archive still carries
+    rows for the models left out of it."""
+    h = _signup(client)["headers"]
+    names = ["case-a"]
+    agent = _agent_with_named_tests(client, h, names)
+    archive = _benchmark_archive({"openai/gpt-4.1": {"case-a"}}, names)
+
+    import io
+    import tarfile
+
+    rebuilt = io.BytesIO()
+    with tarfile.open(fileobj=rebuilt, mode="w") as out:
+        with tarfile.open(fileobj=io.BytesIO(archive)) as src:
+            for member in src.getmembers():
+                if member.name.endswith("llm_leaderboard.csv"):
+                    continue
+                out.addfile(member, src.extractfile(member))
+        data = b"model,passed,total\nopenai__gpt-4.1,1,1\nz-ai__glm-5.1,0,1\n"
+        info = tarfile.TarInfo("output/leaderboard/llm_leaderboard.csv")
+        info.size = len(data)
+        out.addfile(info, io.BytesIO(data))
+
+    resp = _post_benchmark_import(client, h, agent, rebuilt.getvalue())
+    assert resp.status_code == 200, resp.text
+    detail = client.get(
+        f"/agent-tests/benchmark/{resp.json()['task_id']}", headers=h
+    ).json()
+    assert [r["model"] for r in detail["leaderboard_summary"]] == ["openai/gpt-4.1"]
+
+
+def test_benchmark_import_resolves_evaluators_recreated_since_the_run(client):
+    """A run carried out elsewhere echoes the evaluator id it ran under. Once the
+    evaluator has been recreated here that id is gone, and the name is the only
+    handle back to the rubric."""
+    h = _signup(client)["headers"]
+    names = ["case-a"]
+    evaluators = client.get("/evaluators", headers=h).json()["items"]
+    llm_ev = next(e for e in evaluators if e.get("evaluator_type") == "llm")
+
+    agent = _create_agent(client, h)["uuid"]
+    test = client.post(
+        "/tests",
+        headers=h,
+        json={
+            "name": "case-a",
+            "type": "response",
+            "config": {"history": [], "evaluation": {"type": "response"}},
+            "evaluators": [{"evaluator_uuid": llm_ev["uuid"]}],
+        },
+    ).json()
+    client.post(
+        "/agent-tests",
+        json={"agent_uuid": agent, "test_uuids": [test["uuid"]]},
+        headers=h,
+    )
+
+    archive = _benchmark_archive(
+        {"openai/gpt-4.1": {"case-a"}},
+        names,
+        judge_evaluator_id=NONEXISTENT_UUID,
+        judge_name=llm_ev["name"],
+    )
+    resp = _post_benchmark_import(client, h, agent, archive)
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["unresolved_evaluators"] == [NONEXISTENT_UUID]
+
+    detail = client.get(
+        f"/agent-tests/benchmark/{resp.json()['task_id']}", headers=h
+    ).json()
+    row = detail["model_results"][0]["test_results"][0]
+    # The stale id is replaced by this workspace's evaluator, so the run shows a
+    # name and a rubric rather than an unnamed verdict.
+    assert [v["evaluator_uuid"] for v in row["judge_results"]] == [llm_ev["uuid"]]
+    assert row["judge_results"][0]["value_name"] is not None
+    assert any(e["uuid"] == llm_ev["uuid"] for e in detail["evaluators"])
+
+
+def test_benchmark_import_counts_rows_when_a_model_has_no_metrics(client):
+    import io
+    import json
+    import tarfile
+
+    h = _signup(client)["headers"]
+    names = ["case-a", "case-b"]
+    agent = _agent_with_named_tests(client, h, names)
+    base = _benchmark_archive({"openai/gpt-4.1": {"case-a"}}, names)
+
+    stripped = io.BytesIO()
+    with tarfile.open(fileobj=stripped, mode="w") as out:
+        with tarfile.open(fileobj=io.BytesIO(base)) as src:
+            for member in src.getmembers():
+                if member.name.endswith("metrics.json"):
+                    continue
+                out.addfile(member, src.extractfile(member))
+
+    resp = _post_benchmark_import(client, h, agent, stripped.getvalue())
+    assert resp.status_code == 200, resp.text
+    model = client.get(
+        f"/agent-tests/benchmark/{resp.json()['task_id']}", headers=h
+    ).json()["model_results"][0]
+    assert model["total_tests"] == 2
+    assert model["passed"] == 1
+    assert model["failed"] == 1
+
+
+def test_benchmark_import_rejects_an_unreadable_archive(client):
+    h = _signup(client)["headers"]
+    agent = _agent_with_named_tests(client, h, ["case-a"])
+
+    resp = _post_benchmark_import(client, h, agent, b"this is not a tar")
+    assert resp.status_code == 400
+    assert "Could not read the archive" in resp.json()["detail"]
+
+
+def test_benchmark_import_rejects_an_oversized_archive(client, monkeypatch):
+    import routers.agent_tests as mod
+
+    h = _signup(client)["headers"]
+    agent = _agent_with_named_tests(client, h, ["case-a"])
+    monkeypatch.setattr(mod, "_MAX_BENCHMARK_ARCHIVE_BYTES", 16)
+
+    archive = _benchmark_archive({"openai/gpt-4.1": {"case-a"}}, ["case-a"])
+    resp = _post_benchmark_import(client, h, agent, archive)
+    assert resp.status_code == 413
+    assert "larger than" in resp.json()["detail"]
+
+
+def test_benchmark_import_rejects_a_model_folder_with_no_rows(client):
+    import io
+    import json
+    import tarfile
+
+    h = _signup(client)["headers"]
+    agent = _agent_with_named_tests(client, h, ["case-a"])
+
+    buf = io.BytesIO()
+    with tarfile.open(fileobj=buf, mode="w") as tar:
+        for name, payload in (
+            ("output/openai__gpt-4.1/results.json", json.dumps([])),
+            ("output/openai__gpt-4.1/metrics.json", json.dumps({"total": 0})),
+        ):
+            data = payload.encode()
+            info = tarfile.TarInfo(name)
+            info.size = len(data)
+            tar.addfile(info, io.BytesIO(data))
+
+    resp = _post_benchmark_import(client, h, agent, buf.getvalue())
+    assert resp.status_code == 400
+    assert "No rows could be read for: openai/gpt-4.1" in resp.json()["detail"]
+
+
+def test_benchmark_import_needs_the_artifact_bucket(client, monkeypatch):
+    h = _signup(client)["headers"]
+    agent = _agent_with_named_tests(client, h, ["case-a"])
+    monkeypatch.delenv("S3_OUTPUT_BUCKET", raising=False)
+
+    archive = _benchmark_archive({"openai/gpt-4.1": {"case-a"}}, ["case-a"])
+    resp = _post_benchmark_import(client, h, agent, archive)
+    assert resp.status_code == 500
+
+
+def test_benchmark_import_counts_rows_when_metrics_omits_the_total(client):
+    """A metrics file that names neither `total` nor `turns` still has to give
+    the model a row count."""
+    import io
+    import json
+    import tarfile
+
+    h = _signup(client)["headers"]
+    names = ["case-a", "case-b"]
+    agent = _agent_with_named_tests(client, h, names)
+    base = _benchmark_archive({"openai/gpt-4.1": {"case-a"}}, names)
+
+    rebuilt = io.BytesIO()
+    with tarfile.open(fileobj=rebuilt, mode="w") as out:
+        with tarfile.open(fileobj=io.BytesIO(base)) as src:
+            for member in src.getmembers():
+                if member.name.endswith("metrics.json"):
+                    continue
+                out.addfile(member, src.extractfile(member))
+        data = json.dumps({"passed": 1}).encode()
+        info = tarfile.TarInfo("output/openai__gpt-4.1/metrics.json")
+        info.size = len(data)
+        out.addfile(info, io.BytesIO(data))
+
+    resp = _post_benchmark_import(client, h, agent, rebuilt.getvalue())
+    assert resp.status_code == 200, resp.text
+    model = client.get(
+        f"/agent-tests/benchmark/{resp.json()['task_id']}", headers=h
+    ).json()["model_results"][0]
+    assert model["total_tests"] == 2
+    assert model["passed"] == 1
+    assert model["failed"] == 1
+
+
+
+def test_run_list_reports_the_launched_test_count_before_a_run_stores_one(client):
+    """A run and a benchmark both show how many tests they cover from launch,
+    instead of a dash until they finish. A benchmark never stores a run-level
+    count at all, and neither stores one until calibrate writes its metrics, so
+    both fall back to the test set the job was launched over. A stored count
+    always wins, and a job that froze no test set stays blank rather than
+    reporting zero tests."""
+    from db import create_agent_test_job, update_agent_test_job
+
+    h = _signup(client)["headers"]
+    agent = _create_agent(client, h)
+    names = [f"tc{i}" for i in range(3)]
+    test_uuids = [_create_test(client, h, name=n)["uuid"] for n in names]
+
+    # A run and a benchmark, both mid-flight with no count stored yet.
+    run_id = create_agent_test_job(
+        agent_id=agent["uuid"],
+        job_type="llm-unit-test",
+        status="in_progress",
+        details={"test_uuids": test_uuids},
+        results={"test_results": [{"name": n} for n in names]},
+    )
+    bench_id = create_agent_test_job(
+        agent_id=agent["uuid"],
+        job_type="llm-benchmark",
+        status="in_progress",
+        details={"test_uuids": test_uuids},
+        results={
+            "model_results": [
+                {"model": "m1", "success": None, "message": "Queued..."}
+            ]
+        },
+    )
+    # A job that froze no test set: nothing to fall back to.
+    bare_id = create_agent_test_job(
+        agent_id=agent["uuid"], job_type="llm-unit-test", status="in_progress"
+    )
+
+    def _by_uuid():
+        resp = client.get(f"/agent-tests/agent/{agent['uuid']}/runs", headers=h)
+        assert resp.status_code == 200
+        return {r["uuid"]: r for r in resp.json()["items"]}
+
+    runs = _by_uuid()
+    assert runs[run_id]["total_tests"] == 3
+    # The benchmark's own column, and its one model's, both read the same set.
+    assert runs[bench_id]["total_tests"] == 3
+    assert runs[bench_id]["model_results"][0]["total_tests"] == 3
+    # No frozen test set stays null, not 0 — a dash, not "0 tests".
+    assert runs[bare_id]["total_tests"] is None
+
+    # A stored count wins over the launched set.
+    update_agent_test_job(run_id, results={"total_tests": 2, "test_results": []})
+    update_agent_test_job(
+        bench_id,
+        results={
+            "model_results": [
+                {"model": "m1", "success": True, "message": "ok", "total_tests": 2}
+            ]
+        },
+    )
+    runs = _by_uuid()
+    assert runs[run_id]["total_tests"] == 2
+    assert runs[bench_id]["model_results"][0]["total_tests"] == 2
+
+
+def test_global_run_list_reports_the_launched_test_count(client):
+    """The workspace-wide runs list reads the same launched test count as the
+    per-agent one, so a run shows the same number in both."""
+    from db import create_agent_test_job
+
+    h = _signup(client)["headers"]
+    agent = _create_agent(client, h)
+    test_uuids = [_create_test(client, h, name=f"gtc{i}")["uuid"] for i in range(2)]
+
+    job_id = create_agent_test_job(
+        agent_id=agent["uuid"],
+        job_type="llm-unit-test",
+        status="in_progress",
+        details={"test_uuids": test_uuids},
+    )
+
+    resp = client.get("/agent-tests/runs", headers=h)
+    assert resp.status_code == 200
+    run = next(r for r in resp.json()["items"] if r["uuid"] == job_id)
+    assert run["total_tests"] == 2

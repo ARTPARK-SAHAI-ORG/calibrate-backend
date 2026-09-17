@@ -12,6 +12,7 @@ from db import (
     get_user,
 )
 from auth_utils import create_access_token
+from mailer import send_email, frontend_url, WELCOME_TEMPLATE
 
 logger = logging.getLogger(__name__)
 
@@ -44,6 +45,17 @@ class LoginResponse(BaseModel):
     token_type: str = Field("bearer", description="Always `bearer`")
     user: UserResponse = Field(description="Your profile")
     message: str = Field(description="Status message")
+
+
+def _send_welcome_email(email: str, first_name: str) -> None:
+    send_email(
+        to=email,
+        template=WELCOME_TEMPLATE,
+        variables={
+            "NAME": first_name.strip() or "there",
+            "URL": frontend_url(),
+        },
+    )
 
 
 async def verify_google_token(id_token: str) -> dict:
@@ -99,12 +111,16 @@ async def google_login(request: GoogleLoginRequest):
             status_code=400, detail="Email not provided in Google token"
         )
 
-    # Get or create user
+    is_new = get_user_by_email(email) is None
+
     user = get_or_create_user(
         email=email,
         first_name=given_name,
         last_name=family_name,
     )
+
+    if is_new:
+        _send_welcome_email(user["email"], user["first_name"])
 
     # Generate JWT access token
     access_token = create_access_token(user["uuid"], user["email"])
@@ -168,6 +184,11 @@ def signup(request: SignupRequest):
 
     access_token = create_access_token(user["uuid"], user["email"])
     logger.info(f"User signed up: {request.email} (UUID: {user['uuid']})")
+
+    # A stub row means an invite already emailed them; only a brand-new account
+    # gets the welcome, matching the Google path.
+    if existing is None:
+        _send_welcome_email(user["email"], user["first_name"])
 
     return LoginResponse(
         access_token=access_token,

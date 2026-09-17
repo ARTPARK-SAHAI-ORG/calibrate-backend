@@ -1927,8 +1927,38 @@ def test_agent_test_jobs(user):
     assert db.get_agent_test_job_by_share_token("agtok", "llm-unit-test") is not None
     assert db.get_agent_test_job_by_share_token("missing") is None
 
+    assert db.set_agent_test_job_name(j_uuid, "Nightly regression") is True
+    assert db.get_agent_test_job(j_uuid)["name"] == "Nightly regression"
+    assert db.set_agent_test_job_name(j_uuid, None) is True
+    assert db.get_agent_test_job(j_uuid)["name"] is None
+    assert db.set_agent_test_job_name(str(_uuid.uuid4()), "x") is False
+
     assert db.delete_agent_test_job(j_uuid) is True
     assert db.delete_agent_test_job(j_uuid) is False
+
+
+def test_agent_test_job_position_counts_same_type_oldest_first(user):
+    agent_uuid = db.create_agent(
+        name=_u("pos-agent"), user_id=user["uuid"], org_uuid=user["org_uuid"]
+    )
+    first = db.create_agent_test_job(agent_id=agent_uuid, job_type="llm-unit-test")
+    bench = db.create_agent_test_job(agent_id=agent_uuid, job_type="llm-benchmark")
+    second = db.create_agent_test_job(agent_id=agent_uuid, job_type="llm-unit-test")
+
+    # Runs and benchmarks are counted separately, and rows sharing a
+    # second-resolution `created_at` fall back to insertion order.
+    assert db.get_agent_test_job_position(first) == 1
+    assert db.get_agent_test_job_position(second) == 2
+    assert db.get_agent_test_job_position(bench) == 1
+
+    # Another agent's runs never count towards this one.
+    other_agent = db.create_agent(
+        name=_u("pos-agent-2"), user_id=user["uuid"], org_uuid=user["org_uuid"]
+    )
+    other = db.create_agent_test_job(agent_id=other_agent, job_type="llm-unit-test")
+    assert db.get_agent_test_job_position(other) == 1
+
+    assert db.get_agent_test_job_position(str(_uuid.uuid4())) == 0
 
 
 # ---------------------------------------------------------------------------
