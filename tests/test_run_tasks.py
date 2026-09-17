@@ -549,7 +549,7 @@ def test_run_llm_test_task_keeps_results_when_cli_exits_nonzero_after_stopping_e
     sentry.assert_not_called()
 
 
-def test_run_llm_test_task_without_results_stores_the_cli_error_line():
+def test_run_llm_test_task_without_results_stores_thecli_error_line():
     """No results and a nonzero exit: the stored error is the one line the eval
     tool printed about it, taken from stdout with colour codes stripped, not
     the harmless warning on stderr."""
@@ -594,36 +594,36 @@ def test_run_llm_test_task_exit_zero_without_files_is_a_failure():
 
 
 def test_cli_error_line_picks_the_line_worth_reading():
-    from routers.agent_tests import _cli_error_line
+    from cli_run import cli_error_line
 
     # The last ❌ or ✗ line on stdout wins.
     assert (
-        _cli_error_line("❌ agent down\n✗ Verification failed: bad url\n", "", 1)
+        cli_error_line("❌ agent down\n✗ Verification failed: bad url\n", "", 1)
         == "✗ Verification failed: bad url"
     )
     # A count line like "2 errored" is not the reason.
     assert (
-        _cli_error_line("❌ Test 1 errored: agent down\nTotal: 2 errored\n", "", 1)
+        cli_error_line("❌ Test 1 errored: agent down\nTotal: 2 errored\n", "", 1)
         == "❌ Test 1 errored: agent down"
     )
     # "errored" is not the word "error": with no ❌ line, fall through to stderr.
-    assert _cli_error_line("Running\nTotal: 2 errored\n", "warn\n", 1) == "warn"
+    assert cli_error_line("Running\nTotal: 2 errored\n", "warn\n", 1) == "warn"
     # A harmless stderr traceback does not beat the ❌ line on stdout.
     assert (
-        _cli_error_line("❌ agent down\n", "RuntimeError: Event loop is closed\n", 1)
+        cli_error_line("❌ agent down\n", "RuntimeError: Event loop is closed\n", 1)
         == "❌ agent down"
     )
     # The ❌ line wins over a later plain line, and colour codes are stripped.
     assert (
-        _cli_error_line("\x1b[1m❌ agent down\x1b[0m\nDone.\n", "", 1)
+        cli_error_line("\x1b[1m❌ agent down\x1b[0m\nDone.\n", "", 1)
         == "❌ agent down"
     )
     # A line mentioning an error is enough.
-    assert _cli_error_line("Running\nError: bad key\nbye\n", "", 1) == "Error: bad key"
+    assert cli_error_line("Running\nError: bad key\nbye\n", "", 1) == "Error: bad key"
     # Nothing that looks like an error: the last stderr line.
-    assert _cli_error_line("all fine\n", "warn one\nwarn two\n", 1) == "warn two"
+    assert cli_error_line("all fine\n", "warn one\nwarn two\n", 1) == "warn two"
     # Nothing at all: the exit code.
-    assert _cli_error_line("", "\n", 3) == "exit code 3"
+    assert cli_error_line("", "\n", 3) == "exit code 3"
 
 
 def test_run_llm_test_task_records_cases_that_never_ran():

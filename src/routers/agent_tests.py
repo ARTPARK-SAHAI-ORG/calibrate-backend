@@ -76,6 +76,13 @@ from routers.tests import (
     required_agent_interaction_type,
 )
 from auth_utils import get_current_org, get_org_jwt_or_api_key, OrgContext
+from cli_run import (
+    CliRunFailed,
+    cli_error_line,
+    no_output_failure,
+    run_counts,
+    unanswered_case_count,
+)
 from utils import (
     job_slot,
     with_calibrate_eval_header,
@@ -1898,71 +1905,6 @@ def _parse_agent_test_results(
     return test_results
 
 
-def _unanswered_case_count(test_results: Optional[List[Dict[str, Any]]]) -> int:
-    """How many parsed rows produced no answer. Used when calibrate's own count
-    is not on disk yet, so a run in progress and a run that wrote no
-    ``metrics.json`` still report their gaps."""
-    return sum(1 for r in test_results or [] if r.get("unanswered"))
-
-
-def _cli_error_line(stdout: str, stderr: str, returncode: int) -> str:
-    """The one line worth showing a reader when the eval tool wrote nothing."""
-    ansi = re.compile(r"\x1b\[[0-9;]*m")
-    out = [l.strip() for l in ansi.sub("", stdout or "").splitlines() if l.strip()]
-    err = [l.strip() for l in ansi.sub("", stderr or "").splitlines() if l.strip()]
-    # calibrate prints the failure it stopped on as its last ❌ or ✗ line.
-    for line in reversed(out):
-        if line.startswith(("❌", "✗")):
-            return line
-    for lines in (out, err):
-        for line in reversed(lines):
-            if re.search(r"\berror\b", line, re.I):
-                return line
-    for lines in (err, out):
-        if lines:
-            return lines[-1]
-    return f"exit code {returncode}"
-
-
-def _run_counts(
-    metrics_data: Optional[Dict[str, Any]], test_results: List[Dict[str, Any]]
-) -> Dict[str, Any]:
-    """``unanswered_tests`` / ``stopped_early`` for a run's results, from metrics.json when present."""
-    metrics_data = metrics_data or {}
-    return {
-        "unanswered_tests": (
-            metrics_data["errored"]
-            if metrics_data.get("errored") is not None
-            else _unanswered_case_count(test_results)
-        ),
-        "stopped_early": bool(metrics_data.get("stopped_early")),
-    }
-
-
-class CliRunFailed(subprocess.CalledProcessError):
-    """A CLI run that left no finished results. ``error_line`` is what a reader may see."""
-
-    error_line: str = ""
-
-
-def _no_output_failure(
-    process, run_cmd, stdout: str, stderr: str, output_dir: Path, noun: str
-) -> CliRunFailed:
-    """Log, report to Sentry and build the failure for a run that wrote no metrics.json."""
-    if process.returncode != 0:
-        error_line = _cli_error_line(stdout, stderr, process.returncode)
-        error_msg = f"{noun} failed with exit code {process.returncode}: {error_line}"
-    else:
-        # The path is for the log only; the reader sees the short line.
-        error_line = "The eval tool produced no results."
-        error_msg = f"{noun} produced no output files (results.json/metrics.json not found in {output_dir})"
-    logger.error(error_msg)
-    capture_exception_to_sentry(RuntimeError(error_msg))
-    err = CliRunFailed(process.returncode, run_cmd, stdout, stderr)
-    err.error_line = error_line
-    return err
-
-
 def _pending_test_case_result_placeholder(name: str) -> Dict[str, Any]:
     """``TestCaseResult`` shape for rows not yet finished (explicit nulls for clients)."""
     return {
@@ -2620,7 +2562,7 @@ def _update_agent_test_intermediate_results(
             "total_tokens": (
                 metrics_data.get("total_tokens") if metrics_data else None
             ),
-            **_run_counts(metrics_data, test_results),
+            **run_counts(metrics_data, test_results),
             "test_results": intermediate_results,
         },
     )
@@ -2831,9 +2773,12 @@ def run_llm_test_task(
                 if (results_data is None and metrics_data is None) or (
                     process.returncode != 0 and metrics_data is None
                 ):
-                    raise _no_output_failure(
+                    failure = no_output_failure(
                         process, run_cmd, stdout, stderr, output_dir, "LLM test"
                     )
+                    logger.error(failure.log_message)
+                    capture_exception_to_sentry(RuntimeError(failure.log_message))
+                    raise failure
 
                 # Parse results
                 test_results = _parse_agent_test_results(
@@ -2891,7 +2836,7 @@ def run_llm_test_task(
                         "latency_ms": latency_ms,
                         "cost": cost,
                         "total_tokens": total_tokens,
-                        **_run_counts(metrics_data, test_results),
+                        **run_counts(metrics_data, test_results),
                         "test_results": test_results,
                         "results_s3_prefix": results_prefix,
                         "error": None,
@@ -3925,7 +3870,7 @@ def _update_benchmark_intermediate_results(
                         "latency_ms": metrics_data.get("latency_ms"),
                         "cost": metrics_data.get("cost"),
                         "total_tokens": metrics_data.get("total_tokens"),
-                        **_run_counts(metrics_data, test_results),
+                        **run_counts(metrics_data, test_results),
                         "test_results": merged,
                     }
                 )
@@ -4175,9 +4120,12 @@ def run_benchmark_task(
                     process.returncode != 0
                     and not any(metrics for _, metrics in all_results.values())
                 ):
-                    raise _no_output_failure(
+                    failure = no_output_failure(
                         process, run_cmd, stdout, stderr, output_dir, "Benchmark"
                     )
+                    logger.error(failure.log_message)
+                    capture_exception_to_sentry(RuntimeError(failure.log_message))
+                    raise failure
                 folder_names = list(all_results.keys())
                 logger.info(f"Found result folders: {folder_names}")
 
@@ -4230,7 +4178,7 @@ def run_benchmark_task(
                                     "latency_ms": metrics_data.get("latency_ms"),
                                     "cost": metrics_data.get("cost"),
                                     "total_tokens": metrics_data.get("total_tokens"),
-                                    **_run_counts(metrics_data, test_results),
+                                    **run_counts(metrics_data, test_results),
                                     "test_results": test_results,
                                 }
                             )
@@ -4529,7 +4477,6 @@ def run_agent_benchmark(
         logger.info(f"Queued LLM benchmark job {job_id}")
 
     return AgentTestRunCreateResponse(task_id=job_id, status=initial_status)
-
 
 
 _BENCHMARK_IMPORT_FILES = ("results.json", "metrics.json")

@@ -1628,7 +1628,7 @@ This applies to:
 Agent tests and benchmarks read the output directory before deciding, because calibrate exits 1 after writing its results when a run stopped early or every case errored:
 
 1. `metrics.json` present (for a benchmark, any model's `metrics.json`) → the run finished whatever the exit code; results are kept and reported as done with `stopped_early` / `unanswered_tests`.
-2. Non-zero exit with no `metrics.json` → a crash mid-run (calibrate writes `metrics.json` last). The run is marked failed and the rows `results.json` collected so far, already stored by the intermediate updates, are kept. `_no_output_failure` logs, reports to Sentry and raises `CliRunFailed` with the reader-facing `error_line` from `_cli_error_line`.
+2. Non-zero exit with no `metrics.json` → a crash mid-run (calibrate writes `metrics.json` last). The run is marked failed and the rows `results.json` collected so far, already stored by the intermediate updates, are kept. `no_output_failure` logs, reports to Sentry and raises `CliRunFailed` with the reader-facing `error_line` from `cli_error_line`.
 3. Exit code 0 with neither `results.json` nor `metrics.json` (benchmarks: `_find_all_results_in_output()` empty) → failure, stored as "The eval tool produced no results."
 
 Stderr is logged for debugging but **never** used for failure detection. The calibrate CLI's subprocess may emit benign cleanup tracebacks (e.g., httpx `AsyncClient.aclose()` "Event loop is closed" errors) that are not real failures. Relying on exit code + structured output avoids false positives from noisy stderr.
