@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import random
+import re
 import uuid
 from dataclasses import asdict
 
@@ -408,10 +409,27 @@ def test_non_string_reasoning_is_coerced_rather_than_dropped():
 def test_backoff_grows_with_attempts_and_never_lands_on_one_instant():
     """Without jitter a whole-batch failure defers every run to the same
     moment, and the next claim reassembles the identical failing batch."""
-    delays = {ts.backoff_available_at(1, 0, random.Random(seed)) for seed in range(20)}
+    t0 = "2026-01-01 00:00:00"
+    delays = {ts.backoff_available_at(1, t0, random.Random(seed)) for seed in range(20)}
     assert len(delays) > 1
-    assert min(delays) >= ts._BACKOFF_BASE_SECONDS
-    assert ts.backoff_available_at(6, 0, random.Random(1)) >= ts._BACKOFF_CAP_SECONDS
+    assert min(delays) >= ts.add_seconds(t0, ts._BACKOFF_BASE_SECONDS)
+    assert ts.backoff_available_at(6, t0, random.Random(1)) >= ts.add_seconds(
+        t0, ts._BACKOFF_CAP_SECONDS
+    )
+
+
+def test_utc_now_is_sqlite_timestamp_text():
+    from datetime import datetime
+
+    now = ts.utc_now()
+    assert re.fullmatch(r"\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}", now)
+    assert abs((datetime.utcnow() - datetime.strptime(now, "%Y-%m-%d %H:%M:%S")).total_seconds()) < 5
+
+
+def test_add_seconds_carries_across_minute_and_day_boundaries():
+    assert ts.add_seconds("2026-01-01 00:00:59", 2) == "2026-01-01 00:01:01"
+    assert ts.add_seconds("2026-01-31 23:59:30", 45) == "2026-02-01 00:00:15"
+    assert ts.add_seconds("2026-01-01 00:00:00", 0) == "2026-01-01 00:00:00"
 
 
 def test_a_long_error_is_truncated_and_an_empty_one_still_says_something():

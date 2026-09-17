@@ -9,6 +9,7 @@ from unittest.mock import patch
 import pytest
 
 import db
+import trace_scoring as ts
 from routers.traces import MAX_DELETE_IDS, MAX_LABELS, MAX_LIST_LIMIT
 from fastapi.testclient import TestClient
 
@@ -2035,6 +2036,7 @@ def _runs_for_trace(trace_uuid: str):
 
 def test_ingest_opted_out_creates_no_run_and_keeps_response_contract(client):
     h, agent_id = _signup_with_agent(client)
+    _disable_auto_score(client, h, agent_id)
     mid = _mid()
     body = _post_trace(client, h, _payload(agent_id, mid))
 
@@ -2043,6 +2045,59 @@ def test_ingest_opted_out_creates_no_run_and_keeps_response_contract(client):
     assert body["conversation_id"] == "conv-1"
     assert len(body["uuid"]) == 36
     assert _runs_for_trace(body["uuid"]) == []
+
+
+def test_new_agent_scores_by_default_and_ingest_records_why_it_could_not(client):
+    """Scoring is on for a new agent, but its only evaluator is the seeded
+    correctness default with `{{criteria}}`, so ingest writes a skipped run."""
+    h, agent_id = _signup_with_agent(client)
+    assert client.get(f"/agents/{agent_id}", headers=h).json()["auto_score_traces"] is True
+
+    body = _post_trace(client, h, _payload(agent_id, _mid()))
+    rows = _runs_for_trace(body["uuid"])
+    assert len(rows) == 1
+    assert rows[0]["status"] == "skipped"
+    assert rows[0]["error"] == "no_usable_evaluators"
+    assert rows[0]["scoring_plan"] is None
+    assert rows[0]["completed_at"] == rows[0]["created_at"]
+    run = client.get(f"/traces/{body['uuid']}/scores", headers=h).json()["runs"][0]
+    assert run["status"] == "skipped"
+    assert run["error"] == "no_usable_evaluators"
+    assert run["created_at"] == db._trace_iso(rows[0]["created_at"])
+
+
+def test_ingest_past_workspace_scored_traces_limit_writes_over_limit_run(client, monkeypatch):
+    from routers import traces as traces_mod
+
+    h, agent_id = _signup_with_agent(client)
+    _enable_auto_score(client, h, agent_id)
+    monkeypatch.setattr(traces_mod, "effective_max_scored_traces", lambda org_uuid: 1)
+
+    first = _post_trace(client, h, _payload(agent_id, _mid()))
+    assert _runs_for_trace(first["uuid"])[0]["status"] == "pending"
+
+    second = _post_trace(client, h, _payload(agent_id, _mid()))
+    assert set(second) == {"uuid", "message_id", "conversation_id", "created_at"}
+    rows = _runs_for_trace(second["uuid"])
+    assert len(rows) == 1
+    assert rows[0]["status"] == "skipped"
+    assert rows[0]["error"] == "over_limit"
+    assert rows[0]["scoring_plan"] is None
+    assert rows[0]["completed_at"] == rows[0]["created_at"]
+
+    scores = client.get(f"/traces/{second['uuid']}/scores", headers=h).json()
+    assert len(scores["runs"]) == 1
+    assert scores["runs"][0]["status"] == "skipped"
+    assert scores["runs"][0]["error"] == "over_limit"
+    assert scores["runs"][0]["completed_at"] == db._trace_iso(rows[0]["completed_at"])
+    assert _list_item(client, h, second["uuid"])["latest_run_status"] == "skipped"
+
+    # A skipped run does not count against the limit, so the cap is on scored traces.
+    third = _post_trace(client, h, _payload(agent_id, _mid()))
+    assert _runs_for_trace(third["uuid"])[0]["error"] == "over_limit"
+    monkeypatch.setattr(traces_mod, "effective_max_scored_traces", lambda org_uuid: 2)
+    fourth = _post_trace(client, h, _payload(agent_id, _mid()))
+    assert _runs_for_trace(fourth["uuid"])[0]["status"] == "pending"
 
 
 def test_ingest_opted_in_conversation_creates_pending_response_run(client):
@@ -2306,6 +2361,22 @@ def _org_of(agent_id: str) -> str:
     return db.get_agent(agent_id)["org_uuid"]
 
 
+# Every clock in the hand-inserted runs below is seconds after this instant.
+T0 = "2000-01-01 00:00:00"
+
+
+def _at(seconds: int) -> str:
+    return ts.add_seconds(T0, seconds)
+
+
+def _disable_auto_score(client, h, agent_uuid):
+    r = client.put(
+        f"/agents/{agent_uuid}", json={"auto_score_traces": False}, headers=h
+    )
+    assert r.status_code == 200, r.text
+    assert r.json()["auto_score_traces"] is False
+
+
 def _insert_run(org: str, trace_uuid: str, **overrides) -> str:
     row = {
         "uuid": str(uuid.uuid4()),
@@ -2314,11 +2385,11 @@ def _insert_run(org: str, trace_uuid: str, **overrides) -> str:
         "agent_id": "agent-1",
         "status": "pending",
         "scoring_plan": None,
-        "available_at": 0,
+        "available_at": T0,
         "attempts": 0,
         "error": None,
-        "created_at": 1,
-        "updated_at": 1,
+        "created_at": _at(1),
+        "updated_at": _at(1),
         "completed_at": None,
     }
     row.update(overrides)
@@ -2357,7 +2428,7 @@ def _insert_score(org: str, run_uuid: str, trace_uuid: str, **overrides) -> None
         "value": 1,
         "output_type": "binary",
         "reasoning": "ok",
-        "completed_at": 10,
+        "completed_at": _at(10),
     }
     row.update(overrides)
     with db.get_db_connection() as conn:
@@ -2423,6 +2494,7 @@ def test_scores_endpoint_is_jwt_only(client):
 
 def test_scores_no_run_is_empty_and_list_fields_are_null(client):
     h, agent_id = _signup_with_agent(client)
+    _disable_auto_score(client, h, agent_id)
     trace = _post_trace(client, h, _payload(agent_id, _mid()))
     scores = client.get(f"/traces/{trace['uuid']}/scores", headers=h)
     assert scores.status_code == 200, scores.text
@@ -2439,12 +2511,13 @@ def test_scores_no_run_is_empty_and_list_fields_are_null(client):
     [
         ("pending", None, None),
         ("processing", None, None),
-        ("failed", "judge exploded", 9),
-        ("skipped", "no_usable_evaluators", 9),
+        ("failed", "judge exploded", _at(9)),
+        ("skipped", "no_usable_evaluators", _at(9)),
     ],
 )
 def test_scores_and_list_for_non_completed_status(client, status, error, completed_at):
     h, agent_id = _signup_with_agent(client)
+    _disable_auto_score(client, h, agent_id)
     org = _org_of(agent_id)
     trace = _post_trace(client, h, _payload(agent_id, _mid()))
     run = _insert_run(
@@ -2452,7 +2525,7 @@ def test_scores_and_list_for_non_completed_status(client, status, error, complet
         trace["uuid"],
         status=status,
         error=error,
-        created_at=1,
+        created_at=_at(1),
         completed_at=completed_at,
         agent_id=agent_id,
     )
@@ -2463,11 +2536,11 @@ def test_scores_and_list_for_non_completed_status(client, status, error, complet
     assert run_body["status"] == status
     assert run_body["error"] == error
     assert run_body["results"] == []
-    assert run_body["created_at"] == "1970-01-01T00:00:01Z"
+    assert run_body["created_at"] == "2000-01-01T00:00:01Z"
     if completed_at is None:
         assert run_body["completed_at"] is None
     else:
-        assert run_body["completed_at"].endswith("Z")
+        assert run_body["completed_at"] == "2000-01-01T00:00:09Z"
     item = _list_item(client, h, trace["uuid"])
     assert item["latest_run_status"] == status
     assert item["passed"] is None
@@ -2477,6 +2550,7 @@ def test_scores_and_list_for_non_completed_status(client, status, error, complet
 
 def test_scores_completed_mixed_types_and_list_conjunction(client):
     h, agent_id = _signup_with_agent(client)
+    _disable_auto_score(client, h, agent_id)
     org = _org_of(agent_id)
     binary_id, binary_ver = _create_clean_evaluator(client, h)
     rating_id, rating_ver, rating_name = _create_rating_evaluator(client, h, scale_max=5)
@@ -2485,8 +2559,8 @@ def test_scores_completed_mixed_types_and_list_conjunction(client):
         org,
         trace["uuid"],
         status="completed",
-        created_at=2,
-        completed_at=3,
+        created_at=_at(2),
+        completed_at=_at(3),
         agent_id=agent_id,
     )
     _insert_score(
@@ -2533,6 +2607,7 @@ def test_scores_completed_mixed_types_and_list_conjunction(client):
 
 def test_list_uses_latest_run_scores_show_full_history(client):
     h, agent_id = _signup_with_agent(client)
+    _disable_auto_score(client, h, agent_id)
     org = _org_of(agent_id)
     ev, ver = _create_clean_evaluator(client, h)
     trace = _post_trace(client, h, _payload(agent_id, _mid()))
@@ -2540,16 +2615,16 @@ def test_list_uses_latest_run_scores_show_full_history(client):
         org,
         trace["uuid"],
         status="completed",
-        created_at=10,
-        completed_at=11,
+        created_at=_at(10),
+        completed_at=_at(11),
         agent_id=agent_id,
     )
     newer = _insert_run(
         org,
         trace["uuid"],
         status="completed",
-        created_at=20,
-        completed_at=21,
+        created_at=_at(20),
+        completed_at=_at(21),
         agent_id=agent_id,
     )
     _insert_score(
@@ -2571,6 +2646,7 @@ def test_list_uses_latest_run_scores_show_full_history(client):
 
 def test_scores_renamed_and_deleted_evaluator_keeps_history(client):
     h, agent_id = _signup_with_agent(client)
+    _disable_auto_score(client, h, agent_id)
     org = _org_of(agent_id)
     ev, ver = _create_clean_evaluator(client, h)
     new_name = f"renamed-{uuid.uuid4().hex[:6]}"
@@ -2581,8 +2657,8 @@ def test_scores_renamed_and_deleted_evaluator_keeps_history(client):
         org,
         trace["uuid"],
         status="completed",
-        created_at=1,
-        completed_at=2,
+        created_at=_at(1),
+        completed_at=_at(2),
         agent_id=agent_id,
     )
     _insert_score(
@@ -2604,6 +2680,7 @@ def test_scores_renamed_and_deleted_evaluator_keeps_history(client):
 
 def test_scores_pinned_soft_deleted_version_keeps_scale(client):
     h, agent_id = _signup_with_agent(client)
+    _disable_auto_score(client, h, agent_id)
     org = _org_of(agent_id)
     ev, v1, _name = _create_rating_evaluator(client, h, scale_max=5)
     v2 = client.post(
@@ -2629,8 +2706,8 @@ def test_scores_pinned_soft_deleted_version_keeps_scale(client):
         org,
         trace["uuid"],
         status="completed",
-        created_at=1,
-        completed_at=2,
+        created_at=_at(1),
+        completed_at=_at(2),
         agent_id=agent_id,
     )
     _insert_score(
@@ -2652,6 +2729,7 @@ def test_scores_pinned_soft_deleted_version_keeps_scale(client):
 
 def test_scores_cross_org_is_403(client):
     h, agent_id = _signup_with_agent(client)
+    _disable_auto_score(client, h, agent_id)
     org = _org_of(agent_id)
     ev, ver = _create_clean_evaluator(client, h)
     trace = _post_trace(client, h, _payload(agent_id, _mid()))
@@ -2659,8 +2737,8 @@ def test_scores_cross_org_is_403(client):
         org,
         trace["uuid"],
         status="completed",
-        created_at=1,
-        completed_at=2,
+        created_at=_at(1),
+        completed_at=_at(2),
         agent_id=agent_id,
     )
     _insert_score(
@@ -2681,6 +2759,7 @@ def test_list_scoring_summary_is_one_batched_query_for_the_page(client, monkeypa
     from routers import traces as traces_mod
 
     h, agent_id = _signup_with_agent(client)
+    _disable_auto_score(client, h, agent_id)
     org = _org_of(agent_id)
     ev, ver = _create_clean_evaluator(client, h)
     traces = [_post_trace(client, h, _payload(agent_id, _mid())) for _ in range(3)]
@@ -2689,8 +2768,8 @@ def test_list_scoring_summary_is_one_batched_query_for_the_page(client, monkeypa
             org,
             trace["uuid"],
             status="completed",
-            created_at=created_at,
-            completed_at=created_at,
+            created_at=_at(created_at),
+            completed_at=_at(created_at),
             agent_id=agent_id,
         )
         _insert_score(

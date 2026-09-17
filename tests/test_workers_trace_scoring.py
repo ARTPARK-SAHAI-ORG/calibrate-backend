@@ -37,7 +37,7 @@ def client(app, _enable_pool_for_this_module):
     os.environ["FAKE_AI_PROVIDERS"] = "1"
     with db.get_db_connection() as conn:
         conn.execute(
-            "UPDATE trace_eval_runs SET available_at = 2000000000 "
+            "UPDATE trace_eval_runs SET available_at = '2099-01-01 00:00:00' "
             "WHERE status IN ('pending', 'processing')"
         )
         conn.commit()
@@ -200,6 +200,7 @@ def test_runnable_ingest_sets_nudge(monkeypatch):
     agent = db.get_agent(agent_uuid)
     db.create_trace_with_eval_run(
         org_uuid=org,
+        max_scored_traces=1_000_000,
         agent=agent,
         input=[{"role": "user", "content": "hi"}],
         output={"response": "hello", "tool_calls": None},
@@ -229,12 +230,14 @@ def test_skipped_and_opted_out_ingest_do_not_nudge(monkeypatch):
         conn.commit()
     db.create_trace_with_eval_run(
         org_uuid=org,
+        max_scored_traces=1_000_000,
         agent=db.get_agent(opted_out),
         input=[{"role": "user", "content": "hi"}],
         output={"response": "hello", "tool_calls": None},
     )
     db.create_trace_with_eval_run(
         org_uuid=org,
+        max_scored_traces=1_000_000,
         agent=db.get_agent(skipped),
         input=[{"role": "user", "content": "hi"}],
         output={"response": "hello", "tool_calls": None},

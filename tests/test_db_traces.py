@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 import sqlite3
 import uuid
 
@@ -292,7 +293,7 @@ def _eligible_evaluator(org: str, evaluator_type="llm"):
     return ev, version["uuid"]
 
 
-def _combined_ingest(org: str, agent: dict, **overrides):
+def _combined_ingest(org: str, agent: dict, max_scored_traces: int = 10_000, **overrides):
     payload = {
         "message_id": None,
         "conversation_id": "conv-1",
@@ -301,7 +302,9 @@ def _combined_ingest(org: str, agent: dict, **overrides):
         "metadata": None,
     }
     payload.update(overrides)
-    return db.create_trace_with_eval_run(org_uuid=org, agent=agent, **payload)
+    return db.create_trace_with_eval_run(
+        org_uuid=org, agent=agent, max_scored_traces=max_scored_traces, **payload
+    )
 
 
 def _runs_for(trace_uuid: str):
@@ -458,3 +461,47 @@ def test_create_trace_still_inserts_without_a_run():
         output={"response": "hello"},
     )
     assert _runs_for(row["uuid"]) == []
+
+
+def test_create_agent_auto_scores_traces_by_default():
+    agent = db.get_agent(db.create_agent("fresh", _org(), link_default_evaluator=False))
+    assert agent["auto_score_traces"] is True
+
+
+def test_over_limit_ingest_persists_skipped_run():
+    org = _org()
+    agent = _insert_agent(org, auto_score=True)
+    ev, _ = _eligible_evaluator(org, "llm")
+    db.add_evaluator_to_agent(agent["uuid"], ev)
+
+    for _ in range(2):
+        trace = _combined_ingest(org, agent, max_scored_traces=2)
+        assert _runs_for(trace["uuid"])[0]["status"] == "pending"
+    third = _combined_ingest(org, agent, max_scored_traces=2)
+    rows = _runs_for(third["uuid"])
+    assert len(rows) == 1
+    assert rows[0]["status"] == "skipped"
+    assert rows[0]["error"] == "over_limit"
+    assert rows[0]["scoring_plan"] is None
+    assert rows[0]["completed_at"] is not None
+
+
+def test_skipped_runs_do_not_count_toward_the_cap():
+    org = _org()
+    agent = _insert_agent(org, auto_score=True)
+    for _ in range(2):
+        trace = _combined_ingest(org, agent, max_scored_traces=1)
+        assert _runs_for(trace["uuid"])[0]["error"] == "no_usable_evaluators"
+
+    ev, _ = _eligible_evaluator(org, "llm")
+    db.add_evaluator_to_agent(agent["uuid"], ev)
+    trace = _combined_ingest(org, agent, max_scored_traces=1)
+    assert _runs_for(trace["uuid"])[0]["status"] == "pending"
+
+
+def test_run_timestamps_are_stored_as_timestamp_text():
+    org = _org()
+    agent = _insert_agent(org, auto_score=True)
+    trace = _combined_ingest(org, agent)
+    run = _runs_for(trace["uuid"])[0]
+    assert re.fullmatch(r"\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}", run["created_at"])

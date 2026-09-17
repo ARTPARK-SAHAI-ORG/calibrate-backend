@@ -11,7 +11,6 @@ from __future__ import annotations
 import json
 import random
 import subprocess
-import time
 import uuid
 from dataclasses import asdict
 from pathlib import Path
@@ -21,6 +20,13 @@ import pytest
 import trace_scoring as ts
 
 RunStatus = ts.TraceEvalRunStatus
+
+# Every clock in this file is seconds after this instant.
+T0 = "2026-01-01 00:00:00"
+
+
+def _at(seconds: int) -> str:
+    return ts.add_seconds(T0, seconds)
 
 
 @pytest.fixture(autouse=True)
@@ -121,7 +127,7 @@ def _run(
         conn.execute(
             "INSERT INTO trace_eval_runs (uuid, trace_uuid, org_uuid, agent_id, status, "
             "scoring_plan, available_at, attempts, created_at, updated_at) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1, 1)",
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 run_uuid,
                 trace["uuid"],
@@ -129,8 +135,10 @@ def _run(
                 agent["uuid"],
                 status.value,
                 scoring_plan,
-                available_at,
+                _at(available_at),
                 attempts,
+                _at(1),
+                _at(1),
             ),
         )
         conn.commit()
@@ -166,6 +174,18 @@ def _status(run_uuid: str) -> str:
     return db.get_trace_eval_run(run_uuid)["status"]
 
 
+def _claim_all(*, now: str) -> list[dict]:
+    """A claim serves one agent; keep claiming until every agent is served."""
+    claimed: list[dict] = []
+    while batch := db.claim_trace_eval_runs(now=now, lease_seconds=600, batch_size=10):
+        claimed.extend(batch)
+    return claimed
+
+
+def _uuids(rows: list[dict]) -> list[str]:
+    return [row["uuid"] for row in rows]
+
+
 # --- claim -----------------------------------------------------------------
 
 
@@ -176,13 +196,13 @@ def test_claim_takes_oldest_first_and_stamps_the_lease():
     newer = _run(org, agent, _trace(org, agent), [ev], available_at=200)
     older = _run(org, agent, _trace(org, agent), [ev], available_at=100)
 
-    claimed = db.claim_trace_eval_runs(now=1000, lease_seconds=600, batch_size=1)
+    claimed = db.claim_trace_eval_runs(now=_at(1000), lease_seconds=600, batch_size=1)
 
     assert [row["uuid"] for row in claimed] == [older]
     assert claimed[0]["attempts"] == 1
     row = db.get_trace_eval_run(older)
     assert row["status"] == RunStatus.PROCESSING.value
-    assert row["available_at"] == 1600
+    assert row["available_at"] == _at(1600)
     assert _status(newer) == RunStatus.PENDING.value
 
 
@@ -191,7 +211,7 @@ def test_claim_ignores_runs_not_yet_available():
     agent = _agent(org)
     run = _run(org, agent, _trace(org, agent), [_evaluator(org)], available_at=5000)
 
-    assert db.claim_trace_eval_runs(now=1000, lease_seconds=600, batch_size=10) == []
+    assert db.claim_trace_eval_runs(now=_at(1000), lease_seconds=600, batch_size=10) == []
     assert _status(run) == RunStatus.PENDING.value
 
 
@@ -208,7 +228,7 @@ def test_expired_lease_is_reclaimed_and_counts_another_attempt():
         status=RunStatus.PROCESSING,
     )
 
-    claimed = db.claim_trace_eval_runs(now=1000, lease_seconds=600, batch_size=10)
+    claimed = db.claim_trace_eval_runs(now=_at(1000), lease_seconds=600, batch_size=10)
 
     assert [row["uuid"] for row in claimed] == [run]
     assert claimed[0]["attempts"] == 2
@@ -216,16 +236,78 @@ def test_expired_lease_is_reclaimed_and_counts_another_attempt():
 
 def test_two_claimers_never_receive_the_same_run():
     org = _org()
-    agent = _agent(org)
     ev = _evaluator(org)
-    runs = {_run(org, agent, _trace(org, agent), [ev]) for _ in range(4)}
+    runs = set()
+    for agent in (_agent(org), _agent(org)):
+        runs.update(_run(org, agent, _trace(org, agent), [ev]) for _ in range(2))
 
-    first = db.claim_trace_eval_runs(now=1000, lease_seconds=600, batch_size=2)
-    second = db.claim_trace_eval_runs(now=1000, lease_seconds=600, batch_size=2)
+    first = db.claim_trace_eval_runs(now=_at(1000), lease_seconds=600, batch_size=2)
+    second = db.claim_trace_eval_runs(now=_at(1000), lease_seconds=600, batch_size=2)
 
     got = [row["uuid"] for row in first] + [row["uuid"] for row in second]
     assert sorted(got) == sorted(runs)
     assert len(set(got)) == 4
+
+
+def test_each_claim_serves_one_agent():
+    org = _org()
+    ev = _evaluator(org)
+    first_agent, second_agent = _agent(org), _agent(org)
+    first = _run(org, first_agent, _trace(org, first_agent), [ev], available_at=1)
+    second = _run(org, second_agent, _trace(org, second_agent), [ev], available_at=2)
+    third = _run(org, first_agent, _trace(org, first_agent), [ev], available_at=3)
+
+    claimed = db.claim_trace_eval_runs(now=_at(1000), lease_seconds=600, batch_size=10)
+    assert _uuids(claimed) == [first, third]
+
+    claimed = db.claim_trace_eval_runs(now=_at(1000), lease_seconds=600, batch_size=10)
+    assert _uuids(claimed) == [second]
+
+
+def test_an_agent_with_a_live_lease_is_skipped_for_the_next_agent():
+    org = _org()
+    ev = _evaluator(org)
+    busy, idle = _agent(org), _agent(org)
+    in_flight = _run(
+        org, busy, _trace(org, busy), [ev], available_at=2000, status=RunStatus.PROCESSING
+    )
+    waiting = _run(org, busy, _trace(org, busy), [ev], available_at=1)
+    other = _run(org, idle, _trace(org, idle), [ev], available_at=2)
+
+    claimed = db.claim_trace_eval_runs(now=_at(1000), lease_seconds=600, batch_size=10)
+    assert _uuids(claimed) == [other]
+
+    assert db.claim_trace_eval_runs(now=_at(1000), lease_seconds=600, batch_size=10) == []
+    assert _status(waiting) == RunStatus.PENDING.value
+    assert db.get_trace_eval_run(in_flight)["available_at"] == _at(2000)
+
+
+def test_an_agent_whose_lease_expired_is_served_again_with_its_pending_runs():
+    org = _org()
+    ev = _evaluator(org)
+    agent = _agent(org)
+    expired = _run(
+        org,
+        agent,
+        _trace(org, agent),
+        [ev],
+        available_at=500,
+        attempts=1,
+        status=RunStatus.PROCESSING,
+    )
+    waiting = _run(org, agent, _trace(org, agent), [ev], available_at=600)
+
+    claimed = db.claim_trace_eval_runs(now=_at(1000), lease_seconds=600, batch_size=10)
+
+    assert _uuids(claimed) == [expired, waiting]
+    assert [row["attempts"] for row in claimed] == [2, 1]
+
+
+def test_backoff_lands_at_least_the_base_delay_after_now():
+    later = ts.backoff_available_at(1, T0, random.Random(0))
+
+    assert isinstance(later, str)
+    assert later >= ts.add_seconds(T0, ts._BACKOFF_BASE_SECONDS)
 
 
 def test_claim_with_no_capacity_is_a_noop():
@@ -233,7 +315,7 @@ def test_claim_with_no_capacity_is_a_noop():
     agent = _agent(org)
     run = _run(org, agent, _trace(org, agent), [_evaluator(org)])
 
-    assert db.claim_trace_eval_runs(now=1000, lease_seconds=600, batch_size=0) == []
+    assert db.claim_trace_eval_runs(now=_at(1000), lease_seconds=600, batch_size=0) == []
     assert _status(run) == RunStatus.PENDING.value
 
 
@@ -260,10 +342,11 @@ def test_ingested_plan_survives_the_round_trip_to_the_claim():
         agent=agent,
         input="Summarize the schedule.",
         output={"response": "Done."},
+        max_scored_traces=10**6,
     )
 
     claimed = db.claim_trace_eval_runs(
-        now=int(time.time()) + 5, lease_seconds=600, batch_size=10
+        now=ts.add_seconds(ts.utc_now(), 5), lease_seconds=600, batch_size=10
     )
 
     assert len(claimed) == 1
@@ -320,7 +403,7 @@ def test_a_pin_that_no_longer_resolves_fails_the_run(break_it):
     run = _run(org, agent, trace, pins)
 
     invoke = _invoker([])
-    ts.claim_and_score_batch(now=1000, invoke=invoke)
+    ts.claim_and_score_batch(now=_at(1000), invoke=invoke)
 
     row = db.get_trace_eval_run(run)
     assert row["status"] == RunStatus.FAILED.value
@@ -334,7 +417,7 @@ def test_an_unparseable_snapshot_fails_the_run_without_invoking():
     run = _run(org, agent, _trace(org, agent), [], scoring_plan="{not json")
 
     invoke = _invoker([])
-    ts.claim_and_score_batch(now=1000, invoke=invoke)
+    ts.claim_and_score_batch(now=_at(1000), invoke=invoke)
 
     row = db.get_trace_eval_run(run)
     assert row["status"] == RunStatus.FAILED.value
@@ -354,7 +437,7 @@ def test_binary_and_rating_verdicts_settle_in_their_own_types():
     run = _run(org, agent, trace, [(binary_uuid, binary_version), (rating_uuid, rating_version)])
 
     ts.claim_and_score_batch(
-        now=1000,
+        now=_at(1000),
         invoke=_invoker(
             [
                 _judged(
@@ -386,7 +469,7 @@ def test_a_failed_binary_verdict_stores_zero_not_a_missing_row():
     run = _run(org, agent, _trace(org, agent), [(evaluator_uuid, version_uuid)])
 
     ts.claim_and_score_batch(
-        now=1000,
+        now=_at(1000),
         invoke=_invoker([_judged(run, {"Correctness": {"match": False, "reasoning": "no"}})]),
     )
 
@@ -410,7 +493,7 @@ def test_a_general_run_sends_input_and_no_history():
     )
 
     invoke = _invoker(lambda ds: [_judged(run, {"Quality": {"match": True}})])
-    ts.claim_and_score_batch(now=1000, invoke=invoke)
+    ts.claim_and_score_batch(now=_at(1000), invoke=invoke)
 
     item = invoke.captured["dataset"][0]
     assert item["test_case"]["id"] == run
@@ -435,7 +518,7 @@ def test_a_conversation_run_sends_history_and_tool_calls():
     run = _run(org, agent, trace, [(evaluator_uuid, version_uuid)])
 
     invoke = _invoker([_judged(run, {"Correctness": {"match": False}})])
-    ts.claim_and_score_batch(now=1000, invoke=invoke)
+    ts.claim_and_score_batch(now=_at(1000), invoke=invoke)
 
     item = invoke.captured["dataset"][0]
     assert item["test_case"]["history"] == [{"role": "user", "content": "when?"}]
@@ -468,7 +551,8 @@ def test_both_modes_share_one_invocation_and_one_evaluator_definition():
             _judged(third, {"Quality": {"match": True}}),
         ]
     )
-    ts.claim_and_score_batch(now=1000, invoke=invoke)
+    claimed = _claim_all(now=_at(1000))
+    ts.process_claimed_runs(claimed, now=_at(1000), invoke=invoke)
 
     assert len(invoke.captured["dataset"]) == 3
     definitions = invoke.captured["config"]["evaluators"]
@@ -479,8 +563,9 @@ def test_both_modes_share_one_invocation_and_one_evaluator_definition():
 
 
 def test_same_named_evaluators_from_two_orgs_stay_distinct_in_one_batch():
-    """A display name is unique only within an org, and a claim batch spans
-    orgs, so calibrate — which keys its output by name — needs the suffix."""
+    """A display name is unique only within an org, and one invocation can
+    carry several claims, so calibrate — which keys its output by name — needs
+    the suffix."""
     first_org, second_org = _org(), _org()
     first_agent, second_agent = _agent(first_org), _agent(second_org)
     first_uuid, first_version = _evaluator(first_org, name="Correctness")
@@ -511,7 +596,7 @@ def test_same_named_evaluators_from_two_orgs_stay_distinct_in_one_batch():
         ]
 
     invoke = _invoker(results)
-    ts.claim_and_score_batch(now=1000, invoke=invoke)
+    ts.process_claimed_runs(_claim_all(now=_at(1000)), now=_at(1000), invoke=invoke)
 
     names = [ev["name"] for ev in invoke.captured["config"]["evaluators"]]
     assert len(set(names)) == 2
@@ -527,7 +612,7 @@ def test_results_map_by_id_so_a_reordered_file_still_lands():
     second = _run(org, agent, _trace(org, agent), [(evaluator_uuid, version_uuid)], available_at=2)
 
     ts.claim_and_score_batch(
-        now=1000,
+        now=_at(1000),
         invoke=_invoker(
             [
                 _judged(second, {"Correctness": {"match": False}}),
@@ -553,7 +638,7 @@ def test_a_result_covering_only_part_of_the_snapshot_is_not_settled():
     )
 
     ts.claim_and_score_batch(
-        now=1000, invoke=_invoker([_judged(run, {"Correctness": {"match": True}})])
+        now=_at(1000), invoke=_invoker([_judged(run, {"Correctness": {"match": True}})])
     )
 
     assert _status(run) == RunStatus.PENDING.value
@@ -568,7 +653,7 @@ def test_a_partial_batch_settles_the_finished_runs_and_retries_the_rest():
     cut = _run(org, agent, _trace(org, agent), [(evaluator_uuid, version_uuid)], available_at=2)
 
     ts.claim_and_score_batch(
-        now=1000,
+        now=_at(1000),
         invoke=_invoker(
             [_judged(done, {"Correctness": {"match": True}})],
             timed_out=True,
@@ -582,7 +667,7 @@ def test_a_partial_batch_settles_the_finished_runs_and_retries_the_rest():
     unfinished = db.get_trace_eval_run(cut)
     assert unfinished["status"] == RunStatus.PENDING.value
     assert unfinished["error"] == "timed out"
-    assert unfinished["available_at"] > 1000
+    assert unfinished["available_at"] > _at(1000)
 
 
 def test_deferral_and_completion_are_stamped_after_the_call_not_before(monkeypatch):
@@ -593,11 +678,11 @@ def test_deferral_and_completion_are_stamped_after_the_call_not_before(monkeypat
     evaluator_uuid, version_uuid = _evaluator(org, name="Correctness")
     done = _run(org, agent, _trace(org, agent), [(evaluator_uuid, version_uuid)], available_at=1)
     cut = _run(org, agent, _trace(org, agent), [(evaluator_uuid, version_uuid)], available_at=2)
-    claim_time = 1000
-    after_invoke = claim_time + 25 * 60
+    claim_time = _at(1000)
+    after_invoke = ts.add_seconds(claim_time, 25 * 60)
 
     def slow(config, dataset, **kwargs):
-        monkeypatch.setattr(ts.time, "time", lambda: after_invoke)
+        monkeypatch.setattr(ts, "utc_now", lambda: after_invoke)
         return ts.EvalOnlyCliResult(
             returncode=1,
             timed_out=False,
@@ -623,13 +708,13 @@ def test_an_invocation_that_raises_defers_every_run_in_the_batch():
     def explode(config, dataset, **kwargs):
         raise RuntimeError("cli vanished")
 
-    ts.claim_and_score_batch(now=1000, invoke=explode, rng=random.Random(3))
+    ts.claim_and_score_batch(now=_at(1000), invoke=explode, rng=random.Random(3))
 
     for run in runs:
         row = db.get_trace_eval_run(run)
         assert row["status"] == RunStatus.PENDING.value
         assert row["error"] == "cli vanished"
-        assert row["available_at"] > 1000
+        assert row["available_at"] > _at(1000)
 
 
 def test_a_settle_failure_defers_that_run_and_spares_the_rest_of_the_batch(
@@ -654,7 +739,7 @@ def test_a_settle_failure_defers_that_run_and_spares_the_rest_of_the_batch(
 
     monkeypatch.setattr(db, "settle_trace_eval_run_completed", flaky_settle)
     ts.claim_and_score_batch(
-        now=1000,
+        now=_at(1000),
         invoke=_invoker(
             [
                 _judged(run_a, {"Correctness": {"match": True, "reasoning": "ok"}}),
@@ -667,7 +752,7 @@ def test_a_settle_failure_defers_that_run_and_spares_the_rest_of_the_batch(
     deferred = db.get_trace_eval_run(run_a)
     assert deferred["status"] == RunStatus.PENDING.value
     assert deferred["error"] == "database table is locked"
-    assert deferred["available_at"] > 1000
+    assert deferred["available_at"] > _at(1000)
     assert db.get_trace_eval_scores(run_a) == []
     assert _status(run_b) == RunStatus.COMPLETED.value
     assert [s["value"] for s in db.get_trace_eval_scores(run_b)] == [1]
@@ -686,7 +771,7 @@ def test_retries_stop_at_the_ceiling_and_the_run_is_buried():
     )
 
     ts.claim_and_score_batch(
-        now=1000, invoke=_invoker([], error="judge exploded"), max_attempts=ts.MAX_ATTEMPTS
+        now=_at(1000), invoke=_invoker([], error="judge exploded"), max_attempts=ts.MAX_ATTEMPTS
     )
 
     row = db.get_trace_eval_run(run)
@@ -705,7 +790,7 @@ def test_an_unreadable_verdict_defers_rather_than_hitting_the_value_constraint()
     run = _run(org, agent, _trace(org, agent), [(evaluator_uuid, version_uuid)])
 
     ts.claim_and_score_batch(
-        now=1000,
+        now=_at(1000),
         invoke=_invoker([_judged(run, {"Helpfulness": {"score": None, "reasoning": "?"}})]),
         rng=random.Random(1),
     )
@@ -725,7 +810,7 @@ def test_a_trace_deleted_before_the_claim_is_skipped_without_a_judge_call():
     db.soft_delete_traces(org, trace_ids=[trace["uuid"]])
 
     invoke = _invoker([])
-    ts.claim_and_score_batch(now=1000, invoke=invoke)
+    ts.claim_and_score_batch(now=_at(1000), invoke=invoke)
 
     row = db.get_trace_eval_run(run)
     assert row["status"] == RunStatus.SKIPPED.value
@@ -739,7 +824,7 @@ def test_a_deleted_agent_is_skipped_with_its_own_reason():
     run = _run(org, agent, _trace(org, agent), [_evaluator(org)])
     db.delete_agent(agent["uuid"])
 
-    ts.claim_and_score_batch(now=1000, invoke=_invoker([]))
+    ts.claim_and_score_batch(now=_at(1000), invoke=_invoker([]))
 
     row = db.get_trace_eval_run(run)
     assert row["status"] == RunStatus.SKIPPED.value
@@ -761,7 +846,7 @@ def test_a_trace_deleted_during_the_call_settles_skipped_and_stores_no_scores():
             results=[_judged(run, {"Correctness": {"match": True}})],
         )
 
-    ts.claim_and_score_batch(now=1000, invoke=delete_then_return)
+    ts.claim_and_score_batch(now=_at(1000), invoke=delete_then_return)
 
     row = db.get_trace_eval_run(run)
     assert row["status"] == RunStatus.SKIPPED.value
@@ -781,7 +866,7 @@ def test_a_trace_deleted_during_a_failed_call_skips_instead_of_deferring():
             returncode=1, timed_out=False, results=[], error="boom"
         )
 
-    ts.claim_and_score_batch(now=1000, invoke=delete_then_fail, rng=random.Random(5))
+    ts.claim_and_score_batch(now=_at(1000), invoke=delete_then_fail, rng=random.Random(5))
 
     row = db.get_trace_eval_run(run)
     assert row["status"] == RunStatus.SKIPPED.value
@@ -800,7 +885,7 @@ def test_a_trace_deleted_at_the_ceiling_skips_rather_than_failing():
             returncode=1, timed_out=False, results=[], error="boom"
         )
 
-    ts.claim_and_score_batch(now=1000, invoke=delete_then_fail)
+    ts.claim_and_score_batch(now=_at(1000), invoke=delete_then_fail)
 
     row = db.get_trace_eval_run(run)
     assert row["status"] == RunStatus.SKIPPED.value
@@ -826,9 +911,9 @@ def test_only_the_first_settler_of_a_run_writes():
         }
     ]
 
-    assert db.settle_trace_eval_run_completed(run, scores, now=10) == "completed"
+    assert db.settle_trace_eval_run_completed(run, scores, now=_at(10)) == "completed"
     late = [{**scores[0], "value": 0, "reasoning": "late"}]
-    assert db.settle_trace_eval_run_completed(run, late, now=20) == "noop"
+    assert db.settle_trace_eval_run_completed(run, late, now=_at(20)) == "noop"
 
     stored = db.get_trace_eval_scores(run)
     assert [s["value"] for s in stored] == [1]
@@ -851,7 +936,7 @@ def test_a_retry_of_the_same_run_overwrites_its_own_score_rows():
         "reasoning": "first pass",
     }
 
-    db.settle_trace_eval_run_completed(run, [score], now=10)
+    db.settle_trace_eval_run_completed(run, [score], now=_at(10))
     with db.get_db_connection() as conn:
         conn.execute(
             "UPDATE trace_eval_runs SET status = ? WHERE uuid = ?",
@@ -859,7 +944,7 @@ def test_a_retry_of_the_same_run_overwrites_its_own_score_rows():
         )
         conn.commit()
     db.settle_trace_eval_run_completed(
-        run, [{**score, "value": 1, "reasoning": "retry"}], now=20
+        run, [{**score, "value": 1, "reasoning": "retry"}], now=_at(20)
     )
 
     stored = db.get_trace_eval_scores(run)
@@ -869,17 +954,17 @@ def test_a_retry_of_the_same_run_overwrites_its_own_score_rows():
 
 
 def test_settling_a_run_nobody_claimed_is_a_noop():
-    assert db.settle_trace_eval_run_completed(str(uuid.uuid4()), [], now=10) == "noop"
+    assert db.settle_trace_eval_run_completed(str(uuid.uuid4()), [], now=_at(10)) == "noop"
     assert not db.settle_trace_eval_run_terminal(
-        str(uuid.uuid4()), status=RunStatus.FAILED, error="x", now=10
+        str(uuid.uuid4()), status=RunStatus.FAILED, error="x", now=_at(10)
     )
-    assert not db.defer_trace_eval_run(str(uuid.uuid4()), available_at=50, now=10)
+    assert not db.defer_trace_eval_run(str(uuid.uuid4()), available_at=_at(50), now=_at(10))
 
 
 def test_terminal_settlement_refuses_a_non_terminal_status():
     with pytest.raises(ValueError, match="failed or skipped"):
         db.settle_trace_eval_run_terminal(
-            str(uuid.uuid4()), status=RunStatus.COMPLETED, error=None, now=10
+            str(uuid.uuid4()), status=RunStatus.COMPLETED, error=None, now=_at(10)
         )
 
 
@@ -888,8 +973,8 @@ def test_settling_a_pending_run_is_refused():
     agent = _agent(org)
     run = _run(org, agent, _trace(org, agent), [_evaluator(org)])
 
-    assert db.settle_trace_eval_run_completed(run, [], now=10) == "noop"
-    assert not db.defer_trace_eval_run(run, available_at=50, now=10)
+    assert db.settle_trace_eval_run_completed(run, [], now=_at(10)) == "noop"
+    assert not db.defer_trace_eval_run(run, available_at=_at(50), now=_at(10))
     assert _status(run) == RunStatus.PENDING.value
 
 
@@ -1052,7 +1137,7 @@ def test_unreadable_stderr_does_not_mask_the_exit_code(monkeypatch):
 
 
 def test_an_empty_queue_scores_nothing():
-    assert ts.claim_and_score_batch(now=1000, invoke=_invoker([])) == []
+    assert ts.claim_and_score_batch(now=_at(1000), invoke=_invoker([])) == []
     ts.process_claimed_runs([], invoke=_invoker([]))
 
 
@@ -1080,7 +1165,7 @@ def test_a_trace_deleted_between_the_liveness_check_and_the_read_is_skipped(monk
     monkeypatch.setattr(db, "get_trace", lambda *a, **kw: None)
 
     invoke = _invoker([])
-    ts.claim_and_score_batch(now=1000, invoke=invoke)
+    ts.claim_and_score_batch(now=_at(1000), invoke=invoke)
 
     row = db.get_trace_eval_run(run)
     assert row["status"] == RunStatus.SKIPPED.value
@@ -1110,7 +1195,7 @@ def test_a_run_whose_preparation_raises_is_deferred_not_left_claimed(monkeypatch
     monkeypatch.setattr(db, "get_trace", flaky)
 
     ts.claim_and_score_batch(
-        now=1000,
+        now=_at(1000),
         invoke=_invoker(lambda ds: [_judged(healthy, {"Correctness": {"match": True}})]),
         rng=random.Random(2),
     )
@@ -1118,5 +1203,5 @@ def test_a_run_whose_preparation_raises_is_deferred_not_left_claimed(monkeypatch
     deferred = db.get_trace_eval_run(broken)
     assert deferred["status"] == RunStatus.PENDING.value
     assert deferred["error"] == "unreadable trace payload"
-    assert deferred["available_at"] > 1000
+    assert deferred["available_at"] > _at(1000)
     assert _status(healthy) == RunStatus.COMPLETED.value

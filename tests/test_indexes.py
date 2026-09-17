@@ -31,6 +31,7 @@ EXPECTED_INDEXES = [
     "ix_trace_eval_claim",
     "ix_trace_eval_agent_status",
     "ix_trace_eval_trace",
+    "ix_trace_eval_org_status",
 ]
 
 
@@ -163,7 +164,7 @@ def test_trace_eval_claim_uses_index():
     plan = _query_plan(
         f"SELECT * FROM trace_eval_runs WHERE status IN ({_OPEN_TRACE_EVAL_SQL}) "
         "AND available_at <= ? ORDER BY available_at LIMIT 10",
-        (0,),
+        ("2026-01-01 00:00:00",),
     )
     assert "ix_trace_eval_claim" in plan, plan
 
@@ -185,3 +186,11 @@ def test_trace_eval_history_uses_index():
     )
     assert "ix_trace_eval_trace" in plan, plan
     assert "TEMP B-TREE" not in plan, plan
+
+
+def test_trace_eval_org_status_count_uses_index():
+    plan = _query_plan(
+        "SELECT COUNT(*) FROM trace_eval_runs WHERE org_uuid = ? AND status != ?",
+        ("org", "skipped"),
+    )
+    assert "ix_trace_eval_org_status" in plan, plan

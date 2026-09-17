@@ -8,6 +8,8 @@ import os
 import sqlite3
 
 from fastapi import APIRouter, HTTPException, Depends, Path
+from typing import Optional
+
 from pydantic import BaseModel, Field
 
 from db import (
@@ -23,6 +25,7 @@ from auth_utils import get_current_org, OrgContext, require_superadmin, is_super
 router = APIRouter(prefix="/org-limits", tags=["org-limits"])
 
 DEFAULT_MAX_ROWS_PER_EVAL = int(os.getenv("DEFAULT_MAX_ROWS_PER_EVAL", "20"))
+DEFAULT_MAX_SCORED_TRACES = int(os.getenv("DEFAULT_MAX_SCORED_TRACES", "20"))
 
 
 class OrgLimits(BaseModel):
@@ -30,6 +33,12 @@ class OrgLimits(BaseModel):
         gt=0,
         le=10000,
         description="Maximum dataset rows a single eval run may process",
+    )
+    max_scored_traces: Optional[int] = Field(
+        None,
+        gt=0,
+        le=1_000_000,
+        description="Maximum traces a workspace may score automatically, counted over its lifetime",
     )
 
 
@@ -81,6 +90,13 @@ def effective_max_rows_per_eval(org_uuid: str) -> int:
     return DEFAULT_MAX_ROWS_PER_EVAL
 
 
+def effective_max_scored_traces(org_uuid: str) -> int:
+    """Workspace cap on automatically scored traces, falling back to the server default."""
+    limits = get_org_limits(org_uuid)
+    stored = (limits or {}).get("limits", {}).get("max_scored_traces")
+    return stored if stored is not None else DEFAULT_MAX_SCORED_TRACES
+
+
 def enforce_max_rows_per_eval(org_uuid: str, rows: int) -> None:
     """Reject a run that would process more rows than the workspace allows."""
     cap = effective_max_rows_per_eval(org_uuid)
@@ -98,6 +114,12 @@ def enforce_max_rows_per_eval(org_uuid: str, rows: int) -> None:
 def get_max_rows_per_eval(ctx: OrgContext = Depends(get_current_org)):
     """Get the max rows per eval"""
     return {"max_rows_per_eval": effective_max_rows_per_eval(ctx.org_uuid)}
+
+
+@router.get("/me/max-scored-traces", summary="Get own max scored traces")
+def get_max_scored_traces(ctx: OrgContext = Depends(get_current_org)):
+    """Get the max traces this workspace may score automatically"""
+    return {"max_scored_traces": effective_max_scored_traces(ctx.org_uuid)}
 
 
 @router.post("", response_model=OrgLimitsCreateResponse, summary="Create workspace limits")

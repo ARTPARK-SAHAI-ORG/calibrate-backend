@@ -15,9 +15,9 @@ import random
 import shutil
 import subprocess
 import tempfile
-import time
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
+from datetime import datetime, timedelta
 from enum import Enum
 from pathlib import Path
 from typing import Any, Literal
@@ -33,7 +33,9 @@ from utils import get_calibrate_agent_cli, kill_process_group
 logger = logging.getLogger(__name__)
 
 # Stored on a skipped `trace_eval_runs.error` when ingest cannot build a plan.
-TraceEvalSkipReason = Literal["unsupported_interaction_type", "no_usable_evaluators"]
+TraceEvalSkipReason = Literal[
+    "unsupported_interaction_type", "no_usable_evaluators", "over_limit"
+]
 
 
 class TraceEvalSettleSkipReason(str, Enum):
@@ -247,6 +249,21 @@ def resolve_trace_scoring(
         evaluator_type=required_evaluator_type,
         eligible=eligible,
         ineligible=ineligible,
+    )
+
+
+# Text form SQLite writes for CURRENT_TIMESTAMP, so trace_eval_* rows compare
+# and sort like every other table's timestamps.
+_TIMESTAMP_FORMAT = "%Y-%m-%d %H:%M:%S"
+
+
+def utc_now() -> str:
+    return datetime.utcnow().strftime(_TIMESTAMP_FORMAT)
+
+
+def add_seconds(ts: str, seconds: int) -> str:
+    return (datetime.strptime(ts, _TIMESTAMP_FORMAT) + timedelta(seconds=seconds)).strftime(
+        _TIMESTAMP_FORMAT
     )
 
 
@@ -551,9 +568,9 @@ def parse_results_json(path: Path) -> list[Any]:
 
 def backoff_available_at(
     attempts: int,
-    now: int,
+    now: str,
     rng: random.Random | None = None,
-) -> int:
+) -> str:
     """Exponential backoff plus jitter. The jitter is not decorative: without it
     a whole-invocation failure defers every run in the batch to the same
     instant, and the next claim reassembles and re-fails the identical batch."""
@@ -561,7 +578,7 @@ def backoff_available_at(
     delay = min(
         _BACKOFF_BASE_SECONDS * (2 ** max(attempts - 1, 0)), _BACKOFF_CAP_SECONDS
     )
-    return now + delay + roller.randint(0, max(delay // 2, 1))
+    return add_seconds(now, delay + roller.randint(0, max(delay // 2, 1)))
 
 
 def _truncate_error(detail: str) -> str:
@@ -694,7 +711,7 @@ def invoke_eval_only_cli(
         _cleanup_cli_tempdir(tmp_path, proc)
 
 
-def _fail_run(run: dict[str, Any], error: str, now: int) -> None:
+def _fail_run(run: dict[str, Any], error: str, now: str) -> None:
     from db import settle_trace_eval_run_terminal
 
     settle_trace_eval_run_terminal(
@@ -708,7 +725,7 @@ def _fail_run(run: dict[str, Any], error: str, now: int) -> None:
 def _defer_or_fail(
     run: dict[str, Any],
     *,
-    now: int,
+    now: str,
     error: str,
     rng: random.Random | None,
     max_attempts: int,
@@ -732,7 +749,7 @@ def _defer_or_fail(
     )
 
 
-def _prepare_claimed_run(run: dict[str, Any], now: int) -> PreparedRun | None:
+def _prepare_claimed_run(run: dict[str, Any], now: str) -> PreparedRun | None:
     """Settle everything a claimed run can be settled by without a judge call."""
     from db import get_trace, settle_trace_eval_run_terminal, trace_scoring_skip_reason
 
@@ -768,7 +785,7 @@ def _prepare_claimed_run(run: dict[str, Any], now: int) -> PreparedRun | None:
 def process_claimed_runs(
     claimed: Sequence[dict[str, Any]],
     *,
-    now: int | None = None,
+    now: str | None = None,
     invoke: Callable[..., EvalOnlyCliResult] | None = None,
     rng: random.Random | None = None,
     max_attempts: int = MAX_ATTEMPTS,
@@ -782,7 +799,7 @@ def process_claimed_runs(
     """
     from db import settle_trace_eval_run_completed
 
-    prepare_now = int(now if now is not None else time.time())
+    prepare_now = now or utc_now()
     prepared: list[PreparedRun] = []
     for run in claimed:
         try:
@@ -813,7 +830,7 @@ def process_claimed_runs(
         )
     except Exception as exc:
         logger.exception("trace-scoring: eval-only invocation raised")
-        settle_now = int(time.time())
+        settle_now = utc_now()
         for item in prepared:
             _defer_or_fail(
                 item.run,
@@ -839,7 +856,7 @@ def process_claimed_runs(
         if scores is not None:
             scored[item.run["uuid"]] = scores
 
-    settle_now = int(time.time())
+    settle_now = utc_now()
     leftover_error = cli_result.error or "incomplete evaluator results"
     for item in prepared:
         scores = scored.get(item.run["uuid"])
@@ -872,7 +889,7 @@ def process_claimed_runs(
 
 def claim_and_score_batch(
     *,
-    now: int | None = None,
+    now: str | None = None,
     batch_size: int = CLAIM_BATCH_SIZE,
     lease_seconds: int = CLAIM_LEASE_SECONDS,
     invoke: Callable[..., EvalOnlyCliResult] | None = None,
@@ -883,7 +900,7 @@ def claim_and_score_batch(
     """Claim one batch and score it. No loop — the caller decides when to run."""
     from db import claim_trace_eval_runs
 
-    now = int(now if now is not None else time.time())
+    now = now or utc_now()
     claimed = claim_trace_eval_runs(
         now=now, lease_seconds=lease_seconds, batch_size=batch_size
     )

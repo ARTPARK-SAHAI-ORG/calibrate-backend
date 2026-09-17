@@ -1,7 +1,6 @@
 import sqlite3
 import json
 import logging
-import time
 import uuid
 from dataclasses import asdict
 from os.path import join
@@ -1223,10 +1222,17 @@ def init_db():
 
         try:
             cursor.execute(
-                "ALTER TABLE agents ADD COLUMN auto_score_traces INTEGER NOT NULL DEFAULT 0"
+                "ALTER TABLE agents ADD COLUMN auto_score_traces INTEGER NOT NULL DEFAULT 1"
             )
         except sqlite3.OperationalError:
             pass
+        # ALTER cannot change a default, so databases that got DEFAULT 0 are
+        # flipped once here.
+        if not _schema_migration_applied(cursor, AUTO_SCORE_TRACES_DEFAULT_ON_MIGRATION):
+            cursor.execute(
+                "UPDATE agents SET auto_score_traces = 1 WHERE deleted_at IS NULL"
+            )
+            _mark_schema_migration_applied(cursor, AUTO_SCORE_TRACES_DEFAULT_ON_MIGRATION)
 
         # User-chosen run name. NULL means the run falls back to its position
         # ("Run 3"), which is what every run read as before this column existed.
@@ -1607,12 +1613,12 @@ def init_db():
                 agent_id TEXT NOT NULL,
                 status TEXT NOT NULL DEFAULT 'pending',
                 scoring_plan TEXT,
-                available_at INTEGER NOT NULL,
+                available_at TIMESTAMP NOT NULL,
                 attempts INTEGER NOT NULL DEFAULT 0,
                 error TEXT,
-                created_at INTEGER NOT NULL,
-                updated_at INTEGER NOT NULL,
-                completed_at INTEGER,
+                created_at TIMESTAMP NOT NULL,
+                updated_at TIMESTAMP NOT NULL,
+                completed_at TIMESTAMP,
                 FOREIGN KEY (trace_uuid) REFERENCES traces(uuid),
                 FOREIGN KEY (org_uuid) REFERENCES organizations(uuid),
                 FOREIGN KEY (agent_id) REFERENCES agents(uuid)
@@ -1637,6 +1643,10 @@ def init_db():
             "CREATE INDEX IF NOT EXISTS ix_trace_eval_trace "
             "ON trace_eval_runs (trace_uuid, created_at DESC)"
         )
+        cursor.execute(
+            "CREATE INDEX IF NOT EXISTS ix_trace_eval_org_status "
+            "ON trace_eval_runs (org_uuid, status)"
+        )
 
         # One score per (run, evaluator). Keyed on the run so a same-version
         # rescore never overwrites earlier history.
@@ -1654,7 +1664,7 @@ def init_db():
                 -- Denormalized from evaluators.output_type.
                 output_type TEXT NOT NULL,
                 reasoning TEXT,
-                completed_at INTEGER,
+                completed_at TIMESTAMP,
                 UNIQUE (run_uuid, evaluator_uuid),
                 CHECK (output_type IN ('binary', 'rating')),
                 CHECK (output_type <> 'binary' OR value IN (0, 1)),
@@ -2862,6 +2872,7 @@ def _backfill_test_evaluator_links(
 
 
 AGENT_EVALUATORS_BACKFILL_MIGRATION = "agent_evaluators_from_test_evaluators_v1"
+AUTO_SCORE_TRACES_DEFAULT_ON_MIGRATION = "auto_score_traces_default_on_v1"
 DATASET_NAME_DEDUPE_MIGRATION = "dedupe_active_dataset_names_v1"
 JOBS_SUMMARY_BACKFILL_MIGRATION = "backfill_jobs_summary_columns_v1"
 
@@ -10569,8 +10580,8 @@ def _insert_trace_eval_run(
     status: trace_scoring.TraceEvalRunStatus,
     scoring_plan: Optional[str],
     error: Optional[str],
-    now: int,
-    completed_at: Optional[int] = None,
+    now: str,
+    completed_at: Optional[str] = None,
 ) -> None:
     """Insert one trace_eval_runs row. Caller owns the transaction."""
     cur.execute(
@@ -10635,8 +10646,12 @@ def create_trace_with_eval_run(
     conversation_id: Optional[str] = None,
     metadata: Optional[Any] = None,
     labels: Optional[List[str]] = None,
+    max_scored_traces: int,
 ) -> Dict[str, Any]:
     """Insert a trace, and if auto-scoring is on, its scoring run plan.
+
+    A workspace already holding `max_scored_traces` non-skipped runs gets a
+    `skipped` run with error `over_limit` instead of a pending one.
 
     Resolution of Evaluators and their live versions to use is done before the
     write lock so evaluator reads do not hold it.
@@ -10654,7 +10669,7 @@ def create_trace_with_eval_run(
             resolve_live_evaluators(agent["uuid"]),
         ).as_plan()
 
-    now = int(time.time())
+    now = trace_scoring.utc_now()
     with get_db_connection() as conn:
         cur = conn.cursor()
         cur.execute("BEGIN IMMEDIATE")
@@ -10683,6 +10698,25 @@ def create_trace_with_eval_run(
                         if isinstance(plan, trace_scoring.ScoringPlanSkip)
                         else "no_usable_evaluators"
                     ),
+                    now=now,
+                    completed_at=now,
+                )
+            elif (
+                cur.execute(
+                    "SELECT COUNT(*) FROM trace_eval_runs "
+                    "WHERE org_uuid = ? AND status != ?",
+                    (org_uuid, trace_scoring.TraceEvalRunStatus.SKIPPED.value),
+                ).fetchone()[0]
+                >= max_scored_traces
+            ):
+                _insert_trace_eval_run(
+                    cur,
+                    trace_uuid=row["uuid"],
+                    org_uuid=org_uuid,
+                    agent_id=agent["uuid"],
+                    status=trace_scoring.TraceEvalRunStatus.SKIPPED,
+                    scoring_plan=None,
+                    error="over_limit",
                     now=now,
                     completed_at=now,
                 )
@@ -11024,11 +11058,15 @@ def list_trace_scoring_runs(org_uuid: str, trace_uuid: str) -> List[Dict[str, An
 
 def claim_trace_eval_runs(
     *,
-    now: int,
+    now: str,
     lease_seconds: int,
     batch_size: int,
 ) -> List[Dict[str, Any]]:
-    """Claim up to `batch_size` open runs, oldest `available_at` first.
+    """Claim up to `batch_size` open runs of ONE agent, oldest `available_at` first.
+
+    The agent served is the one owning the oldest claimable run among agents
+    with no run in flight (`processing` with a live lease), so each agent's
+    runs are scored one batch at a time.
 
     `available_at` carries both meanings — when a pending run becomes ready, and
     when a processing run's lease expires — so one range scan picks up fresh,
@@ -11043,9 +11081,27 @@ def claim_trace_eval_runs(
         return []
     open_statuses = [s.value for s in trace_scoring.OPEN_TRACE_EVAL_RUN_STATUSES]
     placeholders = ",".join("?" for _ in open_statuses)
+    processing = trace_scoring.TraceEvalRunStatus.PROCESSING.value
     with get_db_connection() as conn:
         cur = conn.cursor()
         cur.execute("BEGIN IMMEDIATE")
+        agent = cur.execute(
+            f"""
+            SELECT agent_id FROM trace_eval_runs
+             WHERE status IN ({placeholders})
+               AND available_at <= ?
+               AND agent_id NOT IN (
+                     SELECT agent_id FROM trace_eval_runs
+                      WHERE status = ? AND available_at > ?
+                   )
+             ORDER BY available_at, id
+             LIMIT 1
+            """,
+            (*open_statuses, now, processing, now),
+        ).fetchone()
+        if agent is None:
+            conn.rollback()
+            return []
         cur.execute(
             f"""
             UPDATE trace_eval_runs
@@ -11057,6 +11113,7 @@ def claim_trace_eval_runs(
                      SELECT id FROM trace_eval_runs
                       WHERE status IN ({placeholders})
                         AND available_at <= ?
+                        AND agent_id = ?
                       ORDER BY available_at, id
                       LIMIT ?
                    )
@@ -11064,11 +11121,12 @@ def claim_trace_eval_runs(
                       status, available_at
             """,
             (
-                trace_scoring.TraceEvalRunStatus.PROCESSING.value,
-                now + lease_seconds,
+                processing,
+                trace_scoring.add_seconds(now, lease_seconds),
                 now,
                 *open_statuses,
                 now,
+                agent["agent_id"],
                 batch_size,
             ),
         )
@@ -11084,7 +11142,7 @@ def _upsert_trace_eval_scores(
     trace_uuid: str,
     org_uuid: str,
     scores: List[Dict[str, Any]],
-    now: int,
+    now: str,
 ) -> None:
     """Write this run's scores. Keyed on the run, so a retry of the same run
     overwrites its own rows while a rescore (a different run) never touches
@@ -11144,7 +11202,7 @@ def _mark_skipped(
     cur: sqlite3.Cursor,
     run_uuid: str,
     reason: trace_scoring.TraceEvalSettleSkipReason,
-    now: int,
+    now: str,
 ) -> None:
     cur.execute(
         "UPDATE trace_eval_runs SET status = ?, error = ?, completed_at = ?, "
@@ -11164,7 +11222,7 @@ def settle_trace_eval_run_completed(
     run_uuid: str,
     scores: List[Dict[str, Any]],
     *,
-    now: int,
+    now: str,
 ) -> str:
     """Complete a run and write its scores, if this worker still owns it.
 
@@ -11215,7 +11273,7 @@ def settle_trace_eval_run_terminal(
     *,
     status: trace_scoring.TraceEvalRunStatus,
     error: Optional[str],
-    now: int,
+    now: str,
 ) -> bool:
     """Bury a run as `failed` or `skipped`. True if this worker wrote the row.
 
@@ -11260,8 +11318,8 @@ def settle_trace_eval_run_terminal(
 def defer_trace_eval_run(
     run_uuid: str,
     *,
-    available_at: int,
-    now: int,
+    available_at: str,
+    now: str,
     error: Optional[str] = None,
 ) -> bool:
     """Return a still-owned run to `pending` for a later retry.

@@ -8,7 +8,6 @@ seam or the fake's per-subcommand output contract.
 
 import asyncio
 import os
-import time
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -506,12 +505,20 @@ def test_trace_scoring_claim_and_settle_end_to_end_with_fake_cli(
     db.update_agent(agent_uuid, auto_score_traces=True)
 
     agent = db.get_agent(agent_uuid)
-    row = db.create_trace_with_eval_run(org_uuid=org_uuid, agent=agent, **trace)
+    row = db.create_trace_with_eval_run(
+        org_uuid=org_uuid, agent=agent, max_scored_traces=1_000_000, **trace
+    )
 
+    # A claim serves one agent per batch, oldest run first, so runs other
+    # tests left behind may come out ahead of this one.
+    run = None
     with patch.dict(os.environ, {"FAKE_AI_PROVIDERS": "1"}):
-        claimed = ts.claim_and_score_batch(now=int(time.time()) + 5)
-
-    run = next(r for r in claimed if r["trace_uuid"] == row["uuid"])
+        for _ in range(50):
+            claimed = ts.claim_and_score_batch(now=ts.add_seconds(ts.utc_now(), 5))
+            run = next((r for r in claimed if r["trace_uuid"] == row["uuid"]), None)
+            if run or not claimed:
+                break
+    assert run, "this trace's run was never claimed"
     settled = db.get_trace_eval_run(run["uuid"])
     assert settled["status"] == ts.TraceEvalRunStatus.COMPLETED.value, settled["error"]
     scores = db.get_trace_eval_scores(run["uuid"])

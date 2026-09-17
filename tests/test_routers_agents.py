@@ -207,7 +207,7 @@ def test_list_agents_returns_trimmed_summary(client):
     }
     assert item["name"] == name
     assert item["type"] == "agent"
-    assert item["auto_score_traces"] is False
+    assert item["auto_score_traces"] is True
     assert item["created_at"]
     assert item["updated_at"]
 
@@ -1242,11 +1242,11 @@ def _insert_run(org, agent_id, trace_uuid, status, **overrides):
         "agent_id": agent_id,
         "status": status,
         "scoring_plan": None,
-        "available_at": 0,
+        "available_at": "2000-01-01 00:00:00",
         "attempts": 0,
         "error": None,
-        "created_at": 1,
-        "updated_at": 1,
+        "created_at": "2000-01-01 00:00:01",
+        "updated_at": "2000-01-01 00:00:01",
         "completed_at": None,
     }
     row.update(overrides)
@@ -1275,17 +1275,25 @@ def _insert_run(org, agent_id, trace_uuid, status, **overrides):
     return row["uuid"]
 
 
-def test_agent_reads_include_auto_score_traces_off_by_default(client):
+def _disable_auto_score(client, h, agent_uuid):
+    r = client.put(
+        f"/agents/{agent_uuid}", json={"auto_score_traces": False}, headers=h
+    )
+    assert r.status_code == 200, r.text
+    assert r.json()["auto_score_traces"] is False
+
+
+def test_agent_reads_include_auto_score_traces_on_by_default(client):
     h = _signup(client)
     agent = _create_agent(client, h, f"flag-read-{uuid.uuid4().hex[:6]}")
 
     got = client.get(f"/agents/{agent['uuid']}", headers=h)
     assert got.status_code == 200, got.text
-    assert got.json()["auto_score_traces"] is False
+    assert got.json()["auto_score_traces"] is True
 
     listed = client.get("/agents", headers=h)
     item = next(a for a in listed.json()["items"] if a["uuid"] == agent["uuid"])
-    assert item["auto_score_traces"] is False
+    assert item["auto_score_traces"] is True
 
 
 def test_omitting_auto_score_traces_leaves_it_unchanged(client):
@@ -1363,10 +1371,11 @@ def test_enable_auto_score_traces_general_with_eligible_llm_general(client):
 
 
 def test_enable_rejected_when_only_default_correctness_evaluator_is_linked(client):
-    """The seeded correctness defaults declare `{{criteria}}`, so a new agent
-    has zero eligible evaluators and cannot opt in."""
+    """The seeded correctness defaults declare `{{criteria}}`, so an agent
+    with zero eligible evaluators cannot turn scoring back on once it is off."""
     h = _signup(client)
     agent = _create_agent(client, h, f"flag-block-{uuid.uuid4().hex[:6]}")
+    _disable_auto_score(client, h, agent["uuid"])
 
     r = client.put(
         f"/agents/{agent['uuid']}",
@@ -1398,6 +1407,7 @@ def test_enable_rejected_for_general_agent_with_only_default_evaluator(client):
         },
         headers=h,
     ).json()
+    _disable_auto_score(client, h, created["uuid"])
 
     r = client.put(
         f"/agents/{created['uuid']}",
@@ -1496,6 +1506,7 @@ def test_eligibility_endpoint_reports_each_disqualification_reason(client):
     _unlink_all_evaluators(client, h, conv["uuid"])
     _link_evaluators(client, h, conv["uuid"], with_vars, wrong_type)
     db.add_evaluator_to_agent(conv["uuid"], no_live)
+    _disable_auto_score(client, h, conv["uuid"])
 
     r = client.get(
         f"/agents/{conv['uuid']}/trace-scoring-eligibility", headers=h
@@ -1595,7 +1606,7 @@ def test_disable_auto_score_traces_deletes_pending_runs_only(client):
         agent["uuid"],
         completed_trace["uuid"],
         "completed",
-        completed_at=5,
+        completed_at="2000-01-01 00:00:05",
     )
 
     r = client.put(
@@ -1674,16 +1685,10 @@ def test_enable_auto_score_traces_with_api_key(client):
 
 
 def test_duplicate_agent_does_not_copy_auto_score_traces(client):
+    """The copy starts with the default (on), whatever the original chose."""
     h = _signup(client)
     agent = _create_agent(client, h, f"flag-dup-{uuid.uuid4().hex[:6]}")
-    clean = _create_evaluator(client, h, name=f"dup-clean-{uuid.uuid4().hex[:6]}")
-    _unlink_all_evaluators(client, h, agent["uuid"])
-    _link_evaluators(client, h, agent["uuid"], clean)
-    client.put(
-        f"/agents/{agent['uuid']}",
-        json={"auto_score_traces": True},
-        headers=h,
-    )
+    _disable_auto_score(client, h, agent["uuid"])
 
     dup = client.post(
         f"/agents/{agent['uuid']}/duplicate",
@@ -1692,4 +1697,4 @@ def test_duplicate_agent_does_not_copy_auto_score_traces(client):
     )
     assert dup.status_code == 200, dup.text
     copied = client.get(f"/agents/{dup.json()['uuid']}", headers=h).json()
-    assert copied["auto_score_traces"] is False
+    assert copied["auto_score_traces"] is True

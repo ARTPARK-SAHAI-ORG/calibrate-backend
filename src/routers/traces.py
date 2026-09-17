@@ -17,7 +17,6 @@ OTel-gateway migration.
 
 import logging
 import os
-from datetime import datetime, timezone
 from typing import Annotated, Any, ClassVar, Dict, List, Literal, Optional, Union
 
 from fastapi import APIRouter, Depends, HTTPException, Path, Query
@@ -25,6 +24,7 @@ from pydantic import BaseModel, ConfigDict, Field, StringConstraints, model_vali
 
 from auth_utils import OrgContext, get_current_org, get_org_jwt_or_api_key
 from db import (
+    _trace_iso,
     add_test_to_agent,
     bulk_create_tests,
     count_live_traces,
@@ -45,6 +45,7 @@ from db import (
 )
 from org_scope import ensure_owned_agent
 from pagination import PaginatedResponse, PaginationParams, page_envelope
+from routers.org_limits import effective_max_scored_traces
 
 # Reuse the tests router's validation so a converted test accepts exactly what
 # POST /tests does (evaluator visible to the workspace, evaluator_type matches).
@@ -532,14 +533,6 @@ def _turn_count(stored_input: Any) -> int:
     return 1 if isinstance(stored_input, str) else len(stored_input or [])
 
 
-def _unix_iso(ts: Any) -> Optional[str]:
-    if ts is None:
-        return None
-    return datetime.fromtimestamp(int(ts), tz=timezone.utc).strftime(
-        "%Y-%m-%dT%H:%M:%SZ"
-    )
-
-
 def _to_summary(
     row: Dict[str, Any], scoring: Optional[Dict[str, Any]] = None
 ) -> Dict[str, Any]:
@@ -638,6 +631,7 @@ async def ingest_trace(
     row = create_trace_with_eval_run(
         org_uuid=ctx.org_uuid,
         agent=agent,
+        max_scored_traces=effective_max_scored_traces(ctx.org_uuid),
         message_id=payload.message_id,
         conversation_id=payload.conversation_id,
         input=(
@@ -1115,8 +1109,8 @@ async def get_trace_scores_endpoint(
             {
                 "run_uuid": run["run_uuid"],
                 "status": run["status"],
-                "created_at": _unix_iso(run["created_at"]),
-                "completed_at": _unix_iso(run["completed_at"]),
+                "created_at": _trace_iso(run["created_at"]),
+                "completed_at": _trace_iso(run["completed_at"]),
                 "error": run["error"],
                 "results": run["results"],
             }
