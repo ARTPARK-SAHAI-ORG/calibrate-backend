@@ -216,7 +216,10 @@ class PublicTestRunResponse(BaseModel):
         description="Whether the run stopped before starting every test case, after too many failed in a row",
     )
     aborted: bool = Field(False, description=_ABORTED_DESCRIPTION)
-    error: bool = Field(False, description="`true` if the run failed")
+    error: Optional[str] = Field(
+        None,
+        description="Why the run could not be carried out, when it failed before producing any result",
+    )
 
 
 class PublicBenchmarkResponse(BaseModel):
@@ -242,8 +245,15 @@ class PublicBenchmarkResponse(BaseModel):
         description=LEADERBOARD_SUMMARY_DESCRIPTION,
         examples=[LEADERBOARD_SUMMARY_EXAMPLE],
     )
+    stopped_early: bool = Field(
+        False,
+        description="Whether any model's run stopped before starting every test case, after too many failed in a row",
+    )
     aborted: bool = Field(False, description=_ABORTED_DESCRIPTION)
-    error: bool = Field(False, description="`true` if the run failed")
+    error: Optional[str] = Field(
+        None,
+        description="Why the run could not be carried out, when it failed before producing any result",
+    )
 
 
 class PublicSimulationRunResponse(BaseModel):
@@ -680,7 +690,7 @@ def get_public_test_run(
         unanswered_tests=results.get("unanswered_tests"),
         stopped_early=bool(results.get("stopped_early")),
         aborted=bool(details.get("aborted")),
-        error=bool(results.get("error")),
+        error=str(results["error"]) if results.get("error") else None,
     )
 
 
@@ -727,8 +737,9 @@ def get_public_benchmark(
         evaluators=evaluators_block or None,
         model_results=results.get("model_results"),
         leaderboard_summary=results.get("leaderboard_summary"),
+        stopped_early=bool(results.get("stopped_early")),
         aborted=bool(details.get("aborted")),
-        error=bool(results.get("error")),
+        error=str(results["error"]) if results.get("error") else None,
     )
 
 

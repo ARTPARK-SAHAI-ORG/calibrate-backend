@@ -305,6 +305,35 @@ def _shared_run(client, job_type="llm-unit-test"):
     return token
 
 
+def test_public_test_run_error_is_the_stored_text_or_null(client):
+    import db as db_mod
+
+    token = _shared_run(client)
+    assert client.get(f"/public/test-run/{token}").json()["error"] is None
+
+    job = db_mod.get_agent_test_job_by_share_token(token)
+    db_mod.update_agent_test_job(
+        job["uuid"], status="failed", results={"error": "❌ agent down"}
+    )
+    assert client.get(f"/public/test-run/{token}").json()["error"] == "❌ agent down"
+
+
+def test_public_benchmark_carries_stopped_early_and_error_text(client):
+    import db as db_mod
+
+    token = _shared_run(client, job_type="llm-benchmark")
+    data = client.get(f"/public/benchmark/{token}").json()
+    assert data["stopped_early"] is False
+    assert data["error"] is None
+
+    job = db_mod.get_agent_test_job_by_share_token(token)
+    results = dict(job["results"], stopped_early=True, error="❌ agent down")
+    db_mod.update_agent_test_job(job["uuid"], results=results)
+    data = client.get(f"/public/benchmark/{token}").json()
+    assert data["stopped_early"] is True
+    assert data["error"] == "❌ agent down"
+
+
 _SHARED_HEAVY_FIELDS = ("test_case", "output", "judge_results", "inputs")
 
 

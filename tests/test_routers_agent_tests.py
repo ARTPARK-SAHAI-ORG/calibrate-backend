@@ -669,6 +669,7 @@ def test_run_reports_cases_that_never_ran(client):
 
     listed = client.get(f"/agent-tests/agent/{agent['uuid']}/runs", headers=h).json()
     assert listed["items"][0]["unanswered_tests"] == 1
+    assert listed["items"][0]["stopped_early"] is True
 
     share = client.patch(
         f"/agent-tests/run/{job_id}/visibility",
@@ -678,6 +679,23 @@ def test_run_reports_cases_that_never_ran(client):
     public = client.get(f"/public/test-run/{share['share_token']}").json()
     assert public["unanswered_tests"] == 1
     assert public["stopped_early"] is True
+
+
+def test_agent_runs_list_stopped_early_false_when_not_stored(client):
+    """A run whose results carry no stopped_early lists it as false, not null."""
+    from db import create_agent_test_job, update_agent_test_job
+
+    h = _signup(client)["headers"]
+    agent = _create_agent(client, h)
+    job_id = create_agent_test_job(agent_id=agent["uuid"], job_type="llm-unit-test")
+    update_agent_test_job(
+        job_id,
+        status="done",
+        results={"total_tests": 1, "passed": 1, "failed": 0, "test_results": []},
+    )
+
+    listed = client.get(f"/agent-tests/agent/{agent['uuid']}/runs", headers=h).json()
+    assert listed["items"][0]["stopped_early"] is False
 
 
 def test_agent_runs_list_slims_benchmark_model_results(client):
@@ -2488,6 +2506,213 @@ def test_benchmark_response_test_judge_results_completes(client, monkeypatch):
     assert judge_results[0]["match"] is True
 
 
+def _run_benchmark_with_exit_code(
+    client, returncode, write_files, stdout="", write_metrics=True, extra_tests=()
+):
+    """Drive one benchmark of one model through the worker with a fake CLI
+    process. extra_tests: names of linked tests calibrate never writes a row
+    for. Returns (headers, job_uuid)."""
+    import json
+    from pathlib import Path
+
+    import db
+    from routers.agent_tests import run_benchmark_task
+
+    auth = _signup(client)
+    h = auth["headers"]
+    agent = _create_agent(client, h)
+    test_name = f"t-{uuid.uuid4().hex[:6]}"
+    test = _create_test(client, h, name=test_name)
+    client.post(
+        "/agent-tests",
+        json={"agent_uuid": agent["uuid"], "test_uuids": [test["uuid"]]},
+        headers=h,
+    )
+    extra_rows = []
+    for name in extra_tests:
+        extra = _create_test(client, h, name=name)
+        client.post(
+            "/agent-tests",
+            json={"agent_uuid": agent["uuid"], "test_uuids": [extra["uuid"]]},
+            headers=h,
+        )
+        extra_rows.append(db.get_test(extra["uuid"]))
+    agent_row = db.get_agent(agent["uuid"])
+    test_row = db.get_test(test["uuid"])
+    job_uuid = db.create_agent_test_job(
+        agent_id=agent["uuid"], job_type="llm-benchmark", status="in_progress"
+    )
+
+    class _P:
+        def __init__(self):
+            self.returncode = returncode
+            self.pid = 4242
+            self._poll = [None, returncode]
+
+        def poll(self):
+            return self._poll.pop(0) if self._poll else returncode
+
+        def wait(self, *a, **k):
+            return returncode
+
+    def fake_popen(*args, **kwargs):
+        out = Path(kwargs["cwd"]) / "output"
+        with open(out / "stdout.log", "w") as f:
+            f.write(stdout)
+        if write_files:
+            model_dir = out / "gpt-4.1"
+            model_dir.mkdir(parents=True, exist_ok=True)
+            with open(model_dir / "results.json", "w") as f:
+                json.dump(
+                    [
+                        {
+                            "output": {"response": "Yes.", "tool_calls": []},
+                            "metrics": {"passed": True, "reasoning": "ok"},
+                            "test_case": {"id": test["uuid"], "name": test_name},
+                            "test_case_id": test["uuid"],
+                        }
+                    ],
+                    f,
+                )
+        if write_files and write_metrics:
+            with open(model_dir / "metrics.json", "w") as f:
+                json.dump(
+                    {"total": 2, "passed": 1, "errored": 1, "stopped_early": True},
+                    f,
+                )
+        return _P()
+
+    with patch(
+        "routers.agent_tests.subprocess.Popen", side_effect=fake_popen
+    ), patch(
+        "routers.agent_tests.get_s3_client", return_value=MagicMock()
+    ), patch("routers.agent_tests.upload_directory_tree_to_s3"), patch(
+        "routers.agent_tests.upload_file_to_s3"
+    ), patch(
+        "routers.agent_tests.try_start_queued_agent_test_job"
+    ), patch(
+        "routers.agent_tests.time.sleep"
+    ):
+        run_benchmark_task(
+            job_uuid, agent_row, [test_row] + extra_rows, ["gpt-4.1"], "bucket"
+        )
+    return h, job_uuid
+
+
+def test_benchmark_keeps_results_when_cli_exits_nonzero_after_stopping_early(client):
+    """calibrate exits 1 after writing results when a run stops early. The
+    results on disk are the run: status done, the model's stopped_early and
+    unanswered count come from metrics.json, and the detail carries them."""
+    import db
+
+    h, job_uuid = _run_benchmark_with_exit_code(client, 1, write_files=True)
+
+    job = db.get_agent_test_job(job_uuid)
+    assert job["status"] == "done", job.get("results")
+    model = job["results"]["model_results"][0]
+    assert model["stopped_early"] is True
+    assert model["unanswered_tests"] == 1
+
+    data = client.get(f"/agent-tests/benchmark/{job_uuid}", headers=h).json()
+    assert data["stopped_early"] is True
+    assert data["error"] is None
+    assert data["model_results"][0]["stopped_early"] is True
+    assert data["model_results"][0]["unanswered_tests"] == 1
+
+
+def test_benchmark_without_results_reports_the_cli_error_line(client):
+    """No results on disk and a nonzero exit: the run failed, and the detail
+    says why with the line the eval tool printed."""
+    import db
+
+    h, job_uuid = _run_benchmark_with_exit_code(
+        client,
+        1,
+        write_files=False,
+        stdout="header\n❌ Could not connect to agent at http://x (after 4 attempts)\n",
+    )
+
+    assert db.get_agent_test_job(job_uuid)["status"] == "failed"
+    data = client.get(f"/agent-tests/benchmark/{job_uuid}", headers=h).json()
+    assert data["status"] == "failed"
+    assert data["error"] == "❌ Could not connect to agent at http://x (after 4 attempts)"
+    assert data["stopped_early"] is False
+
+
+def test_benchmark_crash_after_some_results_is_a_failure_that_keeps_them(client):
+    """A nonzero exit with results.json but no metrics.json for any model is a
+    crash mid-run: failed, with the rows the last intermediate write kept."""
+    import db
+
+    h, job_uuid = _run_benchmark_with_exit_code(
+        client, 1, write_files=True, write_metrics=False, stdout="❌ judge unreachable\n"
+    )
+
+    job = db.get_agent_test_job(job_uuid)
+    assert job["status"] == "failed"
+    assert job["results"]["error"] == "❌ judge unreachable"
+    assert job["results"]["model_results"][0]["model"] == "gpt-4.1"
+    assert job["results"]["model_results"][0]["test_results"][0]["passed"] is True
+    data = client.get(f"/agent-tests/benchmark/{job_uuid}", headers=h).json()
+    assert data["error"] == "❌ judge unreachable"
+    assert data["model_results"][0]["model"] == "gpt-4.1"
+
+
+def test_benchmark_crash_marks_unreached_rows_not_run(client):
+    """A crash mid-run leaves the model's unreached rows with no verdict. They
+    are marked not_run and the model's message says Failed, and the detail
+    endpoint returns both."""
+    import db
+
+    h, job_uuid = _run_benchmark_with_exit_code(
+        client, 1, write_files=True, write_metrics=False, extra_tests=("never-ran",)
+    )
+
+    job = db.get_agent_test_job(job_uuid)
+    assert job["status"] == "failed"
+    model = job["results"]["model_results"][0]
+    assert model["message"] == "Failed"
+    rows = {r["name"]: r for r in model["test_results"]}
+    assert rows["never-ran"]["passed"] is None
+    assert rows["never-ran"]["not_run"] is True
+    assert model["passed"] == 1
+    assert model["failed"] == 0
+
+    data = client.get(f"/agent-tests/benchmark/{job_uuid}", headers=h).json()
+    model = data["model_results"][0]
+    assert model["message"] == "Failed"
+    rows = {r["name"]: r for r in model["test_results"]}
+    assert rows["never-ran"]["not_run"] is True
+    assert rows["never-ran"]["passed"] is None
+
+
+def test_benchmark_exit_zero_without_files_is_a_failure(client):
+    import db
+
+    h, job_uuid = _run_benchmark_with_exit_code(client, 0, write_files=False)
+
+    assert db.get_agent_test_job(job_uuid)["status"] == "failed"
+    data = client.get(f"/agent-tests/benchmark/{job_uuid}", headers=h).json()
+    assert data["error"] == "calibrate-agent exited with code 0 but wrote no results.json or metrics.json"
+
+
+def test_benchmark_unexpected_exception_stores_its_type_and_message(
+    client, monkeypatch
+):
+    import db
+    from routers import agent_tests
+
+    def boom(*_args, **_kwargs):
+        raise ValueError("boom")
+
+    monkeypatch.setattr(agent_tests, "_find_all_results_in_output", boom)
+    _h, job_uuid = _run_benchmark_with_exit_code(client, 0, write_files=True)
+
+    job = db.get_agent_test_job(job_uuid)
+    assert job["status"] == "failed"
+    assert job["results"]["error"] == "ValueError: boom"
+
+
 def test_unverified_connection_blocks_all_test_types(client, monkeypatch):
     """Every test type runs the agent (conversation tests are live too), so an
     unverified agent-connection agent blocks response AND conversation runs."""
@@ -4062,7 +4287,7 @@ def test_abort_run_keeps_everything_captured_so_far(client):
     detail = client.get(f"/agent-tests/run/{job_id}", headers=h).json()
     assert detail["status"] == "done"
     assert detail["aborted"] is True
-    assert detail["error"] is False
+    assert detail["error"] is None
     assert [r["name"] for r in detail["results"]] == ["T1", "T2"]
     assert detail["results"][0]["reasoning"] == "good"
     assert detail["results"][0]["not_run"] is False
