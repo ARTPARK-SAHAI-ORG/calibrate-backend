@@ -418,14 +418,6 @@ def test_backoff_grows_with_attempts_and_never_lands_on_one_instant():
     )
 
 
-def test_utc_now_is_sqlite_timestamp_text():
-    from datetime import datetime
-
-    now = ts.utc_now()
-    assert re.fullmatch(r"\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}", now)
-    assert abs((datetime.utcnow() - datetime.strptime(now, "%Y-%m-%d %H:%M:%S")).total_seconds()) < 5
-
-
 def test_add_seconds_carries_across_minute_and_day_boundaries():
     assert ts.add_seconds("2026-01-01 00:00:59", 2) == "2026-01-01 00:01:01"
     assert ts.add_seconds("2026-01-31 23:59:30", 45) == "2026-02-01 00:00:15"

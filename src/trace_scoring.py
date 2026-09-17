@@ -28,7 +28,7 @@ from shared_enums import (
     AgentInteractionType,
     EvaluatorType,
 )
-from utils import get_calibrate_agent_cli, kill_process_group
+from utils import get_calibrate_agent_cli, kill_process_group, utc_now
 
 logger = logging.getLogger(__name__)
 
@@ -252,13 +252,7 @@ def resolve_trace_scoring(
     )
 
 
-# Text form SQLite writes for CURRENT_TIMESTAMP, so trace_eval_* rows compare
-# and sort like every other table's timestamps.
 _TIMESTAMP_FORMAT = "%Y-%m-%d %H:%M:%S"
-
-
-def utc_now() -> str:
-    return datetime.utcnow().strftime(_TIMESTAMP_FORMAT)
 
 
 def add_seconds(ts: str, seconds: int) -> str:

@@ -25,11 +25,6 @@ from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Set, Tuple
 
 
-def _utcnow_str() -> str:
-    """SQLite CURRENT_TIMESTAMP-style UTC string. Used in details when we need
-    to record times in JSON (the row's status column is updated separately)."""
-    return datetime.datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
-
 from db import (
     clear_evaluator_runs_for_job,
     create_evaluator_runs,
@@ -47,6 +42,7 @@ from llm_judge import (
     build_evaluator_cli_payload_unrendered,
 )
 from utils import (
+    utc_now,
     TaskStatus,
     capture_exception_to_sentry,
     coerce_evaluator_score,
@@ -1473,7 +1469,7 @@ def _run_job(
                         "s3_prefix": s3_prefix,
                         "metrics": metrics,
                         "item_count": len(items),
-                        "completed_at": _utcnow_str(),
+                        "completed_at": utc_now(),
                     },
                 )
                 logger.info(f"[annotation-eval] job {job_uuid} completed")
@@ -1494,7 +1490,7 @@ def _run_job(
             getattr(e, "stdout", "") or "", getattr(e, "stderr", "") or ""
         )
         _discard_partial_runs(job_uuid)
-        details_patch = {"completed_at": _utcnow_str()}
+        details_patch = {"completed_at": utc_now()}
         if partial_prefix:
             details_patch["s3_prefix"] = partial_prefix
         update_job(
@@ -1508,7 +1504,7 @@ def _run_job(
         logger.exception(f"[annotation-eval] job {job_uuid} failed: {e}")
         capture_exception_to_sentry(e)
         _discard_partial_runs(job_uuid)
-        details_patch = {"completed_at": _utcnow_str()}
+        details_patch = {"completed_at": utc_now()}
         if partial_prefix:
             details_patch["s3_prefix"] = partial_prefix
         update_job(

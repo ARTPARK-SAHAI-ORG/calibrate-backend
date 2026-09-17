@@ -190,7 +190,8 @@ def test_trace_eval_history_uses_index():
 
 def test_trace_eval_org_status_count_uses_index():
     plan = _query_plan(
-        "SELECT COUNT(*) FROM trace_eval_runs WHERE org_uuid = ? AND status != ?",
-        ("org", "skipped"),
+        "SELECT COUNT(*) FROM (SELECT 1 FROM trace_eval_runs WHERE org_uuid = ? "
+        "AND status IN ('pending', 'processing', 'completed') LIMIT ?)",
+        ("org", 20),
     )
     assert "ix_trace_eval_org_status" in plan, plan

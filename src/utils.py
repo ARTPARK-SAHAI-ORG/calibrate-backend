@@ -2007,3 +2007,8 @@ def read_leaderboard_xlsx(leaderboard_dir: Path) -> Optional[List[dict]]:
     except Exception as e:
         logger.warning(f"Failed to read leaderboard xlsx: {e}")
         return None
+
+
+def utc_now() -> str:
+    """UTC in the text form SQLite writes for CURRENT_TIMESTAMP."""
+    return datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")

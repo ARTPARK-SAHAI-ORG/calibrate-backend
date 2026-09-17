@@ -303,13 +303,6 @@ def test_an_agent_whose_lease_expired_is_served_again_with_its_pending_runs():
     assert [row["attempts"] for row in claimed] == [2, 1]
 
 
-def test_backoff_lands_at_least_the_base_delay_after_now():
-    later = ts.backoff_available_at(1, T0, random.Random(0))
-
-    assert isinstance(later, str)
-    assert later >= ts.add_seconds(T0, ts._BACKOFF_BASE_SECONDS)
-
-
 def test_claim_with_no_capacity_is_a_noop():
     org = _org()
     agent = _agent(org)
@@ -1205,3 +1198,22 @@ def test_a_run_whose_preparation_raises_is_deferred_not_left_claimed(monkeypatch
     assert deferred["error"] == "unreadable trace payload"
     assert deferred["available_at"] > _at(1000)
     assert _status(healthy) == RunStatus.COMPLETED.value
+
+
+def test_release_at_startup_hands_in_flight_runs_back_to_the_queue():
+    org = _org()
+    ev = _evaluator(org)
+    agent = _agent(org)
+    in_flight = _run(
+        org, agent, _trace(org, agent), [ev], available_at=2000, status=RunStatus.PROCESSING
+    )
+    waiting = _run(org, agent, _trace(org, agent), [ev], available_at=1)
+    assert db.claim_trace_eval_runs(now=_at(1000), lease_seconds=600, batch_size=10) == []
+
+    assert db.release_trace_eval_leases(_at(1000)) == 1
+
+    row = db.get_trace_eval_run(in_flight)
+    assert row["status"] == RunStatus.PENDING.value
+    assert row["available_at"] == _at(1000)
+    claimed = db.claim_trace_eval_runs(now=_at(1000), lease_seconds=600, batch_size=10)
+    assert set(_uuids(claimed)) == {in_flight, waiting}

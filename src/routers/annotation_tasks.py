@@ -76,9 +76,9 @@ from annotation_eval_runner import (
     required_evaluator_ids_for_item,
     start_annotation_eval_job,
     TOOL_CALL_EVALUATOR_TYPE,
-    _utcnow_str,
 )
 from utils import (
+    utc_now,
     job_slot,
     TaskStatus,
     AnnotationTaskTypeLiteral,
@@ -1107,7 +1107,7 @@ def _store_evaluator_results(
             "evaluators": job_evaluators,
             "item_count": len(scored_item_ids),
             "item_ids": scored_item_ids,
-            "completed_at": _utcnow_str(),
+            "completed_at": utc_now(),
         },
     )
     # Same frozen item snapshot every evaluator run carries, so the run still

@@ -113,3 +113,19 @@ def test_max_scored_traces_of_zero_is_rejected(client, monkeypatch):
     assert client.get("/org-limits/me/max-scored-traces", headers=h).json() == {
         "max_scored_traces": 5
     }
+
+
+def test_updating_only_rows_keeps_the_stored_scored_traces_cap(client, monkeypatch):
+    h, org = _signup_as_superadmin(client, monkeypatch)
+    created = client.post(
+        "/org-limits",
+        json={"org_uuid": org, "limits": {"max_rows_per_eval": 20, "max_scored_traces": 5000}},
+        headers=h,
+    )
+    assert created.status_code == 200, created.text
+
+    updated = client.put(f"/org-limits/{org}", json={"limits": {"max_rows_per_eval": 40}}, headers=h)
+
+    assert updated.status_code == 200, updated.text
+    assert updated.json()["limits"] == {"max_rows_per_eval": 40, "max_scored_traces": 5000}
+    assert org_limits.effective_max_scored_traces(org) == 5000

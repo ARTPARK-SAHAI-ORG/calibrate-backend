@@ -463,11 +463,6 @@ def test_create_trace_still_inserts_without_a_run():
     assert _runs_for(row["uuid"]) == []
 
 
-def test_create_agent_auto_scores_traces_by_default():
-    agent = db.get_agent(db.create_agent("fresh", _org(), link_default_evaluator=False))
-    assert agent["auto_score_traces"] is True
-
-
 def test_over_limit_ingest_persists_skipped_run():
     org = _org()
     agent = _insert_agent(org, auto_score=True)
@@ -486,22 +481,26 @@ def test_over_limit_ingest_persists_skipped_run():
     assert rows[0]["completed_at"] is not None
 
 
-def test_skipped_runs_do_not_count_toward_the_cap():
-    org = _org()
-    agent = _insert_agent(org, auto_score=True)
-    for _ in range(2):
-        trace = _combined_ingest(org, agent, max_scored_traces=1)
-        assert _runs_for(trace["uuid"])[0]["error"] == "no_usable_evaluators"
-
-    ev, _ = _eligible_evaluator(org, "llm")
-    db.add_evaluator_to_agent(agent["uuid"], ev)
-    trace = _combined_ingest(org, agent, max_scored_traces=1)
-    assert _runs_for(trace["uuid"])[0]["status"] == "pending"
-
-
 def test_run_timestamps_are_stored_as_timestamp_text():
     org = _org()
     agent = _insert_agent(org, auto_score=True)
     trace = _combined_ingest(org, agent)
     run = _runs_for(trace["uuid"])[0]
     assert re.fullmatch(r"\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}", run["created_at"])
+
+
+def test_failed_runs_free_their_slot_in_the_cap():
+    org = _org()
+    agent = _insert_agent(org, auto_score=True)
+    ev, _ = _eligible_evaluator(org, "llm")
+    db.add_evaluator_to_agent(agent["uuid"], ev)
+    first = _combined_ingest(org, agent, max_scored_traces=1)
+    run = _runs_for(first["uuid"])[0]
+    assert run["status"] == "pending"
+    with db.get_db_connection() as conn:
+        conn.execute("UPDATE trace_eval_runs SET status = 'failed' WHERE uuid = ?", (run["uuid"],))
+        conn.commit()
+
+    second = _combined_ingest(org, agent, max_scored_traces=1)
+
+    assert _runs_for(second["uuid"])[0]["status"] == "pending"

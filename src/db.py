@@ -1226,13 +1226,6 @@ def init_db():
             )
         except sqlite3.OperationalError:
             pass
-        # ALTER cannot change a default, so databases that got DEFAULT 0 are
-        # flipped once here.
-        if not _schema_migration_applied(cursor, AUTO_SCORE_TRACES_DEFAULT_ON_MIGRATION):
-            cursor.execute(
-                "UPDATE agents SET auto_score_traces = 1 WHERE deleted_at IS NULL"
-            )
-            _mark_schema_migration_applied(cursor, AUTO_SCORE_TRACES_DEFAULT_ON_MIGRATION)
 
         # User-chosen run name. NULL means the run falls back to its position
         # ("Run 3"), which is what every run read as before this column existed.
@@ -2872,7 +2865,6 @@ def _backfill_test_evaluator_links(
 
 
 AGENT_EVALUATORS_BACKFILL_MIGRATION = "agent_evaluators_from_test_evaluators_v1"
-AUTO_SCORE_TRACES_DEFAULT_ON_MIGRATION = "auto_score_traces_default_on_v1"
 DATASET_NAME_DEDUPE_MIGRATION = "dedupe_active_dataset_names_v1"
 JOBS_SUMMARY_BACKFILL_MIGRATION = "backfill_jobs_summary_columns_v1"
 
@@ -8540,12 +8532,14 @@ def get_org_limits(org_uuid: str) -> Optional[Dict[str, Any]]:
 
 
 def update_org_limits(org_uuid: str, limits: "OrgLimits") -> Optional[Dict[str, Any]]:
-    """Update limits JSON for an org. Returns the updated row, or None if not found."""
+    """Merge the given limits into an org's limits JSON, so an omitted key keeps
+    its stored value. Returns the updated row, or None if not found."""
     with get_db_connection() as conn:
         cursor = conn.cursor()
         cursor.execute(
-            "UPDATE org_limits SET limits = ?, updated_at = CURRENT_TIMESTAMP WHERE org_uuid = ?",
-            (limits.model_dump_json(), org_uuid),
+            "UPDATE org_limits SET limits = json_patch(limits, ?), "
+            "updated_at = CURRENT_TIMESTAMP WHERE org_uuid = ?",
+            (limits.model_dump_json(exclude_none=True), org_uuid),
         )
         conn.commit()
         if cursor.rowcount == 0:
@@ -10636,6 +10630,17 @@ def create_trace(
         return row
 
 
+def _scored_trace_count(cur: sqlite3.Cursor, org_uuid: str, cap: int) -> int:
+    """Runs that scored or may still score. A failed run frees its slot, so an
+    outage cannot use up a workspace's cap. Bounded at `cap`, since the caller
+    only asks whether the cap is reached."""
+    return cur.execute(
+        "SELECT COUNT(*) FROM (SELECT 1 FROM trace_eval_runs WHERE org_uuid = ? "
+        "AND status IN ('pending', 'processing', 'completed') LIMIT ?)",
+        (org_uuid, cap),
+    ).fetchone()[0]
+
+
 def create_trace_with_eval_run(
     *,
     org_uuid: str,
@@ -10685,7 +10690,15 @@ def create_trace_with_eval_run(
             labels,
         )
         if plan is not None:
-            if isinstance(plan, trace_scoring.ScoringPlanSkip) or not plan.evaluators:
+            if isinstance(plan, trace_scoring.ScoringPlanSkip):
+                skip = plan.skip
+            elif not plan.evaluators:
+                skip = "no_usable_evaluators"
+            elif _scored_trace_count(cur, org_uuid, max_scored_traces) >= max_scored_traces:
+                skip = "over_limit"
+            else:
+                skip = None
+            if skip is not None:
                 _insert_trace_eval_run(
                     cur,
                     trace_uuid=row["uuid"],
@@ -10693,30 +10706,7 @@ def create_trace_with_eval_run(
                     agent_id=agent["uuid"],
                     status=trace_scoring.TraceEvalRunStatus.SKIPPED,
                     scoring_plan=None,
-                    error=(
-                        plan.skip
-                        if isinstance(plan, trace_scoring.ScoringPlanSkip)
-                        else "no_usable_evaluators"
-                    ),
-                    now=now,
-                    completed_at=now,
-                )
-            elif (
-                cur.execute(
-                    "SELECT COUNT(*) FROM trace_eval_runs "
-                    "WHERE org_uuid = ? AND status != ?",
-                    (org_uuid, trace_scoring.TraceEvalRunStatus.SKIPPED.value),
-                ).fetchone()[0]
-                >= max_scored_traces
-            ):
-                _insert_trace_eval_run(
-                    cur,
-                    trace_uuid=row["uuid"],
-                    org_uuid=org_uuid,
-                    agent_id=agent["uuid"],
-                    status=trace_scoring.TraceEvalRunStatus.SKIPPED,
-                    scoring_plan=None,
-                    error="over_limit",
+                    error=skip,
                     now=now,
                     completed_at=now,
                 )
@@ -11056,6 +11046,20 @@ def list_trace_scoring_runs(org_uuid: str, trace_uuid: str) -> List[Dict[str, An
     return runs
 
 
+def release_trace_eval_leases(now: str) -> int:
+    """Hand every `processing` run back to the queue. Called at startup: a run
+    in flight when the process died would otherwise hold its agent's slot
+    until the lease expired."""
+    with get_db_connection() as conn:
+        cur = conn.execute(
+            "UPDATE trace_eval_runs SET status = 'pending', available_at = ?, "
+            "updated_at = ? WHERE status = 'processing'",
+            (now, now),
+        )
+        conn.commit()
+        return cur.rowcount or 0
+
+
 def claim_trace_eval_runs(
     *,
     now: str,
@@ -11079,41 +11083,35 @@ def claim_trace_eval_runs(
     """
     if batch_size <= 0:
         return []
-    open_statuses = [s.value for s in trace_scoring.OPEN_TRACE_EVAL_RUN_STATUSES]
-    placeholders = ",".join("?" for _ in open_statuses)
-    processing = trace_scoring.TraceEvalRunStatus.PROCESSING.value
     with get_db_connection() as conn:
         cur = conn.cursor()
         cur.execute("BEGIN IMMEDIATE")
-        agent = cur.execute(
-            f"""
-            SELECT agent_id FROM trace_eval_runs
-             WHERE status IN ({placeholders})
-               AND available_at <= ?
-               AND agent_id NOT IN (
-                     SELECT agent_id FROM trace_eval_runs
-                      WHERE status = ? AND available_at > ?
-                   )
-             ORDER BY available_at, id
-             LIMIT 1
-            """,
-            (*open_statuses, now, processing, now),
-        ).fetchone()
-        if agent is None:
-            conn.rollback()
-            return []
+        # Statuses are literals, not bound parameters, so the partial indexes
+        # (declared on these same values) can be used.
         cur.execute(
-            f"""
+            """
             UPDATE trace_eval_runs
-               SET status = ?,
+               SET status = 'processing',
                    available_at = ?,
                    attempts = attempts + 1,
                    updated_at = ?
              WHERE id IN (
                      SELECT id FROM trace_eval_runs
-                      WHERE status IN ({placeholders})
+                      WHERE status IN ('pending', 'processing')
                         AND available_at <= ?
-                        AND agent_id = ?
+                        AND agent_id = (
+                              SELECT t.agent_id FROM trace_eval_runs t
+                               WHERE t.status IN ('pending', 'processing')
+                                 AND t.available_at <= ?
+                                 AND NOT EXISTS (
+                                       SELECT 1 FROM trace_eval_runs p
+                                        WHERE p.agent_id = t.agent_id
+                                          AND p.status = 'processing'
+                                          AND p.available_at > ?
+                                     )
+                               ORDER BY t.available_at, t.id
+                               LIMIT 1
+                            )
                       ORDER BY available_at, id
                       LIMIT ?
                    )
@@ -11121,12 +11119,11 @@ def claim_trace_eval_runs(
                       status, available_at
             """,
             (
-                processing,
                 trace_scoring.add_seconds(now, lease_seconds),
                 now,
-                *open_statuses,
                 now,
-                agent["agent_id"],
+                now,
+                now,
                 batch_size,
             ),
         )

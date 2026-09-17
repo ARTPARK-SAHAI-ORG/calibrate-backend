@@ -509,16 +509,18 @@ def test_trace_scoring_claim_and_settle_end_to_end_with_fake_cli(
         org_uuid=org_uuid, agent=agent, max_scored_traces=1_000_000, **trace
     )
 
-    # A claim serves one agent per batch, oldest run first, so runs other
-    # tests left behind may come out ahead of this one.
-    run = None
+    # Park runs other tests left open so this agent's run is the only claimable one.
+    with db.get_db_connection() as conn:
+        conn.execute(
+            "UPDATE trace_eval_runs SET available_at = '2099-01-01 00:00:00' "
+            "WHERE status IN ('pending', 'processing') AND trace_uuid != ?",
+            (row["uuid"],),
+        )
+        conn.commit()
     with patch.dict(os.environ, {"FAKE_AI_PROVIDERS": "1"}):
-        for _ in range(50):
-            claimed = ts.claim_and_score_batch(now=ts.add_seconds(ts.utc_now(), 5))
-            run = next((r for r in claimed if r["trace_uuid"] == row["uuid"]), None)
-            if run or not claimed:
-                break
-    assert run, "this trace's run was never claimed"
+        claimed = ts.claim_and_score_batch(now=ts.add_seconds(ts.utc_now(), 5))
+
+    run = next(r for r in claimed if r["trace_uuid"] == row["uuid"])
     settled = db.get_trace_eval_run(run["uuid"])
     assert settled["status"] == ts.TraceEvalRunStatus.COMPLETED.value, settled["error"]
     scores = db.get_trace_eval_scores(run["uuid"])

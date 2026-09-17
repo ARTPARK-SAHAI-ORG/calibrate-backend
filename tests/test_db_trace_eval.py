@@ -21,8 +21,7 @@ def _org() -> str:
 
 
 def _ts(seconds: int) -> str:
-    """Timestamp text in the form trace_eval_* columns store, `seconds` after midnight."""
-    return f"2026-01-01 {seconds // 3600:02d}:{seconds // 60 % 60:02d}:{seconds % 60:02d}"
+    return ts.add_seconds("2026-01-01 00:00:00", seconds)
 
 
 def _ingest_trace(org: str, agent_id: str = "agent-1") -> dict:
