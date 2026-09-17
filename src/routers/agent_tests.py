@@ -429,7 +429,7 @@ class TestCaseResult(BaseModel):
         description="ID of the test this case ran, which is what you pass to read the case on its own",
         examples=[EXAMPLE_TEST_UUID],
     )
-    test_type: Optional[TestTypeLiteral] = Field(
+    test_type: Optional[TestType] = Field(
         None,
         description="What the test asks of the agent, which decides how a reader draws the case",
     )
