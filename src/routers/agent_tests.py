@@ -3727,6 +3727,10 @@ class BenchmarkRequest(BaseModel):
         description="A subset of the agent's linked tests to benchmark. Each ID must be linked to the agent. Omit to run all linked tests",
         examples=[[EXAMPLE_TEST_UUID]],
     )
+    parallel_models: bool = Field(
+        True,
+        description="Whether to run the models at the same time. Set false to run them one after another",
+    )
 
 
 class ModelResult(BaseModel):
@@ -4029,6 +4033,9 @@ def run_benchmark_task(
 
                 # Test-case parallelism is left to calibrate (CALIBRATE_TEST_PARALLEL
                 # env / default 4); the subprocess inherits this process's env.
+                job_details = (get_agent_test_job(task_id) or {}).get("details") or {}
+                if not job_details.get("parallel_models", True):
+                    run_cmd += ["--max-parallel", "1"]
 
                 logger.info(f"Running benchmark command: {' '.join(run_cmd)}")
 
@@ -4441,6 +4448,7 @@ def run_agent_benchmark(
 
     test_names, details = _agent_test_job_details(agent, tests, s3_bucket)
     details["models"] = request.models
+    details["parallel_models"] = request.parallel_models
     job_id, initial_status = _create_agent_test_job_in_slot(
         agent,
         "llm-benchmark",
