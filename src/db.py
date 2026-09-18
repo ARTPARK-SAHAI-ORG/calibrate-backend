@@ -1223,14 +1223,11 @@ def init_db():
             "ON organizations(invite_token) WHERE invite_token IS NOT NULL"
         )
 
-        # Workspace default for a model comparison: 1 runs the models at the
-        # same time, 0 runs them one after another. 1 is what every comparison
-        # did before this column existed.
+        # Workspace settings as a JSON object of sections, see
+        # ORG_SETTINGS_DEFAULTS. NULL means every setting is at its default, so
+        # a setting added later needs no backfill.
         try:
-            cursor.execute(
-                "ALTER TABLE organizations "
-                "ADD COLUMN benchmark_parallel_models INTEGER NOT NULL DEFAULT 1"
-            )
+            cursor.execute("ALTER TABLE organizations ADD COLUMN settings TEXT")
         except sqlite3.OperationalError:
             pass
 
@@ -3772,10 +3769,36 @@ def create_user_with_password(
 # ============ Organizations (multi-tenant) ============
 
 
+# Every workspace setting and the value it holds until someone changes it.
+# `run_models_in_parallel` True runs the models of a comparison at the same
+# time, False runs them one after another, which is what every comparison did
+# before a workspace could remember a choice.
+ORG_SETTINGS_DEFAULTS: Dict[str, Dict[str, Any]] = {
+    "model_benchmarking": {"run_models_in_parallel": True},
+}
+
+
+def _merge_org_settings(
+    base: Dict[str, Any], incoming: Dict[str, Any]
+) -> Dict[str, Any]:
+    """Merge the sections, then the keys inside each section, so writing one
+    setting never clears a sibling."""
+    merged = {section: dict(keys) for section, keys in base.items()}
+    for section, keys in incoming.items():
+        # A section sent as null means "leave it alone", the same as leaving it
+        # out. Without this it reaches dict.update(None) and answers with a
+        # server error instead.
+        if keys is None:
+            continue
+        merged.setdefault(section, {}).update(keys)
+    return merged
+
+
 def _parse_org_row(row: sqlite3.Row) -> Dict[str, Any]:
     d = dict(row)
     d["is_personal"] = bool(d.get("is_personal"))
-    d["benchmark_parallel_models"] = bool(d.get("benchmark_parallel_models", 1))
+    stored = json.loads(d["settings"]) if d.get("settings") else {}
+    d["settings"] = _merge_org_settings(ORG_SETTINGS_DEFAULTS, stored)
     return d
 
 
@@ -3821,9 +3844,10 @@ def get_organization(org_uuid: str) -> Optional[Dict[str, Any]]:
 def update_organization(
     org_uuid: str,
     name: Optional[str] = None,
-    benchmark_parallel_models: Optional[bool] = None,
+    settings: Optional[Dict[str, Any]] = None,
 ) -> bool:
-    """Update whichever fields are given. Anything left out stays as it was."""
+    """Update whichever fields are given. Anything left out stays as it was,
+    down to the keys inside a settings section."""
     sets: List[str] = []
     params: List[Any] = []
     if name is not None:
@@ -3832,9 +3856,11 @@ def update_organization(
             raise ValueError("organization name required")
         sets.append("name = ?")
         params.append(name)
-    if benchmark_parallel_models is not None:
-        sets.append("benchmark_parallel_models = ?")
-        params.append(1 if benchmark_parallel_models else 0)
+    if settings is not None:
+        stored = get_organization(org_uuid)
+        base = stored["settings"] if stored else ORG_SETTINGS_DEFAULTS
+        sets.append("settings = ?")
+        params.append(json.dumps(_merge_org_settings(base, settings)))
     if not sets:
         return False
     sets.append("updated_at = CURRENT_TIMESTAMP")

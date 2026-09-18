@@ -11,6 +11,7 @@ freshly minted name/uuid so tests are order-independent.
 
 from __future__ import annotations
 
+import json
 import sqlite3
 import time
 import uuid as _uuid
@@ -3124,3 +3125,82 @@ def test_update_organization_given_nothing_touches_nothing(user):
     after = db.get_organization(user["org_uuid"])
     assert after["name"] == before["name"]
     assert after["updated_at"] == before["updated_at"]
+
+
+def test_a_workspace_with_no_stored_settings_reads_the_defaults(user):
+    """Nothing is written when a workspace is created, so the column is NULL
+    and every setting has to come from the defaults."""
+    with db.get_db_connection() as conn:
+        stored = conn.execute(
+            "SELECT settings FROM organizations WHERE uuid = ?",
+            (user["org_uuid"],),
+        ).fetchone()["settings"]
+    assert stored is None
+
+    org = db.get_organization(user["org_uuid"])
+    assert org["settings"] == db.ORG_SETTINGS_DEFAULTS
+
+
+def test_writing_one_setting_leaves_the_others_alone(user):
+    """Sections beside the one being written, and keys beside the one being
+    written inside it, both survive."""
+    with db.get_db_connection() as conn:
+        conn.execute(
+            "UPDATE organizations SET settings = ? WHERE uuid = ?",
+            (
+                json.dumps(
+                    {
+                        "model_benchmarking": {
+                            "run_models_in_parallel": False,
+                            "second_key": "kept",
+                        },
+                        "second_section": {"a_key": "kept"},
+                    }
+                ),
+                user["org_uuid"],
+            ),
+        )
+        conn.commit()
+
+    assert db.update_organization(
+        user["org_uuid"],
+        settings={"model_benchmarking": {"run_models_in_parallel": True}},
+    ) is True
+
+    with db.get_db_connection() as conn:
+        written = json.loads(
+            conn.execute(
+                "SELECT settings FROM organizations WHERE uuid = ?",
+                (user["org_uuid"],),
+            ).fetchone()["settings"]
+        )
+    assert written == {
+        "model_benchmarking": {"run_models_in_parallel": True, "second_key": "kept"},
+        "second_section": {"a_key": "kept"},
+    }
+
+
+def test_a_section_sent_as_null_leaves_that_section_alone(user):
+    """Null means "leave it alone", the same as leaving the section out. The
+    API lets one through, and merging it used to be a server error."""
+    assert db.update_organization(
+        user["org_uuid"],
+        settings={"model_benchmarking": {"run_models_in_parallel": False}},
+    ) is True
+
+    assert db.update_organization(
+        user["org_uuid"], settings={"model_benchmarking": None}
+    ) is True
+
+    org = db.get_organization(user["org_uuid"])
+    assert org["settings"]["model_benchmarking"]["run_models_in_parallel"] is False
+
+
+def test_writing_settings_to_a_workspace_that_is_not_there_writes_nothing():
+    assert (
+        db.update_organization(
+            _u("missing"),
+            settings={"model_benchmarking": {"run_models_in_parallel": False}},
+        )
+        is False
+    )
