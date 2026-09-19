@@ -10910,26 +10910,6 @@ def _hydrate_trace_score_row(row: sqlite3.Row) -> Dict[str, Any]:
     }
 
 
-def _trace_run_summary_from_scores(
-    status: str, scores: List[Dict[str, Any]]
-) -> Dict[str, Any]:
-    if status != trace_scoring.TraceEvalRunStatus.COMPLETED.value:
-        return {
-            "status": status,
-            "passed": None,
-            "n_passed": None,
-            "n_total": None,
-        }
-    n_total = len(scores)
-    n_passed = sum(1 for s in scores if s["passed"])
-    return {
-        "status": status,
-        "passed": n_passed == n_total,
-        "n_passed": n_passed,
-        "n_total": n_total,
-    }
-
-
 # Scores join through the pinned version for the rating scale, and through the
 # evaluator row for name/type -- soft-deleted evaluators and historical versions
 # still resolve, so a finished run renders after later edits or deletes.
@@ -10964,11 +10944,11 @@ _TRACE_SCORE_SELECT_SQL = """
 def get_latest_trace_run_summaries(
     org_uuid: str, trace_uuids: List[str]
 ) -> Dict[str, Dict[str, Any]]:
-    """Latest run per trace (created_at DESC, id DESC) plus its row-summary.
+    """Latest run per trace (created_at DESC, id DESC) with its per-evaluator
+    results, the same rows `list_trace_scoring_runs` returns for that run.
 
     One SELECT for the given page of trace ids. Traces with no run are omitted.
-    Non-completed runs contribute `status` only; `passed`/`n_passed`/`n_total`
-    stay None so a pending retry cannot blend with an older completed run.
+    A run that has not completed carries whatever results have landed so far.
     """
     if not trace_uuids:
         return {}
@@ -11000,13 +10980,10 @@ def get_latest_trace_run_summaries(
     for row in rows:
         tid = row["trace_uuid"]
         if tid not in grouped:
-            grouped[tid] = {"status": row["status"], "scores": []}
+            grouped[tid] = {"status": row["status"], "error": row["error"], "results": []}
         if row["evaluator_uuid"] is not None:
-            grouped[tid]["scores"].append(_hydrate_trace_score_row(row))
-    return {
-        tid: _trace_run_summary_from_scores(data["status"], data["scores"])
-        for tid, data in grouped.items()
-    }
+            grouped[tid]["results"].append(_hydrate_trace_score_row(row))
+    return grouped
 
 
 def list_trace_scoring_runs(org_uuid: str, trace_uuid: str) -> List[Dict[str, Any]]:

@@ -2501,9 +2501,8 @@ def test_scores_no_run_is_empty_and_list_fields_are_null(client):
     assert scores.json() == {"runs": []}
     item = _list_item(client, h, trace["uuid"])
     assert item["latest_run_status"] is None
-    assert item["passed"] is None
-    assert item["n_passed"] is None
-    assert item["n_total"] is None
+    assert item["latest_run_error"] is None
+    assert item["results"] == []
 
 
 @pytest.mark.parametrize(
@@ -2543,9 +2542,8 @@ def test_scores_and_list_for_non_completed_status(client, status, error, complet
         assert run_body["completed_at"] == "2000-01-01T00:00:09Z"
     item = _list_item(client, h, trace["uuid"])
     assert item["latest_run_status"] == status
-    assert item["passed"] is None
-    assert item["n_passed"] is None
-    assert item["n_total"] is None
+    assert item["latest_run_error"] == run_body["error"]
+    assert item["results"] == []
 
 
 def test_scores_completed_mixed_types_and_list_conjunction(client):
@@ -2600,9 +2598,7 @@ def test_scores_completed_mixed_types_and_list_conjunction(client):
     assert results[rating_id]["name"] == rating_name
     item = _list_item(client, h, trace["uuid"])
     assert item["latest_run_status"] == "completed"
-    assert item["passed"] is False
-    assert item["n_passed"] == 1
-    assert item["n_total"] == 2
+    assert {r["evaluator_uuid"]: r for r in item["results"]} == results
 
 
 def test_list_uses_latest_run_scores_show_full_history(client):
@@ -2633,15 +2629,13 @@ def test_list_uses_latest_run_scores_show_full_history(client):
     _insert_score(
         org, newer, trace["uuid"], evaluator_uuid=ev, evaluator_version_id=ver, value=0
     )
-    item = _list_item(client, h, trace["uuid"])
-    assert item["latest_run_status"] == "completed"
-    assert item["passed"] is False
-    assert item["n_passed"] == 0
-    assert item["n_total"] == 1
     runs = client.get(f"/traces/{trace['uuid']}/scores", headers=h).json()["runs"]
     assert [r["run_uuid"] for r in runs] == [newer, older]
     assert runs[0]["results"][0]["passed"] is False
     assert runs[1]["results"][0]["passed"] is True
+    item = _list_item(client, h, trace["uuid"])
+    assert item["latest_run_status"] == "completed"
+    assert item["results"] == runs[0]["results"]
 
 
 def test_scores_renamed_and_deleted_evaluator_keeps_history(client):
@@ -2674,8 +2668,7 @@ def test_scores_renamed_and_deleted_evaluator_keeps_history(client):
     result = after_delete.json()["runs"][0]["results"][0]
     assert result["name"] == new_name
     assert result["passed"] is True
-    item = _list_item(client, h, trace["uuid"])
-    assert item["passed"] is True
+    assert _list_item(client, h, trace["uuid"])["results"] == [result]
 
 
 def test_scores_pinned_soft_deleted_version_keeps_scale(client):
@@ -2724,7 +2717,7 @@ def test_scores_pinned_soft_deleted_version_keeps_scale(client):
     ][0]
     assert result["scale_max"] == 5
     assert result["passed"] is True
-    assert _list_item(client, h, trace["uuid"])["passed"] is True
+    assert _list_item(client, h, trace["uuid"])["results"] == [result]
 
 
 def test_scores_cross_org_is_403(client):
@@ -2800,6 +2793,4 @@ def test_list_scoring_summary_is_one_batched_query_for_the_page(client, monkeypa
     assert len(body["items"]) == 2
     for item in body["items"]:
         assert item["latest_run_status"] == "completed"
-        assert item["passed"] is True
-        assert item["n_passed"] == 1
-        assert item["n_total"] == 1
+        assert [r["passed"] for r in item["results"]] == [True]

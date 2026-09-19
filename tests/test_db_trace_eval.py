@@ -421,9 +421,8 @@ def test_latest_run_summary_tie_breaks_on_id():
         }
     assert ids[second] > ids[first]
 
-    summary = db.get_latest_trace_run_summaries(org, [trace["uuid"]])[trace["uuid"]]
-    assert summary["passed"] is False
-    assert summary["n_passed"] == 0
+    latest = db.get_latest_trace_run_summaries(org, [trace["uuid"]])[trace["uuid"]]
+    assert [r["value"] for r in latest["results"]] == [0]
 
 
 def test_score_read_helpers_are_org_scoped():
@@ -433,12 +432,9 @@ def test_score_read_helpers_are_org_scoped():
     _insert_score(org_a, run, trace["uuid"], value=1)
     assert db.get_latest_trace_run_summaries(org_b, [trace["uuid"]]) == {}
     assert db.list_trace_scoring_runs(org_b, trace["uuid"]) == []
-    assert (
-        db.get_latest_trace_run_summaries(org_a, [trace["uuid"]])[trace["uuid"]][
-            "passed"
-        ]
-        is True
-    )
+    assert db.get_latest_trace_run_summaries(org_a, [trace["uuid"]])[trace["uuid"]][
+        "results"
+    ][0]["passed"] is True
     assert db.list_trace_scoring_runs(org_a, trace["uuid"])[0]["results"][0][
         "passed"
     ] is True

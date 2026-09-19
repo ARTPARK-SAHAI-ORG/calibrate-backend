@@ -306,20 +306,12 @@ class TraceSummary(BaseModel):
         None,
         description="Status of the latest scoring run for this trace",
     )
-    passed: Optional[bool] = Field(
-        None,
-        description=(
-            "Whether every evaluator on the latest completed run passed. "
-            "A binary result passes on 1. A rating passes at the top of its scale"
-        ),
+    latest_run_error: Optional[str] = Field(
+        None, description="Why the latest scoring run was skipped or failed"
     )
-    n_passed: Optional[int] = Field(
-        None,
-        description="How many evaluators passed on the latest completed run",
-    )
-    n_total: Optional[int] = Field(
-        None,
-        description="How many evaluators the latest completed run scored",
+    results: List["TraceScoreResult"] = Field(
+        default_factory=list,
+        description="Results for each evaluator on the latest scoring run",
     )
 
 
@@ -565,9 +557,8 @@ def _to_summary(
         "labels": row.get("labels") or [],
         "created_at": row["created_at"],
         "latest_run_status": scoring.get("status"),
-        "passed": scoring.get("passed"),
-        "n_passed": scoring.get("n_passed"),
-        "n_total": scoring.get("n_total"),
+        "latest_run_error": scoring.get("error"),
+        "results": scoring.get("results") or [],
     }
 
 
