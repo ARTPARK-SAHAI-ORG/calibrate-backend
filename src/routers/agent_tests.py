@@ -527,7 +527,11 @@ class TestRunStatusResponse(BaseModel):
         None, description="Number of test cases that passed"
     )
     failed: Optional[int] = Field(
-        None, description="Number of test cases that failed"
+        None,
+        description=(
+            "Number of test cases that did not pass, which includes the ones "
+            "that produced no answer"
+        ),
     )
     latency_ms: Optional[Dict[str, Any]] = Field(
         None,
@@ -605,7 +609,18 @@ class ModelRunSummary(BaseModel):
         None, description="Number of test cases that passed for this model"
     )
     failed: Optional[int] = Field(
-        None, description="Number of test cases that failed for this model"
+        None,
+        description=(
+            "Number of test cases that did not pass for this model, which "
+            "includes the ones that produced no answer"
+        ),
+    )
+    unanswered_tests: Optional[int] = Field(
+        None,
+        description=(
+            "Number of this model's test cases that produced no answer, "
+            "already counted in `failed`"
+        ),
     )
 
 
@@ -649,7 +664,11 @@ class AgentTestRunListItem(BaseModel):
         None, description="Number of test cases that passed"
     )
     failed: Optional[int] = Field(
-        None, description="Number of test cases that failed"
+        None,
+        description=(
+            "Number of test cases that did not pass, which includes the ones "
+            "that produced no answer"
+        ),
     )
     evaluators: List[RunListEvaluator] = Field(
         default_factory=list,
@@ -876,6 +895,7 @@ def _slim_model_results(
                 ),
                 "passed": m.get("passed"),
                 "failed": m.get("failed"),
+                "unanswered_tests": m.get("unanswered_tests"),
             }
         )
     return slim or None
@@ -1196,18 +1216,69 @@ def _build_agent_test_run_item_fields(
     }
 
 
+def _run_item_answers(item: AgentTestRunListItem) -> tuple[int, int]:
+    """How many of a run's tests were answered, and how many of those failed.
+
+    A test that produced no answer is not a wrong answer, and a test the run
+    never reached is neither. The stored `failed` is `total - passed` for a run
+    that finished, so it holds both of those until they are taken back out:
+    the rows say which cases have a verdict at all, and `unanswered_tests`
+    says how many of those answered nothing.
+
+    A comparison runs every test once per model, so it is read off the model
+    that got furthest rather than added up.
+    """
+    unanswered = item.unanswered_tests or 0
+    if item.results:
+        answered = sum(1 for r in item.results if r.passed is not None)
+        failed = sum(1 for r in item.results if r.passed is False)
+        return max(answered - unanswered, 0), max(failed - unanswered, 0)
+    if item.model_results:
+        answered = 0
+        failed = 0
+        for m in item.model_results:
+            if m.passed is None or m.failed is None:
+                continue
+            model_unanswered = m.unanswered_tests or 0
+            answered = max(answered, max(m.passed + m.failed - model_unanswered, 0))
+            failed = max(failed, max(m.failed - model_unanswered, 0))
+        return answered, failed
+    passed = item.passed or 0
+    failed = item.failed or 0
+    return max(passed + failed - unanswered, 0), max(failed - unanswered, 0)
+
+
+def _run_item_cannot_be_judged(item: AgentTestRunListItem) -> bool:
+    """True if the run never got through its tests and none of them failed.
+
+    ``has_failures=false`` means every test passed, so a run that broke, that
+    someone stopped, or that gave up before starting every test cannot be one:
+    nothing failed, yet calling it clean would hide that it never finished.
+    Such a run belongs under the status filter instead. A run that does carry
+    failing tests keeps them however it ended, since those counts are recorded
+    from the cases that finished.
+    """
+    unfinished = (
+        item.status == TaskStatus.FAILED
+        or item.error
+        or item.aborted
+        or item.stopped_early
+        or any(m.success is False for m in item.model_results or [])
+    )
+    answered, _ = _run_item_answers(item)
+    # A run that answered nothing has no result either way, so neither side of
+    # the filter is true of it.
+    if answered == 0:
+        return True
+    return bool(unfinished) and not _run_item_has_failures(item)
+
+
 def _run_item_has_failures(item: AgentTestRunListItem) -> bool:
-    """True if a run has any failing test case or model. Covers both shapes:
-    a unit-test run's aggregate `failed`/`error`, and a benchmark run where any
-    single model failed (`failed > 0`) or its run didn't succeed."""
-    if item.error:
-        return True
-    if item.failed and item.failed > 0:
-        return True
-    for m in item.model_results or []:
-        if (m.failed and m.failed > 0) or m.success is False:
-            return True
-    return False
+    """True if a test in the run was answered wrongly. A test that produced no
+    answer, and one the run never reached, are not wrong answers, which is why
+    the stored `failed` is not read on its own."""
+    _, failed = _run_item_answers(item)
+    return failed > 0
 
 
 @router.get(
@@ -1237,9 +1308,11 @@ def get_agent_test_runs(
     has_failures: Optional[bool] = Query(
         None,
         description=(
-            "Filter by whether the run has any failing test case or model. "
-            "`true` returns only runs with failures (or errors), `false` only "
-            "clean runs. Omit for both"
+            "Filter by whether a test in the run did not pass. `true` returns "
+            "only runs with a failing test, `false` only runs that got through "
+            "every test and passed them all. A run that broke, was stopped, or "
+            "gave up part way with no failing test is in neither: filter by "
+            "`status` for those. Omit for both"
         ),
     ),
     around: Optional[str] = Query(
@@ -1290,7 +1363,12 @@ def get_agent_test_runs(
     if status is not None:
         runs = [r for r in runs if r.status == status]
     if has_failures is not None:
-        runs = [r for r in runs if _run_item_has_failures(r) == has_failures]
+        runs = [
+            r
+            for r in runs
+            if not _run_item_cannot_be_judged(r)
+            and _run_item_has_failures(r) == has_failures
+        ]
 
     # `total` = matches after filtering, before the page slice.
     return paginate_around(runs, pagination, around, key=lambda r: r.uuid)
@@ -1318,9 +1396,11 @@ def get_all_test_runs_for_user(
     has_failures: Optional[bool] = Query(
         None,
         description=(
-            "Filter by whether the run has any failing test case or model. "
-            "`true` returns only runs with failures (or errors), `false` only "
-            "clean runs. Omit for both"
+            "Filter by whether a test in the run did not pass. `true` returns "
+            "only runs with a failing test, `false` only runs that got through "
+            "every test and passed them all. A run that broke, was stopped, or "
+            "gave up part way with no failing test is in neither: filter by "
+            "`status` for those. Omit for both"
         ),
     ),
     around: Optional[str] = Query(
@@ -1363,7 +1443,12 @@ def get_all_test_runs_for_user(
     if status is not None:
         runs = [r for r in runs if r.status == status]
     if has_failures is not None:
-        runs = [r for r in runs if _run_item_has_failures(r) == has_failures]
+        runs = [
+            r
+            for r in runs
+            if not _run_item_cannot_be_judged(r)
+            and _run_item_has_failures(r) == has_failures
+        ]
 
     # `total` = matches after filtering, before the page slice.
     return paginate_around(runs, pagination, around, key=lambda r: r.uuid)
@@ -3742,7 +3827,11 @@ class ModelResult(BaseModel):
         None, description="Number of test cases that passed"
     )
     failed: Optional[int] = Field(
-        None, description="Number of test cases that failed"
+        None,
+        description=(
+            "Number of test cases that did not pass, which includes the ones "
+            "that produced no answer"
+        ),
     )
     evaluator_summary: Optional[List[Dict[str, Any]]] = Field(
         None,
@@ -4629,6 +4718,11 @@ def _benchmark_model_result(
             "latency_ms": metrics_data.get("latency_ms"),
             "cost": metrics_data.get("cost"),
             "total_tokens": metrics_data.get("total_tokens"),
+            # `failed` is `total - passed`, so it holds the cases that produced
+            # no answer too; without this count a reader cannot take them back
+            # out, and an imported run would read worse than the same run
+            # carried out here.
+            **run_counts(metrics_data, test_results),
             "test_results": test_results,
         }
 
@@ -4642,6 +4736,7 @@ def _benchmark_model_result(
         "passed": passed,
         "failed": total - passed,
         "evaluator_summary": None,
+        **run_counts(None, test_results),
         "test_results": test_results,
     }
 
