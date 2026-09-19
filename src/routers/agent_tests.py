@@ -1216,29 +1216,69 @@ def _build_agent_test_run_item_fields(
     }
 
 
-def _run_item_only_broke(item: AgentTestRunListItem) -> bool:
-    """True if the run broke and no test in it failed.
+def _run_item_answers(item: AgentTestRunListItem) -> tuple[int, int]:
+    """How many of a run's tests were answered, and how many of those failed.
 
-    Such a run belongs under the status filter, not under either side of
-    ``has_failures``: nothing failed, yet calling it clean would hide that it
-    broke. A broken run that does carry failing tests keeps them, since those
-    counts are recorded from the cases that finished.
+    A test that produced no answer is not a wrong answer, and a test the run
+    never reached is neither. The stored `failed` is `total - passed` for a run
+    that finished, so it holds both of those until they are taken back out:
+    the rows say which cases have a verdict at all, and `unanswered_tests`
+    says how many of those answered nothing.
+
+    A comparison runs every test once per model, so it is read off the model
+    that got furthest rather than added up.
     """
-    broke = (
+    unanswered = item.unanswered_tests or 0
+    if item.results:
+        answered = sum(1 for r in item.results if r.passed is not None)
+        failed = sum(1 for r in item.results if r.passed is False)
+        return max(answered - unanswered, 0), max(failed - unanswered, 0)
+    if item.model_results:
+        answered = 0
+        failed = 0
+        for m in item.model_results:
+            if m.passed is None or m.failed is None:
+                continue
+            model_unanswered = m.unanswered_tests or 0
+            answered = max(answered, max(m.passed + m.failed - model_unanswered, 0))
+            failed = max(failed, max(m.failed - model_unanswered, 0))
+        return answered, failed
+    passed = item.passed or 0
+    failed = item.failed or 0
+    return max(passed + failed - unanswered, 0), max(failed - unanswered, 0)
+
+
+def _run_item_cannot_be_judged(item: AgentTestRunListItem) -> bool:
+    """True if the run never got through its tests and none of them failed.
+
+    ``has_failures=false`` means every test passed, so a run that broke, that
+    someone stopped, or that gave up before starting every test cannot be one:
+    nothing failed, yet calling it clean would hide that it never finished.
+    Such a run belongs under the status filter instead. A run that does carry
+    failing tests keeps them however it ended, since those counts are recorded
+    from the cases that finished.
+    """
+    unfinished = (
         item.status == TaskStatus.FAILED
         or item.error
+        or item.aborted
+        or item.stopped_early
         or any(m.success is False for m in item.model_results or [])
     )
-    return bool(broke) and not _run_item_has_failures(item)
+    answered, _ = _run_item_answers(item)
+    # A run that answered nothing has no result either way, so neither side of
+    # the filter is true of it.
+    if answered == 0:
+        return True
+    return bool(unfinished) and not _run_item_has_failures(item)
 
 
 def _run_item_has_failures(item: AgentTestRunListItem) -> bool:
-    """True if a test in the run did not pass. Covers both shapes: a unit-test
-    run's aggregate `failed`, and a benchmark run where any single model has
-    `failed > 0`."""
-    if item.failed and item.failed > 0:
-        return True
-    return any(bool(m.failed) and m.failed > 0 for m in item.model_results or [])
+    """True if a test in the run was answered wrongly. A test that produced no
+    answer, and one the run never reached, are not wrong answers, which is why
+    the stored `failed` is not read on its own."""
+    _, failed = _run_item_answers(item)
+    return failed > 0
 
 
 @router.get(
@@ -1269,9 +1309,10 @@ def get_agent_test_runs(
         None,
         description=(
             "Filter by whether a test in the run did not pass. `true` returns "
-            "only runs with a failing test, `false` only runs where every test "
-            "passed. A run that broke with no failing test is in neither: "
-            "filter by `status` for those. Omit for both"
+            "only runs with a failing test, `false` only runs that got through "
+            "every test and passed them all. A run that broke, was stopped, or "
+            "gave up part way with no failing test is in neither: filter by "
+            "`status` for those. Omit for both"
         ),
     ),
     around: Optional[str] = Query(
@@ -1325,7 +1366,7 @@ def get_agent_test_runs(
         runs = [
             r
             for r in runs
-            if not _run_item_only_broke(r)
+            if not _run_item_cannot_be_judged(r)
             and _run_item_has_failures(r) == has_failures
         ]
 
@@ -1356,9 +1397,10 @@ def get_all_test_runs_for_user(
         None,
         description=(
             "Filter by whether a test in the run did not pass. `true` returns "
-            "only runs with a failing test, `false` only runs where every test "
-            "passed. A run that broke with no failing test is in neither: "
-            "filter by `status` for those. Omit for both"
+            "only runs with a failing test, `false` only runs that got through "
+            "every test and passed them all. A run that broke, was stopped, or "
+            "gave up part way with no failing test is in neither: filter by "
+            "`status` for those. Omit for both"
         ),
     ),
     around: Optional[str] = Query(
@@ -1404,7 +1446,7 @@ def get_all_test_runs_for_user(
         runs = [
             r
             for r in runs
-            if not _run_item_only_broke(r)
+            if not _run_item_cannot_be_judged(r)
             and _run_item_has_failures(r) == has_failures
         ]
 

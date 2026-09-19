@@ -1042,6 +1042,94 @@ def test_runs_list_keeps_a_broken_run_out_of_the_failures_filter(client):
     assert _uuids() == {clean, broke, broke_with_failures}
 
 
+def test_runs_list_keeps_a_run_that_answered_nothing_out_of_both_filters(client):
+    """A run whose tests all produced no answer has no result to show, so it is
+    neither a run with failing tests nor one where every test passed. The
+    stored `failed` counts those tests, which is why it is not read alone."""
+    from db import create_agent_test_job, update_agent_test_job
+
+    h = _signup(client)["headers"]
+    au = _create_agent(client, h)["uuid"]
+
+    nothing = create_agent_test_job(agent_id=au, job_type="llm-unit-test")
+    update_agent_test_job(
+        nothing,
+        status="done",
+        results={
+            "total_tests": 2,
+            "passed": 0,
+            "failed": 2,
+            "unanswered_tests": 2,
+            "test_results": [
+                {"name": "one", "passed": False, "unanswered": True},
+                {"name": "two", "passed": False, "unanswered": True},
+            ],
+        },
+    )
+
+    def _uuids(**params):
+        r = client.get(f"/agent-tests/agent/{au}/runs", params=params, headers=h)
+        assert r.status_code == 200
+        return {x["uuid"] for x in r.json()["items"]}
+
+    assert _uuids(has_failures=True) == set()
+    assert _uuids(has_failures=False) == set()
+    assert _uuids() == {nothing}
+
+
+def test_runs_list_keeps_a_stopped_run_out_of_all_passed(client):
+    """A run someone stopped never got through its tests, so it is not a run
+    where every test passed, however few of them failed."""
+    from db import create_agent_test_job, update_agent_test_job
+
+    h = _signup(client)["headers"]
+    au = _create_agent(client, h)["uuid"]
+
+    stopped = create_agent_test_job(agent_id=au, job_type="llm-benchmark")
+    update_agent_test_job(
+        stopped,
+        status="in_progress",
+        results={
+            "model_results": [
+                {
+                    "model": "anthropic/claude-haiku",
+                    "success": True,
+                    "message": "ok",
+                    "total_tests": 20,
+                    "passed": 0,
+                    "failed": 0,
+                }
+            ]
+        },
+    )
+    # Stopping it is what records the abort, the same way the app does it.
+    assert (
+        client.post(f"/agent-tests/run/{stopped}/abort", headers=h).status_code
+        == 200
+    )
+
+    gave_up = create_agent_test_job(agent_id=au, job_type="llm-unit-test")
+    update_agent_test_job(
+        gave_up,
+        status="done",
+        results={
+            "total_tests": 10,
+            "passed": 4,
+            "failed": 0,
+            "stopped_early": True,
+        },
+    )
+
+    def _uuids(**params):
+        r = client.get(f"/agent-tests/agent/{au}/runs", params=params, headers=h)
+        assert r.status_code == 200
+        return {x["uuid"] for x in r.json()["items"]}
+
+    assert _uuids(has_failures=False) == set()
+    assert _uuids(has_failures=True) == set()
+    assert _uuids() == {stopped, gave_up}
+
+
 def test_runs_list_keeps_a_broken_model_out_of_the_failures_filter(client):
     """Same for a comparison whose model could not be run at all and whose
     other models had nothing fail."""
@@ -3574,13 +3662,11 @@ def test_agent_runs_list_filters_and_pagination_with_heavy_jobs(client):
     # status filter.
     assert {x["uuid"] for x in _agent(status="in_progress")["items"]} == {bench_prog}
     assert {x["uuid"] for x in _agent(status="done")["items"]} == {unit_pass, unit_id}
-    # has_failures — only the heavy unit run has a failing case; the clean unit
-    # run and the empty in-progress benchmark are both failure-free.
+    # has_failures — only the heavy unit run has a failing case. The clean unit
+    # run is the only one every test passed in: the in-progress benchmark has
+    # answered nothing yet, so neither side of the filter is true of it.
     assert {x["uuid"] for x in _agent(has_failures=True)["items"]} == {unit_id}
-    assert {x["uuid"] for x in _agent(has_failures=False)["items"]} == {
-        unit_pass,
-        bench_prog,
-    }
+    assert {x["uuid"] for x in _agent(has_failures=False)["items"]} == {unit_pass}
     # Pagination: total is the pre-slice filtered count; page is sliced.
     p1 = _agent(status="done", limit=1, offset=0)
     p2 = _agent(status="done", limit=1, offset=1)
