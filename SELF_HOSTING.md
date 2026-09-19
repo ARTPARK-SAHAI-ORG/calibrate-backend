@@ -225,7 +225,7 @@ Use nginx to route your custom domain (e.g. calibrate-backend.<yourdomain.com>) 
 
 Open `https://<YOUR_DOMAIN>/docs` on your browser. It should load the FastAPI docs for the server.
 
-If you frontend is set up, [create a new speech-to-text dataset](https://calibrate.artpark.ai/docs/core-concepts/speech-to-text#create-a-dataset) and upload one audio. If it uploads successfully, your S3 connection works.
+If you frontend is set up, [create a new speech-to-text dataset](https://docs.calibrate.artpark.ai/core-concepts/speech-to-text#create-a-dataset) and upload one audio. If it uploads successfully, your S3 connection works.
 
 ## Set up EBS snapshots
 
@@ -517,7 +517,7 @@ Use nginx to route your custom domain (e.g. calibrate-backend.<yourdomain.com>) 
 
 Open `https://<YOUR_DOMAIN>/docs` on your browser. It should load the FastAPI docs.
 
-If your frontend is set up, [create a new speech-to-text dataset](https://calibrate.artpark.ai/docs/core-concepts/speech-to-text#create-a-dataset) and upload one audio. If it uploads successfully, your GCS connection works.
+If your frontend is set up, [create a new speech-to-text dataset](https://docs.calibrate.artpark.ai/core-concepts/speech-to-text#create-a-dataset) and upload one audio. If it uploads successfully, your GCS connection works.
 
 ## Automate deployments with GitHub Actions
 
