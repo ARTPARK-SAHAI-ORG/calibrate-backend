@@ -1,4 +1,4 @@
-"""Trace-scoring eligibility, plan resolution, and the claim/invoke/settle engine.
+"""Trace-scoring eligibility, evaluator resolution, and the claim/invoke/settle engine.
 
 Shared by agent opt-in, ingest-time run creation, and the scoring loop. Lives
 outside `routers/` so `db.py` can import it without a db→router cycle; `db`
@@ -32,27 +32,18 @@ from utils import get_calibrate_agent_cli, kill_process_group, utc_now
 
 logger = logging.getLogger(__name__)
 
-# Stored on a skipped `trace_eval_runs.error` when ingest cannot build a plan.
+# Stored on a skipped `trace_eval_runs.error`.
 TraceEvalSkipReason = Literal[
     "unsupported_interaction_type", "no_usable_evaluators", "over_limit"
 ]
 
 
 class TraceEvalSettleSkipReason(str, Enum):
-    """Why a claimed run was abandoned. Also stored on `error`.
-
-    Separate from `TraceEvalSkipReason`: these are reachable only after a run
-    exists, so ingest can never write one and a reader can tell where a skip
-    came from.
-    """
+    """Why a claimed run was abandoned. Also stored on `error`."""
 
     TRACE_DELETED = "trace_deleted"
     AGENT_DELETED = "agent_deleted"
 
-
-# Stored on a failed run whose pinned versions no longer resolve. Every other
-# `failed` carries free-text detail, so this is a sentinel, not a vocabulary.
-CORRUPT_SNAPSHOT_ERROR = "corrupt_snapshot"
 
 # Subset of TestType that traces can score.
 TraceScorableEvaluationType = Literal["response", "general"]
@@ -120,33 +111,18 @@ def trace_evaluator_passed(
 
 
 @dataclass(frozen=True)
-class ScoringPlanPin:
-    """One evaluator pin stored within a `trace_eval_runs.scoring_plan`."""
+class EvaluatorPin:
+    """One evaluator and the version of it a run is scored against."""
 
     evaluator_uuid: str
     evaluator_version_id: str
 
 
 @dataclass(frozen=True)
-class ScoringPlan:
-    """JSON envelope pinning evaluators to use in a runnable `trace_eval_runs` row."""
-
-    evaluation_type: TraceScorableEvaluationType
-    evaluators: list[ScoringPlanPin]
-
-
-@dataclass(frozen=True)
-class ScoringPlanSkip:
-    """Why ingest wrote a `skipped` run instead of a runnable plan."""
-
-    skip: TraceEvalSkipReason
-
-
-@dataclass(frozen=True)
 class TraceScoringEligible:
-    """Eligible snapshot pin plus the evaluator name for eligibility responses."""
+    """An evaluator that can score this agent's traces, at its live version."""
 
-    pin: ScoringPlanPin
+    pin: EvaluatorPin
     name: str
 
 
@@ -164,16 +140,14 @@ class TraceScoringResolution:
     eligible: list[TraceScoringEligible] = field(default_factory=list)
     ineligible: list[TraceScoringIneligible] = field(default_factory=list)
 
-    def as_plan(self) -> ScoringPlan | ScoringPlanSkip:
-        """Snapshot written at ingest, or a skip reason if nothing can score."""
+    @property
+    def skip_reason(self) -> TraceEvalSkipReason | None:
+        """Why nothing can score, or None when the eligible list is runnable."""
         if self.evaluation_type is None:
-            return ScoringPlanSkip(skip="unsupported_interaction_type")
+            return "unsupported_interaction_type"
         if not self.eligible:
-            return ScoringPlanSkip(skip="no_usable_evaluators")
-        return ScoringPlan(
-            evaluation_type=self.evaluation_type,
-            evaluators=[item.pin for item in self.eligible],
-        )
+            return "no_usable_evaluators"
+        return None
 
 
 def resolve_trace_scoring(
@@ -237,7 +211,7 @@ def resolve_trace_scoring(
             continue
         eligible.append(
             TraceScoringEligible(
-                pin=ScoringPlanPin(
+                pin=EvaluatorPin(
                     evaluator_uuid=ev["uuid"],
                     evaluator_version_id=version["uuid"],
                 ),
@@ -263,7 +237,6 @@ def add_seconds(ts: str, seconds: int) -> str:
 
 # The lease must outlast the CLI timeout, or a still-running invocation's runs
 # are reclaimed and double-scored while the first worker is mid-flight.
-CLAIM_BATCH_SIZE = 20
 CLI_TIMEOUT_SECONDS = 25 * 60
 CLAIM_LEASE_SECONDS = 30 * 60
 assert CLAIM_LEASE_SECONDS > CLI_TIMEOUT_SECONDS
@@ -285,84 +258,60 @@ class EvalOnlyCliResult:
 
 @dataclass(frozen=True)
 class PreparedRun:
-    """A claimed run that passed liveness, snapshot, and hydration checks."""
+    """A claimed run whose trace and agent are still live."""
 
     run: dict[str, Any]
-    plan: ScoringPlan
     trace: dict[str, Any]
+
+
+@dataclass(frozen=True)
+class BatchEvaluators:
+    """What every run in one claimed batch is scored against.
+
+    A claim only ever returns runs of a single agent, so the agent's evaluators
+    are resolved once for the batch rather than once for each run.
+    """
+
+    evaluation_type: TraceScorableEvaluationType
     hydrated: list[dict[str, Any]]
 
-
-def parse_scoring_plan(raw: Any) -> ScoringPlan | None:
-    """Deserialize a stored `scoring_plan`. None means the run cannot be scored.
-
-    Mirrors what `create_trace_with_eval_run` writes (`asdict(ScoringPlan)`).
-    Anything else — malformed JSON, an unknown evaluation type, no pins, a
-    duplicated evaluator — is a corrupt snapshot, never a partial run.
-    """
-    if not isinstance(raw, str):
-        return None
-    try:
-        data = json.loads(raw)
-    except json.JSONDecodeError:
-        return None
-    if not isinstance(data, dict):
-        return None
-    evaluation_type = data.get("evaluation_type")
-    if evaluation_type not in ("response", "general"):
-        return None
-    raw_pins = data.get("evaluators")
-    if not isinstance(raw_pins, list) or not raw_pins:
-        return None
-    pins: list[ScoringPlanPin] = []
-    seen: set[str] = set()
-    for item in raw_pins:
-        if not isinstance(item, dict):
-            return None
-        evaluator_uuid = item.get("evaluator_uuid")
-        version_id = item.get("evaluator_version_id")
-        if not evaluator_uuid or not version_id:
-            return None
-        if evaluator_uuid in seen:
-            return None
-        seen.add(evaluator_uuid)
-        pins.append(
-            ScoringPlanPin(
-                evaluator_uuid=evaluator_uuid,
-                evaluator_version_id=version_id,
+    @property
+    def pins(self) -> list[EvaluatorPin]:
+        return [
+            EvaluatorPin(
+                evaluator_uuid=ev["uuid"],
+                evaluator_version_id=ev["evaluator_version_id"],
             )
-        )
-    return ScoringPlan(evaluation_type=evaluation_type, evaluators=pins)
+            for ev in self.hydrated
+        ]
 
 
-def hydrate_pinned_evaluators(
-    pins: Sequence[ScoringPlanPin],
-) -> list[dict[str, Any]] | None:
-    """Load execution defs from each pin's version, never the evaluator's live one.
+def hydrate_eligible_evaluators(
+    eligible: Sequence[TraceScoringEligible],
+) -> list[dict[str, Any]]:
+    """Load execution defs for each eligible evaluator's live version.
 
-    Version rows carry no `deleted_at` and the evaluator is read with
-    `include_deleted`, so a version pinned months ago still resolves after the
-    evaluator was edited or deleted — the run reproduces what it pinned. None
-    when any pin is missing or its version belongs to another evaluator.
+    An evaluator whose version disappeared between resolution and this read is
+    dropped rather than failing the batch.
     """
     from db import get_evaluator_versions_by_uuids, get_evaluators_by_uuids
 
     versions = get_evaluator_versions_by_uuids(
-        [pin.evaluator_version_id for pin in pins]
+        [item.pin.evaluator_version_id for item in eligible]
     )
     evaluators = get_evaluators_by_uuids(
-        [pin.evaluator_uuid for pin in pins], include_deleted=True
+        [item.pin.evaluator_uuid for item in eligible], include_deleted=True
     )
     hydrated: list[dict[str, Any]] = []
-    for pin in pins:
-        version = versions.get(pin.evaluator_version_id)
-        evaluator = evaluators.get(pin.evaluator_uuid)
+    for item in eligible:
+        version = versions.get(item.pin.evaluator_version_id)
+        evaluator = evaluators.get(item.pin.evaluator_uuid)
         if (
             version is None
             or evaluator is None
-            or version.get("evaluator_id") != pin.evaluator_uuid
+            or version.get("evaluator_id") != item.pin.evaluator_uuid
         ):
-            return None
+            continue
         hydrated.append(
             {
                 "uuid": evaluator["uuid"],
@@ -375,6 +324,29 @@ def hydrate_pinned_evaluators(
             }
         )
     return hydrated
+
+
+def resolve_batch_evaluators(
+    agent_id: str,
+) -> BatchEvaluators | TraceEvalSkipReason | TraceEvalSettleSkipReason:
+    """Work out what this agent's traces are scored against, at judge time."""
+    from db import get_agent, resolve_live_evaluators
+
+    agent = get_agent(agent_id)
+    if agent is None:
+        return TraceEvalSettleSkipReason.AGENT_DELETED
+    resolution = resolve_trace_scoring(
+        agent.get("interaction_type"), resolve_live_evaluators(agent["uuid"])
+    )
+    skip = resolution.skip_reason
+    if skip is not None:
+        return skip
+    hydrated = hydrate_eligible_evaluators(resolution.eligible)
+    if not hydrated:
+        return "no_usable_evaluators"
+    return BatchEvaluators(
+        evaluation_type=resolution.evaluation_type, hydrated=hydrated
+    )
 
 
 def build_dataset_item(
@@ -415,24 +387,24 @@ def build_dataset_item(
 
 def build_eval_only_batch(
     prepared: Sequence[PreparedRun],
+    evaluators: BatchEvaluators,
 ) -> tuple[dict[str, Any], list[dict[str, Any]], dict[str, str]]:
     """Assemble one invocation covering the whole batch.
 
-    Returns `(config, dataset, manifest)`. The config's evaluator list is the
-    union across runs deduped by uuid, so two runs sharing an evaluator ship one
-    definition; the manifest maps the runtime name calibrate keys its output by
-    (uuid-suffixed on a display-name collision) back to the evaluator uuid.
+    Returns `(config, dataset, manifest)`. The manifest maps the runtime name
+    calibrate keys its output by (uuid-suffixed on a display-name collision)
+    back to the evaluator uuid.
     """
     top_level, criteria_per_run = build_test_evaluators_payload(
         [
-            {"test_uuid": item.run["uuid"], "evaluators": item.hydrated}
+            {"test_uuid": item.run["uuid"], "evaluators": evaluators.hydrated}
             for item in prepared
         ]
     )
     dataset = [
         build_dataset_item(
             item.run["uuid"],
-            item.plan.evaluation_type,
+            evaluators.evaluation_type,
             item.trace,
             criteria_per_run.get(item.run["uuid"]) or [],
         )
@@ -507,7 +479,7 @@ def _typed_score(judgement: dict[str, Any], output_type: str) -> dict[str, Any] 
 def map_item_scores(
     entry: dict[str, Any],
     *,
-    pins: Sequence[ScoringPlanPin],
+    pins: Sequence[EvaluatorPin],
     name_to_uuid: dict[str, str],
     hydrated_by_uuid: dict[str, dict[str, Any]],
 ) -> list[dict[str, Any]] | None:
@@ -761,19 +733,11 @@ def _prepare_claimed_run(run: dict[str, Any], now: str) -> PreparedRun | None:
     if deleted is not None:
         skip(deleted)
         return None
-    plan = parse_scoring_plan(run.get("scoring_plan"))
-    if plan is None:
-        _fail_run(run, CORRUPT_SNAPSHOT_ERROR, now)
-        return None
-    hydrated = hydrate_pinned_evaluators(plan.evaluators)
-    if hydrated is None:
-        _fail_run(run, CORRUPT_SNAPSHOT_ERROR, now)
-        return None
     trace = get_trace(run["org_uuid"], run["trace_uuid"])
     if trace is None:
         skip(TraceEvalSettleSkipReason.TRACE_DELETED)
         return None
-    return PreparedRun(run=run, plan=plan, trace=trace, hydrated=hydrated)
+    return PreparedRun(run=run, trace=trace)
 
 
 def process_claimed_runs(
@@ -785,13 +749,14 @@ def process_claimed_runs(
     max_attempts: int = MAX_ATTEMPTS,
     timeout_seconds: int = CLI_TIMEOUT_SECONDS,
 ) -> None:
-    """Hydrate each snapshot, score the batch in one invocation, settle by id.
+    """Resolve the agent's evaluators once, score the batch in one invocation,
+    settle by id.
 
     `now` stamps preparation only. Everything after the CLI returns re-reads the
     clock, because an invocation can run for many minutes and reusing the claim
     time would write a backoff `available_at` that is already in the past.
     """
-    from db import settle_trace_eval_run_completed
+    from db import settle_trace_eval_run_completed, settle_trace_eval_run_terminal
 
     prepare_now = now or utc_now()
     prepared: list[PreparedRun] = []
@@ -816,7 +781,36 @@ def process_claimed_runs(
     if not prepared:
         return
 
-    config, dataset, manifest = build_eval_only_batch(prepared)
+    # Every claimed run belongs to one agent, so this resolves once per batch.
+    try:
+        evaluators = resolve_batch_evaluators(claimed[0]["agent_id"])
+    except Exception as exc:
+        logger.exception("trace-scoring: resolving evaluators raised")
+        for item in prepared:
+            _defer_or_fail(
+                item.run,
+                now=prepare_now,
+                error=str(exc),
+                rng=rng,
+                max_attempts=max_attempts,
+            )
+        return
+    if not isinstance(evaluators, BatchEvaluators):
+        reason = (
+            evaluators.value
+            if isinstance(evaluators, TraceEvalSettleSkipReason)
+            else evaluators
+        )
+        for item in prepared:
+            settle_trace_eval_run_terminal(
+                item.run["uuid"],
+                status=TraceEvalRunStatus.SKIPPED,
+                error=reason,
+                now=prepare_now,
+            )
+        return
+
+    config, dataset, manifest = build_eval_only_batch(prepared, evaluators)
     invoke_fn = invoke or invoke_eval_only_cli
     try:
         cli_result = invoke_fn(
@@ -836,6 +830,8 @@ def process_claimed_runs(
         return
 
     indexed = index_cli_results(cli_result.results)
+    pins = evaluators.pins
+    hydrated_by_uuid = {ev["uuid"]: ev for ev in evaluators.hydrated}
     scored: dict[str, list[dict[str, Any]]] = {}
     for item in prepared:
         entry = indexed.get(item.run["uuid"])
@@ -843,9 +839,9 @@ def process_claimed_runs(
             continue
         scores = map_item_scores(
             entry,
-            pins=item.plan.evaluators,
+            pins=pins,
             name_to_uuid=manifest,
-            hydrated_by_uuid={ev["uuid"]: ev for ev in item.hydrated},
+            hydrated_by_uuid=hydrated_by_uuid,
         )
         if scores is not None:
             scored[item.run["uuid"]] = scores
@@ -884,19 +880,35 @@ def process_claimed_runs(
 def claim_and_score_batch(
     *,
     now: str | None = None,
-    batch_size: int = CLAIM_BATCH_SIZE,
+    batch_size: int | None = None,
     lease_seconds: int = CLAIM_LEASE_SECONDS,
     invoke: Callable[..., EvalOnlyCliResult] | None = None,
     rng: random.Random | None = None,
     max_attempts: int = MAX_ATTEMPTS,
     timeout_seconds: int = CLI_TIMEOUT_SECONDS,
 ) -> list[dict[str, Any]]:
-    """Claim one batch and score it. No loop — the caller decides when to run."""
+    """Claim one batch and score it. No loop — the caller decides when to run.
+
+    The claim reads each workspace's own batch size and concurrency limit;
+    `batch_size` only replaces the fallback for a workspace that set neither.
+    """
+    # Imported here, not at module scope: db.py imports this module, so a
+    # router import at import time would be a cycle.
+    from routers.org_limits import (
+        DEFAULT_MAX_CONCURRENT_TRACE_SCORING_BATCHES,
+        DEFAULT_TRACE_SCORING_BATCH_SIZE,
+    )
+
     from db import claim_trace_eval_runs
 
     now = now or utc_now()
     claimed = claim_trace_eval_runs(
-        now=now, lease_seconds=lease_seconds, batch_size=batch_size
+        now=now,
+        lease_seconds=lease_seconds,
+        default_batch_size=(
+            DEFAULT_TRACE_SCORING_BATCH_SIZE if batch_size is None else batch_size
+        ),
+        default_max_batches_per_org=DEFAULT_MAX_CONCURRENT_TRACE_SCORING_BATCHES,
     )
     process_claimed_runs(
         claimed,

@@ -12,7 +12,6 @@ import json
 import random
 import subprocess
 import uuid
-from dataclasses import asdict
 from pathlib import Path
 
 import db
@@ -48,8 +47,8 @@ def _agent(org: str, *, interaction_type: str = "conversation") -> dict:
     agent_uuid = str(uuid.uuid4())
     with db.get_db_connection() as conn:
         conn.execute(
-            "INSERT INTO agents (uuid, org_uuid, name, config, interaction_type, "
-            "auto_score_traces) VALUES (?, ?, ?, ?, ?, 1)",
+            "INSERT INTO agents (uuid, org_uuid, name, config, interaction_type) "
+            "VALUES (?, ?, ?, ?, ?)",
             (agent_uuid, org, f"agent-{agent_uuid[:8]}", "{}", interaction_type),
         )
         conn.commit()
@@ -107,34 +106,22 @@ def _run(
     available_at: int = 0,
     attempts: int = 0,
     status: RunStatus = RunStatus.PENDING,
-    scoring_plan: str | None = "",
 ) -> str:
-    """Insert one open run carrying a real snapshot. Returns its uuid."""
-    if scoring_plan == "":
-        scoring_plan = json.dumps(
-            asdict(
-                ts.ScoringPlan(
-                    evaluation_type=evaluation_type,
-                    evaluators=[
-                        ts.ScoringPlanPin(evaluator_uuid=e, evaluator_version_id=v)
-                        for e, v in pins
-                    ],
-                )
-            )
-        )
+    """Insert one open run, its evaluators linked to the agent. Returns its uuid."""
+    for evaluator_uuid, _version in pins:
+        db.add_evaluator_to_agent(agent["uuid"], evaluator_uuid)
     run_uuid = str(uuid.uuid4())
     with db.get_db_connection() as conn:
         conn.execute(
             "INSERT INTO trace_eval_runs (uuid, trace_uuid, org_uuid, agent_id, status, "
-            "scoring_plan, available_at, attempts, created_at, updated_at) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "available_at, attempts, created_at, updated_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 run_uuid,
                 trace["uuid"],
                 org,
                 agent["uuid"],
                 status.value,
-                scoring_plan,
                 _at(available_at),
                 attempts,
                 _at(1),
@@ -174,12 +161,23 @@ def _status(run_uuid: str) -> str:
     return db.get_trace_eval_run(run_uuid)["status"]
 
 
-def _claim_all(*, now: str) -> list[dict]:
-    """A claim serves one agent; keep claiming until every agent is served."""
-    claimed: list[dict] = []
-    while batch := db.claim_trace_eval_runs(now=now, lease_seconds=600, batch_size=10):
-        claimed.extend(batch)
-    return claimed
+def _claim(*, now: str, batch_size: int = 10, max_batches_per_org: int = 100) -> list[dict]:
+    return db.claim_trace_eval_runs(
+        now=now,
+        lease_seconds=600,
+        default_batch_size=batch_size,
+        default_max_batches_per_org=max_batches_per_org,
+    )
+
+
+def _set_org_limits(org: str, limits: dict) -> None:
+    with db.get_db_connection() as conn:
+        conn.execute(
+            "INSERT INTO org_limits (uuid, org_uuid, limits) VALUES (?, ?, ?) "
+            "ON CONFLICT (org_uuid) DO UPDATE SET limits = excluded.limits",
+            (str(uuid.uuid4()), org, json.dumps(limits)),
+        )
+        conn.commit()
 
 
 def _uuids(rows: list[dict]) -> list[str]:
@@ -196,7 +194,7 @@ def test_claim_takes_oldest_first_and_stamps_the_lease():
     newer = _run(org, agent, _trace(org, agent), [ev], available_at=200)
     older = _run(org, agent, _trace(org, agent), [ev], available_at=100)
 
-    claimed = db.claim_trace_eval_runs(now=_at(1000), lease_seconds=600, batch_size=1)
+    claimed = _claim(now=_at(1000), batch_size=1)
 
     assert [row["uuid"] for row in claimed] == [older]
     assert claimed[0]["attempts"] == 1
@@ -211,7 +209,7 @@ def test_claim_ignores_runs_not_yet_available():
     agent = _agent(org)
     run = _run(org, agent, _trace(org, agent), [_evaluator(org)], available_at=5000)
 
-    assert db.claim_trace_eval_runs(now=_at(1000), lease_seconds=600, batch_size=10) == []
+    assert _claim(now=_at(1000), batch_size=10) == []
     assert _status(run) == RunStatus.PENDING.value
 
 
@@ -228,7 +226,7 @@ def test_expired_lease_is_reclaimed_and_counts_another_attempt():
         status=RunStatus.PROCESSING,
     )
 
-    claimed = db.claim_trace_eval_runs(now=_at(1000), lease_seconds=600, batch_size=10)
+    claimed = _claim(now=_at(1000), batch_size=10)
 
     assert [row["uuid"] for row in claimed] == [run]
     assert claimed[0]["attempts"] == 2
@@ -241,8 +239,8 @@ def test_two_claimers_never_receive_the_same_run():
     for agent in (_agent(org), _agent(org)):
         runs.update(_run(org, agent, _trace(org, agent), [ev]) for _ in range(2))
 
-    first = db.claim_trace_eval_runs(now=_at(1000), lease_seconds=600, batch_size=2)
-    second = db.claim_trace_eval_runs(now=_at(1000), lease_seconds=600, batch_size=2)
+    first = _claim(now=_at(1000), batch_size=2)
+    second = _claim(now=_at(1000), batch_size=2)
 
     got = [row["uuid"] for row in first] + [row["uuid"] for row in second]
     assert sorted(got) == sorted(runs)
@@ -257,10 +255,10 @@ def test_each_claim_serves_one_agent():
     second = _run(org, second_agent, _trace(org, second_agent), [ev], available_at=2)
     third = _run(org, first_agent, _trace(org, first_agent), [ev], available_at=3)
 
-    claimed = db.claim_trace_eval_runs(now=_at(1000), lease_seconds=600, batch_size=10)
+    claimed = _claim(now=_at(1000), batch_size=10)
     assert _uuids(claimed) == [first, third]
 
-    claimed = db.claim_trace_eval_runs(now=_at(1000), lease_seconds=600, batch_size=10)
+    claimed = _claim(now=_at(1000), batch_size=10)
     assert _uuids(claimed) == [second]
 
 
@@ -274,10 +272,10 @@ def test_an_agent_with_a_live_lease_is_skipped_for_the_next_agent():
     waiting = _run(org, busy, _trace(org, busy), [ev], available_at=1)
     other = _run(org, idle, _trace(org, idle), [ev], available_at=2)
 
-    claimed = db.claim_trace_eval_runs(now=_at(1000), lease_seconds=600, batch_size=10)
+    claimed = _claim(now=_at(1000), batch_size=10)
     assert _uuids(claimed) == [other]
 
-    assert db.claim_trace_eval_runs(now=_at(1000), lease_seconds=600, batch_size=10) == []
+    assert _claim(now=_at(1000), batch_size=10) == []
     assert _status(waiting) == RunStatus.PENDING.value
     assert db.get_trace_eval_run(in_flight)["available_at"] == _at(2000)
 
@@ -297,7 +295,7 @@ def test_an_agent_whose_lease_expired_is_served_again_with_its_pending_runs():
     )
     waiting = _run(org, agent, _trace(org, agent), [ev], available_at=600)
 
-    claimed = db.claim_trace_eval_runs(now=_at(1000), lease_seconds=600, batch_size=10)
+    claimed = _claim(now=_at(1000), batch_size=10)
 
     assert _uuids(claimed) == [expired, waiting]
     assert [row["attempts"] for row in claimed] == [2, 1]
@@ -308,8 +306,81 @@ def test_claim_with_no_capacity_is_a_noop():
     agent = _agent(org)
     run = _run(org, agent, _trace(org, agent), [_evaluator(org)])
 
-    assert db.claim_trace_eval_runs(now=_at(1000), lease_seconds=600, batch_size=0) == []
+    assert _claim(now=_at(1000), batch_size=0) == []
+    assert _claim(now=_at(1000), max_batches_per_org=0) == []
     assert _status(run) == RunStatus.PENDING.value
+
+
+def test_two_agents_of_different_orgs_are_served_at_once():
+    org_a, org_b = _org(), _org()
+    agent_a, agent_b = _agent(org_a), _agent(org_b)
+    first = _run(org_a, agent_a, _trace(org_a, agent_a), [_evaluator(org_a)], available_at=1)
+    second = _run(org_b, agent_b, _trace(org_b, agent_b), [_evaluator(org_b)], available_at=2)
+
+    assert _uuids(_claim(now=_at(1000))) == [first]
+    assert _uuids(_claim(now=_at(1000))) == [second]
+
+
+def test_an_org_at_its_batch_limit_is_skipped_for_another_org():
+    org_a, org_b = _org(), _org()
+    busy, waiting = _agent(org_a), _agent(org_a)
+    other = _agent(org_b)
+    _run(
+        org_a,
+        busy,
+        _trace(org_a, busy),
+        [_evaluator(org_a)],
+        available_at=2000,
+        status=RunStatus.PROCESSING,
+    )
+    blocked = _run(org_a, waiting, _trace(org_a, waiting), [_evaluator(org_a)], available_at=1)
+    served = _run(org_b, other, _trace(org_b, other), [_evaluator(org_b)], available_at=2)
+
+    assert _uuids(_claim(now=_at(1000), max_batches_per_org=1)) == [served]
+    assert _claim(now=_at(1000), max_batches_per_org=1) == []
+    assert _status(blocked) == RunStatus.PENDING.value
+
+
+def test_a_workspace_batch_limit_overrides_the_default():
+    org = _org()
+    busy, waiting = _agent(org), _agent(org)
+    _set_org_limits(org, {"max_concurrent_trace_scoring_batches": 1})
+    _run(
+        org,
+        busy,
+        _trace(org, busy),
+        [_evaluator(org)],
+        available_at=2000,
+        status=RunStatus.PROCESSING,
+    )
+    blocked = _run(org, waiting, _trace(org, waiting), [_evaluator(org)], available_at=1)
+
+    assert _claim(now=_at(1000), max_batches_per_org=10) == []
+    assert _status(blocked) == RunStatus.PENDING.value
+
+
+def test_a_workspace_batch_size_caps_the_batch_below_the_default():
+    org = _org()
+    agent = _agent(org)
+    ev = _evaluator(org)
+    _set_org_limits(org, {"trace_scoring_batch_size": 5})
+    runs = [
+        _run(org, agent, _trace(org, agent), [ev], available_at=i) for i in range(8)
+    ]
+
+    claimed = _claim(now=_at(1000), batch_size=20)
+
+    assert _uuids(claimed) == runs[:5]
+    assert [_status(r) for r in runs[5:]] == [RunStatus.PENDING.value] * 3
+
+
+def test_an_org_with_no_limits_row_uses_the_defaults():
+    org = _org()
+    agent = _agent(org)
+    ev = _evaluator(org)
+    runs = [_run(org, agent, _trace(org, agent), [ev], available_at=i) for i in range(4)]
+
+    assert _uuids(_claim(now=_at(1000), batch_size=2)) == runs[:2]
 
 
 def test_boot_check_rejects_a_sqlite_without_returning(monkeypatch):
@@ -317,105 +388,6 @@ def test_boot_check_rejects_a_sqlite_without_returning(monkeypatch):
     monkeypatch.setattr(db.sqlite3, "sqlite_version", "3.34.0")
     with pytest.raises(RuntimeError, match="3.35"):
         db.assert_sqlite_returning_support()
-
-
-# --- snapshot round-trip and hydration --------------------------------------
-
-
-def test_ingested_plan_survives_the_round_trip_to_the_claim():
-    """The writer's format and the engine's parser must not drift apart. A
-    parser reading a stale key still passes against a hand-built fixture, so
-    this goes through a really-ingested row."""
-    org = _org()
-    agent = _agent(org, interaction_type="general")
-    evaluator_uuid, version_uuid = _evaluator(org, evaluator_type="llm-general")
-    db.add_evaluator_to_agent(agent["uuid"], evaluator_uuid)
-    db.create_trace_with_eval_run(
-        org_uuid=org,
-        agent=agent,
-        input="Summarize the schedule.",
-        output={"response": "Done."},
-        max_scored_traces=10**6,
-    )
-
-    claimed = db.claim_trace_eval_runs(
-        now=ts.add_seconds(ts.utc_now(), 5), lease_seconds=600, batch_size=10
-    )
-
-    assert len(claimed) == 1
-    assert ts.parse_scoring_plan(claimed[0]["scoring_plan"]) == ts.ScoringPlan(
-        evaluation_type="general",
-        evaluators=[
-            ts.ScoringPlanPin(
-                evaluator_uuid=evaluator_uuid, evaluator_version_id=version_uuid
-            )
-        ],
-    )
-
-
-def test_hydration_reads_the_pinned_version_not_the_live_one():
-    org = _org()
-    evaluator_uuid, pinned = _evaluator(org)
-    newer = db.create_evaluator_version(evaluator_uuid, "openai/gpt-5", "Judge harder.")
-    db.set_evaluator_live_version(evaluator_uuid, newer["uuid"])
-
-    hydrated = ts.hydrate_pinned_evaluators(
-        [ts.ScoringPlanPin(evaluator_uuid=evaluator_uuid, evaluator_version_id=pinned)]
-    )
-
-    assert [ev["evaluator_version_id"] for ev in hydrated] == [pinned]
-    assert hydrated[0]["system_prompt"] == "Judge it."
-    assert hydrated[0]["judge_model"] == "openai/gpt-4.1"
-
-
-def test_hydration_survives_an_evaluator_deleted_after_it_was_pinned():
-    org = _org()
-    evaluator_uuid, pinned = _evaluator(org, name="Gone but pinned")
-    db.delete_evaluator(evaluator_uuid)
-
-    hydrated = ts.hydrate_pinned_evaluators(
-        [ts.ScoringPlanPin(evaluator_uuid=evaluator_uuid, evaluator_version_id=pinned)]
-    )
-
-    assert hydrated is not None
-    assert hydrated[0]["name"] == "Gone but pinned"
-
-
-@pytest.mark.parametrize("break_it", ["missing_version", "wrong_evaluator"])
-def test_a_pin_that_no_longer_resolves_fails_the_run(break_it):
-    org = _org()
-    agent = _agent(org)
-    trace = _trace(org, agent)
-    evaluator_uuid, version_uuid = _evaluator(org)
-    other_uuid, _ = _evaluator(org)
-    pins = [
-        (evaluator_uuid, str(uuid.uuid4()))
-        if break_it == "missing_version"
-        else (other_uuid, version_uuid)
-    ]
-    run = _run(org, agent, trace, pins)
-
-    invoke = _invoker([])
-    ts.claim_and_score_batch(now=_at(1000), invoke=invoke)
-
-    row = db.get_trace_eval_run(run)
-    assert row["status"] == RunStatus.FAILED.value
-    assert row["error"] == ts.CORRUPT_SNAPSHOT_ERROR
-    assert "dataset" not in invoke.captured
-
-
-def test_an_unparseable_snapshot_fails_the_run_without_invoking():
-    org = _org()
-    agent = _agent(org)
-    run = _run(org, agent, _trace(org, agent), [], scoring_plan="{not json")
-
-    invoke = _invoker([])
-    ts.claim_and_score_batch(now=_at(1000), invoke=invoke)
-
-    row = db.get_trace_eval_run(run)
-    assert row["status"] == RunStatus.FAILED.value
-    assert row["error"] == ts.CORRUPT_SNAPSHOT_ERROR
-    assert "dataset" not in invoke.captured
 
 
 # --- settlement -------------------------------------------------------------
@@ -452,7 +424,6 @@ def test_binary_and_rating_verdicts_settle_in_their_own_types():
     assert scores[binary_uuid]["evaluator_version_id"] == binary_version
     assert scores[rating_uuid]["value"] == 4
     assert scores[rating_uuid]["output_type"] == "rating"
-    assert scores[rating_uuid]["trace_uuid"] == trace["uuid"]
 
 
 def test_a_failed_binary_verdict_stores_zero_not_a_missing_row():
@@ -517,84 +488,6 @@ def test_a_conversation_run_sends_history_and_tool_calls():
     assert item["test_case"]["history"] == [{"role": "user", "content": "when?"}]
     assert "input" not in item["test_case"]
     assert item["output"] == {"response": "", "tool_calls": calls}
-
-
-def test_both_modes_share_one_invocation_and_one_evaluator_definition():
-    org = _org()
-    conversation = _agent(org)
-    general = _agent(org, interaction_type="general")
-    shared_uuid, shared_version = _evaluator(org, name="Correctness")
-    general_uuid, general_version = _evaluator(
-        org, name="Quality", evaluator_type="llm-general"
-    )
-    first = _run(org, conversation, _trace(org, conversation), [(shared_uuid, shared_version)])
-    second = _run(org, conversation, _trace(org, conversation), [(shared_uuid, shared_version)])
-    third = _run(
-        org,
-        general,
-        _trace(org, general, input="x", output={"response": "y"}),
-        [(general_uuid, general_version)],
-        evaluation_type="general",
-    )
-
-    invoke = _invoker(
-        lambda ds: [
-            _judged(first, {"Correctness": {"match": True}}),
-            _judged(second, {"Correctness": {"match": True}}),
-            _judged(third, {"Quality": {"match": True}}),
-        ]
-    )
-    claimed = _claim_all(now=_at(1000))
-    ts.process_claimed_runs(claimed, now=_at(1000), invoke=invoke)
-
-    assert len(invoke.captured["dataset"]) == 3
-    definitions = invoke.captured["config"]["evaluators"]
-    assert sorted(ev["id"] for ev in definitions) == sorted([shared_uuid, general_uuid])
-    assert all(
-        _status(run) == RunStatus.COMPLETED.value for run in (first, second, third)
-    )
-
-
-def test_same_named_evaluators_from_two_orgs_stay_distinct_in_one_batch():
-    """A display name is unique only within an org, and one invocation can
-    carry several claims, so calibrate — which keys its output by name — needs
-    the suffix."""
-    first_org, second_org = _org(), _org()
-    first_agent, second_agent = _agent(first_org), _agent(second_org)
-    first_uuid, first_version = _evaluator(first_org, name="Correctness")
-    second_uuid, second_version = _evaluator(second_org, name="Correctness")
-    first_run = _run(
-        first_org,
-        first_agent,
-        _trace(first_org, first_agent),
-        [(first_uuid, first_version)],
-        available_at=1,
-    )
-    second_run = _run(
-        second_org,
-        second_agent,
-        _trace(second_org, second_agent),
-        [(second_uuid, second_version)],
-        available_at=2,
-    )
-
-    def results(dataset):
-        by_run = {
-            item["test_case"]["id"]: item["test_case"]["evaluation"]["criteria"][0]["name"]
-            for item in dataset
-        }
-        return [
-            _judged(first_run, {by_run[first_run]: {"match": True}}),
-            _judged(second_run, {by_run[second_run]: {"match": False}}),
-        ]
-
-    invoke = _invoker(results)
-    ts.process_claimed_runs(_claim_all(now=_at(1000)), now=_at(1000), invoke=invoke)
-
-    names = [ev["name"] for ev in invoke.captured["config"]["evaluators"]]
-    assert len(set(names)) == 2
-    assert [s["value"] for s in db.get_trace_eval_scores(first_run)] == [1]
-    assert [s["value"] for s in db.get_trace_eval_scores(second_run)] == [0]
 
 
 def test_results_map_by_id_so_a_reordered_file_still_lands():
@@ -1172,7 +1065,9 @@ def test_a_run_whose_preparation_raises_is_deferred_not_left_claimed(monkeypatch
     org = _org()
     agent = _agent(org)
     healthy_uuid, healthy_version = _evaluator(org, name="Correctness")
-    broken = _run(org, agent, _trace(org, agent), [_evaluator(org)], available_at=1)
+    broken = _run(
+        org, agent, _trace(org, agent), [(healthy_uuid, healthy_version)], available_at=1
+    )
     healthy = _run(
         org, agent, _trace(org, agent), [(healthy_uuid, healthy_version)], available_at=2
     )
@@ -1208,12 +1103,12 @@ def test_release_at_startup_hands_in_flight_runs_back_to_the_queue():
         org, agent, _trace(org, agent), [ev], available_at=2000, status=RunStatus.PROCESSING
     )
     waiting = _run(org, agent, _trace(org, agent), [ev], available_at=1)
-    assert db.claim_trace_eval_runs(now=_at(1000), lease_seconds=600, batch_size=10) == []
+    assert _claim(now=_at(1000), batch_size=10) == []
 
     assert db.release_trace_eval_leases(_at(1000)) == 1
 
     row = db.get_trace_eval_run(in_flight)
     assert row["status"] == RunStatus.PENDING.value
     assert row["available_at"] == _at(1000)
-    claimed = db.claim_trace_eval_runs(now=_at(1000), lease_seconds=600, batch_size=10)
+    claimed = _claim(now=_at(1000), batch_size=10)
     assert set(_uuids(claimed)) == {in_flight, waiting}

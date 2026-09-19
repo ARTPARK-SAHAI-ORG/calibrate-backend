@@ -188,6 +188,16 @@ def test_trace_eval_history_uses_index():
     assert "TEMP B-TREE" not in plan, plan
 
 
+def test_trace_eval_in_flight_batch_count_uses_index():
+    """The claim's per-workspace concurrency check."""
+    plan = _query_plan(
+        "SELECT COUNT(DISTINCT agent_id) FROM trace_eval_runs WHERE org_uuid = ? "
+        "AND status = 'processing' AND available_at > ?",
+        ("org", "2026-01-01 00:00:00"),
+    )
+    assert "ix_trace_eval_org_status" in plan, plan
+
+
 def test_trace_eval_org_status_count_uses_index():
     plan = _query_plan(
         "SELECT COUNT(*) FROM (SELECT 1 FROM trace_eval_runs WHERE org_uuid = ? "

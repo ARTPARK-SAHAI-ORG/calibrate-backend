@@ -10,7 +10,6 @@ import uuid
 import pytest
 
 import db
-import trace_scoring as ts
 
 
 def _org() -> str:
@@ -261,24 +260,27 @@ def test_create_allows_null_labels():
     assert db.get_trace(org, row["uuid"])["message_id"] is None
 
 
-def _insert_agent(org: str, *, interaction_type="conversation", auto_score=False):
+def _insert_agent(org: str, *, interaction_type="conversation", config=None):
     agent_uuid = str(uuid.uuid4())
     with db.get_db_connection() as conn:
         conn.execute(
             "INSERT INTO agents "
-            "(uuid, org_uuid, name, config, interaction_type, auto_score_traces) "
-            "VALUES (?, ?, ?, ?, ?, ?)",
+            "(uuid, org_uuid, name, config, interaction_type) "
+            "VALUES (?, ?, ?, ?, ?)",
             (
                 agent_uuid,
                 org,
                 f"agent-{agent_uuid[:8]}",
-                "{}",
+                json.dumps(config if config is not None else {}),
                 interaction_type,
-                1 if auto_score else 0,
             ),
         )
         conn.commit()
     return db.get_agent(agent_uuid)
+
+
+def _scoring_off() -> dict:
+    return {"trace_scoring": {"enabled": False}}
 
 
 def _eligible_evaluator(org: str, evaluator_type="llm"):
@@ -315,18 +317,34 @@ def _runs_for(trace_uuid: str):
         ).fetchall()
 
 
-def test_opted_out_agent_ingests_with_no_run():
+def test_scoring_turned_off_in_config_ingests_with_no_run():
     org = _org()
-    agent = _insert_agent(org, auto_score=False)
+    agent = _insert_agent(org, config=_scoring_off())
     trace = _combined_ingest(org, agent)
     assert db.get_trace(org, trace["uuid"])["uuid"] == trace["uuid"]
     assert _runs_for(trace["uuid"]) == []
 
 
-def test_opted_in_conversation_run_pins_response_snapshot():
+def test_a_config_with_no_trace_scoring_key_still_scores():
     org = _org()
-    agent = _insert_agent(org, interaction_type="conversation", auto_score=True)
-    ev, version_id = _eligible_evaluator(org, "llm")
+    agent = _insert_agent(org, config={"agent_url": "https://example.test"})
+    trace = _combined_ingest(org, agent)
+    rows = _runs_for(trace["uuid"])
+    assert len(rows) == 1
+    assert rows[0]["status"] == "pending"
+
+
+def test_an_enabled_config_scores():
+    org = _org()
+    agent = _insert_agent(org, config={"trace_scoring": {"enabled": True}})
+    trace = _combined_ingest(org, agent)
+    assert _runs_for(trace["uuid"])[0]["status"] == "pending"
+
+
+def test_ingest_writes_a_pending_run_with_no_plan_column():
+    org = _org()
+    agent = _insert_agent(org)
+    ev, _version_id = _eligible_evaluator(org, "llm")
     db.add_evaluator_to_agent(agent["uuid"], ev)
 
     trace = _combined_ingest(org, agent)
@@ -338,94 +356,28 @@ def test_opted_in_conversation_run_pins_response_snapshot():
     assert run["completed_at"] is None
     assert run["org_uuid"] == org
     assert run["agent_id"] == agent["uuid"]
-    assert run["scoring_plan"] is not None
-    snapshot = json.loads(run["scoring_plan"])
-    assert snapshot == {
-        "evaluation_type": "response",
-        "evaluators": [
-            {"evaluator_uuid": ev, "evaluator_version_id": version_id},
-        ],
-    }
+    assert "scoring_plan" not in run.keys()
 
 
-def test_opted_in_general_run_pins_general_snapshot():
+def test_an_agent_with_no_evaluators_still_gets_a_pending_run():
+    """Which evaluators run is the worker's decision now, so ingest does not
+    look at them."""
     org = _org()
-    agent = _insert_agent(org, interaction_type="general", auto_score=True)
-    ev, version_id = _eligible_evaluator(org, "llm-general")
-    db.add_evaluator_to_agent(agent["uuid"], ev)
-
-    trace = _combined_ingest(
-        org,
-        agent,
-        input="Summarize the schedule.",
-        output={"response": "Done.", "tool_calls": None},
-    )
-    rows = _runs_for(trace["uuid"])
-    assert len(rows) == 1
-    snapshot = json.loads(rows[0]["scoring_plan"])
-    assert snapshot["evaluation_type"] == "general"
-    assert snapshot["evaluators"] == [
-        {"evaluator_uuid": ev, "evaluator_version_id": version_id},
-    ]
-    assert rows[0]["status"] == "pending"
-    assert rows[0]["scoring_plan"] is not None
-
-
-def test_eligibility_drift_persists_skipped_run():
-    org = _org()
-    agent = _insert_agent(org, auto_score=True)
-    ev, _ = _eligible_evaluator(org, "llm")
-    db.add_evaluator_to_agent(agent["uuid"], ev)
-    db.remove_evaluator_from_agent(agent["uuid"], ev)
-
+    agent = _insert_agent(org)
     trace = _combined_ingest(org, agent)
-    rows = _runs_for(trace["uuid"])
-    assert len(rows) == 1
-    assert rows[0]["status"] == "skipped"
-    assert rows[0]["error"] == "no_usable_evaluators"
-    assert rows[0]["scoring_plan"] is None
-    assert rows[0]["completed_at"] is not None
+    assert _runs_for(trace["uuid"])[0]["status"] == "pending"
 
 
-def test_unsupported_interaction_type_persists_skipped_run():
+def test_an_unsupported_interaction_type_still_gets_a_pending_run():
     org = _org()
-    agent = _insert_agent(org, interaction_type="voice", auto_score=True)
-    ev, _ = _eligible_evaluator(org, "llm")
-    db.add_evaluator_to_agent(agent["uuid"], ev)
-
+    agent = _insert_agent(org, interaction_type="voice")
     trace = _combined_ingest(org, agent)
-    rows = _runs_for(trace["uuid"])
-    assert len(rows) == 1
-    assert rows[0]["status"] == "skipped"
-    assert rows[0]["error"] == "unsupported_interaction_type"
-    assert rows[0]["scoring_plan"] is None
-    assert rows[0]["completed_at"] is not None
-
-
-def test_empty_evaluators_plan_is_skipped_not_pending(monkeypatch):
-    org = _org()
-    agent = _insert_agent(org, auto_score=True)
-
-    class _EmptyPlan:
-        def as_plan(self):
-            return ts.ScoringPlan(evaluation_type="response", evaluators=[])
-
-    monkeypatch.setattr(
-        "trace_scoring.resolve_trace_scoring",
-        lambda *_args, **_kwargs: _EmptyPlan(),
-    )
-
-    trace = _combined_ingest(org, agent)
-    rows = _runs_for(trace["uuid"])
-    assert len(rows) == 1
-    assert rows[0]["status"] == "skipped"
-    assert rows[0]["error"] == "no_usable_evaluators"
-    assert rows[0]["scoring_plan"] is None
+    assert _runs_for(trace["uuid"])[0]["status"] == "pending"
 
 
 def test_trace_and_run_roll_back_together(monkeypatch):
     org = _org()
-    agent = _insert_agent(org, auto_score=True)
+    agent = _insert_agent(org)
     ev, _ = _eligible_evaluator(org, "llm")
     db.add_evaluator_to_agent(agent["uuid"], ev)
 
@@ -450,7 +402,7 @@ def test_trace_and_run_roll_back_together(monkeypatch):
 
 def test_create_trace_still_inserts_without_a_run():
     org = _org()
-    agent = _insert_agent(org, auto_score=True)
+    agent = _insert_agent(org)
     ev, _ = _eligible_evaluator(org, "llm")
     db.add_evaluator_to_agent(agent["uuid"], ev)
 
@@ -465,7 +417,7 @@ def test_create_trace_still_inserts_without_a_run():
 
 def test_over_limit_ingest_persists_skipped_run():
     org = _org()
-    agent = _insert_agent(org, auto_score=True)
+    agent = _insert_agent(org)
     ev, _ = _eligible_evaluator(org, "llm")
     db.add_evaluator_to_agent(agent["uuid"], ev)
 
@@ -477,13 +429,12 @@ def test_over_limit_ingest_persists_skipped_run():
     assert len(rows) == 1
     assert rows[0]["status"] == "skipped"
     assert rows[0]["error"] == "over_limit"
-    assert rows[0]["scoring_plan"] is None
     assert rows[0]["completed_at"] is not None
 
 
 def test_run_timestamps_are_stored_as_timestamp_text():
     org = _org()
-    agent = _insert_agent(org, auto_score=True)
+    agent = _insert_agent(org)
     trace = _combined_ingest(org, agent)
     run = _runs_for(trace["uuid"])[0]
     assert re.fullmatch(r"\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}", run["created_at"])
@@ -491,7 +442,7 @@ def test_run_timestamps_are_stored_as_timestamp_text():
 
 def test_failed_runs_free_their_slot_in_the_cap():
     org = _org()
-    agent = _insert_agent(org, auto_score=True)
+    agent = _insert_agent(org)
     ev, _ = _eligible_evaluator(org, "llm")
     db.add_evaluator_to_agent(agent["uuid"], ev)
     first = _combined_ingest(org, agent, max_scored_traces=1)

@@ -16,7 +16,6 @@ OTel-gateway migration.
 """
 
 import logging
-import os
 from typing import Annotated, Any, ClassVar, Dict, List, Literal, Optional, Union
 
 from fastapi import APIRouter, Depends, HTTPException, Path, Query
@@ -28,6 +27,7 @@ from db import (
     add_test_to_agent,
     bulk_create_tests,
     count_live_traces,
+    count_scored_traces,
     create_trace_with_eval_run,
     get_agent,
     get_all_tests_summary,
@@ -45,7 +45,7 @@ from db import (
 )
 from org_scope import ensure_owned_agent
 from pagination import PaginatedResponse, PaginationParams, page_envelope
-from routers.org_limits import effective_max_scored_traces
+from routers.org_limits import effective_max_scored_traces, effective_max_traces
 
 # Reuse the tests router's validation so a converted test accepts exactly what
 # POST /tests does (evaluator visible to the workspace, evaluator_type matches).
@@ -70,10 +70,6 @@ from utils import (
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/traces", tags=["traces"])
-
-# A fixed ceiling, not a per-workspace setting: one number is enough until a
-# customer actually needs a different one.
-MAX_TRACES_PER_WORKSPACE = int(os.getenv("DEFAULT_MAX_TRACES", "50000"))
 
 # How many traces one delete call accepts. Independent of the storage cap:
 # lowering that must not shrink a user's ability to delete their way back
@@ -606,7 +602,7 @@ async def ingest_trace(
     agent = ensure_owned_agent(payload.agent_id, ctx.org_uuid)
     _ensure_input_matches_agent(payload.input, agent)
 
-    cap = MAX_TRACES_PER_WORKSPACE
+    cap = effective_max_traces(ctx.org_uuid)
     current = count_live_traces(ctx.org_uuid)
     if current >= cap:
         raise HTTPException(
@@ -696,6 +692,34 @@ async def list_traces_endpoint(
         total,
         pagination,
     )
+
+
+class TraceUsageResponse(BaseModel):
+    traces_stored: int = Field(
+        description="How many traces the workspace currently holds"
+    )
+    max_traces: int = Field(description="How many traces the workspace may hold")
+    traces_scored: int = Field(
+        description="How many traces count against the scoring limit. A trace whose scoring failed does not"
+    )
+    max_scored_traces: int = Field(
+        description="How many traces the workspace may have scored"
+    )
+
+
+@router.get(
+    "/usage",
+    response_model=TraceUsageResponse,
+    summary="Get trace usage against the workspace limits",
+)
+async def get_trace_usage_endpoint(ctx: OrgContext = Depends(get_current_org)):
+    """Report how much of each trace limit the workspace has used"""
+    return {
+        "traces_stored": count_live_traces(ctx.org_uuid),
+        "max_traces": effective_max_traces(ctx.org_uuid),
+        "traces_scored": count_scored_traces(ctx.org_uuid),
+        "max_scored_traces": effective_max_scored_traces(ctx.org_uuid),
+    }
 
 
 @router.get(

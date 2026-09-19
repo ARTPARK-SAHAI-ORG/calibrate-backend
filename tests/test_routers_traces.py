@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import json
 import uuid
 from unittest.mock import patch
 
@@ -11,6 +10,7 @@ import pytest
 import db
 import trace_scoring as ts
 from routers.traces import MAX_DELETE_IDS, MAX_LABELS, MAX_LIST_LIMIT
+from utils import TRACE_SCORING_CONFIG_KEY, trace_scoring_enabled
 from fastapi.testclient import TestClient
 
 
@@ -273,7 +273,7 @@ def test_ingest_cap_returns_429(client, monkeypatch):
     from routers import traces as traces_mod
 
     h, agent_id = _signup_with_agent(client)
-    monkeypatch.setattr(traces_mod, "MAX_TRACES_PER_WORKSPACE", 1)
+    monkeypatch.setattr(traces_mod, "effective_max_traces", lambda org_uuid: 1)
 
     _post_trace(client, h, _payload(agent_id, _mid()))
 
@@ -799,24 +799,6 @@ def test_bulk_delete_ignores_another_workspaces_traces(client):
     assert res.status_code == 200, res.text
     assert res.json() == {"deleted": 0}
     assert client.get(f"/traces/{mine['uuid']}", headers=h).status_code == 200
-
-
-def test_trace_cap_comes_from_its_env_var():
-    """Reload re-runs the module body, which is where the env var is read."""
-    import importlib
-    import os
-
-    from routers import traces as traces_mod
-
-    original = os.environ["DEFAULT_MAX_TRACES"]
-    os.environ["DEFAULT_MAX_TRACES"] = "7"
-    try:
-        importlib.reload(traces_mod)
-        assert traces_mod.MAX_TRACES_PER_WORKSPACE == 7
-    finally:
-        os.environ["DEFAULT_MAX_TRACES"] = original
-        importlib.reload(traces_mod)
-    assert traces_mod.MAX_TRACES_PER_WORKSPACE == int(original)
 
 
 def test_list_rejects_an_oversized_page(client):
@@ -2016,13 +1998,7 @@ def _enable_auto_score(client, h, agent_uuid, evaluator_type="llm"):
         headers=h,
     )
     assert r.status_code == 200, r.text
-    enabled = client.put(
-        f"/agents/{agent_uuid}",
-        json={"auto_score_traces": True},
-        headers=h,
-    )
-    assert enabled.status_code == 200, enabled.text
-    assert enabled.json()["auto_score_traces"] is True
+    _set_trace_scoring(client, h, agent_uuid, True)
     return ev_uuid, version_id
 
 
@@ -2047,22 +2023,22 @@ def test_ingest_opted_out_creates_no_run_and_keeps_response_contract(client):
     assert _runs_for_trace(body["uuid"]) == []
 
 
-def test_new_agent_scores_by_default_and_ingest_records_why_it_could_not(client):
-    """Scoring is on for a new agent, but its only evaluator is the seeded
-    correctness default with `{{criteria}}`, so ingest writes a skipped run."""
+def test_new_agent_scores_by_default_and_ingest_leaves_the_run_pending(client):
+    """Scoring is on for a new agent whose only evaluator is the built-in
+    correctness default with `{{criteria}}`. Ingest cannot tell that nothing
+    will score it, so the run waits for the worker to decide."""
     h, agent_id = _signup_with_agent(client)
-    assert client.get(f"/agents/{agent_id}", headers=h).json()["auto_score_traces"] is True
+    assert trace_scoring_enabled(client.get(f"/agents/{agent_id}", headers=h).json())
 
     body = _post_trace(client, h, _payload(agent_id, _mid()))
     rows = _runs_for_trace(body["uuid"])
     assert len(rows) == 1
-    assert rows[0]["status"] == "skipped"
-    assert rows[0]["error"] == "no_usable_evaluators"
-    assert rows[0]["scoring_plan"] is None
-    assert rows[0]["completed_at"] == rows[0]["created_at"]
+    assert rows[0]["status"] == "pending"
+    assert rows[0]["error"] is None
+    assert rows[0]["completed_at"] is None
     run = client.get(f"/traces/{body['uuid']}/scores", headers=h).json()["runs"][0]
-    assert run["status"] == "skipped"
-    assert run["error"] == "no_usable_evaluators"
+    assert run["status"] == "pending"
+    assert run["error"] is None
     assert run["created_at"] == db._trace_iso(rows[0]["created_at"])
 
 
@@ -2082,7 +2058,6 @@ def test_ingest_past_workspace_scored_traces_limit_writes_over_limit_run(client,
     assert len(rows) == 1
     assert rows[0]["status"] == "skipped"
     assert rows[0]["error"] == "over_limit"
-    assert rows[0]["scoring_plan"] is None
     assert rows[0]["completed_at"] == rows[0]["created_at"]
 
     scores = client.get(f"/traces/{second['uuid']}/scores", headers=h).json()
@@ -2100,9 +2075,9 @@ def test_ingest_past_workspace_scored_traces_limit_writes_over_limit_run(client,
     assert _runs_for_trace(fourth["uuid"])[0]["status"] == "pending"
 
 
-def test_ingest_opted_in_conversation_creates_pending_response_run(client):
+def test_ingest_opted_in_conversation_creates_a_pending_run(client):
     h, agent_id = _signup_with_agent(client)
-    ev_uuid, version_id = _enable_auto_score(client, h, agent_id)
+    _enable_auto_score(client, h, agent_id)
 
     body = _post_trace(client, h, _payload(agent_id, _mid()))
     assert set(body) == {"uuid", "message_id", "conversation_id", "created_at"}
@@ -2110,48 +2085,21 @@ def test_ingest_opted_in_conversation_creates_pending_response_run(client):
     rows = _runs_for_trace(body["uuid"])
     assert len(rows) == 1
     assert rows[0]["status"] == "pending"
-    assert rows[0]["scoring_plan"] is not None
-    snapshot = json.loads(rows[0]["scoring_plan"])
-    assert snapshot == {
-        "evaluation_type": "response",
-        "evaluators": [
-            {"evaluator_uuid": ev_uuid, "evaluator_version_id": version_id},
-        ],
-    }
+    assert rows[0]["error"] is None
+    assert rows[0]["completed_at"] is None
 
 
-def test_ingest_opted_in_general_creates_pending_general_run(client):
+def test_ingest_opted_in_general_creates_a_pending_run(client):
     h, agent_id = _signup_with_general_agent(client)
-    ev_uuid, version_id = _enable_auto_score(
-        client, h, agent_id, evaluator_type="llm-general"
-    )
+    _enable_auto_score(client, h, agent_id, evaluator_type="llm-general")
 
     body = _post_trace(client, h, _general_payload(agent_id, _mid()))
     assert set(body) == {"uuid", "message_id", "conversation_id", "created_at"}
 
     rows = _runs_for_trace(body["uuid"])
     assert len(rows) == 1
-    snapshot = json.loads(rows[0]["scoring_plan"])
-    assert snapshot["evaluation_type"] == "general"
-    assert snapshot["evaluators"] == [
-        {"evaluator_uuid": ev_uuid, "evaluator_version_id": version_id},
-    ]
     assert rows[0]["status"] == "pending"
-
-
-def test_ingest_eligibility_drift_creates_skipped_run(client):
-    h, agent_id = _signup_with_agent(client)
-    ev_uuid, _ = _enable_auto_score(client, h, agent_id)
-    r = client.delete(f"/agents/{agent_id}/evaluators/{ev_uuid}", headers=h)
-    assert r.status_code == 200, r.text
-    assert client.get(f"/agents/{agent_id}", headers=h).json()["auto_score_traces"] is True
-
-    body = _post_trace(client, h, _payload(agent_id, _mid()))
-    rows = _runs_for_trace(body["uuid"])
-    assert len(rows) == 1
-    assert rows[0]["status"] == "skipped"
-    assert rows[0]["error"] == "no_usable_evaluators"
-    assert rows[0]["scoring_plan"] is None
+    assert rows[0]["error"] is None
 
 
 def test_ingest_opted_in_still_scopes_to_the_caller_org(client):
@@ -2177,7 +2125,7 @@ def test_ingest_opted_in_cap_still_returns_429(client, monkeypatch):
 
     h, agent_id = _signup_with_agent(client)
     _enable_auto_score(client, h, agent_id)
-    monkeypatch.setattr(traces_mod, "MAX_TRACES_PER_WORKSPACE", 1)
+    monkeypatch.setattr(traces_mod, "effective_max_traces", lambda org_uuid: 1)
 
     first = _post_trace(client, h, _payload(agent_id, _mid()))
     assert _runs_for_trace(first["uuid"])
@@ -2369,12 +2317,19 @@ def _at(seconds: int) -> str:
     return ts.add_seconds(T0, seconds)
 
 
-def _disable_auto_score(client, h, agent_uuid):
+def _set_trace_scoring(client, h, agent_uuid, enabled: bool):
     r = client.put(
-        f"/agents/{agent_uuid}", json={"auto_score_traces": False}, headers=h
+        f"/agents/{agent_uuid}",
+        json={"config": {TRACE_SCORING_CONFIG_KEY: {"enabled": enabled}}},
+        headers=h,
     )
     assert r.status_code == 200, r.text
-    assert r.json()["auto_score_traces"] is False
+    stored = client.get(f"/agents/{agent_uuid}", headers=h).json()
+    assert trace_scoring_enabled(stored) is enabled
+
+
+def _disable_auto_score(client, h, agent_uuid):
+    _set_trace_scoring(client, h, agent_uuid, False)
 
 
 def _insert_run(org: str, trace_uuid: str, **overrides) -> str:
@@ -2384,7 +2339,6 @@ def _insert_run(org: str, trace_uuid: str, **overrides) -> str:
         "org_uuid": org,
         "agent_id": "agent-1",
         "status": "pending",
-        "scoring_plan": None,
         "available_at": T0,
         "attempts": 0,
         "error": None,
@@ -2396,16 +2350,15 @@ def _insert_run(org: str, trace_uuid: str, **overrides) -> str:
     with db.get_db_connection() as conn:
         conn.execute(
             "INSERT INTO trace_eval_runs "
-            "(uuid, trace_uuid, org_uuid, agent_id, status, scoring_plan, "
+            "(uuid, trace_uuid, org_uuid, agent_id, status, "
             "available_at, attempts, error, created_at, updated_at, completed_at) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 row["uuid"],
                 row["trace_uuid"],
                 row["org_uuid"],
                 row["agent_id"],
                 row["status"],
-                row["scoring_plan"],
                 row["available_at"],
                 row["attempts"],
                 row["error"],
@@ -2418,13 +2371,11 @@ def _insert_run(org: str, trace_uuid: str, **overrides) -> str:
     return row["uuid"]
 
 
-def _insert_score(org: str, run_uuid: str, trace_uuid: str, **overrides) -> None:
+def _insert_score(run_uuid: str, **overrides) -> None:
     row = {
         "run_uuid": run_uuid,
-        "trace_uuid": trace_uuid,
         "evaluator_uuid": "eval-1",
         "evaluator_version_id": "version-1",
-        "org_uuid": org,
         "value": 1,
         "output_type": "binary",
         "reasoning": "ok",
@@ -2434,15 +2385,13 @@ def _insert_score(org: str, run_uuid: str, trace_uuid: str, **overrides) -> None
     with db.get_db_connection() as conn:
         conn.execute(
             "INSERT INTO trace_eval_scores "
-            "(run_uuid, trace_uuid, evaluator_uuid, evaluator_version_id, "
-            "org_uuid, value, output_type, reasoning, completed_at) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "(run_uuid, evaluator_uuid, evaluator_version_id, "
+            "value, output_type, reasoning, completed_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?)",
             (
                 row["run_uuid"],
-                row["trace_uuid"],
                 row["evaluator_uuid"],
                 row["evaluator_version_id"],
-                row["org_uuid"],
                 row["value"],
                 row["output_type"],
                 row["reasoning"],
@@ -2562,9 +2511,7 @@ def test_scores_completed_mixed_types_and_list_conjunction(client):
         agent_id=agent_id,
     )
     _insert_score(
-        org,
         run,
-        trace["uuid"],
         evaluator_uuid=binary_id,
         evaluator_version_id=binary_ver,
         value=1,
@@ -2572,9 +2519,7 @@ def test_scores_completed_mixed_types_and_list_conjunction(client):
         reasoning="binary pass",
     )
     _insert_score(
-        org,
         run,
-        trace["uuid"],
         evaluator_uuid=rating_id,
         evaluator_version_id=rating_ver,
         value=4,
@@ -2623,12 +2568,8 @@ def test_list_uses_latest_run_scores_show_full_history(client):
         completed_at=_at(21),
         agent_id=agent_id,
     )
-    _insert_score(
-        org, older, trace["uuid"], evaluator_uuid=ev, evaluator_version_id=ver, value=1
-    )
-    _insert_score(
-        org, newer, trace["uuid"], evaluator_uuid=ev, evaluator_version_id=ver, value=0
-    )
+    _insert_score(older, evaluator_uuid=ev, evaluator_version_id=ver, value=1)
+    _insert_score(newer, evaluator_uuid=ev, evaluator_version_id=ver, value=0)
     runs = client.get(f"/traces/{trace['uuid']}/scores", headers=h).json()["runs"]
     assert [r["run_uuid"] for r in runs] == [newer, older]
     assert runs[0]["results"][0]["passed"] is False
@@ -2655,9 +2596,7 @@ def test_scores_renamed_and_deleted_evaluator_keeps_history(client):
         completed_at=_at(2),
         agent_id=agent_id,
     )
-    _insert_score(
-        org, run, trace["uuid"], evaluator_uuid=ev, evaluator_version_id=ver, value=1
-    )
+    _insert_score(run, evaluator_uuid=ev, evaluator_version_id=ver, value=1)
     before_delete = client.get(f"/traces/{trace['uuid']}/scores", headers=h).json()
     assert before_delete["runs"][0]["results"][0]["name"] == new_name
 
@@ -2704,9 +2643,7 @@ def test_scores_pinned_soft_deleted_version_keeps_scale(client):
         agent_id=agent_id,
     )
     _insert_score(
-        org,
         run,
-        trace["uuid"],
         evaluator_uuid=ev,
         evaluator_version_id=v1,
         value=5,
@@ -2734,9 +2671,7 @@ def test_scores_cross_org_is_403(client):
         completed_at=_at(2),
         agent_id=agent_id,
     )
-    _insert_score(
-        org, run, trace["uuid"], evaluator_uuid=ev, evaluator_version_id=ver, value=1
-    )
+    _insert_score(run, evaluator_uuid=ev, evaluator_version_id=ver, value=1)
     other = _signup(client)
     denied = client.get(f"/traces/{trace['uuid']}/scores", headers=other)
     assert denied.status_code == 403
@@ -2765,9 +2700,7 @@ def test_list_scoring_summary_is_one_batched_query_for_the_page(client, monkeypa
             completed_at=_at(created_at),
             agent_id=agent_id,
         )
-        _insert_score(
-            org, run, trace["uuid"], evaluator_uuid=ev, evaluator_version_id=ver, value=1
-        )
+        _insert_score(run, evaluator_uuid=ev, evaluator_version_id=ver, value=1)
 
     calls = []
     real = traces_mod.get_latest_trace_run_summaries
@@ -2794,3 +2727,54 @@ def test_list_scoring_summary_is_one_batched_query_for_the_page(client, monkeypa
     for item in body["items"]:
         assert item["latest_run_status"] == "completed"
         assert [r["passed"] for r in item["results"]] == [True]
+
+
+def test_usage_reports_both_counts_and_both_limits(client, monkeypatch):
+    from routers import traces as traces_mod
+
+    h, agent_id = _signup_with_agent(client)
+    monkeypatch.setattr(traces_mod, "effective_max_scored_traces", lambda org_uuid: 2)
+    monkeypatch.setattr(traces_mod, "effective_max_traces", lambda org_uuid: 5)
+
+    empty = client.get("/traces/usage", headers=h)
+    assert empty.status_code == 200, empty.text
+    assert empty.json() == {
+        "traces_stored": 0,
+        "max_traces": 5,
+        "traces_scored": 0,
+        "max_scored_traces": 2,
+    }
+
+    first = _post_trace(client, h, _payload(agent_id, _mid()))
+    _post_trace(client, h, _payload(agent_id, _mid()))
+
+    assert client.get("/traces/usage", headers=h).json() == {
+        "traces_stored": 2,
+        "max_traces": 5,
+        "traces_scored": 2,
+        "max_scored_traces": 2,
+    }
+
+    # Past the scoring limit the trace is still stored, so only one count moves.
+    _post_trace(client, h, _payload(agent_id, _mid()))
+    after = client.get("/traces/usage", headers=h).json()
+    assert after["traces_stored"] == 3
+    assert after["traces_scored"] == 2
+
+    # A failed run frees its slot, matching what the limit counts.
+    with db.get_db_connection() as conn:
+        conn.execute(
+            "UPDATE trace_eval_runs SET status = 'failed' WHERE trace_uuid = ?",
+            (first["uuid"],),
+        )
+        conn.commit()
+    assert client.get("/traces/usage", headers=h).json()["traces_scored"] == 1
+
+
+def test_usage_is_scoped_to_the_callers_workspace(client):
+    h, agent_id = _signup_with_agent(client)
+    _post_trace(client, h, _payload(agent_id, _mid()))
+    other_h, _ = _signup_with_agent(client)
+
+    assert client.get("/traces/usage", headers=other_h).json()["traces_stored"] == 0
+    assert client.get("/traces/usage", headers=h).json()["traces_stored"] == 1

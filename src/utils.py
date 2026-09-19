@@ -2012,3 +2012,14 @@ def read_leaderboard_xlsx(leaderboard_dir: Path) -> Optional[List[dict]]:
 def utc_now() -> str:
     """UTC in the text form SQLite writes for CURRENT_TIMESTAMP."""
     return datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
+
+
+TRACE_SCORING_CONFIG_KEY = "trace_scoring"
+
+
+def trace_scoring_enabled(agent: Dict[str, Any]) -> bool:
+    """Whether new traces for this agent are scored. On unless turned off, so an
+    agent created before the setting existed still scores."""
+    config = agent.get("config") or {}
+    settings = config.get(TRACE_SCORING_CONFIG_KEY) or {}
+    return settings.get("enabled", True) is not False

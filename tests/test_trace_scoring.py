@@ -1,17 +1,13 @@
-"""Unit tests for trace-scoring eligibility, plan resolution, and the pure
-engine helpers.
+"""Unit tests for trace-scoring eligibility, judge-time evaluator resolution,
+and the pure engine helpers.
 
-Anything touching the DB or the claim/settle transactions lives in
-`test_trace_eval_claim.py`.
+Anything touching the claim transaction lives in `test_trace_eval_claim.py`.
 """
 
 from __future__ import annotations
 
-import json
 import random
-import re
 import uuid
-from dataclasses import asdict
 
 import pytest
 
@@ -55,14 +51,7 @@ def test_conversation_agent_maps_to_response_llm():
     assert [p.pin.evaluator_uuid for p in result.eligible] == [ev["uuid"]]
     assert result.eligible[0].pin.evaluator_version_id == live
     assert result.ineligible == []
-    assert result.as_plan() == ts.ScoringPlan(
-        evaluation_type="response",
-        evaluators=[
-            ts.ScoringPlanPin(
-                evaluator_uuid=ev["uuid"], evaluator_version_id=live
-            )
-        ],
-    )
+    assert result.skip_reason is None
 
 
 def test_general_agent_maps_to_general_llm_general():
@@ -72,7 +61,7 @@ def test_general_agent_maps_to_general_llm_general():
     assert result.evaluation_type == "general"
     assert result.evaluator_type == "llm-general"
     assert result.eligible[0].pin.evaluator_uuid == ev["uuid"]
-    assert result.as_plan().evaluation_type == "general"
+    assert result.skip_reason is None
 
 
 def test_mixed_evaluator_types_are_filtered_before_validation():
@@ -113,7 +102,7 @@ def test_no_live_version_disqualifies():
         "none": ts.IneligibleReason.NO_LIVE_VERSION,
         "missing": ts.IneligibleReason.NO_LIVE_VERSION,
     }
-    assert result.as_plan() == ts.ScoringPlanSkip(skip="no_usable_evaluators")
+    assert result.skip_reason == "no_usable_evaluators"
 
 
 def test_declares_variables_disqualifies():
@@ -143,14 +132,14 @@ def test_unsupported_interaction_type_skips_and_marks_wrong_type():
     assert result.evaluation_type is None
     assert result.eligible == []
     assert result.ineligible[0].reason == ts.IneligibleReason.WRONG_TYPE
-    assert result.as_plan() == ts.ScoringPlanSkip(skip="unsupported_interaction_type")
+    assert result.skip_reason == "unsupported_interaction_type"
 
 
 def test_empty_linked_set_is_not_usable():
     result = ts.resolve_trace_scoring("conversation", [])
     assert result.eligible == []
     assert result.ineligible == []
-    assert result.as_plan() == ts.ScoringPlanSkip(skip="no_usable_evaluators")
+    assert result.skip_reason == "no_usable_evaluators"
 
 
 def test_resolve_live_evaluators_pairs_version_or_none():
@@ -188,63 +177,9 @@ def test_resolve_live_evaluators_pairs_version_or_none():
     result = ts.resolve_trace_scoring(agent["interaction_type"], pairs)
     assert result.evaluation_type == "general"
     assert [p.pin.evaluator_uuid for p in result.eligible] == [live_ev]
-    assert result.as_plan() == ts.ScoringPlan(
-        evaluation_type="general",
-        evaluators=[
-            ts.ScoringPlanPin(
-                evaluator_uuid=live_ev, evaluator_version_id=version["uuid"]
-            )
-        ],
-    )
+    assert result.eligible[0].pin.evaluator_version_id == version["uuid"]
     assert result.ineligible[0].evaluator_uuid == bare_ev
     assert result.ineligible[0].reason == ts.IneligibleReason.NO_LIVE_VERSION
-
-
-def _plan(evaluation_type="response", pins=(("ev-1", "ver-1"),)) -> ts.ScoringPlan:
-    return ts.ScoringPlan(
-        evaluation_type=evaluation_type,
-        evaluators=[
-            ts.ScoringPlanPin(evaluator_uuid=e, evaluator_version_id=v) for e, v in pins
-        ],
-    )
-
-
-def test_a_serialized_plan_parses_back_to_the_same_dataclass():
-    plan = _plan(pins=(("ev-1", "ver-1"), ("ev-2", "ver-2")))
-    assert ts.parse_scoring_plan(json.dumps(asdict(plan))) == plan
-
-
-@pytest.mark.parametrize(
-    "raw",
-    [
-        None,
-        "",
-        "{not json",
-        123,
-        json.dumps([]),
-        json.dumps({"evaluation_type": "conversation", "evaluators": [{"a": 1}]}),
-        json.dumps({"evaluators": [{"evaluator_uuid": "e", "evaluator_version_id": "v"}]}),
-        json.dumps({"evaluation_type": "response"}),
-        json.dumps({"evaluation_type": "response", "evaluators": []}),
-        json.dumps({"evaluation_type": "response", "evaluators": "nope"}),
-        json.dumps({"evaluation_type": "response", "evaluators": ["ev-1"]}),
-        json.dumps({"evaluation_type": "response", "evaluators": [{"evaluator_uuid": "e"}]}),
-        json.dumps(
-            {"evaluation_type": "response", "evaluators": [{"evaluator_version_id": "v"}]}
-        ),
-        json.dumps(
-            {
-                "evaluation_type": "response",
-                "evaluators": [
-                    {"evaluator_uuid": "e", "evaluator_version_id": "v1"},
-                    {"evaluator_uuid": "e", "evaluator_version_id": "v2"},
-                ],
-            }
-        ),
-    ],
-)
-def test_an_unusable_snapshot_never_parses_into_a_partial_plan(raw):
-    assert ts.parse_scoring_plan(raw) is None
 
 
 def test_results_are_indexed_by_id_and_a_repeated_id_drops_both():
@@ -285,7 +220,7 @@ def test_a_verdict_maps_by_evaluator_id_ahead_of_its_runtime_name():
     }
     scores = ts.map_item_scores(
         entry,
-        pins=[ts.ScoringPlanPin(evaluator_uuid="ev-1", evaluator_version_id="ev-1-version")],
+        pins=[ts.EvaluatorPin(evaluator_uuid="ev-1", evaluator_version_id="ev-1-version")],
         name_to_uuid={},
         hydrated_by_uuid={"ev-1": _hydrated("ev-1", "binary")},
     )
@@ -304,7 +239,7 @@ def test_a_verdict_falls_back_to_the_runtime_name_when_the_runner_sends_no_id():
     entry = {"metrics": {"judge_results": {"Correctness-ab12": {"score": 3}}}}
     scores = ts.map_item_scores(
         entry,
-        pins=[ts.ScoringPlanPin(evaluator_uuid="ev-1", evaluator_version_id="ev-1-version")],
+        pins=[ts.EvaluatorPin(evaluator_uuid="ev-1", evaluator_version_id="ev-1-version")],
         name_to_uuid={"Correctness-ab12": "ev-1"},
         hydrated_by_uuid={"ev-1": _hydrated("ev-1", "rating")},
     )
@@ -336,7 +271,7 @@ def test_a_result_that_cannot_be_read_cleanly_leaves_the_run_unsettled(judge_res
         ts.map_item_scores(
             entry,
             pins=[
-                ts.ScoringPlanPin(evaluator_uuid="ev-1", evaluator_version_id="ev-1-version")
+                ts.EvaluatorPin(evaluator_uuid="ev-1", evaluator_version_id="ev-1-version")
             ],
             name_to_uuid={"A": "ev-1", "B": "ev-1"},
             hydrated_by_uuid={"ev-1": _hydrated("ev-1", "binary")},
@@ -351,7 +286,7 @@ def test_a_result_with_no_judge_block_leaves_the_run_unsettled(entry):
         ts.map_item_scores(
             entry,
             pins=[
-                ts.ScoringPlanPin(evaluator_uuid="ev-1", evaluator_version_id="ev-1-version")
+                ts.EvaluatorPin(evaluator_uuid="ev-1", evaluator_version_id="ev-1-version")
             ],
             name_to_uuid={},
             hydrated_by_uuid={"ev-1": _hydrated("ev-1", "binary")},
@@ -366,8 +301,8 @@ def test_a_result_missing_one_of_two_pinned_evaluators_is_unsettleable():
         ts.map_item_scores(
             entry,
             pins=[
-                ts.ScoringPlanPin(evaluator_uuid="ev-1", evaluator_version_id="ev-1-version"),
-                ts.ScoringPlanPin(evaluator_uuid="ev-2", evaluator_version_id="ev-2-version"),
+                ts.EvaluatorPin(evaluator_uuid="ev-1", evaluator_version_id="ev-1-version"),
+                ts.EvaluatorPin(evaluator_uuid="ev-2", evaluator_version_id="ev-2-version"),
             ],
             name_to_uuid={},
             hydrated_by_uuid={
@@ -463,3 +398,232 @@ def test_scale_bounds_read_stored_text_and_tolerate_junk():
     assert ts.scale_bounds_from_output_config("not json") == (None, None)
     assert ts.scale_bounds_from_output_config(None) == (None, None)
     assert ts.scale_bounds_from_output_config({"scale": []}) == (None, None)
+
+
+def _agent_with_traces(n=1, *, evaluator_type="llm", link_evaluator=True):
+    """An agent, `n` traces of it, and one pending run each."""
+    org = str(uuid.uuid4())
+    agent_uuid = db.create_agent(
+        name=f"a-{uuid.uuid4().hex[:6]}",
+        org_uuid=org,
+        interaction_type="conversation",
+        link_default_evaluator=False,
+    )
+    version_uuid = None
+    evaluator_uuid = None
+    if link_evaluator:
+        evaluator_uuid = db.create_evaluator(
+            name=f"ev-{uuid.uuid4().hex[:6]}",
+            evaluator_type=evaluator_type,
+            output_type="binary",
+            org_uuid=org,
+            owner_user_id=str(uuid.uuid4()),
+        )
+        version = db.create_evaluator_version(evaluator_uuid, "openai/gpt-4.1", "Judge.")
+        db.set_evaluator_live_version(evaluator_uuid, version["uuid"])
+        db.add_evaluator_to_agent(agent_uuid, evaluator_uuid)
+        version_uuid = version["uuid"]
+    now = ts.utc_now()
+    claimed = []
+    for _ in range(n):
+        trace = db.create_trace(
+            org, agent_uuid, [{"role": "user", "content": "hi"}], {"response": "hello"}
+        )
+        run_uuid = str(uuid.uuid4())
+        with db.get_db_connection() as conn:
+            conn.execute(
+                "INSERT INTO trace_eval_runs (uuid, trace_uuid, org_uuid, agent_id, "
+                "status, available_at, attempts, created_at, updated_at) "
+                "VALUES (?, ?, ?, ?, 'processing', ?, 1, ?, ?)",
+                (run_uuid, trace["uuid"], org, agent_uuid, now, now, now),
+            )
+            conn.commit()
+        claimed.append(
+            {
+                "uuid": run_uuid,
+                "trace_uuid": trace["uuid"],
+                "org_uuid": org,
+                "agent_id": agent_uuid,
+                "attempts": 1,
+            }
+        )
+    return claimed, evaluator_uuid, version_uuid
+
+
+def _binary_pass(run_uuid, evaluator_uuid):
+    return {
+        "test_case_id": run_uuid,
+        "metrics": {
+            "judge_results": {
+                "any name": {
+                    "evaluator_id": evaluator_uuid,
+                    "match": True,
+                    "reasoning": "fine",
+                }
+            }
+        },
+    }
+
+
+def test_a_batch_whose_agent_has_no_usable_evaluator_is_skipped_without_a_judge_call():
+    claimed, _, _ = _agent_with_traces(2, link_evaluator=False)
+
+    def never(*args, **kwargs):
+        raise AssertionError("the judge must not be invoked")
+
+    ts.process_claimed_runs(claimed, invoke=never)
+    for run in claimed:
+        row = db.get_trace_eval_run(run["uuid"])
+        assert row["status"] == "skipped"
+        assert row["error"] == "no_usable_evaluators"
+
+
+def test_an_agent_whose_interaction_type_cannot_be_scored_is_skipped_with_that_reason():
+    claimed, _, _ = _agent_with_traces(1)
+    with db.get_db_connection() as conn:
+        conn.execute(
+            "UPDATE agents SET interaction_type = 'voice' WHERE uuid = ?",
+            (claimed[0]["agent_id"],),
+        )
+        conn.commit()
+
+    ts.process_claimed_runs(claimed, invoke=lambda *a, **k: None)
+    row = db.get_trace_eval_run(claimed[0]["uuid"])
+    assert row["status"] == "skipped"
+    assert row["error"] == "unsupported_interaction_type"
+
+
+def test_a_wrong_type_evaluator_leaves_nothing_usable():
+    claimed, _, _ = _agent_with_traces(1, evaluator_type="llm-general")
+    ts.process_claimed_runs(claimed, invoke=lambda *a, **k: None)
+    row = db.get_trace_eval_run(claimed[0]["uuid"])
+    assert row["status"] == "skipped"
+    assert row["error"] == "no_usable_evaluators"
+
+
+def test_evaluators_are_resolved_once_for_the_whole_batch(monkeypatch):
+    claimed, evaluator_uuid, _ = _agent_with_traces(3)
+    calls = []
+    real = ts.resolve_trace_scoring
+
+    def counting(interaction_type, live_evaluators):
+        calls.append(interaction_type)
+        return real(interaction_type, live_evaluators)
+
+    monkeypatch.setattr(ts, "resolve_trace_scoring", counting)
+    ts.process_claimed_runs(
+        claimed,
+        invoke=lambda *a, **k: ts.EvalOnlyCliResult(
+            returncode=0,
+            timed_out=False,
+            results=[_binary_pass(r["uuid"], evaluator_uuid) for r in claimed],
+        ),
+    )
+    assert calls == ["conversation"]
+    assert [db.get_trace_eval_run(r["uuid"])["status"] for r in claimed] == [
+        "completed"
+    ] * 3
+
+
+def test_a_score_records_the_live_version_it_was_judged_against():
+    claimed, evaluator_uuid, version_uuid = _agent_with_traces(1)
+    run_uuid = claimed[0]["uuid"]
+    ts.process_claimed_runs(
+        claimed,
+        invoke=lambda *a, **k: ts.EvalOnlyCliResult(
+            returncode=0,
+            timed_out=False,
+            results=[_binary_pass(run_uuid, evaluator_uuid)],
+        ),
+    )
+    assert db.get_trace_eval_run(run_uuid)["status"] == "completed"
+    scores = db.get_trace_eval_scores(run_uuid)
+    assert [(s["evaluator_uuid"], s["evaluator_version_id"], s["value"]) for s in scores] == [
+        (evaluator_uuid, version_uuid, 1)
+    ]
+
+
+def test_a_new_live_version_is_what_the_next_run_is_judged_against():
+    """Nothing is pinned at ingest, so editing an evaluator changes what its
+    agent's next trace is scored with."""
+    claimed, evaluator_uuid, first_version = _agent_with_traces(1)
+    second = db.create_evaluator_version(evaluator_uuid, "openai/gpt-4.1", "Judge harder.")
+    db.set_evaluator_live_version(evaluator_uuid, second["uuid"])
+    run_uuid = claimed[0]["uuid"]
+    ts.process_claimed_runs(
+        claimed,
+        invoke=lambda *a, **k: ts.EvalOnlyCliResult(
+            returncode=0,
+            timed_out=False,
+            results=[_binary_pass(run_uuid, evaluator_uuid)],
+        ),
+    )
+    scores = db.get_trace_eval_scores(run_uuid)
+    assert scores[0]["evaluator_version_id"] == second["uuid"]
+    assert second["uuid"] != first_version
+
+
+def test_a_deleted_agent_settles_its_claimed_runs_as_skipped():
+    claimed, _, _ = _agent_with_traces(1)
+    db.delete_agent(claimed[0]["agent_id"])
+    ts.process_claimed_runs(claimed, invoke=lambda *a, **k: None)
+    row = db.get_trace_eval_run(claimed[0]["uuid"])
+    assert row["status"] == "skipped"
+    assert row["error"] == ts.TraceEvalSettleSkipReason.AGENT_DELETED.value
+
+
+def test_hydrated_evaluators_carry_the_execution_fields_the_cli_needs():
+    claimed, evaluator_uuid, version_uuid = _agent_with_traces(1)
+    resolved = ts.resolve_batch_evaluators(claimed[0]["agent_id"])
+    assert resolved.evaluation_type == "response"
+    assert [ev["uuid"] for ev in resolved.hydrated] == [evaluator_uuid]
+    assert resolved.hydrated[0]["judge_model"] == "openai/gpt-4.1"
+    assert resolved.hydrated[0]["system_prompt"] == "Judge."
+    assert resolved.hydrated[0]["output_type"] == "binary"
+    assert resolved.pins == [
+        ts.EvaluatorPin(
+            evaluator_uuid=evaluator_uuid, evaluator_version_id=version_uuid
+        )
+    ]
+
+
+def test_an_unknown_agent_resolves_to_the_deleted_skip_reason():
+    assert (
+        ts.resolve_batch_evaluators(str(uuid.uuid4()))
+        == ts.TraceEvalSettleSkipReason.AGENT_DELETED
+    )
+
+
+def test_hydration_drops_a_version_that_belongs_to_another_evaluator():
+    claimed, evaluator_uuid, version_uuid = _agent_with_traces(1)
+    other = ts.TraceScoringEligible(
+        pin=ts.EvaluatorPin(
+            evaluator_uuid=str(uuid.uuid4()), evaluator_version_id=version_uuid
+        ),
+        name="stranger",
+    )
+    eligible = ts.resolve_batch_evaluators(claimed[0]["agent_id"]).hydrated
+    assert [ev["uuid"] for ev in eligible] == [evaluator_uuid]
+    assert ts.hydrate_eligible_evaluators([other]) == []
+
+
+def test_nothing_left_after_hydration_skips_the_batch(monkeypatch):
+    claimed, _, _ = _agent_with_traces(1)
+    monkeypatch.setattr(ts, "hydrate_eligible_evaluators", lambda eligible: [])
+    ts.process_claimed_runs(claimed, invoke=lambda *a, **k: None)
+    row = db.get_trace_eval_run(claimed[0]["uuid"])
+    assert row["status"] == "skipped"
+    assert row["error"] == "no_usable_evaluators"
+
+
+def test_a_resolution_that_raises_defers_the_batch_rather_than_stranding_it(monkeypatch):
+    claimed, _, _ = _agent_with_traces(1)
+
+    def boom(agent_id):
+        raise RuntimeError("evaluator lookup exploded")
+
+    monkeypatch.setattr(ts, "resolve_batch_evaluators", boom)
+    ts.process_claimed_runs(claimed, invoke=lambda *a, **k: None)
+    row = db.get_trace_eval_run(claimed[0]["uuid"])
+    assert row["status"] == "pending"
+    assert row["error"] == "evaluator lookup exploded"

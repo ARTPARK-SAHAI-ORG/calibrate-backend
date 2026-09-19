@@ -1,4 +1,4 @@
-"""Schema tests for trace_eval_runs, trace_eval_scores, and agents.auto_score_traces.
+"""Schema tests for trace_eval_runs and trace_eval_scores.
 
 This slice ships tables + indexes only -- no enqueue/claim/settle logic yet,
 so these tests write directly via raw SQL.
@@ -43,7 +43,6 @@ def _insert_run(org: str, trace_uuid: str, *, run_uuid: str | None = None, **ove
         "org_uuid": org,
         "agent_id": "agent-1",
         "status": "pending",
-        "scoring_plan": None,
         "available_at": _ts(0),
         "attempts": 0,
         "error": None,
@@ -55,16 +54,15 @@ def _insert_run(org: str, trace_uuid: str, *, run_uuid: str | None = None, **ove
     with db.get_db_connection() as conn:
         conn.execute(
             "INSERT INTO trace_eval_runs "
-            "(uuid, trace_uuid, org_uuid, agent_id, status, scoring_plan, "
+            "(uuid, trace_uuid, org_uuid, agent_id, status, "
             "available_at, attempts, error, created_at, updated_at, completed_at) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 row["uuid"],
                 row["trace_uuid"],
                 row["org_uuid"],
                 row["agent_id"],
                 row["status"],
-                row["scoring_plan"],
                 row["available_at"],
                 row["attempts"],
                 row["error"],
@@ -77,13 +75,11 @@ def _insert_run(org: str, trace_uuid: str, *, run_uuid: str | None = None, **ove
     return row["uuid"]
 
 
-def _insert_score(org: str, run_uuid: str, trace_uuid: str, **overrides):
+def _insert_score(run_uuid: str, **overrides):
     row = {
         "run_uuid": run_uuid,
-        "trace_uuid": trace_uuid,
         "evaluator_uuid": "eval-1",
         "evaluator_version_id": "version-1",
-        "org_uuid": org,
         "value": 1,
         "output_type": "binary",
         "reasoning": "ok",
@@ -93,15 +89,13 @@ def _insert_score(org: str, run_uuid: str, trace_uuid: str, **overrides):
     with db.get_db_connection() as conn:
         conn.execute(
             "INSERT INTO trace_eval_scores "
-            "(run_uuid, trace_uuid, evaluator_uuid, evaluator_version_id, "
-            "org_uuid, value, output_type, reasoning, completed_at) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "(run_uuid, evaluator_uuid, evaluator_version_id, "
+            "value, output_type, reasoning, completed_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?)",
             (
                 row["run_uuid"],
-                row["trace_uuid"],
                 row["evaluator_uuid"],
                 row["evaluator_version_id"],
-                row["org_uuid"],
                 row["value"],
                 row["output_type"],
                 row["reasoning"],
@@ -127,10 +121,6 @@ def test_init_db_is_idempotent():
                 "SELECT name FROM sqlite_master WHERE type='index'"
             ).fetchall()
         }
-        cols = {
-            r["name"]
-            for r in conn.execute("PRAGMA table_info(agents)").fetchall()
-        }
     assert {"trace_eval_runs", "trace_eval_scores"} <= names
     assert {
         "ux_trace_eval_active",
@@ -139,7 +129,6 @@ def test_init_db_is_idempotent():
         "ix_trace_eval_trace",
         "ix_trace_eval_org_status",
     } <= indexes
-    assert "auto_score_traces" in cols
 
 
 _OPEN_STATUS_IN_LIST = "status IN ('pending', 'processing')"
@@ -169,21 +158,6 @@ def test_trace_eval_run_ddl_is_frozen_not_interpolated_from_the_enum():
     )
 
 
-def test_auto_score_traces_defaults_to_on():
-    org = _org()
-    agent_uuid = str(uuid.uuid4())
-    with db.get_db_connection() as conn:
-        conn.execute(
-            "INSERT INTO agents (uuid, org_uuid, name, config) VALUES (?, ?, ?, ?)",
-            (agent_uuid, org, "test-agent", "{}"),
-        )
-        conn.commit()
-        auto_score = conn.execute(
-            "SELECT auto_score_traces FROM agents WHERE uuid = ?", (agent_uuid,)
-        ).fetchone()["auto_score_traces"]
-    assert auto_score == 1
-
-
 def test_active_run_uniqueness_rejects_a_second_open_run():
     org = _org()
     trace = _ingest_trace(org)
@@ -211,19 +185,15 @@ def test_typed_result_check_accepts_binary_or_rating():
     org = _org()
     trace = _ingest_trace(org)
     run = _insert_run(org, trace["uuid"], status="completed", completed_at=_ts(5))
-    _insert_score(org, run, trace["uuid"], value=0, output_type="binary")
+    _insert_score(run, value=0, output_type="binary")
     _insert_score(
-        org,
         run,
-        trace["uuid"],
         evaluator_uuid="eval-rating",
         value=0.0,
         output_type="rating",
     )
     _insert_score(
-        org,
         run,
-        trace["uuid"],
         evaluator_uuid="eval-rating-high",
         value=4,
         output_type="rating",
@@ -259,7 +229,7 @@ def test_typed_result_check_rejects_null_invalid_type_and_non_binary_value(kwarg
     trace = _ingest_trace(org)
     run = _insert_run(org, trace["uuid"], status="completed", completed_at=_ts(5))
     with pytest.raises(sqlite3.IntegrityError):
-        _insert_score(org, run, trace["uuid"], **kwargs)
+        _insert_score(run, **kwargs)
 
 
 def test_evaluator_version_id_is_required():
@@ -267,7 +237,7 @@ def test_evaluator_version_id_is_required():
     trace = _ingest_trace(org)
     run = _insert_run(org, trace["uuid"], status="completed", completed_at=_ts(5))
     with pytest.raises(sqlite3.IntegrityError):
-        _insert_score(org, run, trace["uuid"], evaluator_version_id=None)
+        _insert_score(run, evaluator_version_id=None)
 
 
 def test_same_version_scores_are_preserved_across_distinct_runs():
@@ -275,9 +245,7 @@ def test_same_version_scores_are_preserved_across_distinct_runs():
     trace = _ingest_trace(org)
     first = _insert_run(org, trace["uuid"], status="completed", completed_at=_ts(5))
     _insert_score(
-        org,
         first,
-        trace["uuid"],
         value=1,
         output_type="binary",
         evaluator_version_id="version-same",
@@ -288,9 +256,7 @@ def test_same_version_scores_are_preserved_across_distinct_runs():
         org, trace["uuid"], status="completed", created_at=_ts(6), completed_at=_ts(7)
     )
     _insert_score(
-        org,
         second,
-        trace["uuid"],
         value=0,
         output_type="binary",
         evaluator_version_id="version-same",
@@ -299,8 +265,9 @@ def test_same_version_scores_are_preserved_across_distinct_runs():
     )
     with db.get_db_connection() as conn:
         rows = conn.execute(
-            "SELECT run_uuid, value, reasoning FROM trace_eval_scores "
-            "WHERE trace_uuid = ? ORDER BY completed_at",
+            "SELECT ts.run_uuid, ts.value, ts.reasoning FROM trace_eval_scores ts "
+            "JOIN trace_eval_runs r ON r.uuid = ts.run_uuid "
+            "WHERE r.trace_uuid = ? ORDER BY ts.completed_at",
             (trace["uuid"],),
         ).fetchall()
     assert len(rows) == 2
@@ -364,6 +331,43 @@ def test_delete_pending_trace_eval_runs_leaves_processing_and_terminal():
     assert remaining[other_pending] == "pending"
 
 
+def test_update_agent_can_delete_its_pending_runs():
+    org = _org()
+    agent_uuid = str(uuid.uuid4())
+    with db.get_db_connection() as conn:
+        conn.execute(
+            "INSERT INTO agents (uuid, org_uuid, name, config) VALUES (?, ?, ?, ?)",
+            (agent_uuid, org, "test-agent", "{}"),
+        )
+        conn.commit()
+    trace = _ingest_trace(org, agent_id=agent_uuid)
+    pending = _insert_run(org, trace["uuid"], agent_id=agent_uuid, status="pending")
+
+    assert db.update_agent(
+        agent_uuid,
+        config={"trace_scoring": {"enabled": False}},
+        org_uuid=org,
+        delete_pending_trace_runs=True,
+    )
+    assert db.get_trace_eval_run(pending) is None
+
+
+def test_update_agent_keeps_pending_runs_unless_asked():
+    org = _org()
+    agent_uuid = str(uuid.uuid4())
+    with db.get_db_connection() as conn:
+        conn.execute(
+            "INSERT INTO agents (uuid, org_uuid, name, config) VALUES (?, ?, ?, ?)",
+            (agent_uuid, org, "test-agent", "{}"),
+        )
+        conn.commit()
+    trace = _ingest_trace(org, agent_id=agent_uuid)
+    pending = _insert_run(org, trace["uuid"], agent_id=agent_uuid, status="pending")
+
+    assert db.update_agent(agent_uuid, name="renamed", org_uuid=org)
+    assert db.get_trace_eval_run(pending)["status"] == "pending"
+
+
 def test_delete_pending_without_org_uuid_still_scopes_to_agent():
     org = _org()
     agent_id = str(uuid.uuid4())
@@ -380,17 +384,20 @@ def test_delete_pending_without_org_uuid_still_scopes_to_agent():
         )
 
 
-def test_update_agent_auto_score_traces_missing_row_is_false():
-    assert db.update_agent(str(uuid.uuid4()), auto_score_traces=True) is False
+def test_update_agent_missing_row_is_false():
+    assert (
+        db.update_agent(str(uuid.uuid4()), name="x", delete_pending_trace_runs=True)
+        is False
+    )
 
 
 def test_same_run_evaluator_is_unique():
     org = _org()
     trace = _ingest_trace(org)
     run = _insert_run(org, trace["uuid"], status="completed", completed_at=_ts(5))
-    _insert_score(org, run, trace["uuid"], evaluator_version_id="v1")
+    _insert_score(run, evaluator_version_id="v1")
     with pytest.raises(sqlite3.IntegrityError):
-        _insert_score(org, run, trace["uuid"], evaluator_version_id="v2", value=0)
+        _insert_score(run, evaluator_version_id="v2", value=0)
 
 
 # The read helpers' user-facing contract (latest-run summary fields, full
@@ -409,8 +416,8 @@ def test_latest_run_summary_tie_breaks_on_id():
     second = _insert_run(
         org, trace["uuid"], status="completed", created_at=_ts(50), completed_at=_ts(50)
     )
-    _insert_score(org, first, trace["uuid"], value=1)
-    _insert_score(org, second, trace["uuid"], value=0)
+    _insert_score(first, value=1)
+    _insert_score(second, value=0)
     with db.get_db_connection() as conn:
         ids = {
             r["uuid"]: r["id"]
@@ -429,7 +436,7 @@ def test_score_read_helpers_are_org_scoped():
     org_a, org_b = _org(), _org()
     trace = _ingest_trace(org_a)
     run = _insert_run(org_a, trace["uuid"], status="completed", completed_at=_ts(3))
-    _insert_score(org_a, run, trace["uuid"], value=1)
+    _insert_score(run, value=1)
     assert db.get_latest_trace_run_summaries(org_b, [trace["uuid"]]) == {}
     assert db.list_trace_scoring_runs(org_b, trace["uuid"]) == []
     assert db.get_latest_trace_run_summaries(org_a, [trace["uuid"]])[trace["uuid"]][
@@ -445,7 +452,7 @@ def test_latest_run_summary_one_select_for_the_page(monkeypatch):
     traces = [_ingest_trace(org) for _ in range(3)]
     for trace in traces:
         run = _insert_run(org, trace["uuid"], status="completed", completed_at=_ts(4))
-        _insert_score(org, run, trace["uuid"], value=1)
+        _insert_score(run, value=1)
 
     executes = []
     real_connect = db.get_db_connection

@@ -203,11 +203,11 @@ def test_list_agents_returns_trimmed_summary(client):
         "updated_at",
         "connection_verified",
         "has_default_inputs",
-        "auto_score_traces",
+        "trace_scoring_enabled",
     }
     assert item["name"] == name
     assert item["type"] == "agent"
-    assert item["auto_score_traces"] is True
+    assert item["trace_scoring_enabled"] is True
     assert item["created_at"]
     assert item["updated_at"]
 
@@ -1215,7 +1215,7 @@ def test_presave_verify_sends_the_body_its_stated_type_expects(client, monkeypat
     }
 
 
-# ============ auto_score_traces + eligibility ============
+# ============ trace scoring setting + eligibility ============
 
 
 def _unlink_all_evaluators(client, h, agent_uuid):
@@ -1241,7 +1241,6 @@ def _insert_run(org, agent_id, trace_uuid, status, **overrides):
         "org_uuid": org,
         "agent_id": agent_id,
         "status": status,
-        "scoring_plan": None,
         "available_at": "2000-01-01 00:00:00",
         "attempts": 0,
         "error": None,
@@ -1253,63 +1252,49 @@ def _insert_run(org, agent_id, trace_uuid, status, **overrides):
     with db.get_db_connection() as conn:
         conn.execute(
             "INSERT INTO trace_eval_runs "
-            "(uuid, trace_uuid, org_uuid, agent_id, status, scoring_plan, "
-            "available_at, attempts, error, created_at, updated_at, completed_at) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-            (
-                row["uuid"],
-                row["trace_uuid"],
-                row["org_uuid"],
-                row["agent_id"],
-                row["status"],
-                row["scoring_plan"],
-                row["available_at"],
-                row["attempts"],
-                row["error"],
-                row["created_at"],
-                row["updated_at"],
-                row["completed_at"],
-            ),
+            f"({', '.join(row)}) VALUES ({', '.join('?' * len(row))})",
+            tuple(row.values()),
         )
         conn.commit()
     return row["uuid"]
 
 
-def _disable_auto_score(client, h, agent_uuid):
-    r = client.put(
-        f"/agents/{agent_uuid}", json={"auto_score_traces": False}, headers=h
-    )
+def _set_trace_scoring(client, h, agent_uuid, enabled):
+    """A PUT replaces the whole config, so send the stored one back with the key set."""
+    config = client.get(f"/agents/{agent_uuid}", headers=h).json().get("config") or {}
+    config["trace_scoring"] = {"enabled": enabled}
+    return client.put(f"/agents/{agent_uuid}", json={"config": config}, headers=h)
+
+
+def _disable_trace_scoring(client, h, agent_uuid):
+    r = _set_trace_scoring(client, h, agent_uuid, False)
     assert r.status_code == 200, r.text
-    assert r.json()["auto_score_traces"] is False
+    assert r.json()["trace_scoring_enabled"] is False
 
 
-def test_agent_reads_include_auto_score_traces_on_by_default(client):
+def test_agent_reads_include_trace_scoring_on_by_default(client):
     h = _signup(client)
     agent = _create_agent(client, h, f"flag-read-{uuid.uuid4().hex[:6]}")
 
     got = client.get(f"/agents/{agent['uuid']}", headers=h)
     assert got.status_code == 200, got.text
-    assert got.json()["auto_score_traces"] is True
+    assert got.json()["trace_scoring_enabled"] is True
 
     listed = client.get("/agents", headers=h)
     item = next(a for a in listed.json()["items"] if a["uuid"] == agent["uuid"])
-    assert item["auto_score_traces"] is True
+    assert item["trace_scoring_enabled"] is True
 
 
-def test_omitting_auto_score_traces_leaves_it_unchanged(client):
+def test_omitting_trace_scoring_leaves_it_unchanged(client):
     h = _signup(client)
     agent = _create_agent(client, h, f"flag-omit-{uuid.uuid4().hex[:6]}")
     clean = _create_evaluator(client, h, name=f"omit-clean-{uuid.uuid4().hex[:6]}")
     _unlink_all_evaluators(client, h, agent["uuid"])
     _link_evaluators(client, h, agent["uuid"], clean)
 
-    enabled = client.put(
-        f"/agents/{agent['uuid']}",
-        json={"auto_score_traces": True},
-        headers=h,
-    )
+    enabled = _set_trace_scoring(client, h, agent["uuid"], True)
     assert enabled.status_code == 200, enabled.text
-    assert enabled.json()["auto_score_traces"] is True
+    assert enabled.json()["trace_scoring_enabled"] is True
 
     renamed = f"flag-omit-renamed-{uuid.uuid4().hex[:6]}"
     r = client.put(
@@ -1319,28 +1304,24 @@ def test_omitting_auto_score_traces_leaves_it_unchanged(client):
     )
     assert r.status_code == 200, r.text
     assert r.json()["name"] == renamed
-    assert r.json()["auto_score_traces"] is True
+    assert r.json()["trace_scoring_enabled"] is True
 
 
-def test_enable_auto_score_traces_conversation_with_eligible_llm(client):
+def test_enable_trace_scoring_conversation_with_eligible_llm(client):
     h = _signup(client)
     agent = _create_agent(client, h, f"flag-on-{uuid.uuid4().hex[:6]}")
     clean = _create_evaluator(client, h, name=f"conv-clean-{uuid.uuid4().hex[:6]}")
     _unlink_all_evaluators(client, h, agent["uuid"])
     _link_evaluators(client, h, agent["uuid"], clean)
 
-    r = client.put(
-        f"/agents/{agent['uuid']}",
-        json={"auto_score_traces": True},
-        headers=h,
-    )
+    r = _set_trace_scoring(client, h, agent["uuid"], True)
     assert r.status_code == 200, r.text
-    assert r.json()["auto_score_traces"] is True
+    assert r.json()["trace_scoring_enabled"] is True
     fetched = client.get(f"/agents/{agent['uuid']}", headers=h).json()
-    assert fetched["auto_score_traces"] is True
+    assert fetched["trace_scoring_enabled"] is True
 
 
-def test_enable_auto_score_traces_general_with_eligible_llm_general(client):
+def test_enable_trace_scoring_general_with_eligible_llm_general(client):
     h = _signup(client)
     created = client.post(
         "/agents",
@@ -1360,13 +1341,9 @@ def test_enable_auto_score_traces_general_with_eligible_llm_general(client):
     _unlink_all_evaluators(client, h, created["uuid"])
     _link_evaluators(client, h, created["uuid"], clean)
 
-    r = client.put(
-        f"/agents/{created['uuid']}",
-        json={"auto_score_traces": True},
-        headers=h,
-    )
+    r = _set_trace_scoring(client, h, created["uuid"], True)
     assert r.status_code == 200, r.text
-    assert r.json()["auto_score_traces"] is True
+    assert r.json()["trace_scoring_enabled"] is True
     assert r.json()["interaction_type"] == "general"
 
 
@@ -1375,13 +1352,9 @@ def test_enable_rejected_when_only_default_correctness_evaluator_is_linked(clien
     with zero eligible evaluators cannot turn scoring back on once it is off."""
     h = _signup(client)
     agent = _create_agent(client, h, f"flag-block-{uuid.uuid4().hex[:6]}")
-    _disable_auto_score(client, h, agent["uuid"])
+    _disable_trace_scoring(client, h, agent["uuid"])
 
-    r = client.put(
-        f"/agents/{agent['uuid']}",
-        json={"auto_score_traces": True},
-        headers=h,
-    )
+    r = _set_trace_scoring(client, h, agent["uuid"], True)
     assert r.status_code == 422, r.text
     body = r.json()["detail"]
     assert body["error"] == (
@@ -1391,9 +1364,12 @@ def test_enable_rejected_when_only_default_correctness_evaluator_is_linked(clien
     assert {e["reason"] for e in body["ineligible"]} == {
         IneligibleReason.DECLARES_VARIABLES
     }
-    assert client.get(f"/agents/{agent['uuid']}", headers=h).json()[
-        "auto_score_traces"
-    ] is False
+    assert (
+        client.get(f"/agents/{agent['uuid']}", headers=h).json()[
+            "trace_scoring_enabled"
+        ]
+        is False
+    )
 
 
 def test_enable_rejected_for_general_agent_with_only_default_evaluator(client):
@@ -1407,20 +1383,16 @@ def test_enable_rejected_for_general_agent_with_only_default_evaluator(client):
         },
         headers=h,
     ).json()
-    _disable_auto_score(client, h, created["uuid"])
+    _disable_trace_scoring(client, h, created["uuid"])
 
-    r = client.put(
-        f"/agents/{created['uuid']}",
-        json={"auto_score_traces": True},
-        headers=h,
-    )
+    r = _set_trace_scoring(client, h, created["uuid"], True)
     assert r.status_code == 422, r.text
     assert {e["reason"] for e in r.json()["detail"]["ineligible"]} == {
         IneligibleReason.DECLARES_VARIABLES
     }
 
 
-def test_already_on_auto_score_true_survives_later_empty_eligibility(client):
+def test_already_on_trace_scoring_survives_later_empty_eligibility(client):
     """The 422 gate is only off→on. An already-on agent can send true again
     after its linked set drifts to zero eligible evaluators."""
     h = _signup(client)
@@ -1429,11 +1401,7 @@ def test_already_on_auto_score_true_survives_later_empty_eligibility(client):
     _unlink_all_evaluators(client, h, agent["uuid"])
     _link_evaluators(client, h, agent["uuid"], clean)
     assert (
-        client.put(
-            f"/agents/{agent['uuid']}",
-            json={"auto_score_traces": True},
-            headers=h,
-        ).status_code
+        _set_trace_scoring(client, h, agent["uuid"], True).status_code
         == 200
     )
 
@@ -1443,13 +1411,9 @@ def test_already_on_auto_score_true_survives_later_empty_eligibility(client):
     ).json()
     assert eligibility["eligible"] == []
 
-    r = client.put(
-        f"/agents/{agent['uuid']}",
-        json={"auto_score_traces": True},
-        headers=h,
-    )
+    r = _set_trace_scoring(client, h, agent["uuid"], True)
     assert r.status_code == 200, r.text
-    assert r.json()["auto_score_traces"] is True
+    assert r.json()["trace_scoring_enabled"] is True
 
 
 def test_eligibility_endpoint_partitions_mixed_evaluator_types(client):
@@ -1506,7 +1470,7 @@ def test_eligibility_endpoint_reports_each_disqualification_reason(client):
     _unlink_all_evaluators(client, h, conv["uuid"])
     _link_evaluators(client, h, conv["uuid"], with_vars, wrong_type)
     db.add_evaluator_to_agent(conv["uuid"], no_live)
-    _disable_auto_score(client, h, conv["uuid"])
+    _disable_trace_scoring(client, h, conv["uuid"])
 
     r = client.get(
         f"/agents/{conv['uuid']}/trace-scoring-eligibility", headers=h
@@ -1518,11 +1482,7 @@ def test_eligibility_endpoint_reports_each_disqualification_reason(client):
     assert by_id[no_live] == IneligibleReason.NO_LIVE_VERSION
     assert r.json()["eligible"] == []
 
-    blocked = client.put(
-        f"/agents/{conv['uuid']}",
-        json={"auto_score_traces": True},
-        headers=h,
-    )
+    blocked = _set_trace_scoring(client, h, conv["uuid"], True)
     assert blocked.status_code == 422, blocked.text
     assert {e["reason"] for e in blocked.json()["detail"]["ineligible"]} == {
         IneligibleReason.DECLARES_VARIABLES,
@@ -1562,18 +1522,14 @@ def test_eligibility_endpoint_is_jwt_only_and_org_scoped(client):
     assert "organization_uuid" not in other.json()
 
 
-def test_disable_auto_score_traces_deletes_pending_runs_only(client):
+def test_disable_trace_scoring_deletes_pending_runs_only(client):
     h = _signup(client)
     agent = _create_agent(client, h, f"flag-off-{uuid.uuid4().hex[:6]}")
     clean = _create_evaluator(client, h, name=f"off-clean-{uuid.uuid4().hex[:6]}")
     _unlink_all_evaluators(client, h, agent["uuid"])
     _link_evaluators(client, h, agent["uuid"], clean)
     assert (
-        client.put(
-            f"/agents/{agent['uuid']}",
-            json={"auto_score_traces": True},
-            headers=h,
-        ).status_code
+        _set_trace_scoring(client, h, agent["uuid"], True).status_code
         == 200
     )
 
@@ -1609,13 +1565,9 @@ def test_disable_auto_score_traces_deletes_pending_runs_only(client):
         completed_at="2000-01-01 00:00:05",
     )
 
-    r = client.put(
-        f"/agents/{agent['uuid']}",
-        json={"auto_score_traces": False},
-        headers=h,
-    )
+    r = _set_trace_scoring(client, h, agent["uuid"], False)
     assert r.status_code == 200, r.text
-    assert r.json()["auto_score_traces"] is False
+    assert r.json()["trace_scoring_enabled"] is False
 
     with db.get_db_connection() as conn:
         remaining = {
@@ -1631,17 +1583,13 @@ def test_disable_auto_score_traces_deletes_pending_runs_only(client):
     assert remaining[completed] == "completed"
 
 
-def test_omitting_auto_score_traces_does_not_delete_pending_runs(client):
+def test_omitting_trace_scoring_does_not_delete_pending_runs(client):
     h = _signup(client)
     agent = _create_agent(client, h, f"flag-omit-runs-{uuid.uuid4().hex[:6]}")
     clean = _create_evaluator(client, h, name=f"omit-run-{uuid.uuid4().hex[:6]}")
     _unlink_all_evaluators(client, h, agent["uuid"])
     _link_evaluators(client, h, agent["uuid"], clean)
-    client.put(
-        f"/agents/{agent['uuid']}",
-        json={"auto_score_traces": True},
-        headers=h,
-    )
+    _set_trace_scoring(client, h, agent["uuid"], True)
     agent_row = db.get_agent(agent["uuid"])
     trace = db.create_trace(
         org_uuid=agent_row["org_uuid"],
@@ -1659,7 +1607,7 @@ def test_omitting_auto_score_traces_does_not_delete_pending_runs(client):
         headers=h,
     )
     assert r.status_code == 200, r.text
-    assert r.json()["auto_score_traces"] is True
+    assert r.json()["trace_scoring_enabled"] is True
     with db.get_db_connection() as conn:
         row = conn.execute(
             "SELECT status FROM trace_eval_runs WHERE uuid = ?", (pending,)
@@ -1667,28 +1615,25 @@ def test_omitting_auto_score_traces_does_not_delete_pending_runs(client):
     assert row["status"] == "pending"
 
 
-def test_enable_auto_score_traces_with_api_key(client):
+def test_enable_trace_scoring_with_api_key(client):
     h = _signup(client)
     agent = _create_agent(client, h, f"flag-key-{uuid.uuid4().hex[:6]}")
     clean = _create_evaluator(client, h, name=f"key-clean-{uuid.uuid4().hex[:6]}")
     _unlink_all_evaluators(client, h, agent["uuid"])
     _link_evaluators(client, h, agent["uuid"], clean)
+    _disable_trace_scoring(client, h, agent["uuid"])
     raw = _raw_key(client, h)
 
-    r = client.put(
-        f"/agents/{agent['uuid']}",
-        json={"auto_score_traces": True},
-        headers={"X-API-Key": raw},
-    )
+    r = _set_trace_scoring(client, {"X-API-Key": raw}, agent["uuid"], True)
     assert r.status_code == 200, r.text
-    assert r.json()["auto_score_traces"] is True
+    assert r.json()["trace_scoring_enabled"] is True
 
 
-def test_duplicate_agent_does_not_copy_auto_score_traces(client):
-    """The copy starts with the default (on), whatever the original chose."""
+def test_duplicate_agent_copies_the_trace_scoring_setting(client):
+    """The setting rides in the config, which a duplicate copies."""
     h = _signup(client)
     agent = _create_agent(client, h, f"flag-dup-{uuid.uuid4().hex[:6]}")
-    _disable_auto_score(client, h, agent["uuid"])
+    _disable_trace_scoring(client, h, agent["uuid"])
 
     dup = client.post(
         f"/agents/{agent['uuid']}/duplicate",
@@ -1697,4 +1642,59 @@ def test_duplicate_agent_does_not_copy_auto_score_traces(client):
     )
     assert dup.status_code == 200, dup.text
     copied = client.get(f"/agents/{dup.json()['uuid']}", headers=h).json()
-    assert copied["auto_score_traces"] is True
+    assert copied["trace_scoring_enabled"] is False
+
+
+def test_put_without_config_leaves_trace_scoring_off(client):
+    h = _signup(client)
+    agent = _create_agent(client, h, f"flag-keep-{uuid.uuid4().hex[:6]}")
+    _disable_trace_scoring(client, h, agent["uuid"])
+
+    r = client.put(
+        f"/agents/{agent['uuid']}",
+        json={"name": f"flag-keep-renamed-{uuid.uuid4().hex[:6]}"},
+        headers=h,
+    )
+    assert r.status_code == 200, r.text
+    assert r.json()["trace_scoring_enabled"] is False
+
+
+def test_put_config_without_the_key_does_not_trigger_the_eligibility_gate(client):
+    """Only a config that names the key can flip the setting, so a config edit
+    that leaves it out is never read as turning scoring on."""
+    h = _signup(client)
+    agent = _create_agent(client, h, f"flag-url-{uuid.uuid4().hex[:6]}")
+    _disable_trace_scoring(client, h, agent["uuid"])
+    assert (
+        client.get(
+            f"/agents/{agent['uuid']}/trace-scoring-eligibility", headers=h
+        ).json()["eligible"]
+        == []
+    )
+
+    config = client.get(f"/agents/{agent['uuid']}", headers=h).json()["config"]
+    config.pop("trace_scoring")
+    config["agent_url"] = "https://example.com/agent"
+    r = client.put(f"/agents/{agent['uuid']}", json={"config": config}, headers=h)
+    assert r.status_code == 200, r.text
+    assert r.json()["config"]["agent_url"] == "https://example.com/agent"
+
+
+def test_a_config_update_without_the_key_keeps_the_trace_scoring_setting(client):
+    """A config body replaces the stored config, so the setting is carried
+    forward or editing the URL would silently turn scoring back on."""
+    h = _signup(client)
+    agent = _create_agent(client, h, f"flag-keep-{uuid.uuid4().hex[:6]}")
+    _disable_trace_scoring(client, h, agent["uuid"])
+
+    config = client.get(f"/agents/{agent['uuid']}", headers=h).json()["config"]
+    config.pop("trace_scoring")
+    config["agent_url"] = "https://kept.example/agent"
+    moved = client.put(f"/agents/{agent['uuid']}", json={"config": config}, headers=h)
+
+    assert moved.status_code == 200, moved.text
+    assert moved.json()["config"]["agent_url"] == "https://kept.example/agent"
+    assert moved.json()["trace_scoring_enabled"] is False
+    assert client.get(f"/agents/{agent['uuid']}", headers=h).json()[
+        "trace_scoring_enabled"
+    ] is False

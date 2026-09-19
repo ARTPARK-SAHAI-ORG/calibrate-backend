@@ -502,7 +502,6 @@ def test_trace_scoring_claim_and_settle_end_to_end_with_fake_cli(
     )
     db.set_evaluator_live_version(ev_uuid, version["uuid"])
     db.add_evaluator_to_agent(agent_uuid, ev_uuid)
-    db.update_agent(agent_uuid, auto_score_traces=True)
 
     agent = db.get_agent(agent_uuid)
     row = db.create_trace_with_eval_run(

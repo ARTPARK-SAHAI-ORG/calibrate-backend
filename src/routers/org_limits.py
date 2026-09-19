@@ -1,8 +1,8 @@
 """Workspace limits (superadmin configuration).
 
-Set caps for each workspace: dataset rows per eval run and traces scored
-automatically. Members read the effective values via `/me/max-rows-per-eval`
-and `/me/max-scored-traces`.
+Set caps for each workspace: dataset rows per eval run, stored traces, traces
+scored automatically, and trace scoring batch size and concurrency. Members read
+the effective values via `/me`.
 """
 
 import os
@@ -26,7 +26,12 @@ from auth_utils import get_current_org, OrgContext, require_superadmin, is_super
 router = APIRouter(prefix="/org-limits", tags=["org-limits"])
 
 DEFAULT_MAX_ROWS_PER_EVAL = int(os.getenv("DEFAULT_MAX_ROWS_PER_EVAL", "20"))
-DEFAULT_MAX_SCORED_TRACES = int(os.getenv("DEFAULT_MAX_SCORED_TRACES", "20"))
+DEFAULT_MAX_SCORED_TRACES = int(os.getenv("DEFAULT_MAX_SCORED_TRACES", "100"))
+DEFAULT_MAX_TRACES = int(os.getenv("DEFAULT_MAX_TRACES", "50000"))
+DEFAULT_TRACE_SCORING_BATCH_SIZE = int(os.getenv("DEFAULT_TRACE_SCORING_BATCH_SIZE", "20"))
+DEFAULT_MAX_CONCURRENT_TRACE_SCORING_BATCHES = int(
+    os.getenv("MAX_CONCURRENT_TRACE_SCORING_BATCHES_PER_ORG", "1")
+)
 
 
 class OrgLimits(BaseModel):
@@ -40,6 +45,24 @@ class OrgLimits(BaseModel):
         gt=0,
         le=1_000_000,
         description="Maximum traces a workspace may score automatically, counted over its lifetime",
+    )
+    max_traces: Optional[int] = Field(
+        None,
+        gt=0,
+        le=1_000_000,
+        description="Maximum traces a workspace may store",
+    )
+    trace_scoring_batch_size: Optional[int] = Field(
+        None,
+        gt=0,
+        le=1000,
+        description="Maximum traces one scoring batch takes",
+    )
+    max_concurrent_trace_scoring_batches: Optional[int] = Field(
+        None,
+        gt=0,
+        le=100,
+        description="Maximum scoring batches a workspace may run at once",
     )
 
 
@@ -98,6 +121,27 @@ def effective_max_scored_traces(org_uuid: str) -> int:
     return _effective_limit(org_uuid, "max_scored_traces", DEFAULT_MAX_SCORED_TRACES)
 
 
+def effective_max_traces(org_uuid: str) -> int:
+    """Workspace cap on stored traces, falling back to the server default."""
+    return _effective_limit(org_uuid, "max_traces", DEFAULT_MAX_TRACES)
+
+
+def effective_trace_scoring_batch_size(org_uuid: str) -> int:
+    """Workspace size of one trace scoring batch, falling back to the server default."""
+    return _effective_limit(
+        org_uuid, "trace_scoring_batch_size", DEFAULT_TRACE_SCORING_BATCH_SIZE
+    )
+
+
+def effective_max_concurrent_trace_scoring_batches(org_uuid: str) -> int:
+    """Workspace cap on trace scoring batches running at once, falling back to the server default."""
+    return _effective_limit(
+        org_uuid,
+        "max_concurrent_trace_scoring_batches",
+        DEFAULT_MAX_CONCURRENT_TRACE_SCORING_BATCHES,
+    )
+
+
 def enforce_max_rows_per_eval(org_uuid: str, rows: int) -> None:
     """Reject a run that would process more rows than the workspace allows."""
     cap = effective_max_rows_per_eval(org_uuid)
@@ -109,6 +153,20 @@ def enforce_max_rows_per_eval(org_uuid: str, rows: int) -> None:
                 f"limit of {cap}. Run fewer rows, or ask an admin to raise the limit."
             ),
         )
+
+
+@router.get("/me", summary="Get own workspace limits")
+def get_own_limits(ctx: OrgContext = Depends(get_current_org)):
+    """Get every limit in force for your workspace, whether set for it or left at the server default"""
+    return {
+        "max_rows_per_eval": effective_max_rows_per_eval(ctx.org_uuid),
+        "max_scored_traces": effective_max_scored_traces(ctx.org_uuid),
+        "max_traces": effective_max_traces(ctx.org_uuid),
+        "trace_scoring_batch_size": effective_trace_scoring_batch_size(ctx.org_uuid),
+        "max_concurrent_trace_scoring_batches": effective_max_concurrent_trace_scoring_batches(
+            ctx.org_uuid
+        ),
+    }
 
 
 @router.get("/me/max-rows-per-eval", summary="Get own max rows per eval")

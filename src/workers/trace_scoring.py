@@ -2,7 +2,7 @@
 
 Not `BackgroundTasks` (unbounded, request-lifecycle-bound) and not
 `MAX_CONCURRENT_JOBS_PER_ORG` (defaults to 1; a backfill would block an org's
-live scoring). One worker, one subprocess, bounded batch, explicit CLI
+live scoring). One worker, one subprocess, one claimed batch, explicit CLI
 `--parallel` via `claim_and_score_batch`. Subprocess work runs in a thread so
 it never blocks the event loop.
 """
@@ -11,20 +11,15 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 
 import trace_scoring_nudge
-from trace_scoring import (
-    CLAIM_BATCH_SIZE,
-    CLAIM_LEASE_SECONDS,
-    claim_and_score_batch,
-)
+from trace_scoring import CLAIM_LEASE_SECONDS, claim_and_score_batch
 from utils import capture_exception_to_sentry
 
 logger = logging.getLogger(__name__)
 
-# Conservative defaults — not env vars. Batch size / lease / `--parallel` are
-# the claim-engine constants; this module only owns pool size and idle poll.
-POOL_SIZE = 1
+POOL_SIZE = int(os.getenv("TRACE_SCORING_WORKERS", "2"))
 POLL_SECONDS = 5.0
 _ERROR_BACKOFF_SECONDS = 1.0
 
@@ -39,10 +34,7 @@ def set_pool_enabled(enabled: bool) -> None:
 
 
 def _run_batch() -> list:
-    return claim_and_score_batch(
-        batch_size=CLAIM_BATCH_SIZE,
-        lease_seconds=CLAIM_LEASE_SECONDS,
-    )
+    return claim_and_score_batch(lease_seconds=CLAIM_LEASE_SECONDS)
 
 
 async def _worker_loop(

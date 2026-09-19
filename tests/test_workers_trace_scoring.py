@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import asyncio
+import importlib
+import json
 import os
 import time
 import uuid
@@ -107,12 +109,6 @@ def _create_opted_in_agent(client, h):
         headers=h,
     )
     assert r.status_code == 200, r.text
-    enabled = client.put(
-        f"/agents/{agent_id}",
-        json={"auto_score_traces": True},
-        headers=h,
-    )
-    assert enabled.status_code == 200, enabled.text
     return agent_id, ev_uuid
 
 
@@ -174,75 +170,64 @@ def test_nudge_reset_works_across_event_loops():
     asyncio.run(second())
 
 
+def _agent_row(org, config):
+    agent_uuid = str(uuid.uuid4())
+    with db.get_db_connection() as conn:
+        conn.execute(
+            "INSERT INTO agents (uuid, org_uuid, name, config, interaction_type) "
+            "VALUES (?, ?, ?, ?, 'conversation')",
+            (agent_uuid, org, f"a-{agent_uuid[:8]}", json.dumps(config)),
+        )
+        conn.commit()
+    return db.get_agent(agent_uuid)
+
+
 def test_runnable_ingest_sets_nudge(monkeypatch):
     calls = []
     monkeypatch.setattr(trace_scoring_nudge, "set", lambda: calls.append(1))
     org = str(uuid.uuid4())
-    agent_uuid = str(uuid.uuid4())
-    with db.get_db_connection() as conn:
-        conn.execute(
-            "INSERT INTO agents "
-            "(uuid, org_uuid, name, config, interaction_type, auto_score_traces) "
-            "VALUES (?, ?, ?, ?, ?, 1)",
-            (agent_uuid, org, "a", "{}", "conversation"),
-        )
-        conn.commit()
-    ev = db.create_evaluator(
-        name=f"e-{uuid.uuid4().hex[:6]}",
-        evaluator_type="llm",
-        output_type="binary",
-        org_uuid=org,
-        owner_user_id=str(uuid.uuid4()),
-    )
-    version = db.create_evaluator_version(ev, "openai/gpt-4.1", "Judge.")
-    db.set_evaluator_live_version(ev, version["uuid"])
-    db.add_evaluator_to_agent(agent_uuid, ev)
-    agent = db.get_agent(agent_uuid)
     db.create_trace_with_eval_run(
         org_uuid=org,
         max_scored_traces=1_000_000,
-        agent=agent,
+        agent=_agent_row(org, {}),
         input=[{"role": "user", "content": "hi"}],
         output={"response": "hello", "tool_calls": None},
     )
     assert calls == [1]
 
 
-def test_skipped_and_opted_out_ingest_do_not_nudge(monkeypatch):
+def test_opted_out_and_over_limit_ingest_do_not_nudge(monkeypatch):
     calls = []
     monkeypatch.setattr(trace_scoring_nudge, "set", lambda: calls.append(1))
     org = str(uuid.uuid4())
-    opted_out = str(uuid.uuid4())
-    skipped = str(uuid.uuid4())
-    with db.get_db_connection() as conn:
-        conn.execute(
-            "INSERT INTO agents "
-            "(uuid, org_uuid, name, config, interaction_type, auto_score_traces) "
-            "VALUES (?, ?, ?, ?, ?, 0)",
-            (opted_out, org, "off", "{}", "conversation"),
-        )
-        conn.execute(
-            "INSERT INTO agents "
-            "(uuid, org_uuid, name, config, interaction_type, auto_score_traces) "
-            "VALUES (?, ?, ?, ?, ?, 1)",
-            (skipped, org, "on", "{}", "conversation"),
-        )
-        conn.commit()
     db.create_trace_with_eval_run(
         org_uuid=org,
         max_scored_traces=1_000_000,
-        agent=db.get_agent(opted_out),
+        agent=_agent_row(org, {"trace_scoring": {"enabled": False}}),
         input=[{"role": "user", "content": "hi"}],
         output={"response": "hello", "tool_calls": None},
     )
     db.create_trace_with_eval_run(
         org_uuid=org,
-        max_scored_traces=1_000_000,
-        agent=db.get_agent(skipped),
+        max_scored_traces=0,
+        agent=_agent_row(org, {}),
         input=[{"role": "user", "content": "hi"}],
         output={"response": "hello", "tool_calls": None},
     )
     assert calls == []
+
+
+def test_worker_count_comes_from_the_environment(monkeypatch):
+    monkeypatch.setenv("TRACE_SCORING_WORKERS", "3")
+    reloaded = importlib.reload(pool_mod)
+    try:
+        assert reloaded.POOL_SIZE == 3
+        assert reloaded.TraceScoringPool()._size == 3
+        monkeypatch.delenv("TRACE_SCORING_WORKERS")
+        assert importlib.reload(pool_mod).POOL_SIZE == 2
+    finally:
+        importlib.reload(pool_mod)
+        pool_mod.set_pool_enabled(True)
 
 
 def test_disabled_start_creates_no_tasks():
@@ -344,7 +329,7 @@ def test_overlapping_start_does_not_duplicate_the_pool():
             assert a is b
             assert a._leases == 2
             running = list(a._tasks)
-            assert len(running) == 1
+            assert len(running) == pool_mod.POOL_SIZE
             await pool_mod.shutdown_trace_scoring_pool(a)
             assert a.is_running
             await pool_mod.shutdown_trace_scoring_pool(b)

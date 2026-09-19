@@ -29,6 +29,8 @@ from utils import (
     AGENT_TYPE_DESCRIPTION,
     AGENT_INTERACTION_TYPE_DESCRIPTION,
     EvaluatorUuid,
+    TRACE_SCORING_CONFIG_KEY,
+    trace_scoring_enabled,
 )
 from shared_enums import AgentInteractionType, DEFAULT_AGENT_INTERACTION_TYPE
 
@@ -327,6 +329,13 @@ _AGENT_CONFIG_DESCRIPTION = """Agent behavioral config. The keys depend on `type
 }
 ```
 
+**Either type**:
+- `trace_scoring.enabled`: whether the traces you send for this agent are scored by its linked evaluators. On unless you set it to `false`. Turning it back on needs at least one linked evaluator that can score traces
+
+```json
+{"trace_scoring": {"enabled": false}}
+```
+
 Every request Calibrate makes to your endpoint carries the header
 `X-Calibrate-Eval: 1`. Read it to tell a test run from a real user, for example
 to tag the trace you send back or to skip sending one."""
@@ -434,10 +443,6 @@ class AgentUpdate(BaseModel):
         description="Set the benchmark verification map, keyed by model, for a `type=connection` agent. Omit to leave it untouched",
         examples=[{"openai/gpt-4.1": {"verified": True, "verified_at": "2026-01-01T00:00:00Z", "error": None}}],
     )
-    auto_score_traces: Optional[bool] = Field(
-        None,
-        description="Whether newly ingested traces are scored automatically. Enabling requires at least one eligible linked evaluator. Omit to leave unchanged",
-    )
 
 
 class AgentResponse(BaseModel):
@@ -457,8 +462,8 @@ class AgentResponse(BaseModel):
     updated_at: str = Field(
         description="When the agent was last updated (ISO 8601 UTC)"
     )
-    auto_score_traces: bool = Field(
-        description="Whether newly ingested traces are scored automatically"
+    trace_scoring_enabled: bool = Field(
+        description="Whether the traces you send for this agent are scored by its linked evaluators"
     )
 
 
@@ -485,9 +490,13 @@ class AgentSummary(BaseModel):
     has_default_inputs: bool = Field(
         description="Whether the agent has custom request fields configured",
     )
-    auto_score_traces: bool = Field(
-        description="Whether newly ingested traces are scored automatically"
+    trace_scoring_enabled: bool = Field(
+        description="Whether the traces you send for this agent are scored by its linked evaluators"
     )
+
+
+def _agent_detail(agent: Dict[str, Any]) -> Dict[str, Any]:
+    return {**agent, "trace_scoring_enabled": trace_scoring_enabled(agent)}
 
 
 def to_agent_summary(agent: Dict[str, Any]) -> AgentSummary:
@@ -510,7 +519,7 @@ def to_agent_summary(agent: Dict[str, Any]) -> AgentSummary:
         updated_at=agent["updated_at"],
         connection_verified=None if verified is None else bool(verified),
         has_default_inputs=bool(config.get("default_inputs")),
-        auto_score_traces=bool(agent.get("auto_score_traces")),
+        trace_scoring_enabled=trace_scoring_enabled(agent),
     )
 
 
@@ -616,7 +625,7 @@ def _eligibility_response(resolution) -> TraceScoringEligibilityResponse:
     )
 
 
-def _enable_auto_score_rejected(resolution) -> HTTPException:
+def _enable_trace_scoring_rejected(resolution) -> HTTPException:
     return HTTPException(
         status_code=422,
         detail={
@@ -934,7 +943,7 @@ def get_agent_endpoint(
     agent = get_agent(agent_uuid)
     if not agent or agent.get("org_uuid") != ctx.org_uuid:
         raise HTTPException(status_code=404, detail="Agent not found")
-    return agent
+    return _agent_detail(agent)
 
 
 @router.get(
@@ -1002,12 +1011,26 @@ def update_agent_endpoint(
         if agent.benchmark_models_verified is not None:
             agent.config["benchmark_models_verified"] = agent.benchmark_models_verified
 
+    was_scoring = trace_scoring_enabled(existing_agent)
+    now_scoring = was_scoring
+    if agent.config is not None:
+        if TRACE_SCORING_CONFIG_KEY in agent.config:
+            now_scoring = trace_scoring_enabled({"config": agent.config})
+        else:
+            # A config body replaces the stored one, so a client editing the URL
+            # would otherwise reset this setting to its default.
+            stored = (existing_agent.get("config") or {}).get(
+                TRACE_SCORING_CONFIG_KEY
+            )
+            if stored is not None:
+                agent.config[TRACE_SCORING_CONFIG_KEY] = stored
+
     # Only the off→on flip is blocked. An already-on agent whose evaluators
     # later all become ineligible stays on; ingest skips those runs.
-    if agent.auto_score_traces is True and not existing_agent.get("auto_score_traces"):
+    if now_scoring and not was_scoring:
         resolution = _resolve_agent_scoring(existing_agent)
         if not resolution.eligible:
-            raise _enable_auto_score_rejected(resolution)
+            raise _enable_trace_scoring_rejected(resolution)
 
     with ensure_name_unique(
         "agents", agent.name, ctx.org_uuid, entity="Agent", exclude_uuid=agent_uuid
@@ -1016,15 +1039,14 @@ def update_agent_endpoint(
             agent_uuid=agent_uuid,
             name=agent.name,
             config=agent.config,
-            auto_score_traces=agent.auto_score_traces,
+            delete_pending_trace_runs=was_scoring and not now_scoring,
             org_uuid=ctx.org_uuid,
         )
 
     if not updated:
         raise HTTPException(status_code=400, detail="No fields to update")
 
-    updated_agent = get_agent(agent_uuid)
-    return updated_agent
+    return _agent_detail(get_agent(agent_uuid))
 
 
 @router.post(
