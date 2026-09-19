@@ -989,9 +989,9 @@ def test_global_runs_list_evaluators_column(client):
 
 
 def test_runs_list_keeps_a_broken_run_out_of_the_failures_filter(client):
-    """A run that broke is neither a run with failing tests nor a clean one:
-    its counts cannot say how the tests went, so `has_failures` skips it and
-    `status` is what finds it."""
+    """A run that broke with nothing failing is neither a run with failing
+    tests nor a clean one, so `has_failures` skips it and `status` is what
+    finds it. A broken run that does carry failing tests keeps them."""
     from db import create_agent_test_job, update_agent_test_job
 
     h = _signup(client)["headers"]
@@ -1001,6 +1001,7 @@ def test_runs_list_keeps_a_broken_run_out_of_the_failures_filter(client):
     update_agent_test_job(
         clean, status="done", results={"total_tests": 2, "passed": 2, "failed": 0}
     )
+    # Broke before it produced a verdict for anything.
     broke = create_agent_test_job(agent_id=au, job_type="llm-unit-test")
     update_agent_test_job(
         broke,
@@ -1008,7 +1009,22 @@ def test_runs_list_keeps_a_broken_run_out_of_the_failures_filter(client):
         results={
             "total_tests": 2,
             "passed": 0,
-            "failed": 2,
+            "failed": 0,
+            "error": "calibrate-agent exited with code 1",
+        },
+    )
+    # Broke after seven of its tests had already failed: those are real
+    # failures, recorded from the cases that finished.
+    broke_with_failures = create_agent_test_job(
+        agent_id=au, job_type="llm-unit-test"
+    )
+    update_agent_test_job(
+        broke_with_failures,
+        status="failed",
+        results={
+            "total_tests": 10,
+            "passed": 0,
+            "failed": 7,
             "error": "calibrate-agent exited with code 1",
         },
     )
@@ -1018,14 +1034,17 @@ def test_runs_list_keeps_a_broken_run_out_of_the_failures_filter(client):
         assert r.status_code == 200
         return {x["uuid"] for x in r.json()["items"]}
 
-    assert _uuids(has_failures=True) == set()
+    assert _uuids(has_failures=True) == {broke_with_failures}
     assert _uuids(has_failures=False) == {clean}
-    assert _uuids(status="failed") == {broke}
-    assert _uuids() == {clean, broke}
+    assert _uuids(status="failed") == {broke, broke_with_failures}
+    # The two filters still compose, rather than answering with nothing.
+    assert _uuids(status="failed", has_failures=True) == {broke_with_failures}
+    assert _uuids() == {clean, broke, broke_with_failures}
 
 
 def test_runs_list_keeps_a_broken_model_out_of_the_failures_filter(client):
-    """Same for a comparison whose model could not be run at all."""
+    """Same for a comparison whose model could not be run at all and whose
+    other models had nothing fail."""
     from db import create_agent_test_job, update_agent_test_job
 
     h = _signup(client)["headers"]
