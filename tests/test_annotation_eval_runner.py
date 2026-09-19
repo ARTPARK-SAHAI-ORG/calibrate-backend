@@ -22,8 +22,10 @@ import annotation_eval_runner as runner
 # ---------------------------------------------------------------------------
 
 
-def test_utcnow_str_format():
-    s = runner._utcnow_str()
+def test_utc_now_format():
+    from utils import utc_now
+
+    s = utc_now()
     assert len(s) == len("2024-01-01 00:00:00")
     assert s[4] == "-" and s[7] == "-" and s[10] == " "
 

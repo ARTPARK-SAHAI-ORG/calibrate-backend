@@ -24,17 +24,20 @@ from pydantic import BaseModel, ConfigDict, Field, StringConstraints, model_vali
 
 from auth_utils import OrgContext, get_current_org, get_org_jwt_or_api_key
 from db import (
+    _trace_iso,
     add_test_to_agent,
     bulk_create_tests,
     count_live_traces,
-    create_trace,
+    create_trace_with_eval_run,
     get_agent,
     get_all_tests_summary,
     get_evaluator_versions_by_uuids,
     get_evaluators_by_uuids,
+    get_latest_trace_run_summaries,
     get_trace,
     get_traces_by_uuids,
     list_trace_labels,
+    list_trace_scoring_runs,
     list_traces,
     set_test_evaluators,
     soft_delete_traces,
@@ -42,16 +45,27 @@ from db import (
 )
 from org_scope import ensure_owned_agent
 from pagination import PaginatedResponse, PaginationParams, page_envelope
+from routers.org_limits import effective_max_scored_traces
 
 # Reuse the tests router's validation so a converted test accepts exactly what
 # POST /tests does (evaluator visible to the workspace, evaluator_type matches).
-from routers.tests import (
+from shared_enums import (
     DEFAULT_AGENT_INTERACTION_TYPE,
-    EvaluatorRef,
-    _validate_evaluators,
+    EvaluatorType,
     required_agent_interaction_type,
 )
-from utils import EXAMPLE_TEST_UUID, EvaluatorUuid
+from trace_scoring import TraceEvalRunStatus
+from routers.tests import (
+    EvaluatorRef,
+    _validate_evaluators,
+)
+from utils import (
+    EVALUATOR_TYPE_DESCRIPTION,
+    EXAMPLE_TEST_UUID,
+    EvaluatorUuid,
+    OUTPUT_TYPE_DESCRIPTION,
+    OutputTypeLiteral,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -288,6 +302,92 @@ class TraceSummary(BaseModel):
     )
     labels: List[str] = Field(description=_LABELS_DESCRIPTION)
     created_at: str = Field(description="When the trace was created (ISO 8601 UTC)")
+    latest_run_status: Optional[TraceEvalRunStatus] = Field(
+        None,
+        description="Status of the latest scoring run for this trace",
+    )
+    latest_run_error: Optional[str] = Field(
+        None, description="Why the latest scoring run was skipped or failed"
+    )
+    results: List["TraceScoreResult"] = Field(
+        default_factory=list,
+        description="Results for each evaluator on the latest scoring run",
+    )
+
+
+class TraceScoreResult(BaseModel):
+    evaluator_uuid: str = Field(
+        min_length=36,
+        max_length=36,
+        description="ID of the evaluator that produced this result",
+        examples=[_EXAMPLE_TRACE_UUID],
+    )
+    name: str = Field(
+        description="Name of the evaluator. Uses the last stored name if it has been deleted"
+    )
+    evaluator_type: Optional[EvaluatorType] = Field(
+        None, description=EVALUATOR_TYPE_DESCRIPTION
+    )
+    output_type: OutputTypeLiteral = Field(description=OUTPUT_TYPE_DESCRIPTION)
+    scale_min: Optional[float] = Field(
+        None, description="Lowest value on a rating scale"
+    )
+    scale_max: Optional[float] = Field(
+        None, description="Highest value on a rating scale"
+    )
+    value: float = Field(
+        description="The judged result. Binary stores 0 or 1. Rating stores the numeric score"
+    )
+    reasoning: Optional[str] = Field(
+        None, description="The judge's rationale for this result"
+    )
+    evaluator_version_id: str = Field(
+        min_length=36,
+        max_length=36,
+        description="ID of the evaluator version that produced this result",
+        examples=[_EXAMPLE_TRACE_UUID],
+    )
+    passed: bool = Field(
+        description=(
+            "Whether this evaluator passed. A binary result passes on 1. "
+            "A rating passes at the top of its scale"
+        )
+    )
+
+
+class TraceScoringRun(BaseModel):
+    run_uuid: str = Field(
+        min_length=36,
+        max_length=36,
+        description="ID of this scoring run",
+        examples=[_EXAMPLE_TRACE_UUID],
+    )
+    status: TraceEvalRunStatus = Field(
+        description=(
+            "Status of the scoring run:\n\n"
+            "- `pending`: waiting to be claimed\n"
+            "- `processing`: a worker holds the lease\n"
+            "- `completed`: every snapshot evaluator has a result\n"
+            "- `failed`: attempts exhausted with at least one evaluator unscored\n"
+            "- `skipped`: nothing to score. `error` holds the reason"
+        )
+    )
+    created_at: str = Field(description="When the run was created (ISO 8601 UTC)")
+    completed_at: Optional[str] = Field(
+        None, description="When the run reached a terminal status (ISO 8601 UTC)"
+    )
+    error: Optional[str] = Field(
+        None, description="Why this run was skipped or failed"
+    )
+    results: List[TraceScoreResult] = Field(
+        description="Results for each evaluator that scored this run"
+    )
+
+
+class TraceScoresResponse(BaseModel):
+    runs: List[TraceScoringRun] = Field(
+        description="Scoring runs for this trace, newest first"
+    )
 
 
 class TraceResponse(BaseModel):
@@ -425,13 +525,16 @@ def _turn_count(stored_input: Any) -> int:
     return 1 if isinstance(stored_input, str) else len(stored_input or [])
 
 
-def _to_summary(row: Dict[str, Any]) -> Dict[str, Any]:
+def _to_summary(
+    row: Dict[str, Any], scoring: Optional[Dict[str, Any]] = None
+) -> Dict[str, Any]:
     output = row.get("output") or {}
     calls = [
         call
         for call in (output.get("tool_calls") or [])
         if isinstance(call, dict) and call.get("tool")
     ]
+    scoring = scoring or {}
     return {
         "uuid": row["uuid"],
         "agent_id": row["agent_id"],
@@ -453,6 +556,9 @@ def _to_summary(row: Dict[str, Any]) -> Dict[str, Any]:
         "metadata_count": len(row.get("metadata") or []),
         "labels": row.get("labels") or [],
         "created_at": row["created_at"],
+        "latest_run_status": scoring.get("status"),
+        "latest_run_error": scoring.get("error"),
+        "results": scoring.get("results") or [],
     }
 
 
@@ -513,9 +619,10 @@ async def ingest_trace(
             },
         )
 
-    row = create_trace(
+    row = create_trace_with_eval_run(
         org_uuid=ctx.org_uuid,
-        agent_id=payload.agent_id,
+        agent=agent,
+        max_scored_traces=effective_max_scored_traces(ctx.org_uuid),
         message_id=payload.message_id,
         conversation_id=payload.conversation_id,
         input=(
@@ -581,7 +688,14 @@ async def list_traces_endpoint(
         output_type=output_type,
         labels=labels,
     )
-    return page_envelope([_to_summary(row) for row in rows], total, pagination)
+    scoring = get_latest_trace_run_summaries(
+        ctx.org_uuid, [row["uuid"] for row in rows]
+    )
+    return page_envelope(
+        [_to_summary(row, scoring.get(row["uuid"])) for row in rows],
+        total,
+        pagination,
+    )
 
 
 @router.get(
@@ -962,6 +1076,37 @@ def convert_traces_to_tests(
         "created": len(test_uuids),
         "test_uuids": test_uuids,
         "warnings": warnings or None,
+    }
+
+
+@router.get(
+    "/{trace_uuid}/scores",
+    response_model=TraceScoresResponse,
+    summary="Get trace scores",
+)
+async def get_trace_scores_endpoint(
+    trace_uuid: str = Path(
+        description="The trace whose scoring runs to return",
+        examples=[_EXAMPLE_TRACE_UUID],
+    ),
+    ctx: OrgContext = Depends(get_current_org),
+):
+    """Get every scoring run for this trace, newest first"""
+    if not get_trace(ctx.org_uuid, trace_uuid):
+        raise HTTPException(status_code=404, detail="Trace not found")
+    runs = list_trace_scoring_runs(ctx.org_uuid, trace_uuid)
+    return {
+        "runs": [
+            {
+                "run_uuid": run["run_uuid"],
+                "status": run["status"],
+                "created_at": _trace_iso(run["created_at"]),
+                "completed_at": _trace_iso(run["completed_at"]),
+                "error": run["error"],
+                "results": run["results"],
+            }
+            for run in runs
+        ]
     }
 
 
