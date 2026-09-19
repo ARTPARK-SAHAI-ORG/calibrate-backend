@@ -7473,7 +7473,8 @@ _AGENT_TEST_JOB_SUMMARY_COLUMNS = """
             'message', json_extract(je.value, '$.message'),
             'total_tests', json_extract(je.value, '$.total_tests'),
             'passed', json_extract(je.value, '$.passed'),
-            'failed', json_extract(je.value, '$.failed')
+            'failed', json_extract(je.value, '$.failed'),
+            'unanswered_tests', json_extract(je.value, '$.unanswered_tests')
          )) FROM json_each(COALESCE(atj.results, '{}'), '$.model_results') je
          WHERE je.type = 'object'
         ) AS model_results,

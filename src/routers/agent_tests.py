@@ -605,7 +605,18 @@ class ModelRunSummary(BaseModel):
         None, description="Number of test cases that passed for this model"
     )
     failed: Optional[int] = Field(
-        None, description="Number of test cases that failed for this model"
+        None,
+        description=(
+            "Number of test cases that did not pass for this model, which "
+            "includes the ones that produced no answer"
+        ),
+    )
+    unanswered_tests: Optional[int] = Field(
+        None,
+        description=(
+            "Number of this model's test cases that produced no answer, "
+            "already counted in `failed`"
+        ),
     )
 
 
@@ -876,6 +887,7 @@ def _slim_model_results(
                 ),
                 "passed": m.get("passed"),
                 "failed": m.get("failed"),
+                "unanswered_tests": m.get("unanswered_tests"),
             }
         )
     return slim or None
@@ -1196,18 +1208,26 @@ def _build_agent_test_run_item_fields(
     }
 
 
-def _run_item_has_failures(item: AgentTestRunListItem) -> bool:
-    """True if a run has any failing test case or model. Covers both shapes:
-    a unit-test run's aggregate `failed`/`error`, and a benchmark run where any
-    single model failed (`failed > 0`) or its run didn't succeed."""
-    if item.error:
+def _run_item_broke(item: AgentTestRunListItem) -> bool:
+    """True if the run itself broke, rather than its tests failing.
+
+    Such a run belongs under the status filter, not under either side of
+    ``has_failures``: a run that fell over before it asked anything still
+    carries a count for every test it was meant to run, so its own counts
+    cannot say how the tests went.
+    """
+    if item.status == TaskStatus.FAILED or item.error:
         return True
+    return any(m.success is False for m in item.model_results or [])
+
+
+def _run_item_has_failures(item: AgentTestRunListItem) -> bool:
+    """True if a test in the run did not pass. Covers both shapes: a unit-test
+    run's aggregate `failed`, and a benchmark run where any single model has
+    `failed > 0`."""
     if item.failed and item.failed > 0:
         return True
-    for m in item.model_results or []:
-        if (m.failed and m.failed > 0) or m.success is False:
-            return True
-    return False
+    return any(bool(m.failed) and m.failed > 0 for m in item.model_results or [])
 
 
 @router.get(
@@ -1237,9 +1257,10 @@ def get_agent_test_runs(
     has_failures: Optional[bool] = Query(
         None,
         description=(
-            "Filter by whether the run has any failing test case or model. "
-            "`true` returns only runs with failures (or errors), `false` only "
-            "clean runs. Omit for both"
+            "Filter by whether a test in the run did not pass. `true` returns "
+            "only runs with a failing test, `false` only runs where every test "
+            "passed. A run that broke is in neither: filter by `status` for "
+            "those. Omit for both"
         ),
     ),
     around: Optional[str] = Query(
@@ -1290,7 +1311,12 @@ def get_agent_test_runs(
     if status is not None:
         runs = [r for r in runs if r.status == status]
     if has_failures is not None:
-        runs = [r for r in runs if _run_item_has_failures(r) == has_failures]
+        runs = [
+            r
+            for r in runs
+            if not _run_item_broke(r)
+            and _run_item_has_failures(r) == has_failures
+        ]
 
     # `total` = matches after filtering, before the page slice.
     return paginate_around(runs, pagination, around, key=lambda r: r.uuid)
@@ -1318,9 +1344,10 @@ def get_all_test_runs_for_user(
     has_failures: Optional[bool] = Query(
         None,
         description=(
-            "Filter by whether the run has any failing test case or model. "
-            "`true` returns only runs with failures (or errors), `false` only "
-            "clean runs. Omit for both"
+            "Filter by whether a test in the run did not pass. `true` returns "
+            "only runs with a failing test, `false` only runs where every test "
+            "passed. A run that broke is in neither: filter by `status` for "
+            "those. Omit for both"
         ),
     ),
     around: Optional[str] = Query(
@@ -1363,7 +1390,12 @@ def get_all_test_runs_for_user(
     if status is not None:
         runs = [r for r in runs if r.status == status]
     if has_failures is not None:
-        runs = [r for r in runs if _run_item_has_failures(r) == has_failures]
+        runs = [
+            r
+            for r in runs
+            if not _run_item_broke(r)
+            and _run_item_has_failures(r) == has_failures
+        ]
 
     # `total` = matches after filtering, before the page slice.
     return paginate_around(runs, pagination, around, key=lambda r: r.uuid)

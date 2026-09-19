@@ -2708,7 +2708,15 @@ def test_agent_test_jobs_summary_slims_results_and_omits_details(user):
     bench = by_uuid[bench_uuid]
     mr = bench["results"]["model_results"]
     assert len(mr) == 1
-    assert set(mr[0]) == {"model", "success", "message", "total_tests", "passed", "failed"}
+    assert set(mr[0]) == {
+        "model",
+        "success",
+        "message",
+        "total_tests",
+        "passed",
+        "failed",
+        "unanswered_tests",
+    }
     assert mr[0]["model"] == "openai/gpt-4.1"
     assert "test_results" not in mr[0]
 

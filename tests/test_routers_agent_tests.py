@@ -749,6 +749,7 @@ def test_agent_runs_list_slims_benchmark_model_results(client):
             "total_tests": 2,
             "passed": 2,
             "failed": 0,
+            "unanswered_tests": None,
         }
     ]
     # Leaderboard + the heavy rubric block are not part of the list item at all;
@@ -985,6 +986,102 @@ def test_global_runs_list_evaluators_column(client):
         {"uuid": ev["uuid"], "name": live_name},
         {"uuid": None, "name": "Tool call"},
     ]
+
+
+def test_runs_list_keeps_a_broken_run_out_of_the_failures_filter(client):
+    """A run that broke is neither a run with failing tests nor a clean one:
+    its counts cannot say how the tests went, so `has_failures` skips it and
+    `status` is what finds it."""
+    from db import create_agent_test_job, update_agent_test_job
+
+    h = _signup(client)["headers"]
+    au = _create_agent(client, h)["uuid"]
+
+    clean = create_agent_test_job(agent_id=au, job_type="llm-unit-test")
+    update_agent_test_job(
+        clean, status="done", results={"total_tests": 2, "passed": 2, "failed": 0}
+    )
+    broke = create_agent_test_job(agent_id=au, job_type="llm-unit-test")
+    update_agent_test_job(
+        broke,
+        status="failed",
+        results={
+            "total_tests": 2,
+            "passed": 0,
+            "failed": 2,
+            "error": "calibrate-agent exited with code 1",
+        },
+    )
+
+    def _uuids(**params):
+        r = client.get(f"/agent-tests/agent/{au}/runs", params=params, headers=h)
+        assert r.status_code == 200
+        return {x["uuid"] for x in r.json()["items"]}
+
+    assert _uuids(has_failures=True) == set()
+    assert _uuids(has_failures=False) == {clean}
+    assert _uuids(status="failed") == {broke}
+    assert _uuids() == {clean, broke}
+
+
+def test_runs_list_keeps_a_broken_model_out_of_the_failures_filter(client):
+    """Same for a comparison whose model could not be run at all."""
+    from db import create_agent_test_job, update_agent_test_job
+
+    h = _signup(client)["headers"]
+    au = _create_agent(client, h)["uuid"]
+
+    bench = create_agent_test_job(agent_id=au, job_type="llm-benchmark")
+    update_agent_test_job(
+        bench,
+        status="done",
+        results={
+            "model_results": [
+                {"model": "openai/gpt-4.1", "success": True, "message": "ok", "passed": 2, "failed": 0},
+                {"model": "openai/gpt-4o", "success": False, "message": "no key"},
+            ]
+        },
+    )
+
+    r = client.get(
+        f"/agent-tests/agent/{au}/runs", params={"has_failures": True}, headers=h
+    )
+    assert r.status_code == 200
+    assert r.json()["items"] == []
+
+
+def test_runs_list_carries_each_model_unanswered_count(client):
+    """A model records how many of its tests produced no answer, and the list
+    passes it on: `failed` holds those tests too, so a reader needs this count
+    to leave them out of a pass rate."""
+    from db import create_agent_test_job, update_agent_test_job
+
+    h = _signup(client)["headers"]
+    au = _create_agent(client, h)["uuid"]
+
+    bench = create_agent_test_job(agent_id=au, job_type="llm-benchmark")
+    update_agent_test_job(
+        bench,
+        status="done",
+        results={
+            "model_results": [
+                {
+                    "model": "openai/gpt-4.1",
+                    "success": True,
+                    "message": "ok",
+                    "total_tests": 10,
+                    "passed": 5,
+                    "failed": 5,
+                    "unanswered_tests": 3,
+                }
+            ]
+        },
+    )
+
+    r = client.get(f"/agent-tests/agent/{au}/runs", headers=h)
+    assert r.status_code == 200
+    item = next(x for x in r.json()["items"] if x["uuid"] == bench)
+    assert item["model_results"][0]["unanswered_tests"] == 3
 
 
 def test_agent_runs_list_filters_and_pagination(client):
@@ -3409,6 +3506,7 @@ def test_agent_runs_list_hides_heavy_detail_both_endpoints(client):
             "total_tests": 2,
             "passed": 1,
             "failed": 1,
+            "unanswered_tests": None,
         }
     ]
     _assert_no_heavy_leak(bench)
