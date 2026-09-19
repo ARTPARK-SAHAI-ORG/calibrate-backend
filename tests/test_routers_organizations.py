@@ -119,6 +119,113 @@ def test_create_and_rename_org(client):
     assert other_resp.status_code == 404
 
 
+def test_a_new_workspace_reads_every_setting_at_its_default(client):
+    """Every comparison ran its models at the same time before a workspace
+    could remember a choice, so that is what a new workspace starts with."""
+    auth = _signup(client)
+    org = client.post(
+        "/organizations", json={"name": "Parallel"}, headers=auth["headers"]
+    ).json()
+    assert org["settings"] == {"model_benchmarking": {"run_models_in_parallel": True}}
+
+    listed = client.get("/organizations", headers=auth["headers"]).json()
+    assert all(
+        o["settings"] == {"model_benchmarking": {"run_models_in_parallel": True}}
+        for o in listed
+    )
+
+
+def test_running_models_one_after_another_is_remembered(client):
+    auth = _signup(client)
+    h = auth["headers"]
+    org = client.post("/organizations", json={"name": "Serial"}, headers=h).json()
+
+    resp = client.patch(
+        f"/organizations/{org['uuid']}",
+        json={"settings": {"model_benchmarking": {"run_models_in_parallel": False}}},
+        headers=h,
+    )
+    assert resp.status_code == 200
+    assert resp.json()["settings"]["model_benchmarking"]["run_models_in_parallel"] is False
+    # Untouched by a write that only named a setting.
+    assert resp.json()["name"] == "Serial"
+
+    reread = client.get("/organizations", headers=h).json()
+    saved = next(o for o in reread if o["uuid"] == org["uuid"])
+    assert saved["settings"]["model_benchmarking"]["run_models_in_parallel"] is False
+    assert saved["name"] == "Serial"
+
+
+def test_renaming_leaves_the_settings_alone(client):
+    auth = _signup(client)
+    h = auth["headers"]
+    org = client.post("/organizations", json={"name": "Keep"}, headers=h).json()
+    client.patch(
+        f"/organizations/{org['uuid']}",
+        json={"settings": {"model_benchmarking": {"run_models_in_parallel": False}}},
+        headers=h,
+    )
+
+    renamed = client.patch(
+        f"/organizations/{org['uuid']}", json={"name": "Kept"}, headers=h
+    )
+    assert renamed.status_code == 200
+    assert renamed.json()["name"] == "Kept"
+    assert (
+        renamed.json()["settings"]["model_benchmarking"]["run_models_in_parallel"]
+        is False
+    )
+
+
+def test_update_workspace_with_nothing_to_change_is_rejected(client):
+    auth = _signup(client)
+    h = auth["headers"]
+    org = client.post("/organizations", json={"name": "Empty"}, headers=h).json()
+
+    resp = client.patch(f"/organizations/{org['uuid']}", json={}, headers=h)
+    assert resp.status_code == 400
+    assert "settings" in resp.json()["detail"]
+
+
+@pytest.mark.parametrize(
+    "settings",
+    [
+        {"model_benchmarking": {"run_models_in_paralel": False}},
+        {"model_bencmarking": {"run_models_in_parallel": False}},
+    ],
+    ids=["unknown key", "unknown section"],
+)
+def test_a_setting_we_do_not_have_is_refused(client, settings):
+    """A misspelt setting is rejected rather than stored where nothing reads it."""
+    auth = _signup(client)
+    h = auth["headers"]
+    org = client.post("/organizations", json={"name": "Strict"}, headers=h).json()
+
+    resp = client.patch(
+        f"/organizations/{org['uuid']}", json={"settings": settings}, headers=h
+    )
+    assert resp.status_code == 422
+
+    saved = client.get("/organizations", headers=h).json()
+    unchanged = next(o for o in saved if o["uuid"] == org["uuid"])
+    assert unchanged["settings"]["model_benchmarking"]["run_models_in_parallel"] is True
+
+
+def test_non_member_cannot_change_the_settings(client):
+    owner = _signup(client)
+    org = client.post(
+        "/organizations", json={"name": "Private"}, headers=owner["headers"]
+    ).json()
+
+    other = _signup(client)
+    resp = client.patch(
+        f"/organizations/{org['uuid']}",
+        json={"settings": {"model_benchmarking": {"run_models_in_parallel": False}}},
+        headers=other["headers"],
+    )
+    assert resp.status_code == 404
+
+
 def test_personal_org_lookup_is_implicit_default(client):
     """No `current_org_uuid` is persisted; the personal org is resolved
     on-demand via `get_personal_org_for_user`. Verify it returns the auto-

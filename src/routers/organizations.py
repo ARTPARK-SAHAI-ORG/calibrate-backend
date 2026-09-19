@@ -1,10 +1,10 @@
 """Manage workspaces and membership.
 
-Create workspaces, rename them, and add or remove members.
+Create workspaces, update them, and add or remove members.
 """
 
 from fastapi import APIRouter, Depends, HTTPException, Path
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 from typing import List, Optional
 
 from auth_utils import get_current_user_id, is_superadmin_user
@@ -24,11 +24,49 @@ from db import (
     list_organizations_for_user,
     remove_organization_member,
     revoke_org_invite,
-    update_organization_name,
+    update_organization,
 )
 
 router = APIRouter(prefix="/organizations", tags=["organizations"])
 invites_router = APIRouter(prefix="/invites", tags=["organizations"])
+
+
+_RUN_MODELS_IN_PARALLEL_DESCRIPTION = (
+    "`true` runs the models of a comparison at the same time, `false` runs them "
+    "one after another"
+)
+
+
+class ModelBenchmarkingSettings(BaseModel):
+    run_models_in_parallel: bool = Field(
+        description=_RUN_MODELS_IN_PARALLEL_DESCRIPTION
+    )
+
+
+class OrganizationSettings(BaseModel):
+    model_config = ConfigDict(protected_namespaces=())
+
+    model_benchmarking: ModelBenchmarkingSettings = Field(
+        description="How this workspace compares models"
+    )
+
+
+class ModelBenchmarkingSettingsUpdate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    run_models_in_parallel: Optional[bool] = Field(
+        None,
+        description=f"{_RUN_MODELS_IN_PARALLEL_DESCRIPTION}. Omit to leave it as it is",
+    )
+
+
+class OrganizationSettingsUpdate(BaseModel):
+    model_config = ConfigDict(extra="forbid", protected_namespaces=())
+
+    model_benchmarking: Optional[ModelBenchmarkingSettingsUpdate] = Field(
+        None,
+        description="How this workspace compares models. Omit to leave the whole section as it is",
+    )
 
 
 class OrganizationResponse(BaseModel):
@@ -40,6 +78,9 @@ class OrganizationResponse(BaseModel):
     name: str = Field(description="Workspace display name")
     is_personal: bool = Field(
         description="`true` for your auto-created personal workspace, `false` for shared workspaces"
+    )
+    settings: OrganizationSettings = Field(
+        description="This workspace's settings, every one of them filled in"
     )
     created_by_user_id: str = Field(
         min_length=36,
@@ -59,7 +100,13 @@ class CreateOrganizationRequest(BaseModel):
 
 
 class UpdateOrganizationRequest(BaseModel):
-    name: str = Field(..., min_length=1, description="New display name for the workspace")
+    name: Optional[str] = Field(
+        None, min_length=1, description="New display name for the workspace"
+    )
+    settings: Optional[OrganizationSettingsUpdate] = Field(
+        None,
+        description="Settings to change. Omit to leave every setting as it is",
+    )
 
 
 class AddMemberRequest(BaseModel):
@@ -142,17 +189,25 @@ def create_org(
 
 
 @router.patch("/{org_uuid}", response_model=OrganizationResponse, summary="Update workspace")
-def rename_org(
+def update_org(
     org_uuid: str = Path(
-        description="The workspace to rename. You must be a member",
+        description="The workspace to update. You must be a member",
         examples=["f47ac10b-58cc-4372-a567-0e02b2c3d479"],
     ),
     request: UpdateOrganizationRequest = ...,
     user_id: str = Depends(get_current_user_id),
 ):
-    """Rename a workspace you belong to"""
+    """Update a workspace you belong to. Send only the fields you want to change"""
     role = _require_membership(org_uuid, user_id)
-    update_organization_name(org_uuid, request.name)
+    fields = {
+        k: v for k, v in request.model_dump(exclude_unset=True).items() if v is not None
+    }
+    if not fields:
+        raise HTTPException(
+            status_code=400,
+            detail="Provide name or settings to update",
+        )
+    update_organization(org_uuid, **fields)
     org = get_organization(org_uuid)
     return OrganizationResponse(**org, member_role=role)
 
