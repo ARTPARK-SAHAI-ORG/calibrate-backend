@@ -7,6 +7,7 @@ import logging
 import time
 
 from db import (
+    release_trace_eval_leases,
     get_pending_jobs,
     get_agent,
     get_test,
@@ -26,6 +27,7 @@ from db import (
     get_queued_simulation_jobs,
 )
 from utils import (
+    utc_now,
     TaskStatus,
     try_start_queued_job,
     try_start_queued_agent_test_job,
@@ -192,6 +194,9 @@ def _kill_orphaned_process(details: dict, job_id: str) -> bool:
 
 def recover_pending_jobs():
     """Check for in_progress jobs and restart them."""
+    released = release_trace_eval_leases(utc_now())
+    if released:
+        logger.info(f"Released {released} trace-scoring lease(s) held by the previous process")
     # Recover generic jobs
     pending_jobs = get_pending_jobs()
     if pending_jobs:

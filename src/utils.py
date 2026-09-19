@@ -31,6 +31,8 @@ import openpyxl
 import sentry_sdk
 from pydantic import BaseModel, Field, StringConstraints
 
+from shared_enums import TestType
+
 logger = logging.getLogger(__name__)
 
 
@@ -197,9 +199,7 @@ class AnnotationStatus(str, Enum):
 
 
 # Concrete value sets reused across routers for entity/job "type" fields.
-EvaluatorTypeLiteral = Literal[
-    "tts", "stt", "llm", "llm-general", "conversation", "tool-call"
-]
+# Additional mapped type sets (TestType / AgentInteractionType / EvaluatorType) live in shared_enums.py.
 DataTypeLiteral = Literal["text", "audio"]
 OutputTypeLiteral = Literal["binary", "rating"]
 EvaluatorKindLiteral = Literal["single", "side_by_side"]
@@ -232,7 +232,6 @@ EvalJobType = Literal["stt-eval", "tts-eval", "annotation-eval"]
 # Keep in sync with db.ANNOTATION_TASK_TYPES and db.VALID_EVALUATOR_TYPES
 # (Literal requires literal members, so the vocabulary is mirrored here).
 AnnotationTaskTypeLiteral = Literal["stt", "llm", "llm-general", "conversation", "tts"]
-TestTypeLiteral = Literal["response", "tool_call", "conversation", "general"]
 MemberRoleLiteral = Literal["owner", "admin"]  # mirrors DB CHECK(role IN ('owner','admin'))
 EvaluatorUuid = Annotated[str, StringConstraints(min_length=36, max_length=36)]
 TestUuid = Annotated[str, StringConstraints(min_length=36, max_length=36)]
@@ -299,7 +298,7 @@ class TestListResponse(BaseModel):
         examples=[EXAMPLE_TEST_UUID],
     )
     name: str = Field(description="Name of the test")
-    type: TestTypeLiteral = Field(description=TEST_TYPE_DESCRIPTION)
+    type: TestType = Field(description=TEST_TYPE_DESCRIPTION)
     config: Optional[TestListConfig] = Field(
         None,
         description="Trimmed config carrying only the test's description. Fetch the test by ID for the full config and evaluators",
@@ -2008,3 +2007,8 @@ def read_leaderboard_xlsx(leaderboard_dir: Path) -> Optional[List[dict]]:
     except Exception as e:
         logger.warning(f"Failed to read leaderboard xlsx: {e}")
         return None
+
+
+def utc_now() -> str:
+    """UTC in the text form SQLite writes for CURRENT_TIMESTAMP."""
+    return datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
