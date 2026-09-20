@@ -2018,20 +2018,44 @@ TRACES_CONFIG_KEY = "traces"
 TRACE_SCORING_CONFIG_KEY = "scoring"
 
 
-def trace_scoring_settings(config: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
-    """The `traces.scoring` object inside an agent config, or None when absent."""
-    traces = (config or {}).get(TRACES_CONFIG_KEY)
+_UNSET = object()
+
+
+def trace_scoring_setting(config: Optional[Dict[str, Any]]) -> Any:
+    """What the agent's config says about scoring, or `_UNSET` when it says
+    nothing.
+
+    `traces.scoring` is meant to be an object carrying `enabled`, but a client
+    writing `{"traces": {"scoring": false}}` plainly means off, and reading
+    that as "nothing was said" would keep charging them for judges. So a value
+    that is not an object is taken as the answer itself.
+    """
+    traces = (config or {}).get(TRACES_CONFIG_KEY, _UNSET)
+    if traces is _UNSET:
+        return _UNSET
     if not isinstance(traces, dict):
+        return traces
+    scoring = traces.get(TRACE_SCORING_CONFIG_KEY, _UNSET)
+    if scoring is _UNSET or not isinstance(scoring, dict):
+        return scoring
+    return scoring.get("enabled", True)
+
+
+def trace_scoring_settings(config: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+    """The stored `traces.scoring` value when the config says anything about
+    scoring, normalised to an object so a caller can carry it forward."""
+    setting = trace_scoring_setting(config)
+    if setting is _UNSET:
         return None
-    scoring = traces.get(TRACE_SCORING_CONFIG_KEY)
-    return scoring if isinstance(scoring, dict) else None
+    return setting if isinstance(setting, dict) else {"enabled": setting}
 
 
 def trace_scoring_enabled(agent: Dict[str, Any]) -> bool:
     """Whether new traces for this agent are scored. On unless turned off, so an
     agent whose config never mentions it still scores."""
-    scoring = trace_scoring_settings(agent.get("config")) or {}
-    enabled = scoring.get("enabled", True)
+    enabled = trace_scoring_setting(agent.get("config"))
+    if enabled is _UNSET:
+        return True
     # A client can put anything in config, and a value that reads as off must
     # turn scoring off rather than keep paying for judges.
     if isinstance(enabled, str):

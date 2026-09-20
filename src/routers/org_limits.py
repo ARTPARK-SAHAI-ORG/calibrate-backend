@@ -9,7 +9,7 @@ import os
 import sqlite3
 
 from fastapi import APIRouter, HTTPException, Depends, Path
-from typing import Optional
+from typing import Dict, Optional
 
 from pydantic import BaseModel, Field
 
@@ -106,6 +106,31 @@ class OrgLimitsCreateResponse(BaseModel):
     message: str = Field(description="Status message")
 
 
+_DEFAULT_LIMITS = {
+    "max_rows_per_eval": lambda: DEFAULT_MAX_ROWS_PER_EVAL,
+    "max_scored_traces": lambda: DEFAULT_MAX_SCORED_TRACES,
+    "max_traces": lambda: DEFAULT_MAX_TRACES,
+    "trace_scoring_batch_size": lambda: DEFAULT_TRACE_SCORING_BATCH_SIZE,
+    "max_concurrent_trace_scoring_batches": (
+        lambda: DEFAULT_MAX_CONCURRENT_TRACE_SCORING_BATCHES
+    ),
+}
+
+
+def effective_limits(org_uuid: str) -> Dict[str, int]:
+    """Every limit in force for a workspace, from ONE read of its row.
+
+    Trace ingest is the highest-volume write here and needs two of these, so
+    asking per key would put an extra read on the same file the scoring workers
+    are writing to, for every trace.
+    """
+    stored = (get_org_limits(org_uuid) or {}).get("limits") or {}
+    return {
+        key: stored.get(key) if stored.get(key) is not None else default()
+        for key, default in _DEFAULT_LIMITS.items()
+    }
+
+
 def _effective_limit(org_uuid: str, key: str, default: int) -> int:
     stored = ((get_org_limits(org_uuid) or {}).get("limits") or {}).get(key)
     return stored if stored is not None else default
@@ -158,15 +183,7 @@ def enforce_max_rows_per_eval(org_uuid: str, rows: int) -> None:
 @router.get("/me", summary="Get own workspace limits")
 def get_own_limits(ctx: OrgContext = Depends(get_current_org)):
     """Get every limit in force for your workspace, whether set for it or left at the server default"""
-    return {
-        "max_rows_per_eval": effective_max_rows_per_eval(ctx.org_uuid),
-        "max_scored_traces": effective_max_scored_traces(ctx.org_uuid),
-        "max_traces": effective_max_traces(ctx.org_uuid),
-        "trace_scoring_batch_size": effective_trace_scoring_batch_size(ctx.org_uuid),
-        "max_concurrent_trace_scoring_batches": effective_max_concurrent_trace_scoring_batches(
-            ctx.org_uuid
-        ),
-    }
+    return effective_limits(ctx.org_uuid)
 
 
 @router.get("/me/max-rows-per-eval", summary="Get own max rows per eval")

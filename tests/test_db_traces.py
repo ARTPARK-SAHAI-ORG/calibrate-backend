@@ -387,3 +387,21 @@ def test_failed_runs_free_their_slot_in_the_cap():
     second = _combined_ingest(org, agent, max_scored_traces=1)
 
     assert _runs_for(second["uuid"])[0]["status"] == "pending"
+
+
+def test_deleting_traces_frees_their_share_of_the_scoring_cap():
+    """A run counts against the cap through its trace, so a workspace that
+    scored its allowance and deleted it can score again."""
+    org = _org()
+    agent = _insert_agent(org)
+    ev, _ = _eligible_evaluator(org, "llm")
+    db.add_evaluator_to_agent(agent["uuid"], ev)
+    first = _combined_ingest(org, agent, max_scored_traces=1)
+    assert _runs_for(first["uuid"])[0]["status"] == "pending"
+    assert _combined_ingest(org, agent, max_scored_traces=1) and db.count_scored_traces(org) == 1
+
+    db.soft_delete_traces(org, trace_ids=[first["uuid"]])
+
+    assert db.count_scored_traces(org) == 0
+    later = _combined_ingest(org, agent, max_scored_traces=1)
+    assert _runs_for(later["uuid"])[0]["status"] == "pending"

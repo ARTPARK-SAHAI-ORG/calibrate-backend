@@ -644,6 +644,7 @@ def _fail_run(run: dict[str, Any], error: str, now: str) -> None:
         status=TraceEvalRunStatus.FAILED,
         error=_truncate_error(error),
         now=now,
+        attempts=run.get("attempts"),
     )
 
 
@@ -671,6 +672,7 @@ def _defer_or_fail(
         available_at=backoff_available_at(attempts, now, rng),
         now=now,
         error=_truncate_error(error),
+        attempts=attempts,
     )
 
 
@@ -692,7 +694,8 @@ def _settle_or_defer_terminal(
 
     try:
         settle_trace_eval_run_terminal(
-            run["uuid"], status=TraceEvalRunStatus.SKIPPED, error=reason, now=now
+            run["uuid"], status=TraceEvalRunStatus.SKIPPED, error=reason, now=now,
+            attempts=run.get("attempts"),
         )
     except Exception as exc:
         logger.exception("trace-scoring: skipping run %s raised", run["uuid"])
@@ -712,6 +715,7 @@ def _prepare_claimed_run(run: dict[str, Any], now: str) -> PreparedRun | None:
             status=TraceEvalRunStatus.SKIPPED,
             error=reason.value,
             now=now,
+            attempts=run.get("attempts"),
         )
 
     deleted = trace_scoring_skip_reason(
@@ -755,11 +759,8 @@ def process_claimed_runs(
             # one whose preparation always raises (a trace holding unreadable
             # JSON, say) would be reclaimed forever. Defer it like any other.
             logger.exception("trace-scoring: preparing run %s raised", run["uuid"])
-            _defer_or_fail(
-                run,
-                now=prepare_now,
-                error=str(exc),
-                rng=rng,
+            _swallow_settle(
+                _defer_or_fail, run, now=prepare_now, error=str(exc), rng=rng,
                 max_attempts=max_attempts,
             )
             continue
@@ -772,18 +773,18 @@ def process_claimed_runs(
     # A claim that ever widened would judge each trace against another agent's
     # evaluators and store the wrong pins as real scores, with nothing logged.
     agent_ids = {run["agent_id"] for run in claimed}
-    assert len(agent_ids) == 1, f"a batch must be one agent's runs, got {agent_ids}"
     try:
+        if len(agent_ids) != 1:
+            # Judging each trace against another agent's evaluators would store
+            # the wrong verdicts as real scores, so refuse rather than guess.
+            raise RuntimeError(f"a batch must be one agent's runs, got {agent_ids}")
         evaluators = resolve_batch_evaluators(claimed[0]["agent_id"])
     except Exception as exc:
         logger.exception("trace-scoring: resolving evaluators raised")
         for item in prepared:
-            _defer_or_fail(
-                item.run,
-                now=prepare_now,
-                error=str(exc),
-                rng=rng,
-                max_attempts=max_attempts,
+            _swallow_settle(
+                _defer_or_fail, item.run, now=prepare_now, error=str(exc),
+                rng=rng, max_attempts=max_attempts,
             )
         return
     if not isinstance(evaluators, BatchEvaluators):
@@ -799,7 +800,18 @@ def process_claimed_runs(
             )
         return
 
-    config, dataset, manifest = build_eval_only_batch(prepared, evaluators)
+    try:
+        config, dataset, manifest = build_eval_only_batch(prepared, evaluators)
+    except Exception as exc:
+        logger.exception("trace-scoring: building the batch raised")
+        build_now = utc_now()
+        for item in prepared:
+            _swallow_settle(
+                _defer_or_fail, item.run, now=build_now, error=str(exc),
+                rng=rng, max_attempts=max_attempts,
+            )
+        return
+
     invoke_fn = invoke or invoke_eval_only_cli
     try:
         cli_result = invoke_fn(
@@ -809,12 +821,9 @@ def process_claimed_runs(
         logger.exception("trace-scoring: eval-only invocation raised")
         settle_now = utc_now()
         for item in prepared:
-            _defer_or_fail(
-                item.run,
-                now=settle_now,
-                error=str(exc),
-                rng=rng,
-                max_attempts=max_attempts,
+            _swallow_settle(
+                _defer_or_fail, item.run, now=settle_now, error=str(exc),
+                rng=rng, max_attempts=max_attempts,
             )
         return
 
@@ -844,7 +853,10 @@ def process_claimed_runs(
             )
             continue
         try:
-            settle_trace_eval_run_completed(item.run["uuid"], scores, now=settle_now)
+            settle_trace_eval_run_completed(
+                item.run["uuid"], scores, now=settle_now,
+                attempts=item.run.get("attempts"),
+            )
         except Exception as exc:
             # A settle failure (a busy write, say) must not raise through the
             # batch: the run would stay `processing` -- invisible to the attempt

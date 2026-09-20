@@ -273,7 +273,7 @@ def test_ingest_cap_returns_429(client, monkeypatch):
     from routers import traces as traces_mod
 
     h, agent_id = _signup_with_agent(client)
-    monkeypatch.setattr(traces_mod, "effective_max_traces", lambda org_uuid: 1)
+    _cap(monkeypatch, max_traces=1)
 
     _post_trace(client, h, _payload(agent_id, _mid()))
 
@@ -2048,7 +2048,7 @@ def test_ingest_past_workspace_scored_traces_limit_writes_over_limit_run(client,
 
     h, agent_id = _signup_with_agent(client)
     _enable_auto_score(client, h, agent_id)
-    monkeypatch.setattr(traces_mod, "effective_max_scored_traces", lambda org_uuid: 1)
+    _cap(monkeypatch, max_scored_traces=1)
 
     first = _post_trace(client, h, _payload(agent_id, _mid()))
     assert _runs_for_trace(first["uuid"])[0]["status"] == "pending"
@@ -2071,7 +2071,7 @@ def test_ingest_past_workspace_scored_traces_limit_writes_over_limit_run(client,
     # A skipped run does not count against the limit, so the cap is on scored traces.
     third = _post_trace(client, h, _payload(agent_id, _mid()))
     assert _runs_for_trace(third["uuid"])[0]["error"] == "over_limit"
-    monkeypatch.setattr(traces_mod, "effective_max_scored_traces", lambda org_uuid: 2)
+    _cap(monkeypatch, max_scored_traces=2)
     fourth = _post_trace(client, h, _payload(agent_id, _mid()))
     assert _runs_for_trace(fourth["uuid"])[0]["status"] == "pending"
 
@@ -2126,7 +2126,7 @@ def test_ingest_opted_in_cap_still_returns_429(client, monkeypatch):
 
     h, agent_id = _signup_with_agent(client)
     _enable_auto_score(client, h, agent_id)
-    monkeypatch.setattr(traces_mod, "effective_max_traces", lambda org_uuid: 1)
+    _cap(monkeypatch, max_traces=1)
 
     first = _post_trace(client, h, _payload(agent_id, _mid()))
     assert _runs_for_trace(first["uuid"])
@@ -2686,8 +2686,7 @@ def test_usage_reports_both_counts_and_both_limits(client, monkeypatch):
     from routers import traces as traces_mod
 
     h, agent_id = _signup_with_agent(client)
-    monkeypatch.setattr(traces_mod, "effective_max_scored_traces", lambda org_uuid: 2)
-    monkeypatch.setattr(traces_mod, "effective_max_traces", lambda org_uuid: 5)
+    _cap(monkeypatch, max_scored_traces=2, max_traces=5)
 
     empty = client.get("/traces/usage", headers=h)
     assert empty.status_code == 200, empty.text
@@ -2737,6 +2736,17 @@ _EVAL_A = str(uuid.uuid4())
 _VER_A = str(uuid.uuid4())
 _EVAL_B = str(uuid.uuid4())
 
+
+
+def _cap(monkeypatch, **overrides):
+    """Override one workspace limit, leaving the rest at their defaults."""
+    from routers import org_limits as limits_mod
+    from routers import traces as traces_mod
+
+    real = limits_mod.effective_limits
+    monkeypatch.setattr(
+        traces_mod, "effective_limits", lambda org: {**real(org), **overrides}
+    )
 
 def _averages(client, h, **params):
     r = client.get(

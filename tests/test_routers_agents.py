@@ -1678,3 +1678,20 @@ def test_an_off_looking_value_turns_scoring_off(client):
         assert r.status_code in (200, 422), (value, r.text)
         if r.status_code == 200:
             assert _scoring_on(r.json()) is expected, value
+
+
+def test_scoring_written_as_a_plain_false_turns_it_off(client):
+    """A client writing {"traces": {"scoring": false}} plainly means off, and
+    reading that as silence would keep charging them for judges."""
+    h = _signup(client)
+    agent = _create_agent(client, h, f"flag-plain-{uuid.uuid4().hex[:6]}")
+
+    r = client.put(
+        f"/agents/{agent['uuid']}",
+        json={"config": {"traces": {"scoring": False}}},
+        headers=h,
+    )
+
+    assert r.status_code == 200, r.text
+    assert _scoring_on(r.json()) is False
+    assert _scoring_on(client.get(f"/agents/{agent['uuid']}", headers=h).json()) is False

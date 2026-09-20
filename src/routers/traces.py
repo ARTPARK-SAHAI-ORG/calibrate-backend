@@ -46,7 +46,11 @@ from db import (
 )
 from org_scope import ensure_owned_agent
 from pagination import PaginatedResponse, PaginationParams, page_envelope
-from routers.org_limits import effective_max_scored_traces, effective_max_traces
+from routers.org_limits import (
+    effective_limits,
+    effective_max_scored_traces,
+    effective_max_traces,
+)
 
 # Reuse the tests router's validation so a converted test accepts exactly what
 # POST /tests does (evaluator visible to the workspace, evaluator_type matches).
@@ -603,7 +607,8 @@ async def ingest_trace(
     agent = ensure_owned_agent(payload.agent_id, ctx.org_uuid)
     _ensure_input_matches_agent(payload.input, agent)
 
-    cap = effective_max_traces(ctx.org_uuid)
+    limits = effective_limits(ctx.org_uuid)
+    cap = limits["max_traces"]
     current = count_live_traces(ctx.org_uuid)
     if current >= cap:
         raise HTTPException(
@@ -619,7 +624,7 @@ async def ingest_trace(
     row = create_trace_with_eval_run(
         org_uuid=ctx.org_uuid,
         agent=agent,
-        max_scored_traces=effective_max_scored_traces(ctx.org_uuid),
+        max_scored_traces=limits["max_scored_traces"],
         message_id=payload.message_id,
         conversation_id=payload.conversation_id,
         input=(
@@ -760,11 +765,12 @@ class TraceUsageResponse(BaseModel):
 )
 async def get_trace_usage_endpoint(ctx: OrgContext = Depends(get_current_org)):
     """Report how much of each trace limit you have used"""
+    usage_limits = effective_limits(ctx.org_uuid)
     return {
         "traces_stored": count_live_traces(ctx.org_uuid),
-        "max_traces": effective_max_traces(ctx.org_uuid),
+        "max_traces": usage_limits["max_traces"],
         "traces_scored": count_scored_traces(ctx.org_uuid),
-        "max_scored_traces": effective_max_scored_traces(ctx.org_uuid),
+        "max_scored_traces": usage_limits["max_scored_traces"],
     }
 
 

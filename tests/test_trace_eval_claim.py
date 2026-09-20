@@ -601,10 +601,10 @@ def test_a_settle_failure_defers_that_run_and_spares_the_rest_of_the_batch(
 
     real_settle = db.settle_trace_eval_run_completed
 
-    def flaky_settle(run_uuid, scores, *, now):
+    def flaky_settle(run_uuid, scores, *, now, attempts=None):
         if run_uuid == run_a:
             raise RuntimeError("database table is locked")
-        return real_settle(run_uuid, scores, now=now)
+        return real_settle(run_uuid, scores, now=now, attempts=attempts)
 
     monkeypatch.setattr(db, "settle_trace_eval_run_completed", flaky_settle)
     ts.claim_and_score_batch(
@@ -1024,23 +1024,29 @@ def test_a_run_whose_preparation_raises_is_deferred_not_left_claimed(monkeypatch
     assert _status(healthy) == RunStatus.COMPLETED.value
 
 
-def test_release_at_startup_hands_in_flight_runs_back_to_the_queue():
+def test_release_at_startup_takes_back_only_an_expired_lease():
+    """Two processes overlap during a rolling deploy, so a live lease belongs
+    to a worker that is still judging. Taking it would put the same traces
+    through the judge twice and throw one result away."""
     org = _org()
     ev = _evaluator(org)
-    agent = _agent(org)
-    in_flight = _run(
-        org, agent, _trace(org, agent), [ev], available_at=2000, status=RunStatus.PROCESSING
+    agent, other = _agent(org), _agent(org)
+    live = _run(
+        org, agent, _trace(org, agent), [ev], available_at=2000,
+        status=RunStatus.PROCESSING,
     )
-    waiting = _run(org, agent, _trace(org, agent), [ev], available_at=1)
-    assert _claim(now=_at(1000), batch_size=10) == []
+    expired = _run(
+        org, other, _trace(org, other), [ev], available_at=500,
+        status=RunStatus.PROCESSING,
+    )
 
     assert db.release_trace_eval_leases(_at(1000)) == 1
 
-    row = db.get_trace_eval_run(in_flight)
-    assert row["status"] == RunStatus.PENDING.value
-    assert row["available_at"] == _at(1000)
-    claimed = _claim(now=_at(1000), batch_size=10)
-    assert set(_uuids(claimed)) == {in_flight, waiting}
+    assert db.get_trace_eval_run(live)["status"] == RunStatus.PROCESSING.value
+    assert db.get_trace_eval_run(live)["available_at"] == _at(2000)
+    back = db.get_trace_eval_run(expired)
+    assert back["status"] == RunStatus.PENDING.value
+    assert back["available_at"] == _at(1000)
 
 
 def test_a_run_that_used_up_its_attempts_is_buried_not_reclaimed_forever():
@@ -1091,3 +1097,50 @@ def test_a_stored_limit_that_is_not_a_positive_whole_number_falls_back():
         )
 
         assert len(claimed) == taken, stored
+
+
+def test_one_workspaces_unreadable_limits_do_not_stop_everyone_else():
+    """The claim is one statement across every workspace, so a value SQLite
+    cannot parse would otherwise abort it and stall the whole pool."""
+    broken, healthy = _org(), _org()
+    with db.get_db_connection() as conn:
+        conn.execute(
+            "INSERT INTO org_limits (uuid, org_uuid, limits) VALUES (?, ?, ?)",
+            (str(uuid.uuid4()), broken, '{"trace_scoring_batch_size": 3'),
+        )
+        conn.commit()
+    bad_agent, good_agent = _agent(broken), _agent(healthy)
+    _run(broken, bad_agent, _trace(broken, bad_agent), [_evaluator(broken)], available_at=1)
+    waiting = _run(
+        healthy, good_agent, _trace(healthy, good_agent), [_evaluator(healthy)],
+        available_at=2,
+    )
+
+    claimed = [_claim(now=_at(1000), batch_size=10) for _ in range(2)]
+
+    assert waiting in {run["uuid"] for batch in claimed for run in batch}
+
+
+def test_a_superseded_worker_cannot_settle_a_run_someone_else_now_owns():
+    """A lease that expires mid-judge lets a second worker claim the same run.
+    The first must not then overwrite, fail or requeue it."""
+    org = _org()
+    agent = _agent(org)
+    run = _run(org, agent, _trace(org, agent), [_evaluator(org)], available_at=1)
+    first = _claim(now=_at(1000), batch_size=1)[0]
+    second = _claim(now=_at(9000), batch_size=1)[0]
+    assert first["uuid"] == second["uuid"] == run
+    assert second["attempts"] == first["attempts"] + 1
+
+    stale = db.settle_trace_eval_run_completed(
+        run, [], now=_at(9100), attempts=first["attempts"]
+    )
+
+    assert stale == "noop"
+    assert db.get_trace_eval_run(run)["status"] == RunStatus.PROCESSING.value
+    assert not db.defer_trace_eval_run(
+        run, available_at=_at(9999), now=_at(9100), attempts=first["attempts"]
+    )
+    assert db.settle_trace_eval_run_completed(
+        run, [], now=_at(9100), attempts=second["attempts"]
+    ) == "completed"

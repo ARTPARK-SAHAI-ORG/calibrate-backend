@@ -8587,7 +8587,7 @@ def update_org_limits(org_uuid: str, limits: "OrgLimits") -> Optional[Dict[str, 
         cursor.execute(
             "UPDATE org_limits SET limits = json_patch(limits, ?), "
             "updated_at = CURRENT_TIMESTAMP WHERE org_uuid = ?",
-            (limits.model_dump_json(exclude_none=True), org_uuid),
+            (limits.model_dump_json(exclude_unset=True), org_uuid),
         )
         conn.commit()
         if cursor.rowcount == 0:
@@ -10680,8 +10680,9 @@ def count_scored_traces(org_uuid: str) -> int:
     """How many of the workspace's traces count against its scoring limit."""
     with get_db_connection() as conn:
         return conn.execute(
-            "SELECT COUNT(*) FROM trace_eval_runs WHERE org_uuid = ? "
-            "AND status IN ('pending', 'processing', 'completed')",
+            "SELECT COUNT(*) FROM trace_eval_runs r "
+            "JOIN traces t ON t.uuid = r.trace_uuid AND t.deleted_at IS NULL "
+            "WHERE r.org_uuid = ? AND r.status IN ('pending', 'processing', 'completed')",
             (org_uuid,),
         ).fetchone()[0]
 
@@ -10691,8 +10692,10 @@ def _scored_trace_count(cur: sqlite3.Cursor, org_uuid: str, cap: int) -> int:
     outage cannot use up a workspace's cap. Bounded at `cap`, since the caller
     only asks whether the cap is reached."""
     return cur.execute(
-        "SELECT COUNT(*) FROM (SELECT 1 FROM trace_eval_runs WHERE org_uuid = ? "
-        "AND status IN ('pending', 'processing', 'completed') LIMIT ?)",
+        "SELECT COUNT(*) FROM (SELECT 1 FROM trace_eval_runs r "
+        "JOIN traces t ON t.uuid = r.trace_uuid AND t.deleted_at IS NULL "
+        "WHERE r.org_uuid = ? AND r.status IN ('pending', 'processing', 'completed') "
+        "LIMIT ?)",
         (org_uuid, cap),
     ).fetchone()[0]
 
@@ -11116,8 +11119,8 @@ def release_trace_eval_leases(now: str) -> int:
     with get_db_connection() as conn:
         cur = conn.execute(
             "UPDATE trace_eval_runs SET status = 'pending', available_at = ?, "
-            "updated_at = ? WHERE status = 'processing'",
-            (now, now),
+            "updated_at = ? WHERE status = 'processing' AND available_at <= ?",
+            (now, now, now),
         )
         conn.commit()
         return cur.rowcount or 0
@@ -11193,7 +11196,7 @@ def claim_trace_eval_runs(
                             AND b.available_at > ?
                        ) < _positive_limit(
                              json_extract(
-                                 ol.limits,
+                                 CASE WHEN json_valid(ol.limits) THEN ol.limits END,
                                  '$.max_concurrent_trace_scoring_batches'
                              ),
                              ?
@@ -11212,7 +11215,8 @@ def claim_trace_eval_runs(
                      (
                          SELECT _positive_limit(
                                     json_extract(
-                                        ol.limits, '$.trace_scoring_batch_size'
+                                        CASE WHEN json_valid(ol.limits) THEN ol.limits END,
+                                        '$.trace_scoring_batch_size'
                                     ),
                                     ?
                                 )
@@ -11284,23 +11288,26 @@ def _upsert_trace_eval_scores(
 
 
 def _claimed_run_for_update(
-    cur: sqlite3.Cursor, run_uuid: str
+    cur: sqlite3.Cursor, run_uuid: str, attempts: Optional[int] = None
 ) -> Optional[sqlite3.Row]:
     """The run if this worker still owns it, else None.
 
-    Settlement is guarded on `processing` rather than on a claim token: the
-    snapshot is immutable from creation, so every worker that ever runs a given
-    run does identical work and only "is it still open" matters.
+    A lease that expires while a worker is still judging lets a second worker
+    claim the same run, so `processing` alone does not prove ownership. Each
+    claim bumps `attempts`, so the claiming worker's count is the claim token:
+    a worker holding a stale count has been superseded and must not settle,
+    fail, or requeue a run somebody else is working on.
 
-    This is the ONLY guard each settle path needs. Callers hold the write lock
-    from BEGIN IMMEDIATE, so nothing can move the row between this read and
-    their UPDATE; the `status` predicate they still carry is belt-and-braces.
+    Callers hold the write lock from BEGIN IMMEDIATE, so nothing can move the
+    row between this read and their UPDATE.
     """
     row = cur.execute(
-        "SELECT uuid, trace_uuid, org_uuid, agent_id, status "
+        "SELECT uuid, trace_uuid, org_uuid, agent_id, status, attempts "
         "FROM trace_eval_runs WHERE uuid = ?",
         (run_uuid,),
     ).fetchone()
+    if row is not None and attempts is not None and row["attempts"] != attempts:
+        return None
     if row is None or row["status"] != trace_scoring.TraceEvalRunStatus.PROCESSING.value:
         return None
     return row
@@ -11331,6 +11338,7 @@ def settle_trace_eval_run_completed(
     scores: List[Dict[str, Any]],
     *,
     now: str,
+    attempts: Optional[int] = None,
 ) -> str:
     """Complete a run and write its scores, if this worker still owns it.
 
@@ -11342,7 +11350,7 @@ def settle_trace_eval_run_completed(
     with get_db_connection() as conn:
         cur = conn.cursor()
         cur.execute("BEGIN IMMEDIATE")
-        run = _claimed_run_for_update(cur, run_uuid)
+        run = _claimed_run_for_update(cur, run_uuid, attempts)
         if run is None:
             conn.rollback()
             return "noop"
@@ -11375,6 +11383,7 @@ def settle_trace_eval_run_terminal(
     status: trace_scoring.TraceEvalRunStatus,
     error: Optional[str],
     now: str,
+    attempts: Optional[int] = None,
 ) -> bool:
     """Bury a run as `failed` or `skipped`. True if this worker wrote the row.
 
@@ -11390,7 +11399,7 @@ def settle_trace_eval_run_terminal(
     with get_db_connection() as conn:
         cur = conn.cursor()
         cur.execute("BEGIN IMMEDIATE")
-        run = _claimed_run_for_update(cur, run_uuid)
+        run = _claimed_run_for_update(cur, run_uuid, attempts)
         if run is None:
             conn.rollback()
             return False
@@ -11422,6 +11431,7 @@ def defer_trace_eval_run(
     available_at: str,
     now: str,
     error: Optional[str] = None,
+    attempts: Optional[int] = None,
 ) -> bool:
     """Return a still-owned run to `pending` for a later retry.
 
@@ -11431,7 +11441,7 @@ def defer_trace_eval_run(
     with get_db_connection() as conn:
         cur = conn.cursor()
         cur.execute("BEGIN IMMEDIATE")
-        run = _claimed_run_for_update(cur, run_uuid)
+        run = _claimed_run_for_update(cur, run_uuid, attempts)
         if run is None:
             conn.rollback()
             return False
