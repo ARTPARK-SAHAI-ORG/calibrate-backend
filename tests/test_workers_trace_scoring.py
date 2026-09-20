@@ -1,0 +1,306 @@
+"""Tests for the trace-scoring lifespan worker pool."""
+
+from __future__ import annotations
+
+import asyncio
+import json
+import os
+import time
+import uuid
+from unittest.mock import patch
+
+import pytest
+from fastapi.testclient import TestClient
+
+import db
+import trace_scoring_nudge
+from workers import trace_scoring as pool_mod
+
+
+@pytest.fixture(scope="module", autouse=True)
+def _enable_pool_for_this_module():
+    pool_mod.set_pool_enabled(True)
+    yield
+    pool_mod.set_pool_enabled(False)
+    pool_mod._active_pool = None
+
+
+@pytest.fixture(scope="module")
+def app():
+    import main as main_mod
+
+    return main_mod.app
+
+
+@pytest.fixture
+def client(app, _enable_pool_for_this_module):
+    original = os.environ.get("FAKE_AI_PROVIDERS")
+    os.environ["FAKE_AI_PROVIDERS"] = "1"
+    with db.get_db_connection() as conn:
+        conn.execute(
+            "UPDATE trace_eval_runs SET available_at = '2099-01-01 00:00:00' "
+            "WHERE status IN ('pending', 'processing')"
+        )
+        conn.commit()
+    with patch("main.recover_pending_jobs"):
+        with TestClient(app) as c:
+            yield c
+    if original is None:
+        os.environ.pop("FAKE_AI_PROVIDERS", None)
+    else:
+        os.environ["FAKE_AI_PROVIDERS"] = original
+    pool_mod._active_pool = None
+
+
+def _signup(client):
+    suffix = uuid.uuid4().hex[:8]
+    body = client.post(
+        "/auth/signup",
+        json={
+            "first_name": "Wk",
+            "last_name": "Er",
+            "email": f"wk-{suffix}@example.com",
+            "password": "passw0rd",
+        },
+    )
+    body.raise_for_status()
+    data = body.json()
+    return {"Authorization": f"Bearer {data['access_token']}"}
+
+
+def _create_clean_evaluator(client, h, evaluator_type="llm"):
+    resp = client.post(
+        "/evaluators",
+        json={
+            "name": f"ev-{uuid.uuid4().hex[:6]}",
+            "evaluator_type": evaluator_type,
+            "output_type": "binary",
+            "version": {
+                "judge_model": "openai/gpt-4.1",
+                "system_prompt": "Judge the reply.",
+            },
+        },
+        headers=h,
+    )
+    assert resp.status_code == 200, resp.text
+    return resp.json()["uuid"]
+
+
+def _unlink_all_evaluators(client, h, agent_uuid):
+    items = client.get(f"/agents/{agent_uuid}/evaluators", headers=h).json()["items"]
+    for ev in items:
+        r = client.delete(f"/agents/{agent_uuid}/evaluators/{ev['uuid']}", headers=h)
+        assert r.status_code == 200, r.text
+
+
+def _create_opted_in_agent(client, h):
+    created = client.post(
+        "/agents",
+        json={"name": f"a-{uuid.uuid4().hex[:6]}", "type": "agent"},
+        headers=h,
+    ).json()
+    agent_id = created["uuid"]
+    ev_uuid = _create_clean_evaluator(client, h)
+    _unlink_all_evaluators(client, h, agent_id)
+    r = client.post(
+        f"/agents/{agent_id}/evaluators",
+        json={"evaluator_ids": [ev_uuid]},
+        headers=h,
+    )
+    assert r.status_code == 200, r.text
+    return agent_id, ev_uuid
+
+
+def _ingest(client, h, agent_id, **extra):
+    payload = {
+        "agent_id": agent_id,
+        "message_id": f"m-{uuid.uuid4().hex[:8]}",
+        "input": [{"role": "user", "content": "hi"}],
+        "output": {"response": "hello there"},
+    }
+    payload.update(extra)
+    r = client.post("/traces", json=payload, headers=h)
+    assert r.status_code == 200, r.text
+    return r.json()["uuid"]
+
+
+def _run_for_trace(trace_uuid):
+    with db.get_db_connection() as conn:
+        row = conn.execute(
+            "SELECT * FROM trace_eval_runs WHERE trace_uuid = ?",
+            (trace_uuid,),
+        ).fetchone()
+    return dict(row) if row else None
+
+
+def _wait_for_status(trace_uuid, wanted, timeout=10):
+    deadline = time.time() + timeout
+    last = None
+    while time.time() < deadline:
+        last = _run_for_trace(trace_uuid)
+        if last and last["status"] == wanted:
+            return last
+        time.sleep(0.1)
+    return last
+
+
+def test_nudge_get_creates_an_event_when_unset():
+    trace_scoring_nudge._event = None
+    ev = trace_scoring_nudge.get()
+    assert ev is trace_scoring_nudge.get()
+    trace_scoring_nudge.set()
+    assert ev.is_set()
+
+
+def test_nudge_reset_works_across_event_loops():
+    async def first():
+        ev = trace_scoring_nudge.reset()
+        trace_scoring_nudge.set()
+        assert ev.is_set()
+
+    asyncio.run(first())
+
+    async def second():
+        ev = trace_scoring_nudge.reset()
+        assert not ev.is_set()
+        trace_scoring_nudge.set()
+        await ev.wait()
+
+    asyncio.run(second())
+
+
+def _agent_row(org, config):
+    agent_uuid = str(uuid.uuid4())
+    with db.get_db_connection() as conn:
+        conn.execute(
+            "INSERT INTO agents (uuid, org_uuid, name, config, interaction_type) "
+            "VALUES (?, ?, ?, ?, 'conversation')",
+            (agent_uuid, org, f"a-{agent_uuid[:8]}", json.dumps(config)),
+        )
+        conn.commit()
+    return db.get_agent(agent_uuid)
+
+
+def test_runnable_ingest_sets_nudge(monkeypatch):
+    calls = []
+    monkeypatch.setattr(trace_scoring_nudge, "set", lambda: calls.append(1))
+    org = str(uuid.uuid4())
+    db.create_trace_with_eval_run(
+        org_uuid=org,
+        max_scored_traces=1_000_000,
+        agent=_agent_row(org, {}),
+        input=[{"role": "user", "content": "hi"}],
+        output={"response": "hello", "tool_calls": None},
+    )
+    assert calls == [1]
+
+
+def test_opted_out_and_over_limit_ingest_do_not_nudge(monkeypatch):
+    calls = []
+    monkeypatch.setattr(trace_scoring_nudge, "set", lambda: calls.append(1))
+    org = str(uuid.uuid4())
+    db.create_trace_with_eval_run(
+        org_uuid=org,
+        max_scored_traces=1_000_000,
+        agent=_agent_row(org, {"traces": {"scoring": {"enabled": False}}}),
+        input=[{"role": "user", "content": "hi"}],
+        output={"response": "hello", "tool_calls": None},
+    )
+    db.create_trace_with_eval_run(
+        org_uuid=org,
+        max_scored_traces=0,
+        agent=_agent_row(org, {}),
+        input=[{"role": "user", "content": "hi"}],
+        output={"response": "hello", "tool_calls": None},
+    )
+    assert calls == []
+
+
+def test_worker_survives_batch_exceptions_and_reports_sentry():
+    hits = {"n": 0}
+    captured = []
+
+    def flaky():
+        hits["n"] += 1
+        if hits["n"] == 1:
+            raise RuntimeError("boom")
+        return []
+
+    async def _exercise():
+        with patch.object(pool_mod, "_run_batch", flaky), patch.object(
+            pool_mod, "capture_exception_to_sentry", lambda e: captured.append(e)
+        ), patch.object(pool_mod, "_ERROR_BACKOFF_SECONDS", 0.01):
+            pool = pool_mod.TraceScoringPool(size=1)
+            pool.start()
+            deadline = time.time() + 2
+            while time.time() < deadline and hits["n"] < 2:
+                await asyncio.sleep(0.05)
+            await pool.shutdown()
+
+    asyncio.run(_exercise())
+    assert hits["n"] >= 2
+    assert captured
+    assert isinstance(captured[0], RuntimeError)
+
+
+def test_nudge_wakes_idle_worker_before_poll():
+    calls = []
+
+    def batch():
+        calls.append(time.time())
+        return []
+
+    async def _exercise():
+        with patch.object(pool_mod, "_run_batch", batch), patch.object(
+            pool_mod, "POLL_SECONDS", 30
+        ):
+            pool = pool_mod.TraceScoringPool(size=1)
+            pool.start()
+            deadline = time.time() + 2
+            while time.time() < deadline and not calls:
+                await asyncio.sleep(0.01)
+            assert calls, "worker never claimed"
+            await asyncio.sleep(0.05)
+            n_before = len(calls)
+            started = time.time()
+            trace_scoring_nudge.set()
+            while time.time() - started < 2 and len(calls) <= n_before:
+                await asyncio.sleep(0.01)
+            elapsed = time.time() - started
+            await pool.shutdown()
+            assert len(calls) > n_before
+            return elapsed
+
+    elapsed = asyncio.run(_exercise())
+    assert elapsed < 5
+
+
+def test_opted_in_trace_is_scored_end_to_end(client):
+    h = _signup(client)
+    agent_id, ev_uuid = _create_opted_in_agent(client, h)
+    trace_uuid = _ingest(client, h, agent_id)
+    run = _wait_for_status(trace_uuid, "completed")
+    assert run is not None, "worker never created a run"
+    assert run["status"] == "completed", run
+    scores = db.get_trace_eval_scores(run["uuid"])
+    assert len(scores) == 1
+    assert scores[0]["evaluator_uuid"] == ev_uuid
+    assert scores[0]["value"] == 1
+    assert scores[0]["output_type"] == "binary"
+    assert "Simulated judge reasoning" in (scores[0]["reasoning"] or "")
+
+
+def test_the_worker_count_survives_a_bad_environment_value():
+    """Zero would stop scoring dead with nothing in the log, and a typo would
+    stop the app booting, so both are clamped to one worker."""
+    import importlib
+
+    import workers.trace_scoring as pool_mod
+
+    for value, expected in (("3", 3), ("0", 1), ("-2", 1), ("two", 1), ("", 1)):
+        with patch.dict(os.environ, {"TRACE_SCORING_WORKERS": value}):
+            assert importlib.reload(pool_mod).POOL_SIZE == expected, value
+
+    with patch.dict(os.environ, {}, clear=False):
+        os.environ.pop("TRACE_SCORING_WORKERS", None)
+        assert importlib.reload(pool_mod).POOL_SIZE == 2

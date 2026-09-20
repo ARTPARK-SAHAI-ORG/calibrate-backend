@@ -8,7 +8,8 @@ from pathlib import Path
 from typing import Optional, List, Dict, Any, Set, Tuple, TYPE_CHECKING
 from contextlib import contextmanager
 
-from utils import is_tool_call_row
+import trace_scoring
+from utils import is_tool_call_row, trace_scoring_enabled
 
 if TYPE_CHECKING:
     from routers.org_limits import OrgLimits
@@ -22,6 +23,12 @@ DB_PATH = Path(join(os.getenv("DB_ROOT_DIR"), "pense.db"))
 DEFAULT_USER_EMAIL = os.getenv("DEFAULT_USER_EMAIL", "")
 DEFAULT_USER_FIRST_NAME = os.getenv("DEFAULT_USER_FIRST_NAME", "")
 DEFAULT_USER_LAST_NAME = os.getenv("DEFAULT_USER_LAST_NAME", "")
+
+
+def _positive_limit(stored: Any, default: int) -> int:
+    if isinstance(stored, bool) or not isinstance(stored, int) or stored <= 0:
+        return default
+    return stored
 
 
 @contextmanager
@@ -39,6 +46,10 @@ def get_db_connection():
     # SQLite's own LOWER only folds ASCII, so an accented or non-Latin word
     # would never match a case-insensitive search.
     conn.create_function("PY_LOWER", 1, lambda s: s.lower() if s else s)
+    # A limit stored in org_limits.limits is free-form JSON. Zero, a negative, a
+    # string or a fraction would each break a claim differently, so anything but
+    # a positive whole number falls back to the server default.
+    conn.create_function("_positive_limit", 2, _positive_limit)
     try:
         yield conn
     finally:
@@ -238,10 +249,24 @@ def is_name_taken(
         return cursor.fetchone() is not None
 
 
+# `claim_trace_eval_runs` claims with UPDATE...RETURNING, added in SQLite 3.35.
+SQLITE_RETURNING_MIN = (3, 35, 0)
+
+
+def assert_sqlite_returning_support() -> None:
+    """Fail at boot rather than at the first scoring claim on an old libsqlite."""
+    if sqlite3.sqlite_version_info < SQLITE_RETURNING_MIN:
+        raise RuntimeError(
+            f"SQLite {sqlite3.sqlite_version} is too old for trace scoring "
+            "(needs 3.35+ for UPDATE...RETURNING)"
+        )
+
+
 def init_db():
     """Initialize the database and create tables if they don't exist."""
     # Ensure the data directory exists
     DB_PATH.parent.mkdir(parents=True, exist_ok=True)
+    assert_sqlite_returning_support()
 
     with get_db_connection() as conn:
         cursor = conn.cursor()
@@ -1573,6 +1598,81 @@ def init_db():
             cursor.execute("ALTER TABLE traces ADD COLUMN labels TEXT DEFAULT NULL")
         except sqlite3.OperationalError:
             pass
+        conn.commit()
+
+        # Durable scoring runs. `status` is the source of truth for "scored?";
+        # allowed values are TraceEvalRunStatus. A run whose trace or agent was
+        # deleted is still claimed; settlement is where it becomes skipped.
+        # DEFAULT and the partial-index WHERE lists are frozen literals. Do not
+        # interpolate TraceEvalRunStatus / OPEN_TRACE_EVAL_RUN_STATUSES: CREATE
+        # IF NOT EXISTS will not reshape an existing table or index.
+        cursor.execute(
+            """
+            CREATE TABLE IF NOT EXISTS trace_eval_runs (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                uuid TEXT NOT NULL UNIQUE,
+                trace_uuid TEXT NOT NULL,
+                org_uuid TEXT NOT NULL,
+                agent_id TEXT NOT NULL,
+                status TEXT NOT NULL DEFAULT 'pending',
+                available_at TIMESTAMP NOT NULL,
+                attempts INTEGER NOT NULL DEFAULT 0,
+                error TEXT,
+                created_at TIMESTAMP NOT NULL,
+                updated_at TIMESTAMP NOT NULL,
+                completed_at TIMESTAMP,
+                FOREIGN KEY (trace_uuid) REFERENCES traces(uuid),
+                FOREIGN KEY (org_uuid) REFERENCES organizations(uuid),
+                FOREIGN KEY (agent_id) REFERENCES agents(uuid)
+            )
+            """
+        )
+        cursor.execute(
+            "CREATE UNIQUE INDEX IF NOT EXISTS ux_trace_eval_active "
+            "ON trace_eval_runs (trace_uuid) "
+            "WHERE status IN ('pending', 'processing')"
+        )
+        cursor.execute(
+            "CREATE INDEX IF NOT EXISTS ix_trace_eval_claim "
+            "ON trace_eval_runs (available_at) "
+            "WHERE status IN ('pending', 'processing')"
+        )
+        cursor.execute(
+            "CREATE INDEX IF NOT EXISTS ix_trace_eval_agent_status "
+            "ON trace_eval_runs (agent_id, status, completed_at)"
+        )
+        cursor.execute(
+            "CREATE INDEX IF NOT EXISTS ix_trace_eval_trace "
+            "ON trace_eval_runs (trace_uuid, created_at DESC)"
+        )
+        cursor.execute(
+            "CREATE INDEX IF NOT EXISTS ix_trace_eval_org_status "
+            "ON trace_eval_runs (org_uuid, status)"
+        )
+
+        # One score per (run, evaluator). Keyed on the run so a same-version
+        # rescore never overwrites earlier history.
+        cursor.execute(
+            """
+            CREATE TABLE IF NOT EXISTS trace_eval_scores (
+                run_uuid TEXT NOT NULL,
+                evaluator_uuid TEXT NOT NULL,
+                evaluator_version_id TEXT NOT NULL,
+                -- NUMERIC affinity: 0/1 and integer ratings store as integers;
+                -- a future float rating stores as real.
+                value NUMERIC NOT NULL,
+                -- Denormalized from evaluators.output_type.
+                output_type TEXT NOT NULL,
+                reasoning TEXT,
+                completed_at TIMESTAMP,
+                UNIQUE (run_uuid, evaluator_uuid),
+                CHECK (output_type IN ('binary', 'rating')),
+                CHECK (output_type <> 'binary' OR value IN (0, 1)),
+                FOREIGN KEY (run_uuid) REFERENCES trace_eval_runs(uuid),
+                FOREIGN KEY (evaluator_uuid) REFERENCES evaluators(uuid)
+            )
+            """
+        )
         conn.commit()
 
         # ============ org_limits (renamed from user_limits) ============
@@ -3110,7 +3210,7 @@ def _link_default_correctness_evaluator(
     yet, then link it to `agent_uuid`. Picks `default-llm-general` for a
     `general` agent, `default-llm-next-reply` otherwise, matching the
     evaluator_type each interaction_type requires (see
-    REQUIRED_AGENT_INTERACTION_TYPE_BY_TEST_TYPE in routers/tests.py). Runs on
+    REQUIRED_AGENT_INTERACTION_TYPE_BY_TEST_TYPE in shared_enums.py). Runs on
     the caller's cursor and does not commit — callers own the transaction."""
     slug = _correctness_evaluator_slug_for_interaction_type(interaction_type)
     cursor.execute(
@@ -4436,8 +4536,16 @@ def update_agent(
     name: Optional[str] = None,
     config: Optional[Dict[str, Any]] = None,
     interaction_type: Optional[str] = None,
+    org_uuid: Optional[str] = None,
+    delete_pending_trace_runs: bool = False,
 ) -> bool:
-    """Update an agent. Returns True if the agent was found and updated."""
+    """Update an agent. Returns True if the agent was found and updated.
+
+    `delete_pending_trace_runs` drops this agent's `pending` `trace_eval_runs`
+    in the same transaction, for a caller turning trace scoring off.
+    `processing` and terminal runs are left alone so in-flight judge spend is
+    not thrown away.
+    """
     # Build dynamic update query
     updates = []
     params = []
@@ -4452,7 +4560,6 @@ def update_agent(
     if interaction_type is not None:
         updates.append("interaction_type = ?")
         params.append(interaction_type)
-
     if not updates:
         return False
 
@@ -4466,10 +4573,14 @@ def update_agent(
     with get_db_connection() as conn:
         cursor = conn.cursor()
         cursor.execute(query, params)
-        conn.commit()
         updated = cursor.rowcount > 0
+        if updated and delete_pending_trace_runs:
+            _delete_pending_trace_eval_runs(cursor, agent_uuid, org_uuid)
         if updated:
+            conn.commit()
             logger.info(f"Updated agent with UUID: {agent_uuid}")
+        else:
+            conn.rollback()
         return updated
 
 
@@ -4874,6 +4985,21 @@ def get_evaluators_for_agent(agent_id: str) -> List[Dict[str, Any]]:
             (agent_id,),
         )
         return [_parse_evaluator_row(row) for row in cursor.fetchall()]
+
+
+def resolve_live_evaluators(
+    agent_uuid: str,
+) -> List[Tuple[Dict[str, Any], Optional[Dict[str, Any]]]]:
+    """`(evaluator, live_version)` pairs in `get_evaluators_for_agent` order.
+
+    `live_version` is None when `live_version_id` is unset or the version row
+    is gone.
+    """
+    evaluators = get_evaluators_for_agent(agent_uuid)
+    versions = get_evaluator_versions_by_uuids(
+        [ev.get("live_version_id") for ev in evaluators if ev.get("live_version_id")]
+    )
+    return [(ev, versions.get(ev.get("live_version_id"))) for ev in evaluators]
 
 
 def get_agents_for_tool(tool_id: str) -> List[Dict[str, Any]]:
@@ -5581,22 +5707,25 @@ def get_evaluator(evaluator_uuid: str) -> Optional[Dict[str, Any]]:
 
 def get_evaluators_by_uuids(
     evaluator_uuids: List[str],
+    include_deleted: bool = False,
 ) -> Dict[str, Dict[str, Any]]:
     """Bulk variant of `get_evaluator` — single query for many UUIDs.
-    Returns `{uuid: evaluator_row}`; missing or soft-deleted UUIDs are
-    omitted from the result. Use this when a caller would otherwise loop
-    `get_evaluator(...)` per id (N+1)."""
+    Returns `{uuid: evaluator_row}`; missing UUIDs are omitted. Soft-deleted
+    rows are omitted unless `include_deleted=True`, which trace scoring needs
+    to reproduce a run against an evaluator deleted after it was pinned. Use
+    this when a caller would otherwise loop `get_evaluator(...)` per id (N+1)."""
     if not evaluator_uuids:
         return {}
     unique_uuids = list({u for u in evaluator_uuids if u})
     if not unique_uuids:
         return {}
     placeholders = ",".join("?" for _ in unique_uuids)
+    deleted_clause = "" if include_deleted else " AND deleted_at IS NULL"
     with get_db_connection() as conn:
         cursor = conn.cursor()
         cursor.execute(
             f"SELECT * FROM evaluators "
-            f"WHERE uuid IN ({placeholders}) AND deleted_at IS NULL",
+            f"WHERE uuid IN ({placeholders}){deleted_clause}",
             unique_uuids,
         )
         return {row["uuid"]: _parse_evaluator_row(row) for row in cursor.fetchall()}
@@ -8451,12 +8580,14 @@ def get_org_limits(org_uuid: str) -> Optional[Dict[str, Any]]:
 
 
 def update_org_limits(org_uuid: str, limits: "OrgLimits") -> Optional[Dict[str, Any]]:
-    """Update limits JSON for an org. Returns the updated row, or None if not found."""
+    """Merge the given limits into an org's limits JSON, so an omitted key keeps
+    its stored value. Returns the updated row, or None if not found."""
     with get_db_connection() as conn:
         cursor = conn.cursor()
         cursor.execute(
-            "UPDATE org_limits SET limits = ?, updated_at = CURRENT_TIMESTAMP WHERE org_uuid = ?",
-            (limits.model_dump_json(), org_uuid),
+            "UPDATE org_limits SET limits = json_patch(limits, ?), "
+            "updated_at = CURRENT_TIMESTAMP WHERE org_uuid = ?",
+            (limits.model_dump_json(exclude_unset=True), org_uuid),
         )
         conn.commit()
         if cursor.rowcount == 0:
@@ -10444,6 +10575,76 @@ def count_live_traces(org_uuid: str) -> int:
         ).fetchone()[0]
 
 
+def _insert_trace_row(
+    cur: sqlite3.Cursor,
+    org_uuid: str,
+    agent_id: str,
+    input: Any,
+    output: Any,
+    message_id: Optional[str] = None,
+    conversation_id: Optional[str] = None,
+    metadata: Optional[Any] = None,
+    labels: Optional[List[str]] = None,
+) -> Dict[str, Any]:
+    """Insert one traces row on `cur` and return it. Does not commit."""
+    trace_uuid = str(uuid.uuid4())
+    cur.execute(
+        """
+        INSERT INTO traces
+            (uuid, org_uuid, agent_id, message_id, conversation_id,
+             input, output, metadata, labels)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            trace_uuid,
+            org_uuid,
+            agent_id,
+            message_id,
+            conversation_id,
+            json.dumps(input),
+            json.dumps(output),
+            json.dumps(metadata) if metadata is not None else None,
+            json.dumps(labels) if labels else None,
+        ),
+    )
+    row = cur.execute(
+        "SELECT * FROM traces WHERE uuid = ?", (trace_uuid,)
+    ).fetchone()
+    return _trace_row(row)
+
+
+def _insert_trace_eval_run(
+    cur: sqlite3.Cursor,
+    *,
+    trace_uuid: str,
+    org_uuid: str,
+    agent_id: str,
+    status: trace_scoring.TraceEvalRunStatus,
+    error: Optional[str],
+    now: str,
+    completed_at: Optional[str] = None,
+) -> None:
+    """Insert one trace_eval_runs row. Caller owns the transaction."""
+    cur.execute(
+        "INSERT INTO trace_eval_runs "
+        "(uuid, trace_uuid, org_uuid, agent_id, status, "
+        "error, available_at, created_at, updated_at, completed_at) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        (
+            str(uuid.uuid4()),
+            trace_uuid,
+            org_uuid,
+            agent_id,
+            status.value,
+            error,
+            now,
+            now,
+            now,
+            completed_at,
+        ),
+    )
+
+
 def create_trace(
     org_uuid: str,
     agent_id: str,
@@ -10459,32 +10660,113 @@ def create_trace(
     Every call stores a new row. `message_id` is the caller's own label, not a
     key: matching on it meant a customer who reused one silently lost a turn.
     """
-    trace_uuid = str(uuid.uuid4())
     with get_db_connection() as conn:
-        conn.execute(
-            """
-            INSERT INTO traces
-                (uuid, org_uuid, agent_id, message_id, conversation_id,
-                 input, output, metadata, labels)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """,
-            (
-                trace_uuid,
-                org_uuid,
-                agent_id,
-                message_id,
-                conversation_id,
-                json.dumps(input),
-                json.dumps(output),
-                json.dumps(metadata) if metadata is not None else None,
-                json.dumps(labels) if labels else None,
-            ),
+        row = _insert_trace_row(
+            conn.cursor(),
+            org_uuid,
+            agent_id,
+            input,
+            output,
+            message_id,
+            conversation_id,
+            metadata,
+            labels,
         )
         conn.commit()
-        row = conn.execute(
-            "SELECT * FROM traces WHERE uuid = ?", (trace_uuid,)
-        ).fetchone()
-        return _trace_row(row)
+        return row
+
+
+def count_scored_traces(org_uuid: str) -> int:
+    """How many of the workspace's traces count against its scoring limit."""
+    with get_db_connection() as conn:
+        return conn.execute(
+            "SELECT COUNT(*) FROM trace_eval_runs r "
+            "JOIN traces t ON t.uuid = r.trace_uuid AND t.deleted_at IS NULL "
+            "WHERE r.org_uuid = ? AND r.status IN ('pending', 'processing', 'completed')",
+            (org_uuid,),
+        ).fetchone()[0]
+
+
+def _scored_trace_count(cur: sqlite3.Cursor, org_uuid: str, cap: int) -> int:
+    """Runs that scored or may still score. A failed run frees its slot, so an
+    outage cannot use up a workspace's cap. Bounded at `cap`, since the caller
+    only asks whether the cap is reached."""
+    return cur.execute(
+        "SELECT COUNT(*) FROM (SELECT 1 FROM trace_eval_runs r "
+        "JOIN traces t ON t.uuid = r.trace_uuid AND t.deleted_at IS NULL "
+        "WHERE r.org_uuid = ? AND r.status IN ('pending', 'processing', 'completed') "
+        "LIMIT ?)",
+        (org_uuid, cap),
+    ).fetchone()[0]
+
+
+def create_trace_with_eval_run(
+    *,
+    org_uuid: str,
+    agent: Dict[str, Any],
+    input: Any,
+    output: Any,
+    message_id: Optional[str] = None,
+    conversation_id: Optional[str] = None,
+    metadata: Optional[Any] = None,
+    labels: Optional[List[str]] = None,
+    max_scored_traces: int,
+) -> Dict[str, Any]:
+    """Insert a trace, and if trace scoring is on for the agent, its scoring run.
+
+    The run is `pending`, or `skipped` with error `over_limit` when the
+    workspace already holds `max_scored_traces` non-skipped runs. Which
+    evaluators run is resolved by the worker, not here.
+
+    Uses BEGIN IMMEDIATE rather than a bare BEGIN: a deferred transaction
+    starts as a reader and only upgrades at the first write, which can fail
+    with SQLITE_BUSY without honouring busy_timeout. Taking the write lock
+    up front means the timeout applies.
+    """
+    scoring_on = trace_scoring_enabled(agent)
+    pending_run = False
+    now = trace_scoring.utc_now()
+    with get_db_connection() as conn:
+        cur = conn.cursor()
+        cur.execute("BEGIN IMMEDIATE")
+        row = _insert_trace_row(
+            cur,
+            org_uuid,
+            agent["uuid"],
+            input,
+            output,
+            message_id,
+            conversation_id,
+            metadata,
+            labels,
+        )
+        if scoring_on:
+            over_limit = (
+                _scored_trace_count(cur, org_uuid, max_scored_traces)
+                >= max_scored_traces
+            )
+            _insert_trace_eval_run(
+                cur,
+                trace_uuid=row["uuid"],
+                org_uuid=org_uuid,
+                agent_id=agent["uuid"],
+                status=trace_scoring.TraceEvalRunStatus.SKIPPED
+                if over_limit
+                else trace_scoring.TraceEvalRunStatus.PENDING,
+                error="over_limit" if over_limit else None,
+                now=now,
+                completed_at=now if over_limit else None,
+            )
+            pending_run = not over_limit
+        conn.commit()
+
+    if pending_run:
+        import trace_scoring_nudge
+
+        # After commit, so a worker cannot claim a run that then rolls back.
+        # Skipped / opted-out ingests do not wake the pool.
+        trace_scoring_nudge.set()
+    return row
 
 
 def list_traces(
@@ -10556,3 +10838,630 @@ def soft_delete_traces(org_uuid: str, *, trace_ids: List[str]) -> int:
             deleted += cursor.rowcount or 0
         conn.commit()
     return deleted
+
+
+def _delete_pending_trace_eval_runs(
+    cursor: sqlite3.Cursor, agent_id: str, org_uuid: str
+) -> int:
+    """Delete never-started runs for an agent. Leaves processing/terminal rows."""
+    cursor.execute(
+        "DELETE FROM trace_eval_runs "
+        "WHERE agent_id = ? AND org_uuid = ? AND status = ?",
+        (agent_id, org_uuid, trace_scoring.TraceEvalRunStatus.PENDING.value),
+    )
+    return cursor.rowcount or 0
+
+
+def _trace_scoring_skip_reason_on(
+    cur: sqlite3.Cursor, org_uuid: str, trace_uuid: str, agent_id: str
+) -> Optional[trace_scoring.TraceEvalSettleSkipReason]:
+    """Why this run can no longer be scored, or None if both rows are live.
+
+    Takes a cursor so settlement can re-check inside its own transaction —
+    either row can be soft-deleted between claim and settle, and a score
+    written for a deleted trace is invisible to every read path but still
+    counts in aggregates.
+    """
+    trace = cur.execute(
+        "SELECT deleted_at FROM traces WHERE uuid = ? AND org_uuid = ?",
+        (trace_uuid, org_uuid),
+    ).fetchone()
+    if trace is None or trace["deleted_at"] is not None:
+        return trace_scoring.TraceEvalSettleSkipReason.TRACE_DELETED
+    agent = cur.execute(
+        "SELECT deleted_at FROM agents WHERE uuid = ?", (agent_id,)
+    ).fetchone()
+    if agent is None or agent["deleted_at"] is not None:
+        return trace_scoring.TraceEvalSettleSkipReason.AGENT_DELETED
+    return None
+
+
+def trace_scoring_skip_reason(
+    org_uuid: str, trace_uuid: str, agent_id: str
+) -> Optional[trace_scoring.TraceEvalSettleSkipReason]:
+    """Committed-read variant of `_trace_scoring_skip_reason_on`, for claim time."""
+    with get_db_connection() as conn:
+        return _trace_scoring_skip_reason_on(
+            conn.cursor(), org_uuid, trace_uuid, agent_id
+        )
+
+
+def get_trace_eval_run(run_uuid: str) -> Optional[Dict[str, Any]]:
+    with get_db_connection() as conn:
+        row = conn.execute(
+            "SELECT * FROM trace_eval_runs WHERE uuid = ?", (run_uuid,)
+        ).fetchone()
+        return dict(row) if row else None
+
+
+def get_trace_eval_scores(run_uuid: str) -> List[Dict[str, Any]]:
+    """This run's scores, ordered for stable reads."""
+    with get_db_connection() as conn:
+        rows = conn.execute(
+            "SELECT * FROM trace_eval_scores WHERE run_uuid = ? ORDER BY evaluator_uuid",
+            (run_uuid,),
+        ).fetchall()
+        return [dict(row) for row in rows]
+
+
+def _hydrate_trace_score_row(row: sqlite3.Row) -> Dict[str, Any]:
+    output_type = row["output_type"]
+    scale_min, scale_max = (
+        trace_scoring.scale_bounds_from_output_config(row["output_config"])
+        if output_type == "rating"
+        else (None, None)
+    )
+    return {
+        "evaluator_uuid": row["evaluator_uuid"],
+        "name": row["evaluator_name"] or row["evaluator_uuid"],
+        "evaluator_type": row["evaluator_type"],
+        "output_type": output_type,
+        "scale_min": scale_min,
+        "scale_max": scale_max,
+        "value": row["value"],
+        "reasoning": row["reasoning"],
+        "evaluator_version_id": row["evaluator_version_id"],
+        "passed": trace_scoring.trace_evaluator_passed(
+            output_type, row["value"], scale_max
+        ),
+    }
+
+
+# Scores join through the pinned version for the rating scale, and through the
+# evaluator row for name/type -- soft-deleted evaluators and historical versions
+# still resolve, so a finished run renders after later edits or deletes.
+_TRACE_SCORE_JOIN_SQL = """
+LEFT JOIN trace_eval_scores ts
+  ON ts.run_uuid = runs.uuid
+LEFT JOIN evaluators e
+  ON e.uuid = ts.evaluator_uuid
+LEFT JOIN evaluator_versions ev
+  ON ev.uuid = ts.evaluator_version_id
+"""
+
+_TRACE_SCORE_SELECT_SQL = """
+    runs.uuid AS run_uuid,
+    runs.trace_uuid AS trace_uuid,
+    runs.org_uuid AS org_uuid,
+    runs.status AS status,
+    runs.error AS error,
+    runs.created_at AS created_at,
+    runs.completed_at AS completed_at,
+    ts.evaluator_uuid AS evaluator_uuid,
+    ts.value AS value,
+    ts.output_type AS output_type,
+    ts.reasoning AS reasoning,
+    ts.evaluator_version_id AS evaluator_version_id,
+    e.name AS evaluator_name,
+    e.evaluator_type AS evaluator_type,
+    ev.output_config AS output_config
+"""
+
+
+def average_trace_scores(
+    org_uuid: str,
+    *,
+    agent_id: Optional[str] = None,
+    q: Optional[str] = None,
+    output_type: Optional[str] = None,
+    labels: Optional[List[str]] = None,
+) -> List[Dict[str, Any]]:
+    """Mean score per evaluator over the live traces matching the list filters.
+
+    Counts each trace's LATEST run, whatever its status, which is the run the
+    list row shows. Averaging finished runs only would disagree with the rows
+    on screen, since a row shows whatever scores have landed.
+
+    One entry per evaluator, describing it as it is NOW: scores written under a
+    different `output_type` are left out, because a pass or fail cannot be
+    averaged with a rating, and the scale comes from the live version rather
+    than whichever version happened to sort highest. An evaluator that has
+    scored nothing in the filtered set is absent rather than zero.
+    """
+    where, params = _trace_filters(org_uuid, agent_id, q, output_type, labels)
+    sql = f"""
+        WITH matched AS (
+            SELECT uuid FROM traces WHERE {where}
+        ),
+        latest AS (
+            SELECT r.uuid, ROW_NUMBER() OVER (
+                       PARTITION BY r.trace_uuid
+                        ORDER BY r.created_at DESC, r.id DESC
+                   ) AS rn
+              FROM trace_eval_runs r
+              JOIN matched ON matched.uuid = r.trace_uuid
+             WHERE r.org_uuid = ?
+        )
+        SELECT ts.evaluator_uuid AS evaluator_uuid,
+               MAX(COALESCE(e.output_type, ts.output_type)) AS output_type,
+               COUNT(*) AS traces_scored,
+               AVG(ts.value) AS average,
+               MAX(e.name) AS evaluator_name,
+               MAX(live.output_config) AS output_config
+          FROM latest
+          JOIN trace_eval_scores ts ON ts.run_uuid = latest.uuid
+          LEFT JOIN evaluators e ON e.uuid = ts.evaluator_uuid
+          LEFT JOIN evaluator_versions live ON live.uuid = e.live_version_id
+         WHERE latest.rn = 1
+           AND ts.output_type = COALESCE(e.output_type, ts.output_type)
+         GROUP BY ts.evaluator_uuid
+         ORDER BY MAX(e.name), ts.evaluator_uuid
+    """
+    with get_db_connection() as conn:
+        rows = conn.execute(sql, params + [org_uuid]).fetchall()
+    summaries = []
+    for row in rows:
+        scale_min, scale_max = (
+            trace_scoring.scale_bounds_from_output_config(row["output_config"])
+            if row["output_type"] == "rating"
+            else (None, None)
+        )
+        summaries.append(
+            {
+                "evaluator_uuid": row["evaluator_uuid"],
+                "name": row["evaluator_name"] or row["evaluator_uuid"],
+                "output_type": row["output_type"],
+                "traces_scored": row["traces_scored"],
+                "average": row["average"],
+                "scale_min": scale_min,
+                "scale_max": scale_max,
+            }
+        )
+    return summaries
+
+
+def get_latest_trace_run_summaries(
+    org_uuid: str, trace_uuids: List[str]
+) -> Dict[str, Dict[str, Any]]:
+    """Latest run per trace (created_at DESC, id DESC) with its per-evaluator
+    results, the same rows `list_trace_scoring_runs` returns for that run.
+
+    One SELECT for the given page of trace ids. Traces with no run are omitted.
+    A run that has not completed carries whatever results have landed so far.
+    """
+    if not trace_uuids:
+        return {}
+    unique = list(dict.fromkeys(trace_uuids))
+    placeholders = ",".join("?" * len(unique))
+    sql = f"""
+        WITH ranked AS (
+            SELECT uuid, trace_uuid, org_uuid, status, error,
+                   created_at, completed_at, id,
+                   ROW_NUMBER() OVER (
+                       PARTITION BY trace_uuid
+                       ORDER BY created_at DESC, id DESC
+                   ) AS rn
+            FROM trace_eval_runs
+            WHERE org_uuid = ? AND trace_uuid IN ({placeholders})
+        ),
+        runs AS (
+            SELECT * FROM ranked WHERE rn = 1
+        )
+        SELECT {_TRACE_SCORE_SELECT_SQL}
+        FROM runs
+        {_TRACE_SCORE_JOIN_SQL}
+        ORDER BY runs.trace_uuid, ts.evaluator_uuid
+    """
+    with get_db_connection() as conn:
+        rows = conn.execute(sql, [org_uuid] + unique).fetchall()
+
+    grouped: Dict[str, Dict[str, Any]] = {}
+    for row in rows:
+        tid = row["trace_uuid"]
+        if tid not in grouped:
+            grouped[tid] = {"status": row["status"], "error": row["error"], "results": []}
+        if row["evaluator_uuid"] is not None:
+            grouped[tid]["results"].append(_hydrate_trace_score_row(row))
+    return grouped
+
+
+def list_trace_scoring_runs(org_uuid: str, trace_uuid: str) -> List[Dict[str, Any]]:
+    """Every run for a trace, newest first, each with hydrated per-evaluator results."""
+    sql = f"""
+        WITH runs AS (
+            SELECT uuid, trace_uuid, org_uuid, status, error,
+                   created_at, completed_at, id
+            FROM trace_eval_runs
+            WHERE org_uuid = ? AND trace_uuid = ?
+        )
+        SELECT {_TRACE_SCORE_SELECT_SQL}
+        FROM runs
+        {_TRACE_SCORE_JOIN_SQL}
+        ORDER BY runs.created_at DESC, runs.id DESC, ts.evaluator_uuid
+    """
+    with get_db_connection() as conn:
+        rows = conn.execute(sql, (org_uuid, trace_uuid)).fetchall()
+
+    runs: List[Dict[str, Any]] = []
+    index: Dict[str, Dict[str, Any]] = {}
+    for row in rows:
+        run_uuid = row["run_uuid"]
+        if run_uuid not in index:
+            run = {
+                "run_uuid": run_uuid,
+                "status": row["status"],
+                "created_at": row["created_at"],
+                "completed_at": row["completed_at"],
+                "error": row["error"],
+                "results": [],
+            }
+            index[run_uuid] = run
+            runs.append(run)
+        if row["evaluator_uuid"] is not None:
+            index[run_uuid]["results"].append(_hydrate_trace_score_row(row))
+    return runs
+
+
+def release_trace_eval_leases(now: str) -> int:
+    """Hand every `processing` run back to the queue. Called at startup: a run
+    in flight when the process died would otherwise hold its agent's slot
+    until the lease expired."""
+    with get_db_connection() as conn:
+        cur = conn.execute(
+            "UPDATE trace_eval_runs SET status = 'pending', available_at = ?, "
+            "updated_at = ? WHERE status = 'processing' AND available_at <= ?",
+            (now, now, now),
+        )
+        conn.commit()
+        return cur.rowcount or 0
+
+
+def claim_trace_eval_runs(
+    *,
+    now: str,
+    lease_seconds: int,
+    default_batch_size: int,
+    default_max_batches_per_org: int,
+    max_attempts: Optional[int] = None,
+) -> List[Dict[str, Any]]:
+    """Claim one batch of open runs, all belonging to ONE agent.
+
+    The agent served is the one owning the oldest claimable run among agents
+    with no run in flight (`processing` with a live lease) whose workspace is
+    below `max_concurrent_trace_scoring_batches`; one agent in flight counts as
+    one batch for its workspace. The batch holds up to that workspace's
+    `trace_scoring_batch_size` runs, oldest `available_at` first.
+
+    `available_at` carries both meanings — when a pending run becomes ready, and
+    when a processing run's lease expires — so one range scan picks up fresh,
+    timed-out, and backed-off work and no sweeper is needed. Claiming stamps the
+    next lease into the same column.
+
+    BEGIN IMMEDIATE takes the write lock up front: a deferred transaction starts
+    as a reader and can fail SQLITE_BUSY when it upgrades, without honouring
+    busy_timeout.
+    """
+    if default_batch_size <= 0 or default_max_batches_per_org <= 0:
+        return []
+    with get_db_connection() as conn:
+        cur = conn.cursor()
+        cur.execute("BEGIN IMMEDIATE")
+        # A run that kills its worker before it can settle never reaches the
+        # settle-path ceiling, so bury it here or it is reclaimed forever and
+        # keeps occupying its agent's slot.
+        cur.execute(
+            "UPDATE trace_eval_runs SET status = 'failed', error = ?, "
+            "completed_at = ?, updated_at = ? "
+            "WHERE status IN ('pending', 'processing') AND available_at <= ? "
+            "AND attempts >= ?",
+            (
+                "attempts exhausted",
+                now,
+                now,
+                now,
+                trace_scoring.MAX_ATTEMPTS if max_attempts is None else max_attempts,
+            ),
+        )
+        # Statuses are literals, not bound parameters, so the partial indexes
+        # (declared on these same values) can be used.
+        cur.execute(
+            """
+            WITH picked AS (
+                SELECT t.agent_id AS agent_id, t.org_uuid AS org_uuid
+                  FROM trace_eval_runs t
+                  LEFT JOIN org_limits ol ON ol.org_uuid = t.org_uuid
+                 WHERE t.status IN ('pending', 'processing')
+                   AND t.available_at <= ?
+                   AND NOT EXISTS (
+                         SELECT 1 FROM trace_eval_runs p
+                          WHERE p.agent_id = t.agent_id
+                            AND p.status = 'processing'
+                            AND p.available_at > ?
+                       )
+                   AND (
+                         SELECT COUNT(DISTINCT b.agent_id)
+                           FROM trace_eval_runs b
+                          WHERE b.org_uuid = t.org_uuid
+                            AND b.status = 'processing'
+                            AND b.available_at > ?
+                       ) < _positive_limit(
+                             json_extract(
+                                 CASE WHEN json_valid(ol.limits) THEN ol.limits END,
+                                 '$.max_concurrent_trace_scoring_batches'
+                             ),
+                             ?
+                           )
+                 ORDER BY t.available_at, t.id
+                 LIMIT 1
+            ),
+            batch AS (
+                SELECT r.id AS id
+                  FROM trace_eval_runs r, picked
+                 WHERE r.agent_id = picked.agent_id
+                   AND r.status IN ('pending', 'processing')
+                   AND r.available_at <= ?
+                 ORDER BY r.available_at, r.id
+                 LIMIT COALESCE(
+                     (
+                         SELECT _positive_limit(
+                                    json_extract(
+                                        CASE WHEN json_valid(ol.limits) THEN ol.limits END,
+                                        '$.trace_scoring_batch_size'
+                                    ),
+                                    ?
+                                )
+                           FROM picked
+                           LEFT JOIN org_limits ol ON ol.org_uuid = picked.org_uuid
+                     ),
+                     0
+                 )
+            )
+            UPDATE trace_eval_runs
+               SET status = 'processing',
+                   available_at = ?,
+                   attempts = attempts + 1,
+                   updated_at = ?
+             WHERE id IN (SELECT id FROM batch)
+            RETURNING uuid, trace_uuid, org_uuid, agent_id, attempts,
+                      status, available_at
+            """,
+            (
+                now,
+                now,
+                now,
+                default_max_batches_per_org,
+                now,
+                default_batch_size,
+                trace_scoring.add_seconds(now, lease_seconds),
+                now,
+            ),
+        )
+        rows = [dict(row) for row in cur.fetchall()]
+        conn.commit()
+    return rows
+
+
+def _upsert_trace_eval_scores(
+    cur: sqlite3.Cursor,
+    *,
+    run_uuid: str,
+    scores: List[Dict[str, Any]],
+    now: str,
+) -> None:
+    """Write this run's scores. Keyed on the run, so a retry of the same run
+    overwrites its own rows while a rescore (a different run) never touches
+    them."""
+    for score in scores:
+        cur.execute(
+            """
+            INSERT INTO trace_eval_scores
+                (run_uuid, evaluator_uuid, evaluator_version_id,
+                 value, output_type, reasoning, completed_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT (run_uuid, evaluator_uuid) DO UPDATE SET
+                evaluator_version_id = excluded.evaluator_version_id,
+                value = excluded.value,
+                output_type = excluded.output_type,
+                reasoning = excluded.reasoning,
+                completed_at = excluded.completed_at
+            """,
+            (
+                run_uuid,
+                score["evaluator_uuid"],
+                score["evaluator_version_id"],
+                score["value"],
+                score["output_type"],
+                score.get("reasoning"),
+                now,
+            ),
+        )
+
+
+def _claimed_run_for_update(
+    cur: sqlite3.Cursor, run_uuid: str, attempts: Optional[int] = None
+) -> Optional[sqlite3.Row]:
+    """The run if this worker still owns it, else None.
+
+    A lease that expires while a worker is still judging lets a second worker
+    claim the same run, so `processing` alone does not prove ownership. Each
+    claim bumps `attempts`, so the claiming worker's count is the claim token:
+    a worker holding a stale count has been superseded and must not settle,
+    fail, or requeue a run somebody else is working on.
+
+    Callers hold the write lock from BEGIN IMMEDIATE, so nothing can move the
+    row between this read and their UPDATE.
+    """
+    row = cur.execute(
+        "SELECT uuid, trace_uuid, org_uuid, agent_id, status, attempts "
+        "FROM trace_eval_runs WHERE uuid = ?",
+        (run_uuid,),
+    ).fetchone()
+    if row is not None and attempts is not None and row["attempts"] != attempts:
+        return None
+    if row is None or row["status"] != trace_scoring.TraceEvalRunStatus.PROCESSING.value:
+        return None
+    return row
+
+
+def _mark_skipped(
+    cur: sqlite3.Cursor,
+    run_uuid: str,
+    reason: trace_scoring.TraceEvalSettleSkipReason,
+    now: str,
+) -> None:
+    cur.execute(
+        "UPDATE trace_eval_runs SET status = ?, error = ?, completed_at = ?, "
+        "updated_at = ? WHERE uuid = ? AND status = ?",
+        (
+            trace_scoring.TraceEvalRunStatus.SKIPPED.value,
+            reason.value,
+            now,
+            now,
+            run_uuid,
+            trace_scoring.TraceEvalRunStatus.PROCESSING.value,
+        ),
+    )
+
+
+def settle_trace_eval_run_completed(
+    run_uuid: str,
+    scores: List[Dict[str, Any]],
+    *,
+    now: str,
+    attempts: Optional[int] = None,
+) -> str:
+    """Complete a run and write its scores, if this worker still owns it.
+
+    Returns `completed`, `skipped` (the trace or agent was deleted during the
+    judge call), or `noop` (someone else already settled it). The scores are
+    written in the same transaction as the status flip, so a run is never
+    `completed` with no rows and never carries rows it did not settle.
+    """
+    with get_db_connection() as conn:
+        cur = conn.cursor()
+        cur.execute("BEGIN IMMEDIATE")
+        run = _claimed_run_for_update(cur, run_uuid, attempts)
+        if run is None:
+            conn.rollback()
+            return "noop"
+        skip = _trace_scoring_skip_reason_on(
+            cur, run["org_uuid"], run["trace_uuid"], run["agent_id"]
+        )
+        if skip is not None:
+            _mark_skipped(cur, run_uuid, skip, now)
+            conn.commit()
+            return "skipped"
+        cur.execute(
+            "UPDATE trace_eval_runs SET status = ?, error = NULL, completed_at = ?, "
+            "updated_at = ? WHERE uuid = ? AND status = ?",
+            (
+                trace_scoring.TraceEvalRunStatus.COMPLETED.value,
+                now,
+                now,
+                run_uuid,
+                trace_scoring.TraceEvalRunStatus.PROCESSING.value,
+            ),
+        )
+        _upsert_trace_eval_scores(cur, run_uuid=run_uuid, scores=scores, now=now)
+        conn.commit()
+        return "completed"
+
+
+def settle_trace_eval_run_terminal(
+    run_uuid: str,
+    *,
+    status: trace_scoring.TraceEvalRunStatus,
+    error: Optional[str],
+    now: str,
+    attempts: Optional[int] = None,
+) -> bool:
+    """Bury a run as `failed` or `skipped`. True if this worker wrote the row.
+
+    A trace or agent deleted since the claim becomes `skipped` whatever the
+    caller asked for: "the judge could not run" is not the interesting fact
+    once the thing being scored is gone.
+    """
+    if status not in (
+        trace_scoring.TraceEvalRunStatus.FAILED,
+        trace_scoring.TraceEvalRunStatus.SKIPPED,
+    ):
+        raise ValueError(f"terminal status must be failed or skipped, got {status!r}")
+    with get_db_connection() as conn:
+        cur = conn.cursor()
+        cur.execute("BEGIN IMMEDIATE")
+        run = _claimed_run_for_update(cur, run_uuid, attempts)
+        if run is None:
+            conn.rollback()
+            return False
+        skip = _trace_scoring_skip_reason_on(
+            cur, run["org_uuid"], run["trace_uuid"], run["agent_id"]
+        )
+        if skip is not None:
+            _mark_skipped(cur, run_uuid, skip, now)
+        else:
+            cur.execute(
+                "UPDATE trace_eval_runs SET status = ?, error = ?, completed_at = ?, "
+                "updated_at = ? WHERE uuid = ? AND status = ?",
+                (
+                    status.value,
+                    error,
+                    now,
+                    now,
+                    run_uuid,
+                    trace_scoring.TraceEvalRunStatus.PROCESSING.value,
+                ),
+            )
+        conn.commit()
+        return True
+
+
+def defer_trace_eval_run(
+    run_uuid: str,
+    *,
+    available_at: str,
+    now: str,
+    error: Optional[str] = None,
+    attempts: Optional[int] = None,
+) -> bool:
+    """Return a still-owned run to `pending` for a later retry.
+
+    A deleted trace or agent skips instead, matching completed settlement —
+    there is nothing left to retry against.
+    """
+    with get_db_connection() as conn:
+        cur = conn.cursor()
+        cur.execute("BEGIN IMMEDIATE")
+        run = _claimed_run_for_update(cur, run_uuid, attempts)
+        if run is None:
+            conn.rollback()
+            return False
+        skip = _trace_scoring_skip_reason_on(
+            cur, run["org_uuid"], run["trace_uuid"], run["agent_id"]
+        )
+        if skip is not None:
+            _mark_skipped(cur, run_uuid, skip, now)
+        else:
+            cur.execute(
+                "UPDATE trace_eval_runs SET status = ?, available_at = ?, "
+                "updated_at = ?, error = ? WHERE uuid = ? AND status = ?",
+                (
+                    trace_scoring.TraceEvalRunStatus.PENDING.value,
+                    available_at,
+                    now,
+                    error,
+                    run_uuid,
+                    trace_scoring.TraceEvalRunStatus.PROCESSING.value,
+                ),
+            )
+        conn.commit()
+        return True

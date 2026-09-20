@@ -31,6 +31,8 @@ import openpyxl
 import sentry_sdk
 from pydantic import BaseModel, Field, StringConstraints
 
+from shared_enums import TestType
+
 logger = logging.getLogger(__name__)
 
 
@@ -197,9 +199,7 @@ class AnnotationStatus(str, Enum):
 
 
 # Concrete value sets reused across routers for entity/job "type" fields.
-EvaluatorTypeLiteral = Literal[
-    "tts", "stt", "llm", "llm-general", "conversation", "tool-call"
-]
+# Additional mapped type sets (TestType / AgentInteractionType / EvaluatorType) live in shared_enums.py.
 DataTypeLiteral = Literal["text", "audio"]
 OutputTypeLiteral = Literal["binary", "rating"]
 EvaluatorKindLiteral = Literal["single", "side_by_side"]
@@ -232,7 +232,6 @@ EvalJobType = Literal["stt-eval", "tts-eval", "annotation-eval"]
 # Keep in sync with db.ANNOTATION_TASK_TYPES and db.VALID_EVALUATOR_TYPES
 # (Literal requires literal members, so the vocabulary is mirrored here).
 AnnotationTaskTypeLiteral = Literal["stt", "llm", "llm-general", "conversation", "tts"]
-TestTypeLiteral = Literal["response", "tool_call", "conversation", "general"]
 MemberRoleLiteral = Literal["owner", "admin"]  # mirrors DB CHECK(role IN ('owner','admin'))
 EvaluatorUuid = Annotated[str, StringConstraints(min_length=36, max_length=36)]
 TestUuid = Annotated[str, StringConstraints(min_length=36, max_length=36)]
@@ -299,7 +298,7 @@ class TestListResponse(BaseModel):
         examples=[EXAMPLE_TEST_UUID],
     )
     name: str = Field(description="Name of the test")
-    type: TestTypeLiteral = Field(description=TEST_TYPE_DESCRIPTION)
+    type: TestType = Field(description=TEST_TYPE_DESCRIPTION)
     config: Optional[TestListConfig] = Field(
         None,
         description="Trimmed config carrying only the test's description. Fetch the test by ID for the full config and evaluators",
@@ -2008,3 +2007,57 @@ def read_leaderboard_xlsx(leaderboard_dir: Path) -> Optional[List[dict]]:
     except Exception as e:
         logger.warning(f"Failed to read leaderboard xlsx: {e}")
         return None
+
+
+def utc_now() -> str:
+    """UTC in the text form SQLite writes for CURRENT_TIMESTAMP."""
+    return datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
+
+
+TRACES_CONFIG_KEY = "traces"
+TRACE_SCORING_CONFIG_KEY = "scoring"
+
+
+_UNSET = object()
+
+
+def trace_scoring_setting(config: Optional[Dict[str, Any]]) -> Any:
+    """What the agent's config says about scoring, or `_UNSET` when it says
+    nothing.
+
+    `traces.scoring` is meant to be an object carrying `enabled`, but a client
+    writing `{"traces": {"scoring": false}}` plainly means off, and reading
+    that as "nothing was said" would keep charging them for judges. So a value
+    that is not an object is taken as the answer itself.
+    """
+    traces = (config or {}).get(TRACES_CONFIG_KEY, _UNSET)
+    if traces is _UNSET:
+        return _UNSET
+    if not isinstance(traces, dict):
+        return traces
+    scoring = traces.get(TRACE_SCORING_CONFIG_KEY, _UNSET)
+    if scoring is _UNSET or not isinstance(scoring, dict):
+        return scoring
+    return scoring.get("enabled", True)
+
+
+def trace_scoring_settings(config: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+    """The stored `traces.scoring` value when the config says anything about
+    scoring, normalised to an object so a caller can carry it forward."""
+    setting = trace_scoring_setting(config)
+    if setting is _UNSET:
+        return None
+    return setting if isinstance(setting, dict) else {"enabled": setting}
+
+
+def trace_scoring_enabled(agent: Dict[str, Any]) -> bool:
+    """Whether new traces for this agent are scored. On unless turned off, so an
+    agent whose config never mentions it still scores."""
+    enabled = trace_scoring_setting(agent.get("config"))
+    if enabled is _UNSET:
+        return True
+    # A client can put anything in config, and a value that reads as off must
+    # turn scoring off rather than keep paying for judges.
+    if isinstance(enabled, str):
+        return enabled.strip().lower() not in ("false", "0", "no", "off", "")
+    return bool(enabled)

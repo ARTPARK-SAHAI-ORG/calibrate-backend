@@ -8,6 +8,9 @@ from unittest.mock import patch
 import pytest
 from fastapi.testclient import TestClient
 
+import db
+from trace_scoring import IneligibleReason
+
 
 @pytest.fixture(scope="module")
 def app():
@@ -203,6 +206,7 @@ def test_list_agents_returns_trimmed_summary(client):
     }
     assert item["name"] == name
     assert item["type"] == "agent"
+    assert _scoring_on(item) is True
     assert item["created_at"]
     assert item["updated_at"]
 
@@ -446,18 +450,25 @@ def test_update_agent_with_api_key_cannot_self_attest_verification(client):
 # ============ Agent <-> Evaluator association ============
 
 
-def _create_evaluator(client, h, name=None, evaluator_type="llm"):
+def _create_evaluator(
+    client, h, name=None, evaluator_type="llm", variables=None
+):
     """Create a minimal evaluator owned by the caller's org."""
+    version = {
+        "judge_model": "openai/gpt-4.1",
+        "system_prompt": (
+            "Judge {{criteria}} carefully" if variables else "Judge the reply."
+        ),
+    }
+    if variables is not None:
+        version["variables"] = variables
     resp = client.post(
         "/evaluators",
         json={
             "name": name or f"ev-{uuid.uuid4().hex[:6]}",
             "evaluator_type": evaluator_type,
             "output_type": "binary",
-            "version": {
-                "judge_model": "openai/gpt-4.1",
-                "system_prompt": "Judge the reply.",
-            },
+            "version": version,
         },
         headers=h,
     )
@@ -1201,3 +1212,486 @@ def test_presave_verify_sends_the_body_its_stated_type_expects(client, monkeypat
     assert sent["body"] == {
         "messages": [{"role": "user", "content": "Hello, are you there?"}]
     }
+
+
+# ============ trace scoring setting + eligibility ============
+
+
+def _unlink_all_evaluators(client, h, agent_uuid):
+    items = client.get(f"/agents/{agent_uuid}/evaluators", headers=h).json()["items"]
+    for ev in items:
+        r = client.delete(f"/agents/{agent_uuid}/evaluators/{ev['uuid']}", headers=h)
+        assert r.status_code == 200, r.text
+
+
+def _link_evaluators(client, h, agent_uuid, *evaluator_ids):
+    r = client.post(
+        f"/agents/{agent_uuid}/evaluators",
+        json={"evaluator_ids": list(evaluator_ids)},
+        headers=h,
+    )
+    assert r.status_code == 200, r.text
+
+
+def _insert_run(org, agent_id, trace_uuid, status, **overrides):
+    row = {
+        "uuid": str(uuid.uuid4()),
+        "trace_uuid": trace_uuid,
+        "org_uuid": org,
+        "agent_id": agent_id,
+        "status": status,
+        "available_at": "2000-01-01 00:00:00",
+        "attempts": 0,
+        "error": None,
+        "created_at": "2000-01-01 00:00:01",
+        "updated_at": "2000-01-01 00:00:01",
+        "completed_at": None,
+    }
+    row.update(overrides)
+    with db.get_db_connection() as conn:
+        conn.execute(
+            "INSERT INTO trace_eval_runs "
+            f"({', '.join(row)}) VALUES ({', '.join('?' * len(row))})",
+            tuple(row.values()),
+        )
+        conn.commit()
+    return row["uuid"]
+
+
+def _set_trace_scoring(client, h, agent_uuid, enabled):
+    """A PUT replaces the whole config, so send the stored one back with the key set."""
+    config = client.get(f"/agents/{agent_uuid}", headers=h).json().get("config") or {}
+    config.setdefault("traces", {})["scoring"] = {"enabled": enabled}
+    return client.put(f"/agents/{agent_uuid}", json={"config": config}, headers=h)
+
+
+def _scoring_on(body):
+    """The setting as a client reads it: from config, missing means on."""
+    from utils import trace_scoring_enabled
+
+    return trace_scoring_enabled(body if "config" in body else {"config": body})
+
+
+def _disable_trace_scoring(client, h, agent_uuid):
+    r = _set_trace_scoring(client, h, agent_uuid, False)
+    assert r.status_code == 200, r.text
+    assert _scoring_on(r.json()) is False
+
+
+def test_agent_reads_include_trace_scoring_on_by_default(client):
+    h = _signup(client)
+    agent = _create_agent(client, h, f"flag-read-{uuid.uuid4().hex[:6]}")
+
+    got = client.get(f"/agents/{agent['uuid']}", headers=h)
+    assert got.status_code == 200, got.text
+    assert _scoring_on(got.json()) is True
+
+    listed = client.get("/agents", headers=h)
+    item = next(a for a in listed.json()["items"] if a["uuid"] == agent["uuid"])
+    assert _scoring_on(item) is True
+
+
+def test_enable_trace_scoring_general_with_eligible_llm_general(client):
+    h = _signup(client)
+    created = client.post(
+        "/agents",
+        json={
+            "name": f"flag-gen-{uuid.uuid4().hex[:6]}",
+            "type": "agent",
+            "interaction_type": "general",
+        },
+        headers=h,
+    ).json()
+    clean = _create_evaluator(
+        client,
+        h,
+        name=f"gen-clean-{uuid.uuid4().hex[:6]}",
+        evaluator_type="llm-general",
+    )
+    _unlink_all_evaluators(client, h, created["uuid"])
+    _link_evaluators(client, h, created["uuid"], clean)
+
+    r = _set_trace_scoring(client, h, created["uuid"], True)
+    assert r.status_code == 200, r.text
+    assert _scoring_on(r.json()) is True
+    assert r.json()["interaction_type"] == "general"
+
+
+def test_enable_rejected_when_only_default_correctness_evaluator_is_linked(client):
+    """The seeded correctness defaults declare `{{criteria}}`, so an agent
+    with zero eligible evaluators cannot turn scoring back on once it is off."""
+    h = _signup(client)
+    agent = _create_agent(client, h, f"flag-block-{uuid.uuid4().hex[:6]}")
+    _disable_trace_scoring(client, h, agent["uuid"])
+
+    r = _set_trace_scoring(client, h, agent["uuid"], True)
+    assert r.status_code == 422, r.text
+    body = r.json()["detail"]
+    assert body["error"] == (
+        "There are no eligible evaluators configured for this agent"
+    )
+    assert body["ineligible"]
+    assert {e["reason"] for e in body["ineligible"]} == {
+        IneligibleReason.DECLARES_VARIABLES
+    }
+    assert (
+        _scoring_on(client.get(f"/agents/{agent['uuid']}", headers=h).json()) is False
+    )
+
+
+def test_enable_rejected_for_general_agent_with_only_default_evaluator(client):
+    h = _signup(client)
+    created = client.post(
+        "/agents",
+        json={
+            "name": f"flag-gen-block-{uuid.uuid4().hex[:6]}",
+            "type": "agent",
+            "interaction_type": "general",
+        },
+        headers=h,
+    ).json()
+    _disable_trace_scoring(client, h, created["uuid"])
+
+    r = _set_trace_scoring(client, h, created["uuid"], True)
+    assert r.status_code == 422, r.text
+    assert {e["reason"] for e in r.json()["detail"]["ineligible"]} == {
+        IneligibleReason.DECLARES_VARIABLES
+    }
+
+
+def test_already_on_trace_scoring_survives_later_empty_eligibility(client):
+    """The 422 gate is only off→on. An already-on agent can send true again
+    after its linked set drifts to zero eligible evaluators."""
+    h = _signup(client)
+    agent = _create_agent(client, h, f"flag-drift-{uuid.uuid4().hex[:6]}")
+    clean = _create_evaluator(client, h, name=f"drift-clean-{uuid.uuid4().hex[:6]}")
+    _unlink_all_evaluators(client, h, agent["uuid"])
+    _link_evaluators(client, h, agent["uuid"], clean)
+    assert (
+        _set_trace_scoring(client, h, agent["uuid"], True).status_code
+        == 200
+    )
+
+    _unlink_all_evaluators(client, h, agent["uuid"])
+    eligibility = client.get(
+        f"/agents/{agent['uuid']}/trace-scoring-eligibility", headers=h
+    ).json()
+    assert eligibility["eligible"] == []
+
+    r = _set_trace_scoring(client, h, agent["uuid"], True)
+    assert r.status_code == 200, r.text
+    assert _scoring_on(r.json()) is True
+
+
+def test_eligibility_endpoint_partitions_mixed_evaluator_types(client):
+    h = _signup(client)
+    agent = _create_agent(client, h, f"elig-mix-{uuid.uuid4().hex[:6]}")
+    clean = _create_evaluator(client, h, name=f"mix-clean-{uuid.uuid4().hex[:6]}")
+    general = _create_evaluator(
+        client,
+        h,
+        name=f"mix-general-{uuid.uuid4().hex[:6]}",
+        evaluator_type="llm-general",
+    )
+    stt = _create_evaluator(
+        client, h, name=f"mix-stt-{uuid.uuid4().hex[:6]}", evaluator_type="stt"
+    )
+    _link_evaluators(client, h, agent["uuid"], clean, general, stt)
+
+    r = client.get(
+        f"/agents/{agent['uuid']}/trace-scoring-eligibility", headers=h
+    )
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert set(body.keys()) == {"eligible", "ineligible"}
+    assert [e["evaluator_uuid"] for e in body["eligible"]] == [clean]
+    assert body["eligible"][0]["name"]
+    assert body["eligible"][0]["evaluator_version_id"]
+    by_id = {e["evaluator_uuid"]: e["reason"] for e in body["ineligible"]}
+    assert by_id[general] == IneligibleReason.WRONG_TYPE
+    assert by_id[stt] == IneligibleReason.WRONG_TYPE
+    assert IneligibleReason.DECLARES_VARIABLES in by_id.values()
+
+
+def test_eligibility_endpoint_reports_each_disqualification_reason(client):
+    h = _signup(client)
+    conv = _create_agent(client, h, f"elig-reasons-{uuid.uuid4().hex[:6]}")
+    with_vars = _create_evaluator(
+        client,
+        h,
+        name=f"reason-vars-{uuid.uuid4().hex[:6]}",
+        variables=[{"name": "criteria"}],
+    )
+    wrong_type = _create_evaluator(
+        client,
+        h,
+        name=f"reason-type-{uuid.uuid4().hex[:6]}",
+        evaluator_type="llm-general",
+    )
+    agent_row = db.get_agent(conv["uuid"])
+    no_live = db.create_evaluator(
+        name=f"reason-nolive-{uuid.uuid4().hex[:6]}",
+        evaluator_type="llm",
+        org_uuid=agent_row["org_uuid"],
+    )
+    _unlink_all_evaluators(client, h, conv["uuid"])
+    _link_evaluators(client, h, conv["uuid"], with_vars, wrong_type)
+    db.add_evaluator_to_agent(conv["uuid"], no_live)
+    _disable_trace_scoring(client, h, conv["uuid"])
+
+    r = client.get(
+        f"/agents/{conv['uuid']}/trace-scoring-eligibility", headers=h
+    )
+    assert r.status_code == 200, r.text
+    by_id = {e["evaluator_uuid"]: e["reason"] for e in r.json()["ineligible"]}
+    assert by_id[with_vars] == IneligibleReason.DECLARES_VARIABLES
+    assert by_id[wrong_type] == IneligibleReason.WRONG_TYPE
+    assert by_id[no_live] == IneligibleReason.NO_LIVE_VERSION
+    assert r.json()["eligible"] == []
+
+    blocked = _set_trace_scoring(client, h, conv["uuid"], True)
+    assert blocked.status_code == 422, blocked.text
+    assert {e["reason"] for e in blocked.json()["detail"]["ineligible"]} == {
+        IneligibleReason.DECLARES_VARIABLES,
+        IneligibleReason.WRONG_TYPE,
+        IneligibleReason.NO_LIVE_VERSION,
+    }
+
+
+def test_eligibility_endpoint_is_jwt_only_and_org_scoped(client):
+    ha = _signup(client)
+    agent = _create_agent(client, ha, f"elig-auth-{uuid.uuid4().hex[:6]}")
+    raw = _raw_key(client, ha)
+
+    keyed = client.get(
+        f"/agents/{agent['uuid']}/trace-scoring-eligibility",
+        headers={"X-API-Key": raw},
+    )
+    assert keyed.status_code == 403
+
+    missing = client.get(
+        f"/agents/{uuid.uuid4()}/trace-scoring-eligibility", headers=ha
+    )
+    assert missing.status_code == 404
+
+    from main import _build_public_openapi
+
+    assert (
+        "/agents/{agent_uuid}/trace-scoring-eligibility"
+        not in _build_public_openapi()["paths"]
+    )
+
+    hb = _signup(client)
+    other = client.get(
+        f"/agents/{agent['uuid']}/trace-scoring-eligibility", headers=hb
+    )
+    assert other.status_code == 403
+    assert "organization_uuid" not in other.json()
+
+
+def test_disable_trace_scoring_deletes_pending_runs_only(client):
+    h = _signup(client)
+    agent = _create_agent(client, h, f"flag-off-{uuid.uuid4().hex[:6]}")
+    clean = _create_evaluator(client, h, name=f"off-clean-{uuid.uuid4().hex[:6]}")
+    _unlink_all_evaluators(client, h, agent["uuid"])
+    _link_evaluators(client, h, agent["uuid"], clean)
+    assert (
+        _set_trace_scoring(client, h, agent["uuid"], True).status_code
+        == 200
+    )
+
+    agent_row = db.get_agent(agent["uuid"])
+    org = agent_row["org_uuid"]
+    pending_trace = db.create_trace(
+        org_uuid=org,
+        agent_id=agent["uuid"],
+        input=[{"role": "user", "content": "hi"}],
+        output={"response": "hello", "tool_calls": None},
+    )
+    processing_trace = db.create_trace(
+        org_uuid=org,
+        agent_id=agent["uuid"],
+        input=[{"role": "user", "content": "hi"}],
+        output={"response": "hello", "tool_calls": None},
+    )
+    completed_trace = db.create_trace(
+        org_uuid=org,
+        agent_id=agent["uuid"],
+        input=[{"role": "user", "content": "hi"}],
+        output={"response": "hello", "tool_calls": None},
+    )
+    pending = _insert_run(org, agent["uuid"], pending_trace["uuid"], "pending")
+    processing = _insert_run(
+        org, agent["uuid"], processing_trace["uuid"], "processing"
+    )
+    completed = _insert_run(
+        org,
+        agent["uuid"],
+        completed_trace["uuid"],
+        "completed",
+        completed_at="2000-01-01 00:00:05",
+    )
+
+    r = _set_trace_scoring(client, h, agent["uuid"], False)
+    assert r.status_code == 200, r.text
+    assert _scoring_on(r.json()) is False
+
+    with db.get_db_connection() as conn:
+        remaining = {
+            row["uuid"]: row["status"]
+            for row in conn.execute(
+                "SELECT uuid, status FROM trace_eval_runs "
+                "WHERE uuid IN (?, ?, ?)",
+                (pending, processing, completed),
+            ).fetchall()
+        }
+    assert pending not in remaining
+    assert remaining[processing] == "processing"
+    assert remaining[completed] == "completed"
+
+
+def test_omitting_trace_scoring_does_not_delete_pending_runs(client):
+    h = _signup(client)
+    agent = _create_agent(client, h, f"flag-omit-runs-{uuid.uuid4().hex[:6]}")
+    clean = _create_evaluator(client, h, name=f"omit-run-{uuid.uuid4().hex[:6]}")
+    _unlink_all_evaluators(client, h, agent["uuid"])
+    _link_evaluators(client, h, agent["uuid"], clean)
+    _set_trace_scoring(client, h, agent["uuid"], True)
+    agent_row = db.get_agent(agent["uuid"])
+    trace = db.create_trace(
+        org_uuid=agent_row["org_uuid"],
+        agent_id=agent["uuid"],
+        input=[{"role": "user", "content": "hi"}],
+        output={"response": "hello", "tool_calls": None},
+    )
+    pending = _insert_run(
+        agent_row["org_uuid"], agent["uuid"], trace["uuid"], "pending"
+    )
+
+    r = client.put(
+        f"/agents/{agent['uuid']}",
+        json={"name": f"flag-omit-runs-renamed-{uuid.uuid4().hex[:6]}"},
+        headers=h,
+    )
+    assert r.status_code == 200, r.text
+    assert _scoring_on(r.json()) is True
+    with db.get_db_connection() as conn:
+        row = conn.execute(
+            "SELECT status FROM trace_eval_runs WHERE uuid = ?", (pending,)
+        ).fetchone()
+    assert row["status"] == "pending"
+
+
+def test_enable_trace_scoring_with_api_key(client):
+    h = _signup(client)
+    agent = _create_agent(client, h, f"flag-key-{uuid.uuid4().hex[:6]}")
+    clean = _create_evaluator(client, h, name=f"key-clean-{uuid.uuid4().hex[:6]}")
+    _unlink_all_evaluators(client, h, agent["uuid"])
+    _link_evaluators(client, h, agent["uuid"], clean)
+    _disable_trace_scoring(client, h, agent["uuid"])
+    raw = _raw_key(client, h)
+
+    r = _set_trace_scoring(client, {"X-API-Key": raw}, agent["uuid"], True)
+    assert r.status_code == 200, r.text
+    assert _scoring_on(r.json()) is True
+
+
+def test_duplicate_agent_copies_the_trace_scoring_setting(client):
+    """The setting rides in the config, which a duplicate copies."""
+    h = _signup(client)
+    agent = _create_agent(client, h, f"flag-dup-{uuid.uuid4().hex[:6]}")
+    _disable_trace_scoring(client, h, agent["uuid"])
+
+    dup = client.post(
+        f"/agents/{agent['uuid']}/duplicate",
+        json={"name": f"flag-dup-copy-{uuid.uuid4().hex[:6]}"},
+        headers=h,
+    )
+    assert dup.status_code == 200, dup.text
+    copied = client.get(f"/agents/{dup.json()['uuid']}", headers=h).json()
+    assert _scoring_on(copied) is False
+
+
+def test_put_without_config_leaves_trace_scoring_off(client):
+    h = _signup(client)
+    agent = _create_agent(client, h, f"flag-keep-{uuid.uuid4().hex[:6]}")
+    _disable_trace_scoring(client, h, agent["uuid"])
+
+    r = client.put(
+        f"/agents/{agent['uuid']}",
+        json={"name": f"flag-keep-renamed-{uuid.uuid4().hex[:6]}"},
+        headers=h,
+    )
+    assert r.status_code == 200, r.text
+    assert _scoring_on(r.json()) is False
+
+
+def test_a_config_update_without_the_key_keeps_the_trace_scoring_setting(client):
+    """A config body replaces the stored config, so the setting is carried
+    forward or editing the URL would silently turn scoring back on."""
+    h = _signup(client)
+    agent = _create_agent(client, h, f"flag-keep-{uuid.uuid4().hex[:6]}")
+    _disable_trace_scoring(client, h, agent["uuid"])
+
+    config = client.get(f"/agents/{agent['uuid']}", headers=h).json()["config"]
+    config.pop("traces")
+    config["agent_url"] = "https://kept.example/agent"
+    moved = client.put(f"/agents/{agent['uuid']}", json={"config": config}, headers=h)
+
+    assert moved.status_code == 200, moved.text
+    assert moved.json()["config"]["agent_url"] == "https://kept.example/agent"
+    assert _scoring_on(moved.json()) is False
+    assert (
+        _scoring_on(client.get(f"/agents/{agent['uuid']}", headers=h).json()) is False
+    )
+
+
+def test_a_config_whose_traces_key_is_not_an_object_is_rejected_not_a_crash(client):
+    """The carry-forward writes into config.traces, so a client sending
+    something that is not an object there must not reach a 500."""
+    h = _signup(client)
+    agent = _create_agent(client, h, f"flag-bad-{uuid.uuid4().hex[:6]}")
+    _disable_trace_scoring(client, h, agent["uuid"])
+
+    for bad in (5, "x", [], None):
+        r = client.put(
+            f"/agents/{agent['uuid']}",
+            json={"config": {"agent_url": "https://b.example", "traces": bad}},
+            headers=h,
+        )
+        assert r.status_code < 500, (bad, r.status_code, r.text)
+
+    assert _scoring_on(client.get(f"/agents/{agent['uuid']}", headers=h).json()) is False
+
+
+def test_an_off_looking_value_turns_scoring_off(client):
+    """config is a free dict, so a value that reads as off must stop the judges
+    rather than be ignored for not being a literal false."""
+    h = _signup(client)
+    for value, expected in ((0, False), ("false", False), ("", False), (1, True)):
+        agent = _create_agent(client, h, f"flag-v-{uuid.uuid4().hex[:6]}")
+        r = client.put(
+            f"/agents/{agent['uuid']}",
+            json={"config": {"traces": {"scoring": {"enabled": value}}}},
+            headers=h,
+        )
+        assert r.status_code in (200, 422), (value, r.text)
+        if r.status_code == 200:
+            assert _scoring_on(r.json()) is expected, value
+
+
+def test_scoring_written_as_a_plain_false_turns_it_off(client):
+    """A client writing {"traces": {"scoring": false}} plainly means off, and
+    reading that as silence would keep charging them for judges."""
+    h = _signup(client)
+    agent = _create_agent(client, h, f"flag-plain-{uuid.uuid4().hex[:6]}")
+
+    r = client.put(
+        f"/agents/{agent['uuid']}",
+        json={"config": {"traces": {"scoring": False}}},
+        headers=h,
+    )
+
+    assert r.status_code == 200, r.text
+    assert _scoring_on(r.json()) is False
+    assert _scoring_on(client.get(f"/agents/{agent['uuid']}", headers=h).json()) is False

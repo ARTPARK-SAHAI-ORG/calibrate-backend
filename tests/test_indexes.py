@@ -22,6 +22,11 @@ EXPECTED_INDEXES = [
     "idx_annotation_jobs_annotator",
     "idx_traces_org_agent_active",
     "idx_traces_org_created",
+    "ux_trace_eval_active",
+    "ix_trace_eval_claim",
+    "ix_trace_eval_agent_status",
+    "ix_trace_eval_trace",
+    "ix_trace_eval_org_status",
 ]
 
 
@@ -139,3 +144,4 @@ def test_traces_default_list_sorts_from_the_index():
     )
     assert "idx_traces_org_created" in plan, plan
     assert "TEMP B-TREE" not in plan, plan
+

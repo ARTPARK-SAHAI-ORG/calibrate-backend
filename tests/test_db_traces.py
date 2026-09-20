@@ -2,7 +2,11 @@
 
 from __future__ import annotations
 
+import json
+import sqlite3
 import uuid
+
+import pytest
 
 import db
 
@@ -253,3 +257,151 @@ def test_create_allows_null_labels():
     assert row["message_id"] is None
     assert row["conversation_id"] is None
     assert db.get_trace(org, row["uuid"])["message_id"] is None
+
+
+def _insert_agent(org: str, *, interaction_type="conversation", config=None):
+    agent_uuid = str(uuid.uuid4())
+    with db.get_db_connection() as conn:
+        conn.execute(
+            "INSERT INTO agents "
+            "(uuid, org_uuid, name, config, interaction_type) "
+            "VALUES (?, ?, ?, ?, ?)",
+            (
+                agent_uuid,
+                org,
+                f"agent-{agent_uuid[:8]}",
+                json.dumps(config if config is not None else {}),
+                interaction_type,
+            ),
+        )
+        conn.commit()
+    return db.get_agent(agent_uuid)
+
+
+
+
+def _eligible_evaluator(org: str, evaluator_type="llm"):
+    ev = db.create_evaluator(
+        name=f"eval-{uuid.uuid4().hex[:6]}",
+        evaluator_type=evaluator_type,
+        org_uuid=org,
+        owner_user_id=str(uuid.uuid4()),
+    )
+    version = db.create_evaluator_version(ev, "openai/gpt-4.1", "Judge it.")
+    db.set_evaluator_live_version(ev, version["uuid"])
+    return ev, version["uuid"]
+
+
+def _combined_ingest(org: str, agent: dict, max_scored_traces: int = 10_000, **overrides):
+    payload = {
+        "message_id": None,
+        "conversation_id": "conv-1",
+        "input": [{"role": "user", "content": "hi"}],
+        "output": {"response": "hello", "tool_calls": None},
+        "metadata": None,
+    }
+    payload.update(overrides)
+    return db.create_trace_with_eval_run(
+        org_uuid=org, agent=agent, max_scored_traces=max_scored_traces, **payload
+    )
+
+
+def _runs_for(trace_uuid: str):
+    with db.get_db_connection() as conn:
+        return conn.execute(
+            "SELECT * FROM trace_eval_runs WHERE trace_uuid = ?",
+            (trace_uuid,),
+        ).fetchall()
+
+
+def test_ingest_writes_a_pending_run_with_no_plan_column():
+    org = _org()
+    agent = _insert_agent(org)
+    ev, _version_id = _eligible_evaluator(org, "llm")
+    db.add_evaluator_to_agent(agent["uuid"], ev)
+
+    trace = _combined_ingest(org, agent)
+    rows = _runs_for(trace["uuid"])
+    assert len(rows) == 1
+    run = rows[0]
+    assert run["status"] == "pending"
+    assert run["error"] is None
+    assert run["completed_at"] is None
+    assert run["org_uuid"] == org
+    assert run["agent_id"] == agent["uuid"]
+    assert "scoring_plan" not in run.keys()
+
+
+def test_trace_and_run_roll_back_together(monkeypatch):
+    org = _org()
+    agent = _insert_agent(org)
+    ev, _ = _eligible_evaluator(org, "llm")
+    db.add_evaluator_to_agent(agent["uuid"], ev)
+
+    def _boom(*_args, **_kwargs):
+        raise sqlite3.IntegrityError("forced mid-transaction failure")
+
+    monkeypatch.setattr(db, "_insert_trace_eval_run", _boom)
+
+    with pytest.raises(sqlite3.IntegrityError):
+        _combined_ingest(org, agent, message_id="m-atomic")
+
+    with db.get_db_connection() as conn:
+        trace_count = conn.execute(
+            "SELECT COUNT(*) c FROM traces WHERE org_uuid = ?", (org,)
+        ).fetchone()["c"]
+        run_count = conn.execute(
+            "SELECT COUNT(*) c FROM trace_eval_runs WHERE org_uuid = ?", (org,)
+        ).fetchone()["c"]
+    assert trace_count == 0
+    assert run_count == 0
+
+
+def test_create_trace_still_inserts_without_a_run():
+    org = _org()
+    agent = _insert_agent(org)
+    ev, _ = _eligible_evaluator(org, "llm")
+    db.add_evaluator_to_agent(agent["uuid"], ev)
+
+    row = db.create_trace(
+        org_uuid=org,
+        agent_id=agent["uuid"],
+        input=[{"role": "user", "content": "hi"}],
+        output={"response": "hello"},
+    )
+    assert _runs_for(row["uuid"]) == []
+
+
+def test_failed_runs_free_their_slot_in_the_cap():
+    org = _org()
+    agent = _insert_agent(org)
+    ev, _ = _eligible_evaluator(org, "llm")
+    db.add_evaluator_to_agent(agent["uuid"], ev)
+    first = _combined_ingest(org, agent, max_scored_traces=1)
+    run = _runs_for(first["uuid"])[0]
+    assert run["status"] == "pending"
+    with db.get_db_connection() as conn:
+        conn.execute("UPDATE trace_eval_runs SET status = 'failed' WHERE uuid = ?", (run["uuid"],))
+        conn.commit()
+
+    second = _combined_ingest(org, agent, max_scored_traces=1)
+
+    assert _runs_for(second["uuid"])[0]["status"] == "pending"
+
+
+def test_deleting_traces_frees_their_share_of_the_scoring_cap():
+    """A run counts against the cap through its trace, so a workspace that
+    scored its allowance and deleted it can score again."""
+    org = _org()
+    agent = _insert_agent(org)
+    ev, _ = _eligible_evaluator(org, "llm")
+    db.add_evaluator_to_agent(agent["uuid"], ev)
+    first = _combined_ingest(org, agent, max_scored_traces=1)
+    assert _runs_for(first["uuid"])[0]["status"] == "pending"
+    assert _combined_ingest(org, agent, max_scored_traces=1) and db.count_scored_traces(org) == 1
+
+    db.soft_delete_traces(org, trace_ids=[first["uuid"]])
+
+    assert db.count_scored_traces(org) == 0
+    later = _combined_ingest(org, agent, max_scored_traces=1)
+    assert _runs_for(later["uuid"])[0]["status"] == "pending"
