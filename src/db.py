@@ -10964,6 +10964,71 @@ _TRACE_SCORE_SELECT_SQL = """
 """
 
 
+def average_trace_scores(
+    org_uuid: str,
+    *,
+    agent_id: Optional[str] = None,
+    q: Optional[str] = None,
+    output_type: Optional[str] = None,
+    labels: Optional[List[str]] = None,
+) -> List[Dict[str, Any]]:
+    """Mean score per evaluator over the live traces matching the list filters.
+
+    Counts each trace's LATEST completed run only, so a trace counts once and
+    the numbers match what the list rows show. An evaluator that has scored
+    nothing in the filtered set is absent rather than present with a zero.
+    """
+    where, params = _trace_filters(org_uuid, agent_id, q, output_type, labels)
+    sql = f"""
+        WITH matched AS (
+            SELECT uuid FROM traces WHERE {where}
+        ),
+        latest AS (
+            SELECT r.uuid, ROW_NUMBER() OVER (
+                       PARTITION BY r.trace_uuid
+                        ORDER BY r.created_at DESC, r.id DESC
+                   ) AS rn
+              FROM trace_eval_runs r
+              JOIN matched ON matched.uuid = r.trace_uuid
+             WHERE r.org_uuid = ? AND r.status = 'completed'
+        )
+        SELECT ts.evaluator_uuid AS evaluator_uuid,
+               ts.output_type AS output_type,
+               COUNT(*) AS traces_scored,
+               AVG(ts.value) AS average,
+               MAX(e.name) AS evaluator_name,
+               MAX(ev.output_config) AS output_config
+          FROM latest
+          JOIN trace_eval_scores ts ON ts.run_uuid = latest.uuid
+          LEFT JOIN evaluators e ON e.uuid = ts.evaluator_uuid
+          LEFT JOIN evaluator_versions ev ON ev.uuid = ts.evaluator_version_id
+         WHERE latest.rn = 1
+         GROUP BY ts.evaluator_uuid, ts.output_type
+         ORDER BY MAX(e.name), ts.evaluator_uuid
+    """
+    with get_db_connection() as conn:
+        rows = conn.execute(sql, params + [org_uuid]).fetchall()
+    summaries = []
+    for row in rows:
+        scale_min, scale_max = (
+            trace_scoring.scale_bounds_from_output_config(row["output_config"])
+            if row["output_type"] == "rating"
+            else (None, None)
+        )
+        summaries.append(
+            {
+                "evaluator_uuid": row["evaluator_uuid"],
+                "name": row["evaluator_name"] or row["evaluator_uuid"],
+                "output_type": row["output_type"],
+                "traces_scored": row["traces_scored"],
+                "average": row["average"],
+                "scale_min": scale_min,
+                "scale_max": scale_max,
+            }
+        )
+    return summaries
+
+
 def get_latest_trace_run_summaries(
     org_uuid: str, trace_uuids: List[str]
 ) -> Dict[str, Dict[str, Any]]:

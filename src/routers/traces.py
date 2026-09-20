@@ -26,6 +26,7 @@ from db import (
     _trace_iso,
     add_test_to_agent,
     bulk_create_tests,
+    average_trace_scores,
     count_live_traces,
     count_scored_traces,
     create_trace_with_eval_run,
@@ -642,7 +643,41 @@ async def ingest_trace(
     }
 
 
-@router.get("", response_model=PaginatedResponse[TraceSummary], summary="List traces")
+class TraceScoreAverage(BaseModel):
+    evaluator_uuid: str = Field(
+        min_length=36,
+        max_length=36,
+        description="ID of the evaluator these numbers are for",
+        examples=[_EXAMPLE_TRACE_UUID],
+    )
+    name: str = Field(
+        description="Name of the evaluator. Uses the last stored name if it has been deleted"
+    )
+    output_type: OutputTypeLiteral = Field(description=OUTPUT_TYPE_DESCRIPTION)
+    traces_scored: int = Field(
+        description="How many of the matching traces this evaluator scored"
+    )
+    average: float = Field(
+        description="Mean of those scores. A binary evaluator averages 0 and 1, so its mean is the share that passed"
+    )
+    scale_min: Optional[float] = Field(
+        None, description="Lowest value on a rating scale"
+    )
+    scale_max: Optional[float] = Field(
+        None, description="Highest value on a rating scale"
+    )
+
+
+class TraceListResponse(PaginatedResponse[TraceSummary]):
+    """The page, plus the averages when `include_score_averages` asked for them."""
+
+    score_averages: Optional[List[TraceScoreAverage]] = Field(
+        None,
+        description="One entry per evaluator that scored at least one matching trace, averaged over every matching trace rather than this page. Ask for it with `include_score_averages`",
+    )
+
+
+@router.get("", response_model=TraceListResponse, summary="List traces")
 async def list_traces_endpoint(
     ctx: OrgContext = Depends(get_current_org),
     pagination: PaginationParams = Depends(),
@@ -660,6 +695,10 @@ async def list_traces_endpoint(
     labels: Optional[List[TraceLabel]] = Query(
         None,
         description="Return only traces carrying at least one of these labels. Repeat the parameter for each label",
+    ),
+    include_score_averages: bool = Query(
+        False,
+        description="Also return each evaluator's mean score over every matching trace, not just this page. Costs a pass over those traces, so ask for it when the filters change rather than on every page",
     ),
 ):
     """List ingested traces, newest first"""
@@ -687,11 +726,20 @@ async def list_traces_endpoint(
     scoring = get_latest_trace_run_summaries(
         ctx.org_uuid, [row["uuid"] for row in rows]
     )
-    return page_envelope(
+    body = page_envelope(
         [_to_summary(row, scoring.get(row["uuid"])) for row in rows],
         total,
         pagination,
     )
+    if include_score_averages:
+        body["score_averages"] = average_trace_scores(
+            ctx.org_uuid,
+            agent_id=agent_id,
+            q=q,
+            output_type=output_type,
+            labels=labels,
+        )
+    return body
 
 
 class TraceUsageResponse(BaseModel):

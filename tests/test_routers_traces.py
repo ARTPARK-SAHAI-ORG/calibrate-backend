@@ -434,7 +434,8 @@ def test_list_and_detail_roundtrip(client):
     listed = client.get("/traces", headers=h)
     assert listed.status_code == 200
     body = listed.json()
-    assert set(body) == {"items", "total", "limit", "offset"}
+    assert set(body) == {"items", "total", "limit", "offset", "score_averages"}
+    assert body["score_averages"] is None
     assert body["total"] == 2 and body["limit"] == 50 and body["offset"] == 0
     # Newest first.
     assert [item["message_id"] for item in body["items"]] == [mid_b, mid_a]
@@ -2730,3 +2731,132 @@ def test_usage_is_scoped_to_the_callers_workspace(client):
 
     assert client.get("/traces/usage", headers=other_h).json()["traces_stored"] == 0
     assert client.get("/traces/usage", headers=h).json()["traces_stored"] == 1
+
+
+_EVAL_A = str(uuid.uuid4())
+_VER_A = str(uuid.uuid4())
+_EVAL_B = str(uuid.uuid4())
+
+
+def _averages(client, h, **params):
+    r = client.get(
+        "/traces", headers=h, params={**params, "include_score_averages": True}
+    )
+    assert r.status_code == 200, r.text
+    return {e["evaluator_uuid"]: e for e in r.json()["score_averages"]}
+
+
+def test_score_averages_mean_each_evaluator_over_the_matching_traces(client):
+    h, agent_id = _signup_with_agent(client)
+    _disable_auto_score(client, h, agent_id)
+    for value in (1, 0, 1):
+        trace = _post_trace(client, h, _payload(agent_id, _mid()))
+        run = _insert_run(_org_of(agent_id), trace["uuid"], status="completed",
+                          completed_at=_at(9), agent_id=agent_id)
+        _insert_score(run, evaluator_uuid=_EVAL_A, evaluator_version_id=_VER_A, value=value)
+        _insert_score(run, evaluator_uuid=_EVAL_B, evaluator_version_id=str(uuid.uuid4()),
+                      value=4, output_type="rating")
+
+    got = _averages(client, h)
+
+    assert got[_EVAL_A]["traces_scored"] == 3
+    assert got[_EVAL_A]["average"] == pytest.approx(2 / 3)
+    assert got[_EVAL_A]["output_type"] == "binary"
+    assert got[_EVAL_B]["average"] == 4
+    assert got[_EVAL_B]["traces_scored"] == 3
+
+
+def test_score_averages_count_a_trace_once_through_its_latest_run(client):
+    h, agent_id = _signup_with_agent(client)
+    _disable_auto_score(client, h, agent_id)
+    org = _org_of(agent_id)
+    trace = _post_trace(client, h, _payload(agent_id, _mid()))
+    older = _insert_run(org, trace["uuid"], status="completed", created_at=_at(1),
+                        completed_at=_at(2), agent_id=agent_id)
+    newer = _insert_run(org, trace["uuid"], status="completed", created_at=_at(5),
+                        completed_at=_at(6), agent_id=agent_id)
+    _insert_score(older, evaluator_uuid=_EVAL_A, evaluator_version_id=_VER_A, value=0)
+    _insert_score(newer, evaluator_uuid=_EVAL_A, evaluator_version_id=_VER_A, value=1)
+
+    got = _averages(client, h)
+
+    assert got[_EVAL_A]["traces_scored"] == 1
+    assert got[_EVAL_A]["average"] == 1
+
+
+def test_score_averages_honour_the_list_filters_and_skip_deleted_traces(client):
+    h, agent_id = _signup_with_agent(client)
+    _disable_auto_score(client, h, agent_id)
+    org = _org_of(agent_id)
+    kept = _post_trace(client, h, _payload(agent_id, _mid()))
+    gone = _post_trace(client, h, _payload(agent_id, _mid()))
+    for trace, value in ((kept, 1), (gone, 0)):
+        run = _insert_run(org, trace["uuid"], status="completed",
+                          completed_at=_at(9), agent_id=agent_id)
+        _insert_score(run, evaluator_uuid=_EVAL_A, evaluator_version_id=_VER_A, value=value)
+    assert _averages(client, h)[_EVAL_A]["average"] == pytest.approx(0.5)
+
+    client.post("/traces/bulk-delete", json={"trace_ids": [gone["uuid"]]}, headers=h)
+
+    got = _averages(client, h)
+    assert got[_EVAL_A]["traces_scored"] == 1
+    assert got[_EVAL_A]["average"] == 1
+    assert _averages(client, h, agent_id=str(uuid.uuid4())) == {}
+
+
+def test_score_averages_ignore_runs_that_did_not_complete(client):
+    h, agent_id = _signup_with_agent(client)
+    _disable_auto_score(client, h, agent_id)
+    org = _org_of(agent_id)
+    trace = _post_trace(client, h, _payload(agent_id, _mid()))
+    pending = _insert_run(org, trace["uuid"], status="pending", agent_id=agent_id)
+    _insert_score(pending, evaluator_uuid=_EVAL_A, evaluator_version_id=_VER_A, value=0)
+
+    assert _averages(client, h) == {}
+
+
+def test_score_averages_are_scoped_to_the_callers_workspace(client):
+    h, agent_id = _signup_with_agent(client)
+    _disable_auto_score(client, h, agent_id)
+    trace = _post_trace(client, h, _payload(agent_id, _mid()))
+    run = _insert_run(_org_of(agent_id), trace["uuid"], status="completed",
+                      completed_at=_at(9), agent_id=agent_id)
+    _insert_score(run, evaluator_uuid=_EVAL_A, evaluator_version_id=_VER_A, value=1)
+    other_h, _ = _signup_with_agent(client)
+
+    assert _averages(client, other_h) == {}
+    assert _averages(client, h)[_EVAL_A]["traces_scored"] == 1
+
+
+def test_score_averages_refuse_more_labels_than_a_trace_can_carry(client):
+    """The existing list guard still applies when the averages are asked for."""
+    h, _ = _signup_with_agent(client)
+
+    r = client.get(
+        "/traces",
+        headers=h,
+        params={
+            "labels": [f"l{i}" for i in range(MAX_LABELS + 1)],
+            "include_score_averages": True,
+        },
+    )
+
+    assert r.status_code == 422, r.text
+
+
+def test_the_list_omits_score_averages_unless_they_are_asked_for(client):
+    """Averaging passes over every matching trace, not just the page, so paging
+    must not pay for it."""
+    h, agent_id = _signup_with_agent(client)
+    _disable_auto_score(client, h, agent_id)
+    trace = _post_trace(client, h, _payload(agent_id, _mid()))
+    run = _insert_run(_org_of(agent_id), trace["uuid"], status="completed",
+                      completed_at=_at(9), agent_id=agent_id)
+    _insert_score(run, evaluator_uuid=_EVAL_A, evaluator_version_id=_VER_A, value=1)
+
+    plain = client.get("/traces", headers=h)
+
+    assert plain.status_code == 200, plain.text
+    assert plain.json()["score_averages"] is None
+    assert len(plain.json()["items"]) == 1
+    assert _averages(client, h)[_EVAL_A]["average"] == 1
