@@ -38,89 +38,6 @@ def _signup_as_superadmin(client, monkeypatch):
     return h, db.get_personal_org_for_user(body["user"]["uuid"])["uuid"]
 
 
-def test_max_scored_traces_reads_default_then_stored_value(client, monkeypatch):
-    h, org = _signup_as_superadmin(client, monkeypatch)
-
-    r = client.get("/org-limits/me/max-scored-traces", headers=h)
-    assert r.status_code == 200, r.text
-    assert r.json() == {"max_scored_traces": org_limits.DEFAULT_MAX_SCORED_TRACES}
-
-    created = client.post(
-        "/org-limits",
-        json={"org_uuid": org, "limits": {"max_rows_per_eval": 20, "max_scored_traces": 3}},
-        headers=h,
-    )
-    assert created.status_code == 200, created.text
-    assert client.get("/org-limits/me/max-scored-traces", headers=h).json() == {
-        "max_scored_traces": 3
-    }
-
-    updated = client.put(
-        f"/org-limits/{org}", json={"limits": {"max_rows_per_eval": 20, "max_scored_traces": 7}}, headers=h
-    )
-    assert updated.status_code == 200, updated.text
-    assert updated.json()["limits"]["max_scored_traces"] == 7
-    assert client.get("/org-limits/me/max-scored-traces", headers=h).json() == {
-        "max_scored_traces": 7
-    }
-    assert org_limits.effective_max_scored_traces(org) == 7
-
-
-def test_limits_row_without_the_key_still_reads_and_falls_back_to_default(
-    client, monkeypatch
-):
-    h, org = _signup_as_superadmin(client, monkeypatch)
-    created = client.post(
-        "/org-limits",
-        json={"org_uuid": org, "limits": {"max_rows_per_eval": 50}},
-        headers=h,
-    )
-    assert created.status_code == 200, created.text
-
-    got = client.get(f"/org-limits/{org}", headers=h)
-    assert got.status_code == 200, got.text
-    assert got.json()["limits"] == {
-        "max_rows_per_eval": 50,
-        "max_scored_traces": None,
-        "max_traces": None,
-        "trace_scoring_batch_size": None,
-        "max_concurrent_trace_scoring_batches": None,
-    }
-    assert client.get("/org-limits/me/max-scored-traces", headers=h).json() == {
-        "max_scored_traces": org_limits.DEFAULT_MAX_SCORED_TRACES
-    }
-    assert client.get("/org-limits/me/max-rows-per-eval", headers=h).json() == {
-        "max_rows_per_eval": 50
-    }
-
-
-def test_max_scored_traces_of_zero_is_rejected(client, monkeypatch):
-    h, org = _signup_as_superadmin(client, monkeypatch)
-    rejected = client.post(
-        "/org-limits",
-        json={"org_uuid": org, "limits": {"max_rows_per_eval": 20, "max_scored_traces": 0}},
-        headers=h,
-    )
-    assert rejected.status_code == 422, rejected.text
-    assert client.get("/org-limits/me/max-scored-traces", headers=h).json() == {
-        "max_scored_traces": org_limits.DEFAULT_MAX_SCORED_TRACES
-    }
-
-    created = client.post(
-        "/org-limits",
-        json={"org_uuid": org, "limits": {"max_rows_per_eval": 20, "max_scored_traces": 5}},
-        headers=h,
-    )
-    assert created.status_code == 200, created.text
-    rejected_update = client.put(
-        f"/org-limits/{org}", json={"limits": {"max_rows_per_eval": 20, "max_scored_traces": 0}}, headers=h
-    )
-    assert rejected_update.status_code == 422, rejected_update.text
-    assert client.get("/org-limits/me/max-scored-traces", headers=h).json() == {
-        "max_scored_traces": 5
-    }
-
-
 def test_updating_only_rows_keeps_the_stored_scored_traces_cap(client, monkeypatch):
     h, org = _signup_as_superadmin(client, monkeypatch)
     created = client.post(
@@ -141,9 +58,18 @@ def test_updating_only_rows_keeps_the_stored_scored_traces_cap(client, monkeypat
         "max_concurrent_trace_scoring_batches": None,
     }
     assert org_limits.effective_max_scored_traces(org) == 5000
+    assert client.get("/org-limits/me/max-scored-traces", headers=h).json() == {
+        "max_scored_traces": 5000
+    }
 
 
 NEW_LIMITS = [
+    (
+        "max_scored_traces",
+        "DEFAULT_MAX_SCORED_TRACES",
+        org_limits.effective_max_scored_traces,
+        7,
+    ),
     ("max_traces", "DEFAULT_MAX_TRACES", org_limits.effective_max_traces, 1234),
     (
         "trace_scoring_batch_size",

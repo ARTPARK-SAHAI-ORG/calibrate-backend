@@ -112,19 +112,15 @@ def trace_evaluator_passed(
 
 
 @dataclass(frozen=True)
-class EvaluatorPin:
-    """One evaluator and the version of it a run is scored against."""
+class TraceScoringEligible:
+    """An evaluator that can score this agent's traces, at its live version,
+    with the execution definition the CLI payload is built from. Resolution
+    already reads both rows, so nothing re-reads them to build it."""
 
     evaluator_uuid: str
     evaluator_version_id: str
-
-
-@dataclass(frozen=True)
-class TraceScoringEligible:
-    """An evaluator that can score this agent's traces, at its live version."""
-
-    pin: EvaluatorPin
     name: str
+    execution: dict[str, Any]
 
 
 @dataclass(frozen=True)
@@ -212,11 +208,18 @@ def resolve_trace_scoring(
             continue
         eligible.append(
             TraceScoringEligible(
-                pin=EvaluatorPin(
-                    evaluator_uuid=ev["uuid"],
-                    evaluator_version_id=version["uuid"],
-                ),
+                evaluator_uuid=ev["uuid"],
+                evaluator_version_id=version["uuid"],
                 name=name,
+                execution={
+                    "uuid": ev["uuid"],
+                    "name": name,
+                    "output_type": ev.get("output_type") or "binary",
+                    "judge_model": version.get("judge_model"),
+                    "system_prompt": version.get("system_prompt") or "",
+                    "output_config": version.get("output_config"),
+                    "evaluator_version_id": version["uuid"],
+                },
             )
         )
     return TraceScoringResolution(
@@ -279,57 +282,6 @@ class BatchEvaluators:
     evaluation_type: TraceScorableEvaluationType
     hydrated: list[dict[str, Any]]
 
-    @property
-    def pins(self) -> list[EvaluatorPin]:
-        return [
-            EvaluatorPin(
-                evaluator_uuid=ev["uuid"],
-                evaluator_version_id=ev["evaluator_version_id"],
-            )
-            for ev in self.hydrated
-        ]
-
-
-def hydrate_eligible_evaluators(
-    eligible: Sequence[TraceScoringEligible],
-) -> list[dict[str, Any]]:
-    """Load execution defs for each eligible evaluator's live version.
-
-    An evaluator whose version disappeared between resolution and this read is
-    dropped rather than failing the batch.
-    """
-    from db import get_evaluator_versions_by_uuids, get_evaluators_by_uuids
-
-    versions = get_evaluator_versions_by_uuids(
-        [item.pin.evaluator_version_id for item in eligible]
-    )
-    evaluators = get_evaluators_by_uuids(
-        [item.pin.evaluator_uuid for item in eligible], include_deleted=True
-    )
-    hydrated: list[dict[str, Any]] = []
-    for item in eligible:
-        version = versions.get(item.pin.evaluator_version_id)
-        evaluator = evaluators.get(item.pin.evaluator_uuid)
-        if (
-            version is None
-            or evaluator is None
-            or version.get("evaluator_id") != item.pin.evaluator_uuid
-        ):
-            continue
-        hydrated.append(
-            {
-                "uuid": evaluator["uuid"],
-                "name": evaluator.get("name") or evaluator["uuid"],
-                "output_type": evaluator.get("output_type") or "binary",
-                "judge_model": version.get("judge_model"),
-                "system_prompt": version.get("system_prompt") or "",
-                "output_config": version.get("output_config"),
-                "evaluator_version_id": version["uuid"],
-            }
-        )
-    return hydrated
-
-
 def resolve_batch_evaluators(
     agent_id: str,
 ) -> BatchEvaluators | TraceEvalSkipReason | TraceEvalSettleSkipReason:
@@ -351,7 +303,7 @@ def resolve_batch_evaluators(
     skip = resolution.skip_reason
     if skip is not None:
         return skip
-    hydrated = hydrate_eligible_evaluators(resolution.eligible)
+    hydrated = [item.execution for item in resolution.eligible]
     if not hydrated:
         return "no_usable_evaluators"
     return BatchEvaluators(
@@ -489,7 +441,6 @@ def _typed_score(judgement: dict[str, Any], output_type: str) -> dict[str, Any] 
 def map_item_scores(
     entry: dict[str, Any],
     *,
-    pins: Sequence[EvaluatorPin],
     name_to_uuid: dict[str, str],
     hydrated_by_uuid: dict[str, dict[str, Any]],
 ) -> list[dict[str, Any]] | None:
@@ -500,7 +451,7 @@ def map_item_scores(
     carries an unreadable verdict, or covers only part of the snapshot leaves
     the run open for a retry rather than settling it half-scored.
     """
-    expected = [pin.evaluator_uuid for pin in pins]
+    expected = hydrated_by_uuid.keys()
     metrics = entry.get("metrics")
     if not isinstance(metrics, dict):
         return None
@@ -870,7 +821,6 @@ def process_claimed_runs(
         return
 
     indexed = index_cli_results(cli_result.results)
-    pins = evaluators.pins
     hydrated_by_uuid = {ev["uuid"]: ev for ev in evaluators.hydrated}
     scored: dict[str, list[dict[str, Any]]] = {}
     for item in prepared:
@@ -879,7 +829,6 @@ def process_claimed_runs(
             continue
         scores = map_item_scores(
             entry,
-            pins=pins,
             name_to_uuid=manifest,
             hydrated_by_uuid=hydrated_by_uuid,
         )

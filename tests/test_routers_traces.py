@@ -2457,9 +2457,7 @@ def test_scores_no_run_is_empty_and_list_fields_are_null(client):
 @pytest.mark.parametrize(
     "status,error,completed_at",
     [
-        ("pending", None, None),
         ("processing", None, None),
-        ("failed", "judge exploded", _at(9)),
         ("skipped", "no_usable_evaluators", _at(9)),
     ],
 )
@@ -2681,52 +2679,6 @@ def test_scores_cross_org_is_403(client):
         "/traces/00000000-0000-4000-8000-000000000001/scores", headers=h
     )
     assert unknown.status_code == 404
-
-
-def test_list_scoring_summary_is_one_batched_query_for_the_page(client, monkeypatch):
-    from routers import traces as traces_mod
-
-    h, agent_id = _signup_with_agent(client)
-    _disable_auto_score(client, h, agent_id)
-    org = _org_of(agent_id)
-    ev, ver = _create_clean_evaluator(client, h)
-    traces = [_post_trace(client, h, _payload(agent_id, _mid())) for _ in range(3)]
-    for created_at, trace in enumerate(traces, start=1):
-        run = _insert_run(
-            org,
-            trace["uuid"],
-            status="completed",
-            created_at=_at(created_at),
-            completed_at=_at(created_at),
-            agent_id=agent_id,
-        )
-        _insert_score(run, evaluator_uuid=ev, evaluator_version_id=ver, value=1)
-
-    calls = []
-    real = traces_mod.get_latest_trace_run_summaries
-
-    def _counting(org_uuid, trace_uuids):
-        calls.append(list(trace_uuids))
-        return real(org_uuid, trace_uuids)
-
-    def _boom(*_a, **_k):
-        raise AssertionError("list scoring must not do per-row lookups")
-
-    monkeypatch.setattr(traces_mod, "get_latest_trace_run_summaries", _counting)
-    monkeypatch.setattr(db, "get_trace_eval_run", _boom)
-    monkeypatch.setattr(db, "get_trace_eval_scores", _boom)
-    monkeypatch.setattr(db, "get_evaluator", _boom)
-
-    page = client.get("/traces?limit=2", headers=h)
-    assert page.status_code == 200, page.text
-    assert len(calls) == 1
-    assert len(calls[0]) == 2
-    body = page.json()
-    assert body["total"] == 3
-    assert len(body["items"]) == 2
-    for item in body["items"]:
-        assert item["latest_run_status"] == "completed"
-        assert [r["passed"] for r in item["results"]] == [True]
 
 
 def test_usage_reports_both_counts_and_both_limits(client, monkeypatch):

@@ -10858,16 +10858,6 @@ def _delete_pending_trace_eval_runs(
     return cursor.rowcount or 0
 
 
-def delete_pending_trace_eval_runs_for_agent(
-    agent_id: str, org_uuid: Optional[str] = None
-) -> int:
-    """Commit a pending-run delete for this agent. See `_delete_pending_trace_eval_runs`."""
-    with get_db_connection() as conn:
-        deleted = _delete_pending_trace_eval_runs(conn.cursor(), agent_id, org_uuid)
-        conn.commit()
-        return deleted
-
-
 def _trace_scoring_skip_reason_on(
     cur: sqlite3.Cursor, org_uuid: str, trace_uuid: str, agent_id: str
 ) -> Optional[trace_scoring.TraceEvalSettleSkipReason]:

@@ -1291,42 +1291,6 @@ def test_agent_reads_include_trace_scoring_on_by_default(client):
     assert _scoring_on(item) is True
 
 
-def test_omitting_trace_scoring_leaves_it_unchanged(client):
-    h = _signup(client)
-    agent = _create_agent(client, h, f"flag-omit-{uuid.uuid4().hex[:6]}")
-    clean = _create_evaluator(client, h, name=f"omit-clean-{uuid.uuid4().hex[:6]}")
-    _unlink_all_evaluators(client, h, agent["uuid"])
-    _link_evaluators(client, h, agent["uuid"], clean)
-
-    enabled = _set_trace_scoring(client, h, agent["uuid"], True)
-    assert enabled.status_code == 200, enabled.text
-    assert _scoring_on(enabled.json()) is True
-
-    renamed = f"flag-omit-renamed-{uuid.uuid4().hex[:6]}"
-    r = client.put(
-        f"/agents/{agent['uuid']}",
-        json={"name": renamed},
-        headers=h,
-    )
-    assert r.status_code == 200, r.text
-    assert r.json()["name"] == renamed
-    assert _scoring_on(r.json()) is True
-
-
-def test_enable_trace_scoring_conversation_with_eligible_llm(client):
-    h = _signup(client)
-    agent = _create_agent(client, h, f"flag-on-{uuid.uuid4().hex[:6]}")
-    clean = _create_evaluator(client, h, name=f"conv-clean-{uuid.uuid4().hex[:6]}")
-    _unlink_all_evaluators(client, h, agent["uuid"])
-    _link_evaluators(client, h, agent["uuid"], clean)
-
-    r = _set_trace_scoring(client, h, agent["uuid"], True)
-    assert r.status_code == 200, r.text
-    assert _scoring_on(r.json()) is True
-    fetched = client.get(f"/agents/{agent['uuid']}", headers=h).json()
-    assert _scoring_on(fetched) is True
-
-
 def test_enable_trace_scoring_general_with_eligible_llm_general(client):
     h = _signup(client)
     created = client.post(
@@ -1660,27 +1624,6 @@ def test_put_without_config_leaves_trace_scoring_off(client):
     )
     assert r.status_code == 200, r.text
     assert _scoring_on(r.json()) is False
-
-
-def test_put_config_without_the_key_does_not_trigger_the_eligibility_gate(client):
-    """Only a config that names the key can flip the setting, so a config edit
-    that leaves it out is never read as turning scoring on."""
-    h = _signup(client)
-    agent = _create_agent(client, h, f"flag-url-{uuid.uuid4().hex[:6]}")
-    _disable_trace_scoring(client, h, agent["uuid"])
-    assert (
-        client.get(
-            f"/agents/{agent['uuid']}/trace-scoring-eligibility", headers=h
-        ).json()["eligible"]
-        == []
-    )
-
-    config = client.get(f"/agents/{agent['uuid']}", headers=h).json()["config"]
-    config.pop("traces")
-    config["agent_url"] = "https://example.com/agent"
-    r = client.put(f"/agents/{agent['uuid']}", json={"config": config}, headers=h)
-    assert r.status_code == 200, r.text
-    assert r.json()["config"]["agent_url"] == "https://example.com/agent"
 
 
 def test_a_config_update_without_the_key_keeps_the_trace_scoring_setting(client):

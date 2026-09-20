@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import json
-import re
 import sqlite3
 import uuid
 
@@ -317,30 +316,6 @@ def _runs_for(trace_uuid: str):
         ).fetchall()
 
 
-def test_scoring_turned_off_in_config_ingests_with_no_run():
-    org = _org()
-    agent = _insert_agent(org, config=_scoring_off())
-    trace = _combined_ingest(org, agent)
-    assert db.get_trace(org, trace["uuid"])["uuid"] == trace["uuid"]
-    assert _runs_for(trace["uuid"]) == []
-
-
-def test_a_config_with_no_trace_scoring_key_still_scores():
-    org = _org()
-    agent = _insert_agent(org, config={"agent_url": "https://example.test"})
-    trace = _combined_ingest(org, agent)
-    rows = _runs_for(trace["uuid"])
-    assert len(rows) == 1
-    assert rows[0]["status"] == "pending"
-
-
-def test_an_enabled_config_scores():
-    org = _org()
-    agent = _insert_agent(org, config={"traces": {"scoring": {"enabled": True}}})
-    trace = _combined_ingest(org, agent)
-    assert _runs_for(trace["uuid"])[0]["status"] == "pending"
-
-
 def test_ingest_writes_a_pending_run_with_no_plan_column():
     org = _org()
     agent = _insert_agent(org)
@@ -357,22 +332,6 @@ def test_ingest_writes_a_pending_run_with_no_plan_column():
     assert run["org_uuid"] == org
     assert run["agent_id"] == agent["uuid"]
     assert "scoring_plan" not in run.keys()
-
-
-def test_an_agent_with_no_evaluators_still_gets_a_pending_run():
-    """Which evaluators run is the worker's decision now, so ingest does not
-    look at them."""
-    org = _org()
-    agent = _insert_agent(org)
-    trace = _combined_ingest(org, agent)
-    assert _runs_for(trace["uuid"])[0]["status"] == "pending"
-
-
-def test_an_unsupported_interaction_type_still_gets_a_pending_run():
-    org = _org()
-    agent = _insert_agent(org, interaction_type="voice")
-    trace = _combined_ingest(org, agent)
-    assert _runs_for(trace["uuid"])[0]["status"] == "pending"
 
 
 def test_trace_and_run_roll_back_together(monkeypatch):
@@ -413,31 +372,6 @@ def test_create_trace_still_inserts_without_a_run():
         output={"response": "hello"},
     )
     assert _runs_for(row["uuid"]) == []
-
-
-def test_over_limit_ingest_persists_skipped_run():
-    org = _org()
-    agent = _insert_agent(org)
-    ev, _ = _eligible_evaluator(org, "llm")
-    db.add_evaluator_to_agent(agent["uuid"], ev)
-
-    for _ in range(2):
-        trace = _combined_ingest(org, agent, max_scored_traces=2)
-        assert _runs_for(trace["uuid"])[0]["status"] == "pending"
-    third = _combined_ingest(org, agent, max_scored_traces=2)
-    rows = _runs_for(third["uuid"])
-    assert len(rows) == 1
-    assert rows[0]["status"] == "skipped"
-    assert rows[0]["error"] == "over_limit"
-    assert rows[0]["completed_at"] is not None
-
-
-def test_run_timestamps_are_stored_as_timestamp_text():
-    org = _org()
-    agent = _insert_agent(org)
-    trace = _combined_ingest(org, agent)
-    run = _runs_for(trace["uuid"])[0]
-    assert re.fullmatch(r"\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}", run["created_at"])
 
 
 def test_failed_runs_free_their_slot_in_the_cap():

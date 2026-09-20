@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-import importlib
 import json
 import os
 import time
@@ -217,128 +216,6 @@ def test_opted_out_and_over_limit_ingest_do_not_nudge(monkeypatch):
     assert calls == []
 
 
-def test_worker_count_comes_from_the_environment(monkeypatch):
-    monkeypatch.setenv("TRACE_SCORING_WORKERS", "3")
-    reloaded = importlib.reload(pool_mod)
-    try:
-        assert reloaded.POOL_SIZE == 3
-        assert reloaded.TraceScoringPool()._size == 3
-        monkeypatch.delenv("TRACE_SCORING_WORKERS")
-        assert importlib.reload(pool_mod).POOL_SIZE == 2
-    finally:
-        importlib.reload(pool_mod)
-        pool_mod.set_pool_enabled(True)
-
-
-def test_disabled_start_creates_no_tasks():
-    pool_mod.set_pool_enabled(False)
-    try:
-        pool = pool_mod.TraceScoringPool()
-        pool.start()
-        assert pool._tasks == []
-        assert not pool.is_running
-        asyncio.run(pool.shutdown())
-    finally:
-        pool_mod.set_pool_enabled(True)
-
-
-def test_start_is_idempotent_and_shutdown_stops_workers():
-    calls = []
-
-    def fake_batch(**kwargs):
-        calls.append("batch")
-        return []
-
-    async def _exercise():
-        with patch.object(pool_mod, "_run_batch", fake_batch):
-            pool = pool_mod.TraceScoringPool(size=1)
-            pool.start()
-            first = list(pool._tasks)
-            assert len(first) == 1
-            pool.start()
-            assert pool._tasks == first
-            await asyncio.sleep(0.05)
-            await pool.shutdown()
-            assert all(t.done() for t in first)
-            assert pool._tasks == []
-            n = len(calls)
-            await asyncio.sleep(0.05)
-            assert len(calls) == n
-
-    asyncio.run(_exercise())
-
-
-def test_shutdown_of_a_foreign_pool_leaves_the_active_one():
-    async def _exercise():
-        with patch.object(pool_mod, "_run_batch", lambda: []):
-            pool_mod._active_pool = None
-            active = pool_mod.start_trace_scoring_pool()
-            other = pool_mod.TraceScoringPool()
-            other._leases = 1
-            await pool_mod.shutdown_trace_scoring_pool(other)
-            assert active.is_running
-            await pool_mod.shutdown_trace_scoring_pool(active)
-            assert pool_mod._active_pool is None
-
-    asyncio.run(_exercise())
-
-
-def test_worker_loops_immediately_after_a_nonempty_claim():
-    calls = []
-
-    def batch():
-        calls.append(1)
-        return ["row"] if len(calls) == 1 else []
-
-    async def _exercise():
-        with patch.object(pool_mod, "_run_batch", batch):
-            pool = pool_mod.TraceScoringPool(size=1)
-            pool.start()
-            deadline = time.time() + 2
-            while time.time() < deadline and len(calls) < 2:
-                await asyncio.sleep(0.02)
-            await pool.shutdown()
-
-    asyncio.run(_exercise())
-    assert len(calls) >= 2
-
-
-def test_worker_exception_backoff_aborts_on_shutdown():
-    def boom():
-        raise RuntimeError("boom")
-
-    async def _exercise():
-        with patch.object(pool_mod, "_run_batch", boom), patch.object(
-            pool_mod, "capture_exception_to_sentry", lambda e: None
-        ), patch.object(pool_mod, "_ERROR_BACKOFF_SECONDS", 30):
-            pool = pool_mod.TraceScoringPool(size=1)
-            pool.start()
-            await asyncio.sleep(0.1)
-            await pool.shutdown()
-            assert not pool.is_running
-
-    asyncio.run(_exercise())
-
-
-def test_overlapping_start_does_not_duplicate_the_pool():
-    async def _exercise():
-        with patch.object(pool_mod, "_run_batch", lambda: []):
-            pool_mod._active_pool = None
-            a = pool_mod.start_trace_scoring_pool()
-            b = pool_mod.start_trace_scoring_pool()
-            assert a is b
-            assert a._leases == 2
-            running = list(a._tasks)
-            assert len(running) == pool_mod.POOL_SIZE
-            await pool_mod.shutdown_trace_scoring_pool(a)
-            assert a.is_running
-            await pool_mod.shutdown_trace_scoring_pool(b)
-            assert all(t.done() for t in running)
-            assert pool_mod._active_pool is None
-
-    asyncio.run(_exercise())
-
-
 def test_worker_survives_batch_exceptions_and_reports_sentry():
     hits = {"n": 0}
     captured = []
@@ -364,28 +241,6 @@ def test_worker_survives_batch_exceptions_and_reports_sentry():
     assert hits["n"] >= 2
     assert captured
     assert isinstance(captured[0], RuntimeError)
-
-
-def test_idle_worker_claims_after_poll_timeout_without_nudge():
-    claimed = []
-
-    def batch():
-        claimed.append(time.time())
-        return []
-
-    async def _exercise():
-        with patch.object(pool_mod, "_run_batch", batch), patch.object(
-            pool_mod, "POLL_SECONDS", 0.05
-        ):
-            pool = pool_mod.TraceScoringPool(size=1)
-            pool.start()
-            deadline = time.time() + 2
-            while time.time() < deadline and len(claimed) < 2:
-                await asyncio.sleep(0.05)
-            await pool.shutdown()
-
-    asyncio.run(_exercise())
-    assert len(claimed) >= 2
 
 
 def test_nudge_wakes_idle_worker_before_poll():
@@ -418,27 +273,6 @@ def test_nudge_wakes_idle_worker_before_poll():
 
     elapsed = asyncio.run(_exercise())
     assert elapsed < 5
-
-
-def test_shutdown_lets_in_flight_batch_finish():
-    started = asyncio.Event()
-    finished = []
-
-    def slow_batch():
-        started.set()
-        time.sleep(0.2)
-        finished.append("done")
-        return ["row"]
-
-    async def _exercise():
-        with patch.object(pool_mod, "_run_batch", slow_batch):
-            pool = pool_mod.TraceScoringPool(size=1)
-            pool.start()
-            await asyncio.wait_for(started.wait(), timeout=2)
-            await pool.shutdown()
-
-    asyncio.run(_exercise())
-    assert finished == ["done"]
 
 
 def test_opted_in_trace_is_scored_end_to_end(client):

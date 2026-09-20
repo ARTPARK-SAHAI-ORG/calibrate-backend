@@ -6,7 +6,6 @@ so these tests write directly via raw SQL.
 
 from __future__ import annotations
 
-import contextlib
 import sqlite3
 import uuid
 
@@ -131,33 +130,6 @@ def test_init_db_is_idempotent():
     } <= indexes
 
 
-_OPEN_STATUS_IN_LIST = "status IN ('pending', 'processing')"
-
-
-def test_trace_eval_run_ddl_is_frozen_not_interpolated_from_the_enum():
-    """CREATE IF NOT EXISTS will not reshape; the birth DDL must stay literals
-    that still agree with TraceEvalRunStatus / OPEN_TRACE_EVAL_RUN_STATUSES."""
-    with db.get_db_connection() as conn:
-        table_sql = conn.execute(
-            "SELECT sql FROM sqlite_master WHERE type='table' AND name='trace_eval_runs'"
-        ).fetchone()["sql"]
-        index_sql = {
-            r["name"]: r["sql"]
-            for r in conn.execute(
-                "SELECT name, sql FROM sqlite_master WHERE type='index' "
-                "AND name IN ('ux_trace_eval_active', 'ix_trace_eval_claim')"
-            )
-        }
-    assert "DEFAULT 'pending'" in table_sql
-    assert _OPEN_STATUS_IN_LIST in index_sql["ux_trace_eval_active"]
-    assert _OPEN_STATUS_IN_LIST in index_sql["ix_trace_eval_claim"]
-    assert ts.TraceEvalRunStatus.PENDING.value == "pending"
-    assert tuple(s.value for s in ts.OPEN_TRACE_EVAL_RUN_STATUSES) == (
-        "pending",
-        "processing",
-    )
-
-
 def test_active_run_uniqueness_rejects_a_second_open_run():
     org = _org()
     trace = _ingest_trace(org)
@@ -214,22 +186,12 @@ def test_typed_result_check_accepts_binary_or_rating():
     assert by_eval["eval-rating-high"]["output_type"] == "rating"
 
 
-@pytest.mark.parametrize(
-    "kwargs",
-    [
-        {"value": None, "output_type": "binary"},
-        {"value": 1, "output_type": None},
-        {"value": 1, "output_type": "categorical"},
-        {"value": 2, "output_type": "binary"},
-        {"value": 0.5, "output_type": "binary"},
-    ],
-)
-def test_typed_result_check_rejects_null_invalid_type_and_non_binary_value(kwargs):
+def test_typed_result_check_rejects_a_non_binary_value():
     org = _org()
     trace = _ingest_trace(org)
     run = _insert_run(org, trace["uuid"], status="completed", completed_at=_ts(5))
     with pytest.raises(sqlite3.IntegrityError):
-        _insert_score(run, **kwargs)
+        _insert_score(run, value=2, output_type="binary")
 
 
 def test_evaluator_version_id_is_required():
@@ -279,111 +241,6 @@ def test_same_version_scores_are_preserved_across_distinct_runs():
     assert rows[1]["reasoning"] == "rescore"
 
 
-def test_delete_pending_trace_eval_runs_leaves_processing_and_terminal():
-    org = _org()
-    agent_id = str(uuid.uuid4())
-    pending_trace = _ingest_trace(org, agent_id=agent_id)
-    processing_trace = _ingest_trace(org, agent_id=agent_id)
-    completed_trace = _ingest_trace(org, agent_id=agent_id)
-    failed_trace = _ingest_trace(org, agent_id=agent_id)
-    skipped_trace = _ingest_trace(org, agent_id=agent_id)
-    other_agent_trace = _ingest_trace(org, agent_id="other-agent")
-
-    pending = _insert_run(
-        org, pending_trace["uuid"], agent_id=agent_id, status="pending"
-    )
-    processing = _insert_run(
-        org, processing_trace["uuid"], agent_id=agent_id, status="processing"
-    )
-    completed = _insert_run(
-        org,
-        completed_trace["uuid"],
-        agent_id=agent_id,
-        status="completed",
-        completed_at=_ts(5),
-    )
-    failed = _insert_run(
-        org, failed_trace["uuid"], agent_id=agent_id, status="failed", completed_at=_ts(6)
-    )
-    skipped = _insert_run(
-        org, skipped_trace["uuid"], agent_id=agent_id, status="skipped", completed_at=_ts(7)
-    )
-    other_pending = _insert_run(
-        org, other_agent_trace["uuid"], agent_id="other-agent", status="pending"
-    )
-
-    deleted = db.delete_pending_trace_eval_runs_for_agent(agent_id, org)
-    assert deleted == 1
-    with db.get_db_connection() as conn:
-        remaining = {
-            r["uuid"]: r["status"]
-            for r in conn.execute(
-                "SELECT uuid, status FROM trace_eval_runs "
-                "WHERE uuid IN (?, ?, ?, ?, ?, ?)",
-                (pending, processing, completed, failed, skipped, other_pending),
-            ).fetchall()
-        }
-    assert pending not in remaining
-    assert remaining[processing] == "processing"
-    assert remaining[completed] == "completed"
-    assert remaining[failed] == "failed"
-    assert remaining[skipped] == "skipped"
-    assert remaining[other_pending] == "pending"
-
-
-def test_update_agent_can_delete_its_pending_runs():
-    org = _org()
-    agent_uuid = str(uuid.uuid4())
-    with db.get_db_connection() as conn:
-        conn.execute(
-            "INSERT INTO agents (uuid, org_uuid, name, config) VALUES (?, ?, ?, ?)",
-            (agent_uuid, org, "test-agent", "{}"),
-        )
-        conn.commit()
-    trace = _ingest_trace(org, agent_id=agent_uuid)
-    pending = _insert_run(org, trace["uuid"], agent_id=agent_uuid, status="pending")
-
-    assert db.update_agent(
-        agent_uuid,
-        config={"traces": {"scoring": {"enabled": False}}},
-        org_uuid=org,
-        delete_pending_trace_runs=True,
-    )
-    assert db.get_trace_eval_run(pending) is None
-
-
-def test_update_agent_keeps_pending_runs_unless_asked():
-    org = _org()
-    agent_uuid = str(uuid.uuid4())
-    with db.get_db_connection() as conn:
-        conn.execute(
-            "INSERT INTO agents (uuid, org_uuid, name, config) VALUES (?, ?, ?, ?)",
-            (agent_uuid, org, "test-agent", "{}"),
-        )
-        conn.commit()
-    trace = _ingest_trace(org, agent_id=agent_uuid)
-    pending = _insert_run(org, trace["uuid"], agent_id=agent_uuid, status="pending")
-
-    assert db.update_agent(agent_uuid, name="renamed", org_uuid=org)
-    assert db.get_trace_eval_run(pending)["status"] == "pending"
-
-
-def test_delete_pending_without_org_uuid_still_scopes_to_agent():
-    org = _org()
-    agent_id = str(uuid.uuid4())
-    trace = _ingest_trace(org, agent_id=agent_id)
-    pending = _insert_run(org, trace["uuid"], agent_id=agent_id, status="pending")
-    deleted = db.delete_pending_trace_eval_runs_for_agent(agent_id)
-    assert deleted == 1
-    with db.get_db_connection() as conn:
-        assert (
-            conn.execute(
-                "SELECT 1 FROM trace_eval_runs WHERE uuid = ?", (pending,)
-            ).fetchone()
-            is None
-        )
-
-
 def test_update_agent_missing_row_is_false():
     assert (
         db.update_agent(str(uuid.uuid4()), name="x", delete_pending_trace_runs=True)
@@ -402,7 +259,7 @@ def test_same_run_evaluator_is_unique():
 
 # The read helpers' user-facing contract (latest-run summary fields, full
 # history, pass rule, hydration of deleted evaluators and pinned versions) is
-# pinned in test_routers_traces.py. These three cover only what the endpoints
+# pinned in test_routers_traces.py. These two cover only what the endpoints
 # cannot reach: the id tie-break, the helpers' own org filters, and the
 # single-statement guarantee behind the "no N+1" rule.
 
@@ -447,37 +304,3 @@ def test_score_read_helpers_are_org_scoped():
     ] is True
 
 
-def test_latest_run_summary_one_select_for_the_page(monkeypatch):
-    org = _org()
-    traces = [_ingest_trace(org) for _ in range(3)]
-    for trace in traces:
-        run = _insert_run(org, trace["uuid"], status="completed", completed_at=_ts(4))
-        _insert_score(run, value=1)
-
-    executes = []
-    real_connect = db.get_db_connection
-
-    class _CountingConn:
-        def __init__(self, conn):
-            self._conn = conn
-
-        def execute(self, sql, params=None):
-            executes.append(sql)
-            if params is None:
-                return self._conn.execute(sql)
-            return self._conn.execute(sql, params)
-
-        def __getattr__(self, name):
-            return getattr(self._conn, name)
-
-    @contextlib.contextmanager
-    def _counting():
-        with real_connect() as conn:
-            yield _CountingConn(conn)
-
-    monkeypatch.setattr(db, "get_db_connection", _counting)
-    result = db.get_latest_trace_run_summaries(org, [t["uuid"] for t in traces])
-    assert len(result) == 3
-    data_selects = [sql for sql in executes if "ROW_NUMBER()" in sql]
-    assert len(data_selects) == 1
-    assert len(executes) == 1

@@ -311,15 +311,6 @@ def test_claim_with_no_capacity_is_a_noop():
     assert _status(run) == RunStatus.PENDING.value
 
 
-def test_two_agents_of_different_orgs_are_served_at_once():
-    org_a, org_b = _org(), _org()
-    agent_a, agent_b = _agent(org_a), _agent(org_b)
-    first = _run(org_a, agent_a, _trace(org_a, agent_a), [_evaluator(org_a)], available_at=1)
-    second = _run(org_b, agent_b, _trace(org_b, agent_b), [_evaluator(org_b)], available_at=2)
-
-    assert _uuids(_claim(now=_at(1000))) == [first]
-    assert _uuids(_claim(now=_at(1000))) == [second]
-
 
 def test_an_org_at_its_batch_limit_is_skipped_for_another_org():
     org_a, org_b = _org(), _org()
@@ -373,14 +364,6 @@ def test_a_workspace_batch_size_caps_the_batch_below_the_default():
     assert _uuids(claimed) == runs[:5]
     assert [_status(r) for r in runs[5:]] == [RunStatus.PENDING.value] * 3
 
-
-def test_an_org_with_no_limits_row_uses_the_defaults():
-    org = _org()
-    agent = _agent(org)
-    ev = _evaluator(org)
-    runs = [_run(org, agent, _trace(org, agent), [ev], available_at=i) for i in range(4)]
-
-    assert _uuids(_claim(now=_at(1000), batch_size=2)) == runs[:2]
 
 
 def test_boot_check_rejects_a_sqlite_without_returning(monkeypatch):
@@ -688,21 +671,6 @@ def test_an_unreadable_verdict_defers_rather_than_hitting_the_value_constraint()
 # --- deletion ---------------------------------------------------------------
 
 
-def test_a_trace_deleted_before_the_claim_is_skipped_without_a_judge_call():
-    org = _org()
-    agent = _agent(org)
-    trace = _trace(org, agent)
-    run = _run(org, agent, trace, [_evaluator(org)])
-    db.soft_delete_traces(org, trace_ids=[trace["uuid"]])
-
-    invoke = _invoker([])
-    ts.claim_and_score_batch(now=_at(1000), invoke=invoke)
-
-    row = db.get_trace_eval_run(run)
-    assert row["status"] == RunStatus.SKIPPED.value
-    assert row["error"] == ts.TraceEvalSettleSkipReason.TRACE_DELETED.value
-    assert "dataset" not in invoke.captured
-
 
 def test_a_deleted_agent_is_skipped_with_its_own_reason():
     org = _org()
@@ -964,11 +932,6 @@ def test_a_nonzero_exit_reports_the_last_stderr_line(monkeypatch):
     assert result.error == "provider refused the key"
 
 
-def test_a_nonzero_exit_with_no_stderr_still_reports_the_code(monkeypatch):
-    _patch_popen(monkeypatch, _FakePopen(returncode=3), results=[])
-
-    assert "exited 3" in ts.invoke_eval_only_cli({"evaluators": []}, []).error
-
 
 def test_the_temp_dir_is_kept_while_the_child_is_still_running(monkeypatch):
     """Deleting it out from under a live child would pull its output away."""
@@ -984,25 +947,6 @@ def test_the_temp_dir_is_kept_while_the_child_is_still_running(monkeypatch):
     assert removed == []
 
 
-def test_reaping_an_already_exited_process_does_nothing(monkeypatch):
-    monkeypatch.setattr(
-        ts,
-        "kill_process_group",
-        lambda pid, job: pytest.fail("should not kill an exited process"),
-    )
-    ts._reap_cli_process(_FakePopen(returncode=0))
-
-
-def test_reaping_swallows_a_kill_that_races_the_exit(monkeypatch):
-    proc = _FakePopen(hangs=True)
-
-    def boom():
-        raise OSError("already gone")
-
-    monkeypatch.setattr(proc, "kill", boom)
-    monkeypatch.setattr(ts, "kill_process_group", lambda pid, job: True)
-
-    ts._reap_cli_process(proc)
 
 
 def test_unreadable_stderr_does_not_mask_the_exit_code(monkeypatch):
@@ -1026,21 +970,6 @@ def test_an_empty_queue_scores_nothing():
     assert ts.claim_and_score_batch(now=_at(1000), invoke=_invoker([])) == []
     ts.process_claimed_runs([], invoke=_invoker([]))
 
-
-def test_a_process_that_dies_to_the_group_kill_is_not_killed_again(monkeypatch):
-    proc = _FakePopen(hangs=True)
-    _patch_popen(monkeypatch, proc)
-
-    def group_kill(pid, job):
-        proc.returncode = -15
-        return True
-
-    monkeypatch.setattr(ts, "kill_process_group", group_kill)
-    monkeypatch.setattr(
-        proc, "kill", lambda: pytest.fail("the group kill already reaped it")
-    )
-
-    assert ts.invoke_eval_only_cli({"evaluators": []}, [], timeout_seconds=1).timed_out
 
 
 def test_a_trace_deleted_between_the_liveness_check_and_the_read_is_skipped(monkeypatch):

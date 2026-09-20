@@ -48,8 +48,8 @@ def test_conversation_agent_maps_to_response_llm():
     result = ts.resolve_trace_scoring("conversation", [(ev, _version(live))])
     assert result.evaluation_type == "response"
     assert result.evaluator_type == "llm"
-    assert [p.pin.evaluator_uuid for p in result.eligible] == [ev["uuid"]]
-    assert result.eligible[0].pin.evaluator_version_id == live
+    assert [p.evaluator_uuid for p in result.eligible] == [ev["uuid"]]
+    assert result.eligible[0].evaluator_version_id == live
     assert result.ineligible == []
     assert result.skip_reason is None
 
@@ -60,7 +60,7 @@ def test_general_agent_maps_to_general_llm_general():
     result = ts.resolve_trace_scoring("general", [(ev, _version(live))])
     assert result.evaluation_type == "general"
     assert result.evaluator_type == "llm-general"
-    assert result.eligible[0].pin.evaluator_uuid == ev["uuid"]
+    assert result.eligible[0].evaluator_uuid == ev["uuid"]
     assert result.skip_reason is None
 
 
@@ -176,8 +176,8 @@ def test_resolve_live_evaluators_pairs_version_or_none():
     agent = db.get_agent(agent_uuid)
     result = ts.resolve_trace_scoring(agent["interaction_type"], pairs)
     assert result.evaluation_type == "general"
-    assert [p.pin.evaluator_uuid for p in result.eligible] == [live_ev]
-    assert result.eligible[0].pin.evaluator_version_id == version["uuid"]
+    assert [p.evaluator_uuid for p in result.eligible] == [live_ev]
+    assert result.eligible[0].evaluator_version_id == version["uuid"]
     assert result.ineligible[0].evaluator_uuid == bare_ev
     assert result.ineligible[0].reason == ts.IneligibleReason.NO_LIVE_VERSION
 
@@ -220,7 +220,6 @@ def test_a_verdict_maps_by_evaluator_id_ahead_of_its_runtime_name():
     }
     scores = ts.map_item_scores(
         entry,
-        pins=[ts.EvaluatorPin(evaluator_uuid="ev-1", evaluator_version_id="ev-1-version")],
         name_to_uuid={},
         hydrated_by_uuid={"ev-1": _hydrated("ev-1", "binary")},
     )
@@ -239,7 +238,6 @@ def test_a_verdict_falls_back_to_the_runtime_name_when_the_runner_sends_no_id():
     entry = {"metrics": {"judge_results": {"Correctness-ab12": {"score": 3}}}}
     scores = ts.map_item_scores(
         entry,
-        pins=[ts.EvaluatorPin(evaluator_uuid="ev-1", evaluator_version_id="ev-1-version")],
         name_to_uuid={"Correctness-ab12": "ev-1"},
         hydrated_by_uuid={"ev-1": _hydrated("ev-1", "rating")},
     )
@@ -270,9 +268,6 @@ def test_a_result_that_cannot_be_read_cleanly_leaves_the_run_unsettled(judge_res
     assert (
         ts.map_item_scores(
             entry,
-            pins=[
-                ts.EvaluatorPin(evaluator_uuid="ev-1", evaluator_version_id="ev-1-version")
-            ],
             name_to_uuid={"A": "ev-1", "B": "ev-1"},
             hydrated_by_uuid={"ev-1": _hydrated("ev-1", "binary")},
         )
@@ -285,9 +280,6 @@ def test_a_result_with_no_judge_block_leaves_the_run_unsettled(entry):
     assert (
         ts.map_item_scores(
             entry,
-            pins=[
-                ts.EvaluatorPin(evaluator_uuid="ev-1", evaluator_version_id="ev-1-version")
-            ],
             name_to_uuid={},
             hydrated_by_uuid={"ev-1": _hydrated("ev-1", "binary")},
         )
@@ -300,10 +292,6 @@ def test_a_result_missing_one_of_two_pinned_evaluators_is_unsettleable():
     assert (
         ts.map_item_scores(
             entry,
-            pins=[
-                ts.EvaluatorPin(evaluator_uuid="ev-1", evaluator_version_id="ev-1-version"),
-                ts.EvaluatorPin(evaluator_uuid="ev-2", evaluator_version_id="ev-2-version"),
-            ],
             name_to_uuid={},
             hydrated_by_uuid={
                 "ev-1": _hydrated("ev-1", "binary"),
@@ -580,11 +568,7 @@ def test_hydrated_evaluators_carry_the_execution_fields_the_cli_needs():
     assert resolved.hydrated[0]["judge_model"] == "openai/gpt-4.1"
     assert resolved.hydrated[0]["system_prompt"] == "Judge."
     assert resolved.hydrated[0]["output_type"] == "binary"
-    assert resolved.pins == [
-        ts.EvaluatorPin(
-            evaluator_uuid=evaluator_uuid, evaluator_version_id=version_uuid
-        )
-    ]
+    assert resolved.hydrated[0]["evaluator_version_id"] == version_uuid
 
 
 def test_an_unknown_agent_resolves_to_the_deleted_skip_reason():
@@ -592,28 +576,6 @@ def test_an_unknown_agent_resolves_to_the_deleted_skip_reason():
         ts.resolve_batch_evaluators(str(uuid.uuid4()))
         == ts.TraceEvalSettleSkipReason.AGENT_DELETED
     )
-
-
-def test_hydration_drops_a_version_that_belongs_to_another_evaluator():
-    claimed, evaluator_uuid, version_uuid = _agent_with_traces(1)
-    other = ts.TraceScoringEligible(
-        pin=ts.EvaluatorPin(
-            evaluator_uuid=str(uuid.uuid4()), evaluator_version_id=version_uuid
-        ),
-        name="stranger",
-    )
-    eligible = ts.resolve_batch_evaluators(claimed[0]["agent_id"]).hydrated
-    assert [ev["uuid"] for ev in eligible] == [evaluator_uuid]
-    assert ts.hydrate_eligible_evaluators([other]) == []
-
-
-def test_nothing_left_after_hydration_skips_the_batch(monkeypatch):
-    claimed, _, _ = _agent_with_traces(1)
-    monkeypatch.setattr(ts, "hydrate_eligible_evaluators", lambda eligible: [])
-    ts.process_claimed_runs(claimed, invoke=lambda *a, **k: None)
-    row = db.get_trace_eval_run(claimed[0]["uuid"])
-    assert row["status"] == "skipped"
-    assert row["error"] == "no_usable_evaluators"
 
 
 def test_a_resolution_that_raises_defers_the_batch_rather_than_stranding_it(monkeypatch):
