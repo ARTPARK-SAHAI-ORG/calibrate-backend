@@ -9,7 +9,12 @@ import pytest
 
 import db
 import trace_scoring as ts
-from routers.traces import MAX_DELETE_IDS, MAX_LABELS, MAX_LIST_LIMIT
+from routers.traces import (
+    MAX_DELETE_IDS,
+    MAX_LABELS,
+    MAX_LIST_LIMIT,
+    MAX_SCORE_FILTERS,
+)
 from utils import TRACE_SCORING_CONFIG_KEY, TRACES_CONFIG_KEY, trace_scoring_enabled
 from fastapi.testclient import TestClient
 
@@ -2879,3 +2884,342 @@ def test_the_list_omits_score_averages_unless_they_are_asked_for(client):
     assert plain.json()["score_averages"] is None
     assert len(plain.json()["items"]) == 1
     assert _averages(client, h)[_EVAL_A]["average"] == 1
+
+
+# ---------------------------------------------------------------------------
+# Filtering and sorting the list by one evaluator's score
+
+
+def _scored_trace(client, h, agent_id, *, evaluator, version, value, output_type):
+    """A trace whose latest run scored `evaluator` at `value`."""
+    trace = _post_trace(client, h, _payload(agent_id, _mid()))
+    run = _insert_run(
+        _org_of(agent_id),
+        trace["uuid"],
+        status="completed",
+        created_at=_at(20),
+        completed_at=_at(21),
+        agent_id=agent_id,
+    )
+    _insert_score(
+        run,
+        evaluator_uuid=evaluator,
+        evaluator_version_id=version,
+        value=value,
+        output_type=output_type,
+    )
+    return trace["uuid"]
+
+
+def _listed(client, h, **params):
+    res = client.get("/traces", headers=h, params=params)
+    assert res.status_code == 200, res.text
+    return res.json()
+
+
+@pytest.mark.parametrize(
+    "condition,expected_values",
+    [
+        ("passed", [1]),
+        ("failed", [0]),
+        ("=1", [1]),
+        ("!=1", [0]),
+        (">0", [1]),
+        (">=1", [1]),
+        ("<1", [0]),
+        ("<=0", [0]),
+    ],
+)
+def test_list_filters_by_binary_score(client, condition, expected_values):
+    h, agent_id = _signup_with_agent(client)
+    _disable_auto_score(client, h, agent_id)
+    ev, ver = _create_clean_evaluator(client, h)
+    by_value = {
+        value: _scored_trace(
+            client, h, agent_id, evaluator=ev, version=ver, value=value,
+            output_type="binary",
+        )
+        for value in (0, 1)
+    }
+    body = _listed(client, h, score=f"{ev}:{condition}")
+    assert body["total"] == len(expected_values)
+    assert [item["uuid"] for item in body["items"]] == [
+        by_value[value] for value in expected_values
+    ]
+
+
+@pytest.mark.parametrize(
+    "condition,expected_values",
+    [
+        ("passed", [5]),
+        ("failed", [4, 2]),
+        (">=4", [5, 4]),
+        (">4", [5]),
+        ("=4", [4]),
+        ("!=4", [5, 2]),
+        ("<4", [2]),
+        ("<=2", [2]),
+    ],
+)
+def test_list_filters_by_rating_score(client, condition, expected_values):
+    h, agent_id = _signup_with_agent(client)
+    _disable_auto_score(client, h, agent_id)
+    ev, ver, _name = _create_rating_evaluator(client, h, scale_max=5)
+    by_value = {
+        value: _scored_trace(
+            client, h, agent_id, evaluator=ev, version=ver, value=value,
+            output_type="rating",
+        )
+        for value in (2, 4, 5)
+    }
+    body = _listed(client, h, score=f"{ev}:{condition}")
+    assert body["total"] == len(expected_values)
+    assert [item["uuid"] for item in body["items"]] == [
+        by_value[value] for value in expected_values
+    ]
+
+
+def test_list_score_filter_matches_the_flag_the_row_shows(client):
+    h, agent_id = _signup_with_agent(client)
+    _disable_auto_score(client, h, agent_id)
+    ev, ver, _name = _create_rating_evaluator(client, h, scale_max=5)
+    top = _scored_trace(
+        client, h, agent_id, evaluator=ev, version=ver, value=5, output_type="rating"
+    )
+    assert _list_item(client, h, top)["results"][0]["passed"] is True
+    assert [i["uuid"] for i in _listed(client, h, score=f"{ev}:passed")["items"]] == [top]
+
+
+def test_list_score_filter_reads_only_the_latest_run(client):
+    h, agent_id = _signup_with_agent(client)
+    _disable_auto_score(client, h, agent_id)
+    org = _org_of(agent_id)
+    ev, ver = _create_clean_evaluator(client, h)
+    trace = _post_trace(client, h, _payload(agent_id, _mid()))
+    older = _insert_run(
+        org, trace["uuid"], status="completed", created_at=_at(10),
+        completed_at=_at(11), agent_id=agent_id,
+    )
+    newer = _insert_run(
+        org, trace["uuid"], status="completed", created_at=_at(20),
+        completed_at=_at(21), agent_id=agent_id,
+    )
+    _insert_score(older, evaluator_uuid=ev, evaluator_version_id=ver, value=1)
+    _insert_score(newer, evaluator_uuid=ev, evaluator_version_id=ver, value=0)
+    assert _listed(client, h, score=f"{ev}:passed")["total"] == 0
+    assert [i["uuid"] for i in _listed(client, h, score=f"{ev}:failed")["items"]] == [
+        trace["uuid"]
+    ]
+
+
+def test_list_score_filters_combine(client):
+    h, agent_id = _signup_with_agent(client)
+    _disable_auto_score(client, h, agent_id)
+    org = _org_of(agent_id)
+    binary_id, binary_ver = _create_clean_evaluator(client, h)
+    rating_id, rating_ver, _name = _create_rating_evaluator(client, h, scale_max=5)
+    wanted = None
+    for binary_value, rating_value in ((1, 5), (1, 2), (0, 5)):
+        trace = _post_trace(client, h, _payload(agent_id, _mid()))
+        run = _insert_run(
+            org, trace["uuid"], status="completed", created_at=_at(20),
+            completed_at=_at(21), agent_id=agent_id,
+        )
+        _insert_score(
+            run, evaluator_uuid=binary_id, evaluator_version_id=binary_ver,
+            value=binary_value, output_type="binary",
+        )
+        _insert_score(
+            run, evaluator_uuid=rating_id, evaluator_version_id=rating_ver,
+            value=rating_value, output_type="rating",
+        )
+        if (binary_value, rating_value) == (1, 5):
+            wanted = trace["uuid"]
+    body = _listed(
+        client, h, score=[f"{binary_id}:passed", f"{rating_id}:>=5"]
+    )
+    assert [item["uuid"] for item in body["items"]] == [wanted]
+    assert body["total"] == 1
+
+
+def test_list_unscored_trace_never_matches_a_score_filter(client):
+    h, agent_id = _signup_with_agent(client)
+    _disable_auto_score(client, h, agent_id)
+    ev, _ver = _create_clean_evaluator(client, h)
+    _post_trace(client, h, _payload(agent_id, _mid()))
+    assert _listed(client, h, score=f"{ev}:failed")["total"] == 0
+    assert _listed(client, h, score=f"{ev}:<99")["total"] == 0
+
+
+def test_list_score_filter_narrows_the_averages(client):
+    h, agent_id = _signup_with_agent(client)
+    _disable_auto_score(client, h, agent_id)
+    ev, ver, _name = _create_rating_evaluator(client, h, scale_max=5)
+    for value in (2, 4):
+        _scored_trace(
+            client, h, agent_id, evaluator=ev, version=ver, value=value,
+            output_type="rating",
+        )
+    body = _listed(client, h, score=f"{ev}:>=4", include_score_averages=True)
+    averages = {a["evaluator_uuid"]: a for a in body["score_averages"]}
+    assert averages[ev]["average"] == 4
+    assert averages[ev]["traces_scored"] == 1
+
+
+@pytest.mark.parametrize(
+    "order,expected_values", [("asc", [2, 4, 5]), ("desc", [5, 4, 2])]
+)
+def test_list_sorts_by_one_evaluators_score(client, order, expected_values):
+    h, agent_id = _signup_with_agent(client)
+    _disable_auto_score(client, h, agent_id)
+    ev, ver, _name = _create_rating_evaluator(client, h, scale_max=5)
+    by_value = {
+        value: _scored_trace(
+            client, h, agent_id, evaluator=ev, version=ver, value=value,
+            output_type="rating",
+        )
+        for value in (4, 2, 5)
+    }
+    body = _listed(client, h, sort_by_evaluator=ev, sort_order=order)
+    assert [item["uuid"] for item in body["items"]] == [
+        by_value[value] for value in expected_values
+    ]
+
+
+@pytest.mark.parametrize("order", ["asc", "desc"])
+def test_list_sort_puts_unscored_traces_last(client, order):
+    h, agent_id = _signup_with_agent(client)
+    _disable_auto_score(client, h, agent_id)
+    ev, ver, _name = _create_rating_evaluator(client, h, scale_max=5)
+    scored = _scored_trace(
+        client, h, agent_id, evaluator=ev, version=ver, value=3, output_type="rating"
+    )
+    unscored = _post_trace(client, h, _payload(agent_id, _mid()))["uuid"]
+    body = _listed(client, h, sort_by_evaluator=ev, sort_order=order)
+    assert [item["uuid"] for item in body["items"]] == [scored, unscored]
+
+
+def test_list_sort_order_alone_leaves_the_order_newest_first(client):
+    h, agent_id = _signup_with_agent(client)
+    _disable_auto_score(client, h, agent_id)
+    first = _post_trace(client, h, _payload(agent_id, _mid()))["uuid"]
+    second = _post_trace(client, h, _payload(agent_id, _mid()))["uuid"]
+    body = _listed(client, h, sort_order="asc")
+    assert [item["uuid"] for item in body["items"]] == [second, first]
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        "nocolon",
+        "onlyid:",
+        ":passed",
+        "ev:maybe",
+        "ev:>abc",
+        "ev:>",
+        "ev:==",
+        # SQLite has no NaN, so these would bind as NULL and quietly match
+        # nothing instead of reporting the typo.
+        "ev:>=nan",
+        "ev:<inf",
+    ],
+)
+def test_list_rejects_a_malformed_score_filter(client, value):
+    h, agent_id = _signup_with_agent(client)
+    res = client.get("/traces", headers=h, params={"score": value})
+    assert res.status_code == 422, res.text
+
+
+def test_list_rejects_too_many_score_filters(client):
+    h, agent_id = _signup_with_agent(client)
+    res = client.get(
+        "/traces",
+        headers=h,
+        params={"score": [f"ev-{i}:passed" for i in range(MAX_SCORE_FILTERS + 1)]},
+    )
+    assert res.status_code == 422, res.text
+    assert "at most" in str(res.json()["detail"])
+
+
+def test_list_rejects_an_unknown_sort_order(client):
+    h, _agent_id = _signup_with_agent(client)
+    res = client.get("/traces", headers=h, params={"sort_order": "sideways"})
+    assert res.status_code == 422, res.text
+
+
+def test_bulk_delete_select_all_honours_the_score_filter(client):
+    h, agent_id = _signup_with_agent(client)
+    _disable_auto_score(client, h, agent_id)
+    ev, ver = _create_clean_evaluator(client, h)
+    failed = _scored_trace(
+        client, h, agent_id, evaluator=ev, version=ver, value=0, output_type="binary"
+    )
+    passed = _scored_trace(
+        client, h, agent_id, evaluator=ev, version=ver, value=1, output_type="binary"
+    )
+    res = client.post(
+        "/traces/bulk-delete",
+        json={"select_all": True, "score": [f"{ev}:failed"]},
+        headers=h,
+    )
+    assert res.status_code == 200, res.text
+    assert res.json() == {"deleted": 1}
+    assert [i["uuid"] for i in _listed(client, h)["items"]] == [passed]
+    assert client.get(f"/traces/{failed}", headers=h).status_code == 404
+
+
+def test_bulk_delete_rejects_a_malformed_score_filter(client):
+    h, _agent_id = _signup_with_agent(client)
+    res = client.post(
+        "/traces/bulk-delete",
+        json={"select_all": True, "score": ["nocolon"]},
+        headers=h,
+    )
+    assert res.status_code == 422, res.text
+
+
+def test_convert_select_all_honours_the_score_filter(client):
+    h, agent_id = _signup_with_agent(client)
+    _disable_auto_score(client, h, agent_id)
+    ev, ver = _create_clean_evaluator(client, h)
+    judge, _judge_ver = _create_clean_evaluator(client, h)
+    _scored_trace(
+        client, h, agent_id, evaluator=ev, version=ver, value=1, output_type="binary"
+    )
+    _scored_trace(
+        client, h, agent_id, evaluator=ev, version=ver, value=0, output_type="binary"
+    )
+    res = client.post(
+        "/traces/convert-to-tests",
+        json={
+            "select_all": True,
+            "score": [f"{ev}:failed"],
+            "type": "response",
+            "evaluators": [judge],
+        },
+        headers=h,
+    )
+    assert res.status_code == 200, res.text
+    assert res.json()["created"] == 1
+
+
+def test_convert_select_all_score_filter_matching_nothing_is_rejected(client):
+    h, agent_id = _signup_with_agent(client)
+    _disable_auto_score(client, h, agent_id)
+    ev, ver = _create_clean_evaluator(client, h)
+    judge, _judge_ver = _create_clean_evaluator(client, h)
+    _scored_trace(
+        client, h, agent_id, evaluator=ev, version=ver, value=1, output_type="binary"
+    )
+    res = client.post(
+        "/traces/convert-to-tests",
+        json={
+            "select_all": True,
+            "score": [f"{ev}:failed"],
+            "type": "response",
+            "evaluators": [judge],
+        },
+        headers=h,
+    )
+    assert res.status_code == 400, res.text
+    assert res.json()["detail"] == "No traces matched the filters"

@@ -10483,12 +10483,73 @@ TRACE_OUTPUT_TYPE_SQL = {
 }
 
 
+# The trace's latest scoring run, which is the run the list row shows. Correlated
+# on traces.uuid so it rides ix_trace_eval_trace (trace_uuid, created_at DESC).
+_LATEST_TRACE_RUN_SQL = (
+    "(SELECT r.uuid FROM trace_eval_runs r WHERE r.trace_uuid = traces.uuid "
+    "ORDER BY r.created_at DESC, r.id DESC LIMIT 1)"
+)
+
+# Highest value in the rubric the score was written under, not the evaluator's
+# current one, so a later edit cannot change what a stored score means.
+_TRACE_SCORE_SCALE_MAX_SQL = (
+    "(SELECT MAX(json_extract(j.value, '$.value')) FROM evaluator_versions ev, "
+    "json_each(CASE WHEN json_valid(ev.output_config) THEN ev.output_config END, "
+    "'$.scale') j WHERE ev.uuid = ts.evaluator_version_id)"
+)
+
+# Mirrors trace_scoring.trace_evaluator_passed, so filtering on a pass agrees
+# with the flag the row shows: binary passes on 1, a rating at its scale max.
+# A rubric that no longer parses reads as a fail here as it does there, which
+# is what COALESCE settles.
+_TRACE_SCORE_PASSED_SQL = (
+    "COALESCE(CASE WHEN ts.output_type = 'rating' "
+    f"THEN ts.value = {_TRACE_SCORE_SCALE_MAX_SQL} ELSE ts.value = 1 END, 0)"
+)
+
+# Operators a score filter may compare against. Interpolated into SQL, never
+# bound, so anything outside this set is refused rather than passed through.
+TRACE_SCORE_COMPARISONS = ("=", "!=", "<", "<=", ">", ">=")
+
+# The named evaluator's value on the trace's latest run, for ORDER BY. At most
+# one row, since trace_eval_scores is unique on (run_uuid, evaluator_uuid).
+_TRACE_SCORE_VALUE_SQL = (
+    "(SELECT ts.value FROM trace_eval_scores ts "
+    f"WHERE ts.run_uuid = {_LATEST_TRACE_RUN_SQL} "
+    "AND ts.evaluator_uuid = ?)"
+)
+
+# One score condition: the evaluator, the operator, and the number to compare
+# against, which is None for "passed" and "failed".
+TraceScoreFilter = Tuple[str, str, Optional[float]]
+
+
+def _trace_score_clause(condition: TraceScoreFilter) -> Tuple[str, List[Any]]:
+    """Build one score predicate against the trace's latest run."""
+    evaluator_uuid, op, value = condition
+    if op == "passed":
+        test, params = _TRACE_SCORE_PASSED_SQL, []
+    elif op == "failed":
+        test, params = f"NOT {_TRACE_SCORE_PASSED_SQL}", []
+    elif op in TRACE_SCORE_COMPARISONS:
+        test, params = f"ts.value {op} ?", [value]
+    else:
+        raise ValueError(f"unknown score operator {op!r}")
+    return (
+        "EXISTS (SELECT 1 FROM trace_eval_scores ts "
+        f"WHERE ts.run_uuid = {_LATEST_TRACE_RUN_SQL} "
+        f"AND ts.evaluator_uuid = ? AND ({test}))",
+        [evaluator_uuid] + params,
+    )
+
+
 def _trace_filters(
     org_uuid: str,
     agent_id: Optional[str] = None,
     q: Optional[str] = None,
     output_type: Optional[str] = None,
     labels: Optional[List[str]] = None,
+    scores: Optional[List[TraceScoreFilter]] = None,
 ) -> Tuple[str, List[Any]]:
     """Build the shared WHERE clause for every live-trace query."""
     where = ["org_uuid = ?", "deleted_at IS NULL"]
@@ -10519,6 +10580,10 @@ def _trace_filters(
                 clauses.append(f"PY_LOWER({column}) LIKE ? ESCAPE '\\'")
                 params.append(f"%{_like_escape(form)}%")
         where.append("(" + " OR ".join(clauses) + ")")
+    for condition in scores or []:
+        clause, score_params = _trace_score_clause(condition)
+        where.append(clause)
+        params.extend(score_params)
     return " AND ".join(where), params
 
 
@@ -10863,17 +10928,34 @@ def list_traces(
     q: Optional[str] = None,
     output_type: Optional[str] = None,
     labels: Optional[List[str]] = None,
+    scores: Optional[List[TraceScoreFilter]] = None,
+    sort_evaluator: Optional[str] = None,
+    sort_order: str = "desc",
 ) -> Tuple[List[Dict[str, Any]], int]:
-    """Return `(page, total)` newest-first; filters and count run in SQL."""
-    where, params = _trace_filters(org_uuid, agent_id, q, output_type, labels)
+    """Return `(page, total)`; filters, ordering and count all run in SQL.
+
+    Newest first, or by `sort_evaluator`'s value on each trace's latest run.
+    A trace that evaluator has not scored sorts last in both directions: an
+    unscored trace is unknown, not a low score, so it must not lead the page.
+    """
+    where, params = _trace_filters(org_uuid, agent_id, q, output_type, labels, scores)
+    order = "ORDER BY created_at DESC, id DESC"
+    order_params: List[Any] = []
+    if sort_evaluator:
+        value_sql = _TRACE_SCORE_VALUE_SQL
+        direction = "ASC" if sort_order == "asc" else "DESC"
+        order = (
+            f"ORDER BY ({value_sql} IS NULL), {value_sql} {direction}, "
+            "created_at DESC, id DESC"
+        )
+        order_params = [sort_evaluator, sort_evaluator]
     with get_db_connection() as conn:
         total = conn.execute(
             f"SELECT COUNT(*) FROM traces WHERE {where}", params
         ).fetchone()[0]
         rows = conn.execute(
-            f"SELECT * FROM traces WHERE {where} "
-            "ORDER BY created_at DESC, id DESC LIMIT ? OFFSET ?",
-            params + [limit, offset],
+            f"SELECT * FROM traces WHERE {where} {order} LIMIT ? OFFSET ?",
+            params + order_params + [limit, offset],
         ).fetchall()
         return [_trace_row(r) for r in rows], total
 
@@ -10890,11 +10972,12 @@ def soft_delete_traces_matching(
     q: Optional[str] = None,
     output_type: Optional[str] = None,
     labels: Optional[List[str]] = None,
+    scores: Optional[List[TraceScoreFilter]] = None,
 ) -> int:
     """Soft-delete every live trace matching the list filters, returning the
     number of rows flipped. No UUID list, so a workspace-wide delete stays one
     statement however many traces it covers."""
-    where, params = _trace_filters(org_uuid, agent_id, q, output_type, labels)
+    where, params = _trace_filters(org_uuid, agent_id, q, output_type, labels, scores)
     with get_db_connection() as conn:
         cursor = conn.execute(
             f"UPDATE traces SET deleted_at = CURRENT_TIMESTAMP, "
@@ -11050,6 +11133,7 @@ def average_trace_scores(
     q: Optional[str] = None,
     output_type: Optional[str] = None,
     labels: Optional[List[str]] = None,
+    scores: Optional[List[TraceScoreFilter]] = None,
 ) -> List[Dict[str, Any]]:
     """Mean score per evaluator over the live traces matching the list filters.
 
@@ -11063,7 +11147,7 @@ def average_trace_scores(
     than whichever version happened to sort highest. An evaluator that has
     scored nothing in the filtered set is absent rather than zero.
     """
-    where, params = _trace_filters(org_uuid, agent_id, q, output_type, labels)
+    where, params = _trace_filters(org_uuid, agent_id, q, output_type, labels, scores)
     sql = f"""
         WITH matched AS (
             SELECT uuid FROM traces WHERE {where}
