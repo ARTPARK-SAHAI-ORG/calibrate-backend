@@ -256,7 +256,7 @@ assert CLAIM_LEASE_SECONDS > CLI_TIMEOUT_SECONDS
 # arrival and never restarts, so a steady drip arriving faster than the wait
 # cannot hold the first trace indefinitely. Set WAIT_SECONDS to 0 to judge on
 # arrival.
-WAIT_SECONDS = int(os.getenv("TRACE_SCORING_WAIT_SECONDS", "120"))
+WAIT_SECONDS = int(os.getenv("TRACE_SCORING_WAIT_SECONDS", "15"))
 MAX_WAIT_SECONDS = int(os.getenv("TRACE_SCORING_MAX_WAIT_SECONDS", "600"))
 
 CLI_PARALLEL = 4
