@@ -554,3 +554,10 @@ def test_a_new_trace_leaves_already_released_traces_alone():
     assert held.pop(_waiting(agent["uuid"])[0][0]) == released
     # Only the arriving trace is held; the released one keeps its time.
     assert all(available_at > db.trace_scoring.utc_now() for available_at in held.values())
+
+
+def test_score_filter_refuses_an_operator_it_does_not_know():
+    """Operators are interpolated into SQL rather than bound, so anything
+    outside the known set must be refused instead of passed through."""
+    with pytest.raises(ValueError):
+        db._trace_score_clause(("ev-1", "; DROP TABLE traces", 1))

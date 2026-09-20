@@ -16,6 +16,7 @@ OTel-gateway migration.
 """
 
 import logging
+import math
 from typing import Annotated, Any, ClassVar, Dict, List, Literal, Optional, Union
 
 from fastapi import APIRouter, Depends, HTTPException, Path, Query
@@ -43,6 +44,7 @@ from db import (
     set_test_evaluators,
     soft_delete_traces,
     soft_delete_traces_matching,
+    TraceScoreFilter,
 )
 from org_scope import ensure_owned_agent
 from pagination import PaginatedResponse, PaginationParams, page_envelope
@@ -99,6 +101,12 @@ MAX_METADATA_ENTRIES = 100
 MAX_LABELS = 50
 MAX_LABEL_CHARS = 128
 
+# Caps how many score conditions one request may combine. Each one costs a
+# lookup of the trace's latest run, so an unbounded repeat is an unbounded
+# query. Enforced on the list and on both bulk actions, so a selection the
+# list can produce is one the delete after it accepts.
+MAX_SCORE_FILTERS = 20
+
 _EXAMPLE_TRACE_UUID = "f47ac10b-58cc-4372-a567-0e02b2c3d479"
 
 _TRACE_UUID_DESCRIPTION = "Unique ID for the trace"
@@ -122,6 +130,77 @@ TraceLabel = Annotated[
 # Bounds each entry so a malformed list is rejected before it reaches the
 # database rather than being bound into a query.
 TraceUuid = Annotated[str, StringConstraints(min_length=36, max_length=36)]
+
+# Longest first, so `>=` is read as one operator rather than `>` followed by
+# a number starting with `=`.
+_SCORE_COMPARISONS = (">=", "<=", "!=", ">", "<", "=")
+
+_SCORE_CONDITION_SYNTAX = (
+    "Each is written as `<evaluator ID>:<condition>`, where the condition is "
+    "`passed`, `failed`, or one of `=`, `!=`, `<`, `<=`, `>`, `>=` followed by "
+    "a number, such as `>=4`"
+)
+
+_SCORE_FILTER_DESCRIPTION = (
+    "Return only traces whose latest scoring run matches this condition. "
+    + _SCORE_CONDITION_SYNTAX
+    + ". Repeat the parameter to require every condition at once"
+)
+
+_SORT_BY_EVALUATOR_DESCRIPTION = (
+    "Order traces by this evaluator's score on each trace's latest scoring "
+    "run. Traces it has not scored come last whichever direction you pick"
+)
+
+_SORT_ORDER_DESCRIPTION = (
+    "Whether `sort_by_evaluator` puts the highest scores first or the lowest. "
+    "Ignored without it"
+)
+
+
+def _parse_score_filters(values: Optional[List[str]]) -> List[TraceScoreFilter]:
+    """Turn each `<evaluator ID>:<condition>` into what db.list_traces takes."""
+    raw_values = values or []
+    if len(raw_values) > MAX_SCORE_FILTERS:
+        raise HTTPException(
+            status_code=422,
+            detail=f"score accepts at most {MAX_SCORE_FILTERS} conditions",
+        )
+    parsed = []
+    for raw in raw_values:
+        evaluator_uuid, separator, condition = raw.partition(":")
+        evaluator_uuid, condition = evaluator_uuid.strip(), condition.strip()
+        if not separator or not evaluator_uuid or not condition:
+            raise _bad_score_filter(raw)
+        if condition in ("passed", "failed"):
+            parsed.append((evaluator_uuid, condition, None))
+            continue
+        operator = next(
+            (op for op in _SCORE_COMPARISONS if condition.startswith(op)), None
+        )
+        if operator is None:
+            raise _bad_score_filter(raw)
+        try:
+            number = float(condition[len(operator) :].strip())
+        except ValueError:
+            raise _bad_score_filter(raw)
+        # float() reads "nan" and "inf". SQLite has no NaN, so a NaN binds as
+        # NULL and the comparison matches nothing, turning a typo into an
+        # empty page rather than an error.
+        if not math.isfinite(number):
+            raise _bad_score_filter(raw)
+        parsed.append((evaluator_uuid, operator, number))
+    return parsed
+
+
+def _bad_score_filter(raw: str) -> HTTPException:
+    return HTTPException(
+        status_code=422,
+        detail=(
+            f"{raw!r} is not a score filter. Write an evaluator ID, a colon, "
+            "then passed, failed, or a comparison such as >=4"
+        ),
+    )
 
 
 class TraceTurn(BaseModel):
@@ -445,6 +524,11 @@ _FILTER_LABELS_DESCRIPTION = (
     "With `select_all` on, act only on traces carrying at least one of these labels"
 )
 
+_FILTER_SCORE_DESCRIPTION = (
+    "With `select_all` on, act only on traces whose latest scoring run matches "
+    "every one of these conditions. " + _SCORE_CONDITION_SYNTAX
+)
+
 
 class _TraceSelection(BaseModel):
     """Either a list of IDs or `select_all` plus the same filters `GET /traces`
@@ -472,6 +556,11 @@ class _TraceSelection(BaseModel):
         default_factory=list,
         max_length=MAX_LABELS,
         description=_FILTER_LABELS_DESCRIPTION,
+    )
+    score: List[str] = Field(
+        default_factory=list,
+        max_length=MAX_SCORE_FILTERS,
+        description=_FILTER_SCORE_DESCRIPTION,
     )
 
     @model_validator(mode="after")
@@ -702,6 +791,15 @@ async def list_traces_endpoint(
         None,
         description="Return only traces carrying at least one of these labels. Repeat the parameter for each label",
     ),
+    score: Optional[List[str]] = Query(
+        None, description=_SCORE_FILTER_DESCRIPTION
+    ),
+    sort_by_evaluator: Optional[str] = Query(
+        None, description=_SORT_BY_EVALUATOR_DESCRIPTION
+    ),
+    sort_order: Literal["asc", "desc"] = Query(
+        "desc", description=_SORT_ORDER_DESCRIPTION
+    ),
     include_score_averages: bool = Query(
         False,
         description="Also return each evaluator's mean score over every matching trace, not just this page. Costs a pass over those traces, so ask for it when the filters change rather than on every page",
@@ -716,6 +814,7 @@ async def list_traces_endpoint(
         raise HTTPException(
             status_code=422, detail=f"labels accepts at most {MAX_LABELS} labels"
         )
+    scores = _parse_score_filters(score)
     # Search/filter/count run in SQL (db.list_traces), not the post-fetch
     # pagination helpers, and paging uses the bounded PaginationParams rather
     # than the unbounded OptionalPaginationParams: traces are machine-written
@@ -728,6 +827,9 @@ async def list_traces_endpoint(
         q=q,
         output_type=output_type,
         labels=labels,
+        scores=scores,
+        sort_evaluator=sort_by_evaluator,
+        sort_order=sort_order,
     )
     scoring = get_latest_trace_run_summaries(
         ctx.org_uuid, [row["uuid"] for row in rows]
@@ -744,6 +846,7 @@ async def list_traces_endpoint(
             q=q,
             output_type=output_type,
             labels=labels,
+            scores=scores,
         )
     return body
 
@@ -806,6 +909,7 @@ async def bulk_delete_traces(
             q=payload.q,
             output_type=payload.output_type,
             labels=payload.labels,
+            scores=_parse_score_filters(payload.score),
         )
     else:
         deleted = soft_delete_traces(ctx.org_uuid, trace_ids=payload.trace_ids)
@@ -982,6 +1086,7 @@ def convert_traces_to_tests(
             q=payload.q,
             output_type=payload.output_type,
             labels=payload.labels,
+            scores=_parse_score_filters(payload.score),
         )
         if total > MAX_CONVERT_TRACES:
             raise HTTPException(
