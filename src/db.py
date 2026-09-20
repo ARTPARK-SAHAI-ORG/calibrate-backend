@@ -10645,6 +10645,50 @@ def _insert_trace_eval_run(
     )
 
 
+def _hold_waiting_trace_eval_runs(
+    cur: sqlite3.Cursor,
+    *,
+    agent_id: str,
+    org_uuid: str,
+    now: str,
+    wait_seconds: int,
+    max_wait_seconds: int,
+    batch_size: int,
+) -> bool:
+    """Push this agent's unstarted runs out to when they should be judged.
+
+    Returns whether they are claimable now. `attempts = 0` is the whole guard:
+    a run waiting out its retry backoff is `pending` too, and moving its time
+    would either cut the backoff short so it fails again at once, or push it
+    further out. Timestamps are fixed-width, so `min` over two of them orders
+    correctly as text.
+    """
+    waiting, oldest = cur.execute(
+        "SELECT COUNT(*), MIN(created_at) FROM trace_eval_runs "
+        "WHERE agent_id = ? AND org_uuid = ? AND status = ? AND attempts = 0",
+        (agent_id, org_uuid, trace_scoring.TraceEvalRunStatus.PENDING.value),
+    ).fetchone()
+    if wait_seconds <= 0 or waiting >= batch_size:
+        available_at = now
+    else:
+        available_at = min(
+            trace_scoring.add_seconds(now, wait_seconds),
+            trace_scoring.add_seconds(oldest, max_wait_seconds),
+        )
+    cur.execute(
+        "UPDATE trace_eval_runs SET available_at = ?, updated_at = ? "
+        "WHERE agent_id = ? AND org_uuid = ? AND status = ? AND attempts = 0",
+        (
+            available_at,
+            now,
+            agent_id,
+            org_uuid,
+            trace_scoring.TraceEvalRunStatus.PENDING.value,
+        ),
+    )
+    return available_at <= now
+
+
 def create_trace(
     org_uuid: str,
     agent_id: str,
@@ -10711,6 +10755,9 @@ def create_trace_with_eval_run(
     metadata: Optional[Any] = None,
     labels: Optional[List[str]] = None,
     max_scored_traces: int,
+    batch_size: int,
+    wait_seconds: Optional[int] = None,
+    max_wait_seconds: Optional[int] = None,
 ) -> Dict[str, Any]:
     """Insert a trace, and if trace scoring is on for the agent, its scoring run.
 
@@ -10718,13 +10765,22 @@ def create_trace_with_eval_run(
     workspace already holds `max_scored_traces` non-skipped runs. Which
     evaluators run is resolved by the worker, not here.
 
+    A pending run is held rather than made claimable at once, so one agent's
+    traces are judged together: see `_hold_waiting_trace_eval_runs`.
+
     Uses BEGIN IMMEDIATE rather than a bare BEGIN: a deferred transaction
     starts as a reader and only upgrades at the first write, which can fail
     with SQLITE_BUSY without honouring busy_timeout. Taking the write lock
     up front means the timeout applies.
     """
     scoring_on = trace_scoring_enabled(agent)
-    pending_run = False
+    # Read at call time, not bound as a default: a default freezes at import,
+    # which no test or restart-free change of the setting could then reach.
+    if wait_seconds is None:
+        wait_seconds = trace_scoring.WAIT_SECONDS
+    if max_wait_seconds is None:
+        max_wait_seconds = trace_scoring.MAX_WAIT_SECONDS
+    release_now = False
     now = trace_scoring.utc_now()
     with get_db_connection() as conn:
         cur = conn.cursor()
@@ -10757,14 +10813,24 @@ def create_trace_with_eval_run(
                 now=now,
                 completed_at=now if over_limit else None,
             )
-            pending_run = not over_limit
+            if not over_limit:
+                release_now = _hold_waiting_trace_eval_runs(
+                    cur,
+                    agent_id=agent["uuid"],
+                    org_uuid=org_uuid,
+                    now=now,
+                    wait_seconds=wait_seconds,
+                    max_wait_seconds=max_wait_seconds,
+                    batch_size=batch_size,
+                )
         conn.commit()
 
-    if pending_run:
+    if release_now:
         import trace_scoring_nudge
 
         # After commit, so a worker cannot claim a run that then rolls back.
-        # Skipped / opted-out ingests do not wake the pool.
+        # A held batch needs no wake-up: it comes due on a time already in the
+        # row, which an idle worker re-checks on its own poll.
         trace_scoring_nudge.set()
     return row
 

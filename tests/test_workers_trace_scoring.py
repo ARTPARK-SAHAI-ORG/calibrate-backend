@@ -13,6 +13,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 import db
+import trace_scoring
 import trace_scoring_nudge
 from workers import trace_scoring as pool_mod
 
@@ -188,10 +189,30 @@ def test_runnable_ingest_sets_nudge(monkeypatch):
     db.create_trace_with_eval_run(
         org_uuid=org,
         max_scored_traces=1_000_000,
+        batch_size=20,
+        wait_seconds=0,
         agent=_agent_row(org, {}),
         input=[{"role": "user", "content": "hi"}],
         output={"response": "hello", "tool_calls": None},
     )
+    assert calls == [1]
+
+
+def test_a_held_ingest_does_not_nudge_but_releasing_the_batch_does(monkeypatch):
+    calls = []
+    monkeypatch.setattr(trace_scoring_nudge, "set", lambda: calls.append(1))
+    org = str(uuid.uuid4())
+    agent = _agent_row(org, {})
+    for _ in range(2):
+        db.create_trace_with_eval_run(
+            org_uuid=org,
+            max_scored_traces=1_000_000,
+            batch_size=2,
+            wait_seconds=120,
+            agent=agent,
+            input=[{"role": "user", "content": "hi"}],
+            output={"response": "hello", "tool_calls": None},
+        )
     assert calls == [1]
 
 
@@ -202,6 +223,8 @@ def test_opted_out_and_over_limit_ingest_do_not_nudge(monkeypatch):
     db.create_trace_with_eval_run(
         org_uuid=org,
         max_scored_traces=1_000_000,
+        batch_size=20,
+        wait_seconds=0,
         agent=_agent_row(org, {"traces": {"scoring": {"enabled": False}}}),
         input=[{"role": "user", "content": "hi"}],
         output={"response": "hello", "tool_calls": None},
@@ -209,6 +232,8 @@ def test_opted_out_and_over_limit_ingest_do_not_nudge(monkeypatch):
     db.create_trace_with_eval_run(
         org_uuid=org,
         max_scored_traces=0,
+        batch_size=20,
+        wait_seconds=0,
         agent=_agent_row(org, {}),
         input=[{"role": "user", "content": "hi"}],
         output={"response": "hello", "tool_calls": None},
@@ -275,7 +300,10 @@ def test_nudge_wakes_idle_worker_before_poll():
     assert elapsed < 5
 
 
-def test_opted_in_trace_is_scored_end_to_end(client):
+def test_opted_in_trace_is_scored_end_to_end(client, monkeypatch):
+    # Ingest holds a new trace for two minutes by default, to judge an agent's
+    # traces together. This test watches one trace through the worker.
+    monkeypatch.setattr(trace_scoring, "WAIT_SECONDS", 0)
     h = _signup(client)
     agent_id, ev_uuid = _create_opted_in_agent(client, h)
     trace_uuid = _ingest(client, h, agent_id)

@@ -505,7 +505,12 @@ def test_trace_scoring_claim_and_settle_end_to_end_with_fake_cli(
 
     agent = db.get_agent(agent_uuid)
     row = db.create_trace_with_eval_run(
-        org_uuid=org_uuid, agent=agent, max_scored_traces=1_000_000, **trace
+        org_uuid=org_uuid,
+        agent=agent,
+        max_scored_traces=1_000_000,
+        batch_size=20,
+        wait_seconds=0,
+        **trace,
     )
 
     # Park runs other tests left open so this agent's run is the only claimable one.

@@ -292,7 +292,15 @@ def _eligible_evaluator(org: str, evaluator_type="llm"):
     return ev, version["uuid"]
 
 
-def _combined_ingest(org: str, agent: dict, max_scored_traces: int = 10_000, **overrides):
+def _combined_ingest(
+    org: str,
+    agent: dict,
+    max_scored_traces: int = 10_000,
+    batch_size: int = 20,
+    wait_seconds: int = 0,
+    max_wait_seconds: int = 600,
+    **overrides,
+):
     payload = {
         "message_id": None,
         "conversation_id": "conv-1",
@@ -302,7 +310,13 @@ def _combined_ingest(org: str, agent: dict, max_scored_traces: int = 10_000, **o
     }
     payload.update(overrides)
     return db.create_trace_with_eval_run(
-        org_uuid=org, agent=agent, max_scored_traces=max_scored_traces, **payload
+        org_uuid=org,
+        agent=agent,
+        max_scored_traces=max_scored_traces,
+        batch_size=batch_size,
+        wait_seconds=wait_seconds,
+        max_wait_seconds=max_wait_seconds,
+        **payload,
     )
 
 
@@ -405,3 +419,125 @@ def test_deleting_traces_frees_their_share_of_the_scoring_cap():
     assert db.count_scored_traces(org) == 0
     later = _combined_ingest(org, agent, max_scored_traces=1)
     assert _runs_for(later["uuid"])[0]["status"] == "pending"
+
+
+def _waiting(agent_uuid: str):
+    """This agent's unstarted runs, oldest first, as (uuid, available_at)."""
+    with db.get_db_connection() as conn:
+        return [
+            (r["uuid"], r["available_at"])
+            for r in conn.execute(
+                "SELECT uuid, available_at FROM trace_eval_runs "
+                "WHERE agent_id = ? AND status = 'pending' AND attempts = 0 "
+                "ORDER BY created_at, id",
+                (agent_uuid,),
+            ).fetchall()
+        ]
+
+
+def test_a_new_trace_is_held_rather_than_judged_on_arrival():
+    org = _org()
+    agent = _insert_agent(org)
+    _combined_ingest(org, agent, wait_seconds=120, max_wait_seconds=600)
+    (_run, available_at), = _waiting(agent["uuid"])
+    assert available_at > db.trace_scoring.utc_now()
+
+
+def test_a_second_trace_restarts_the_wait_for_every_held_trace():
+    org = _org()
+    agent = _insert_agent(org)
+    _combined_ingest(org, agent, wait_seconds=120, max_wait_seconds=600)
+
+    # Both ingests land in the same second, so age the first run to make the
+    # restart visible: a minute old, and five seconds from being judged.
+    now = db.trace_scoring.utc_now()
+    almost_due = db.trace_scoring.add_seconds(now, 5)
+    with db.get_db_connection() as conn:
+        conn.execute(
+            "UPDATE trace_eval_runs SET created_at = ?, available_at = ? "
+            "WHERE agent_id = ?",
+            (db.trace_scoring.add_seconds(now, -60), almost_due, agent["uuid"]),
+        )
+        conn.commit()
+    _combined_ingest(org, agent, wait_seconds=120, max_wait_seconds=600)
+
+    held = _waiting(agent["uuid"])
+    assert len(held) == 2
+    assert {available_at for _uuid, available_at in held} == {held[0][1]}
+    assert held[0][1] > almost_due
+
+
+def test_reaching_the_batch_size_releases_every_held_trace():
+    org = _org()
+    agent = _insert_agent(org)
+    _combined_ingest(org, agent, wait_seconds=120, batch_size=2)
+    assert _waiting(agent["uuid"])[0][1] > db.trace_scoring.utc_now()
+
+    _combined_ingest(org, agent, wait_seconds=120, batch_size=2)
+    now = db.trace_scoring.utc_now()
+    assert [available_at <= now for _uuid, available_at in _waiting(agent["uuid"])] == [
+        True,
+        True,
+    ]
+
+
+def test_the_oldest_trace_is_never_held_past_the_longest_wait():
+    org = _org()
+    agent = _insert_agent(org)
+    _combined_ingest(org, agent, wait_seconds=120, max_wait_seconds=600)
+
+    # Nine minutes of arrivals have already restarted the wait.
+    with db.get_db_connection() as conn:
+        conn.execute(
+            "UPDATE trace_eval_runs SET created_at = ? WHERE agent_id = ?",
+            (
+                db.trace_scoring.add_seconds(db.trace_scoring.utc_now(), -9 * 60),
+                agent["uuid"],
+            ),
+        )
+        conn.commit()
+    _combined_ingest(org, agent, wait_seconds=120, max_wait_seconds=600)
+
+    now = db.trace_scoring.utc_now()
+    # The restart alone would give two minutes; the longest wait leaves one.
+    assert _waiting(agent["uuid"])[0][1] <= db.trace_scoring.add_seconds(now, 61)
+
+
+def test_a_wait_of_zero_judges_on_arrival():
+    org = _org()
+    agent = _insert_agent(org)
+    _combined_ingest(org, agent, wait_seconds=0)
+    assert _waiting(agent["uuid"])[0][1] <= db.trace_scoring.utc_now()
+
+
+def test_a_trace_never_moves_another_agents_held_traces():
+    org = _org()
+    first = _insert_agent(org)
+    second = _insert_agent(org)
+    _combined_ingest(org, first, wait_seconds=120)
+    held = _waiting(first["uuid"])[0][1]
+
+    _combined_ingest(org, second, wait_seconds=0)
+    assert _waiting(first["uuid"])[0][1] == held
+
+
+def test_a_trace_leaves_a_run_waiting_out_its_retry_alone():
+    org = _org()
+    agent = _insert_agent(org)
+    _combined_ingest(org, agent, wait_seconds=0)
+    retry_at = db.trace_scoring.add_seconds(db.trace_scoring.utc_now(), 3600)
+    with db.get_db_connection() as conn:
+        conn.execute(
+            "UPDATE trace_eval_runs SET attempts = 1, available_at = ? WHERE agent_id = ?",
+            (retry_at, agent["uuid"]),
+        )
+        conn.commit()
+
+    _combined_ingest(org, agent, wait_seconds=0)
+    with db.get_db_connection() as conn:
+        rows = conn.execute(
+            "SELECT available_at FROM trace_eval_runs "
+            "WHERE agent_id = ? AND attempts = 1",
+            (agent["uuid"],),
+        ).fetchall()
+    assert [r["available_at"] for r in rows] == [retry_at]
