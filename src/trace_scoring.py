@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import random
 import shutil
 import subprocess
@@ -247,6 +248,16 @@ CLI_TIMEOUT_SECONDS = 25 * 60
 # little and another worker reclaims runs this one is still settling.
 CLAIM_LEASE_SECONDS = 45 * 60
 assert CLAIM_LEASE_SECONDS > CLI_TIMEOUT_SECONDS
+
+# A trace is held rather than judged the moment it lands: starting the judging
+# CLI costs the same for one trace or twenty, so a quiet workspace would
+# otherwise pay that startup per trace. Each new arrival for the same agent
+# restarts WAIT_SECONDS; MAX_WAIT_SECONDS is measured from the oldest waiting
+# arrival and never restarts, so a steady drip arriving faster than the wait
+# cannot hold the first trace indefinitely. Set WAIT_SECONDS to 0 to judge on
+# arrival.
+WAIT_SECONDS = int(os.getenv("TRACE_SCORING_WAIT_SECONDS", "120"))
+MAX_WAIT_SECONDS = int(os.getenv("TRACE_SCORING_MAX_WAIT_SECONDS", "600"))
 
 CLI_PARALLEL = 4
 MAX_ATTEMPTS = 5

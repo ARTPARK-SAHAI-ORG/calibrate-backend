@@ -625,6 +625,7 @@ async def ingest_trace(
         org_uuid=ctx.org_uuid,
         agent=agent,
         max_scored_traces=limits["max_scored_traces"],
+        batch_size=limits["trace_scoring_batch_size"],
         message_id=payload.message_id,
         conversation_id=payload.conversation_id,
         input=(
