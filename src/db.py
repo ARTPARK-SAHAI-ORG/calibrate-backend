@@ -10622,6 +10622,7 @@ def _insert_trace_eval_run(
     status: trace_scoring.TraceEvalRunStatus,
     error: Optional[str],
     now: str,
+    available_at: Optional[str] = None,
     completed_at: Optional[str] = None,
 ) -> None:
     """Insert one trace_eval_runs row. Caller owns the transaction."""
@@ -10637,7 +10638,7 @@ def _insert_trace_eval_run(
             agent_id,
             status.value,
             error,
-            now,
+            available_at if available_at is not None else now,
             now,
             now,
             completed_at,
@@ -10654,39 +10655,47 @@ def _hold_waiting_trace_eval_runs(
     wait_seconds: int,
     max_wait_seconds: int,
     batch_size: int,
-) -> bool:
-    """Push this agent's unstarted runs out to when they should be judged.
+) -> str:
+    """When this agent's arriving run should be judged, moving the held ones to match.
 
-    Returns whether they are claimable now. `attempts = 0` is the whole guard:
-    a run waiting out its retry backoff is `pending` too, and moving its time
+    Two conditions scope the move, and both are load-bearing. `available_at >
+    now` leaves a run that is already claimable alone: a new arrival must not
+    push back a batch that is only waiting for a free worker, and it keeps this
+    write to the held runs rather than the agent's whole backlog. `attempts =
+    0` leaves a run waiting out its retry backoff alone, since moving its time
     would either cut the backoff short so it fails again at once, or push it
-    further out. Timestamps are fixed-width, so `min` over two of them orders
-    correctly as text.
+    further out.
+
+    Timestamps are fixed-width, so `min` over two of them orders as text.
     """
-    waiting, oldest = cur.execute(
+    held, oldest = cur.execute(
         "SELECT COUNT(*), MIN(created_at) FROM trace_eval_runs "
-        "WHERE agent_id = ? AND org_uuid = ? AND status = ? AND attempts = 0",
-        (agent_id, org_uuid, trace_scoring.TraceEvalRunStatus.PENDING.value),
+        "WHERE agent_id = ? AND org_uuid = ? AND status = ? AND attempts = 0 "
+        "AND available_at > ?",
+        (agent_id, org_uuid, trace_scoring.TraceEvalRunStatus.PENDING.value, now),
     ).fetchone()
-    if wait_seconds <= 0 or waiting >= batch_size:
+    if wait_seconds <= 0 or held + 1 >= batch_size:
         available_at = now
     else:
         available_at = min(
             trace_scoring.add_seconds(now, wait_seconds),
-            trace_scoring.add_seconds(oldest, max_wait_seconds),
+            trace_scoring.add_seconds(oldest or now, max_wait_seconds),
         )
-    cur.execute(
-        "UPDATE trace_eval_runs SET available_at = ?, updated_at = ? "
-        "WHERE agent_id = ? AND org_uuid = ? AND status = ? AND attempts = 0",
-        (
-            available_at,
-            now,
-            agent_id,
-            org_uuid,
-            trace_scoring.TraceEvalRunStatus.PENDING.value,
-        ),
-    )
-    return available_at <= now
+    if held:
+        cur.execute(
+            "UPDATE trace_eval_runs SET available_at = ?, updated_at = ? "
+            "WHERE agent_id = ? AND org_uuid = ? AND status = ? AND attempts = 0 "
+            "AND available_at > ?",
+            (
+                available_at,
+                now,
+                agent_id,
+                org_uuid,
+                trace_scoring.TraceEvalRunStatus.PENDING.value,
+                now,
+            ),
+        )
+    return available_at
 
 
 def create_trace(
@@ -10801,20 +10810,19 @@ def create_trace_with_eval_run(
                 _scored_trace_count(cur, org_uuid, max_scored_traces)
                 >= max_scored_traces
             )
-            _insert_trace_eval_run(
-                cur,
-                trace_uuid=row["uuid"],
-                org_uuid=org_uuid,
-                agent_id=agent["uuid"],
-                status=trace_scoring.TraceEvalRunStatus.SKIPPED
-                if over_limit
-                else trace_scoring.TraceEvalRunStatus.PENDING,
-                error="over_limit" if over_limit else None,
-                now=now,
-                completed_at=now if over_limit else None,
-            )
-            if not over_limit:
-                release_now = _hold_waiting_trace_eval_runs(
+            if over_limit:
+                _insert_trace_eval_run(
+                    cur,
+                    trace_uuid=row["uuid"],
+                    org_uuid=org_uuid,
+                    agent_id=agent["uuid"],
+                    status=trace_scoring.TraceEvalRunStatus.SKIPPED,
+                    error="over_limit",
+                    now=now,
+                    completed_at=now,
+                )
+            else:
+                available_at = _hold_waiting_trace_eval_runs(
                     cur,
                     agent_id=agent["uuid"],
                     org_uuid=org_uuid,
@@ -10823,6 +10831,17 @@ def create_trace_with_eval_run(
                     max_wait_seconds=max_wait_seconds,
                     batch_size=batch_size,
                 )
+                _insert_trace_eval_run(
+                    cur,
+                    trace_uuid=row["uuid"],
+                    org_uuid=org_uuid,
+                    agent_id=agent["uuid"],
+                    status=trace_scoring.TraceEvalRunStatus.PENDING,
+                    error=None,
+                    now=now,
+                    available_at=available_at,
+                )
+                release_now = available_at <= now
         conn.commit()
 
     if release_now:

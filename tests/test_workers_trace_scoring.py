@@ -203,7 +203,7 @@ def test_a_held_ingest_does_not_nudge_but_releasing_the_batch_does(monkeypatch):
     monkeypatch.setattr(trace_scoring_nudge, "set", lambda: calls.append(1))
     org = str(uuid.uuid4())
     agent = _agent_row(org, {})
-    for _ in range(2):
+    def ingest():
         db.create_trace_with_eval_run(
             org_uuid=org,
             max_scored_traces=1_000_000,
@@ -213,6 +213,13 @@ def test_a_held_ingest_does_not_nudge_but_releasing_the_batch_does(monkeypatch):
             input=[{"role": "user", "content": "hi"}],
             output={"response": "hello", "tool_calls": None},
         )
+
+    ingest()
+    ingest()
+    assert calls == [1]
+    # The released pair is waiting on a worker, so the next trace is held
+    # again rather than waking the pool a second time for nothing.
+    ingest()
     assert calls == [1]
 
 

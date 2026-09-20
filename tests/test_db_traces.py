@@ -541,3 +541,16 @@ def test_a_trace_leaves_a_run_waiting_out_its_retry_alone():
             (agent["uuid"],),
         ).fetchall()
     assert [r["available_at"] for r in rows] == [retry_at]
+
+
+def test_a_new_trace_leaves_already_released_traces_alone():
+    org = _org()
+    agent = _insert_agent(org)
+    _combined_ingest(org, agent, wait_seconds=0)
+    released = _waiting(agent["uuid"])[0][1]
+
+    _combined_ingest(org, agent, wait_seconds=120)
+    held = dict(_waiting(agent["uuid"]))
+    assert held.pop(_waiting(agent["uuid"])[0][0]) == released
+    # Only the arriving trace is held; the released one keeps its time.
+    assert all(available_at > db.trace_scoring.utc_now() for available_at in held.values())
