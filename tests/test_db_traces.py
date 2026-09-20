@@ -280,7 +280,7 @@ def _insert_agent(org: str, *, interaction_type="conversation", config=None):
 
 
 def _scoring_off() -> dict:
-    return {"trace_scoring": {"enabled": False}}
+    return {"traces": {"scoring": {"enabled": False}}}
 
 
 def _eligible_evaluator(org: str, evaluator_type="llm"):
@@ -336,7 +336,7 @@ def test_a_config_with_no_trace_scoring_key_still_scores():
 
 def test_an_enabled_config_scores():
     org = _org()
-    agent = _insert_agent(org, config={"trace_scoring": {"enabled": True}})
+    agent = _insert_agent(org, config={"traces": {"scoring": {"enabled": True}}})
     trace = _combined_ingest(org, agent)
     assert _runs_for(trace["uuid"])[0]["status"] == "pending"
 

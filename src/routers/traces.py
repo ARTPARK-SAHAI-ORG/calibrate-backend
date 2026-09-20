@@ -695,25 +695,23 @@ async def list_traces_endpoint(
 
 
 class TraceUsageResponse(BaseModel):
-    traces_stored: int = Field(
-        description="How many traces the workspace currently holds"
-    )
-    max_traces: int = Field(description="How many traces the workspace may hold")
+    traces_stored: int = Field(description="How many traces you are storing")
+    max_traces: int = Field(description="How many traces you may store")
     traces_scored: int = Field(
-        description="How many traces count against the scoring limit. A trace whose scoring failed does not"
+        description="How many scoring runs count against your scoring limit, one per trace scored. A run that failed does not count"
     )
     max_scored_traces: int = Field(
-        description="How many traces the workspace may have scored"
+        description="How many traces you may have scored"
     )
 
 
 @router.get(
     "/usage",
     response_model=TraceUsageResponse,
-    summary="Get trace usage against the workspace limits",
+    summary="Get your trace usage against your limits",
 )
 async def get_trace_usage_endpoint(ctx: OrgContext = Depends(get_current_org)):
-    """Report how much of each trace limit the workspace has used"""
+    """Report how much of each trace limit you have used"""
     return {
         "traces_stored": count_live_traces(ctx.org_uuid),
         "max_traces": effective_max_traces(ctx.org_uuid),

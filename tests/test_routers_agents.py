@@ -203,11 +203,10 @@ def test_list_agents_returns_trimmed_summary(client):
         "updated_at",
         "connection_verified",
         "has_default_inputs",
-        "trace_scoring_enabled",
     }
     assert item["name"] == name
     assert item["type"] == "agent"
-    assert item["trace_scoring_enabled"] is True
+    assert _scoring_on(item) is True
     assert item["created_at"]
     assert item["updated_at"]
 
@@ -1262,14 +1261,21 @@ def _insert_run(org, agent_id, trace_uuid, status, **overrides):
 def _set_trace_scoring(client, h, agent_uuid, enabled):
     """A PUT replaces the whole config, so send the stored one back with the key set."""
     config = client.get(f"/agents/{agent_uuid}", headers=h).json().get("config") or {}
-    config["trace_scoring"] = {"enabled": enabled}
+    config.setdefault("traces", {})["scoring"] = {"enabled": enabled}
     return client.put(f"/agents/{agent_uuid}", json={"config": config}, headers=h)
+
+
+def _scoring_on(body):
+    """The setting as a client reads it: from config, missing means on."""
+    from utils import trace_scoring_enabled
+
+    return trace_scoring_enabled(body if "config" in body else {"config": body})
 
 
 def _disable_trace_scoring(client, h, agent_uuid):
     r = _set_trace_scoring(client, h, agent_uuid, False)
     assert r.status_code == 200, r.text
-    assert r.json()["trace_scoring_enabled"] is False
+    assert _scoring_on(r.json()) is False
 
 
 def test_agent_reads_include_trace_scoring_on_by_default(client):
@@ -1278,11 +1284,11 @@ def test_agent_reads_include_trace_scoring_on_by_default(client):
 
     got = client.get(f"/agents/{agent['uuid']}", headers=h)
     assert got.status_code == 200, got.text
-    assert got.json()["trace_scoring_enabled"] is True
+    assert _scoring_on(got.json()) is True
 
     listed = client.get("/agents", headers=h)
     item = next(a for a in listed.json()["items"] if a["uuid"] == agent["uuid"])
-    assert item["trace_scoring_enabled"] is True
+    assert _scoring_on(item) is True
 
 
 def test_omitting_trace_scoring_leaves_it_unchanged(client):
@@ -1294,7 +1300,7 @@ def test_omitting_trace_scoring_leaves_it_unchanged(client):
 
     enabled = _set_trace_scoring(client, h, agent["uuid"], True)
     assert enabled.status_code == 200, enabled.text
-    assert enabled.json()["trace_scoring_enabled"] is True
+    assert _scoring_on(enabled.json()) is True
 
     renamed = f"flag-omit-renamed-{uuid.uuid4().hex[:6]}"
     r = client.put(
@@ -1304,7 +1310,7 @@ def test_omitting_trace_scoring_leaves_it_unchanged(client):
     )
     assert r.status_code == 200, r.text
     assert r.json()["name"] == renamed
-    assert r.json()["trace_scoring_enabled"] is True
+    assert _scoring_on(r.json()) is True
 
 
 def test_enable_trace_scoring_conversation_with_eligible_llm(client):
@@ -1316,9 +1322,9 @@ def test_enable_trace_scoring_conversation_with_eligible_llm(client):
 
     r = _set_trace_scoring(client, h, agent["uuid"], True)
     assert r.status_code == 200, r.text
-    assert r.json()["trace_scoring_enabled"] is True
+    assert _scoring_on(r.json()) is True
     fetched = client.get(f"/agents/{agent['uuid']}", headers=h).json()
-    assert fetched["trace_scoring_enabled"] is True
+    assert _scoring_on(fetched) is True
 
 
 def test_enable_trace_scoring_general_with_eligible_llm_general(client):
@@ -1343,7 +1349,7 @@ def test_enable_trace_scoring_general_with_eligible_llm_general(client):
 
     r = _set_trace_scoring(client, h, created["uuid"], True)
     assert r.status_code == 200, r.text
-    assert r.json()["trace_scoring_enabled"] is True
+    assert _scoring_on(r.json()) is True
     assert r.json()["interaction_type"] == "general"
 
 
@@ -1365,10 +1371,7 @@ def test_enable_rejected_when_only_default_correctness_evaluator_is_linked(clien
         IneligibleReason.DECLARES_VARIABLES
     }
     assert (
-        client.get(f"/agents/{agent['uuid']}", headers=h).json()[
-            "trace_scoring_enabled"
-        ]
-        is False
+        _scoring_on(client.get(f"/agents/{agent['uuid']}", headers=h).json()) is False
     )
 
 
@@ -1413,7 +1416,7 @@ def test_already_on_trace_scoring_survives_later_empty_eligibility(client):
 
     r = _set_trace_scoring(client, h, agent["uuid"], True)
     assert r.status_code == 200, r.text
-    assert r.json()["trace_scoring_enabled"] is True
+    assert _scoring_on(r.json()) is True
 
 
 def test_eligibility_endpoint_partitions_mixed_evaluator_types(client):
@@ -1567,7 +1570,7 @@ def test_disable_trace_scoring_deletes_pending_runs_only(client):
 
     r = _set_trace_scoring(client, h, agent["uuid"], False)
     assert r.status_code == 200, r.text
-    assert r.json()["trace_scoring_enabled"] is False
+    assert _scoring_on(r.json()) is False
 
     with db.get_db_connection() as conn:
         remaining = {
@@ -1607,7 +1610,7 @@ def test_omitting_trace_scoring_does_not_delete_pending_runs(client):
         headers=h,
     )
     assert r.status_code == 200, r.text
-    assert r.json()["trace_scoring_enabled"] is True
+    assert _scoring_on(r.json()) is True
     with db.get_db_connection() as conn:
         row = conn.execute(
             "SELECT status FROM trace_eval_runs WHERE uuid = ?", (pending,)
@@ -1626,7 +1629,7 @@ def test_enable_trace_scoring_with_api_key(client):
 
     r = _set_trace_scoring(client, {"X-API-Key": raw}, agent["uuid"], True)
     assert r.status_code == 200, r.text
-    assert r.json()["trace_scoring_enabled"] is True
+    assert _scoring_on(r.json()) is True
 
 
 def test_duplicate_agent_copies_the_trace_scoring_setting(client):
@@ -1642,7 +1645,7 @@ def test_duplicate_agent_copies_the_trace_scoring_setting(client):
     )
     assert dup.status_code == 200, dup.text
     copied = client.get(f"/agents/{dup.json()['uuid']}", headers=h).json()
-    assert copied["trace_scoring_enabled"] is False
+    assert _scoring_on(copied) is False
 
 
 def test_put_without_config_leaves_trace_scoring_off(client):
@@ -1656,7 +1659,7 @@ def test_put_without_config_leaves_trace_scoring_off(client):
         headers=h,
     )
     assert r.status_code == 200, r.text
-    assert r.json()["trace_scoring_enabled"] is False
+    assert _scoring_on(r.json()) is False
 
 
 def test_put_config_without_the_key_does_not_trigger_the_eligibility_gate(client):
@@ -1673,7 +1676,7 @@ def test_put_config_without_the_key_does_not_trigger_the_eligibility_gate(client
     )
 
     config = client.get(f"/agents/{agent['uuid']}", headers=h).json()["config"]
-    config.pop("trace_scoring")
+    config.pop("traces")
     config["agent_url"] = "https://example.com/agent"
     r = client.put(f"/agents/{agent['uuid']}", json={"config": config}, headers=h)
     assert r.status_code == 200, r.text
@@ -1688,13 +1691,47 @@ def test_a_config_update_without_the_key_keeps_the_trace_scoring_setting(client)
     _disable_trace_scoring(client, h, agent["uuid"])
 
     config = client.get(f"/agents/{agent['uuid']}", headers=h).json()["config"]
-    config.pop("trace_scoring")
+    config.pop("traces")
     config["agent_url"] = "https://kept.example/agent"
     moved = client.put(f"/agents/{agent['uuid']}", json={"config": config}, headers=h)
 
     assert moved.status_code == 200, moved.text
     assert moved.json()["config"]["agent_url"] == "https://kept.example/agent"
-    assert moved.json()["trace_scoring_enabled"] is False
-    assert client.get(f"/agents/{agent['uuid']}", headers=h).json()[
-        "trace_scoring_enabled"
-    ] is False
+    assert _scoring_on(moved.json()) is False
+    assert (
+        _scoring_on(client.get(f"/agents/{agent['uuid']}", headers=h).json()) is False
+    )
+
+
+def test_a_config_whose_traces_key_is_not_an_object_is_rejected_not_a_crash(client):
+    """The carry-forward writes into config.traces, so a client sending
+    something that is not an object there must not reach a 500."""
+    h = _signup(client)
+    agent = _create_agent(client, h, f"flag-bad-{uuid.uuid4().hex[:6]}")
+    _disable_trace_scoring(client, h, agent["uuid"])
+
+    for bad in (5, "x", [], None):
+        r = client.put(
+            f"/agents/{agent['uuid']}",
+            json={"config": {"agent_url": "https://b.example", "traces": bad}},
+            headers=h,
+        )
+        assert r.status_code < 500, (bad, r.status_code, r.text)
+
+    assert _scoring_on(client.get(f"/agents/{agent['uuid']}", headers=h).json()) is False
+
+
+def test_an_off_looking_value_turns_scoring_off(client):
+    """config is a free dict, so a value that reads as off must stop the judges
+    rather than be ignored for not being a literal false."""
+    h = _signup(client)
+    for value, expected in ((0, False), ("false", False), ("", False), (1, True)):
+        agent = _create_agent(client, h, f"flag-v-{uuid.uuid4().hex[:6]}")
+        r = client.put(
+            f"/agents/{agent['uuid']}",
+            json={"config": {"traces": {"scoring": {"enabled": value}}}},
+            headers=h,
+        )
+        assert r.status_code in (200, 422), (value, r.text)
+        if r.status_code == 200:
+            assert _scoring_on(r.json()) is expected, value

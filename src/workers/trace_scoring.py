@@ -2,8 +2,8 @@
 
 Not `BackgroundTasks` (unbounded, request-lifecycle-bound) and not
 `MAX_CONCURRENT_JOBS_PER_ORG` (defaults to 1; a backfill would block an org's
-live scoring). One worker, one subprocess, one claimed batch, explicit CLI
-`--parallel` via `claim_and_score_batch`. Subprocess work runs in a thread so
+live scoring). `TRACE_SCORING_WORKERS` workers, one subprocess and one claimed batch each,
+explicit CLI `--parallel` via `claim_and_score_batch`. Subprocess work runs in a thread so
 it never blocks the event loop.
 """
 
@@ -19,7 +19,17 @@ from utils import capture_exception_to_sentry
 
 logger = logging.getLogger(__name__)
 
-POOL_SIZE = int(os.getenv("TRACE_SCORING_WORKERS", "2"))
+def _worker_count() -> int:
+    """At least one worker, whatever the environment says. A blank or unreadable
+    value must not stop the app booting, and zero would stop scoring silently."""
+    try:
+        return max(1, int(os.getenv("TRACE_SCORING_WORKERS", "2")))
+    except ValueError:
+        logger.warning("TRACE_SCORING_WORKERS is not a number, using 1")
+        return 1
+
+
+POOL_SIZE = _worker_count()
 POLL_SECONDS = 5.0
 _ERROR_BACKOFF_SECONDS = 1.0
 

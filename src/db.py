@@ -25,6 +25,12 @@ DEFAULT_USER_FIRST_NAME = os.getenv("DEFAULT_USER_FIRST_NAME", "")
 DEFAULT_USER_LAST_NAME = os.getenv("DEFAULT_USER_LAST_NAME", "")
 
 
+def _positive_limit(stored: Any, default: int) -> int:
+    if isinstance(stored, bool) or not isinstance(stored, int) or stored <= 0:
+        return default
+    return stored
+
+
 @contextmanager
 def get_db_connection():
     """Context manager for database connections."""
@@ -40,6 +46,10 @@ def get_db_connection():
     # SQLite's own LOWER only folds ASCII, so an accented or non-Latin word
     # would never match a case-insensitive search.
     conn.create_function("PY_LOWER", 1, lambda s: s.lower() if s else s)
+    # A limit stored in org_limits.limits is free-form JSON. Zero, a negative, a
+    # string or a fraction would each break a claim differently, so anything but
+    # a positive whole number falls back to the server default.
+    conn.create_function("_positive_limit", 2, _positive_limit)
     try:
         yield conn
     finally:
@@ -1591,8 +1601,8 @@ def init_db():
         conn.commit()
 
         # Durable scoring runs. `status` is the source of truth for "scored?";
-        # allowed values are TraceEvalRunStatus. Pending runs of soft-deleted
-        # traces are settled at claim time with a status=skipped.
+        # allowed values are TraceEvalRunStatus. A run whose trace or agent was
+        # deleted is still claimed; settlement is where it becomes skipped.
         # DEFAULT and the partial-index WHERE lists are frozen literals. Do not
         # interpolate TraceEvalRunStatus / OPEN_TRACE_EVAL_RUN_STATUSES: CREATE
         # IF NOT EXISTS will not reshape an existing table or index.
@@ -11066,6 +11076,7 @@ def claim_trace_eval_runs(
     lease_seconds: int,
     default_batch_size: int,
     default_max_batches_per_org: int,
+    max_attempts: Optional[int] = None,
 ) -> List[Dict[str, Any]]:
     """Claim one batch of open runs, all belonging to ONE agent.
 
@@ -11089,6 +11100,22 @@ def claim_trace_eval_runs(
     with get_db_connection() as conn:
         cur = conn.cursor()
         cur.execute("BEGIN IMMEDIATE")
+        # A run that kills its worker before it can settle never reaches the
+        # settle-path ceiling, so bury it here or it is reclaimed forever and
+        # keeps occupying its agent's slot.
+        cur.execute(
+            "UPDATE trace_eval_runs SET status = 'failed', error = ?, "
+            "completed_at = ?, updated_at = ? "
+            "WHERE status IN ('pending', 'processing') AND available_at <= ? "
+            "AND attempts >= ?",
+            (
+                "attempts exhausted",
+                now,
+                now,
+                now,
+                trace_scoring.MAX_ATTEMPTS if max_attempts is None else max_attempts,
+            ),
+        )
         # Statuses are literals, not bound parameters, so the partial indexes
         # (declared on these same values) can be used.
         cur.execute(
@@ -11111,7 +11138,7 @@ def claim_trace_eval_runs(
                           WHERE b.org_uuid = t.org_uuid
                             AND b.status = 'processing'
                             AND b.available_at > ?
-                       ) < COALESCE(
+                       ) < _positive_limit(
                              json_extract(
                                  ol.limits,
                                  '$.max_concurrent_trace_scoring_batches'
@@ -11130,7 +11157,7 @@ def claim_trace_eval_runs(
                  ORDER BY r.available_at, r.id
                  LIMIT COALESCE(
                      (
-                         SELECT COALESCE(
+                         SELECT _positive_limit(
                                     json_extract(
                                         ol.limits, '$.trace_scoring_batch_size'
                                     ),

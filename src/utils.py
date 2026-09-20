@@ -2014,12 +2014,26 @@ def utc_now() -> str:
     return datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
 
 
-TRACE_SCORING_CONFIG_KEY = "trace_scoring"
+TRACES_CONFIG_KEY = "traces"
+TRACE_SCORING_CONFIG_KEY = "scoring"
+
+
+def trace_scoring_settings(config: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+    """The `traces.scoring` object inside an agent config, or None when absent."""
+    traces = (config or {}).get(TRACES_CONFIG_KEY)
+    if not isinstance(traces, dict):
+        return None
+    scoring = traces.get(TRACE_SCORING_CONFIG_KEY)
+    return scoring if isinstance(scoring, dict) else None
 
 
 def trace_scoring_enabled(agent: Dict[str, Any]) -> bool:
     """Whether new traces for this agent are scored. On unless turned off, so an
-    agent created before the setting existed still scores."""
-    config = agent.get("config") or {}
-    settings = config.get(TRACE_SCORING_CONFIG_KEY) or {}
-    return settings.get("enabled", True) is not False
+    agent whose config never mentions it still scores."""
+    scoring = trace_scoring_settings(agent.get("config")) or {}
+    enabled = scoring.get("enabled", True)
+    # A client can put anything in config, and a value that reads as off must
+    # turn scoring off rather than keep paying for judges.
+    if isinstance(enabled, str):
+        return enabled.strip().lower() not in ("false", "0", "no", "off", "")
+    return bool(enabled)

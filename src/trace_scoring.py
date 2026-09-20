@@ -43,6 +43,7 @@ class TraceEvalSettleSkipReason(str, Enum):
 
     TRACE_DELETED = "trace_deleted"
     AGENT_DELETED = "agent_deleted"
+    SCORING_DISABLED = "scoring_disabled"
 
 
 # Subset of TestType that traces can score.
@@ -238,7 +239,10 @@ def add_seconds(ts: str, seconds: int) -> str:
 # The lease must outlast the CLI timeout, or a still-running invocation's runs
 # are reclaimed and double-scored while the first worker is mid-flight.
 CLI_TIMEOUT_SECONDS = 25 * 60
-CLAIM_LEASE_SECONDS = 30 * 60
+# Headroom over the CLI covers reading each trace before the call and settling
+# each run after it, every one of which can wait out the busy timeout. Too
+# little and another worker reclaims runs this one is still settling.
+CLAIM_LEASE_SECONDS = 45 * 60
 assert CLAIM_LEASE_SECONDS > CLI_TIMEOUT_SECONDS
 
 CLI_PARALLEL = 4
@@ -331,10 +335,16 @@ def resolve_batch_evaluators(
 ) -> BatchEvaluators | TraceEvalSkipReason | TraceEvalSettleSkipReason:
     """Work out what this agent's traces are scored against, at judge time."""
     from db import get_agent, resolve_live_evaluators
+    from utils import trace_scoring_enabled
 
     agent = get_agent(agent_id)
     if agent is None:
         return TraceEvalSettleSkipReason.AGENT_DELETED
+    # Re-read rather than trust the run: scoring can be switched off in the
+    # instant between ingest reading the agent and committing the run, which
+    # leaves a pending run the off-switch found nothing to delete.
+    if not trace_scoring_enabled(agent):
+        return TraceEvalSettleSkipReason.SCORING_DISABLED
     resolution = resolve_trace_scoring(
         agent.get("interaction_type"), resolve_live_evaluators(agent["uuid"])
     )
@@ -715,6 +725,34 @@ def _defer_or_fail(
     )
 
 
+def _swallow_settle(fn: Callable[..., Any], run: dict[str, Any], **kwargs: Any) -> None:
+    """Settle one run, logging rather than raising. A raise here would strand
+    every run after it in `processing`, where the attempt ceiling cannot see
+    them until their lease expires."""
+    try:
+        fn(run, **kwargs)
+    except Exception:
+        logger.exception("trace-scoring: settling run %s raised", run["uuid"])
+
+
+def _settle_or_defer_terminal(
+    run: dict[str, Any], *, reason: str, now: str, rng: random.Random | None,
+    max_attempts: int,
+) -> None:
+    from db import settle_trace_eval_run_terminal
+
+    try:
+        settle_trace_eval_run_terminal(
+            run["uuid"], status=TraceEvalRunStatus.SKIPPED, error=reason, now=now
+        )
+    except Exception as exc:
+        logger.exception("trace-scoring: skipping run %s raised", run["uuid"])
+        _swallow_settle(
+            _defer_or_fail, run, now=now, error=str(exc), rng=rng,
+            max_attempts=max_attempts,
+        )
+
+
 def _prepare_claimed_run(run: dict[str, Any], now: str) -> PreparedRun | None:
     """Settle everything a claimed run can be settled by without a judge call."""
     from db import get_trace, settle_trace_eval_run_terminal, trace_scoring_skip_reason
@@ -782,6 +820,10 @@ def process_claimed_runs(
         return
 
     # Every claimed run belongs to one agent, so this resolves once per batch.
+    # A claim that ever widened would judge each trace against another agent's
+    # evaluators and store the wrong pins as real scores, with nothing logged.
+    agent_ids = {run["agent_id"] for run in claimed}
+    assert len(agent_ids) == 1, f"a batch must be one agent's runs, got {agent_ids}"
     try:
         evaluators = resolve_batch_evaluators(claimed[0]["agent_id"])
     except Exception as exc:
@@ -802,11 +844,9 @@ def process_claimed_runs(
             else evaluators
         )
         for item in prepared:
-            settle_trace_eval_run_terminal(
-                item.run["uuid"],
-                status=TraceEvalRunStatus.SKIPPED,
-                error=reason,
-                now=prepare_now,
+            _settle_or_defer_terminal(
+                item.run, reason=reason, now=prepare_now, rng=rng,
+                max_attempts=max_attempts,
             )
         return
 
@@ -851,12 +891,9 @@ def process_claimed_runs(
     for item in prepared:
         scores = scored.get(item.run["uuid"])
         if scores is None:
-            _defer_or_fail(
-                item.run,
-                now=settle_now,
-                error=leftover_error,
-                rng=rng,
-                max_attempts=max_attempts,
+            _swallow_settle(
+                _defer_or_fail, item.run, now=settle_now, error=leftover_error,
+                rng=rng, max_attempts=max_attempts,
             )
             continue
         try:
@@ -868,12 +905,9 @@ def process_claimed_runs(
             logger.exception(
                 "trace-scoring: settling run %s raised", item.run["uuid"]
             )
-            _defer_or_fail(
-                item.run,
-                now=settle_now,
-                error=str(exc),
-                rng=rng,
-                max_attempts=max_attempts,
+            _swallow_settle(
+                _defer_or_fail, item.run, now=settle_now, error=str(exc),
+                rng=rng, max_attempts=max_attempts,
             )
 
 
@@ -909,6 +943,7 @@ def claim_and_score_batch(
             DEFAULT_TRACE_SCORING_BATCH_SIZE if batch_size is None else batch_size
         ),
         default_max_batches_per_org=DEFAULT_MAX_CONCURRENT_TRACE_SCORING_BATCHES,
+        max_attempts=max_attempts,
     )
     process_claimed_runs(
         claimed,

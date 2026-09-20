@@ -203,7 +203,7 @@ def test_opted_out_and_over_limit_ingest_do_not_nudge(monkeypatch):
     db.create_trace_with_eval_run(
         org_uuid=org,
         max_scored_traces=1_000_000,
-        agent=_agent_row(org, {"trace_scoring": {"enabled": False}}),
+        agent=_agent_row(org, {"traces": {"scoring": {"enabled": False}}}),
         input=[{"role": "user", "content": "hi"}],
         output={"response": "hello", "tool_calls": None},
     )

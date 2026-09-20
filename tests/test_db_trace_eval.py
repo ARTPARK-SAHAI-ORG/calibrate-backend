@@ -345,7 +345,7 @@ def test_update_agent_can_delete_its_pending_runs():
 
     assert db.update_agent(
         agent_uuid,
-        config={"trace_scoring": {"enabled": False}},
+        config={"traces": {"scoring": {"enabled": False}}},
         org_uuid=org,
         delete_pending_trace_runs=True,
     )

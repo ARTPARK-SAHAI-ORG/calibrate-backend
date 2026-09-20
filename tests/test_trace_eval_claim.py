@@ -1112,3 +1112,53 @@ def test_release_at_startup_hands_in_flight_runs_back_to_the_queue():
     assert row["available_at"] == _at(1000)
     claimed = _claim(now=_at(1000), batch_size=10)
     assert set(_uuids(claimed)) == {in_flight, waiting}
+
+
+def test_a_run_that_used_up_its_attempts_is_buried_not_reclaimed_forever():
+    """A run that kills its worker before it can settle never reaches the
+    settle-path ceiling, so the claim itself has to stop reclaiming it."""
+    org = _org()
+    ev = _evaluator(org)
+    agent = _agent(org)
+    doomed = _run(org, agent, _trace(org, agent), [ev], available_at=1, attempts=ts.MAX_ATTEMPTS)
+    fresh = _run(org, agent, _trace(org, agent), [ev], available_at=2)
+
+    claimed = db.claim_trace_eval_runs(
+        now=_at(1000), lease_seconds=600, default_batch_size=10,
+        default_max_batches_per_org=1, max_attempts=ts.MAX_ATTEMPTS,
+    )
+
+    assert _uuids(claimed) == [fresh]
+    buried = db.get_trace_eval_run(doomed)
+    assert buried["status"] == RunStatus.FAILED.value
+    assert buried["error"] == "attempts exhausted"
+    assert buried["completed_at"] is not None
+
+
+def test_a_stored_limit_that_is_not_a_positive_whole_number_falls_back():
+    """org_limits.limits is free-form JSON, so a zero, a negative or a string
+    must not stall the pool, claim everything, or silently remove the limit."""
+    for stored, taken in (
+        ({"trace_scoring_batch_size": 0}, 2),
+        ({"trace_scoring_batch_size": -1}, 2),
+        ({"trace_scoring_batch_size": "5"}, 2),
+        ({"trace_scoring_batch_size": 3}, 3),
+    ):
+        org = _org()
+        with db.get_db_connection() as conn:
+            conn.execute(
+                "INSERT INTO org_limits (uuid, org_uuid, limits) VALUES (?, ?, ?)",
+                (str(uuid.uuid4()), org, json.dumps(stored)),
+            )
+            conn.commit()
+        ev = _evaluator(org)
+        agent = _agent(org)
+        for i in range(5):
+            _run(org, agent, _trace(org, agent), [ev], available_at=i + 1)
+
+        claimed = db.claim_trace_eval_runs(
+            now=_at(1000), lease_seconds=600, default_batch_size=2,
+            default_max_batches_per_org=1, max_attempts=ts.MAX_ATTEMPTS,
+        )
+
+        assert len(claimed) == taken, stored

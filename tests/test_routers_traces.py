@@ -10,7 +10,7 @@ import pytest
 import db
 import trace_scoring as ts
 from routers.traces import MAX_DELETE_IDS, MAX_LABELS, MAX_LIST_LIMIT
-from utils import TRACE_SCORING_CONFIG_KEY, trace_scoring_enabled
+from utils import TRACE_SCORING_CONFIG_KEY, TRACES_CONFIG_KEY, trace_scoring_enabled
 from fastapi.testclient import TestClient
 
 
@@ -2320,7 +2320,7 @@ def _at(seconds: int) -> str:
 def _set_trace_scoring(client, h, agent_uuid, enabled: bool):
     r = client.put(
         f"/agents/{agent_uuid}",
-        json={"config": {TRACE_SCORING_CONFIG_KEY: {"enabled": enabled}}},
+        json={"config": {TRACES_CONFIG_KEY: {TRACE_SCORING_CONFIG_KEY: {"enabled": enabled}}}},
         headers=h,
     )
     assert r.status_code == 200, r.text
