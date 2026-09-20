@@ -278,8 +278,6 @@ def _insert_agent(org: str, *, interaction_type="conversation", config=None):
     return db.get_agent(agent_uuid)
 
 
-def _scoring_off() -> dict:
-    return {"traces": {"scoring": {"enabled": False}}}
 
 
 def _eligible_evaluator(org: str, evaluator_type="llm"):

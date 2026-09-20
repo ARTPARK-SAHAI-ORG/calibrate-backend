@@ -288,3 +288,19 @@ def test_opted_in_trace_is_scored_end_to_end(client):
     assert scores[0]["value"] == 1
     assert scores[0]["output_type"] == "binary"
     assert "Simulated judge reasoning" in (scores[0]["reasoning"] or "")
+
+
+def test_the_worker_count_survives_a_bad_environment_value():
+    """Zero would stop scoring dead with nothing in the log, and a typo would
+    stop the app booting, so both are clamped to one worker."""
+    import importlib
+
+    import workers.trace_scoring as pool_mod
+
+    for value, expected in (("3", 3), ("0", 1), ("-2", 1), ("two", 1), ("", 1)):
+        with patch.dict(os.environ, {"TRACE_SCORING_WORKERS": value}):
+            assert importlib.reload(pool_mod).POOL_SIZE == expected, value
+
+    with patch.dict(os.environ, {}, clear=False):
+        os.environ.pop("TRACE_SCORING_WORKERS", None)
+        assert importlib.reload(pool_mod).POOL_SIZE == 2

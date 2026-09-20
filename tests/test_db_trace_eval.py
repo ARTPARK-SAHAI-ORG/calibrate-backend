@@ -6,6 +6,7 @@ so these tests write directly via raw SQL.
 
 from __future__ import annotations
 
+import contextlib
 import sqlite3
 import uuid
 
@@ -304,3 +305,86 @@ def test_score_read_helpers_are_org_scoped():
     ] is True
 
 
+
+
+def test_the_frozen_ddl_still_matches_the_status_enum():
+    """The partial indexes name the open statuses as literals and CREATE IF NOT
+    EXISTS never reshapes an existing index, so renaming an enum value would
+    silently stop enforcing one open run per trace and turn the claim into a
+    full scan."""
+    with db.get_db_connection() as conn:
+        sql = " ".join(
+            r["sql"] or ""
+            for r in conn.execute(
+                "SELECT sql FROM sqlite_master WHERE name IN "
+                "('trace_eval_runs', 'ux_trace_eval_active', 'ix_trace_eval_claim')"
+            )
+        )
+    open_values = [s.value for s in ts.OPEN_TRACE_EVAL_RUN_STATUSES]
+    assert open_values == ["pending", "processing"]
+    for value in open_values:
+        assert f"'{value}'" in sql, value
+    assert f"DEFAULT '{ts.TraceEvalRunStatus.PENDING.value}'" in sql
+
+
+def test_a_score_needs_a_known_output_type_and_a_value():
+    """The type decides how the number is read, so the row is refused without
+    one the reader understands."""
+    run = _insert_run(_org(), str(uuid.uuid4()))
+    for output_type, value in (("categorical", 1), (None, 1), ("binary", None)):
+        with pytest.raises(sqlite3.IntegrityError):
+            _insert_score(run, output_type=output_type, value=value)
+
+
+def test_deleting_pending_runs_leaves_another_agents_runs_alone():
+    """Turning scoring off for one agent must not cancel every queued run in
+    the workspace."""
+    org = _org()
+    mine, theirs = str(uuid.uuid4()), str(uuid.uuid4())
+    kept = _insert_run(org, str(uuid.uuid4()), agent_id=theirs)
+    gone = _insert_run(org, str(uuid.uuid4()), agent_id=mine)
+
+    with db.get_db_connection() as conn:
+        deleted = db._delete_pending_trace_eval_runs(conn.cursor(), mine, org)
+        conn.commit()
+
+    assert deleted == 1
+    assert db.get_trace_eval_run(gone) is None
+    assert db.get_trace_eval_run(kept) is not None
+
+
+def test_a_page_of_traces_costs_one_query_however_many_rows(monkeypatch):
+    """The batched helper exists so a page does not read scores per row. A
+    per-row lookup slipped into the loop would pass every other test."""
+    org = _org()
+    traces = []
+    for _ in range(5):
+        trace_uuid = str(uuid.uuid4())
+        run = _insert_run(org, trace_uuid, status="completed", completed_at=_ts(5))
+        _insert_score(run)
+        traces.append(trace_uuid)
+
+    statements = []
+    real = db.get_db_connection
+
+    class _Counting:
+        def __init__(self, conn):
+            self._conn = conn
+
+        def execute(self, sql, params=None):
+            statements.append(sql)
+            return self._conn.execute(sql) if params is None else self._conn.execute(sql, params)
+
+        def __getattr__(self, name):
+            return getattr(self._conn, name)
+
+    @contextlib.contextmanager
+    def counting():
+        with real() as conn:
+            yield _Counting(conn)
+
+    monkeypatch.setattr(db, "get_db_connection", counting)
+    result = db.get_latest_trace_run_summaries(org, traces)
+
+    assert len(result) == 5
+    assert len(statements) == 1, statements

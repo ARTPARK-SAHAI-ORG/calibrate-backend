@@ -304,8 +304,6 @@ def resolve_batch_evaluators(
     if skip is not None:
         return skip
     hydrated = [item.execution for item in resolution.eligible]
-    if not hydrated:
-        return "no_usable_evaluators"
     return BatchEvaluators(
         evaluation_type=resolution.evaluation_type, hydrated=hydrated
     )

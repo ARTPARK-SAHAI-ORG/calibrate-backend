@@ -2804,15 +2804,24 @@ def test_score_averages_honour_the_list_filters_and_skip_deleted_traces(client):
     assert _averages(client, h, agent_id=str(uuid.uuid4())) == {}
 
 
-def test_score_averages_ignore_runs_that_did_not_complete(client):
+def test_score_averages_cover_the_same_scores_the_rows_show(client):
+    """A row shows whatever scores have landed, whatever the run's status, so
+    averaging finished runs only would disagree with the rows on screen."""
     h, agent_id = _signup_with_agent(client)
     _disable_auto_score(client, h, agent_id)
     org = _org_of(agent_id)
     trace = _post_trace(client, h, _payload(agent_id, _mid()))
-    pending = _insert_run(org, trace["uuid"], status="pending", agent_id=agent_id)
-    _insert_score(pending, evaluator_uuid=_EVAL_A, evaluator_version_id=_VER_A, value=0)
+    run = _insert_run(org, trace["uuid"], status="processing", agent_id=agent_id)
+    _insert_score(run, evaluator_uuid=_EVAL_A, evaluator_version_id=_VER_A, value=1)
 
-    assert _averages(client, h) == {}
+    body = client.get(
+        "/traces", headers=h, params={"include_score_averages": True}
+    ).json()
+
+    assert [r["value"] for r in body["items"][0]["results"]] == [1]
+    assert {e["evaluator_uuid"]: e for e in body["score_averages"]}[_EVAL_A][
+        "average"
+    ] == 1
 
 
 def test_score_averages_are_scoped_to_the_callers_workspace(client):

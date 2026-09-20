@@ -10838,23 +10838,14 @@ def soft_delete_traces(org_uuid: str, *, trace_ids: List[str]) -> int:
 
 
 def _delete_pending_trace_eval_runs(
-    cursor: sqlite3.Cursor,
-    agent_id: str,
-    org_uuid: Optional[str] = None,
+    cursor: sqlite3.Cursor, agent_id: str, org_uuid: str
 ) -> int:
     """Delete never-started runs for an agent. Leaves processing/terminal rows."""
-    pending = trace_scoring.TraceEvalRunStatus.PENDING.value
-    if org_uuid:
-        cursor.execute(
-            "DELETE FROM trace_eval_runs "
-            "WHERE agent_id = ? AND org_uuid = ? AND status = ?",
-            (agent_id, org_uuid, pending),
-        )
-    else:
-        cursor.execute(
-            "DELETE FROM trace_eval_runs WHERE agent_id = ? AND status = ?",
-            (agent_id, pending),
-        )
+    cursor.execute(
+        "DELETE FROM trace_eval_runs "
+        "WHERE agent_id = ? AND org_uuid = ? AND status = ?",
+        (agent_id, org_uuid, trace_scoring.TraceEvalRunStatus.PENDING.value),
+    )
     return cursor.rowcount or 0
 
 
@@ -10974,9 +10965,15 @@ def average_trace_scores(
 ) -> List[Dict[str, Any]]:
     """Mean score per evaluator over the live traces matching the list filters.
 
-    Counts each trace's LATEST completed run only, so a trace counts once and
-    the numbers match what the list rows show. An evaluator that has scored
-    nothing in the filtered set is absent rather than present with a zero.
+    Counts each trace's LATEST run, whatever its status, which is the run the
+    list row shows. Averaging finished runs only would disagree with the rows
+    on screen, since a row shows whatever scores have landed.
+
+    One entry per evaluator, describing it as it is NOW: scores written under a
+    different `output_type` are left out, because a pass or fail cannot be
+    averaged with a rating, and the scale comes from the live version rather
+    than whichever version happened to sort highest. An evaluator that has
+    scored nothing in the filtered set is absent rather than zero.
     """
     where, params = _trace_filters(org_uuid, agent_id, q, output_type, labels)
     sql = f"""
@@ -10990,20 +10987,21 @@ def average_trace_scores(
                    ) AS rn
               FROM trace_eval_runs r
               JOIN matched ON matched.uuid = r.trace_uuid
-             WHERE r.org_uuid = ? AND r.status = 'completed'
+             WHERE r.org_uuid = ?
         )
         SELECT ts.evaluator_uuid AS evaluator_uuid,
-               ts.output_type AS output_type,
+               MAX(COALESCE(e.output_type, ts.output_type)) AS output_type,
                COUNT(*) AS traces_scored,
                AVG(ts.value) AS average,
                MAX(e.name) AS evaluator_name,
-               MAX(ev.output_config) AS output_config
+               MAX(live.output_config) AS output_config
           FROM latest
           JOIN trace_eval_scores ts ON ts.run_uuid = latest.uuid
           LEFT JOIN evaluators e ON e.uuid = ts.evaluator_uuid
-          LEFT JOIN evaluator_versions ev ON ev.uuid = ts.evaluator_version_id
+          LEFT JOIN evaluator_versions live ON live.uuid = e.live_version_id
          WHERE latest.rn = 1
-         GROUP BY ts.evaluator_uuid, ts.output_type
+           AND ts.output_type = COALESCE(e.output_type, ts.output_type)
+         GROUP BY ts.evaluator_uuid
          ORDER BY MAX(e.name), ts.evaluator_uuid
     """
     with get_db_connection() as conn:
