@@ -19,7 +19,7 @@ from pagination import (
 _AgentSearch = make_search_params(searchable=["name"])
 _AgentEvaluatorSearch = make_search_params(searchable=["name"])
 from pydantic import BaseModel, Field
-from calibrate_agent.connections import TextAgentConnection
+from calibrate_agent.connections import TextAgentConnection, WebSocketAgentConnection
 
 from utils import (
     env_bool,
@@ -89,6 +89,17 @@ BLOCKED_HEADERS = frozenset(
     }
 )
 
+CONNECTION_TYPE_HTTP_CHAT = "http_chat"
+CONNECTION_TYPE_WEBSOCKET_VOICE = "websocket_voice"
+CONNECTION_TYPES = frozenset(
+    {CONNECTION_TYPE_HTTP_CHAT, CONNECTION_TYPE_WEBSOCKET_VOICE}
+)
+
+
+def _connection_type(config: Optional[Dict[str, Any]] = None) -> str:
+    """Return the persisted connection transport, preserving HTTP compatibility."""
+    return (config or {}).get("connection_type", CONNECTION_TYPE_HTTP_CHAT)
+
 
 def _is_private_ip(addr: str) -> bool:
     """Return True if addr is loopback, private, link-local, or otherwise non-public."""
@@ -106,15 +117,28 @@ def _is_private_ip(addr: str) -> bool:
     )
 
 
-def _validate_agent_url(url: str) -> None:
-    """Raise HTTPException if url is not a valid public HTTP(S) endpoint.
+def _validate_agent_url(
+    url: str, connection_type: str = CONNECTION_TYPE_HTTP_CHAT
+) -> None:
+    """Raise HTTPException if url is valid for the public connection transport.
 
     Checks both the hostname string and the resolved IP addresses to
     prevent SSRF via DNS rebinding or numeric IP encoding tricks.
     """
+    if connection_type not in CONNECTION_TYPES:
+        raise HTTPException(status_code=400, detail="Unsupported connection_type")
+
     parsed = urlparse(url)
-    if parsed.scheme not in ("http", "https"):
-        raise HTTPException(status_code=400, detail="agent_url must use http or https")
+    allowed_schemes = (
+        ("ws", "wss")
+        if connection_type == CONNECTION_TYPE_WEBSOCKET_VOICE
+        else ("http", "https")
+    )
+    if parsed.scheme not in allowed_schemes:
+        schemes = " or ".join(allowed_schemes)
+        raise HTTPException(
+            status_code=400, detail=f"agent_url must use {schemes} for {connection_type}"
+        )
     if not parsed.hostname:
         raise HTTPException(status_code=400, detail="agent_url must include a hostname")
     hostname = parsed.hostname.lower()
@@ -160,19 +184,37 @@ def _sanitize_headers(headers: Optional[Dict[str, str]]) -> Optional[Dict[str, s
 async def _verify_agent_connection(
     agent_url: str,
     agent_headers: Optional[Dict[str, str]] = None,
+    connection_type: str = CONNECTION_TYPE_HTTP_CHAT,
     model: Optional[str] = None,
     messages: Optional[List[Dict[str, str]]] = None,
     default_inputs: Optional[Dict[str, Any]] = None,
     inputs: Optional[Dict[str, Any]] = None,
     interaction_type: str = DEFAULT_AGENT_INTERACTION_TYPE,
 ) -> Dict[str, Any]:
-    """Verify agent connection using calibrate's TextAgentConnection.
+    """Verify an HTTP chat or Pipecat WebSocket voice connection.
 
     `interaction_type` picks the request body the probe sends, so verification
     exercises the same shape a run will: the exchange so far as `messages`, or
     only the latest user text as `input` for a `general` agent.
     """
-    _validate_agent_url(agent_url)
+    _validate_agent_url(agent_url, connection_type)
+    if connection_type == CONNECTION_TYPE_WEBSOCKET_VOICE:
+        if agent_headers:
+            return {
+                "success": False,
+                "error": (
+                    "WebSocket voice connections do not support agent_headers. "
+                    "Authenticate with a short-lived token in the URL instead."
+                ),
+                "sample_response": None,
+            }
+        result = await WebSocketAgentConnection(url=agent_url).verify()
+        return {
+            "success": result["ok"],
+            "error": result.get("error"),
+            "sample_response": None,
+        }
+
     safe_headers = _sanitize_headers(with_calibrate_eval_header(agent_headers))
     agent = TextAgentConnection(
         url=agent_url,
@@ -319,6 +361,7 @@ _AGENT_CONFIG_DESCRIPTION = """Agent behavioral config. The keys depend on `type
 ```
 
 **`type=connection`**, your own HTTP endpoint:
+- `connection_type`: `http_chat` (default) or `websocket_voice`
 - `agent_url`: public HTTP(S) endpoint your agent is called at
 - `agent_headers`: headers sent on each request, e.g. auth
 - `benchmark_provider`: `openrouter` by default. Other values: `openai`, `google`, `anthropic`, `meta-llama`, `mistralai`, `deepseek`, `x-ai`, `cohere`, `qwen`, or `ai21`
@@ -393,6 +436,23 @@ _CREATE_AGENT_EXAMPLES = {
                 "agent_url": "https://api.example.com/v1/chat/completions",
                 "agent_headers": {"Authorization": "Bearer <token>"},
                 "benchmark_provider": "openrouter",
+            },
+        },
+    },
+    "pipecat_websocket_voice_connection": {
+        "summary": "Connect Pipecat voice agent",
+        "description": (
+            "Connect an external Pipecat voice agent over a public WebSocket. "
+            "The agent must use the protobuf frame serializer. Authentication "
+            "headers are not supported; use a short-lived URL token if needed."
+        ),
+        "value": {
+            "name": "My Pipecat Voice Agent",
+            "type": "connection",
+            "config": {
+                "connection_type": "websocket_voice",
+                "agent_url": "wss://voice.example.com/ws?token=<short-lived-token>",
+                "serializer": "protobuf",
             },
         },
     },
@@ -486,6 +546,10 @@ class AgentSummary(BaseModel):
         None,
         description="Whether the agent's connection has been verified, for a `type=connection` agent",
     )
+    connection_type: Optional[Literal["http_chat", "websocket_voice"]] = Field(
+        None,
+        description="Connection transport for a type=connection agent",
+    )
     has_default_inputs: bool = Field(
         description="Whether the agent has custom request fields configured",
     )
@@ -510,6 +574,9 @@ def to_agent_summary(agent: Dict[str, Any]) -> AgentSummary:
         created_at=agent["created_at"],
         updated_at=agent["updated_at"],
         connection_verified=None if verified is None else bool(verified),
+        connection_type=(
+            _connection_type(config) if agent["type"] == "connection" else None
+        ),
         has_default_inputs=bool(config.get("default_inputs")),
     )
 
@@ -702,6 +769,10 @@ class VerifyConnectionRequest(AgentVerifyRequest):
         description="Public HTTP(S) agent endpoint to verify",
         examples=["https://api.example.com/agent"],
     )
+    connection_type: Literal["http_chat", "websocket_voice"] = Field(
+        CONNECTION_TYPE_HTTP_CHAT,
+        description="Verification connection transport",
+    )
     agent_headers: Optional[Dict[str, str]] = Field(
         None,
         description="Extra request headers to send to your agent, e.g. an auth token. Omit if none are needed",
@@ -746,6 +817,7 @@ async def verify_agent_connection_presave(
     result = await _verify_agent_connection(
         agent_url=request.agent_url,
         agent_headers=request.agent_headers,
+        connection_type=request.connection_type,
         model=request.model,
         messages=request.messages,
         default_inputs=request.default_inputs,
@@ -783,6 +855,7 @@ async def verify_agent_connection(
         )
 
     agent_headers = agent_config.get("agent_headers")
+    connection_type = _connection_type(agent_config)
     model = request.model
 
     # Strip provider/ prefix for non-openrouter providers so the agent
@@ -796,6 +869,7 @@ async def verify_agent_connection(
     result = await _verify_agent_connection(
         agent_url=agent_url,
         agent_headers=agent_headers,
+        connection_type=connection_type,
         model=verify_model,
         messages=request.messages,
         default_inputs=agent_config.get("default_inputs"),
@@ -975,12 +1049,15 @@ def update_agent_endpoint(
     if not existing_agent or existing_agent.get("org_uuid") != ctx.org_uuid:
         raise HTTPException(status_code=404, detail="Agent not found")
 
-    # If agent_url or agent_headers changed, reset all verification flags
+    # If a connection target, credentials, or transport changed, reset verification.
     if agent.config is not None:
         existing_config = existing_agent.get("config") or {}
-        if agent.config.get("agent_url") != existing_config.get(
-            "agent_url"
-        ) or agent.config.get("agent_headers") != existing_config.get("agent_headers"):
+        if (
+            agent.config.get("agent_url") != existing_config.get("agent_url")
+            or agent.config.get("agent_headers")
+            != existing_config.get("agent_headers")
+            or _connection_type(agent.config) != _connection_type(existing_config)
+        ):
             agent.config["connection_verified"] = False
             agent.config["connection_verified_at"] = None
             agent.config["connection_verified_error"] = None
