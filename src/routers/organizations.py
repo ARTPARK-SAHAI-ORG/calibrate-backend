@@ -8,7 +8,13 @@ from pydantic import BaseModel, ConfigDict, Field
 from typing import List, Optional
 
 from auth_utils import get_current_user_id, is_superadmin_user
-from mailer import WORKSPACE_INVITE_TEMPLATE, frontend_url, send_email
+from mailer import (
+    MEMBER_ADDED_TEMPLATE,
+    MEMBER_JOINED_TEMPLATE,
+    WORKSPACE_INVITE_TEMPLATE,
+    frontend_url,
+    send_email,
+)
 from utils import MemberRoleLiteral
 from db import (
     add_organization_member,
@@ -142,20 +148,46 @@ def _send_added_to_workspace_email(
 ) -> None:
     """Tell someone they are in. They are already a member, so the link lands
     them in the workspace; a signed-out reader is bounced to login and back."""
-    who = (
-        f"{inviter.get('first_name') or ''} {inviter.get('last_name') or ''}".strip()
-        or inviter.get("email")
-        or ""
-    )
     send_email(
         to=email,
         template=WORKSPACE_INVITE_TEMPLATE,
         variables={
-            "INVITER": who,
+            "INVITER": _display_name(inviter),
             "WORKSPACE": org_name,
             "URL": f"{frontend_url()}/{org_uuid}/agents",
         },
     )
+
+
+def _display_name(user: dict) -> str:
+    return (
+        f"{user.get('first_name') or ''} {user.get('last_name') or ''}".strip()
+        or user.get("email")
+        or ""
+    )
+
+
+def _email_owner(
+    org_uuid: str,
+    org_name: str,
+    actor_id: str,
+    template: str,
+    member: dict,
+    inviter: Optional[dict] = None,
+) -> None:
+    owner = next(
+        (m for m in list_organization_members(org_uuid) if m["role"] == "owner"), None
+    )
+    if owner is None or owner["user_id"] == actor_id:
+        return
+    variables = {
+        "MEMBER": _display_name(member),
+        "WORKSPACE": org_name,
+        "URL": f"{frontend_url()}/{org_uuid}/workspace-settings",
+    }
+    if inviter is not None:
+        variables["INVITER"] = _display_name(inviter)
+    send_email(to=owner["email"], template=template, variables=variables)
 
 
 def _require_membership(org_uuid: str, user_id: str) -> str:
@@ -249,16 +281,16 @@ def add_member(
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
 
+    org_name = get_organization(org_uuid)["name"]
+    inviter = get_user(user_id)
     _send_added_to_workspace_email(
-        email=member["email"],
-        org_uuid=org_uuid,
-        org_name=get_organization(org_uuid)["name"],
-        inviter=get_user(user_id),
+        email=member["email"], org_uuid=org_uuid, org_name=org_name, inviter=inviter
     )
 
     # Re-read the full member row so the response has the joined user fields.
     for m in list_organization_members(org_uuid):
         if m["user_id"] == member["user_id"]:
+            _email_owner(org_uuid, org_name, user_id, MEMBER_ADDED_TEMPLATE, m, inviter)
             return MemberResponse(**m)
     raise HTTPException(status_code=500, detail="Member not found after insert")
 
@@ -362,5 +394,8 @@ def accept_invite(
     org = get_org_by_invite_token(token)
     if org is None:
         raise HTTPException(status_code=404, detail="Invite not found")
-    add_organization_member_by_user_id(org["uuid"], user_id, role="admin")
+    if add_organization_member_by_user_id(org["uuid"], user_id, role="admin"):
+        _email_owner(
+            org["uuid"], org["name"], user_id, MEMBER_JOINED_TEMPLATE, get_user(user_id)
+        )
     return OrganizationResponse(**org, member_role=get_member_role(org["uuid"], user_id))

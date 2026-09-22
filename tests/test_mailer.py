@@ -90,6 +90,8 @@ def test_send_email_strips_angle_brackets_from_values(monkeypatch, inline_thread
 def test_template_aliases():
     assert mailer.WELCOME_TEMPLATE == "calibrate-welcome"
     assert mailer.WORKSPACE_INVITE_TEMPLATE == "calibrate-workspace-invite"
+    assert mailer.MEMBER_JOINED_TEMPLATE == "calibrate-member-joined"
+    assert mailer.MEMBER_ADDED_TEMPLATE == "calibrate-member-added"
 
 
 def test_send_email_without_api_key_sends_nothing(monkeypatch, inline_thread):

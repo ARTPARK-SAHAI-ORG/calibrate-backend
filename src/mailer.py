@@ -18,6 +18,8 @@ SEND_TIMEOUT_SECONDS = 10
 
 WELCOME_TEMPLATE = "calibrate-welcome"
 WORKSPACE_INVITE_TEMPLATE = "calibrate-workspace-invite"
+MEMBER_JOINED_TEMPLATE = "calibrate-member-joined"
+MEMBER_ADDED_TEMPLATE = "calibrate-member-added"
 
 # Bounded, and its threads are joined at interpreter exit, so an unauthenticated
 # endpoint cannot spawn threads without limit and a shutdown does not drop a
