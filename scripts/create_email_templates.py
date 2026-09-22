@@ -166,6 +166,7 @@ def video(youtube_id: str, caption: str) -> str:
 URL_VAR = {"key": "URL", "type": "string", "fallback": APP_URL}
 WORKSPACE_VAR = {"key": "WORKSPACE", "type": "string", "fallback": "a workspace"}
 INVITER_VAR = {"key": "INVITER", "type": "string", "fallback": "Someone"}
+MEMBER_VAR = {"key": "MEMBER", "type": "string", "fallback": "Someone"}
 
 TEMPLATES = [
     {
@@ -246,6 +247,28 @@ TEMPLATES = [
             button="Accept Invite",
         ),
         "variables": [WORKSPACE_VAR, INVITER_VAR, URL_VAR],
+    },
+    {
+        "alias": "calibrate-member-joined",
+        "name": "Calibrate member joined",
+        "subject": "{{{MEMBER}}} joined {{{WORKSPACE}}} on Calibrate",
+        "html": layout(
+            heading="{{{MEMBER}}} joined {{{WORKSPACE}}}",
+            sub="They joined using the workspace invite link.",
+            button="View members",
+        ),
+        "variables": [MEMBER_VAR, WORKSPACE_VAR, URL_VAR],
+    },
+    {
+        "alias": "calibrate-member-added",
+        "name": "Calibrate member added",
+        "subject": "{{{INVITER}}} added {{{MEMBER}}} to {{{WORKSPACE}}} on Calibrate",
+        "html": layout(
+            heading="{{{MEMBER}}} was added to {{{WORKSPACE}}}",
+            sub="Added by {{{INVITER}}}",
+            button="View members",
+        ),
+        "variables": [MEMBER_VAR, WORKSPACE_VAR, INVITER_VAR, URL_VAR],
     },
 ]
 

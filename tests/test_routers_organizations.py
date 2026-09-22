@@ -17,7 +17,11 @@ from unittest.mock import patch
 import pytest
 from fastapi.testclient import TestClient
 
-from mailer import WORKSPACE_INVITE_TEMPLATE
+from mailer import (
+    MEMBER_ADDED_TEMPLATE,
+    MEMBER_JOINED_TEMPLATE,
+    WORKSPACE_INVITE_TEMPLATE,
+)
 
 
 @pytest.fixture(scope="module")
@@ -34,13 +38,13 @@ def client(app):
             yield c
 
 
-def _signup(client, email_prefix: str = "org"):
+def _signup(client, email_prefix: str = "org", first_name: str = "O"):
     suffix = uuid.uuid4().hex[:8]
     email = f"{email_prefix}-{suffix}@example.com"
     body = client.post(
         "/auth/signup",
         json={
-            "first_name": "O",
+            "first_name": first_name,
             "last_name": "U",
             "email": email,
             "password": "passw0rd",
@@ -821,3 +825,99 @@ def test_inviter_falls_back_to_their_email_when_they_have_no_name(
     )
     assert resp.status_code == 201, resp.text
     assert sent_emails[0]["variables"]["INVITER"] == "boss@example.com"
+
+
+def _owner_with_admin(client, sent_emails, name):
+    owner = _signup(client, "notify-owner")
+    admin = _signup(client, "notify-admin", first_name="Ravi")
+    org_uuid = _new_org(client, owner, name=name)
+    client.post(
+        f"/organizations/{org_uuid}/members",
+        json={"email": admin["email"]},
+        headers=owner["headers"],
+    )
+    sent_emails.clear()
+    return owner, admin, org_uuid
+
+
+def test_owner_adding_someone_does_not_email_the_owner(client, sent_emails):
+    owner = _signup(client, "notify-owner")
+    org_uuid = _new_org(client, owner, name="Quiet Co")
+    client.post(
+        f"/organizations/{org_uuid}/members",
+        json={"email": f"quiet-{uuid.uuid4().hex[:8]}@example.com"},
+        headers=owner["headers"],
+    )
+    assert [m["template"] for m in sent_emails] == [WORKSPACE_INVITE_TEMPLATE]
+
+
+def test_admin_adding_someone_tells_the_owner(client, sent_emails):
+    owner, admin, org_uuid = _owner_with_admin(client, sent_emails, "Told Co")
+    newcomer = _signup(client, "notify-new", first_name="Asha")
+
+    resp = client.post(
+        f"/organizations/{org_uuid}/members",
+        json={"email": newcomer["email"]},
+        headers=admin["headers"],
+    )
+    assert resp.status_code == 201, resp.text
+
+    assert [m["template"] for m in sent_emails] == [
+        WORKSPACE_INVITE_TEMPLATE,
+        MEMBER_ADDED_TEMPLATE,
+    ]
+    mail = sent_emails[1]
+    assert mail["to"] == owner["email"]
+    assert mail["variables"] == {
+        "MEMBER": "Asha U",
+        "INVITER": "Ravi U",
+        "WORKSPACE": "Told Co",
+        "URL": f"https://app.example.com/{org_uuid}/workspace-settings",
+    }
+
+
+def test_owner_is_told_the_email_of_a_person_with_no_name(client, sent_emails):
+    _, admin, org_uuid = _owner_with_admin(client, sent_emails, "Stub Co")
+    invitee = f"noname-{uuid.uuid4().hex[:8]}@example.com"
+
+    client.post(
+        f"/organizations/{org_uuid}/members",
+        json={"email": invitee},
+        headers=admin["headers"],
+    )
+
+    assert sent_emails[1]["variables"]["MEMBER"] == invitee
+
+
+def test_joining_through_the_link_tells_the_owner(client, sent_emails):
+    owner = _signup(client, "notify-owner")
+    joiner = _signup(client, "notify-joiner", first_name="Asha")
+    org_uuid = _new_org(client, owner, name="Link Co")
+    token = client.post(f"/organizations/{org_uuid}/invite-link", headers=owner["headers"]).json()["token"]
+
+    assert client.post(f"/invites/{token}/accept", headers=joiner["headers"]).status_code == 200
+
+    assert sent_emails == [
+        {
+            "to": owner["email"],
+            "template": MEMBER_JOINED_TEMPLATE,
+            "variables": {
+                "MEMBER": "Asha U",
+                "WORKSPACE": "Link Co",
+                "URL": f"https://app.example.com/{org_uuid}/workspace-settings",
+            },
+        }
+    ]
+
+
+def test_accepting_the_link_again_sends_nothing(client, sent_emails):
+    owner = _signup(client, "notify-owner")
+    joiner = _signup(client, "notify-joiner")
+    org_uuid = _new_org(client, owner, name="Again Co")
+    token = client.post(f"/organizations/{org_uuid}/invite-link", headers=owner["headers"]).json()["token"]
+    client.post(f"/invites/{token}/accept", headers=joiner["headers"])
+    sent_emails.clear()
+
+    assert client.post(f"/invites/{token}/accept", headers=joiner["headers"]).status_code == 200
+    assert client.post(f"/invites/{token}/accept", headers=owner["headers"]).status_code == 200
+    assert sent_emails == []
