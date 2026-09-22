@@ -75,9 +75,13 @@ def layout(
         '<tr><td align="center" style="padding-bottom:26px;">'
         f'<img src="{LOGO_URL}" width="24" height="24" alt="Calibrate" '
         'style="display:block;border:0;outline:none;text-decoration:none;"></td></tr>'
-        '<tr><td align="center" style="font-size:24px;line-height:1.35;'
-        f'font-weight:600;color:#111111;letter-spacing:-0.01em;">{heading}</td></tr>'
-        f"{sub_row}"
+        + (
+            '<tr><td align="center" style="font-size:24px;line-height:1.35;'
+            f'font-weight:600;color:#111111;letter-spacing:-0.01em;">{heading}</td></tr>'
+            if heading
+            else ""
+        )
+        + f"{sub_row}"
         + (f'<tr><td align="center" style="padding-top:24px;">{hero}</td></tr>' if hero else "")
         + '<tr><td align="center" style="padding-top:22px;">'
         '<table cellpadding="0" cellspacing="0" border="0"><tr>'
@@ -253,8 +257,8 @@ TEMPLATES = [
         "name": "Calibrate member joined",
         "subject": "A new member joined your workspace on Calibrate",
         "html": layout(
-            heading="{{{MEMBER}}} joined {{{WORKSPACE}}}",
-            sub="They joined using the workspace invite link.",
+            heading="",
+            sub="{{{MEMBER}}} joined your <strong>{{{WORKSPACE}}}</strong> workspace following the invite link",
             button="View members",
         ),
         "variables": [MEMBER_VAR, WORKSPACE_VAR, URL_VAR],
@@ -264,8 +268,8 @@ TEMPLATES = [
         "name": "Calibrate member added",
         "subject": "A new member was added to your workspace on Calibrate",
         "html": layout(
-            heading="{{{MEMBER}}} was added to {{{WORKSPACE}}}",
-            sub="Added by {{{INVITER}}}",
+            heading="",
+            sub="{{{MEMBER}}} was added to your <strong>{{{WORKSPACE}}}</strong> workspace by {{{INVITER}}}",
             button="View members",
         ),
         "variables": [MEMBER_VAR, WORKSPACE_VAR, INVITER_VAR, URL_VAR],
