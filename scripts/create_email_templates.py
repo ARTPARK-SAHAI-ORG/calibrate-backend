@@ -251,7 +251,7 @@ TEMPLATES = [
     {
         "alias": "calibrate-member-joined",
         "name": "Calibrate member joined",
-        "subject": "{{{MEMBER}}} joined {{{WORKSPACE}}} on Calibrate",
+        "subject": "A new member joined your workspace on Calibrate",
         "html": layout(
             heading="{{{MEMBER}}} joined {{{WORKSPACE}}}",
             sub="They joined using the workspace invite link.",
@@ -262,7 +262,7 @@ TEMPLATES = [
     {
         "alias": "calibrate-member-added",
         "name": "Calibrate member added",
-        "subject": "{{{INVITER}}} added {{{MEMBER}}} to {{{WORKSPACE}}} on Calibrate",
+        "subject": "A new member was added to your workspace on Calibrate",
         "html": layout(
             heading="{{{MEMBER}}} was added to {{{WORKSPACE}}}",
             sub="Added by {{{INVITER}}}",
