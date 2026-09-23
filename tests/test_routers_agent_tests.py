@@ -5425,6 +5425,24 @@ def _post_benchmark(client, h, agent_uuid, monkeypatch, body):
         )
 
 
+def _connection_benchmark_agent(client, h, verified_models, count=1):
+    """A benchmark agent Calibrate reaches over HTTP, with those models verified."""
+    import db
+
+    agent, tests = _benchmark_agent_with_tests(client, h, count=count)
+    db.update_agent(
+        agent["uuid"],
+        config={
+            "agent_url": "http://agent.local/run",
+            "connection_verified": True,
+            "benchmark_models_verified": {
+                m: {"verified": True} for m in verified_models
+            },
+        },
+    )
+    return agent, tests
+
+
 def _benchmark_run_count(client, h, agent_uuid):
     return client.get(f"/agent-tests/agent/{agent_uuid}/runs", headers=h).json()["total"]
 
@@ -5599,9 +5617,10 @@ def test_benchmark_rejects_a_named_model_clashing_with_an_object_id(
     assert _benchmark_run_count(client, h, agent["uuid"]) == 0
 
 
-def test_benchmark_rejects_request_settings_until_they_are_supported(
+def test_benchmark_rejects_request_settings_on_an_agent_calibrate_runs(
     client, monkeypatch
 ):
+    """Request settings only reach an agent Calibrate calls at your own URL."""
     h = _signup(client)["headers"]
     agent, _ = _benchmark_agent_with_tests(client, h)
 
@@ -5625,9 +5644,10 @@ def test_benchmark_rejects_request_settings_until_they_are_supported(
     assert _benchmark_run_count(client, h, agent["uuid"]) == 0
 
 
-def test_benchmark_rejects_one_model_named_twice_until_it_is_supported(
+def test_benchmark_rejects_one_model_twice_on_an_agent_calibrate_runs(
     client, monkeypatch
 ):
+    """Two runs of one model can only be told apart at your own URL."""
     h = _signup(client)["headers"]
     agent, _ = _benchmark_agent_with_tests(client, h)
 
@@ -5747,16 +5767,15 @@ def test_benchmark_detail_echoes_the_model_and_label_of_each_entry(
     assert row["label"] == "gpt-5 (high thinking)"
 
 
-def test_benchmark_allows_one_model_twice_once_variants_are_supported(
+def test_benchmark_runs_one_model_twice_with_its_own_request_settings(
     client, monkeypatch
 ):
-    """The guards are temporary. With them lifted, one model runs twice with its
-    own request settings and the two runs stay apart under their own IDs."""
+    """The whole point: one model twice, each with its own settings, kept apart
+    under its own ID and remembering what it ran with."""
     from db import get_agent_test_job
 
-    monkeypatch.setattr("routers.agent_tests._VARIANTS_SUPPORTED", True)
     h = _signup(client)["headers"]
-    agent, _ = _benchmark_agent_with_tests(client, h)
+    agent, _ = _connection_benchmark_agent(client, h, ["openai/gpt-5"])
 
     resp = _post_benchmark(
         client,
@@ -5782,7 +5801,14 @@ def test_benchmark_allows_one_model_twice_once_variants_are_supported(
     )
     assert resp.status_code == 200, resp.text
 
-    rows = get_agent_test_job(resp.json()["task_id"])["results"]["model_results"]
+    task_id = resp.json()["task_id"]
+    rows = get_agent_test_job(task_id)["results"]["model_results"]
     assert [r["model"] for r in rows] == ["gpt-5#1", "gpt-5#2"]
     assert all(r["model_name"] == "openai/gpt-5" for r in rows)
     assert [r["extra"]["reasoning"]["effort"] for r in rows] == ["high", "low"]
+
+    detail = client.get(f"/agent-tests/benchmark/{task_id}", headers=h).json()
+    assert [r["label"] for r in detail["model_results"]] == [
+        "gpt-5 (high thinking)",
+        "gpt-5 (low thinking)",
+    ]

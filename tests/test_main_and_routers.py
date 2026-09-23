@@ -142,11 +142,10 @@ def test_public_api_docs_are_unauthenticated_and_filtered(client, monkeypatch):
         "public verify-connection body must expose only model + messages + extra"
     )
 
-    # A benchmark refuses per-model request settings for now, so `extra` must
-    # stay out of the generated clients on both the request and the result.
-    # Verify keeps its own `extra`, which is honoured today.
-    assert "extra" not in pub_top["components"]["schemas"]["BenchmarkModel"]["properties"]
-    assert "extra" not in pub_top["components"]["schemas"]["ModelResult"]["properties"]
+    # Per-model request settings are part of the key API: a client sends them on
+    # a benchmark and reads back what each model ran with.
+    assert "extra" in pub_top["components"]["schemas"]["BenchmarkModel"]["properties"]
+    assert "extra" in pub_top["components"]["schemas"]["ModelResult"]["properties"]
 
     # JWT-only / deliberately-excluded endpoints must NOT leak into the public
     # schema: account/tenant bootstrapping, the UI-only share pages, tools

@@ -2032,13 +2032,6 @@ def _merge_test_results_by_test_names(
     return out
 
 
-# Benchmarking one model more than once, or with its own request settings, needs
-# a calibrate-agent that keeps each one's output apart and sends its own settings
-# to the agent. Flip this and drop both guards in `run_agent_benchmark`
-# once that ships.
-_VARIANTS_SUPPORTED = False
-
-
 def _benchmark_variants(models: List[Any]) -> List[Dict[str, Any]]:
     """Every requested model as ``{id, model, label, extra}``.
 
@@ -2063,6 +2056,16 @@ def _benchmark_variants(models: List[Any]) -> List[Dict[str, Any]]:
             }
         )
     return variants
+
+
+def _variant_folder_names(variants: List[Dict[str, Any]]) -> List[str]:
+    """The name calibrate is told to file each model's results under.
+
+    Positional rather than the caller's own id, because calibrate uses the name
+    verbatim as a folder and refuses one holding a slash, which a model name
+    (``openai/gpt-5``) and the ids built from one both carry.
+    """
+    return [f"v{i}" for i in range(len(variants))]
 
 
 def _variant_identity(variant: Dict[str, Any]) -> Dict[str, Any]:
@@ -3840,7 +3843,7 @@ def get_agent_test_case_result(
 class BenchmarkModel(BaseModel):
     id: str = Field(
         min_length=1,
-        description="Your ID for this model, unique within the request. The results carry it as `model`",
+        description="Your ID for this model, unique within the request. The results carry it as `model`, so one model can be benchmarked more than once",
         examples=["gpt-5#1"],
     )
     model: str = Field(
@@ -3862,7 +3865,7 @@ class BenchmarkModel(BaseModel):
 
 class BenchmarkRequest(BaseModel):
     models: List[Union[BenchmarkModel, str]] = Field(
-        description="Models to benchmark. Name a model, or give an object to set the ID and the display name its results are reported under",
+        description="Models to benchmark. Name a model, or give an object to benchmark it with its own request settings",
         examples=[["openai/gpt-4.1", "anthropic/claude-sonnet-4"]],
     )
     test_uuids: Optional[List[TestUuid]] = Field(
@@ -4193,25 +4196,40 @@ def run_benchmark_task(
                     json.dump(calibrate_config, f, indent=2)
 
                 if agent_config.get("agent_url"):
-                    # Agent connection mode: -m {models} but no -p
-                    # Calibrate sends model in each request body; agent routes internally
+                    # Agent connection mode: the models ride in the config as
+                    # `model_variants`, not as -m, so two of one model stay apart.
                     # Frontend always sends models in openrouter format (provider/model).
                     # Strip the provider prefix for non-openrouter providers so the
                     # agent receives just the model name (e.g. "gpt-4.1" not "openai/gpt-4.1").
                     benchmark_provider = agent_config.get(
                         "benchmark_provider", "openrouter"
                     )
-                    if benchmark_provider != "openrouter":
-                        cli_models = [
-                            m.split("/", 1)[-1] if "/" in m else m for m in named_models
-                        ]
-                    else:
-                        cli_models = named_models
-                    run_cmd = (
-                        [get_calibrate_agent_cli(), "llm", "-c", str(config_file), "-m"]
-                        + cli_models
-                        + ["-o", str(output_dir), "--skip-verify"]
-                    )
+                    strip = benchmark_provider != "openrouter"
+                    cli_models = _variant_folder_names(variants)
+                    calibrate_config["model_variants"] = [
+                        {
+                            "id": folder,
+                            "model": (
+                                v["model"].split("/", 1)[-1]
+                                if strip and "/" in v["model"]
+                                else v["model"]
+                            ),
+                            "label": v.get("label") or v["id"],
+                            "extra": v.get("extra") or {},
+                        }
+                        for v, folder in zip(variants, cli_models)
+                    ]
+                    with open(config_file, "w", encoding="utf-8") as f:
+                        json.dump(calibrate_config, f, indent=2)
+                    run_cmd = [
+                        get_calibrate_agent_cli(),
+                        "llm",
+                        "-c",
+                        str(config_file),
+                        "-o",
+                        str(output_dir),
+                        "--skip-verify",
+                    ]
                 else:
                     # Calibrate agent mode: -m {models} -p {provider}
                     llm_config = agent_config.get("llm", {})
@@ -4417,13 +4435,13 @@ def run_benchmark_task(
                 if leaderboard_dir.exists():
                     logger.info(f"Leaderboard directory exists: {leaderboard_dir}")
                     leaderboard_summary = _read_leaderboard_csv(
-                        leaderboard_dir, models=named_models
+                        leaderboard_dir, models=cli_models
                     )
-                    # Calibrate names each leaderboard row after the model, so
-                    # move it onto the id the rest of the run is keyed by.
-                    id_by_model = {v["model"]: v["id"] for v in variants}
+                    # Calibrate names each leaderboard row after the folder it
+                    # wrote, so move it onto the id the run is keyed by.
+                    id_by_folder = dict(zip(cli_models, [v["id"] for v in variants]))
                     for row in leaderboard_summary or []:
-                        row["model"] = id_by_model.get(row.get("model"), row.get("model"))
+                        row["model"] = id_by_folder.get(row.get("model"), row.get("model"))
 
                     # Upload leaderboard to S3
                     results_prefix = f"agent-tests/benchmarks/{task_id}"
@@ -4596,23 +4614,26 @@ def run_agent_benchmark(
         raise HTTPException(status_code=400, detail="At least one model is required")
 
     variants = _benchmark_variants(request.models)
-    if not _VARIANTS_SUPPORTED:
+    agent_config = agent.get("config") or {}
+    # Calibrate only reads per-model request settings when it is calling the
+    # customer's own endpoint, so an agent Calibrate runs itself can neither
+    # carry them nor tell two runs of one model apart.
+    if not agent_config.get("agent_url"):
         if any(v.get("extra") for v in variants):
             raise HTTPException(
                 status_code=400,
-                detail="Request settings for a model are not available yet. Remove extra from every model in the request.",
+                detail="Request settings for a model only apply to an agent Calibrate calls at your own URL. Remove extra from every model in the request.",
             )
         named = [v["model"] for v in variants]
         if len(named) != len(set(named)):
             raise HTTPException(
                 status_code=400,
-                detail="Benchmarking one model more than once is not available yet. Name each model at most once.",
+                detail="Benchmarking one model more than once only applies to an agent Calibrate calls at your own URL. Name each model at most once.",
             )
 
     # Guard: for agent connection mode, verify each requested model is verified.
     # Verification is keyed by the model name, so two requested models sharing one
     # name share it too.
-    agent_config = agent.get("config") or {}
     if agent_config.get("agent_url"):
         benchmark_verified = agent_config.get("benchmark_models_verified") or {}
         unverified = [

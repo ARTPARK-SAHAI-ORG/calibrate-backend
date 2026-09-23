@@ -267,26 +267,91 @@ def _write_llm_model_dir(
 
 
 def _write_leaderboard(
-    output_dir: Path, safe_models: List[str], evaluators: List[Dict[str, Any]]
+    output_dir: Path,
+    safe_models: List[str],
+    evaluators: List[Dict[str, Any]],
+    labels: Optional[List[str]] = None,
 ) -> None:
     leaderboard_dir = output_dir / "leaderboard"
     leaderboard_dir.mkdir(parents=True, exist_ok=True)
     ev_names = [ev.get("name") for ev in evaluators if ev.get("name")]
-    header = ["model", "test_pass_rate"] + ev_names
-    with open(leaderboard_dir / "leaderboard.csv", "w", newline="", encoding="utf-8") as f:
+    label_col = ["label"] if labels is not None else []
+    header = ["model"] + label_col + ["test_pass_rate"] + ev_names
+    # Named as the real CLI names it, so a reader that stops globbing `*.csv`
+    # does not pass here and fail against the real thing.
+    with open(leaderboard_dir / "llm_leaderboard.csv", "w", newline="", encoding="utf-8") as f:
         writer = csv.writer(f)
         writer.writerow(header)
-        for sm in safe_models:
-            writer.writerow([sm, "1.0"] + ["1.0" for _ in ev_names])
+        for i, sm in enumerate(safe_models):
+            row_label = [labels[i]] if labels is not None else []
+            writer.writerow([sm] + row_label + ["1.0"] + ["1.0" for _ in ev_names])
 
 
-def _cmd_llm(opts: Dict[str, List[str]]) -> None:
+# --- Model variants ---------------------------------------------------------
+# A variant's id becomes its results folder name verbatim, so anything that
+# would escape the output dir or collide on a case-insensitive filesystem is
+# rejected before the run starts.
+_RESERVED_VARIANT_IDS = {"", ".", "..", "leaderboard"}
+
+
+def _variants_error(variants: List[Any], config: Any) -> Optional[str]:
+    if not isinstance(config, dict) or not config.get("agent_url"):
+        return "model_variants requires agent_url"
+    seen = set()
+    for variant in variants:
+        if not isinstance(variant, dict):
+            return f"model_variants entry is not an object: {variant!r}"
+        vid = variant.get("id")
+        if (
+            not isinstance(vid, str)
+            or vid in _RESERVED_VARIANT_IDS
+            or "/" in vid
+            or "\\" in vid
+        ):
+            return f"invalid model_variants id: {vid!r}"
+        if vid.lower() in seen:
+            return f"duplicate model_variants id: {vid!r}"
+        seen.add(vid.lower())
+        extra = variant.get("extra")
+        if extra is not None and not isinstance(extra, dict):
+            return f"model_variants extra is not an object for id {vid!r}"
+    return None
+
+
+def _write_llm_variants(
+    output_dir: Path,
+    variants: List[Dict[str, Any]],
+    test_cases: List[Dict[str, Any]],
+    evaluators: List[Dict[str, Any]],
+) -> None:
+    ids = [v["id"] for v in variants]
+    labels = [v.get("label") or v["id"] for v in variants]
+    for variant, label in zip(variants, labels):
+        variant_dir = output_dir / variant["id"]
+        _write_llm_model_dir(variant_dir, test_cases, evaluators)
+        with open(variant_dir / "variant.json", "w", encoding="utf-8") as f:
+            json.dump({**variant, "label": label}, f)
+    _write_leaderboard(output_dir, ids, evaluators, labels=labels)
+
+
+def _cmd_llm(opts: Dict[str, List[str]]) -> int:
     output_dir = Path(_first(opts, "-o", "--output"))
     config = _load_json(_first(opts, "-c", "--config"))
     test_cases = []
     if isinstance(config, dict):
         test_cases = [t for t in (config.get("test_cases") or []) if isinstance(t, dict)]
     evaluators = _evaluators_from_config(config)
+
+    variants = config.get("model_variants") if isinstance(config, dict) else None
+    if isinstance(variants, list) and variants:
+        error = _variants_error(variants, config)
+        if error:
+            sys.stderr.write(f"fake_calibrate_agent: {error}\n")
+            return 1
+        output_dir.mkdir(parents=True, exist_ok=True)
+        _write_config_json(output_dir, evaluators)
+        _write_llm_variants(output_dir, variants, test_cases, evaluators)
+        return 0
 
     models = _many(opts, "-m", "--model", "--models")
     if not models:
@@ -308,6 +373,7 @@ def _cmd_llm(opts: Dict[str, List[str]]) -> None:
     # Benchmark reads a leaderboard; a unit test ignores it. Harmless either way.
     if _many(opts, "-m", "--model", "--models"):
         _write_leaderboard(output_dir, safe_models, evaluators)
+    return 0
 
 
 
@@ -662,7 +728,10 @@ def main(argv: List[str]) -> int:
     elif sub == "general":
         _cmd_annotation_stt_or_general(opts)
     elif sub == "llm":
-        _cmd_annotation_llm(opts) if eval_only else _cmd_llm(opts)
+        if eval_only:
+            _cmd_annotation_llm(opts)
+        else:
+            return _cmd_llm(opts)
     elif sub == "stt":
         _cmd_annotation_stt_or_general(opts) if eval_only else _cmd_stt(opts)
     elif sub == "tts":

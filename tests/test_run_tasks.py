@@ -1801,6 +1801,7 @@ def test_update_benchmark_intermediate_results_carries_stopped_early(tmp_path):
 # ---------------------------------------------------------------------------
 
 
+_LAST_CONFIG: dict = {}
 _GPT_41 = {"id": "gpt-4.1-high", "model": "gpt-4.1", "label": "gpt-4.1 (high)"}
 _GPT_4O_MINI = {"id": "mini-plain", "model": "gpt-4o-mini", "label": None}
 
@@ -1816,6 +1817,8 @@ def _run_benchmark_over_entries(models, folders, agent_config=None, leaderboard=
 
     def fake_popen(cmd, *args, **kwargs):
         captured["cmd"] = list(cmd)
+        with open(cmd[cmd.index("-c") + 1], encoding="utf-8") as f:
+            captured["config"] = json.load(f)
         out = Path(kwargs["cwd"]) / "output"
         for folder in folders:
             model_dir = out / folder
@@ -1855,6 +1858,7 @@ def _run_benchmark_over_entries(models, folders, agent_config=None, leaderboard=
         tests = [{"uuid": "t", "name": "T", "config": {}}]
         run_benchmark_task(job_uuid, agent, tests, models, "bucket")
 
+    _LAST_CONFIG["config"] = captured.get("config")
     return captured["cmd"], db.get_agent_test_job(job_uuid)
 
 
@@ -1868,6 +1872,7 @@ def _cli_models(cmd):
     return names
 
 
+
 def test_run_benchmark_task_sends_model_names_to_the_cli_not_ids():
     cmd, _ = _run_benchmark_over_entries(
         [_GPT_41, _GPT_4O_MINI], ["gpt-4.1", "gpt-4o-mini"]
@@ -1876,20 +1881,23 @@ def test_run_benchmark_task_sends_model_names_to_the_cli_not_ids():
 
 
 def test_run_benchmark_task_strips_the_provider_prefix_from_model_names_only():
-    """A non-openrouter provider gets the bare model name, while the stored rows
-    are still keyed by each entry's ID."""
-    cmd, job = _run_benchmark_over_entries(
+    """A non-openrouter provider gets the bare model name in the settings file,
+    while the stored rows are still keyed by each entry's ID."""
+    _, job = _run_benchmark_over_entries(
         [
             {"id": "one", "model": "openai/gpt-4.1"},
             {"id": "two", "model": "openai/gpt-4o-mini"},
         ],
-        ["gpt-4.1", "gpt-4o-mini"],
+        ["v0", "v1"],
         agent_config={
             "agent_url": "http://agent.test/chat",
             "benchmark_provider": "openai",
         },
     )
-    assert _cli_models(cmd) == ["gpt-4.1", "gpt-4o-mini"]
+    assert [v["model"] for v in _LAST_CONFIG["config"]["model_variants"]] == [
+        "gpt-4.1",
+        "gpt-4o-mini",
+    ]
     assert [m["model"] for m in job["results"]["model_results"]] == ["one", "two"]
     assert [m["model_name"] for m in job["results"]["model_results"]] == [
         "openai/gpt-4.1",
@@ -1959,19 +1967,57 @@ def test_run_benchmark_task_moves_leaderboard_rows_onto_the_entry_id():
     ]
 
 
-def test_run_benchmark_task_keeps_the_provider_prefix_for_openrouter():
-    """An openrouter agent connection gets the model name whole, so the entry
-    IDs never reach the CLI and the prefix is not stripped from them either."""
+def test_run_benchmark_task_sends_variants_in_the_settings_file_not_on_the_command():
+    """The models ride in the settings file, so two of one model can be told
+    apart. The folder names never carry a slash, which calibrate refuses."""
     cmd, job = _run_benchmark_over_entries(
         [
-            {"id": "one", "model": "openai/gpt-4.1"},
-            {"id": "two", "model": "openai/gpt-4o-mini"},
+            {
+                "id": "gpt-5#1",
+                "model": "openai/gpt-5",
+                "label": "gpt-5 (high)",
+                "extra": {"reasoning": {"effort": "high"}},
+            },
+            {"id": "gpt-5#2", "model": "openai/gpt-5", "label": "gpt-5 (low)"},
         ],
-        ["openai__gpt-4.1", "openai__gpt-4o-mini"],
+        ["v0", "v1"],
         agent_config={"agent_url": "http://agent.test/chat"},
     )
-    assert _cli_models(cmd) == ["openai/gpt-4.1", "openai/gpt-4o-mini"]
-    assert [m["model"] for m in job["results"]["model_results"]] == ["one", "two"]
+    assert "-m" not in cmd
+    assert _LAST_CONFIG["config"]["model_variants"] == [
+        {
+            "id": "v0",
+            "model": "openai/gpt-5",
+            "label": "gpt-5 (high)",
+            "extra": {"reasoning": {"effort": "high"}},
+        },
+        {"id": "v1", "model": "openai/gpt-5", "label": "gpt-5 (low)", "extra": {}},
+    ]
+    assert [m["model"] for m in job["results"]["model_results"]] == [
+        "gpt-5#1",
+        "gpt-5#2",
+    ]
+    assert all(
+        m["model_name"] == "openai/gpt-5" for m in job["results"]["model_results"]
+    )
+
+
+def test_run_benchmark_task_moves_leaderboard_rows_off_the_folder_name():
+    """Calibrate names each leaderboard row after the folder it wrote, so the
+    row is rewritten to the ID the run is keyed by."""
+    _, job = _run_benchmark_over_entries(
+        [
+            {"id": "gpt-5#1", "model": "openai/gpt-5"},
+            {"id": "gpt-5#2", "model": "openai/gpt-5"},
+        ],
+        ["v0", "v1"],
+        agent_config={"agent_url": "http://agent.test/chat"},
+        leaderboard=["v0", "v1"],
+    )
+    assert [r["model"] for r in job["results"]["leaderboard_summary"]] == [
+        "gpt-5#1",
+        "gpt-5#2",
+    ]
 
 
 def test_update_benchmark_intermediate_results_identifies_a_folder_with_no_rows(
