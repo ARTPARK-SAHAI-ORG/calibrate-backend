@@ -2528,20 +2528,27 @@ def _find_all_results_in_output(output_dir: Path) -> Dict[str, tuple]:
     return found
 
 
-def _match_model_to_folder(model: str, folder_names: List[str]) -> Optional[str]:
-    """Find folder name that matches the model.
+def _model_folder_candidates(model: str) -> Set[str]:
+    """Lowercased folder names calibrate may have written for ``model``.
 
-    Uses exact matching across known calibrate separator conventions (single
-    underscore, double underscore, dash) rather than substring matching.
-    Substring matching caused false matches when one model name was a prefix of
-    another (e.g. `gpt-5.4` matching the `gpt-5.4-mini` folder).
+    What it writes today is ``/`` as ``__`` and nothing else, so a name holding
+    a ``:`` (``qwen/qwen3:free``) keeps the colon in its folder. The other forms
+    are older conventions, kept so a result folder written by an earlier version
+    still resolves. Matching is exact rather than by substring, or ``gpt-5.4``
+    would claim the ``gpt-5.4-mini`` folder.
     """
-    candidates = {
+    return {
+        model.replace("/", "__").lower(),
         model.replace("/", "_").replace(":", "_").lower(),
         model.replace("/", "-").replace(":", "-").lower(),
         model.replace("/", "__").replace(":", "__").lower(),
         model.lower(),
     }
+
+
+def _match_model_to_folder(model: str, folder_names: List[str]) -> Optional[str]:
+    """Find folder name that matches the model."""
+    candidates = _model_folder_candidates(model)
 
     for folder in folder_names:
         if folder.lower() in candidates:
@@ -2554,8 +2561,8 @@ def _read_leaderboard_csv(
 ) -> Optional[List[dict]]:
     """Read the leaderboard CSV from the leaderboard directory.
 
-    The calibrate CLI writes the ``model`` column using the model name converted
-    to a filesystem-safe form (``/`` and ``:`` replaced with ``__``/``_``/``-``).
+    The calibrate CLI writes the ``model`` column using the folder name it gave
+    that model, so the cell is matched back through ``_model_folder_candidates``.
     When ``models`` is supplied (the original slash-form names), each row's
     ``model`` field is normalized back to the matching original string so the
     API response shape matches ``model_results[].model``.
@@ -2580,12 +2587,7 @@ def _read_leaderboard_csv(
     folder_to_model: Dict[str, str] = {}
     if models:
         for original in models:
-            for variant in {
-                original.replace("/", "_").replace(":", "_").lower(),
-                original.replace("/", "-").replace(":", "-").lower(),
-                original.replace("/", "__").replace(":", "__").lower(),
-                original.lower(),
-            }:
+            for variant in _model_folder_candidates(original):
                 folder_to_model.setdefault(variant, original)
 
     try:

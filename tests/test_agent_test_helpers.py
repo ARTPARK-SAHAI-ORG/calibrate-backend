@@ -1047,3 +1047,38 @@ def test_uuid_maps_drop_a_name_two_tests_share():
     assert _test_uuid_by_name(
         [{"name": "a", "uuid": u1}, {"name": "a", "uuid": u1}]
     ) == {"a": u1}
+
+
+def test_match_model_to_folder_finds_a_name_holding_a_colon():
+    """Calibrate replaces `/` and leaves everything else, so an OpenRouter name
+    like `qwen/qwen3:free` keeps its colon in the folder. Missing it threw the
+    model's finished results away and failed the whole benchmark."""
+    from routers.agent_tests import _match_model_to_folder
+
+    assert (
+        _match_model_to_folder("qwen/qwen3:free", ["qwen__qwen3:free"])
+        == "qwen__qwen3:free"
+    )
+
+
+def test_match_model_to_folder_still_reads_the_older_conventions():
+    from routers.agent_tests import _match_model_to_folder
+
+    for folder in ("openai__gpt-4.1", "openai_gpt-4.1", "openai-gpt-4.1"):
+        assert _match_model_to_folder("openai/gpt-4.1", [folder]) == folder
+
+
+def test_match_model_to_folder_does_not_take_a_longer_name():
+    from routers.agent_tests import _match_model_to_folder
+
+    assert _match_model_to_folder("openai/gpt-5.4", ["openai__gpt-5.4-mini"]) is None
+
+
+def test_leaderboard_rows_map_a_colon_folder_back_to_the_model(tmp_path):
+    from routers.agent_tests import _read_leaderboard_csv
+
+    (tmp_path / "leaderboard.csv").write_text(
+        "model,pass_rate\nqwen__qwen3:free,100\n", encoding="utf-8"
+    )
+    rows = _read_leaderboard_csv(tmp_path, models=["qwen/qwen3:free"])
+    assert [r["model"] for r in rows] == ["qwen/qwen3:free"]

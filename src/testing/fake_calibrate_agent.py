@@ -157,8 +157,13 @@ def _metrics_aggregate(ev: Dict[str, Any], n: int) -> Dict[str, Any]:
 
 # --- Subcommand: llm (unit-test run AND benchmark) --------------------------
 def _safe_model(model: str) -> str:
-    """Filesystem-safe folder name matching ``_match_model_to_folder``."""
-    return model.replace("/", "__").replace(":", "_")
+    """Folder name for a model, exactly as the real CLI builds it.
+
+    It replaces ``/`` and leaves every other character alone, so a name like
+    ``qwen/qwen3:free`` keeps its colon. Turning the colon into ``_`` here would
+    hide a mismatch between what the CLI writes and what the backend looks for.
+    """
+    return model.replace("/", "__")
 
 
 def _llm_judge_results(
