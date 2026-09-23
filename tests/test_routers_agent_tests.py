@@ -744,6 +744,8 @@ def test_agent_runs_list_slims_benchmark_model_results(client):
     assert run["model_results"] == [
         {
             "model": "openai/gpt-4.1",
+            "model_name": None,
+            "label": None,
             "success": True,
             "message": "ok",
             "total_tests": 2,
@@ -3608,6 +3610,8 @@ def test_agent_runs_list_hides_heavy_detail_both_endpoints(client):
     assert bench["model_results"] == [
         {
             "model": "openai/gpt-4.1",
+            "model_name": None,
+            "label": None,
             "success": True,
             "message": "ok",
             "total_tests": 2,
@@ -5812,3 +5816,63 @@ def test_benchmark_runs_one_model_twice_with_its_own_request_settings(
         "gpt-5 (high thinking)",
         "gpt-5 (low thinking)",
     ]
+
+
+def test_runs_list_shows_what_each_model_was_called(client, monkeypatch):
+    """Two runs of one model are only told apart by their ID, which means
+    nothing to a reader, so the list carries the name and the model too."""
+    h = _signup(client)["headers"]
+    agent, _ = _connection_benchmark_agent(client, h, ["openai/gpt-5"])
+
+    resp = _post_benchmark(
+        client,
+        h,
+        agent["uuid"],
+        monkeypatch,
+        {
+            "models": [
+                {
+                    "id": "gpt-5#1",
+                    "model": "openai/gpt-5",
+                    "label": "gpt-5 (high thinking)",
+                    "extra": {"reasoning": {"effort": "high"}},
+                },
+                {
+                    "id": "gpt-5#2",
+                    "model": "openai/gpt-5",
+                    "label": "gpt-5 (low thinking)",
+                },
+            ]
+        },
+    )
+    assert resp.status_code == 200, resp.text
+
+    runs = client.get(f"/agent-tests/agent/{agent['uuid']}/runs", headers=h).json()
+    run = next(r for r in runs["items"] if r["uuid"] == resp.json()["task_id"])
+    assert [m["model"] for m in run["model_results"]] == ["gpt-5#1", "gpt-5#2"]
+    assert [m["model_name"] for m in run["model_results"]] == [
+        "openai/gpt-5",
+        "openai/gpt-5",
+    ]
+    assert [m["label"] for m in run["model_results"]] == [
+        "gpt-5 (high thinking)",
+        "gpt-5 (low thinking)",
+    ]
+
+
+def test_runs_list_names_a_model_that_was_named_plainly(client, monkeypatch):
+    """A request that just names models has no label, and the model name is the
+    ID, so the list still reads correctly."""
+    h = _signup(client)["headers"]
+    agent, _ = _benchmark_agent_with_tests(client, h)
+
+    resp = _post_benchmark(
+        client, h, agent["uuid"], monkeypatch, {"models": ["openai/gpt-4.1"]}
+    )
+    assert resp.status_code == 200, resp.text
+
+    runs = client.get(f"/agent-tests/agent/{agent['uuid']}/runs", headers=h).json()
+    run = next(r for r in runs["items"] if r["uuid"] == resp.json()["task_id"])
+    row = run["model_results"][0]
+    assert row["model"] == row["model_name"] == "openai/gpt-4.1"
+    assert row["label"] is None

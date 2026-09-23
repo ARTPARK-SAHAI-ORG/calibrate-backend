@@ -2710,6 +2710,8 @@ def test_agent_test_jobs_summary_slims_results_and_omits_details(user):
     assert len(mr) == 1
     assert set(mr[0]) == {
         "model",
+        "model_name",
+        "label",
         "success",
         "message",
         "total_tests",

@@ -596,7 +596,18 @@ class ModelRunSummary(BaseModel):
     (`GET /agent-tests/benchmark/{task_id}`), not here."""
 
     model: str = Field(
-        description="Model name these results are for", examples=["openai/gpt-4.1"]
+        description="ID of the model these results are for. It is the model name when you named a model instead of giving an object",
+        examples=["openai/gpt-4.1"],
+    )
+    model_name: Optional[str] = Field(
+        None,
+        description="Model that produced these results",
+        examples=["openai/gpt-5"],
+    )
+    label: Optional[str] = Field(
+        None,
+        description="Name to show instead of the model name",
+        examples=["gpt-5 (high thinking)"],
     )
     success: Optional[bool] = Field(
         None, description="Whether this model's run succeeded"
@@ -888,6 +899,8 @@ def _slim_model_results(
         slim.append(
             {
                 "model": m.get("model", ""),
+                "model_name": m.get("model_name"),
+                "label": m.get("label"),
                 "success": m.get("success"),
                 "message": m.get("message", ""),
                 "total_tests": (
