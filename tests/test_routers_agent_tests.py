@@ -744,6 +744,8 @@ def test_agent_runs_list_slims_benchmark_model_results(client):
     assert run["model_results"] == [
         {
             "model": "openai/gpt-4.1",
+            "model_name": None,
+            "label": None,
             "success": True,
             "message": "ok",
             "total_tests": 2,
@@ -3608,6 +3610,8 @@ def test_agent_runs_list_hides_heavy_detail_both_endpoints(client):
     assert bench["model_results"] == [
         {
             "model": "openai/gpt-4.1",
+            "model_name": None,
+            "label": None,
             "success": True,
             "message": "ok",
             "total_tests": 2,
@@ -5397,3 +5401,478 @@ def test_global_run_list_reports_the_launched_test_count(client):
     assert resp.status_code == 200
     run = next(r for r in resp.json()["items"] if r["uuid"] == job_id)
     assert run["total_tests"] == 2
+
+
+# ============ Benchmark model variants ============
+
+
+def _benchmark_agent_with_tests(client, h, count=1):
+    agent = _create_agent(client, h)
+    tests = [_create_test(client, h, name=f"bmv{i}-{uuid.uuid4().hex[:6]}") for i in range(count)]
+    for t in tests:
+        client.post(
+            "/agent-tests",
+            json={"agent_uuid": agent["uuid"], "test_uuids": [t["uuid"]]},
+            headers=h,
+        )
+    return agent, tests
+
+
+def _post_benchmark(client, h, agent_uuid, monkeypatch, body):
+    """Launch a benchmark without starting a thread; returns the raw response."""
+    monkeypatch.setenv("S3_OUTPUT_BUCKET", "test-bucket")
+    with patch(
+        "routers.agent_tests.can_start_agent_test_job", return_value=False
+    ), patch("threading.Thread"):
+        return client.post(
+            f"/agent-tests/agent/{agent_uuid}/benchmark", json=body, headers=h
+        )
+
+
+def _connection_benchmark_agent(client, h, verified_models, count=1):
+    """A benchmark agent Calibrate reaches over HTTP, with those models verified."""
+    import db
+
+    agent, tests = _benchmark_agent_with_tests(client, h, count=count)
+    db.update_agent(
+        agent["uuid"],
+        config={
+            "agent_url": "http://agent.local/run",
+            "connection_verified": True,
+            "benchmark_models_verified": {
+                m: {"verified": True} for m in verified_models
+            },
+        },
+    )
+    return agent, tests
+
+
+def _benchmark_run_count(client, h, agent_uuid):
+    return client.get(f"/agent-tests/agent/{agent_uuid}/runs", headers=h).json()["total"]
+
+
+def test_benchmark_bare_model_names_are_stored_as_variants_keyed_by_the_name(
+    client, monkeypatch
+):
+    """A request that names models keeps behaving exactly as it did before ids
+    existed: the id IS the model name, so every stored row keys on that name."""
+    from db import get_agent_test_job
+
+    h = _signup(client)["headers"]
+    agent, _ = _benchmark_agent_with_tests(client, h)
+
+    resp = _post_benchmark(
+        client,
+        h,
+        agent["uuid"],
+        monkeypatch,
+        {"models": ["openai/gpt-4.1", "anthropic/claude-sonnet-4"]},
+    )
+    assert resp.status_code == 200, resp.text
+    job = get_agent_test_job(resp.json()["task_id"])
+
+    assert job["details"]["models"] == [
+        {"id": "openai/gpt-4.1", "model": "openai/gpt-4.1", "label": None, "extra": None},
+        {
+            "id": "anthropic/claude-sonnet-4",
+            "model": "anthropic/claude-sonnet-4",
+            "label": None,
+            "extra": None,
+        },
+    ]
+
+    rows = job["results"]["model_results"]
+    assert [r["model"] for r in rows] == ["openai/gpt-4.1", "anthropic/claude-sonnet-4"]
+    assert [r["model_name"] for r in rows] == [
+        "openai/gpt-4.1",
+        "anthropic/claude-sonnet-4",
+    ]
+    assert all(r["label"] is None and r["extra"] is None for r in rows)
+
+
+def test_benchmark_object_models_store_id_model_and_label(client, monkeypatch):
+    """An object entry carries its own id and display name, and the stored rows
+    key on the id while remembering which model produced them."""
+    from db import get_agent_test_job
+
+    h = _signup(client)["headers"]
+    agent, _ = _benchmark_agent_with_tests(client, h)
+
+    resp = _post_benchmark(
+        client,
+        h,
+        agent["uuid"],
+        monkeypatch,
+        {
+            "models": [
+                {
+                    "id": "gpt-5#1",
+                    "model": "openai/gpt-5",
+                    "label": "gpt-5 (high thinking)",
+                },
+                {"id": "sonnet", "model": "anthropic/claude-sonnet-4"},
+            ]
+        },
+    )
+    assert resp.status_code == 200, resp.text
+    job = get_agent_test_job(resp.json()["task_id"])
+
+    assert job["details"]["models"] == [
+        {
+            "id": "gpt-5#1",
+            "model": "openai/gpt-5",
+            "label": "gpt-5 (high thinking)",
+            "extra": None,
+        },
+        {
+            "id": "sonnet",
+            "model": "anthropic/claude-sonnet-4",
+            "label": None,
+            "extra": None,
+        },
+    ]
+
+    rows = job["results"]["model_results"]
+    assert [r["model"] for r in rows] == ["gpt-5#1", "sonnet"]
+    assert [r["model_name"] for r in rows] == [
+        "openai/gpt-5",
+        "anthropic/claude-sonnet-4",
+    ]
+    assert [r["label"] for r in rows] == ["gpt-5 (high thinking)", None]
+
+
+def test_benchmark_mixes_a_named_model_with_an_object_entry(client, monkeypatch):
+    """A list holding both forms normalizes to one shape, so nothing downstream
+    has to know which form the caller used."""
+    from db import get_agent_test_job
+
+    h = _signup(client)["headers"]
+    agent, _ = _benchmark_agent_with_tests(client, h)
+
+    resp = _post_benchmark(
+        client,
+        h,
+        agent["uuid"],
+        monkeypatch,
+        {
+            "models": [
+                "openai/gpt-4.1",
+                {"id": "gpt-5#1", "model": "openai/gpt-5", "label": "gpt-5 high"},
+            ]
+        },
+    )
+    assert resp.status_code == 200, resp.text
+    job = get_agent_test_job(resp.json()["task_id"])
+
+    assert job["details"]["models"] == [
+        {"id": "openai/gpt-4.1", "model": "openai/gpt-4.1", "label": None, "extra": None},
+        {"id": "gpt-5#1", "model": "openai/gpt-5", "label": "gpt-5 high", "extra": None},
+    ]
+    rows = job["results"]["model_results"]
+    assert [(r["model"], r["model_name"], r["label"]) for r in rows] == [
+        ("openai/gpt-4.1", "openai/gpt-4.1", None),
+        ("gpt-5#1", "openai/gpt-5", "gpt-5 high"),
+    ]
+
+
+def test_benchmark_rejects_two_entries_sharing_an_id(client, monkeypatch):
+    """Results are keyed by id, so two entries with one id would overwrite
+    each other."""
+    h = _signup(client)["headers"]
+    agent, _ = _benchmark_agent_with_tests(client, h)
+
+    resp = _post_benchmark(
+        client,
+        h,
+        agent["uuid"],
+        monkeypatch,
+        {
+            "models": [
+                {"id": "gpt-5#1", "model": "openai/gpt-5"},
+                {"id": "gpt-5#1", "model": "anthropic/claude-sonnet-4"},
+            ]
+        },
+    )
+    assert resp.status_code == 422, resp.text
+    assert _benchmark_run_count(client, h, agent["uuid"]) == 0
+
+
+def test_benchmark_rejects_a_named_model_clashing_with_an_object_id(
+    client, monkeypatch
+):
+    """A named model is its own id, so it collides with an object entry that
+    claims the same id."""
+    h = _signup(client)["headers"]
+    agent, _ = _benchmark_agent_with_tests(client, h)
+
+    resp = _post_benchmark(
+        client,
+        h,
+        agent["uuid"],
+        monkeypatch,
+        {
+            "models": [
+                "openai/gpt-5",
+                {"id": "openai/gpt-5", "model": "anthropic/claude-sonnet-4"},
+            ]
+        },
+    )
+    assert resp.status_code == 422, resp.text
+    assert _benchmark_run_count(client, h, agent["uuid"]) == 0
+
+
+def test_benchmark_rejects_request_settings_on_an_agent_calibrate_runs(
+    client, monkeypatch
+):
+    """Request settings only reach an agent Calibrate calls at your own URL."""
+    h = _signup(client)["headers"]
+    agent, _ = _benchmark_agent_with_tests(client, h)
+
+    resp = _post_benchmark(
+        client,
+        h,
+        agent["uuid"],
+        monkeypatch,
+        {
+            "models": [
+                {
+                    "id": "gpt-5#1",
+                    "model": "openai/gpt-5",
+                    "extra": {"reasoning": {"effort": "high"}},
+                }
+            ]
+        },
+    )
+    assert resp.status_code == 400, resp.text
+    assert "request settings" in resp.json()["detail"].lower()
+    assert _benchmark_run_count(client, h, agent["uuid"]) == 0
+
+
+def test_benchmark_rejects_one_model_twice_on_an_agent_calibrate_runs(
+    client, monkeypatch
+):
+    """Two runs of one model can only be told apart at your own URL."""
+    h = _signup(client)["headers"]
+    agent, _ = _benchmark_agent_with_tests(client, h)
+
+    resp = _post_benchmark(
+        client,
+        h,
+        agent["uuid"],
+        monkeypatch,
+        {
+            "models": [
+                {"id": "gpt-5#1", "model": "openai/gpt-5"},
+                {"id": "gpt-5#2", "model": "openai/gpt-5"},
+            ]
+        },
+    )
+    assert resp.status_code == 400, resp.text
+    assert "more than once" in resp.json()["detail"].lower()
+    assert _benchmark_run_count(client, h, agent["uuid"]) == 0
+
+
+def test_benchmark_row_limit_counts_entries_not_distinct_models(client, monkeypatch):
+    """The workspace row limit is charged per entry, so an entry is a row even
+    when it shares its model with another one."""
+    h = _signup(client)["headers"]
+    agent, tests = _benchmark_agent_with_tests(client, h, count=2)
+
+    monkeypatch.setenv("S3_OUTPUT_BUCKET", "test-bucket")
+    with patch(
+        "routers.agent_tests.enforce_max_rows_per_eval"
+    ) as enforce, patch(
+        "routers.agent_tests.can_start_agent_test_job", return_value=False
+    ), patch("threading.Thread"):
+        resp = client.post(
+            f"/agent-tests/agent/{agent['uuid']}/benchmark",
+            json={
+                "models": [
+                    {"id": "a", "model": "openai/gpt-4.1"},
+                    {"id": "b", "model": "openai/gpt-5"},
+                    "anthropic/claude-sonnet-4",
+                ]
+            },
+            headers=h,
+        )
+    assert resp.status_code == 200, resp.text
+    assert enforce.call_args.args[1] == len(tests) * 3
+
+
+def test_benchmark_verified_gate_reads_the_model_not_the_id(client, monkeypatch):
+    """Verification is per model, so an entry passes on its `model` even when
+    its id is something else, and is refused by the model's name."""
+    import db
+
+    h = _signup(client)["headers"]
+    agent, _ = _benchmark_agent_with_tests(client, h)
+    db.update_agent(
+        agent["uuid"],
+        config={
+            "agent_url": "http://agent.local/run",
+            "connection_verified": True,
+            "benchmark_models_verified": {"openai/gpt-5": {"verified": True}},
+        },
+    )
+
+    ok = _post_benchmark(
+        client,
+        h,
+        agent["uuid"],
+        monkeypatch,
+        {"models": [{"id": "gpt-5#1", "model": "openai/gpt-5"}]},
+    )
+    assert ok.status_code == 200, ok.text
+
+    blocked = _post_benchmark(
+        client,
+        h,
+        agent["uuid"],
+        monkeypatch,
+        {"models": [{"id": "openai/gpt-5", "model": "anthropic/claude-sonnet-4"}]},
+    )
+    assert blocked.status_code == 400, blocked.text
+    detail = blocked.json()["detail"]
+    assert "anthropic/claude-sonnet-4" in detail
+    assert "openai/gpt-5" not in detail
+
+
+def test_benchmark_detail_echoes_the_model_and_label_of_each_entry(
+    client, monkeypatch
+):
+    """Reopening a comparison hands back which model each entry ran and what it
+    was called, so the picker can be refilled from the run itself."""
+    h = _signup(client)["headers"]
+    agent, _ = _benchmark_agent_with_tests(client, h)
+
+    resp = _post_benchmark(
+        client,
+        h,
+        agent["uuid"],
+        monkeypatch,
+        {
+            "models": [
+                {
+                    "id": "gpt-5#1",
+                    "model": "openai/gpt-5",
+                    "label": "gpt-5 (high thinking)",
+                }
+            ]
+        },
+    )
+    assert resp.status_code == 200, resp.text
+
+    data = client.get(
+        f"/agent-tests/benchmark/{resp.json()['task_id']}", headers=h
+    ).json()
+    row = data["model_results"][0]
+    assert row["model"] == "gpt-5#1"
+    assert row["model_name"] == "openai/gpt-5"
+    assert row["label"] == "gpt-5 (high thinking)"
+
+
+def test_benchmark_runs_one_model_twice_with_its_own_request_settings(
+    client, monkeypatch
+):
+    """The whole point: one model twice, each with its own settings, kept apart
+    under its own ID and remembering what it ran with."""
+    from db import get_agent_test_job
+
+    h = _signup(client)["headers"]
+    agent, _ = _connection_benchmark_agent(client, h, ["openai/gpt-5"])
+
+    resp = _post_benchmark(
+        client,
+        h,
+        agent["uuid"],
+        monkeypatch,
+        {
+            "models": [
+                {
+                    "id": "gpt-5#1",
+                    "model": "openai/gpt-5",
+                    "label": "gpt-5 (high thinking)",
+                    "extra": {"reasoning": {"effort": "high"}},
+                },
+                {
+                    "id": "gpt-5#2",
+                    "model": "openai/gpt-5",
+                    "label": "gpt-5 (low thinking)",
+                    "extra": {"reasoning": {"effort": "low"}},
+                },
+            ]
+        },
+    )
+    assert resp.status_code == 200, resp.text
+
+    task_id = resp.json()["task_id"]
+    rows = get_agent_test_job(task_id)["results"]["model_results"]
+    assert [r["model"] for r in rows] == ["gpt-5#1", "gpt-5#2"]
+    assert all(r["model_name"] == "openai/gpt-5" for r in rows)
+    assert [r["extra"]["reasoning"]["effort"] for r in rows] == ["high", "low"]
+
+    detail = client.get(f"/agent-tests/benchmark/{task_id}", headers=h).json()
+    assert [r["label"] for r in detail["model_results"]] == [
+        "gpt-5 (high thinking)",
+        "gpt-5 (low thinking)",
+    ]
+
+
+def test_runs_list_shows_what_each_model_was_called(client, monkeypatch):
+    """Two runs of one model are only told apart by their ID, which means
+    nothing to a reader, so the list carries the name and the model too."""
+    h = _signup(client)["headers"]
+    agent, _ = _connection_benchmark_agent(client, h, ["openai/gpt-5"])
+
+    resp = _post_benchmark(
+        client,
+        h,
+        agent["uuid"],
+        monkeypatch,
+        {
+            "models": [
+                {
+                    "id": "gpt-5#1",
+                    "model": "openai/gpt-5",
+                    "label": "gpt-5 (high thinking)",
+                    "extra": {"reasoning": {"effort": "high"}},
+                },
+                {
+                    "id": "gpt-5#2",
+                    "model": "openai/gpt-5",
+                    "label": "gpt-5 (low thinking)",
+                },
+            ]
+        },
+    )
+    assert resp.status_code == 200, resp.text
+
+    runs = client.get(f"/agent-tests/agent/{agent['uuid']}/runs", headers=h).json()
+    run = next(r for r in runs["items"] if r["uuid"] == resp.json()["task_id"])
+    assert [m["model"] for m in run["model_results"]] == ["gpt-5#1", "gpt-5#2"]
+    assert [m["model_name"] for m in run["model_results"]] == [
+        "openai/gpt-5",
+        "openai/gpt-5",
+    ]
+    assert [m["label"] for m in run["model_results"]] == [
+        "gpt-5 (high thinking)",
+        "gpt-5 (low thinking)",
+    ]
+
+
+def test_runs_list_names_a_model_that_was_named_plainly(client, monkeypatch):
+    """A request that just names models has no label, and the model name is the
+    ID, so the list still reads correctly."""
+    h = _signup(client)["headers"]
+    agent, _ = _benchmark_agent_with_tests(client, h)
+
+    resp = _post_benchmark(
+        client, h, agent["uuid"], monkeypatch, {"models": ["openai/gpt-4.1"]}
+    )
+    assert resp.status_code == 200, resp.text
+
+    runs = client.get(f"/agent-tests/agent/{agent['uuid']}/runs", headers=h).json()
+    run = next(r for r in runs["items"] if r["uuid"] == resp.json()["task_id"])
+    row = run["model_results"][0]
+    assert row["model"] == row["model_name"] == "openai/gpt-4.1"
+    assert row["label"] is None

@@ -7598,6 +7598,8 @@ _AGENT_TEST_JOB_SUMMARY_COLUMNS = """
         ) AS test_results,
         (SELECT json_group_array(json_object(
             'model', json_extract(je.value, '$.model'),
+            'model_name', json_extract(je.value, '$.model_name'),
+            'label', json_extract(je.value, '$.label'),
             'success', json_extract(je.value, '$.success'),
             'message', json_extract(je.value, '$.message'),
             'total_tests', json_extract(je.value, '$.total_tests'),

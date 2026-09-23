@@ -127,16 +127,25 @@ def test_public_api_docs_are_unauthenticated_and_filtered(client, monkeypatch):
     assert "get" in paths.get("/annotation-tasks/{task_uuid}/summary", {})
     assert "get" in paths.get("/annotation-tasks/{task_uuid}/agreement", {})
 
-    # The public verify-connection endpoint only accepts the probe inputs
-    # (model + messages). agent_url / agent_headers come from the agent's
-    # stored config and must NOT be on the public request body (the by-id route
-    # ignores them; exposing them misleads API-key clients).
+    # The public verify-connection endpoint only accepts what the caller supplies
+    # for the probe: model, messages and extra. agent_url / agent_headers come
+    # from the agent's stored config and must NOT be on the public request body
+    # (the by-id route ignores them; exposing them misleads API-key clients).
+    # `extra` is public because the public benchmark endpoint takes the same
+    # per-model settings, so a key-authed client has to verify a model with them
+    # before benchmarking it. `inputs` stays hidden: the agent's stored
+    # default_inputs is applied on its own.
     verify_op = paths["/agents/{agent_uuid}/verify-connection"]["post"]
     verify_ref = verify_op["requestBody"]["content"]["application/json"]["schema"]["$ref"]
     verify_schema = pub_top["components"]["schemas"][verify_ref.split("/")[-1]]
-    assert set(verify_schema.get("properties", {})) == {"model", "messages"}, (
-        "public verify-connection body must expose only model + messages"
+    assert set(verify_schema.get("properties", {})) == {"model", "messages", "extra"}, (
+        "public verify-connection body must expose only model + messages + extra"
     )
+
+    # Per-model request settings are part of the key API: a client sends them on
+    # a benchmark and reads back what each model ran with.
+    assert "extra" in pub_top["components"]["schemas"]["BenchmarkModel"]["properties"]
+    assert "extra" in pub_top["components"]["schemas"]["ModelResult"]["properties"]
 
     # JWT-only / deliberately-excluded endpoints must NOT leak into the public
     # schema: account/tenant bootstrapping, the UI-only share pages, tools

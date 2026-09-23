@@ -10,7 +10,7 @@ import traceback
 import threading
 import logging
 from pathlib import Path
-from typing import List, Dict, Any, Literal, Optional, Set, get_args
+from typing import List, Dict, Any, Literal, Optional, Set, Union, get_args
 
 from fastapi import (
     APIRouter,
@@ -32,7 +32,7 @@ from pagination import (
 )
 
 _AgentTestSearch = make_search_params(searchable=["name"], with_modes=True)
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 from sqlite3 import IntegrityError
 
 from db import (
@@ -596,7 +596,18 @@ class ModelRunSummary(BaseModel):
     (`GET /agent-tests/benchmark/{task_id}`), not here."""
 
     model: str = Field(
-        description="Model name these results are for", examples=["openai/gpt-4.1"]
+        description="ID of the model these results are for. It is the model name when you named a model instead of giving an object",
+        examples=["openai/gpt-4.1"],
+    )
+    model_name: Optional[str] = Field(
+        None,
+        description="Model that produced these results",
+        examples=["openai/gpt-5"],
+    )
+    label: Optional[str] = Field(
+        None,
+        description="Name to show instead of the model name",
+        examples=["gpt-5 (high thinking)"],
     )
     success: Optional[bool] = Field(
         None, description="Whether this model's run succeeded"
@@ -888,6 +899,8 @@ def _slim_model_results(
         slim.append(
             {
                 "model": m.get("model", ""),
+                "model_name": m.get("model_name"),
+                "label": m.get("label"),
                 "success": m.get("success"),
                 "message": m.get("message", ""),
                 "total_tests": (
@@ -2032,14 +2045,60 @@ def _merge_test_results_by_test_names(
     return out
 
 
+def _benchmark_variants(models: List[Any]) -> List[Dict[str, Any]]:
+    """Every requested model as ``{id, model, label, extra}``.
+
+    A bare model name becomes its own id, so a run that names models keys its
+    results exactly as it did before ids existed and needs no migration.
+    Accepts the stored dict form too, so a queued or recovered job normalizes
+    the same way as a fresh request.
+    """
+    variants: List[Dict[str, Any]] = []
+    for entry in models:
+        if isinstance(entry, str):
+            variants.append({"id": entry, "model": entry, "label": None, "extra": None})
+            continue
+        if isinstance(entry, BenchmarkModel):
+            entry = entry.model_dump()
+        variants.append(
+            {
+                "id": entry["id"],
+                "model": entry["model"],
+                "label": entry.get("label"),
+                "extra": entry.get("extra"),
+            }
+        )
+    return variants
+
+
+def _variant_folder_names(variants: List[Dict[str, Any]]) -> List[str]:
+    """The name calibrate is told to file each model's results under.
+
+    Positional rather than the caller's own id, because calibrate uses the name
+    verbatim as a folder and refuses one holding a slash, which a model name
+    (``openai/gpt-5``) and the ids built from one both carry.
+    """
+    return [f"v{i}" for i in range(len(variants))]
+
+
+def _variant_identity(variant: Dict[str, Any]) -> Dict[str, Any]:
+    """The identity keys every ``model_results`` row carries."""
+    return {
+        "model": variant["id"],
+        "model_name": variant["model"],
+        "label": variant.get("label"),
+        "extra": variant.get("extra"),
+    }
+
+
 def _benchmark_queued_model_results(
-    models: List[str], test_names: List[str]
+    models: List[Any], test_names: List[str]
 ) -> List[Dict[str, Any]]:
     """Per-model result shell with placeholder ``test_results`` (queued / not started)."""
     placeholders = [_pending_test_case_result_placeholder(n) for n in test_names]
     return [
         {
-            "model": model,
+            **_variant_identity(variant),
             "success": None,
             "message": "Queued...",
             "total_tests": None,
@@ -2048,7 +2107,7 @@ def _benchmark_queued_model_results(
             "evaluator_summary": None,
             "test_results": placeholders,
         }
-        for model in models
+        for variant in _benchmark_variants(models)
     ]
 
 
@@ -3779,7 +3838,7 @@ def get_agent_test_case_result(
     ctx: OrgContext = Depends(get_org_jwt_or_api_key),
     model: Optional[str] = Query(
         None,
-        description="Which model's answer to read. Required for a benchmark, which runs every test once per model",
+        description="The model whose result to read, as `model` on the run's results. **Required for a benchmark**, which runs every test once for each model",
         examples=["openai/gpt-4.1"],
     ),
 ):
@@ -3794,9 +3853,32 @@ def get_agent_test_case_result(
 # ============ Benchmark API ============
 
 
+class BenchmarkModel(BaseModel):
+    id: str = Field(
+        min_length=1,
+        description="Your ID for this model, unique within the request. The results carry it as `model`, so one model can be benchmarked more than once",
+        examples=["gpt-5#1"],
+    )
+    model: str = Field(
+        min_length=1,
+        description="Model name to benchmark",
+        examples=["openai/gpt-5"],
+    )
+    label: Optional[str] = Field(
+        None,
+        description="Name to show instead of the model name",
+        examples=["gpt-5 (high thinking)"],
+    )
+    extra: Optional[Dict[str, Any]] = Field(
+        None,
+        description="Request settings for this model, sent in the request body beside `model`",
+        examples=[{"reasoning": {"effort": "high"}}],
+    )
+
+
 class BenchmarkRequest(BaseModel):
-    models: List[str] = Field(
-        description="Model names to benchmark",
+    models: List[Union[BenchmarkModel, str]] = Field(
+        description="Models to benchmark. Name a model, or give an object to benchmark it with its own request settings",
         examples=[["openai/gpt-4.1", "anthropic/claude-sonnet-4"]],
     )
     test_uuids: Optional[List[TestUuid]] = Field(
@@ -3809,11 +3891,33 @@ class BenchmarkRequest(BaseModel):
         description="How to run the models. `true` runs several at a time, `false` runs each one only after the one before it has finished. Use `false` to keep the load on your own agent down",
     )
 
+    @model_validator(mode="after")
+    def _ids_are_unique(self):
+        ids = [m if isinstance(m, str) else m.id for m in self.models]
+        if len(ids) != len(set(ids)):
+            raise ValueError("Every model in the request needs its own id")
+        return self
+
 
 class ModelResult(BaseModel):
     model: str = Field(
-        description="Model name these results are for",
+        description="ID of the model these results are for. It is the model name when you named a model instead of giving an object",
         examples=["openai/gpt-4.1"],
+    )
+    model_name: Optional[str] = Field(
+        None,
+        description="Model that produced these results",
+        examples=["openai/gpt-5"],
+    )
+    label: Optional[str] = Field(
+        None,
+        description="Name to show instead of the model name",
+        examples=["gpt-5 (high thinking)"],
+    )
+    extra: Optional[Dict[str, Any]] = Field(
+        None,
+        description="Request settings this model ran with, sent in the request body beside `model`",
+        examples=[{"reasoning": {"effort": "high"}}],
     )
     success: Optional[bool] = Field(
         None,
@@ -3919,12 +4023,13 @@ def _update_benchmark_intermediate_results(
     Update intermediate results for a benchmark job.
     Returns the number of models with completed results.
 
-    models: display names (original from frontend, e.g. "openai/gpt-4.1")
+    models: benchmark entries, either bare model names or ``{id, model, ...}``
     test_names: ordered suite names. Pending rows are ``{name: ...}`` only, like unit tests.
-    cli_models: names passed to CLI (may be stripped, e.g. "gpt-4.1"). Defaults to models
+    cli_models: names passed to CLI (may be stripped, e.g. "gpt-4.1"). Defaults to each requested model's name
     """
+    variants = _benchmark_variants(models)
     if cli_models is None:
-        cli_models = models
+        cli_models = [v["model"] for v in variants]
 
     # Find all results in output directory
     all_results = _find_all_results_in_output(output_dir)
@@ -3933,7 +4038,7 @@ def _update_benchmark_intermediate_results(
     model_results = []
     completed_count = 0
 
-    for model, cli_model in zip(models, cli_models):
+    for variant, cli_model in zip(variants, cli_models):
         matched_folder = _match_model_to_folder(cli_model, folder_names)
 
         if matched_folder and matched_folder in all_results:
@@ -3962,7 +4067,7 @@ def _update_benchmark_intermediate_results(
                 evaluator_summary = _build_evaluator_summary(metrics_data)
                 model_results.append(
                     {
-                        "model": model,
+                        **_variant_identity(variant),
                         "success": True,
                         "message": f"Completed",
                         "total_tests": total,
@@ -3983,7 +4088,7 @@ def _update_benchmark_intermediate_results(
                 passed = sum(1 for r in merged if r.get("passed", False))
                 model_results.append(
                     {
-                        "model": model,
+                        **_variant_identity(variant),
                         "success": None,
                         "message": f"Running... ({len(test_results)} tests done)",
                         "total_tests": total,
@@ -3997,7 +4102,7 @@ def _update_benchmark_intermediate_results(
                 # No results yet for this model
                 model_results.append(
                     {
-                        "model": model,
+                        **_variant_identity(variant),
                         "success": None,
                         "message": "Queued...",
                         "total_tests": None,
@@ -4015,7 +4120,7 @@ def _update_benchmark_intermediate_results(
             # No folder found for this model yet
             model_results.append(
                 {
-                    "model": model,
+                    **_variant_identity(variant),
                     "success": None,
                     "message": "Queued...",
                     "total_tests": None,
@@ -4042,13 +4147,17 @@ def run_benchmark_task(
     task_id: str,
     agent: Dict[str, Any],
     tests: List[Dict[str, Any]],
-    models: List[str],
+    models: List[Any],
     s3_bucket: str,
 ):
     """Run the benchmark for multiple models using a single CLI command with intermediate updates.
 
     The calibrate CLI handles parallelization internally and generates the leaderboard.
+
+    ``models`` holds benchmark entries, either bare model names or ``{id, model, ...}``.
     """
+    variants = _benchmark_variants(models)
+    named_models = [v["model"] for v in variants]
     test_uuid_by_name = _test_uuid_by_name(tests)
     try:
         logger.info(
@@ -4100,30 +4209,45 @@ def run_benchmark_task(
                     json.dump(calibrate_config, f, indent=2)
 
                 if agent_config.get("agent_url"):
-                    # Agent connection mode: -m {models} but no -p
-                    # Calibrate sends model in each request body; agent routes internally
+                    # Agent connection mode: the models ride in the config as
+                    # `model_variants`, not as -m, so two of one model stay apart.
                     # Frontend always sends models in openrouter format (provider/model).
                     # Strip the provider prefix for non-openrouter providers so the
                     # agent receives just the model name (e.g. "gpt-4.1" not "openai/gpt-4.1").
                     benchmark_provider = agent_config.get(
                         "benchmark_provider", "openrouter"
                     )
-                    if benchmark_provider != "openrouter":
-                        cli_models = [
-                            m.split("/", 1)[-1] if "/" in m else m for m in models
-                        ]
-                    else:
-                        cli_models = models
-                    run_cmd = (
-                        [get_calibrate_agent_cli(), "llm", "-c", str(config_file), "-m"]
-                        + cli_models
-                        + ["-o", str(output_dir), "--skip-verify"]
-                    )
+                    strip = benchmark_provider != "openrouter"
+                    cli_models = _variant_folder_names(variants)
+                    calibrate_config["model_variants"] = [
+                        {
+                            "id": folder,
+                            "model": (
+                                v["model"].split("/", 1)[-1]
+                                if strip and "/" in v["model"]
+                                else v["model"]
+                            ),
+                            "label": v.get("label") or v["id"],
+                            "extra": v.get("extra") or {},
+                        }
+                        for v, folder in zip(variants, cli_models)
+                    ]
+                    with open(config_file, "w", encoding="utf-8") as f:
+                        json.dump(calibrate_config, f, indent=2)
+                    run_cmd = [
+                        get_calibrate_agent_cli(),
+                        "llm",
+                        "-c",
+                        str(config_file),
+                        "-o",
+                        str(output_dir),
+                        "--skip-verify",
+                    ]
                 else:
                     # Calibrate agent mode: -m {models} -p {provider}
                     llm_config = agent_config.get("llm", {})
                     provider = llm_config.get("provider", "openrouter")
-                    cli_models = models
+                    cli_models = named_models
                     run_cmd = (
                         [get_calibrate_agent_cli(), "llm", "-c", str(config_file), "-m"]
                         + cli_models
@@ -4232,7 +4356,8 @@ def run_benchmark_task(
                 logger.info(f"Found result folders: {folder_names}")
 
                 model_results = []
-                for model, cli_model in zip(models, cli_models):
+                for variant, cli_model in zip(variants, cli_models):
+                    model = variant["id"]
                     matched_folder = _match_model_to_folder(cli_model, folder_names)
 
                     if matched_folder and matched_folder in all_results:
@@ -4270,7 +4395,7 @@ def run_benchmark_task(
                             # time in ``_enrich_model_results_with_evaluators``.
                             model_results.append(
                                 {
-                                    "model": model,
+                                    **_variant_identity(variant),
                                     "success": True,
                                     "message": f"Benchmark completed successfully for {model}",
                                     "total_tests": total,
@@ -4292,7 +4417,7 @@ def run_benchmark_task(
                             )
                             model_results.append(
                                 {
-                                    "model": model,
+                                    **_variant_identity(variant),
                                     "success": True,
                                     "message": f"Benchmark completed for {model}",
                                     "total_tests": total,
@@ -4306,7 +4431,7 @@ def run_benchmark_task(
                         logger.warning(f"No output found for model {model}")
                         model_results.append(
                             {
-                                "model": model,
+                                **_variant_identity(variant),
                                 "success": False,
                                 "message": f"No output found for model {model}",
                                 "test_results": (
@@ -4323,8 +4448,13 @@ def run_benchmark_task(
                 if leaderboard_dir.exists():
                     logger.info(f"Leaderboard directory exists: {leaderboard_dir}")
                     leaderboard_summary = _read_leaderboard_csv(
-                        leaderboard_dir, models=models
+                        leaderboard_dir, models=cli_models
                     )
+                    # Calibrate names each leaderboard row after the folder it
+                    # wrote, so move it onto the id the run is keyed by.
+                    id_by_folder = dict(zip(cli_models, [v["id"] for v in variants]))
+                    for row in leaderboard_summary or []:
+                        row["model"] = id_by_folder.get(row.get("model"), row.get("model"))
 
                     # Upload leaderboard to S3
                     results_prefix = f"agent-tests/benchmarks/{task_id}"
@@ -4496,14 +4626,33 @@ def run_agent_benchmark(
     if not request.models:
         raise HTTPException(status_code=400, detail="At least one model is required")
 
-    # Guard: for agent connection mode, verify each requested model is verified
+    variants = _benchmark_variants(request.models)
     agent_config = agent.get("config") or {}
+    # Calibrate only reads per-model request settings when it is calling the
+    # customer's own endpoint, so an agent Calibrate runs itself can neither
+    # carry them nor tell two runs of one model apart.
+    if not agent_config.get("agent_url"):
+        if any(v.get("extra") for v in variants):
+            raise HTTPException(
+                status_code=400,
+                detail="Request settings for a model only apply to an agent Calibrate calls at your own URL. Remove extra from every model in the request.",
+            )
+        named = [v["model"] for v in variants]
+        if len(named) != len(set(named)):
+            raise HTTPException(
+                status_code=400,
+                detail="Benchmarking one model more than once only applies to an agent Calibrate calls at your own URL. Name each model at most once.",
+            )
+
+    # Guard: for agent connection mode, verify each requested model is verified.
+    # Verification is keyed by the model name, so two requested models sharing one
+    # name share it too.
     if agent_config.get("agent_url"):
         benchmark_verified = agent_config.get("benchmark_models_verified") or {}
         unverified = [
-            m
-            for m in request.models
-            if not benchmark_verified.get(m, {}).get("verified")
+            v["model"]
+            for v in variants
+            if not benchmark_verified.get(v["model"], {}).get("verified")
         ]
         if unverified:
             raise HTTPException(
@@ -4545,7 +4694,7 @@ def run_agent_benchmark(
     else:
         tests = linked_tests
 
-    enforce_max_rows_per_eval(ctx.org_uuid, len(tests) * len(request.models))
+    enforce_max_rows_per_eval(ctx.org_uuid, len(tests) * len(variants))
 
     # Get S3 configuration
     try:
@@ -4554,24 +4703,20 @@ def run_agent_benchmark(
         raise HTTPException(status_code=500, detail=str(e))
 
     test_names, details = _agent_test_job_details(agent, tests, s3_bucket)
-    details["models"] = request.models
+    details["models"] = variants
     details["parallel_models"] = request.parallel_models
     job_id, initial_status = _create_agent_test_job_in_slot(
         agent,
         "llm-benchmark",
         details,
-        results={
-            "model_results": _benchmark_queued_model_results(
-                request.models, test_names
-            )
-        },
+        results={"model_results": _benchmark_queued_model_results(variants, test_names)},
     )
 
     if initial_status == TaskStatus.IN_PROGRESS.value:
         # Start background task
         thread = threading.Thread(
             target=run_benchmark_task,
-            args=(job_id, agent, tests, request.models, s3_bucket),
+            args=(job_id, agent, tests, variants, s3_bucket),
             daemon=True,
         )
         thread.start()
@@ -4709,6 +4854,7 @@ def _benchmark_model_result(
         passed = metrics_data.get("passed", 0)
         return {
             "model": model,
+            "model_name": model,
             "success": True,
             "message": f"Benchmark completed successfully for {model}",
             "total_tests": total,
@@ -4730,6 +4876,7 @@ def _benchmark_model_result(
     passed = sum(1 for r in test_results if r.get("passed"))
     return {
         "model": model,
+        "model_name": model,
         "success": True,
         "message": f"Benchmark completed for {model}",
         "total_tests": total,
