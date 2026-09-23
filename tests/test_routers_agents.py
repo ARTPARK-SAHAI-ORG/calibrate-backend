@@ -1214,6 +1214,97 @@ def test_presave_verify_sends_the_body_its_stated_type_expects(client, monkeypat
     }
 
 
+def _capture_verify(monkeypatch):
+    """Record the arguments the verification probe is called with."""
+    import routers.agents as agents_mod
+
+    seen = {}
+
+    async def _fake(**kwargs):
+        seen.update(kwargs)
+        return {"success": True, "error": None, "sample_response": {"response": "hi"}}
+
+    monkeypatch.setattr(agents_mod, "_verify_agent_connection", _fake)
+    return seen
+
+
+def _connection_agent(client, h):
+    return client.post(
+        "/agents",
+        json={
+            "name": f"a-{uuid.uuid4().hex[:6]}",
+            "type": "connection",
+            "config": {"agent_url": "https://example.com/run"},
+        },
+        headers=h,
+    ).json()
+
+
+def test_verify_extra_alone_is_sent_as_inputs(client, monkeypatch):
+    seen = _capture_verify(monkeypatch)
+    h = _signup(client)
+    agent = _connection_agent(client, h)
+
+    res = client.post(
+        f"/agents/{agent['uuid']}/verify-connection",
+        json={"extra": {"reasoning": {"effort": "high"}}},
+        headers=h,
+    )
+    assert res.status_code == 200, res.text
+    assert seen["inputs"] == {"reasoning": {"effort": "high"}}
+
+
+def test_verify_inputs_win_over_extra_on_a_shared_key(client, monkeypatch):
+    seen = _capture_verify(monkeypatch)
+    h = _signup(client)
+    agent = _connection_agent(client, h)
+
+    res = client.post(
+        f"/agents/{agent['uuid']}/verify-connection",
+        json={
+            "extra": {"reasoning": {"effort": "high"}, "temperature": 0},
+            "inputs": {"temperature": 1, "condition_area": "cardiology"},
+        },
+        headers=h,
+    )
+    assert res.status_code == 200, res.text
+    assert seen["inputs"] == {
+        "reasoning": {"effort": "high"},
+        "temperature": 1,
+        "condition_area": "cardiology",
+    }
+
+
+def test_verify_without_extra_or_inputs_sends_none(client, monkeypatch):
+    seen = _capture_verify(monkeypatch)
+    h = _signup(client)
+    agent = _connection_agent(client, h)
+
+    res = client.post(
+        f"/agents/{agent['uuid']}/verify-connection", json={}, headers=h
+    )
+    assert res.status_code == 200, res.text
+    assert seen["inputs"] is None
+
+
+def test_verify_extra_rides_alongside_a_model(client, monkeypatch):
+    seen = _capture_verify(monkeypatch)
+    h = _signup(client)
+    agent = _connection_agent(client, h)
+
+    res = client.post(
+        f"/agents/{agent['uuid']}/verify-connection",
+        json={
+            "model": "openai/gpt-4.1",
+            "extra": {"reasoning": {"effort": "high"}},
+        },
+        headers=h,
+    )
+    assert res.status_code == 200, res.text
+    assert seen["model"] == "openai/gpt-4.1"
+    assert seen["inputs"] == {"reasoning": {"effort": "high"}}
+
+
 # ============ trace scoring setting + eligibility ============
 
 

@@ -349,6 +349,11 @@ _PUBLIC_SPEC_HIDDEN_FIELDS: Dict[str, tuple] = {
     # globally, so it's pinned to the link responses that return it.
     "AgentTestsCreateResponse": ("ids",),
     "AgentToolsCreateResponse": ("ids",),
+    # A benchmark refuses per-model request settings while `_VARIANTS_SUPPORTED`
+    # is False in routers/agent_tests.py, so a generated client must not carry a
+    # field every call would 400 on. Unhide both when that flag flips.
+    "BenchmarkModel": ("extra",),
+    "ModelResult": ("extra",),
 }
 
 # Distinctive internal field names stripped from every *evaluator* public

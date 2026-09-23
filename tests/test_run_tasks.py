@@ -1794,3 +1794,203 @@ def test_update_benchmark_intermediate_results_carries_stopped_early(tmp_path):
     model = db.get_agent_test_job(job_id)["results"]["model_results"][0]
     assert model["stopped_early"] is True
     assert model["unanswered_tests"] == 1
+
+
+# ---------------------------------------------------------------------------
+# Benchmark entries that carry their own ID — the CLI still gets model names
+# ---------------------------------------------------------------------------
+
+
+_GPT_41 = {"id": "gpt-4.1-high", "model": "gpt-4.1", "label": "gpt-4.1 (high)"}
+_GPT_4O_MINI = {"id": "mini-plain", "model": "gpt-4o-mini", "label": None}
+
+
+def _run_benchmark_over_entries(models, folders, agent_config=None, leaderboard=None):
+    """Run the benchmark worker against a stubbed CLI that writes one finished
+    results folder per name in ``folders``. Returns (argv, job)."""
+    from routers.agent_tests import run_benchmark_task
+
+    _, agent_uuid, job_uuid = _make_agent_test_job(job_type="llm-benchmark")
+    process = _FakeProcess(returncode=0, poll_results=[None, 0])
+    captured = {}
+
+    def fake_popen(cmd, *args, **kwargs):
+        captured["cmd"] = list(cmd)
+        out = Path(kwargs["cwd"]) / "output"
+        for folder in folders:
+            model_dir = out / folder
+            model_dir.mkdir(parents=True, exist_ok=True)
+            with open(model_dir / "results.json", "w") as f:
+                json.dump(
+                    [
+                        {
+                            "test_case": {"name": "T"},
+                            "output": {"response": "hi"},
+                            "metrics": {"passed": True},
+                        }
+                    ],
+                    f,
+                )
+            with open(model_dir / "metrics.json", "w") as f:
+                json.dump({"total": 1, "passed": 1}, f)
+        if leaderboard is not None:
+            lb = out / "leaderboard"
+            lb.mkdir(parents=True, exist_ok=True)
+            with open(lb / "leaderboard.csv", "w") as f:
+                f.write("model,pass_rate\n")
+                for name in leaderboard:
+                    f.write(f"{name},100\n")
+        return process
+
+    with patch("routers.agent_tests.subprocess.Popen", side_effect=fake_popen), patch(
+        "routers.agent_tests.get_s3_client", return_value=MagicMock()
+    ), patch("routers.agent_tests.upload_directory_tree_to_s3"), patch(
+        "routers.agent_tests.upload_file_to_s3"
+    ), patch(
+        "routers.agent_tests.try_start_queued_agent_test_job"
+    ), patch(
+        "routers.agent_tests.time.sleep"
+    ):
+        agent = {"uuid": agent_uuid, "name": "a", "config": agent_config or {}}
+        tests = [{"uuid": "t", "name": "T", "config": {}}]
+        run_benchmark_task(job_uuid, agent, tests, models, "bucket")
+
+    return captured["cmd"], db.get_agent_test_job(job_uuid)
+
+
+def _cli_models(cmd):
+    """The values the CLI was given after ``-m``."""
+    names = []
+    for part in cmd[cmd.index("-m") + 1 :]:
+        if part.startswith("-"):
+            break
+        names.append(part)
+    return names
+
+
+def test_run_benchmark_task_sends_model_names_to_the_cli_not_ids():
+    cmd, _ = _run_benchmark_over_entries(
+        [_GPT_41, _GPT_4O_MINI], ["gpt-4.1", "gpt-4o-mini"]
+    )
+    assert _cli_models(cmd) == ["gpt-4.1", "gpt-4o-mini"]
+
+
+def test_run_benchmark_task_strips_the_provider_prefix_from_model_names_only():
+    """A non-openrouter provider gets the bare model name, while the stored rows
+    are still keyed by each entry's ID."""
+    cmd, job = _run_benchmark_over_entries(
+        [
+            {"id": "one", "model": "openai/gpt-4.1"},
+            {"id": "two", "model": "openai/gpt-4o-mini"},
+        ],
+        ["gpt-4.1", "gpt-4o-mini"],
+        agent_config={
+            "agent_url": "http://agent.test/chat",
+            "benchmark_provider": "openai",
+        },
+    )
+    assert _cli_models(cmd) == ["gpt-4.1", "gpt-4o-mini"]
+    assert [m["model"] for m in job["results"]["model_results"]] == ["one", "two"]
+    assert [m["model_name"] for m in job["results"]["model_results"]] == [
+        "openai/gpt-4.1",
+        "openai/gpt-4o-mini",
+    ]
+
+
+def test_run_benchmark_task_keys_model_results_on_the_entry_id():
+    _, job = _run_benchmark_over_entries(
+        [_GPT_41, _GPT_4O_MINI], ["gpt-4.1", "gpt-4o-mini"]
+    )
+    assert job["status"] == "done"
+    by_id = {m["model"]: m for m in job["results"]["model_results"]}
+    assert set(by_id) == {"gpt-4.1-high", "mini-plain"}
+    assert by_id["gpt-4.1-high"]["model_name"] == "gpt-4.1"
+    assert by_id["gpt-4.1-high"]["label"] == "gpt-4.1 (high)"
+    assert by_id["gpt-4.1-high"]["success"] is True
+    assert by_id["mini-plain"]["model_name"] == "gpt-4o-mini"
+    assert by_id["mini-plain"]["label"] is None
+
+
+def test_update_benchmark_intermediate_results_keys_on_the_entry_id(tmp_path):
+    from routers.agent_tests import _update_benchmark_intermediate_results
+
+    job_id = db.create_agent_test_job(agent_id="agent-z", job_type="llm-benchmark")
+    model_dir = tmp_path / "gpt-4.1"
+    model_dir.mkdir()
+    (model_dir / "results.json").write_text(
+        json.dumps(
+            [
+                {
+                    "test_case": {"name": "T1"},
+                    "output": {"response": "hi"},
+                    "metrics": {"passed": True},
+                }
+            ]
+        )
+    )
+    (model_dir / "metrics.json").write_text(json.dumps({"total": 1, "passed": 1}))
+
+    _update_benchmark_intermediate_results(
+        job_id, tmp_path, [_GPT_41, _GPT_4O_MINI], ["T1"]
+    )
+
+    rows = db.get_agent_test_job(job_id)["results"]["model_results"]
+    by_id = {m["model"]: m for m in rows}
+    assert set(by_id) == {"gpt-4.1-high", "mini-plain"}
+    assert by_id["gpt-4.1-high"]["model_name"] == "gpt-4.1"
+    assert by_id["gpt-4.1-high"]["label"] == "gpt-4.1 (high)"
+    assert by_id["gpt-4.1-high"]["success"] is True
+    # No folder for the second entry yet, but it still carries its identity.
+    assert by_id["mini-plain"]["model_name"] == "gpt-4o-mini"
+    assert by_id["mini-plain"]["success"] is None
+
+
+def test_run_benchmark_task_moves_leaderboard_rows_onto_the_entry_id():
+    """Calibrate names each leaderboard row after the model, so the row is
+    rewritten to the ID the rest of the run is keyed by."""
+    _, job = _run_benchmark_over_entries(
+        [_GPT_41, _GPT_4O_MINI],
+        ["gpt-4.1", "gpt-4o-mini"],
+        leaderboard=["gpt-4.1", "gpt-4o-mini"],
+    )
+    assert [r["model"] for r in job["results"]["leaderboard_summary"]] == [
+        "gpt-4.1-high",
+        "mini-plain",
+    ]
+
+
+def test_run_benchmark_task_keeps_the_provider_prefix_for_openrouter():
+    """An openrouter agent connection gets the model name whole, so the entry
+    IDs never reach the CLI and the prefix is not stripped from them either."""
+    cmd, job = _run_benchmark_over_entries(
+        [
+            {"id": "one", "model": "openai/gpt-4.1"},
+            {"id": "two", "model": "openai/gpt-4o-mini"},
+        ],
+        ["openai__gpt-4.1", "openai__gpt-4o-mini"],
+        agent_config={"agent_url": "http://agent.test/chat"},
+    )
+    assert _cli_models(cmd) == ["openai/gpt-4.1", "openai/gpt-4o-mini"]
+    assert [m["model"] for m in job["results"]["model_results"]] == ["one", "two"]
+
+
+def test_update_benchmark_intermediate_results_identifies_a_folder_with_no_rows(
+    tmp_path,
+):
+    """A folder calibrate has created but not yet written results into still
+    reports which model it belongs to, so the row is never anonymous."""
+    from routers.agent_tests import _update_benchmark_intermediate_results
+
+    job_id = db.create_agent_test_job(agent_id="agent-y", job_type="llm-benchmark")
+    model_dir = tmp_path / "gpt-4.1"
+    model_dir.mkdir()
+    (model_dir / "results.json").write_text("[]")
+
+    _update_benchmark_intermediate_results(job_id, tmp_path, [_GPT_41], ["T1"])
+
+    row = db.get_agent_test_job(job_id)["results"]["model_results"][0]
+    assert row["model"] == "gpt-4.1-high"
+    assert row["model_name"] == "gpt-4.1"
+    assert row["label"] == "gpt-4.1 (high)"
+    assert row["success"] is None
+    assert row["message"] == "Queued..."
