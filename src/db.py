@@ -1833,6 +1833,20 @@ def init_db():
                     "annotation task(s) with tool-call rows"
                 )
 
+        if not _schema_migration_applied(
+            cursor, RENAME_TOOL_CALL_EVALUATOR_DESCRIPTION_MIGRATION
+        ):
+            renamed = _backfill_rename_tool_call_evaluator_description(cursor)
+            _mark_schema_migration_applied(
+                cursor, RENAME_TOOL_CALL_EVALUATOR_DESCRIPTION_MIGRATION
+            )
+            conn.commit()
+            if renamed:
+                logger.info(
+                    f"Updated the tool-call correctness description on {renamed} "
+                    "workspace fork(s)"
+                )
+
         # Re-point pre-existing evaluator links from the shared default templates
         # to each org's fork (one-time). Runs after the fork backfill so the
         # forks exist. Finished-run job snapshots stay frozen.
@@ -2213,7 +2227,7 @@ TOOL_CALL_EVALUATOR_SLUG = "default-tool-call-correctness"
 _TOOL_CALL_SEED = {
     "slug": TOOL_CALL_EVALUATOR_SLUG,
     "name": "Tool call correctness",
-    "description": "Records whether the agent made the right tool call, judged by a person",
+    "description": "Whether the agent made the right tool call",
     "evaluator_type": "tool-call",
     "data_type": "text",
     "kind": "single",
@@ -3287,6 +3301,12 @@ def _backfill_link_default_correctness_evaluator(cursor: sqlite3.Cursor) -> int:
 
 PROVISION_TOOL_CALL_EVALUATOR_MIGRATION = "provision_tool_call_evaluator_v1"
 LINK_TOOL_CALL_EVALUATOR_TO_TASKS_MIGRATION = "link_tool_call_evaluator_to_tasks_v1"
+RENAME_TOOL_CALL_EVALUATOR_DESCRIPTION_MIGRATION = (
+    "rename_tool_call_evaluator_description_v1"
+)
+_TOOL_CALL_EVALUATOR_OLD_DESCRIPTION = (
+    "Records whether the agent made the right tool call, judged by a person"
+)
 
 # Mirrors `is_tool_call_row` in utils.py: an expected_tool_calls or
 # actual_tool_calls list, whatever it holds and whatever the agent produced;
@@ -3322,6 +3342,25 @@ def _backfill_provision_tool_call_evaluator(cursor: sqlite3.Cursor) -> int:
     for org_uuid in org_uuids:
         total += _provision_default_evaluators_for_org(cursor, org_uuid)
     return total
+
+
+def _backfill_rename_tool_call_evaluator_description(cursor: sqlite3.Cursor) -> int:
+    """One-time migration: give each org's fork of the tool-call correctness
+    evaluator the seed's current description. Only forks still carrying the
+    old text change, so a description a user edited is kept. The template
+    itself is reconciled by `_seed_default_evaluators`."""
+    cursor.execute(
+        """
+        UPDATE evaluators SET description = ?
+        WHERE source_default_slug = ? AND description = ? AND deleted_at IS NULL
+        """,
+        (
+            _TOOL_CALL_SEED["description"],
+            TOOL_CALL_EVALUATOR_SLUG,
+            _TOOL_CALL_EVALUATOR_OLD_DESCRIPTION,
+        ),
+    )
+    return cursor.rowcount
 
 
 def _backfill_link_tool_call_evaluator_to_tasks(cursor: sqlite3.Cursor) -> int:
