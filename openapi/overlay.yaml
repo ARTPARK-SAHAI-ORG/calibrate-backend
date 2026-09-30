@@ -446,6 +446,22 @@ actions:
         openWorldHint: true
         description: |
           Get one annotation task with its evaluators, items, and labelling jobs.
+  - target: $.paths['/annotation-tasks/{task_uuid}'].put
+    update:
+      x-speakeasy-group: annotation_tasks
+      x-speakeasy-name-override: update
+      x-speakeasy-mcp:
+        name: update-annotation-task
+        title: Update an annotation task
+        scopes: [write]
+        readOnlyHint: false
+        destructiveHint: false
+        openWorldHint: true
+        idempotentHint: true
+        description: |
+          Rename a task, change its description, or set the labels the
+          labelling form shows beside the user's messages and the agent's
+          replies. The task must be in your workspace.
   - target: $.paths['/annotation-tasks/{task_uuid}/evaluators'].put
     update:
       x-speakeasy-group: annotation_tasks

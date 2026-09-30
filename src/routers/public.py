@@ -986,6 +986,8 @@ def _build_annotation_job_payload(
             "name": task["name"],
             "type": task["type"],
             "description": task.get("description"),
+            "user_label": task["user_label"],
+            "agent_label": task["agent_label"],
         },
         "evaluators": evaluators,
         "items": items,

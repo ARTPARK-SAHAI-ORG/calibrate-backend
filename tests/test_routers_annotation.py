@@ -3342,3 +3342,96 @@ def test_initial_annotations_incomplete_without_tool_call_answer(client):
     assert resp.status_code == 200
     job_uuid = resp.json()["annotation_job_id"]
     assert _job_status(client, h, task_uuid, job_uuid) == "in_progress"
+
+
+def test_annotation_task_labels(client):
+    auth = _signup(client)
+    h = auth["headers"]
+
+    default = client.post(
+        "/annotation-tasks",
+        json={"name": f"t-{uuid.uuid4().hex[:6]}", "type": "llm"},
+        headers=h,
+    )
+    assert default.status_code == 200, default.text
+    default_uuid = default.json()["uuid"]
+    detail = client.get(f"/annotation-tasks/{default_uuid}", headers=h).json()
+    assert detail["user_label"] == "user"
+    assert detail["agent_label"] == "agent"
+    listed = next(
+        t
+        for t in client.get("/annotation-tasks", headers=h).json()["items"]
+        if t["uuid"] == default_uuid
+    )
+    assert listed["user_label"] == "user"
+    assert listed["agent_label"] == "agent"
+
+    trimmed = client.post(
+        "/annotation-tasks",
+        json={
+            "name": f"t-{uuid.uuid4().hex[:6]}",
+            "type": "llm",
+            "user_label": "  Patient ",
+        },
+        headers=h,
+    )
+    assert trimmed.status_code == 200, trimmed.text
+    task_uuid = trimmed.json()["uuid"]
+    detail = client.get(f"/annotation-tasks/{task_uuid}", headers=h).json()
+    assert detail["user_label"] == "Patient"
+    assert detail["agent_label"] == "agent"
+
+    upd = client.put(
+        f"/annotation-tasks/{task_uuid}", json={"agent_label": "Nurse"}, headers=h
+    )
+    assert upd.status_code == 200, upd.text
+    detail = client.get(f"/annotation-tasks/{task_uuid}", headers=h).json()
+    assert detail["user_label"] == "Patient"
+    assert detail["agent_label"] == "Nurse"
+
+    assert (
+        client.put(
+            f"/annotation-tasks/{task_uuid}", json={"agent_label": "   "}, headers=h
+        ).status_code
+        == 422
+    )
+    assert (
+        client.put(
+            f"/annotation-tasks/{task_uuid}", json={"user_label": "x" * 41}, headers=h
+        ).status_code
+        == 422
+    )
+    assert (
+        client.post(
+            "/annotation-tasks",
+            json={"name": "x", "type": "llm", "agent_label": "x" * 41},
+            headers=h,
+        ).status_code
+        == 422
+    )
+
+    raw = client.post("/api-keys", json={"name": "ci"}, headers=h).json()["key"]
+    keyed = client.put(
+        f"/annotation-tasks/{task_uuid}",
+        json={"user_label": "Caller"},
+        headers={"X-API-Key": raw},
+    )
+    assert keyed.status_code == 200, keyed.text
+    assert (
+        client.get(f"/annotation-tasks/{task_uuid}", headers=h).json()["user_label"]
+        == "Caller"
+    )
+    assert (
+        client.put(
+            f"/annotation-tasks/{task_uuid}",
+            json={"user_label": "Nobody"},
+            headers={"X-API-Key": "sk_not-a-real-key"},
+        ).status_code
+        == 401
+    )
+    assert (
+        client.put(
+            f"/annotation-tasks/{task_uuid}", json={"user_label": "Nobody"}
+        ).status_code
+        == 403
+    )

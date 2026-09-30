@@ -122,6 +122,9 @@ paths:
     get:
       x-fern-sdk-group-name: annotation_tasks
       x-fern-sdk-method-name: get
+    put:
+      x-fern-sdk-group-name: annotation_tasks
+      x-fern-sdk-method-name: update
   /annotation-tasks/{task_uuid}/evaluators:
     put:
       x-fern-sdk-group-name: annotation_tasks

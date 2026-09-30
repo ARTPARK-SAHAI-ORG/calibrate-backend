@@ -694,3 +694,30 @@ def test_all_tool_call_job_completes_on_the_tool_call_evaluator_alone(client):
 
     assert _save(client, token, item_uuids[0], tool_ev) == "in_progress"
     assert _save(client, token, item_uuids[1], tool_ev) == "completed"
+
+
+def test_public_annotation_job_carries_task_labels(client):
+    import db as db_mod
+
+    token, _, _ = _labelling_job(client, [_TEXT_PAYLOAD], ["llm"])
+    job = db_mod.get_annotation_job_by_token(token)
+    task_uuid = job["task_id"]
+    db_mod.update_annotation_task(
+        task_uuid, user_label="Patient", agent_label="Doctor"
+    )
+
+    body = client.get(f"/public/annotation-jobs/{token}").json()
+    assert body["task"]["user_label"] == "Patient"
+    assert body["task"]["agent_label"] == "Doctor"
+
+    db_mod.update_annotation_task(task_uuid, agent_label="Nurse")
+    body = client.get(f"/public/annotation-jobs/{token}").json()
+    assert body["task"]["user_label"] == "Patient"
+    assert body["task"]["agent_label"] == "Nurse"
+
+    view_token = uuid.uuid4().hex
+    db_mod.update_annotation_job_visibility(job["uuid"], True, view_token)
+    view = client.get(f"/public/annotation-jobs/view/{view_token}")
+    assert view.status_code == 200, view.text
+    assert view.json()["task"]["user_label"] == "Patient"
+    assert view.json()["task"]["agent_label"] == "Nurse"

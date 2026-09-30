@@ -167,7 +167,7 @@ def test_public_api_docs_are_unauthenticated_and_filtered(client, monkeypatch):
     assert set(paths["/annotators"]) == {"post", "get"}
     assert set(paths["/annotators/{annotator_uuid}"]) == {"put"}
     assert not any(p.startswith("/annotation-agreement") for p in paths)
-    assert "put" not in paths.get("/annotation-tasks/{task_uuid}", {})  # task update stays JWT-only
+    assert set(paths["/annotation-tasks/{task_uuid}"]) == {"get", "put"}
     # Creating labelling jobs is public (it mints the annotator's link); listing
     # them stays JWT-only.
     assert set(paths["/annotation-tasks/{task_uuid}/jobs"]) == {"post"}

@@ -903,6 +903,8 @@ def init_db():
                 name TEXT NOT NULL,
                 description TEXT,
                 type TEXT NOT NULL DEFAULT 'llm',
+                user_label TEXT NOT NULL DEFAULT 'user',
+                agent_label TEXT NOT NULL DEFAULT 'agent',
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                 updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                 deleted_at TIMESTAMP DEFAULT NULL,
@@ -1153,6 +1155,14 @@ def init_db():
             )
         except sqlite3.OperationalError:
             pass
+        for _label_column in (
+            "user_label TEXT NOT NULL DEFAULT 'user'",
+            "agent_label TEXT NOT NULL DEFAULT 'agent'",
+        ):
+            try:
+                cursor.execute(f"ALTER TABLE annotation_tasks ADD COLUMN {_label_column}")
+            except sqlite3.OperationalError:
+                pass
 
         # Migration: the annotation-task `type` value `simulation` was renamed to
         # `conversation` (to match the `tests.type` naming for full-conversation
@@ -8632,6 +8642,8 @@ def create_annotation_task(
     type: str,
     user_id: Optional[str] = None,
     description: Optional[str] = None,
+    user_label: str = "user",
+    agent_label: str = "agent",
 ) -> str:
     """Create a new annotation task and return its UUID."""
     if not org_uuid:
@@ -8643,10 +8655,11 @@ def create_annotation_task(
         task_uuid = str(uuid.uuid4())
         cursor.execute(
             """
-            INSERT INTO annotation_tasks (uuid, user_id, org_uuid, name, description, type)
-            VALUES (?, ?, ?, ?, ?, ?)
+            INSERT INTO annotation_tasks
+                (uuid, user_id, org_uuid, name, description, type, user_label, agent_label)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
             """,
-            (task_uuid, user_id, org_uuid, name, description, type),
+            (task_uuid, user_id, org_uuid, name, description, type, user_label, agent_label),
         )
         conn.commit()
         logger.info(f"Created annotation task with UUID: {task_uuid}")
@@ -8716,6 +8729,8 @@ def update_annotation_task(
     task_uuid: str,
     name: Optional[str] = None,
     description: Optional[str] = None,
+    user_label: Optional[str] = None,
+    agent_label: Optional[str] = None,
 ) -> bool:
     updates: List[str] = []
     params: List[Any] = []
@@ -8725,6 +8740,12 @@ def update_annotation_task(
     if description is not None:
         updates.append("description = ?")
         params.append(description)
+    if user_label is not None:
+        updates.append("user_label = ?")
+        params.append(user_label)
+    if agent_label is not None:
+        updates.append("agent_label = ?")
+        params.append(agent_label)
     if not updates:
         return False
     updates.append("updated_at = CURRENT_TIMESTAMP")

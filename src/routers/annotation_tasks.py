@@ -1,6 +1,6 @@
-from typing import Optional, List, Dict, Any
+from typing import Annotated, Optional, List, Dict, Any
 from fastapi import APIRouter, HTTPException, Depends, Path, Query
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, StringConstraints
 from typing import Literal
 
 import logging
@@ -95,6 +95,12 @@ from utils import (
 AnnotationEvalStatus = Literal["queued", "in_progress", "completed", "failed"]
 
 _EXAMPLE_ID = "f47ac10b-58cc-4372-a567-0e02b2c3d479"
+
+_LabelStr = Annotated[
+    str, StringConstraints(strip_whitespace=True, min_length=1, max_length=40)
+]
+_USER_LABEL_DESCRIPTION = "Name shown beside the user's messages on the labelling form"
+_AGENT_LABEL_DESCRIPTION = "Name shown beside the agent's replies on the labelling form"
 
 # Task type gloss, shared by the create and response models so both render identically.
 _TASK_TYPE_DESCRIPTION = (
@@ -389,6 +395,12 @@ class AnnotationTaskCreate(BaseModel):
         description="IDs of evaluators to link when the task is created, in order. Each must be one you created or a built-in default. Omit to create with no linked evaluators",
         examples=[[_EXAMPLE_ID]],
     )
+    user_label: _LabelStr = Field(
+        "user", description=f"{_USER_LABEL_DESCRIPTION}. Omit to show `user`"
+    )
+    agent_label: _LabelStr = Field(
+        "agent", description=f"{_AGENT_LABEL_DESCRIPTION}. Omit to show `agent`"
+    )
 
 
 class AnnotationTaskUpdate(BaseModel):
@@ -397,6 +409,12 @@ class AnnotationTaskUpdate(BaseModel):
     )
     description: Optional[str] = Field(
         None, description="New task description. Omit to leave unchanged"
+    )
+    user_label: Optional[_LabelStr] = Field(
+        None, description="New name shown beside the user's messages on the labelling form. Omit to leave unchanged"
+    )
+    agent_label: Optional[_LabelStr] = Field(
+        None, description="New name shown beside the agent's replies on the labelling form. Omit to leave unchanged"
     )
 
 
@@ -410,6 +428,8 @@ class AnnotationTaskResponse(BaseModel):
     name: str = Field(description="Name of the task")
     type: AnnotationTaskTypeLiteral = Field(description=_TASK_TYPE_DESCRIPTION)
     description: Optional[str] = Field(None, description="The task's description")
+    user_label: str = Field(description=_USER_LABEL_DESCRIPTION)
+    agent_label: str = Field(description=_AGENT_LABEL_DESCRIPTION)
     created_at: str = Field(description="When the task was created (ISO 8601 UTC)")
     updated_at: str = Field(description="When the task was last updated (ISO 8601 UTC)")
     evaluators: List[Dict[str, Any]] = Field(
@@ -506,6 +526,8 @@ def create_annotation_task_endpoint(
             type=payload.type,
             org_uuid=ctx.org_uuid,
             user_id=ctx.user_id,
+            user_label=payload.user_label,
+            agent_label=payload.agent_label,
         )
 
     if payload.evaluator_ids:
@@ -604,14 +626,14 @@ def get_annotation_task_endpoint(
     return task
 
 
-@router.put("/{task_uuid}", response_model=AnnotationTaskResponse, summary="Update annotation task")
+@router.put("/{task_uuid}", response_model=AnnotationTaskResponse, summary="Update annotation task", tags=["Public API"])
 def update_annotation_task_endpoint(
     task_uuid: str = Path(
         description="Annotation task to act on",
         examples=["f47ac10b-58cc-4372-a567-0e02b2c3d479"],
     ),
     payload: AnnotationTaskUpdate = ...,
-    ctx: OrgContext = Depends(get_current_org),
+    ctx: OrgContext = Depends(get_org_jwt_or_api_key),
 ):
     """Update an annotation task, a labelling task for annotators"""
     _ensure_owned_task(task_uuid, ctx.org_uuid)
@@ -626,6 +648,8 @@ def update_annotation_task_endpoint(
             task_uuid=task_uuid,
             name=payload.name,
             description=payload.description,
+            user_label=payload.user_label,
+            agent_label=payload.agent_label,
         )
     if not updated:
         raise HTTPException(status_code=400, detail="No fields to update")
