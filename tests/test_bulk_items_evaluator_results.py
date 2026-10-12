@@ -79,7 +79,10 @@ def test_scores_are_stored_against_a_finished_job(client):
         f"/annotation-tasks/{task}/items",
         json={
             "items": [
-                _item("i1", evaluator_results={ev["uuid"]: {"value": True, "reasoning": "good"}}),
+                {
+                    **_item("i1", evaluator_results={ev["uuid"]: {"value": True, "reasoning": "good"}}),
+                    "metadata": [{"key": "source", "value": "prod"}],
+                },
                 _item("i2"),
             ]
         },
@@ -95,6 +98,7 @@ def test_scores_are_stored_against_a_finished_job(client):
     assert run["status"] == "completed"
     assert run["details"]["item_count"] == 1
     assert [i["uuid"] for i in run["items"]] == [body["item_ids"][0]]
+    assert run["items"][0]["metadata"] == [{"key": "source", "value": "prod"}]
     assert len(run["runs"]) == 1
     assert [e["uuid"] for e in run["evaluators"]] == [ev["uuid"]]
 
@@ -181,6 +185,7 @@ def _tool_call_item(name="tc"):
         "payload": {
             "name": name,
             "chat_history": [{"role": "user", "content": "hi"}],
+            "agent_response": "",
             "expected_tool_calls": [{"tool": "search", "arguments": {}}],
         }
     }
@@ -370,7 +375,8 @@ def resolve(monkeypatch):
         for name, value in overrides.items():
             monkeypatch.setattr(mod, name, value)
         try:
-            mod._resolve_evaluator_results("task-1", [_FakeItem(evaluator_results)])
+            item = _FakeItem(evaluator_results)
+            mod._resolve_evaluator_results("task-1", [item], [item.payload])
         except HTTPException as e:
             return e
         return None

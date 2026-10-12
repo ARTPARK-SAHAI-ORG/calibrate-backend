@@ -8,6 +8,8 @@ from unittest.mock import patch
 import pytest
 from fastapi.testclient import TestClient
 
+from conftest import llm_item_payload
+
 
 @pytest.fixture(scope="module")
 def app():
@@ -74,7 +76,11 @@ def test_list_has_agreement_flag(client):
     paired_task = _create_task(client, h, llm_ev)
     item_id = client.post(
         f"/annotation-tasks/{paired_task}/items",
-        json={"items": [{"payload": {"name": "i1"}}]},
+        json={
+            "items": [
+                {"payload": llm_item_payload("i1")}
+            ]
+        },
         headers=h,
     ).json()["item_ids"][0]
 
@@ -128,7 +134,11 @@ def test_has_agreement_human_evaluator_path(client):
     task = _create_task(client, h, llm_ev)
     item_id = client.post(
         f"/annotation-tasks/{task}/items",
-        json={"items": [{"payload": {"name": "i1"}}]},
+        json={
+            "items": [
+                {"payload": llm_item_payload("i1")}
+            ]
+        },
         headers=h,
     ).json()["item_ids"][0]
 

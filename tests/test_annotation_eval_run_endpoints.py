@@ -70,7 +70,8 @@ def test_evaluator_run_lifecycle(client, monkeypatch):
                         "name": "i1",
                         "chat_history": [{"role": "user", "content": "hi"}],
                         "agent_response": "hi back",
-                    }
+                    },
+                    "metadata": [{"key": "source", "value": "prod"}],
                 },
                 {
                     "payload": {
@@ -149,6 +150,10 @@ def test_evaluator_run_lifecycle(client, monkeypatch):
         f"/annotation-tasks/{task_uuid}/evaluator-runs/{job_uuid}", headers=h
     )
     assert got.status_code == 200
+    assert {i["payload"]["name"]: i["metadata"] for i in got.json()["items"]} == {
+        "i1": [{"key": "source", "value": "prod"}],
+        "i2": [],
+    }
 
     # Visibility — can't share an in-progress / queued run
     bad = client.patch(
@@ -240,8 +245,8 @@ def test_evaluator_run_all_tool_call_rows_blocked(client):
         f"/annotation-tasks/{task_uuid}/items",
         json={
             "items": [
-                {"payload": {"name": "tc1", "tool_calls": [{"tool": "t", "arguments": {}}]}},
-                {"payload": {"name": "tc2", "actual_tool_calls": [{"tool": "u", "arguments": {}}]}},
+                {"payload": {"name": "tc1", "chat_history": [], "agent_response": "", "tool_calls": [{"tool": "t", "arguments": {}}]}},
+                {"payload": {"name": "tc2", "chat_history": [], "agent_response": "", "actual_tool_calls": [{"tool": "u", "arguments": {}}]}},
             ]
         },
         headers=h,
@@ -269,7 +274,7 @@ def test_evaluator_run_mixed_tool_call_rows_launches(client):
         f"/annotation-tasks/{task_uuid}/items",
         json={
             "items": [
-                {"payload": {"name": "tc", "tool_calls": [{"tool": "t", "arguments": {}}]}},
+                {"payload": {"name": "tc", "chat_history": [], "agent_response": "", "tool_calls": [{"tool": "t", "arguments": {}}]}},
                 {"payload": {"name": "resp", "chat_history": [], "agent_response": "hi"}},
             ]
         },
@@ -298,7 +303,7 @@ def test_evaluator_run_explicit_item_ids_filters_tool_call_rows(client):
         f"/annotation-tasks/{task_uuid}/items",
         json={
             "items": [
-                {"payload": {"name": "tc", "tool_calls": [{"tool": "t", "arguments": {}}]}},
+                {"payload": {"name": "tc", "chat_history": [], "agent_response": "", "tool_calls": [{"tool": "t", "arguments": {}}]}},
                 {"payload": {"name": "resp", "chat_history": [], "agent_response": "hi"}},
             ]
         },
