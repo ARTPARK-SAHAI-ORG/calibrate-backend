@@ -170,6 +170,13 @@ _ITEM_PAYLOAD_EXAMPLES = [
     {
         "name": "case-001",
         "chat_history": [
+            {"role": "user", "content": "What is my account balance?"},
+        ],
+        "agent_response": "Your balance is $42.00.",
+    },
+    {
+        "name": "case-002",
+        "chat_history": [
             {"role": "user", "content": "My child has had a fever since last night."},
             {
                 "role": "assistant",
