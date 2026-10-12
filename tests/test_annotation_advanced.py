@@ -11,6 +11,8 @@ from unittest.mock import patch
 import pytest
 from fastapi.testclient import TestClient
 
+from conftest import llm_item_payload
+
 
 @pytest.fixture(scope="module")
 def app():
@@ -85,7 +87,7 @@ def test_bulk_items_with_annotations_validation(client):
         json={
             "items": [
                 {
-                    "payload": {"name": "i1"},
+                    "payload": llm_item_payload("i1"),
                     "annotations": {llm_ev["uuid"]: {"value": True}},
                 }
             ]
@@ -102,7 +104,7 @@ def test_bulk_items_with_annotations_validation(client):
         json={
             "items": [
                 {
-                    "payload": {"name": "i1"},
+                    "payload": llm_item_payload("i1"),
                     "annotations": {llm_ev["uuid"]: {"value": True}},
                 }
             ],
@@ -118,7 +120,7 @@ def test_bulk_items_with_annotations_validation(client):
         json={
             "items": [
                 {
-                    "payload": {"name": "i1"},
+                    "payload": llm_item_payload("i1"),
                     "annotations": "not-a-dict",
                 }
             ],
@@ -134,7 +136,7 @@ def test_bulk_items_with_annotations_validation(client):
         json={
             "items": [
                 {
-                    "payload": {"name": "i1"},
+                    "payload": llm_item_payload("i1"),
                     "annotations": {"missing-ev": {"value": True}},
                 }
             ],
@@ -150,7 +152,7 @@ def test_bulk_items_with_annotations_validation(client):
         json={
             "items": [
                 {
-                    "payload": {"name": "i1"},
+                    "payload": llm_item_payload("i1"),
                     "annotations": {llm_ev["uuid"]: "not-a-dict"},
                 }
             ],
@@ -166,7 +168,7 @@ def test_bulk_items_with_annotations_validation(client):
         json={
             "items": [
                 {
-                    "payload": {"name": "i1"},
+                    "payload": llm_item_payload("i1"),
                     "annotations": {llm_ev["uuid"]: {"reasoning": "x"}},
                 }
             ],
@@ -190,11 +192,11 @@ def test_bulk_items_with_annotations_happy(client):
         json={
             "items": [
                 {
-                    "payload": {"name": "i1"},
+                    "payload": llm_item_payload("i1"),
                     "annotations": {llm_ev["uuid"]: {"value": True}},
                 },
                 {
-                    "payload": {"name": "i2"},
+                    "payload": llm_item_payload("i2"),
                     "annotations": {llm_ev["uuid"]: {"value": False}},
                 },
             ],
@@ -221,10 +223,10 @@ def test_bulk_items_partial_annotations(client):
         json={
             "items": [
                 {
-                    "payload": {"name": "p1"},
+                    "payload": llm_item_payload("p1"),
                     "annotations": {llm_ev["uuid"]: {"value": True}},
                 },
-                {"payload": {"name": "p2"}},  # no annotations
+                {"payload": llm_item_payload("p2")},  # no annotations
             ],
             "annotator_id": annotator["uuid"],
         },
@@ -247,7 +249,7 @@ def test_public_annotation_job_upsert_flow(client):
     annotator = _create_annotator(client, h)
     items = client.post(
         f"/annotation-tasks/{task_uuid}/items",
-        json={"items": [{"payload": {"name": "i1"}}, {"payload": {"name": "i2"}}]},
+        json={"items": [{"payload": llm_item_payload("i1")}, {"payload": llm_item_payload("i2")}]},
         headers=h,
     ).json()["item_ids"]
 
@@ -338,3 +340,48 @@ def test_public_annotation_job_upsert_flow(client):
     view = client.get(f"/public/annotation-jobs/view/{view_token}")
     assert view.status_code == 200
     assert view.json()["read_only"] is True
+
+
+def test_public_labelling_routes_show_the_metadata_frozen_at_job_creation(client):
+    """Both public routes read the job's snapshot, so editing an item's
+    metadata after the job was created does not change what the form shows."""
+    auth = _signup(client)
+    h = auth["headers"]
+    llm_ev = _llm_ev(client, h)
+    task_uuid = _create_task(client, h, llm_ev)
+    annotator = _create_annotator(client, h)
+    original = [{"key": "source", "value": "prod"}]
+    item_id = client.post(
+        f"/annotation-tasks/{task_uuid}/items",
+        json={"items": [{"payload": llm_item_payload("i1"), "metadata": original}]},
+        headers=h,
+    ).json()["item_ids"][0]
+
+    job = client.post(
+        f"/annotation-tasks/{task_uuid}/jobs",
+        json={"annotator_ids": [annotator["uuid"]], "item_ids": [item_id]},
+        headers=h,
+    ).json()["jobs"][0]
+    public_token = job["public_token"]
+
+    form = client.get(f"/public/annotation-jobs/{public_token}")
+    assert form.status_code == 200
+    assert form.json()["items"][0]["metadata"] == original
+
+    # Complete the job so the owner can share a read-only view of it.
+    done = client.post(
+        f"/public/annotation-jobs/{public_token}/annotations",
+        json={
+            "item_id": item_id,
+            "annotations": [{"evaluator_id": llm_ev["uuid"], "value": {"value": True}}],
+        },
+    )
+    assert done.status_code == 200, done.text
+    view_token = client.patch(
+        f"/annotation-tasks/{task_uuid}/jobs/{job['uuid']}/visibility",
+        json={"is_public": True},
+        headers=h,
+    ).json()["view_token"]
+    view = client.get(f"/public/annotation-jobs/view/{view_token}")
+    assert view.status_code == 200
+    assert view.json()["items"][0]["metadata"] == original

@@ -956,6 +956,7 @@ def init_db():
                 uuid TEXT NOT NULL UNIQUE,
                 task_id TEXT NOT NULL,
                 payload TEXT NOT NULL,
+                metadata TEXT DEFAULT NULL,
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                 updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                 deleted_at TIMESTAMP DEFAULT NULL,
@@ -991,6 +992,7 @@ def init_db():
                 job_id TEXT NOT NULL,
                 item_id TEXT NOT NULL,
                 payload TEXT NOT NULL,
+                metadata TEXT DEFAULT NULL,
                 UNIQUE(job_id, item_id),
                 FOREIGN KEY (job_id) REFERENCES annotation_jobs(uuid),
                 FOREIGN KEY (item_id) REFERENCES annotation_items(uuid)
@@ -1020,6 +1022,7 @@ def init_db():
                 job_id TEXT NOT NULL,
                 item_id TEXT NOT NULL,
                 payload TEXT NOT NULL,
+                metadata TEXT DEFAULT NULL,
                 UNIQUE(job_id, item_id),
                 FOREIGN KEY (job_id) REFERENCES jobs(uuid),
                 FOREIGN KEY (item_id) REFERENCES annotation_items(uuid)
@@ -1082,6 +1085,9 @@ def init_db():
             # SQLite rejects CURRENT_TIMESTAMP as a non-constant default in
             # ADD COLUMN, so we land NULL and backfill from created_at below.
             "ALTER TABLE annotation_items ADD COLUMN updated_at TIMESTAMP DEFAULT NULL",
+            "ALTER TABLE annotation_items ADD COLUMN metadata TEXT DEFAULT NULL",
+            "ALTER TABLE annotation_job_items ADD COLUMN metadata TEXT DEFAULT NULL",
+            "ALTER TABLE annotation_eval_job_items ADD COLUMN metadata TEXT DEFAULT NULL",
             # Explicit display order for the evaluators attached to an
             # annotation task. NULL on legacy rows; backfilled from `id` so
             # current (insertion) order is preserved. See
@@ -9222,6 +9228,14 @@ def delete_annotator(annotator_uuid: str) -> bool:
 # ============ Annotation Items ============
 
 
+def _metadata_json(metadata: Any) -> Optional[str]:
+    return json.dumps(metadata) if metadata else None
+
+
+def _metadata_list(text: Optional[str]) -> List[Dict[str, Any]]:
+    return json.loads(text) if text else []
+
+
 def _parse_annotation_item_row(row: sqlite3.Row) -> Dict[str, Any]:
     item = dict(row)
     if item.get("payload"):
@@ -9229,6 +9243,7 @@ def _parse_annotation_item_row(row: sqlite3.Row) -> Dict[str, Any]:
             item["payload"] = json.loads(item["payload"])
         except (TypeError, ValueError):
             pass
+    item["metadata"] = _metadata_list(item.get("metadata"))
     # Every item read stamps `is_tool_call` here, at the one place both
     # `get_annotation_item` and `get_annotation_items_for_task` parse a row,
     # so no caller has to remember to do it.
@@ -9238,7 +9253,8 @@ def _parse_annotation_item_row(row: sqlite3.Row) -> Dict[str, Any]:
 
 def create_annotation_items(task_id: str, items: List[Dict[str, Any]]) -> List[str]:
     """Bulk insert annotation items. Each `items[i]` must have a `payload`
-    (dict, list, or any JSON-serialisable value). Returns new item UUIDs."""
+    (dict, list, or any JSON-serialisable value) and may carry a `metadata`
+    list. Returns new item UUIDs."""
     if not items:
         return []
     new_uuids: List[str] = []
@@ -9251,10 +9267,10 @@ def create_annotation_items(task_id: str, items: List[Dict[str, Any]]) -> List[s
             payload_json = json.dumps(it["payload"])
             cursor.execute(
                 """
-                INSERT INTO annotation_items (uuid, task_id, payload, updated_at)
-                VALUES (?, ?, ?, CURRENT_TIMESTAMP)
+                INSERT INTO annotation_items (uuid, task_id, payload, metadata, updated_at)
+                VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP)
                 """,
-                (item_uuid, task_id, payload_json),
+                (item_uuid, task_id, payload_json, _metadata_json(it.get("metadata"))),
             )
             new_uuids.append(item_uuid)
         conn.commit()
@@ -9274,8 +9290,9 @@ def get_annotation_item(item_uuid: str) -> Optional[Dict[str, Any]]:
 
 def bulk_update_annotation_items(task_id: str, updates: List[Dict[str, Any]]) -> int:
     """Update `payload` on multiple items in one task. Each `updates[i]` must
-    have `uuid` and `payload`. Items not in this task or soft-deleted are
-    skipped silently. Returns rows updated."""
+    have `uuid` and `payload`; `metadata` is left alone when absent or None,
+    else replaced (`[]` clears). Items not in this task or
+    soft-deleted are skipped silently. Returns rows updated."""
     if not updates:
         return 0
     rows_updated = 0
@@ -9290,10 +9307,15 @@ def bulk_update_annotation_items(task_id: str, updates: List[Dict[str, Any]]) ->
             cursor.execute(
                 """
                 UPDATE annotation_items
-                   SET payload = ?, updated_at = CURRENT_TIMESTAMP
+                   SET payload = ?, metadata = COALESCE(?, metadata), updated_at = CURRENT_TIMESTAMP
                  WHERE uuid = ? AND task_id = ? AND deleted_at IS NULL
                 """,
-                (json.dumps(u["payload"]), item_uuid, task_id),
+                (
+                    json.dumps(u["payload"]),
+                    json.dumps(u["metadata"]) if u.get("metadata") is not None else None,
+                    item_uuid,
+                    task_id,
+                ),
             )
             rows_updated += cursor.rowcount
         conn.commit()
@@ -9428,13 +9450,13 @@ def create_annotation_job(
         # Snapshot the current payload of every item we're about to assign.
         placeholders = ",".join("?" for _ in item_uuids)
         cursor.execute(
-            f"SELECT uuid, payload FROM annotation_items "
+            f"SELECT uuid, payload, metadata FROM annotation_items "
             f"WHERE uuid IN ({placeholders}) AND deleted_at IS NULL",
             item_uuids,
         )
         rows = cursor.fetchall()
-        payload_by_uuid = {r["uuid"]: r["payload"] for r in rows}
-        missing = [u for u in item_uuids if u not in payload_by_uuid]
+        snapshot_by_uuid = {r["uuid"]: (r["payload"], r["metadata"]) for r in rows}
+        missing = [u for u in item_uuids if u not in snapshot_by_uuid]
         if missing:
             raise ValueError(
                 f"Cannot snapshot item(s) — not found or already deleted: {missing}"
@@ -9459,9 +9481,9 @@ def create_annotation_job(
             ),
         )
         cursor.executemany(
-            "INSERT INTO annotation_job_items (job_id, item_id, payload) "
-            "VALUES (?, ?, ?)",
-            [(job_uuid, item_id, payload_by_uuid[item_id]) for item_id in item_uuids],
+            "INSERT INTO annotation_job_items (job_id, item_id, payload, metadata) "
+            "VALUES (?, ?, ?, ?)",
+            [(job_uuid, item_id, *snapshot_by_uuid[item_id]) for item_id in item_uuids],
         )
         # Snapshot the currently-linked evaluator set. Reads via
         # `get_evaluator_ids_for_job` give the auto-complete check a stable
@@ -10012,7 +10034,7 @@ def get_annotations_for_annotator_overlap_slots(
 
 
 def snapshot_eval_job_items(job_uuid: str, items: List[Dict[str, Any]]) -> None:
-    """Write `(item_uuid, payload)` rows into `annotation_eval_job_items`
+    """Write `(item_uuid, payload, metadata)` rows into `annotation_eval_job_items`
     for an annotation-eval job. Idempotent: re-snapshotting the same
     `(job_id, item_id)` is a no-op (UNIQUE constraint with INSERT OR
     IGNORE), so recovery / retries are safe.
@@ -10026,12 +10048,13 @@ def snapshot_eval_job_items(job_uuid: str, items: List[Dict[str, Any]]) -> None:
         cursor = conn.cursor()
         cursor.executemany(
             "INSERT OR IGNORE INTO annotation_eval_job_items "
-            "(job_id, item_id, payload) VALUES (?, ?, ?)",
+            "(job_id, item_id, payload, metadata) VALUES (?, ?, ?, ?)",
             [
                 (
                     job_uuid,
                     it["uuid"],
                     json.dumps(it.get("payload")),
+                    _metadata_json(it.get("metadata")),
                 )
                 for it in items
             ],
@@ -10042,29 +10065,20 @@ def snapshot_eval_job_items(job_uuid: str, items: List[Dict[str, Any]]) -> None:
 def get_eval_job_items(job_uuid: str) -> List[Dict[str, Any]]:
     """Read snapshotted items for an annotation-eval job. Order matches
     submission order (insertion order on `id`). Each row is
-    `{uuid, payload (parsed)}` — no joins to `annotation_items` so the
+    `{uuid, payload (parsed), metadata (parsed)}` — no joins to `annotation_items` so the
     snapshot is independent of post-submit edits / soft-deletes there."""
     with get_db_connection() as conn:
         cursor = conn.cursor()
         cursor.execute(
             """
-            SELECT item_id AS uuid, payload
+            SELECT item_id AS uuid, payload, metadata
               FROM annotation_eval_job_items
              WHERE job_id = ?
              ORDER BY id ASC
             """,
             (job_uuid,),
         )
-        out: List[Dict[str, Any]] = []
-        for row in cursor.fetchall():
-            d = dict(row)
-            if d.get("payload"):
-                try:
-                    d["payload"] = json.loads(d["payload"])
-                except (TypeError, ValueError):
-                    pass
-            out.append(d)
-        return out
+        return [_parse_annotation_item_row(row) for row in cursor.fetchall()]
 
 
 def get_job_items(job_uuid: str) -> List[Dict[str, Any]]:
@@ -10078,6 +10092,7 @@ def get_job_items(job_uuid: str) -> List[Dict[str, Any]]:
             SELECT ji.id           AS id,
                    ji.item_id      AS uuid,
                    ji.payload      AS payload,
+                   ji.metadata     AS metadata,
                    j.task_id       AS task_id
               FROM annotation_job_items ji
               JOIN annotation_jobs j ON j.uuid = ji.job_id
@@ -10086,17 +10101,7 @@ def get_job_items(job_uuid: str) -> List[Dict[str, Any]]:
             """,
             (job_uuid,),
         )
-        out: List[Dict[str, Any]] = []
-        for row in cursor.fetchall():
-            d = dict(row)
-            if d.get("payload"):
-                try:
-                    d["payload"] = json.loads(d["payload"])
-                except (TypeError, ValueError):
-                    pass
-            d["is_tool_call"] = is_tool_call_row(d)
-            out.append(d)
-        return out
+        return [_parse_annotation_item_row(row) for row in cursor.fetchall()]
 
 
 def update_annotation_job_status(
