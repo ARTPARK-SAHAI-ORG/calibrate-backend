@@ -3212,3 +3212,65 @@ def test_writing_settings_to_a_workspace_that_is_not_there_writes_nothing():
         )
         is False
     )
+
+
+def test_annotation_item_metadata_round_trips_and_freezes_in_snapshots(user):
+    task_uuid = db.create_annotation_task(
+        name=_u("meta-task"), user_id=user["uuid"], org_uuid=user["org_uuid"], type="llm"
+    )
+    meta = [{"key": "source", "value": "crm"}, {"key": "lang", "value": "hi"}]
+    with_meta, without = db.create_annotation_items(
+        task_uuid,
+        [{"payload": {"text": "a"}, "metadata": meta}, {"payload": {"text": "b"}}],
+    )
+    assert db.get_annotation_item(with_meta)["metadata"] == meta
+    assert db.get_annotation_item(without)["metadata"] == []
+    assert {i["uuid"]: i["metadata"] for i in db.get_annotation_items_for_task(task_uuid)} == {
+        with_meta: meta, without: [],
+    }
+
+    # Omitted metadata leaves the column alone; payload is still replaced.
+    db.bulk_update_annotation_items(task_uuid, [{"uuid": with_meta, "payload": {"text": "a2"}}])
+    item = db.get_annotation_item(with_meta)
+    assert item["payload"] == {"text": "a2"} and item["metadata"] == meta
+    # [] clears it.
+    db.bulk_update_annotation_items(
+        task_uuid, [{"uuid": with_meta, "payload": {"text": "a3"}, "metadata": []}]
+    )
+    item = db.get_annotation_item(with_meta)
+    assert item["payload"] == {"text": "a3"} and item["metadata"] == []
+    # A new list replaces it.
+    new_meta = [{"key": "k", "value": "v"}]
+    db.bulk_update_annotation_items(
+        task_uuid, [{"uuid": with_meta, "payload": {"text": "a4"}, "metadata": new_meta}]
+    )
+    item = db.get_annotation_item(with_meta)
+    assert item["payload"] == {"text": "a4"} and item["metadata"] == new_meta
+
+    # Labelling-job snapshot keeps the value the item had at job creation.
+    ann = db.create_annotator(name=_u("meta-ann"), user_id=user["uuid"], org_uuid=user["org_uuid"])
+    job_uuid = db.create_annotation_job(
+        task_id=task_uuid, annotator_id=ann, item_uuids=[with_meta, without],
+        public_token=_u("meta-tok"),
+    )
+    db.bulk_update_annotation_items(
+        task_uuid, [{"uuid": with_meta, "payload": {"text": "a5"}, "metadata": meta}]
+    )
+    job_items = {i["uuid"]: i for i in db.get_job_items(job_uuid)}
+    assert job_items[with_meta]["metadata"] == new_meta
+    assert job_items[with_meta]["payload"] == {"text": "a4"}
+    assert job_items[without]["metadata"] == []
+
+    # Evaluator-run snapshot round-trips it the same way.
+    eval_job_uuid = db.create_job(
+        job_type="annotation-eval", user_id=user["uuid"], org_uuid=user["org_uuid"],
+        details={"task_id": task_uuid},
+    )
+    db.snapshot_eval_job_items(
+        eval_job_uuid,
+        [{"uuid": with_meta, "payload": {"text": "s"}, "metadata": meta},
+         {"uuid": without, "payload": {"text": "t"}}],
+    )
+    snap = {i["uuid"]: i["metadata"] for i in db.get_eval_job_items(eval_job_uuid)}
+    assert snap == {with_meta: meta, without: []}
+

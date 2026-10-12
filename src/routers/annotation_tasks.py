@@ -105,20 +105,55 @@ _TASK_TYPE_DESCRIPTION = (
     "- `conversation`: judge a full conversation"
 )
 
-# Per-type item payload shape, rendered on the `payload` field of AnnotationItemPayload.
-# `name` is required and unique within the task for every type; the rest depends on the
-# task `type` (see AnnotationTaskCreate.type). `evaluator_variables` maps an evaluator ID
-# to that evaluator's `{{variable}}` values for the item (used by `llm` and `llm-general`).
-_ITEM_PAYLOAD_DESCRIPTION = (
-    "The item's payload. `name` is required and unique within the task for every type. "
-    "The other fields depend on the task `type`:\n\n"
-    "- `stt`: `name`, `reference_transcript`, `predicted_transcript`\n"
-    "- `llm`: `name`, `chat_history` (list of `{role, content}` turns ending at the user turn), "
-    "`agent_response` (the reply to judge), optional `evaluator_variables`\n"
-    "- `llm-general`: `name`, `input`, `output`, optional `evaluator_variables`\n"
-    "- `conversation`: `name`, `transcript` (list of `{role, content}` turns), optional `evaluator_variables`\n\n"
-    "`evaluator_variables` maps an evaluator ID to that evaluator's `{{variable}}` values for this item"
+# (required, optional) payload fields for each task type. `name` and
+# `description` are accepted by every type.
+_ITEM_FIELDS_BY_TASK_TYPE = {
+    "stt": ({"reference_transcript", "predicted_transcript"}, set()),
+    "tts": ({"text", "audio_path"}, set()),
+    "llm": (
+        {"chat_history", "agent_response"},
+        {"tool_calls", "expected_tool_calls", "actual_tool_calls", "evaluator_variables"},
+    ),
+    "llm-general": (
+        {"input", "output"},
+        {"tool_calls", "expected_tool_calls", "actual_tool_calls", "evaluator_variables"},
+    ),
+    "conversation": ({"transcript"}, {"evaluator_variables"}),
+}
+
+
+def _field_list(keys) -> str:
+    return ", ".join(f"`{k}`" for k in sorted(keys))
+
+
+_ITEM_PAYLOAD_FIELDS = (
+    "`name` is unique within the task for every type, "
+    "and `description` is accepted by every type. The other fields depend on the task `type`:\n\n"
+    + "\n".join(
+        f"- `{t}`: {_field_list(req)}" + (f", optional {_field_list(opt)}" if opt else "")
+        for t, (req, opt) in _ITEM_FIELDS_BY_TASK_TYPE.items()
+    )
 )
+_ITEM_PAYLOAD_DESCRIPTION = "The item's payload. " + _ITEM_PAYLOAD_FIELDS
+
+
+def _check_item_payloads(task_type: str, payloads: List[Dict[str, Any]]) -> None:
+    required, optional = _ITEM_FIELDS_BY_TASK_TYPE[task_type]
+    allowed = required | optional | {"name", "description"}
+    missing_on = [p["name"] for p in payloads if not required <= p.keys()]
+    extra_on = [p["name"] for p in payloads if p.keys() - allowed]
+    extra_keys = set().union(*(p.keys() - allowed for p in payloads))
+    if missing_on:
+        raise HTTPException(
+            status_code=400,
+            detail=f"{task_type} items need {_field_list(required)}. Missing on: {', '.join(missing_on)}",
+        )
+    if extra_on:
+        raise HTTPException(
+            status_code=400,
+            detail=f"{task_type} items do not take {_field_list(extra_keys)}. Found on: {', '.join(extra_on)}",
+        )
+
 
 # Representative payloads, one per task type, surfaced as request examples in the docs.
 _ITEM_PAYLOAD_EXAMPLES = [
@@ -126,6 +161,11 @@ _ITEM_PAYLOAD_EXAMPLES = [
         "name": "clip-001",
         "reference_transcript": "the quick brown fox",
         "predicted_transcript": "the quick brown fax",
+    },
+    {
+        "name": "clip-001",
+        "text": "the quick brown fox",
+        "audio_path": "tts/media/f47ac10b-58cc-4372-a567-0e02b2c3d479.wav",
     },
     {
         "name": "case-001",
@@ -275,6 +315,12 @@ class EvaluatorRunResponse(BaseModel):
 from auth_utils import get_current_org, get_org_jwt_or_api_key, OrgContext
 from org_scope import ensure_owned_evaluator
 from routers.org_limits import enforce_max_rows_per_eval
+from routers.traces import (
+    MAX_METADATA_ENTRIES,
+    TraceMetadataEntry,
+    TraceToolCall,
+    TraceTurn,
+)
 from pagination import (
     OptionalPaginationParams,
     PaginatedResponse,
@@ -790,10 +836,72 @@ def set_task_evaluators(
 
 
 
+class ChatTurn(TraceTurn):
+    """One message in a conversation, in OpenAI chat format"""
+
+
+class ToolCall(TraceToolCall):
+    """One call to a tool"""
+
+    accept_any_arguments: Optional[bool] = Field(
+        None,
+        description="When `true`, only the tool name had to match and `arguments` was ignored. Carried over from a tool-call test's expected calls",
+    )
+
+
+class ItemMetadataEntry(TraceMetadataEntry):
+    """One key-value pair stored with an item and shown beside it on the labelling form"""
+
+
+class ItemPayload(BaseModel):
+    """What an annotation item holds. Which fields apply depends on the task type"""
+
+    model_config = ConfigDict(extra="forbid")
+
+    name: str = Field(min_length=1, description="Name of the item, unique within the task. For every task type")
+    description: Optional[str] = Field(None, description="A description of the item. For every task type")
+    reference_transcript: Optional[str] = Field(None, description="The correct transcript. For `stt` tasks")
+    predicted_transcript: Optional[str] = Field(None, description="The transcript to judge. For `stt` tasks")
+    text: Optional[str] = Field(None, description="The text that was spoken. For `tts` tasks")
+    audio_path: Optional[str] = Field(
+        None,
+        description="Storage key or `s3://` URI of the audio clip. For `tts` tasks",
+    )
+    chat_history: Optional[List[ChatTurn]] = Field(
+        None, description="The conversation up to the reply being judged, ending at the user turn. For `llm` tasks"
+    )
+    agent_response: Optional[str] = Field(
+        None, description="The reply to judge. An empty string when the reply was a tool call. For `llm` tasks"
+    )
+    input: Optional[str] = Field(None, description="The standalone input the agent was given. For `llm-general` tasks")
+    output: Optional[str] = Field(None, description="The output to judge. For `llm-general` tasks")
+    transcript: Optional[List[ChatTurn]] = Field(None, description="The full conversation to judge. For `conversation` tasks")
+    tool_calls: Optional[List[ToolCall]] = Field(
+        None, description="Tool calls the agent made in place of a text reply. With no text reply, sending this marks the item as a tool call for a person to judge. For `llm` and `llm-general` tasks"
+    )
+    expected_tool_calls: Optional[List[ToolCall]] = Field(
+        None,
+        description="Tool calls the agent should have made. Sending this marks the item as a tool call for a person to judge. For `llm` and `llm-general` tasks",
+    )
+    actual_tool_calls: Optional[List[ToolCall]] = Field(
+        None,
+        description="Tool calls the agent made. Sending this marks the item as a tool call for a person to judge. For `llm` and `llm-general` tasks",
+    )
+    evaluator_variables: Optional[Dict[str, Dict[str, Any]]] = Field(
+        None,
+        description="Values for each evaluator's `{{variable}}` placeholders, keyed by evaluator ID. For `llm`, `llm-general` and `conversation` tasks",
+    )
+
+
 class AnnotationItemPayload(BaseModel):
-    payload: Any = Field(
+    payload: ItemPayload = Field(
         description=_ITEM_PAYLOAD_DESCRIPTION,
         examples=_ITEM_PAYLOAD_EXAMPLES,
+    )
+    metadata: Optional[List[ItemMetadataEntry]] = Field(
+        None,
+        max_length=MAX_METADATA_ENTRIES,
+        description="Key-value pairs stored with the item and shown beside it on the labelling form. Omit if you have none",
     )
     annotations: Optional[Dict[str, Any]] = Field(
         None,
@@ -899,7 +1007,7 @@ def check_annotated_items(
 
 
 def _resolve_evaluator_results(
-    task_uuid: str, items: List["AnnotationItemPayload"]
+    task_uuid: str, items: List["AnnotationItemPayload"], payloads: List[Dict[str, Any]]
 ) -> List[Dict[str, Any]]:
     """Validate every item's `evaluator_results` and resolve each score to the
     evaluator version it was produced against.
@@ -964,7 +1072,7 @@ def _resolve_evaluator_results(
             # `required_evaluator_ids_for_item` enforces: a tool-call row is
             # answered by the tool-call evaluator alone, every other row by
             # everything except it.
-            row_is_tool_call = is_tool_call_row({"payload": it.payload})
+            row_is_tool_call = is_tool_call_row({"payload": payloads[idx]})
             evaluator_is_tool_call = (
                 evaluator.get("evaluator_type") == TOOL_CALL_EVALUATOR_TYPE
             )
@@ -1071,7 +1179,8 @@ def _store_evaluator_results(
     ctx: OrgContext,
     resolved_results: List[Dict[str, Any]],
     item_uuid_by_index: Dict[int, str],
-    items: List["AnnotationItemPayload"],
+    payloads: List[Dict[str, Any]],
+    metadatas: List[Optional[List[Dict[str, str]]]],
 ) -> Dict[str, Any]:
     """Store resolved scores as one evaluator-run job that is already finished.
 
@@ -1117,7 +1226,7 @@ def _store_evaluator_results(
     snapshot_eval_job_items(
         eval_job_uuid,
         [
-            {"uuid": item_uuid_by_index[i], "payload": items[i].payload}
+            {"uuid": item_uuid_by_index[i], "payload": payloads[i], "metadata": metadatas[i]}
             for i in scored_indexes
         ],
     )
@@ -1154,20 +1263,10 @@ def bulk_create_items(
     if not payload.items:
         raise HTTPException(status_code=400, detail="items must be non-empty")
 
-    missing = [
-        i
-        for i, it in enumerate(payload.items)
-        if not (isinstance(it.payload, dict) and isinstance(it.payload.get("name"), str) and it.payload["name"])
-    ]
-    if missing:
-        raise HTTPException(
-            status_code=400,
-            detail=(
-                f"`payload.name` is required for {task['type']} task items. "
-                f"Missing on items at index(es): {missing}"
-            ),
-        )
-    names_in_batch = [it.payload["name"] for it in payload.items]
+    payloads = [it.payload.model_dump(exclude_none=True) for it in payload.items]
+    metadatas = [it.model_dump()["metadata"] for it in payload.items]
+    _check_item_payloads(task["type"], payloads)
+    names_in_batch = [p["name"] for p in payloads]
     if len(names_in_batch) != len(set(names_in_batch)):
         seen: set = set()
         dupes = sorted({n for n in names_in_batch if n in seen or seen.add(n)})  # type: ignore[func-returns-value]
@@ -1190,16 +1289,16 @@ def bulk_create_items(
     # matched_existing: request index → UUID of the pre-existing item with
     # the same payload.name.
     matched_existing: Dict[int, str] = {
-        i: existing_name_to_uuid[it.payload["name"]]
-        for i, it in enumerate(payload.items)
-        if it.payload["name"] in existing_name_to_uuid
+        i: existing_name_to_uuid[p["name"]]
+        for i, p in enumerate(payloads)
+        if p["name"] in existing_name_to_uuid
     }
 
     # An existing item keeps its stored payload and ignores the one sent here,
     # so a score would end up describing text the item does not hold. Refuse
     # instead, which also keeps every scored item newly created.
     scored_conflicts = sorted(
-        payload.items[i].payload["name"]
+        payloads[i]["name"]
         for i in matched_existing
         if payload.items[i].evaluator_results is not None
     )
@@ -1231,9 +1330,7 @@ def bulk_create_items(
     # When annotations are present, existing items are folded into the new
     # job instead (see below).
     if matched_existing and not items_with_annotations:
-        conflicts = sorted(
-            payload.items[i].payload["name"] for i in matched_existing
-        )
+        conflicts = sorted(payloads[i]["name"] for i in matched_existing)
         raise HTTPException(
             status_code=409,
             detail={
@@ -1249,7 +1346,7 @@ def bulk_create_items(
     # unconditionally on an active link, so skip when it is already there:
     # later batches must not duplicate the link or move its display position.
     # A workspace that deleted its copy simply gets no link.
-    if any(is_tool_call_row({"payload": it.payload}) for it in payload.items):
+    if any(is_tool_call_row({"payload": p}) for p in payloads):
         tool_call_evaluator = get_tool_call_evaluator_for_org(ctx.org_uuid)
         if tool_call_evaluator and tool_call_evaluator["uuid"] not in {
             e["uuid"] for e in get_evaluators_for_annotation_task(task_uuid)
@@ -1318,14 +1415,14 @@ def bulk_create_items(
 
     # Resolve before any write so a bad score creates nothing, the same way a
     # name conflict does.
-    resolved_results = _resolve_evaluator_results(task_uuid, payload.items)
+    resolved_results = _resolve_evaluator_results(task_uuid, payload.items, payloads)
 
     # Create only the items that don't already exist by name.
     new_uuids = create_annotation_items(
         task_uuid,
         [
-            {"payload": it.payload}
-            for i, it in enumerate(payload.items)
+            {"payload": payloads[i], "metadata": metadatas[i]}
+            for i in range(len(payloads))
             if i not in matched_existing
         ],
     )
@@ -1429,11 +1526,11 @@ def bulk_create_items(
         items_fully_annotated = all(
             it.annotations
             and required_evaluator_ids_for_item(
-                {"payload": it.payload},
+                {"payload": payloads[i]},
                 required_evaluator_ids,
                 tool_call_evaluator_ids,
             ).issubset(set(it.annotations.keys()))
-            for it in payload.items
+            for i, it in enumerate(payload.items)
         )
         if any_annotation_written and items_fully_annotated:
             update_annotation_job_status(
@@ -1454,7 +1551,7 @@ def bulk_create_items(
             "count": len(all_item_uuids),
             "annotation_job_id": job_uuid,
             **_store_evaluator_results(
-                task_uuid, ctx, resolved_results, item_uuid_by_index, payload.items
+                task_uuid, ctx, resolved_results, item_uuid_by_index, payloads, metadatas
             ),
         }
 
@@ -1462,7 +1559,7 @@ def bulk_create_items(
         "item_ids": new_uuids,
         "count": len(new_uuids),
         **_store_evaluator_results(
-            task_uuid, ctx, resolved_results, item_uuid_by_index, payload.items
+            task_uuid, ctx, resolved_results, item_uuid_by_index, payloads, metadatas
         ),
     }
 
@@ -1474,8 +1571,14 @@ class ItemUpdatePayload(BaseModel):
         description="ID of the item to update",
         examples=[_EXAMPLE_ID],
     )
-    payload: Any = Field(
-        description="The item's new payload. `payload['name']` is still required and must be unique within the task"
+    payload: ItemPayload = Field(
+        description="The item's new payload. It replaces the stored one. " + _ITEM_PAYLOAD_FIELDS,
+        examples=_ITEM_PAYLOAD_EXAMPLES,
+    )
+    metadata: Optional[List[ItemMetadataEntry]] = Field(
+        None,
+        max_length=MAX_METADATA_ENTRIES,
+        description="Key-value pairs stored with the item and shown beside it on the labelling form. Omit to leave the stored pairs as they are. Send an empty list to clear them",
     )
 
 
@@ -1499,70 +1602,53 @@ def bulk_update_items(
     if not payload.updates:
         raise HTTPException(status_code=400, detail="updates must be non-empty")
 
-    # A replacement payload must keep a non-empty `name`, same as create — an
-    # update replaces the whole payload, so a missing name would leave the item
-    # nameless and break the task-wide uniqueness invariant.
-    missing = [
-        i
-        for i, u in enumerate(payload.updates)
-        if not (
-            isinstance(u.payload, dict)
-            and isinstance(u.payload.get("name"), str)
-            and u.payload["name"]
-        )
-    ]
-    if missing:
+    payloads = [u.payload.model_dump(exclude_none=True) for u in payload.updates]
+    _check_item_payloads(task["type"], payloads)
+    incoming_names = [(u.uuid, p["name"]) for u, p in zip(payload.updates, payloads)]
+    names_in_batch = [n for _, n in incoming_names]
+    if len(names_in_batch) != len(set(names_in_batch)):
+        seen: set = set()
+        dupes = sorted({n for n in names_in_batch if n in seen or seen.add(n)})  # type: ignore[func-returns-value]
         raise HTTPException(
-            status_code=400,
-            detail=(
-                f"`payload.name` is required for {task['type']} task items. "
-                f"Missing on updates at index(es): {missing}"
-            ),
+            status_code=409,
+            detail={
+                "code": "ITEM_NAME_DUPLICATE_IN_REQUEST",
+                "message": f"Duplicate `payload.name` value(s) within request: {dupes}",
+                "conflicting_names": dupes,
+            },
         )
-
-    incoming_names = [
-        (u.uuid, u.payload["name"])
-        for u in payload.updates
-        if isinstance(u.payload, dict) and isinstance(u.payload.get("name"), str) and u.payload["name"]
+    updating_uuids = {item_uuid for item_uuid, _ in incoming_names}
+    existing_items = get_annotation_items_for_task(task_uuid)
+    names_set = set(names_in_batch)
+    conflicts = [
+        n
+        for it in existing_items
+        if it["uuid"] not in updating_uuids
+        and isinstance(it.get("payload"), dict)
+        for n in [it["payload"].get("name")]
+        if n in names_set
     ]
-    if incoming_names:
-        names_in_batch = [n for _, n in incoming_names]
-        if len(names_in_batch) != len(set(names_in_batch)):
-            seen: set = set()
-            dupes = sorted({n for n in names_in_batch if n in seen or seen.add(n)})  # type: ignore[func-returns-value]
-            raise HTTPException(
-                status_code=409,
-                detail={
-                    "code": "ITEM_NAME_DUPLICATE_IN_REQUEST",
-                    "message": f"Duplicate `payload.name` value(s) within request: {dupes}",
-                    "conflicting_names": dupes,
-                },
-            )
-        updating_uuids = {item_uuid for item_uuid, _ in incoming_names}
-        existing_items = get_annotation_items_for_task(task_uuid)
-        names_set = set(names_in_batch)
-        conflicts = [
-            n
-            for it in existing_items
-            if it["uuid"] not in updating_uuids
-            and isinstance(it.get("payload"), dict)
-            for n in [it["payload"].get("name")]
-            if n in names_set
-        ]
-        if conflicts:
-            deduped = sorted(set(conflicts))
-            raise HTTPException(
-                status_code=409,
-                detail={
-                    "code": "ITEM_NAME_CONFLICT",
-                    "message": f"`payload.name` already exists in this task: {deduped}",
-                    "conflicting_names": deduped,
-                },
-            )
-
+    if conflicts:
+        deduped = sorted(set(conflicts))
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code": "ITEM_NAME_CONFLICT",
+                "message": f"`payload.name` already exists in this task: {deduped}",
+                "conflicting_names": deduped,
+            },
+        )
     try:
         updated_count = bulk_update_annotation_items(
-            task_uuid, [u.dict() for u in payload.updates]
+            task_uuid,
+            [
+                {
+                    "uuid": u.uuid,
+                    "payload": p,
+                    "metadata": u.model_dump()["metadata"],
+                }
+                for u, p in zip(payload.updates, payloads)
+            ],
         )
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
@@ -3300,6 +3386,7 @@ def task_summary(
                     {
                         "item_id": item["uuid"],
                         "payload": item.get("payload"),
+                        "metadata": item["metadata"],
                         # Reference into the top-level `evaluators[]` block
                         # — name/description/output_type and the version's
                         # rubric (output_config, scale_min/max, is_live)

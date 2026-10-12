@@ -9,7 +9,7 @@ from unittest.mock import patch
 import pytest
 from fastapi.testclient import TestClient
 
-from conftest import NONEXISTENT_UUID, NONEXISTENT_UUID_2
+from conftest import NONEXISTENT_UUID, llm_item_payload, NONEXISTENT_UUID_2
 
 
 @pytest.fixture(scope="module")
@@ -246,38 +246,6 @@ def test_tts_task_type_evaluator_run_launches(client, monkeypatch):
     assert body["status"] in ("in_progress", "queued")
 
 
-def test_tts_evaluator_run_requires_text_and_audio_path(client):
-    """TTS evaluator runs 400 when items lack `text` or `audio_path`."""
-    auth = _signup(client)
-    h = auth["headers"]
-    tts_ev = _tts_evaluator(client, h)
-    task_uuid = client.post(
-        "/annotation-tasks",
-        json={
-            "name": f"tts-{uuid.uuid4().hex[:6]}",
-            "type": "tts",
-            "evaluator_ids": [tts_ev["uuid"]],
-        },
-        headers=h,
-    ).json()["uuid"]
-    item_ids = client.post(
-        f"/annotation-tasks/{task_uuid}/items",
-        json={"items": [{"payload": {"name": "clip-1"}}]},
-        headers=h,
-    ).json()["item_ids"]
-
-    run = client.post(
-        f"/annotation-tasks/{task_uuid}/evaluator-runs",
-        json={
-            "evaluators": [{"evaluator_id": tts_ev["uuid"]}],
-            "item_ids": item_ids,
-        },
-        headers=h,
-    )
-    assert run.status_code == 400
-    assert "text" in run.json()["detail"] and "audio_path" in run.json()["detail"]
-
-
 def test_tts_item_audio_path_signed_on_reads(client):
     """TTS items store `audio_path` as an S3 key; every read path signs it into a
     presigned URL so the clip plays — including the unauthenticated public
@@ -298,7 +266,13 @@ def test_tts_item_audio_path_signed_on_reads(client):
         f"/annotation-tasks/{task_uuid}/items",
         json={
             "items": [
-                {"payload": {"name": "clip", "audio_path": "s3://test-bucket/tts/media/abc.wav"}}
+                {
+                    "payload": {
+                        "name": "clip",
+                        "text": "Hello",
+                        "audio_path": "s3://test-bucket/tts/media/abc.wav",
+                    }
+                }
             ]
         },
         headers=h,
@@ -482,21 +456,29 @@ def test_annotation_items_crud(client):
     )
     assert empty.status_code == 400
 
-    # missing payload.name
+    # empty payload: the typed model rejects it before the handler runs
     bad = client.post(
         f"/annotation-tasks/{task_uuid}/items",
         json={"items": [{"payload": {}}]},
         headers=h,
     )
-    assert bad.status_code == 400
+    assert bad.status_code == 422
+
+    # blank name
+    blank = client.post(
+        f"/annotation-tasks/{task_uuid}/items",
+        json={"items": [{"payload": llm_item_payload("")}]},
+        headers=h,
+    )
+    assert blank.status_code == 422
 
     # duplicate names in request
     dup = client.post(
         f"/annotation-tasks/{task_uuid}/items",
         json={
             "items": [
-                {"payload": {"name": "x"}},
-                {"payload": {"name": "x"}},
+                {"payload": llm_item_payload("x")},
+                {"payload": llm_item_payload("x")},
             ]
         },
         headers=h,
@@ -506,7 +488,7 @@ def test_annotation_items_crud(client):
     # create items
     created = client.post(
         f"/annotation-tasks/{task_uuid}/items",
-        json={"items": [{"payload": {"name": "i1"}}, {"payload": {"name": "i2"}}]},
+        json={"items": [{"payload": llm_item_payload("i1")}, {"payload": llm_item_payload("i2")}]},
         headers=h,
     )
     assert created.status_code == 200
@@ -515,7 +497,7 @@ def test_annotation_items_crud(client):
     # conflict on duplicate name
     conflict = client.post(
         f"/annotation-tasks/{task_uuid}/items",
-        json={"items": [{"payload": {"name": "i1"}}]},
+        json={"items": [{"payload": llm_item_payload("i1")}]},
         headers=h,
     )
     assert conflict.status_code == 409
@@ -564,8 +546,8 @@ def test_annotation_items_crud(client):
         f"/annotation-tasks/{task_uuid}/items",
         json={
             "updates": [
-                {"uuid": item_ids[0], "payload": {"name": "dup"}},
-                {"uuid": item_ids[1], "payload": {"name": "dup"}},
+                {"uuid": item_ids[0], "payload": llm_item_payload("dup")},
+                {"uuid": item_ids[1], "payload": llm_item_payload("dup")},
             ]
         },
         headers=h,
@@ -575,20 +557,21 @@ def test_annotation_items_crud(client):
     # Bulk-update
     bu = client.put(
         f"/annotation-tasks/{task_uuid}/items",
-        json={"updates": [{"uuid": item_ids[0], "payload": {"name": "renamed"}}]},
+        json={"updates": [{"uuid": item_ids[0], "payload": llm_item_payload("renamed")}]},
         headers=h,
     )
     assert bu.status_code == 200
 
     # Bulk-update — a replacement payload without a name is rejected (an update
     # replaces the whole payload, so a missing name would leave the item nameless).
+    noname = llm_item_payload("x")
+    del noname["name"]
     bu_noname = client.put(
         f"/annotation-tasks/{task_uuid}/items",
-        json={"updates": [{"uuid": item_ids[1], "payload": {"notes": "no name here"}}]},
+        json={"updates": [{"uuid": item_ids[1], "payload": noname}]},
         headers=h,
     )
-    assert bu_noname.status_code == 400
-    assert "payload.name" in bu_noname.json()["detail"]
+    assert bu_noname.status_code == 422
 
     # Bulk-delete — empty
     bd_empty = client.request(
@@ -688,9 +671,9 @@ def test_bulk_delete_items_select_all(client):
         f"/annotation-tasks/{task_uuid}/items",
         json={
             "items": [
-                {"payload": {"name": "alpha-1"}},
-                {"payload": {"name": "alpha-2"}},
-                {"payload": {"name": "beta-1"}},
+                {"payload": llm_item_payload("alpha-1")},
+                {"payload": llm_item_payload("alpha-2")},
+                {"payload": llm_item_payload("beta-1")},
             ]
         },
         headers=h,
@@ -752,7 +735,7 @@ def test_annotation_jobs_crud(client):
     # Need items
     items = client.post(
         f"/annotation-tasks/{task_uuid}/items",
-        json={"items": [{"payload": {"name": "i1"}}, {"payload": {"name": "i2"}}]},
+        json={"items": [{"payload": llm_item_payload("i1")}, {"payload": llm_item_payload("i2")}]},
         headers=h,
     ).json()["item_ids"]
 
@@ -899,7 +882,7 @@ def test_create_jobs_public_surface(client):
     ).json()["uuid"]
     items = client.post(
         f"/annotation-tasks/{task_uuid}/items",
-        json={"items": [{"payload": {"name": "i1"}}]},
+        json={"items": [{"payload": llm_item_payload("i1")}]},
         headers=h,
     ).json()["item_ids"]
     annotator = client.post(
@@ -951,9 +934,9 @@ def test_create_jobs_select_all(client):
         f"/annotation-tasks/{task_uuid}/items",
         json={
             "items": [
-                {"payload": {"name": "alpha-1"}},
-                {"payload": {"name": "alpha-2"}},
-                {"payload": {"name": "beta-1"}},
+                {"payload": llm_item_payload("alpha-1")},
+                {"payload": llm_item_payload("alpha-2")},
+                {"payload": llm_item_payload("beta-1")},
             ]
         },
         headers=h,
@@ -1037,7 +1020,7 @@ def test_create_jobs_evaluator_subset(client):
     ).json()["uuid"]
     items = client.post(
         f"/annotation-tasks/{task_uuid}/items",
-        json={"items": [{"payload": {"name": "i1"}}]},
+        json={"items": [{"payload": llm_item_payload("i1")}]},
         headers=h,
     ).json()["item_ids"]
     annotator = client.post(
@@ -1194,7 +1177,7 @@ def test_delete_annotation_job(client):
     ).json()["uuid"]
     items = client.post(
         f"/annotation-tasks/{task_uuid}/items",
-        json={"items": [{"payload": {"name": "i1"}}]},
+        json={"items": [{"payload": llm_item_payload("i1")}]},
         headers=h,
     ).json()["item_ids"]
 
@@ -1308,7 +1291,7 @@ def test_bulk_delete_annotation_jobs(client):
     ).json()["uuid"]
     items = client.post(
         f"/annotation-tasks/{task_uuid}/items",
-        json={"items": [{"payload": {"name": "i1"}}]},
+        json={"items": [{"payload": llm_item_payload("i1")}]},
         headers=h,
     ).json()["item_ids"]
 
@@ -1362,7 +1345,7 @@ def test_bulk_delete_annotation_jobs(client):
     ).json()["uuid"]
     other_items = client.post(
         f"/annotation-tasks/{other_task}/items",
-        json={"items": [{"payload": {"name": "x"}}]},
+        json={"items": [{"payload": llm_item_payload("x")}]},
         headers=h,
     ).json()["item_ids"]
     other_ann = client.post(
@@ -1640,7 +1623,7 @@ def test_annotation_task_agreement_and_summary(client):
     # Add an item then filter by it
     item_uuid = client.post(
         f"/annotation-tasks/{task_uuid}/items",
-        json={"items": [{"payload": {"name": "i1"}}]},
+        json={"items": [{"payload": llm_item_payload("i1")}]},
         headers=h,
     ).json()["item_ids"][0]
     summary_filtered = client.get(
@@ -1721,11 +1704,11 @@ def test_summary_surfaces_item_comments(client):
         f"/annotation-tasks/{task_uuid}/items",
         json={
             "items": [
-                {"payload": {"name": "i1"}},
-                {"payload": {"name": "i2"}},
-                {"payload": {"name": "i3-empty-string"}},
-                {"payload": {"name": "i4-non-string"}},
-                {"payload": {"name": "i5-non-dict"}},
+                {"payload": llm_item_payload("i1")},
+                {"payload": llm_item_payload("i2")},
+                {"payload": llm_item_payload("i3-empty-string")},
+                {"payload": llm_item_payload("i4-non-string")},
+                {"payload": llm_item_payload("i5-non-dict")},
             ]
         },
         headers=h,
@@ -1879,8 +1862,8 @@ def test_summary_drops_comments_from_soft_deleted_annotator(client):
         f"/annotation-tasks/{task_uuid}/items",
         json={
             "items": [
-                {"payload": {"name": "shared"}},
-                {"payload": {"name": "doomed-only"}},
+                {"payload": llm_item_payload("shared")},
+                {"payload": llm_item_payload("doomed-only")},
             ]
         },
         headers=h,
@@ -1971,8 +1954,8 @@ def test_summary_comment_cleared_in_newer_job_wipes_older(client):
         f"/annotation-tasks/{task_uuid}/items",
         json={
             "items": [
-                {"payload": {"name": "solo"}},
-                {"payload": {"name": "pair"}},
+                {"payload": llm_item_payload("solo")},
+                {"payload": llm_item_payload("pair")},
             ]
         },
         headers=h,
@@ -2077,7 +2060,7 @@ def test_evaluator_runs_endpoints(client, monkeypatch):
     # Add items
     client.post(
         f"/annotation-tasks/{task_uuid}/items",
-        json={"items": [{"payload": {"name": "i1"}}]},
+        json={"items": [{"payload": llm_item_payload("i1")}]},
         headers=h,
     )
 
@@ -2145,10 +2128,8 @@ def test_evaluator_runs_endpoints(client, monkeypatch):
     )
 
 
-def test_annotation_eval_llm_general_payload_validation(client):
-    """An `llm-general` task is eval-supported; a run with the wrong payload
-    shape 400s synchronously via `_build_llm_general_dataset` (confirming the
-    dispatch wiring) instead of failing async."""
+def test_annotation_eval_llm_general_run_launches(client):
+    """An `llm-general` task reaches the `calibrate general` dataset builder and queues a run."""
     auth = _signup(client)
     h = auth["headers"]
     llm_ev = _llm_evaluator(client, h)
@@ -2161,24 +2142,17 @@ def test_annotation_eval_llm_general_payload_validation(client):
         },
         headers=h,
     ).json()["uuid"]
-    assert task_uuid
-
-    # Item lacks `input`/`output` → dataset build fails → 400 (not a 5xx async).
-    client.post(
-        f"/annotation-tasks/{task_uuid}/items",
-        json={"items": [{"payload": {"name": "i1"}}]},
-        headers=h,
-    )
-    resp = client.post(
-        f"/annotation-tasks/{task_uuid}/evaluator-runs",
-        json={
-            "evaluators": [{"evaluator_id": llm_ev["uuid"]}],
-            "select_all": True,
-        },
-        headers=h,
-    )
-    assert resp.status_code == 400
-    assert "input" in resp.json()["detail"]
+    assert _add_items(
+        client, h, task_uuid, [{"payload": {"name": "i1", "input": "sum this", "output": "a sum"}}]
+    ).status_code == 200
+    with patch("routers.annotation_tasks.can_start_job", return_value=False):
+        resp = client.post(
+            f"/annotation-tasks/{task_uuid}/evaluator-runs",
+            json={"evaluators": [{"evaluator_id": llm_ev["uuid"]}], "select_all": True},
+            headers=h,
+        )
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["status"] == "queued"
 
 
 def test_annotation_eval_supported_task_types_match_creatable():
@@ -2210,7 +2184,7 @@ def test_annotation_task_summary_pagination(client):
     # Seed 5 items
     item_ids = client.post(
         f"/annotation-tasks/{task_uuid}/items",
-        json={"items": [{"payload": {"name": f"item-{i}"}} for i in range(5)]},
+        json={"items": [{"payload": llm_item_payload(f"item-{i}")} for i in range(5)]},
         headers=h,
     ).json()["item_ids"]
     assert len(item_ids) == 5
@@ -2285,10 +2259,10 @@ def test_annotation_task_summary_search(client):
     ).json()["uuid"]
 
     payloads = [
-        {"name": "alpha-one"},
-        {"name": "alpha-two"},
-        {"name": "beta-one"},
-        {"name": "Gamma-Three"},
+        llm_item_payload("alpha-one"),
+        llm_item_payload("alpha-two"),
+        llm_item_payload("beta-one"),
+        llm_item_payload("Gamma-Three"),
     ]
     client.post(
         f"/annotation-tasks/{task_uuid}/items",
@@ -2366,7 +2340,7 @@ def test_annotation_task_summary_sort(client):
     names = ["first", "second", "third"]
     item_ids = client.post(
         f"/annotation-tasks/{task_uuid}/items",
-        json={"items": [{"payload": {"name": n}} for n in names]},
+        json={"items": [{"payload": llm_item_payload(n)} for n in names]},
         headers=h,
     ).json()["item_ids"]
 
@@ -2390,7 +2364,7 @@ def test_annotation_task_summary_sort(client):
     time.sleep(1.05)
     client.put(
         f"/annotation-tasks/{task_uuid}/items",
-        json={"updates": [{"uuid": item_ids[1], "payload": {"name": "second-edited"}}]},
+        json={"updates": [{"uuid": item_ids[1], "payload": llm_item_payload("second-edited")}]},
         headers=h,
     )
 
@@ -2462,7 +2436,7 @@ def test_summary_item_comments_scoped_to_page(client):
     # page includes vs excludes.
     item_ids = client.post(
         f"/annotation-tasks/{task_uuid}/items",
-        json={"items": [{"payload": {"name": f"i{i}"}} for i in range(4)]},
+        json={"items": [{"payload": llm_item_payload(f"i{i}")} for i in range(4)]},
         headers=h,
     ).json()["item_ids"]
 
@@ -2538,10 +2512,10 @@ def _seed_summary_with_agreement(client, h, user_uuid, n_extra_agree=0):
         f"/annotation-tasks/{task_uuid}/items",
         json={
             "items": [
-                {"payload": {"name": "agree"}},
-                {"payload": {"name": "disagree"}},
+                {"payload": llm_item_payload("agree"), "metadata": [{"key": "source", "value": "prod"}]},
+                {"payload": llm_item_payload("disagree")},
                 *[
-                    {"payload": {"name": f"agree-extra-{i}"}}
+                    {"payload": llm_item_payload(f"agree-extra-{i}")}
                     for i in range(n_extra_agree)
                 ],
             ]
@@ -2643,7 +2617,9 @@ def test_summary_default_unchanged_by_new_params(client):
     assert rows_by_item[item_agree]["evaluator_agreement"] == 1.0
     assert rows_by_item[item_disagree]["evaluator_agreement"] == 0.0
     # Heavy fields are present (the contrast with compact below).
-    assert rows_by_item[item_agree]["payload"] == {"name": "agree"}
+    assert rows_by_item[item_agree]["payload"]["name"] == "agree"
+    assert rows_by_item[item_agree]["metadata"] == [{"key": "source", "value": "prod"}]
+    assert rows_by_item[item_disagree]["metadata"] == []
     assert rows_by_item[item_disagree]["evaluator_reasoning"] == "eval disagree"
     ann_cell = next(iter(rows_by_item[item_agree]["annotations"].values()))
     assert ann_cell["reasoning"] == "human take"
@@ -3001,7 +2977,7 @@ def test_labelling_job_completes_with_optional_evaluator_left_blank(client):
     )
     items = client.post(
         f"/annotation-tasks/{task_uuid}/items",
-        json={"items": [{"payload": {"name": "i1"}}, {"payload": {"name": "i2"}}]},
+        json={"items": [{"payload": llm_item_payload("i1")}, {"payload": llm_item_payload("i2")}]},
         headers=h,
     ).json()["item_ids"]
     annotator = client.post(
@@ -3083,7 +3059,7 @@ def test_all_optional_job_still_needs_every_item_touched(client):
     )
     items = client.post(
         f"/annotation-tasks/{task_uuid}/items",
-        json={"items": [{"payload": {"name": "i1"}}, {"payload": {"name": "i2"}}]},
+        json={"items": [{"payload": llm_item_payload("i1")}, {"payload": llm_item_payload("i2")}]},
         headers=h,
     ).json()["item_ids"]
     annotator = client.post(
@@ -3132,7 +3108,7 @@ def test_job_form_settings_round_trip(client):
     ).json()["uuid"]
     items = client.post(
         f"/annotation-tasks/{task_uuid}/items",
-        json={"items": [{"payload": {"name": "i1"}}]},
+        json={"items": [{"payload": llm_item_payload("i1")}]},
         headers=h,
     ).json()["item_ids"]
     annotator = client.post(
@@ -3182,11 +3158,12 @@ def test_job_form_settings_round_trip(client):
 
 
 def _tool_call_payload(name):
-    return {
-        "name": name,
-        "chat_history": [{"role": "user", "content": "book it"}],
-        "tool_calls": [{"tool": "book", "arguments": {"id": 1}}],
-    }
+    return llm_item_payload(
+        name,
+        chat_history=[{"role": "user", "content": "book it"}],
+        agent_response="",
+        tool_calls=[{"tool": "book", "arguments": {"id": 1}}],
+    )
 
 
 def _task_evaluators(client, h, task_uuid):
@@ -3255,8 +3232,8 @@ def test_normal_rows_do_not_link_tool_call_evaluator(client):
         f"/annotation-tasks/{task_uuid}/items",
         json={
             "items": [
-                {"payload": {"name": "n1", "agent_response": "hi"}},
-                {"payload": {"name": "n2"}},
+                {"payload": llm_item_payload("n1")},
+                {"payload": llm_item_payload("n2")},
             ]
         },
         headers=h,
@@ -3296,7 +3273,7 @@ def test_initial_annotations_complete_mixed_rows(client):
         json={
             "items": [
                 {
-                    "payload": {"name": "n1", "agent_response": "hi"},
+                    "payload": llm_item_payload("n1"),
                     "annotations": {llm_ev["uuid"]: {"value": True}},
                 },
                 {
@@ -3327,7 +3304,7 @@ def test_initial_annotations_incomplete_without_tool_call_answer(client):
         json={
             "items": [
                 {
-                    "payload": {"name": "n1", "agent_response": "hi"},
+                    "payload": llm_item_payload("n1"),
                     "annotations": {llm_ev["uuid"]: {"value": True}},
                 },
                 {
@@ -3342,3 +3319,225 @@ def test_initial_annotations_incomplete_without_tool_call_answer(client):
     assert resp.status_code == 200
     job_uuid = resp.json()["annotation_job_id"]
     assert _job_status(client, h, task_uuid, job_uuid) == "in_progress"
+
+
+# ---------------------------------------------------------------------------
+# Typed item payloads
+# ---------------------------------------------------------------------------
+
+
+def _task_of_type(client, h, task_type):
+    return client.post(
+        "/annotation-tasks",
+        json={"name": f"{task_type}-{uuid.uuid4().hex[:6]}", "type": task_type},
+        headers=h,
+    ).json()["uuid"]
+
+
+def _add_items(client, h, task_uuid, items):
+    return client.post(
+        f"/annotation-tasks/{task_uuid}/items", json={"items": items}, headers=h
+    )
+
+
+def test_item_payload_rejects_unknown_keys(client):
+    h = _signup(client)["headers"]
+    task_uuid = _task_of_type(client, h, "llm")
+    resp = _add_items(client, h, task_uuid, [{"payload": llm_item_payload("i1", notes="x")}])
+    assert resp.status_code == 422
+
+
+def test_item_payload_missing_required_field_names_every_bad_item(client):
+    h = _signup(client)["headers"]
+    task_uuid = _task_of_type(client, h, "llm")
+    resp = _add_items(
+        client,
+        h,
+        task_uuid,
+        [
+            {"payload": {"name": "no-reply-1", "chat_history": []}},
+            {"payload": llm_item_payload("fine")},
+            {"payload": {"name": "no-reply-2", "chat_history": []}},
+        ],
+    )
+    assert resp.status_code == 400
+    detail = resp.json()["detail"]
+    assert "need" in detail
+    assert "no-reply-1" in detail and "no-reply-2" in detail
+    assert "fine" not in detail
+    assert client.get(f"/annotation-tasks/{task_uuid}/items", headers=h).json() == []
+
+    item_id = _add_items(client, h, task_uuid, [{"payload": llm_item_payload("fine")}]).json()["item_ids"][0]
+    bad_update = client.put(
+        f"/annotation-tasks/{task_uuid}/items",
+        json={"updates": [{"uuid": item_id, "payload": {"name": "fine", "chat_history": []}}]},
+        headers=h,
+    )
+    assert bad_update.status_code == 400
+    assert "need" in bad_update.json()["detail"] and "fine" in bad_update.json()["detail"]
+
+
+def test_item_payload_rejects_field_of_another_type(client):
+    h = _signup(client)["headers"]
+    task_uuid = _task_of_type(client, h, "llm")
+    resp = _add_items(
+        client,
+        h,
+        task_uuid,
+        [{"payload": llm_item_payload("wrong-shape", transcript=[{"role": "user", "content": "hi"}])}],
+    )
+    assert resp.status_code == 400
+    assert "do not take" in resp.json()["detail"]
+    assert "`transcript`" in resp.json()["detail"]
+    assert "wrong-shape" in resp.json()["detail"]
+
+
+def test_item_payload_tool_call_entries_are_closed_and_chat_turns_are_open(client):
+    h = _signup(client)["headers"]
+    task_uuid = _task_of_type(client, h, "llm")
+    resp = _add_items(
+        client,
+        h,
+        task_uuid,
+        [{"payload": llm_item_payload("bad-call", tool_calls=[{"tool": "lookup", "foo": 1}])}],
+    )
+    assert resp.status_code == 422
+
+    history = [
+        {"role": "user", "content": "find it"},
+        {"role": "assistant", "content": None, "tool_calls": [{"id": "c1", "type": "function"}]},
+        {"role": "tool", "content": "found", "tool_call_id": "c1"},
+    ]
+    resp = _add_items(client, h, task_uuid, [{"payload": llm_item_payload("open-turns", chat_history=history)}])
+    assert resp.status_code == 200, resp.text
+    item_id = resp.json()["item_ids"][0]
+    stored = client.get(f"/annotation-tasks/{task_uuid}/items/{item_id}", headers=h).json()["payload"]
+    assert stored["chat_history"][1]["tool_calls"] == [{"id": "c1", "type": "function"}]
+    assert stored["chat_history"][2]["tool_call_id"] == "c1"
+
+
+_FULL_PAYLOAD_BY_TYPE = {
+    "stt": {
+        "name": "clip",
+        "description": "d",
+        "reference_transcript": "hello world",
+        "predicted_transcript": "hello word",
+    },
+    "tts": {"name": "clip", "description": "d", "text": "hello", "audio_path": "tts/media/abc.wav"},
+    "llm": {
+        "name": "turn",
+        "description": "d",
+        "chat_history": [{"role": "user", "content": "hi"}],
+        "agent_response": "hello",
+        "tool_calls": [{"tool": "lookup", "arguments": {"id": 1}, "output": {"ok": True}}],
+        "evaluator_variables": {NONEXISTENT_UUID: {"criteria": "be nice"}},
+    },
+    "llm-general": {
+        "name": "pair",
+        "description": "d",
+        "input": "summarise this",
+        "output": "a summary",
+        "evaluator_variables": {NONEXISTENT_UUID: {"criteria": "be brief"}},
+        "expected_tool_calls": [{"tool": "search", "accept_any_arguments": True}],
+        "actual_tool_calls": [{"tool": "search", "arguments": {"q": "x"}}],
+    },
+    "conversation": {
+        "name": "chat",
+        "description": "d",
+        "transcript": [
+            {"role": "user", "content": "hi"},
+            {"role": "assistant", "content": "hello"},
+        ],
+        "evaluator_variables": {},
+    },
+}
+
+
+@pytest.mark.parametrize("task_type", sorted(_FULL_PAYLOAD_BY_TYPE))
+def test_item_payload_round_trips_per_task_type(client, task_type):
+    h = _signup(client)["headers"]
+    task_uuid = _task_of_type(client, h, task_type)
+    sent = _FULL_PAYLOAD_BY_TYPE[task_type]
+    resp = _add_items(client, h, task_uuid, [{"payload": sent}])
+    assert resp.status_code == 200, resp.text
+    item_id = resp.json()["item_ids"][0]
+
+    got = client.get(f"/annotation-tasks/{task_uuid}/items/{item_id}", headers=h).json()["payload"]
+    if task_type == "tts":
+        # The clip's key is signed into a playback URL on every read.
+        assert got.pop("audio_path")
+        sent = {k: v for k, v in sent.items() if k != "audio_path"}
+    assert got == sent
+
+
+def test_item_metadata_round_trips_on_add_and_update(client):
+    h = _signup(client)["headers"]
+    task_uuid = _task_of_type(client, h, "llm")
+    meta = [{"key": "source", "value": "prod"}, {"key": "lang", "value": "hi"}]
+    created = _add_items(
+        client,
+        h,
+        task_uuid,
+        [
+            {"payload": llm_item_payload("with-meta"), "metadata": meta},
+            {"payload": llm_item_payload("without-meta")},
+        ],
+    )
+    assert created.status_code == 200, created.text
+    with_meta, without_meta = created.json()["item_ids"]
+
+    def _read(item_id):
+        listed = {i["uuid"]: i for i in client.get(f"/annotation-tasks/{task_uuid}/items", headers=h).json()}
+        one = client.get(f"/annotation-tasks/{task_uuid}/items/{item_id}", headers=h).json()
+        task_items = {
+            i["uuid"]: i for i in client.get(f"/annotation-tasks/{task_uuid}", headers=h).json()["items"]
+        }
+        views = (listed[item_id]["metadata"], one["metadata"], task_items[item_id]["metadata"])
+        assert views[0] == views[1] == views[2]
+        return views[0]
+
+    assert _read(with_meta) == meta
+    assert _read(without_meta) == []
+
+    def _update(item_id, **extra):
+        resp = client.put(
+            f"/annotation-tasks/{task_uuid}/items",
+            json={"updates": [{"uuid": item_id, "payload": llm_item_payload("with-meta"), **extra}]},
+            headers=h,
+        )
+        assert resp.status_code == 200, resp.text
+
+    _update(with_meta)
+    assert _read(with_meta) == meta
+
+    replaced = [{"key": "source", "value": "staging"}]
+    _update(with_meta, metadata=replaced)
+    assert _read(with_meta) == replaced
+
+    _update(with_meta, metadata=[])
+    assert _read(with_meta) == []
+
+
+def test_item_metadata_rejects_too_many_entries_and_extra_keys(client):
+    h = _signup(client)["headers"]
+    task_uuid = _task_of_type(client, h, "llm")
+
+    too_many = [{"key": f"k{i}", "value": "v"} for i in range(101)]
+    resp = _add_items(client, h, task_uuid, [{"payload": llm_item_payload("i1"), "metadata": too_many}])
+    assert resp.status_code == 422
+
+    resp = _add_items(
+        client,
+        h,
+        task_uuid,
+        [{"payload": llm_item_payload("i1"), "metadata": [{"key": "k", "value": "v", "note": "x"}]}],
+    )
+    assert resp.status_code == 422
+
+    item_id = _add_items(client, h, task_uuid, [{"payload": llm_item_payload("i1")}]).json()["item_ids"][0]
+    resp = client.put(
+        f"/annotation-tasks/{task_uuid}/items",
+        json={"updates": [{"uuid": item_id, "payload": llm_item_payload("i1"), "metadata": too_many}]},
+        headers=h,
+    )
+    assert resp.status_code == 422
