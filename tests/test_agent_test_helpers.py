@@ -1047,3 +1047,146 @@ def test_uuid_maps_drop_a_name_two_tests_share():
     assert _test_uuid_by_name(
         [{"name": "a", "uuid": u1}, {"name": "a", "uuid": u1}]
     ) == {"a": u1}
+
+
+# ---------------------------------------------------------------------------
+# Benchmark entries — a bare model name, or an object carrying its own ID
+# ---------------------------------------------------------------------------
+
+
+def test_benchmark_variants_from_bare_model_names():
+    """A bare name is its own ID, so a run that names models keys its results
+    exactly as it did before IDs existed."""
+    from routers.agent_tests import _benchmark_variants
+
+    assert _benchmark_variants(["openai/gpt-5", "anthropic/claude-sonnet-4"]) == [
+        {"id": "openai/gpt-5", "model": "openai/gpt-5", "label": None, "extra": None},
+        {
+            "id": "anthropic/claude-sonnet-4",
+            "model": "anthropic/claude-sonnet-4",
+            "label": None,
+            "extra": None,
+        },
+    ]
+
+
+def test_benchmark_variants_from_dicts():
+    from routers.agent_tests import _benchmark_variants
+
+    assert _benchmark_variants(
+        [
+            {
+                "id": "gpt-5-high",
+                "model": "openai/gpt-5",
+                "label": "gpt-5 (high thinking)",
+                "extra": {"reasoning": {"effort": "high"}},
+            },
+            {"id": "claude", "model": "anthropic/claude-sonnet-4"},
+        ]
+    ) == [
+        {
+            "id": "gpt-5-high",
+            "model": "openai/gpt-5",
+            "label": "gpt-5 (high thinking)",
+            "extra": {"reasoning": {"effort": "high"}},
+        },
+        {
+            "id": "claude",
+            "model": "anthropic/claude-sonnet-4",
+            "label": None,
+            "extra": None,
+        },
+    ]
+
+
+def test_benchmark_variants_is_idempotent():
+    """Job recovery and the queue starter hand `details["models"]` straight back
+    in, so normalizing an already-normalized list must change nothing."""
+    from routers.agent_tests import _benchmark_variants
+
+    once = _benchmark_variants(
+        [
+            "openai/gpt-5",
+            {
+                "id": "claude-high",
+                "model": "anthropic/claude-sonnet-4",
+                "label": "Claude (high)",
+                "extra": {"thinking": {"budget_tokens": 8000}},
+            },
+        ]
+    )
+    assert _benchmark_variants(once) == once
+
+
+def test_benchmark_variants_accepts_a_benchmark_model():
+    from routers.agent_tests import BenchmarkModel, _benchmark_variants
+
+    assert _benchmark_variants(
+        [
+            BenchmarkModel(
+                id="gpt-5-high",
+                model="openai/gpt-5",
+                label="gpt-5 (high thinking)",
+                extra={"reasoning": {"effort": "high"}},
+            ),
+            BenchmarkModel(id="claude", model="anthropic/claude-sonnet-4"),
+        ]
+    ) == [
+        {
+            "id": "gpt-5-high",
+            "model": "openai/gpt-5",
+            "label": "gpt-5 (high thinking)",
+            "extra": {"reasoning": {"effort": "high"}},
+        },
+        {
+            "id": "claude",
+            "model": "anthropic/claude-sonnet-4",
+            "label": None,
+            "extra": None,
+        },
+    ]
+
+
+def test_variant_identity_puts_the_id_on_model_and_the_real_model_on_model_name():
+    from routers.agent_tests import _variant_identity
+
+    assert _variant_identity(
+        {
+            "id": "gpt-5-high",
+            "model": "openai/gpt-5",
+            "label": "gpt-5 (high thinking)",
+            "extra": {"reasoning": {"effort": "high"}},
+        }
+    ) == {
+        "model": "gpt-5-high",
+        "model_name": "openai/gpt-5",
+        "label": "gpt-5 (high thinking)",
+        "extra": {"reasoning": {"effort": "high"}},
+    }
+
+
+def test_benchmark_queued_model_results_stamps_the_identity_of_both_forms():
+    from routers.agent_tests import _benchmark_queued_model_results
+
+    out = _benchmark_queued_model_results(
+        [
+            "openai/gpt-5",
+            {
+                "id": "claude-high",
+                "model": "anthropic/claude-sonnet-4",
+                "label": "Claude (high)",
+                "extra": {"thinking": {"budget_tokens": 8000}},
+            },
+        ],
+        ["t1"],
+    )
+    assert len(out) == 2
+    assert out[0]["model"] == "openai/gpt-5"
+    assert out[0]["model_name"] == "openai/gpt-5"
+    assert out[0]["label"] is None
+    assert out[0]["extra"] is None
+    assert out[1]["model"] == "claude-high"
+    assert out[1]["model_name"] == "anthropic/claude-sonnet-4"
+    assert out[1]["label"] == "Claude (high)"
+    assert out[1]["extra"] == {"thinking": {"budget_tokens": 8000}}
+    assert out[1]["success"] is None

@@ -694,6 +694,11 @@ class AgentVerifyRequest(BaseModel):
         description="Extra request fields for this probe, overriding the agent's stored `default_inputs` per key",
         examples=[{"condition_area": "cardiology"}],
     )
+    extra: Optional[Dict[str, Any]] = Field(
+        None,
+        description="Request settings for this probe, sent in the request body beside `model`",
+        examples=[{"reasoning": {"effort": "high"}}],
+    )
 
 
 class VerifyConnectionRequest(AgentVerifyRequest):
@@ -749,7 +754,7 @@ async def verify_agent_connection_presave(
         model=request.model,
         messages=request.messages,
         default_inputs=request.default_inputs,
-        inputs=request.inputs,
+        inputs={**(request.extra or {}), **(request.inputs or {})} or None,
         interaction_type=request.interaction_type,
     )
     return VerifyConnectionResponse(**result)
@@ -799,7 +804,7 @@ async def verify_agent_connection(
         model=verify_model,
         messages=request.messages,
         default_inputs=agent_config.get("default_inputs"),
-        inputs=request.inputs,
+        inputs={**(request.extra or {}), **(request.inputs or {})} or None,
         interaction_type=(
             agent.get("interaction_type") or DEFAULT_AGENT_INTERACTION_TYPE
         ),

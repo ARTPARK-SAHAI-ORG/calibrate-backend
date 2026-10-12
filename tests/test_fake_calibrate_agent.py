@@ -7,13 +7,19 @@ seam or the fake's per-subcommand output contract.
 """
 
 import asyncio
+import csv
+import json
 import os
+import subprocess
+import sys
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pytest
 
 import db
+
+_FAKE_CLI = Path(__file__).resolve().parents[1] / "src" / "testing" / "fake_calibrate_agent.py"
 
 
 def _make_agent_with_response_test():
@@ -638,3 +644,234 @@ def test_collect_intermediate_results_reports_partial_and_missing_providers(tmp_
     # Never started, so nothing to keep.
     assert results["sarvam"].success is False
     assert results["sarvam"].results is None
+
+
+# --- model_variants: the settings-file replacement for `-m` ------------------
+_EVALUATORS = [{"id": "ev-1", "name": "Safety", "type": "binary"}]
+_TEST_CASES = [
+    {
+        "id": "tc-1",
+        "name": "t1",
+        "evaluation": {"type": "response", "criteria": [{"name": "Safety"}]},
+    }
+]
+
+
+def _run_fake_llm(tmp_path, config, *extra_args):
+    config_path = tmp_path / "config.json"
+    config_path.write_text(json.dumps(config))
+    output_dir = tmp_path / "out"
+    completed = subprocess.run(
+        [sys.executable, str(_FAKE_CLI), "llm", "-c", str(config_path), "-o", str(output_dir)]
+        + list(extra_args),
+        capture_output=True,
+        text=True,
+    )
+    return completed, output_dir
+
+
+def _variants_config(variants):
+    return {
+        "agent_url": "https://agent.example/chat",
+        "model_variants": variants,
+        "test_cases": _TEST_CASES,
+        "evaluators": _EVALUATORS,
+    }
+
+
+def _read_leaderboard(output_dir):
+    with open(output_dir / "leaderboard" / "llm_leaderboard.csv", newline="", encoding="utf-8") as f:
+        return list(csv.DictReader(f))
+
+
+_TWO_VARIANTS_ONE_MODEL = [
+    {
+        "id": "v0",
+        "model": "openai/gpt-5",
+        "label": "gpt-5 (high thinking)",
+        "extra": {"reasoning": {"effort": "high"}},
+    },
+    {"id": "v1", "model": "openai/gpt-5"},
+]
+
+
+def test_model_variants_write_one_folder_per_id(tmp_path):
+    """Two variants of the SAME model must not share a folder — the id, not the
+    model name, is the folder."""
+    completed, output_dir = _run_fake_llm(tmp_path, _variants_config(_TWO_VARIANTS_ONE_MODEL))
+
+    assert completed.returncode == 0, completed.stderr
+    assert sorted(p.name for p in output_dir.iterdir()) == ["config.json", "leaderboard", "v0", "v1"]
+    for variant_id in ("v0", "v1"):
+        for name in ("results.json", "metrics.json", "variant.json"):
+            assert (output_dir / variant_id / name).is_file(), f"{variant_id}/{name}"
+        results = json.loads((output_dir / variant_id / "results.json").read_text())
+        assert [r["test_case_id"] for r in results] == ["tc-1"]
+
+
+def test_variant_json_holds_the_variant_fields(tmp_path):
+    _, output_dir = _run_fake_llm(tmp_path, _variants_config(_TWO_VARIANTS_ONE_MODEL))
+
+    assert json.loads((output_dir / "v0" / "variant.json").read_text()) == {
+        "id": "v0",
+        "model": "openai/gpt-5",
+        "label": "gpt-5 (high thinking)",
+        "extra": {"reasoning": {"effort": "high"}},
+    }
+    # No label given, so it falls back to the id.
+    assert json.loads((output_dir / "v1" / "variant.json").read_text()) == {
+        "id": "v1",
+        "model": "openai/gpt-5",
+        "label": "v1",
+    }
+
+
+def test_model_variants_leaderboard_is_keyed_by_id_with_a_label_column(tmp_path):
+    _, output_dir = _run_fake_llm(tmp_path, _variants_config(_TWO_VARIANTS_ONE_MODEL))
+
+    rows = _read_leaderboard(output_dir)
+    assert [(r["model"], r["label"]) for r in rows] == [
+        ("v0", "gpt-5 (high thinking)"),
+        ("v1", "v1"),
+    ]
+    assert all(r["test_pass_rate"] == "1.0" and r["Safety"] == "1.0" for r in rows)
+
+
+@pytest.mark.parametrize(
+    "variants",
+    [
+        pytest.param([{"id": "..", "model": "m"}], id="dot-dot"),
+        pytest.param([{"id": "a/b", "model": "m"}], id="slash"),
+        pytest.param([{"id": "a\\b", "model": "m"}], id="backslash"),
+        pytest.param([{"id": "leaderboard", "model": "m"}], id="leaderboard"),
+        pytest.param([{"id": "", "model": "m"}], id="empty"),
+        pytest.param([{"id": ".", "model": "m"}], id="dot"),
+        pytest.param([{"id": "V0", "model": "m"}, {"id": "v0", "model": "m"}], id="case-dupe"),
+        pytest.param([{"id": "v0", "model": "m", "extra": "high"}], id="extra-not-object"),
+    ],
+)
+def test_bad_model_variants_exit_non_zero(tmp_path, variants):
+    completed, output_dir = _run_fake_llm(tmp_path, _variants_config(variants))
+
+    assert completed.returncode != 0
+    assert "fake_calibrate_agent" in completed.stderr
+    assert not (output_dir / "leaderboard").exists()
+
+
+def test_model_variants_without_agent_url_exits_non_zero(tmp_path):
+    config = _variants_config(_TWO_VARIANTS_ONE_MODEL)
+    del config["agent_url"]
+
+    completed, _ = _run_fake_llm(tmp_path, config)
+
+    assert completed.returncode != 0
+    assert "agent_url" in completed.stderr
+
+
+def test_dash_m_path_is_unchanged_by_model_variants(tmp_path):
+    """The old form keeps its `_safe_model` folder names and its leaderboard
+    columns — no `label`, no id folders."""
+    config = {"test_cases": _TEST_CASES, "evaluators": _EVALUATORS}
+
+    completed, output_dir = _run_fake_llm(
+        tmp_path, config, "-m", "openai/gpt-4.1", "openai/gpt-4o-mini"
+    )
+
+    assert completed.returncode == 0, completed.stderr
+    assert sorted(p.name for p in output_dir.iterdir()) == [
+        "config.json",
+        "leaderboard",
+        "openai__gpt-4.1",
+        "openai__gpt-4o-mini",
+    ]
+    assert not (output_dir / "openai__gpt-4.1" / "variant.json").exists()
+    rows = _read_leaderboard(output_dir)
+    assert list(rows[0]) == ["model", "test_pass_rate", "Safety"]
+    assert [r["model"] for r in rows] == ["openai__gpt-4.1", "openai__gpt-4o-mini"]
+
+
+def test_run_benchmark_task_one_model_twice_end_to_end_with_fake_cli():
+    """The whole round trip against the real fake CLI: one model benchmarked
+    twice with different request settings comes back as two separate results."""
+    from routers.agent_tests import run_benchmark_task
+
+    agent, test, _ = _make_agent_with_response_test()
+    agent = dict(agent, config={"agent_url": "http://agent.test/chat"})
+    job_uuid = db.create_agent_test_job(
+        agent_id=agent["uuid"], job_type="llm-benchmark", status="in_progress"
+    )
+    variants = [
+        {
+            "id": "gpt-5#1",
+            "model": "openai/gpt-5",
+            "label": "gpt-5 (high thinking)",
+            "extra": {"reasoning": {"effort": "high"}},
+        },
+        {
+            "id": "gpt-5#2",
+            "model": "openai/gpt-5",
+            "label": "gpt-5 (low thinking)",
+            "extra": {"reasoning": {"effort": "low"}},
+        },
+    ]
+
+    with patch.dict(os.environ, {"FAKE_AI_PROVIDERS": "1"}), patch(
+        "routers.agent_tests.get_s3_client", return_value=MagicMock()
+    ), patch("routers.agent_tests.upload_directory_tree_to_s3"), patch(
+        "routers.agent_tests.upload_file_to_s3"
+    ), patch("routers.agent_tests.try_start_queued_agent_test_job"), patch(
+        "routers.agent_tests.time.sleep"
+    ):
+        run_benchmark_task(job_uuid, agent, [test], variants, "bucket")
+
+    job = db.get_agent_test_job(job_uuid)
+    assert job["status"] == "done", job.get("results")
+    rows = job["results"]["model_results"]
+    assert [r["model"] for r in rows] == ["gpt-5#1", "gpt-5#2"]
+    assert all(r["model_name"] == "openai/gpt-5" for r in rows)
+    assert [r["label"] for r in rows] == [
+        "gpt-5 (high thinking)",
+        "gpt-5 (low thinking)",
+    ]
+    # Two runs of one model must not share results.
+    for r in rows:
+        assert r["success"] is True
+        assert r["passed"] == r["total_tests"] == 1
+    assert [r["model"] for r in job["results"]["leaderboard_summary"]] == [
+        "gpt-5#1",
+        "gpt-5#2",
+    ]
+
+
+def test_run_benchmark_task_named_models_end_to_end_with_fake_cli():
+    """A request that just names models still works over a connection agent.
+    Its IDs hold a slash, which calibrate refuses as a folder name, so the
+    folder it is told to use must not be built from them."""
+    from routers.agent_tests import run_benchmark_task
+
+    agent, test, _ = _make_agent_with_response_test()
+    agent = dict(agent, config={"agent_url": "http://agent.test/chat"})
+    job_uuid = db.create_agent_test_job(
+        agent_id=agent["uuid"], job_type="llm-benchmark", status="in_progress"
+    )
+    models = ["openai/gpt-4.1", "openai/gpt-4o-mini"]
+
+    with patch.dict(os.environ, {"FAKE_AI_PROVIDERS": "1"}), patch(
+        "routers.agent_tests.get_s3_client", return_value=MagicMock()
+    ), patch("routers.agent_tests.upload_directory_tree_to_s3"), patch(
+        "routers.agent_tests.upload_file_to_s3"
+    ), patch("routers.agent_tests.try_start_queued_agent_test_job"), patch(
+        "routers.agent_tests.time.sleep"
+    ):
+        run_benchmark_task(job_uuid, agent, [test], models, "bucket")
+
+    job = db.get_agent_test_job(job_uuid)
+    assert job["status"] == "done", job.get("results")
+    by_model = {m["model"]: m for m in job["results"]["model_results"]}
+    assert set(by_model) == set(models)
+    for m in models:
+        assert by_model[m]["success"] is True
+        assert by_model[m]["model_name"] == m
+    assert sorted(r["model"] for r in job["results"]["leaderboard_summary"]) == sorted(
+        models
+    )

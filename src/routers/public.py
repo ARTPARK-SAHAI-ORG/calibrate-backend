@@ -773,7 +773,7 @@ def get_public_benchmark_case(
     ),
     model: Optional[str] = Query(
         None,
-        description="Which model's answer to read",
+        description="The model whose result to read, as `model` on the run's results. **Required**, as a benchmark runs every test once for each model",
         examples=["openai/gpt-4.1"],
     ),
 ):
