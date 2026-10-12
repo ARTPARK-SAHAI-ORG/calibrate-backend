@@ -240,6 +240,52 @@ def test_build_llm_dataset_happy():
     assert out[0]["test_case"]["evaluation"]["criteria"][0]["arguments"] == {"x": 1}
 
 
+def test_build_llm_dataset_judge_sees_only_default_text():
+    evs = [{"uuid": "e1", "name": "judge"}]
+    out = runner._build_llm_dataset(
+        [
+            {
+                "uuid": "i1",
+                "payload": {
+                    "chat_history": [
+                        {
+                            "role": "user",
+                            "content": "hi",
+                            "label": "en",
+                            "versions": {"en": "hi", "hi": "namaste"},
+                        }
+                    ],
+                    "agent_response": {
+                        "content": "hi back",
+                        "label": "en",
+                        "versions": {"en": "hi back", "hi": "namaste wapas"},
+                    },
+                },
+            }
+        ],
+        evs,
+    )
+    assert out[0]["test_case"]["history"] == [{"role": "user", "content": "hi"}]
+    assert out[0]["output"]["response"] == "hi back"
+
+
+def test_build_llm_dataset_object_response_without_content():
+    evs = [{"uuid": "e1", "name": "judge"}]
+    with pytest.raises(runner.DatasetBuildError):
+        runner._build_llm_dataset(
+            [
+                {
+                    "uuid": "i1",
+                    "payload": {
+                        "chat_history": [],
+                        "agent_response": {"label": "en", "versions": {"en": "x"}},
+                    },
+                }
+            ],
+            evs,
+        )
+
+
 def test_is_tool_call_row():
     # Tool call, no text output → True (both field conventions).
     assert runner.is_tool_call_row(
@@ -417,6 +463,41 @@ def test_build_llm_general_dataset_happy():
     ]
 
 
+def test_build_llm_general_dataset_judge_sees_only_default_text():
+    evs = [{"uuid": "e1", "name": "judge"}]
+    out = runner._build_llm_general_dataset(
+        [
+            {
+                "uuid": "i1",
+                "payload": {
+                    "input": {
+                        "content": "summarize this",
+                        "label": "en",
+                        "versions": {"en": "summarize this", "hi": "saar"},
+                    },
+                    "output": {"content": "a summary", "label": "en"},
+                },
+            }
+        ],
+        evs,
+    )
+    assert out == [{"id": "i1", "input": "summarize this", "output": "a summary"}]
+
+
+def test_build_llm_general_dataset_object_without_content():
+    evs = [{"uuid": "e1", "name": "judge"}]
+    with pytest.raises(runner.DatasetBuildError):
+        runner._build_llm_general_dataset(
+            [{"uuid": "i1", "payload": {"input": {"label": "en"}, "output": "o"}}],
+            evs,
+        )
+    with pytest.raises(runner.DatasetBuildError):
+        runner._build_llm_general_dataset(
+            [{"uuid": "i1", "payload": {"input": "i", "output": {"label": "en"}}}],
+            evs,
+        )
+
+
 def test_build_llm_general_dataset_with_arguments():
     """Per-item `evaluator_variables` (same contract as the llm task type) are
     keyed by evaluator NAME in the per-row `arguments` map — each evaluator gets
@@ -547,6 +628,31 @@ def test_build_simulation_dataset():
         [{"uuid": "i1", "payload": {"transcript": [{"role": "user", "content": "x"}]}}]
     )
     assert out[0]["name"] == "i1"
+
+
+def test_build_simulation_dataset_judge_sees_only_default_text():
+    out = runner._build_simulation_dataset(
+        [
+            {
+                "uuid": "i1",
+                "payload": {
+                    "transcript": [
+                        {
+                            "role": "user",
+                            "content": "x",
+                            "label": "en",
+                            "versions": {"en": "x", "hi": "y"},
+                        },
+                        {"role": "assistant", "content": "z", "label": "en"},
+                    ]
+                },
+            }
+        ]
+    )
+    assert out[0]["conversation_history"] == [
+        {"role": "user", "content": "x"},
+        {"role": "assistant", "content": "z"},
+    ]
 
 
 def test_build_simulation_dataset_bad_payload():

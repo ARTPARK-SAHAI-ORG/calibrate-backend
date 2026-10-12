@@ -52,7 +52,9 @@ from utils import (
     get_s3_output_config,
     is_job_timed_out,
     is_tool_call_row,
+    judge_turn,
     kill_process_group,
+    message_text,
     normalize_stored_audio_path,
     register_job_starter,
     resolve_stored_audio_bucket_and_key,
@@ -350,6 +352,7 @@ def _build_llm_dataset(
     not exposed via this endpoint today):
       { "chat_history": [...], "agent_response": "...", "tool_calls"?: [...],
         "evaluator_variables"?: { "<evaluator_uuid>": { "<var>": <value>, ... } } }
+    `agent_response` may also be `{content, label?, versions?}`; the judge sees only `content`.
 
     `evaluator_variables` lets each item supply per-evaluator `{{variable}}`
     values for evaluators whose prompts contain placeholders. Values are
@@ -367,7 +370,7 @@ def _build_llm_dataset(
             continue
         payload = _payload_dict(it)
         history = payload.get("chat_history")
-        response = payload.get("agent_response")
+        response = message_text(payload.get("agent_response"))
         if not isinstance(history, list) or response is None:
             raise DatasetBuildError(
                 f"Item {it['uuid']}: LLM items need `chat_history` (list) and "
@@ -383,7 +386,7 @@ def _build_llm_dataset(
             {
                 "test_case": {
                     "id": it["uuid"],
-                    "history": history,
+                    "history": [judge_turn(t) for t in history],
                     "evaluation": {
                         "type": "response",
                         "criteria": criteria_refs,
@@ -453,6 +456,7 @@ def _build_llm_general_dataset(
     Annotation convention for payload:
       { "input": "...", "output": "...",
         "evaluator_variables"?: { "<evaluator_uuid>": { "<var>": <value>, ... } } }
+    `input`/`output` may also be `{content, label?, versions?}`; the judge sees only `content`.
 
     `evaluator_variables` uses the SAME payload contract as the `llm` task type,
     and is resolved per-evaluator the SAME way (`_criteria_refs_for_item`).
@@ -470,8 +474,8 @@ def _build_llm_general_dataset(
         if is_tool_call_row(it):
             continue
         payload = _payload_dict(it)
-        input_text = payload.get("input")
-        output_text = payload.get("output")
+        input_text = message_text(payload.get("input"))
+        output_text = message_text(payload.get("output"))
         if input_text is None or output_text is None:
             raise DatasetBuildError(
                 f"Item {it['uuid']}: llm-general items need `input` and "
@@ -600,7 +604,12 @@ def _build_simulation_dataset(items: List[Dict[str, Any]]) -> List[Dict[str, Any
                 f"Item {it['uuid']}: simulation items need a non-empty "
                 "`transcript` (list of {role, content}) in payload"
             )
-        out.append({"name": it["uuid"], "conversation_history": transcript})
+        out.append(
+            {
+                "name": it["uuid"],
+                "conversation_history": [judge_turn(t) for t in transcript],
+            }
+        )
     return out
 
 

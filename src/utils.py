@@ -985,6 +985,23 @@ def presign_annotation_items_audio(
     return items
 
 
+JUDGE_TURN_KEYS = ("role", "content", "tool_calls", "tool_call_id")
+
+
+def message_text(value: Any) -> Any:
+    """A reply field is a string, or `{content, label?, versions?}`; return its text."""
+    if isinstance(value, dict):
+        return value.get("content")
+    return value
+
+
+def judge_turn(turn: Any) -> Any:
+    """Drop `label`, `versions` and any other extra key so the judge sees only the default text."""
+    if not isinstance(turn, dict):
+        return turn
+    return {k: v for k, v in turn.items() if k in JUDGE_TURN_KEYS}
+
+
 def is_tool_call_row(item: Dict[str, Any]) -> bool:
     """True when an annotation item is judged on the tool call it made rather
     than on a text reply. Safe on any item — returns False for stt/tts/
@@ -1008,9 +1025,9 @@ def is_tool_call_row(item: Dict[str, Any]) -> bool:
         payload.get("actual_tool_calls"), list
     ):
         return True
-    text = payload.get("agent_response")
+    text = message_text(payload.get("agent_response"))
     if text is None:
-        text = payload.get("output")
+        text = message_text(payload.get("output"))
     calls = payload.get("tool_calls")
     return not text and isinstance(calls, list) and bool(calls)
 
