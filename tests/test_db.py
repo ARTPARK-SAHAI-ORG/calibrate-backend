@@ -2917,6 +2917,38 @@ def test_tool_call_backfills_are_idempotent():
     assert len(db.get_evaluator_versions(tmpl)) == 1
 
 
+def test_tool_call_description_backfill_rewrites_old_text_only():
+    _user, org_a = _fresh_org()
+    _user, org_b = _fresh_org()
+    fork_a = db.get_tool_call_evaluator_for_org(org_a)["uuid"]
+    fork_b = db.get_tool_call_evaluator_for_org(org_b)["uuid"]
+    with db.get_db_connection() as conn:
+        conn.execute(
+            "UPDATE evaluators SET description = ? WHERE uuid = ?",
+            (db._TOOL_CALL_EVALUATOR_OLD_DESCRIPTION, fork_a),
+        )
+        conn.execute(
+            "UPDATE evaluators SET description = 'my own words' WHERE uuid = ?",
+            (fork_b,),
+        )
+        conn.execute(
+            "DELETE FROM _schema_migrations WHERE name = ?",
+            (db.RENAME_TOOL_CALL_EVALUATOR_DESCRIPTION_MIGRATION,),
+        )
+        conn.commit()
+
+    db.init_db()
+
+    new_text = db._TOOL_CALL_SEED["description"]
+    assert new_text == "Whether the agent made the right tool call"
+    assert db.get_evaluator(fork_a)["description"] == new_text
+    assert db.get_evaluator(fork_b)["description"] == "my own words"
+    assert (
+        db.get_evaluator_by_slug(db.TOOL_CALL_EVALUATOR_SLUG)["description"]
+        == new_text
+    )
+
+
 def _rerun_tool_call_backfills():
     with db.get_db_connection() as conn:
         conn.execute(
