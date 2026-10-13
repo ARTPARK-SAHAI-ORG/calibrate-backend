@@ -1262,8 +1262,7 @@ def _build_calibrate_simulation_config(
     }
 
     if agent_config.get("agent_url"):
-        # Agent connection mode — agent owns its LLM; no system_prompt/tools/params
-        # Only supported for text simulations (caller must guard voice)
+        # External connection mode — the connected agent owns its own LLM/STT/TTS.
         config: Dict[str, Any] = {
             "agent_url": agent_config["agent_url"],
             "personas": persona_list,
@@ -1271,9 +1270,14 @@ def _build_calibrate_simulation_config(
             "evaluators": evaluators_payload,
             "settings": shared_settings,
         }
-        config["agent_headers"] = with_calibrate_eval_header(
-            agent_config.get("agent_headers")
-        )
+        connection_type = agent_config.get("connection_type", "http_chat")
+        config["connection_type"] = connection_type
+        # Pipecat's WebSocket transport cannot send handshake headers. HTTP chat
+        # connections retain their existing configurable request headers.
+        if connection_type == "http_chat":
+            config["agent_headers"] = with_calibrate_eval_header(
+                agent_config.get("agent_headers")
+            )
         return config
 
     # Calibrate agent mode
@@ -2459,13 +2463,19 @@ def run_simulation_endpoint(
     if not agent:
         raise HTTPException(status_code=404, detail="Agent not found")
 
-    # Guard: agent connection is not supported for voice simulations
+    # External connection mode supports the transport matching its run type.
     agent_config = agent.get("config") or {}
     if agent_config.get("agent_url"):
-        if request.type == "voice":
+        connection_type = agent_config.get("connection_type", "http_chat")
+        if request.type == "voice" and connection_type != "websocket_voice":
             raise HTTPException(
                 status_code=400,
-                detail="Voice simulations are not supported for agent connection mode. Use a Calibrate agent instead.",
+                detail="Voice simulations require a websocket_voice agent connection.",
+            )
+        if request.type == "text" and connection_type != "http_chat":
+            raise HTTPException(
+                status_code=400,
+                detail="Text simulations require an http_chat agent connection.",
             )
         if not agent_config.get("connection_verified"):
             raise HTTPException(

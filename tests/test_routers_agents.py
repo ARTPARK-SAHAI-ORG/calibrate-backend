@@ -202,6 +202,7 @@ def test_list_agents_returns_trimmed_summary(client):
         "created_at",
         "updated_at",
         "connection_verified",
+        "connection_type",
         "has_default_inputs",
     }
     assert item["name"] == name
@@ -972,7 +973,7 @@ def test_public_spec_preserves_create_agent_code_samples(app):
     import main
 
     op = main._build_public_openapi()["paths"]["/agents"]["post"]
-    assert len(op["x-codeSamples"]) == 2
+    assert len(op["x-codeSamples"]) == 3
 
 
 # ============ interaction_type ============
