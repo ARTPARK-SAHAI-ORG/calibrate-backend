@@ -3327,11 +3327,39 @@ def test_initial_annotations_incomplete_without_tool_call_answer(client):
 
 
 def _task_of_type(client, h, task_type):
+    evaluator_id = client.get("/evaluators", headers=h).json()["items"][0]["uuid"]
     return client.post(
         "/annotation-tasks",
-        json={"name": f"{task_type}-{uuid.uuid4().hex[:6]}", "type": task_type},
+        json={
+            "name": f"{task_type}-{uuid.uuid4().hex[:6]}",
+            "type": task_type,
+            "evaluator_ids": [evaluator_id],
+        },
         headers=h,
     ).json()["uuid"]
+
+
+def test_adding_items_needs_a_linked_evaluator(client):
+    h = _signup(client)["headers"]
+    task_uuid = client.post(
+        "/annotation-tasks",
+        json={"name": f"bare-{uuid.uuid4().hex[:6]}", "type": "llm-general"},
+        headers=h,
+    ).json()["uuid"]
+    item = {"payload": {"name": "one", "input": "hi", "output": "hello"}}
+
+    resp = _add_items(client, h, task_uuid, [item])
+    assert resp.status_code == 400
+    assert "evaluator" in resp.json()["detail"]
+    assert client.get(f"/annotation-tasks/{task_uuid}/items", headers=h).json() == []
+
+    evaluator_id = client.get("/evaluators", headers=h).json()["items"][0]["uuid"]
+    client.put(
+        f"/annotation-tasks/{task_uuid}/evaluators",
+        json={"evaluator_ids": [evaluator_id]},
+        headers=h,
+    )
+    assert _add_items(client, h, task_uuid, [item]).status_code == 200
 
 
 def _add_items(client, h, task_uuid, items):
