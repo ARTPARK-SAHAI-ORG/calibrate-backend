@@ -1,6 +1,6 @@
 from typing import Optional, List, Dict, Any, Union
 from fastapi import APIRouter, HTTPException, Depends, Path, Query
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 from typing import Literal
 
 import logging
@@ -863,8 +863,15 @@ def set_task_evaluators(
 _LABEL_DESCRIPTION = "Display name for the text in `content`, shown to annotators"
 _VERSIONS_DESCRIPTION = (
     "Other forms of the same text, such as a translation or a human rewrite, keyed by the name "
-    "annotators see for each. Shown to annotators only"
+    "annotators see for each. Shown to annotators only. Requires text in `content`"
 )
+
+
+def _require_text_with_versions(content: Optional[str], versions: Optional[Dict[str, str]]) -> None:
+    # Screens skip a text with nothing in `content`, versions included, so
+    # versions without a default text would never reach an annotator.
+    if versions and not (content or "").strip():
+        raise ValueError("`versions` needs text in `content` beside it")
 
 
 class ChatTurn(TraceTurn):
@@ -872,6 +879,11 @@ class ChatTurn(TraceTurn):
 
     label: Optional[str] = Field(None, description=_LABEL_DESCRIPTION)
     versions: Optional[Dict[str, str]] = Field(None, description=_VERSIONS_DESCRIPTION)
+
+    @model_validator(mode="after")
+    def _versions_need_text(self):
+        _require_text_with_versions(self.content, self.versions)
+        return self
 
 
 class TurnText(BaseModel):
@@ -882,6 +894,11 @@ class TurnText(BaseModel):
     content: str = Field(description="The text the LLM judge reads and annotators see by default")
     label: Optional[str] = Field(None, description=_LABEL_DESCRIPTION)
     versions: Optional[Dict[str, str]] = Field(None, description=_VERSIONS_DESCRIPTION)
+
+    @model_validator(mode="after")
+    def _versions_need_text(self):
+        _require_text_with_versions(self.content, self.versions)
+        return self
 
 
 class ToolCall(TraceToolCall):

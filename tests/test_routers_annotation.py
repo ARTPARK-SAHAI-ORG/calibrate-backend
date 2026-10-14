@@ -3616,3 +3616,47 @@ def test_item_payload_accepts_labelled_versions_and_stores_them_verbatim(client)
         "content": "in",
         "label": "Prompt",
     }
+
+
+def test_item_payload_refuses_versions_without_default_text(client):
+    h = _signup(client)["headers"]
+    task_uuid = _task_of_type(client, h, "llm")
+    reply = _add_items(
+        client,
+        h,
+        task_uuid,
+        [{"payload": llm_item_payload("r1", agent_response={"content": "  ", "versions": {"Nurse": "hi"}})}],
+    )
+    assert reply.status_code == 422
+    assert "needs text in `content`" in reply.text
+
+    turn = _add_items(
+        client,
+        h,
+        task_uuid,
+        [{"payload": llm_item_payload("t1", chat_history=[{"role": "user", "versions": {"Hindi": "namaste"}}])}],
+    )
+    assert turn.status_code == 422
+
+    general = _task_of_type(client, h, "llm-general")
+    resp = _add_items(
+        client,
+        h,
+        general,
+        [{"payload": {"name": "g1", "input": "in", "output": {"content": "", "versions": {"Hindi": "x"}}}}],
+    )
+    assert resp.status_code == 422
+
+    assert client.get(f"/annotation-tasks/{task_uuid}/items", headers=h).json() == []
+
+
+def test_item_payload_allows_empty_text_without_versions(client):
+    h = _signup(client)["headers"]
+    task_uuid = _task_of_type(client, h, "llm")
+    resp = _add_items(
+        client,
+        h,
+        task_uuid,
+        [{"payload": llm_item_payload("e1", agent_response={"content": "", "label": "AI draft"}, tool_calls=[{"tool": "lookup", "arguments": {}}])}],
+    )
+    assert resp.status_code == 200, resp.text
