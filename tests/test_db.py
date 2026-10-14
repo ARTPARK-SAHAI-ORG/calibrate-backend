@@ -3114,6 +3114,25 @@ def test_tool_call_item_condition_matches_python_rule():
         {"chat_history": [], "tool_calls": "search(x)"},
         {"chat_history": [], "actual_tool_calls": "search(x)"},
         {"chat_history": [], "output": "words", "actual_tool_calls": []},
+        {
+            "chat_history": [],
+            "agent_response": {"content": "words", "label": "en"},
+            "tool_calls": [{"tool": "search"}],
+        },
+        {
+            "chat_history": [],
+            "agent_response": {"content": "", "label": "en"},
+            "tool_calls": [{"tool": "search"}],
+        },
+        {
+            "chat_history": [],
+            "output": {"content": "words"},
+            "tool_calls": [{"tool": "search"}],
+        },
+        {"chat_history": [], "output": {"content": ""}, "tool_calls": [{"tool": "search"}]},
+        {"chat_history": [], "agent_response": {"label": "en"}, "tool_calls": [{"tool": "search"}]},
+        {"chat_history": [], "agent_response": {"content": ""}, "output": "words"},
+        {"chat_history": [], "agent_response": "", "tool_calls": [{"tool": "search"}]},
     ]
     item_uuids = db.create_annotation_items(
         task_uuid, [{"payload": p} for p in payloads]
@@ -3126,6 +3145,8 @@ def test_tool_call_item_condition_matches_python_rule():
     # `json_type` guard rules it out.
     with db.get_db_connection() as conn:
         cursor = conn.cursor()
+        cursor.execute("""SELECT json_extract('{"a":"hi"}', '$.a.content')""")
+        assert cursor.fetchone()[0] is None
         sql_result = {}
         for iu in item_uuids:
             cursor.execute(

@@ -48,6 +48,9 @@ from utils import (
     get_s3_output_config,
     is_local_object_storage,
     is_evaluator_metric_aggregate,
+    is_tool_call_row,
+    judge_turn,
+    message_text,
     list_object_keys,
     is_job_timed_out,
     kill_process_group,
@@ -1139,3 +1142,52 @@ def test_extract_uploaded_archive_stops_on_what_it_writes_not_what_it_reads(tmp_
         )
     written = sum(p.stat().st_size for p in tmp_path.rglob("*") if p.is_file())
     assert written <= 2 * 1024 * 1024
+
+
+def test_message_text_reads_object_content_and_passes_strings_through():
+    assert message_text("hi") == "hi"
+    assert message_text(None) is None
+    assert message_text({"content": "hi", "label": "en", "versions": {}}) == "hi"
+    assert message_text({"content": ""}) == ""
+    assert message_text({"label": "en"}) is None
+
+
+def test_judge_turn_keeps_judge_keys_and_drops_the_rest():
+    turn = {
+        "role": "assistant",
+        "content": "hi",
+        "tool_calls": [{"tool": "search"}],
+        "tool_call_id": "c1",
+        "label": "en",
+        "versions": {"hi": "hola"},
+    }
+    assert judge_turn(turn) == {
+        "role": "assistant",
+        "content": "hi",
+        "tool_calls": [{"tool": "search"}],
+        "tool_call_id": "c1",
+    }
+    assert judge_turn("plain") == "plain"
+    assert judge_turn(None) is None
+
+
+def test_is_tool_call_row_reads_object_form_replies():
+    calls = [{"tool": "search"}]
+    assert not is_tool_call_row(
+        {"payload": {"agent_response": {"content": "words"}, "tool_calls": calls}}
+    )
+    assert is_tool_call_row(
+        {"payload": {"agent_response": {"content": ""}, "tool_calls": calls}}
+    )
+    assert not is_tool_call_row(
+        {"payload": {"output": {"content": "words"}, "tool_calls": calls}}
+    )
+    assert is_tool_call_row(
+        {"payload": {"output": {"content": "", "label": "en"}, "tool_calls": calls}}
+    )
+    assert is_tool_call_row(
+        {"payload": {"agent_response": {"label": "en"}, "tool_calls": calls}}
+    )
+    assert not is_tool_call_row(
+        {"payload": {"agent_response": {"content": ""}, "output": "words"}}
+    )

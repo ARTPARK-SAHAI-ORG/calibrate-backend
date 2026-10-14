@@ -3317,6 +3317,8 @@ _TOOL_CALL_EVALUATOR_OLD_DESCRIPTION = (
 # Mirrors `is_tool_call_row` in utils.py: an expected_tool_calls or
 # actual_tool_calls list, whatever it holds and whatever the agent produced;
 # otherwise no agent_response / output text and a non-empty tool_calls list.
+# A reply may be a string or `{content, ...}`; the CASE reads an object's text
+# the way `message_text` does, and an object with no `content` falls through.
 # Repeated here in SQL — unlike the Python function, this one runs inside a
 # migration's WHERE clause over the whole table, so it can't call out per row.
 # The json_type guards are load-bearing: json_array_length raises "malformed
@@ -3328,8 +3330,14 @@ _TOOL_CALL_ITEM_CONDITION = """
     json_type(i.payload, '$.expected_tool_calls') = 'array'
     OR json_type(i.payload, '$.actual_tool_calls') = 'array'
     OR (
-        COALESCE(COALESCE(json_extract(i.payload, '$.agent_response'),
-                          json_extract(i.payload, '$.output')), '') = ''
+        COALESCE(
+            CASE WHEN json_type(i.payload, '$.agent_response') = 'object'
+                 THEN json_extract(i.payload, '$.agent_response.content')
+                 ELSE json_extract(i.payload, '$.agent_response') END,
+            CASE WHEN json_type(i.payload, '$.output') = 'object'
+                 THEN json_extract(i.payload, '$.output.content')
+                 ELSE json_extract(i.payload, '$.output') END,
+            '') = ''
         AND json_type(i.payload, '$.tool_calls') = 'array'
         AND json_array_length(json_extract(i.payload, '$.tool_calls')) > 0
     )

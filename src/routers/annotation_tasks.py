@@ -1,4 +1,4 @@
-from typing import Optional, List, Dict, Any
+from typing import Optional, List, Dict, Any, Union
 from fastapi import APIRouter, HTTPException, Depends, Path, Query
 from pydantic import BaseModel, ConfigDict, Field
 from typing import Literal
@@ -173,6 +173,30 @@ _ITEM_PAYLOAD_EXAMPLES = [
             {"role": "user", "content": "What is my account balance?"},
         ],
         "agent_response": "Your balance is $42.00.",
+    },
+    {
+        "name": "case-002",
+        "chat_history": [
+            {"role": "user", "content": "My child has had a fever since last night."},
+            {
+                "role": "assistant",
+                "content": "How old is your child, and what is the temperature now?",
+                "label": "AI draft",
+                "versions": {
+                    "AI draft (Translated)": "आपका बच्चा कितने साल का है, और अभी तापमान कितना है?",
+                    "Nurse": "How old is she? Please check her temperature now and tell me.",
+                },
+            },
+            {"role": "user", "content": "She is two. It is 102 now."},
+        ],
+        "agent_response": {
+            "content": "Keep her hydrated and check again in four hours. If it goes above 104, go to the nearest hospital.",
+            "label": "AI draft",
+            "versions": {
+                "AI draft (Translated)": "उसे पानी पिलाते रहें और चार घंटे बाद फिर जांचें। 104 से ऊपर जाए तो नज़दीकी अस्पताल जाएं।",
+                "Nurse (Translated)": "उसे तरल पदार्थ देते रहें। अगर बुखार 104 से ऊपर जाए या दौरा पड़े, तो तुरंत अस्पताल ले जाएं।",
+            },
+        },
     },
     {
         "name": "pair-001",
@@ -836,8 +860,28 @@ def set_task_evaluators(
 
 
 
+_LABEL_DESCRIPTION = "Display name for the text in `content`, shown to annotators"
+_VERSIONS_DESCRIPTION = (
+    "Other forms of the same text, such as a translation or a human rewrite, keyed by the name "
+    "annotators see for each. Shown to annotators only"
+)
+
+
 class ChatTurn(TraceTurn):
     """One message in a conversation, in OpenAI chat format"""
+
+    label: Optional[str] = Field(None, description=_LABEL_DESCRIPTION)
+    versions: Optional[Dict[str, str]] = Field(None, description=_VERSIONS_DESCRIPTION)
+
+
+class TurnText(BaseModel):
+    """Text with a display name and other forms of it, sent in place of a plain string"""
+
+    model_config = ConfigDict(extra="forbid")
+
+    content: str = Field(description="The text the LLM judge reads and annotators see by default")
+    label: Optional[str] = Field(None, description=_LABEL_DESCRIPTION)
+    versions: Optional[Dict[str, str]] = Field(None, description=_VERSIONS_DESCRIPTION)
 
 
 class ToolCall(TraceToolCall):
@@ -870,11 +914,11 @@ class ItemPayload(BaseModel):
     chat_history: Optional[List[ChatTurn]] = Field(
         None, description="The conversation up to the reply being judged, ending at the user turn. For `llm` tasks"
     )
-    agent_response: Optional[str] = Field(
+    agent_response: Optional[Union[str, TurnText]] = Field(
         None, description="The reply to judge. An empty string when the reply was a tool call. For `llm` tasks"
     )
-    input: Optional[str] = Field(None, description="The standalone input the agent was given. For `llm-general` tasks")
-    output: Optional[str] = Field(None, description="The output to judge. For `llm-general` tasks")
+    input: Optional[Union[str, TurnText]] = Field(None, description="The standalone input the agent was given. For `llm-general` tasks")
+    output: Optional[Union[str, TurnText]] = Field(None, description="The output to judge. For `llm-general` tasks")
     transcript: Optional[List[ChatTurn]] = Field(None, description="The full conversation to judge. For `conversation` tasks")
     tool_calls: Optional[List[ToolCall]] = Field(
         None, description="Tool calls the agent made in place of a text reply. With no text reply, sending this marks the item as a tool call for a person to judge. For `llm` and `llm-general` tasks"

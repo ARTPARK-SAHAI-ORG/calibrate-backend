@@ -3541,3 +3541,50 @@ def test_item_metadata_rejects_too_many_entries_and_extra_keys(client):
         headers=h,
     )
     assert resp.status_code == 422
+
+
+def test_item_payload_accepts_labelled_versions_and_stores_them_verbatim(client):
+    h = _signup(client)["headers"]
+    task_uuid = _task_of_type(client, h, "llm")
+    turn = {
+        "role": "user",
+        "content": "hi",
+        "label": "Caller",
+        "versions": {"Caller (Translated)": "नमस्ते"},
+    }
+    reply = {
+        "content": "hello",
+        "label": "AI draft",
+        "versions": {"Nurse": "hello there"},
+    }
+    resp = _add_items(
+        client,
+        h,
+        task_uuid,
+        [{"payload": llm_item_payload("v1", chat_history=[turn], agent_response=reply)}],
+    )
+    assert resp.status_code == 200, resp.text
+    stored = client.get(f"/annotation-tasks/{task_uuid}/items", headers=h).json()[0]["payload"]
+    assert stored["chat_history"] == [turn]
+    assert stored["agent_response"] == reply
+
+    no_content = _add_items(
+        client,
+        h,
+        task_uuid,
+        [{"payload": llm_item_payload("v2", agent_response={"label": "AI draft"})}],
+    )
+    assert no_content.status_code == 422
+
+    general = _task_of_type(client, h, "llm-general")
+    resp = _add_items(
+        client,
+        h,
+        general,
+        [{"payload": {"name": "g1", "input": {"content": "in", "label": "Prompt"}, "output": "out"}}],
+    )
+    assert resp.status_code == 200, resp.text
+    assert client.get(f"/annotation-tasks/{general}/items", headers=h).json()[0]["payload"]["input"] == {
+        "content": "in",
+        "label": "Prompt",
+    }
