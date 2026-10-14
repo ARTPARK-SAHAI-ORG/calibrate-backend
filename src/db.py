@@ -10130,12 +10130,17 @@ def get_job_items(job_uuid: str) -> List[Dict[str, Any]]:
 
 
 def update_annotation_job_status(
-    job_uuid: str, status: str, set_completed_at: bool = False
+    job_uuid: str,
+    status: str,
+    set_completed_at: bool = False,
+    clear_completed_at: bool = False,
 ) -> bool:
     sets = ["status = ?"]
     params: List[Any] = [status]
     if set_completed_at:
         sets.append("completed_at = CURRENT_TIMESTAMP")
+    if clear_completed_at:
+        sets.append("completed_at = NULL")
     params.append(job_uuid)
     with get_db_connection() as conn:
         cursor = conn.cursor()
@@ -10165,12 +10170,12 @@ def upsert_annotation(
     item_id: str,
     value: Optional[Dict[str, Any]],
     evaluator_id: Optional[str] = None,
-) -> str:
+) -> Optional[str]:
     """
     Insert or update a judgement for (job_id, item_id, evaluator_id).
     Pass evaluator_id=None for a row-level (overall) annotation.
+    A `value` of None soft-deletes the live row and returns None.
     """
-    value_json = json.dumps(value) if value is not None else None
     with get_db_connection() as conn:
         cursor = conn.cursor()
         # SQLite treats NULLs as distinct in UNIQUE constraints, so handle row-level
@@ -10197,6 +10202,19 @@ def upsert_annotation(
                 (job_id, item_id, evaluator_id),
             )
         existing = cursor.fetchone()
+        if value is None:
+            if existing:
+                cursor.execute(
+                    """
+                    UPDATE annotations
+                       SET deleted_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP
+                     WHERE uuid = ? AND deleted_at IS NULL
+                    """,
+                    (existing["uuid"],),
+                )
+                conn.commit()
+            return None
+        value_json = json.dumps(value)
         if existing:
             cursor.execute(
                 """

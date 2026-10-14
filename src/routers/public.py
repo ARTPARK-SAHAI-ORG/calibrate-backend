@@ -1023,7 +1023,7 @@ class PublicAnnotationEntry(BaseModel):
         examples=[_EXAMPLE_EVALUATOR_UUID],
     )
     value: Optional[Dict[str, Any]] = Field(
-        None, description="Judgement payload. Its shape depends on the evaluator's output type. `null` to clear"
+        None, description="Judgement payload. Its shape depends on the evaluator's output type. `null` removes the stored judgement"
     )
 
 
@@ -1045,7 +1045,7 @@ def upsert_public_annotations(
     payload: PublicAnnotationUpsertRequest = ...,
 ):
     """Record all judgements for one item in a single request"""
-    # First save moves the job from `pending` to `in_progress`; all slots filled moves it to `completed`.
+    # The first save that stores something moves the job from `pending` to `in_progress`; all slots filled moves it to `completed`.
     job = _resolve_public_annotation_job(token)
     if not payload.annotations:
         raise HTTPException(
@@ -1088,9 +1088,10 @@ def upsert_public_annotations(
             evaluator_id=entry.evaluator_id,
             value=entry.value,
         )
-        saved_uuids.append(annotation_uuid)
+        if annotation_uuid:
+            saved_uuids.append(annotation_uuid)
 
-    if job["status"] == "pending":
+    if job["status"] == "pending" and saved_uuids:
         update_annotation_job_status(job["uuid"], "in_progress")
 
     # Auto-complete: every required slot each item actually shows must have a
@@ -1100,8 +1101,9 @@ def upsert_public_annotations(
     # what makes a job whose evaluators are all optional still
     # require the annotator to visit each item, rather than completing on the
     # first save. We re-check on every save (including post-completion edits)
-    # so the status remains accurate. `completed_at` is preserved on subsequent
-    # edits — it marks the first time the job was fully filled.
+    # so the status remains accurate: removing a required answer moves a
+    # completed job back to `in_progress` and clears `completed_at`, which is
+    # set again when the job is next fully filled.
     # Both the items AND the evaluator set are read from the job's snapshot
     # so post-creation link/unlink on the parent task can't shift the
     # completion bar under the annotator.
@@ -1137,8 +1139,17 @@ def upsert_public_annotations(
         update_annotation_job_status(
             job["uuid"], "completed", set_completed_at=True
         )
+    elif not completed and job["status"] == "completed":
+        update_annotation_job_status(
+            job["uuid"], "in_progress", clear_completed_at=True
+        )
 
-    final_status = "completed" if completed else "in_progress"
+    if completed:
+        final_status = "completed"
+    elif job["status"] == "pending" and not saved_uuids:
+        final_status = "pending"
+    else:
+        final_status = "in_progress"
     return {
         "saved": saved_uuids,
         "count": len(saved_uuids),
