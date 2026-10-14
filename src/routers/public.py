@@ -1045,7 +1045,7 @@ def upsert_public_annotations(
     payload: PublicAnnotationUpsertRequest = ...,
 ):
     """Record all judgements for one item in a single request"""
-    # First save moves the job from `pending` to `in_progress`; all slots filled moves it to `completed`.
+    # The first save that stores something moves the job from `pending` to `in_progress`; all slots filled moves it to `completed`.
     job = _resolve_public_annotation_job(token)
     if not payload.annotations:
         raise HTTPException(
