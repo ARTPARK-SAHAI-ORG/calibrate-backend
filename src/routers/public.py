@@ -1091,7 +1091,7 @@ def upsert_public_annotations(
         if annotation_uuid:
             saved_uuids.append(annotation_uuid)
 
-    if job["status"] == "pending":
+    if job["status"] == "pending" and saved_uuids:
         update_annotation_job_status(job["uuid"], "in_progress")
 
     # Auto-complete: every required slot each item actually shows must have a
@@ -1144,7 +1144,12 @@ def upsert_public_annotations(
             job["uuid"], "in_progress", clear_completed_at=True
         )
 
-    final_status = "completed" if completed else "in_progress"
+    if completed:
+        final_status = "completed"
+    elif job["status"] == "pending" and not saved_uuids:
+        final_status = "pending"
+    else:
+        final_status = "in_progress"
     return {
         "saved": saved_uuids,
         "count": len(saved_uuids),

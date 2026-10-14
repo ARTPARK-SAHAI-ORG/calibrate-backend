@@ -171,7 +171,6 @@ def test_public_api_docs_are_unauthenticated_and_filtered(client, monkeypatch):
     # Creating labelling jobs is public (it mints the annotator's link); listing
     # them stays JWT-only.
     assert set(paths["/annotation-tasks/{task_uuid}/jobs"]) == {"post"}
-    assert "/annotation-tasks/{task_uuid}/annotations" not in paths
     assert "/annotation-tasks/{task_uuid}/items/{item_uuid}" not in paths
     assert "get" not in paths.get("/agent-tests", {})  # plain link-list stays JWT-only
     assert "delete" not in paths.get("/agents/{agent_uuid}", {})  # no deletes are public

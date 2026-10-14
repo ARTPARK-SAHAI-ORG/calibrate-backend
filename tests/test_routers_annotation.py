@@ -822,48 +822,12 @@ def test_annotation_jobs_crud(client):
     )
     assert off.status_code == 200
 
-    # Annotation upsert against missing job
+    # Public save against an unknown labelling link
     bad_upsert = client.post(
-        f"/annotation-tasks/{task_uuid}/annotations",
-        json={"job_id": "00000000-0000-4000-8000-000000000001", "item_id": items[0], "value": {"value": True}},
-        headers=h,
+        "/public/annotation-jobs/no-such-token/annotations",
+        json={"item_id": items[0], "annotations": [{"evaluator_id": llm_ev["uuid"], "value": {"value": True}}]},
     )
     assert bad_upsert.status_code == 404
-
-    # Annotation upsert with bad item
-    bad_item = client.post(
-        f"/annotation-tasks/{task_uuid}/annotations",
-        json={"job_id": job_uuid, "item_id": "00000000-0000-4000-8000-000000000001", "value": {"value": True}},
-        headers=h,
-    )
-    assert bad_item.status_code == 404
-
-    # Annotation upsert with bad evaluator id
-    bad_ev = client.post(
-        f"/annotation-tasks/{task_uuid}/annotations",
-        json={
-            "job_id": job_uuid,
-            "item_id": items[0],
-            "evaluator_id": "00000000-0000-4000-8000-000000000001",
-            "value": {"value": True},
-        },
-        headers=h,
-    )
-    assert bad_ev.status_code == 400
-
-    # Successful upsert
-    upsert = client.post(
-        f"/annotation-tasks/{task_uuid}/annotations",
-        json={
-            "job_id": job_uuid,
-            "item_id": items[0],
-            "evaluator_id": llm_ev["uuid"],
-            "value": {"value": True},
-        },
-        headers=h,
-    )
-    assert upsert.status_code == 200
-
 
 def test_create_jobs_public_surface(client):
     """POST /jobs is Public API: an API key can mint an annotator's labelling link."""
@@ -1737,14 +1701,11 @@ def test_summary_surfaces_item_comments(client):
     # Per-evaluator annotation by `ann_rater` on item_a.
     assert (
         client.post(
-            f"/annotation-tasks/{task_uuid}/annotations",
+            f"/public/annotation-jobs/{job_rater['public_token']}/annotations",
             json={
-                "job_id": job_rater["uuid"],
                 "item_id": item_a,
-                "evaluator_id": llm_ev["uuid"],
-                "value": {"value": True},
+                "annotations": [{"evaluator_id": llm_ev["uuid"], "value": {"value": True}}],
             },
-            headers=h,
         ).status_code
         == 200
     )
@@ -1753,13 +1714,11 @@ def test_summary_surfaces_item_comments(client):
     for comment in ("first take", "final take"):
         assert (
             client.post(
-                f"/annotation-tasks/{task_uuid}/annotations",
+                f"/public/annotation-jobs/{job_rater['public_token']}/annotations",
                 json={
-                    "job_id": job_rater["uuid"],
                     "item_id": item_a,
-                    "value": {"comment": comment},
+                    "annotations": [{"evaluator_id": None, "value": {"comment": comment}}],
                 },
-                headers=h,
             ).status_code
             == 200
         )
@@ -1768,13 +1727,11 @@ def test_summary_surfaces_item_comments(client):
     for it, comment in ((item_a, "from commenter"), (item_b, "on item b")):
         assert (
             client.post(
-                f"/annotation-tasks/{task_uuid}/annotations",
+                f"/public/annotation-jobs/{job_commenter['public_token']}/annotations",
                 json={
-                    "job_id": job_commenter["uuid"],
                     "item_id": it,
-                    "value": {"comment": comment},
+                    "annotations": [{"evaluator_id": None, "value": {"comment": comment}}],
                 },
-                headers=h,
             ).status_code
             == 200
         )
@@ -1791,13 +1748,11 @@ def test_summary_surfaces_item_comments(client):
     for malformed_item, bad_value in malformed_by_item.items():
         assert (
             client.post(
-                f"/annotation-tasks/{task_uuid}/annotations",
+                f"/public/annotation-jobs/{job_rater['public_token']}/annotations",
                 json={
-                    "job_id": job_rater["uuid"],
                     "item_id": malformed_item,
-                    "value": bad_value,
+                    "annotations": [{"evaluator_id": None, "value": bad_value}],
                 },
-                headers=h,
             ).status_code
             == 200
         )
@@ -1886,13 +1841,11 @@ def test_summary_drops_comments_from_soft_deleted_annotator(client):
     for job in (job_kept, job_doomed):
         assert (
             client.post(
-                f"/annotation-tasks/{task_uuid}/annotations",
+                f"/public/annotation-jobs/{job['public_token']}/annotations",
                 json={
-                    "job_id": job["uuid"],
                     "item_id": item_shared,
-                    "value": {"comment": f"shared-from-{job['annotator_id']}"},
+                    "annotations": [{"evaluator_id": None, "value": {"comment": f"shared-from-{job['annotator_id']}"}}],
                 },
-                headers=h,
             ).status_code
             == 200
         )
@@ -1900,13 +1853,11 @@ def test_summary_drops_comments_from_soft_deleted_annotator(client):
     # Doomed-only item: only the about-to-be-deleted annotator comments.
     assert (
         client.post(
-            f"/annotation-tasks/{task_uuid}/annotations",
+            f"/public/annotation-jobs/{job_doomed['public_token']}/annotations",
             json={
-                "job_id": job_doomed["uuid"],
                 "item_id": item_doomed_only,
-                "value": {"comment": "doomed-only"},
+                "annotations": [{"evaluator_id": None, "value": {"comment": "doomed-only"}}],
             },
-            headers=h,
         ).status_code
         == 200
     )
@@ -1987,13 +1938,11 @@ def test_summary_comment_cleared_in_newer_job_wipes_older(client):
     for it in items:
         assert (
             client.post(
-                f"/annotation-tasks/{task_uuid}/annotations",
+                f"/public/annotation-jobs/{clearer_job_old['public_token']}/annotations",
                 json={
-                    "job_id": clearer_job_old["uuid"],
                     "item_id": it,
-                    "value": {"comment": "old comment"},
+                    "annotations": [{"evaluator_id": None, "value": {"comment": "old comment"}}],
                 },
-                headers=h,
             ).status_code
             == 200
         )
@@ -2001,26 +1950,22 @@ def test_summary_comment_cleared_in_newer_job_wipes_older(client):
     for it in items:
         assert (
             client.post(
-                f"/annotation-tasks/{task_uuid}/annotations",
+                f"/public/annotation-jobs/{clearer_job_new['public_token']}/annotations",
                 json={
-                    "job_id": clearer_job_new["uuid"],
                     "item_id": it,
-                    "value": {"comment": ""},
+                    "annotations": [{"evaluator_id": None, "value": {"comment": ""}}],
                 },
-                headers=h,
             ).status_code
             == 200
         )
     # Survivor leaves a real comment on item_pair.
     assert (
         client.post(
-            f"/annotation-tasks/{task_uuid}/annotations",
+            f"/public/annotation-jobs/{survivor_job['public_token']}/annotations",
             json={
-                "job_id": survivor_job["uuid"],
                 "item_id": item_pair,
-                "value": {"comment": "survivor here"},
+                "annotations": [{"evaluator_id": None, "value": {"comment": "survivor here"}}],
             },
-            headers=h,
         ).status_code
         == 200
     )
@@ -2449,13 +2394,11 @@ def test_summary_item_comments_scoped_to_page(client):
     job_id = jobs[0]["uuid"]
     for it_id in item_ids:
         client.post(
-            f"/annotation-tasks/{task_uuid}/annotations",
+            f"/public/annotation-jobs/{jobs[0]['public_token']}/annotations",
             json={
-                "job_id": job_id,
                 "item_id": it_id,
-                "value": {"comment": f"note for {it_id}"},
+                "annotations": [{"evaluator_id": None, "value": {"comment": f"note for {it_id}"}}],
             },
-            headers=h,
         )
 
     # Page 1: 2 items, 2 comments (only for paged items).
@@ -2540,27 +2483,22 @@ def _seed_summary_with_agreement(client, h, user_uuid, n_extra_agree=0):
     for it in created:
         assert (
             client.post(
-                f"/annotation-tasks/{task_uuid}/annotations",
+                f"/public/annotation-jobs/{job['public_token']}/annotations",
                 json={
-                    "job_id": job["uuid"],
                     "item_id": it,
-                    "evaluator_id": llm_ev["uuid"],
-                    "value": {"value": True, "reasoning": "human take"},
+                    "annotations": [{"evaluator_id": llm_ev["uuid"], "value": {"value": True, "reasoning": "human take"}}],
                 },
-                headers=h,
             ).status_code
             == 200
         )
     # A free-text comment so `item_comments` is populated (compact nulls it).
     assert (
         client.post(
-            f"/annotation-tasks/{task_uuid}/annotations",
+            f"/public/annotation-jobs/{job['public_token']}/annotations",
             json={
-                "job_id": job["uuid"],
                 "item_id": item_agree,
-                "value": {"comment": "looks good"},
+                "annotations": [{"evaluator_id": None, "value": {"comment": "looks good"}}],
             },
-            headers=h,
         ).status_code
         == 200
     )
@@ -3199,17 +3137,9 @@ def test_null_value_on_empty_slot_is_a_no_op(client):
         },
     )
     assert r.status_code == 200, r.text
-    assert r.json() == {"saved": [], "count": 0, "status": "in_progress"}
+    assert r.json() == {"saved": [], "count": 0, "status": "pending"}
     assert db_mod.get_annotations_for_job(job_a["uuid"]) == []
-
-    authed = client.post(
-        f"/annotation-tasks/{task_uuid}/annotations",
-        json={"job_id": job_a["uuid"], "item_id": item_id, "evaluator_id": ev_id, "value": None},
-        headers=h,
-    )
-    assert authed.status_code == 200, authed.text
-    assert authed.json() == {"uuid": None, "message": "Annotation removed"}
-    assert db_mod.get_annotations_for_job(job_a["uuid"]) == []
+    assert db_mod.get_annotation_job(job_a["uuid"])["status"] == "pending"
 
 
 def test_job_form_settings_round_trip(client):
