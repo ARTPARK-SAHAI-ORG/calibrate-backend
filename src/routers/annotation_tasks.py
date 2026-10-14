@@ -1306,6 +1306,11 @@ def bulk_create_items(
     task = _ensure_owned_task(task_uuid, ctx.org_uuid)
     if not payload.items:
         raise HTTPException(status_code=400, detail="items must be non-empty")
+    if not get_evaluators_for_annotation_task(task_uuid):
+        raise HTTPException(
+            status_code=400,
+            detail="Link at least one evaluator to this task before adding items",
+        )
 
     payloads = [it.payload.model_dump(exclude_none=True) for it in payload.items]
     metadatas = [it.model_dump()["metadata"] for it in payload.items]
