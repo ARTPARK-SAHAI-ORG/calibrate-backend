@@ -26,13 +26,18 @@ if sentry_dsn:
 
 import secrets
 
-from fastapi import Depends, FastAPI, HTTPException, Request
+from fastapi import Depends, FastAPI, Header, HTTPException, Request
 from fastapi.exception_handlers import http_exception_handler
 from fastapi.responses import FileResponse, JSONResponse, Response
 from starlette.concurrency import run_in_threadpool
 from starlette.exceptions import HTTPException as StarletteHTTPException
 from fastapi.openapi.docs import get_swagger_ui_html, get_redoc_html
-from fastapi.security import HTTPBasic, HTTPBasicCredentials
+from fastapi.security import (
+    HTTPAuthorizationCredentials,
+    HTTPBasic,
+    HTTPBasicCredentials,
+    HTTPBearer,
+)
 from pydantic import BaseModel
 from fastapi.middleware.cors import CORSMiddleware
 
@@ -41,11 +46,13 @@ from db import (
     NameAlreadyExistsError,
     find_org_for_resource,
     get_personal_org_for_user,
+    list_org_provider_keys,
 )
 from auth_utils import (
     API_KEY_PREFIX,
     resolve_api_key,
     get_current_user_id,
+    get_current_org,
     decode_token,
 )
 from routers.auth import router as auth_router
@@ -71,6 +78,7 @@ from routers.organizations import router as organizations_router
 from routers.organizations import invites_router
 from routers.api_keys import router as api_keys_router
 from routers.traces import router as traces_router
+from routers.provider_keys import router as provider_keys_router
 from utils import (
     LOCAL_ARTIFACTS_URL_PREFIX,
     generate_presigned_upload_url,
@@ -80,7 +88,11 @@ from utils import (
     PRESIGNED_URL_EXPIRY_SECONDS,
 )
 from job_recovery import recover_pending_jobs
-from provider_status import available_provider_names, provider_status_monitor
+from provider_status import (
+    PROVIDER_ENV_VARS,
+    available_provider_names,
+    provider_status_monitor,
+)
 from workers.trace_scoring import (
     shutdown_trace_scoring_pool,
     start_trace_scoring_pool,
@@ -535,6 +547,7 @@ app.include_router(organizations_router)
 app.include_router(invites_router)
 app.include_router(api_keys_router)
 app.include_router(traces_router)
+app.include_router(provider_keys_router)
 # Public (no-auth) sharing endpoints — must be registered without any auth dependency
 app.include_router(public_router)
 
@@ -678,16 +691,26 @@ async def get_provider_status(request: Request, refresh: bool = False):
     return await provider_status_monitor.response(force_refresh=force_refresh)
 
 
-@app.get("/providers")
-def list_available_providers() -> Dict[str, Any]:
+@app.get("/providers", summary="List available providers")
+async def list_available_providers(
+    credentials: Optional[HTTPAuthorizationCredentials] = Depends(
+        HTTPBearer(auto_error=False)
+    ),
+    x_org_uuid: Optional[str] = Header(default=None, alias="X-Org-UUID"),
+) -> Dict[str, Any]:
     """
-    List providers enabled by the current environment's API keys.
-
-    A provider is available when every environment variable it requires is set,
-    so the frontend can show only the providers it can actually run. This is a
-    cheap config check — it does not verify the keys work (see `/provider-status`
-    for live reachability).
+    List the AI providers your evaluations can run with. When your workspace has
+    its own AI provider keys, lists only the providers it has keys for.
+    `/provider-status` checks whether the keys work.
     """
+    if credentials:
+        try:
+            ctx = await get_current_org(credentials, x_org_uuid)
+        except HTTPException:
+            ctx = None
+        saved = ctx and {k["provider"] for k in list_org_provider_keys(ctx.org_uuid)}
+        if saved:
+            return {"providers": [p for p in PROVIDER_ENV_VARS if p in saved]}
     return {"providers": available_provider_names()}
 
 

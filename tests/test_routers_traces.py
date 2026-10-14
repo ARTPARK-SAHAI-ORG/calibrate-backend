@@ -2728,6 +2728,29 @@ def test_usage_reports_both_counts_and_both_limits(client, monkeypatch):
     assert client.get("/traces/usage", headers=h).json()["traces_scored"] == 1
 
 
+def test_own_provider_keys_lift_the_scoring_limit(client, monkeypatch):
+    import provider_keys
+    from routers import org_limits
+    from routers import traces as traces_mod
+
+    h, agent_id = _signup_with_agent(client)
+    monkeypatch.setattr(provider_keys, "org_uses_own_keys", lambda org: True)
+    seen = {}
+    real = traces_mod.create_trace_with_eval_run
+
+    def spy(**kwargs):
+        seen["max_scored_traces"] = kwargs["max_scored_traces"]
+        return real(**kwargs)
+
+    monkeypatch.setattr(traces_mod, "create_trace_with_eval_run", spy)
+    _post_trace(client, h, _payload(agent_id, _mid()))
+    assert seen == {"max_scored_traces": None}
+
+    usage = client.get("/traces/usage", headers=h).json()
+    assert usage["max_scored_traces"] is None
+    assert usage["max_traces"] == org_limits.DEFAULT_MAX_TRACES
+
+
 def test_usage_is_scoped_to_the_callers_workspace(client):
     h, agent_id = _signup_with_agent(client)
     _post_trace(client, h, _payload(agent_id, _mid()))

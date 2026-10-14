@@ -5397,3 +5397,74 @@ def test_global_run_list_reports_the_launched_test_count(client):
     assert resp.status_code == 200
     run = next(r for r in resp.json()["items"] if r["uuid"] == job_id)
     assert run["total_tests"] == 2
+
+
+@pytest.mark.parametrize("env", [None, {"OPENAI_API_KEY": "sk-org"}])
+@pytest.mark.parametrize("job_type", ["llm-unit-test", "llm-benchmark"])
+def test_agent_test_runs_spawn_with_the_workspace_provider_env(job_type, env):
+    import os
+
+    import db
+    from routers.agent_tests import run_benchmark_task, run_llm_test_task
+
+    user_uuid = db.create_user("P", "K", f"pk-{os.urandom(4).hex()}@x.com")
+    org_uuid = db.get_personal_org_for_user(user_uuid)["uuid"]
+    agent_uuid = db.create_agent(
+        name=f"a-{os.urandom(4).hex()}", org_uuid=org_uuid, user_id=user_uuid
+    )
+    test_uuid = db.create_test(
+        name=f"t-{os.urandom(4).hex()}",
+        type="tool_call",
+        config={
+            "history": [{"role": "user", "content": "hi"}],
+            "evaluation": {"type": "tool_call", "tool_calls": []},
+        },
+        org_uuid=org_uuid,
+        user_id=user_uuid,
+    )
+    job_uuid = db.create_agent_test_job(
+        agent_id=agent_uuid, job_type=job_type, status="in_progress"
+    )
+    agent, test = db.get_agent(agent_uuid), db.get_test(test_uuid)
+    seen = {}
+
+    def fake_env(org):
+        seen["org"] = org
+        return env
+
+    def popen(cmd, **kw):
+        seen.update(kw)
+        raise RuntimeError("stop")
+
+    with patch("routers.agent_tests.provider_env", side_effect=fake_env), patch(
+        "routers.agent_tests.subprocess.Popen", side_effect=popen
+    ), patch("routers.agent_tests.get_s3_client", return_value=MagicMock()), patch(
+        "routers.agent_tests.try_start_queued_agent_test_job"
+    ):
+        if job_type == "llm-benchmark":
+            run_benchmark_task(job_uuid, agent, [test], ["openai/gpt-4.1"], "b")
+        else:
+            run_llm_test_task(job_uuid, agent, [test], "b")
+
+    assert seen["org"] == org_uuid
+    assert seen["env"] == env
+    assert db.get_agent_test_job(job_uuid)["status"] == "failed"
+
+
+def test_batch_run_does_not_skip_when_the_workspace_has_no_row_limit():
+    from routers.agent_tests import _run_tests_for_agents
+
+    agent = {"uuid": NONEXISTENT_UUID, "name": "A"}
+    with patch(
+        "routers.agent_tests.effective_max_rows_per_eval", return_value=None
+    ), patch(
+        "routers.agent_tests._agent_connection_unverified", return_value=False
+    ), patch(
+        "routers.agent_tests.get_tests_for_agent", return_value=[{"uuid": "t"}] * 500
+    ), patch(
+        "routers.agent_tests._launch_agent_test_run", return_value=(NONEXISTENT_UUID_2, "queued")
+    ):
+        result = _run_tests_for_agents([agent], "b", "org-1")
+
+    assert [r.task_id for r in result.runs] == [NONEXISTENT_UUID_2]
+    assert result.skipped == []

@@ -589,3 +589,55 @@ def test_a_resolution_that_raises_defers_the_batch_rather_than_stranding_it(monk
     row = db.get_trace_eval_run(claimed[0]["uuid"])
     assert row["status"] == "pending"
     assert row["error"] == "evaluator lookup exploded"
+
+
+@pytest.mark.parametrize("env", [None, {"OPENAI_API_KEY": "sk-org"}])
+def test_batch_invokes_the_cli_with_the_workspace_provider_env(monkeypatch, env):
+    import provider_keys
+
+    run = {"uuid": "r1", "agent_id": "a1", "org_uuid": "org-1"}
+    seen = {}
+
+    def fake_env(org):
+        seen["org"] = org
+        return env
+
+    def invoke(config, dataset, **kw):
+        seen.update(kw)
+        return ts.EvalOnlyCliResult(returncode=0, timed_out=False, results=[])
+
+    monkeypatch.setattr(provider_keys, "provider_env", fake_env)
+    monkeypatch.setattr(ts, "_prepare_claimed_run", lambda r, now: ts.PreparedRun(r, {}))
+    monkeypatch.setattr(
+        ts, "resolve_batch_evaluators",
+        lambda agent_id: ts.BatchEvaluators(evaluation_type="response", hydrated=[]),
+    )
+    monkeypatch.setattr(ts, "build_eval_only_batch", lambda prepared, ev: ({}, [], {}))
+    monkeypatch.setattr(ts, "_swallow_settle", lambda *a, **k: None)
+
+    ts.process_claimed_runs([run], invoke=invoke)
+
+    assert seen["org"] == "org-1"
+    assert seen["env"] == env
+
+
+def test_invoke_eval_only_cli_passes_env_to_the_subprocess(monkeypatch):
+    seen = {}
+
+    class _Proc:
+        returncode = 0
+
+        def wait(self, timeout=None):
+            return 0
+
+        def poll(self):
+            return 0
+
+    def popen(cmd, **kw):
+        seen.update(kw)
+        return _Proc()
+
+    monkeypatch.setattr(ts.subprocess, "Popen", popen)
+    ts.invoke_eval_only_cli({}, [], env={"OPENAI_API_KEY": "sk-org"})
+
+    assert seen["env"] == {"OPENAI_API_KEY": "sk-org"}
