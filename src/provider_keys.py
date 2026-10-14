@@ -11,6 +11,18 @@ from provider_status import PROVIDER_ENV_VARS, parse_provider_status_stdout
 from utils import env_bool, get_calibrate_agent_cli
 
 CHECK_TIMEOUT_SECONDS = 45
+PROVIDER_NAMES = {
+    "openrouter": "OpenRouter",
+    "openai": "OpenAI",
+    "deepgram": "Deepgram",
+    "elevenlabs": "ElevenLabs",
+    "sarvam": "Sarvam",
+    "cartesia": "Cartesia",
+    "smallest": "Smallest AI",
+    "groq": "Groq",
+    "gemini": "Gemini",
+    "google": "Google Cloud",
+}
 UNREADABLE_KEYS_ERROR = (
     "Your saved provider keys cannot be read. Add them again in Workspace settings."
 )
@@ -127,4 +139,7 @@ async def check_provider_key(provider: str, value: str) -> Optional[str]:
         result = {}
     if result.get("status") == "pass":
         return None
-    return result.get("error") or f"Could not check the {provider} key."
+    error = result.get("error") or ""
+    if error.startswith(("HTTP 401", "HTTP 403")):
+        return f"{PROVIDER_NAMES.get(provider, provider)} did not accept this key. Check that you copied the full API key."
+    return error or f"Could not check the {provider} key."
