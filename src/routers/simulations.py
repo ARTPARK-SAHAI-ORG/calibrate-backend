@@ -79,6 +79,7 @@ from utils import (
 )
 from auth_utils import get_current_org, OrgContext
 from routers.org_limits import enforce_max_rows_per_eval
+from provider_keys import provider_env
 from datetime import datetime
 
 # Job types that share the same queue
@@ -1511,6 +1512,7 @@ def _run_calibrate_text_simulation(
     s3_prefix: str,
     task_id: Optional[str] = None,
     log_prefix: str = "LLM simulation",
+    env: Optional[Dict[str, str]] = None,
 ) -> Dict[str, Any]:
     """
     Run calibrate llm simulations run command and return parsed results.
@@ -1585,6 +1587,9 @@ def _run_calibrate_text_simulation(
             stdout=stdout_file,
             stderr=stderr_file,
             start_new_session=True,
+            # Not src/: calibrate loads .env from its cwd upward, which would override `env`.
+            cwd=str(output_dir),
+            env=env,
         )
 
         # Poll for process completion while updating intermediate results
@@ -1997,6 +2002,7 @@ def _run_calibrate_voice_simulation(
     s3_prefix: str,
     task_id: str,
     log_prefix: str = "Voice simulation",
+    env: Optional[Dict[str, str]] = None,
 ) -> Dict[str, Any]:
     """
     Run calibrate agent simulation command and return parsed results.
@@ -2063,6 +2069,7 @@ def _run_calibrate_voice_simulation(
             stderr=stderr_file,
             start_new_session=True,  # Detach from parent process group
             cwd=str(output_dir),
+            env=env,
         )
 
         # Store the process PID and process group ID in the job for cleanup on restart
@@ -2326,6 +2333,8 @@ def run_simulation_task(
                     agent, personas, scenarios, evaluators, simulation_type=simulation_type
                 )
 
+                env = provider_env(agent.get("org_uuid"))
+
                 # Create input and output directories
                 input_dir = temp_path / "input"
                 output_dir = temp_path / "output"
@@ -2341,6 +2350,7 @@ def run_simulation_task(
                         s3_prefix=results_prefix,
                         task_id=task_id,
                         log_prefix=f"Voice simulation {task_id}",
+                        env=env,
                     )
                 else:
                     # Agent connection mode has no params.model — pass None
@@ -2359,6 +2369,7 @@ def run_simulation_task(
                         s3_prefix=results_prefix,
                         task_id=task_id,
                         log_prefix=f"Chat simulation {task_id}",
+                        env=env,
                     )
 
                 # Check if job was aborted by user - don't overwrite abort results

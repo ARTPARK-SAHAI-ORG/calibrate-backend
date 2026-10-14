@@ -679,3 +679,50 @@ def test_run_simulation_voice_default_inputs_blocked(client, monkeypatch):
         headers=h,
     )
     assert resp.status_code == 400
+
+
+@pytest.mark.parametrize("env", [None, {"OPENAI_API_KEY": "sk-org"}])
+@pytest.mark.parametrize("sim_type", ["text", "voice"])
+def test_simulation_spawns_with_the_workspace_provider_env(sim_type, env):
+    import os
+    from pathlib import Path
+    from unittest.mock import MagicMock
+
+    import db
+    from routers.simulations import run_simulation_task
+
+    user_uuid = db.create_user("P", "K", f"pk-{os.urandom(4).hex()}@x.com")
+    org_uuid = db.get_personal_org_for_user(user_uuid)["uuid"]
+    sim_uuid = db.create_simulation(
+        name=f"sim-{os.urandom(4).hex()}", org_uuid=org_uuid, user_id=user_uuid
+    )
+    job_uuid = db.create_simulation_job(
+        simulation_id=sim_uuid, job_type=sim_type, status="in_progress"
+    )
+    agent = {"uuid": "a", "name": "Agent", "config": {}, "org_uuid": org_uuid}
+    seen = {}
+
+    def fake_env(org):
+        seen["org"] = org
+        return env
+
+    def popen(cmd, **kw):
+        seen.update(kw)
+        raise RuntimeError("stop")
+
+    with patch("routers.simulations.provider_env", side_effect=fake_env), patch(
+        "routers.simulations.subprocess.Popen", side_effect=popen
+    ), patch("routers.simulations.get_s3_client", return_value=MagicMock()), patch(
+        "routers.simulations.try_start_queued_simulation_job"
+    ):
+        run_simulation_task(
+            job_uuid, agent,
+            [{"uuid": "p1", "name": "Alex", "config": {}}],
+            [{"uuid": "s1", "name": "Sc", "description": "d"}],
+            [], "b", sim_type,
+        )
+
+    assert seen["org"] == org_uuid
+    assert seen["env"] == env
+    # calibrate reads .env from its cwd upward, so it must never run from src/.
+    assert Path(seen["cwd"]).name == "output"

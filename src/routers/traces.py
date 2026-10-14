@@ -48,11 +48,7 @@ from db import (
 )
 from org_scope import ensure_owned_agent
 from pagination import PaginatedResponse, PaginationParams, page_envelope
-from routers.org_limits import (
-    effective_limits,
-    effective_max_scored_traces,
-    effective_max_traces,
-)
+from routers.org_limits import effective_limits
 
 # Reuse the tests router's validation so a converted test accepts exactly what
 # POST /tests does (evaluator visible to the workspace, evaluator_type matches).
@@ -857,8 +853,8 @@ class TraceUsageResponse(BaseModel):
     traces_scored: int = Field(
         description="How many scoring runs count against your scoring limit, one per trace scored. A run that failed does not count"
     )
-    max_scored_traces: int = Field(
-        description="How many traces you may have scored"
+    max_scored_traces: Optional[int] = Field(
+        description="How many traces you may have scored. No limit (`null`) while your workspace uses its own AI provider keys"
     )
 
 

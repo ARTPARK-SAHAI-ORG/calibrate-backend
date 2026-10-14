@@ -1329,3 +1329,42 @@ def test_growing_results_csv_is_stored_across_ticks(tmp_path):
     tick()
     assert [r["item_id"] for r in stored] == ["i1", "i2", "i3"]
     assert stored[1]["value"] == {"value": False, "reasoning": "no"}
+
+
+@pytest.mark.parametrize("env", [None, {"OPENAI_API_KEY": "sk-org"}])
+def test_run_job_spawns_with_the_workspace_provider_env(env):
+    resolved = {
+        "uuid": "ev-1", "name": "Safety", "judge_model": "gpt",
+        "system_prompt": "judge", "output_type": "binary", "output_config": {},
+        "variables": [], "variable_values": {}, "kind": "single",
+        "data_type": "text", "_evaluator_version_id": "ver-1",
+    }
+    items = [{"uuid": "item-1", "payload": {"input": "q", "output": "a"}}]
+    seen = {}
+    updates = []
+
+    def fake_env(org):
+        seen["org"] = org
+        return env
+
+    def popen(cmd, **kw):
+        seen.update(kw)
+        raise RuntimeError("stop")
+
+    with patch.object(runner, "provider_env", side_effect=fake_env), patch.object(
+        runner.subprocess, "Popen", side_effect=popen
+    ), patch.object(
+        runner, "get_annotation_task",
+        return_value={"type": "llm-general", "org_uuid": "org-1"},
+    ), patch.object(runner, "get_eval_job_items", return_value=items), patch.object(
+        runner, "update_job", side_effect=lambda *a, **k: updates.append(k)
+    ), patch.object(runner, "try_start_queued_job"), patch.object(
+        runner, "clear_evaluator_runs_for_job", return_value=0
+    ), patch.object(runner, "get_s3_client", return_value=MagicMock()), patch.object(
+        runner, "get_s3_output_config", return_value="bucket"
+    ), patch.object(runner, "upload_file_to_s3"):
+        runner._run_job("j-1", "task-1", "u-1", [resolved], item_ids=None)
+
+    assert seen["org"] == "org-1"
+    assert seen["env"] == env
+    assert any(u.get("status") == "failed" for u in updates)

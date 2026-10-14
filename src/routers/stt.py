@@ -37,6 +37,7 @@ from dataset_utils import (
 from auth_utils import get_current_org, OrgContext
 from routers.org_limits import enforce_max_rows_per_eval
 from llm_judge import build_evaluator_cli_payload, refresh_evaluators_to_live
+from provider_keys import provider_env
 from utils import (
     job_slot,
     TaskStatus,
@@ -454,7 +455,8 @@ def run_evaluation_task(
                 )
 
                 # Calibrate: --config <path> with {evaluators: [...]}
-                job_details = (get_job(task_id) or {}).get("details", {}) or {}
+                job = get_job(task_id) or {}
+                job_details = job.get("details") or {}
 
                 # Sarvam judge bundle is a metrics-axis toggle independent of the
                 # evaluator list. The CLI includes it by default; pass
@@ -497,6 +499,7 @@ def run_evaluation_task(
                         text=True,
                         start_new_session=True,
                         cwd=str(temp_path),
+                        env=provider_env(job.get("org_uuid")),
                     )
 
                     # Store PID and output dir for cleanup and intermediate results

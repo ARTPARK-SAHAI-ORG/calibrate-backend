@@ -22,6 +22,7 @@ from db import (
     delete_org_limits,
 )
 from auth_utils import get_current_org, OrgContext, require_superadmin, is_superadmin_user
+import provider_keys
 
 router = APIRouter(prefix="/org-limits", tags=["org-limits"])
 
@@ -106,6 +107,40 @@ class OrgLimitsCreateResponse(BaseModel):
     message: str = Field(description="Status message")
 
 
+class OwnLimitsResponse(BaseModel):
+    max_rows_per_eval: Optional[int] = Field(
+        description="Maximum dataset rows a single eval run may process. No limit (`null`) while your workspace uses its own AI provider keys"
+    )
+    max_scored_traces: Optional[int] = Field(
+        description="Maximum traces your workspace may score automatically, counted over its lifetime. No limit (`null`) while your workspace uses its own AI provider keys"
+    )
+    max_traces: int = Field(description="Maximum traces your workspace may store")
+    trace_scoring_batch_size: int = Field(
+        description="Maximum traces one scoring batch takes"
+    )
+    max_concurrent_trace_scoring_batches: int = Field(
+        description="Maximum scoring batches your workspace may run at once"
+    )
+    uses_own_provider_keys: bool = Field(
+        description="Whether your workspace uses its own AI provider keys"
+    )
+
+
+class MaxRowsPerEvalResponse(BaseModel):
+    max_rows_per_eval: Optional[int] = Field(
+        description="Maximum dataset rows a single eval run may process. No limit (`null`) while your workspace uses its own AI provider keys"
+    )
+
+
+class MaxScoredTracesResponse(BaseModel):
+    max_scored_traces: Optional[int] = Field(
+        description="Maximum traces your workspace may score automatically, counted over its lifetime. No limit (`null`) while your workspace uses its own AI provider keys"
+    )
+
+
+# A workspace paying its own providers is not capped on what it spends.
+_SPEND_LIMITS = ("max_rows_per_eval", "max_scored_traces")
+
 _DEFAULT_LIMITS = {
     "max_rows_per_eval": lambda: DEFAULT_MAX_ROWS_PER_EVAL,
     "max_scored_traces": lambda: DEFAULT_MAX_SCORED_TRACES,
@@ -117,7 +152,7 @@ _DEFAULT_LIMITS = {
 }
 
 
-def effective_limits(org_uuid: str) -> Dict[str, int]:
+def effective_limits(org_uuid: str) -> Dict[str, Optional[int]]:
     """Every limit in force for a workspace, from ONE read of its row.
 
     Trace ingest is the highest-volume write here and needs two of these, so
@@ -125,52 +160,48 @@ def effective_limits(org_uuid: str) -> Dict[str, int]:
     are writing to, for every trace.
     """
     stored = (get_org_limits(org_uuid) or {}).get("limits") or {}
-    return {
+    limits = {
         key: stored.get(key) if stored.get(key) is not None else default()
         for key, default in _DEFAULT_LIMITS.items()
     }
+    if provider_keys.org_uses_own_keys(org_uuid):
+        limits.update(dict.fromkeys(_SPEND_LIMITS))
+    return limits
 
 
-def _effective_limit(org_uuid: str, key: str, default: int) -> int:
-    stored = ((get_org_limits(org_uuid) or {}).get("limits") or {}).get(key)
-    return stored if stored is not None else default
+def _effective_limit(org_uuid: str, key: str) -> Optional[int]:
+    return effective_limits(org_uuid)[key]
 
 
-def effective_max_rows_per_eval(org_uuid: str) -> int:
+def effective_max_rows_per_eval(org_uuid: str) -> Optional[int]:
     """Workspace cap on rows per eval run, falling back to the server default."""
-    return _effective_limit(org_uuid, "max_rows_per_eval", DEFAULT_MAX_ROWS_PER_EVAL)
+    return _effective_limit(org_uuid, "max_rows_per_eval")
 
 
-def effective_max_scored_traces(org_uuid: str) -> int:
+def effective_max_scored_traces(org_uuid: str) -> Optional[int]:
     """Workspace cap on automatically scored traces, falling back to the server default."""
-    return _effective_limit(org_uuid, "max_scored_traces", DEFAULT_MAX_SCORED_TRACES)
+    return _effective_limit(org_uuid, "max_scored_traces")
 
 
 def effective_max_traces(org_uuid: str) -> int:
     """Workspace cap on stored traces, falling back to the server default."""
-    return _effective_limit(org_uuid, "max_traces", DEFAULT_MAX_TRACES)
+    return _effective_limit(org_uuid, "max_traces")
 
 
 def effective_trace_scoring_batch_size(org_uuid: str) -> int:
     """Workspace size of one trace scoring batch, falling back to the server default."""
-    return _effective_limit(
-        org_uuid, "trace_scoring_batch_size", DEFAULT_TRACE_SCORING_BATCH_SIZE
-    )
+    return _effective_limit(org_uuid, "trace_scoring_batch_size")
 
 
 def effective_max_concurrent_trace_scoring_batches(org_uuid: str) -> int:
     """Workspace cap on trace scoring batches running at once, falling back to the server default."""
-    return _effective_limit(
-        org_uuid,
-        "max_concurrent_trace_scoring_batches",
-        DEFAULT_MAX_CONCURRENT_TRACE_SCORING_BATCHES,
-    )
+    return _effective_limit(org_uuid, "max_concurrent_trace_scoring_batches")
 
 
 def enforce_max_rows_per_eval(org_uuid: str, rows: int) -> None:
     """Reject a run that would process more rows than the workspace allows."""
     cap = effective_max_rows_per_eval(org_uuid)
-    if rows > cap:
+    if cap is not None and rows > cap:
         raise HTTPException(
             status_code=400,
             detail=(
@@ -180,19 +211,30 @@ def enforce_max_rows_per_eval(org_uuid: str, rows: int) -> None:
         )
 
 
-@router.get("/me", summary="Get own workspace limits")
+@router.get("/me", response_model=OwnLimitsResponse, summary="Get own workspace limits")
 def get_own_limits(ctx: OrgContext = Depends(get_current_org)):
     """Get every limit in force for your workspace, whether set for it or left at the server default"""
-    return effective_limits(ctx.org_uuid)
+    return {
+        **effective_limits(ctx.org_uuid),
+        "uses_own_provider_keys": provider_keys.org_uses_own_keys(ctx.org_uuid),
+    }
 
 
-@router.get("/me/max-rows-per-eval", summary="Get own max rows per eval")
+@router.get(
+    "/me/max-rows-per-eval",
+    response_model=MaxRowsPerEvalResponse,
+    summary="Get own max rows per eval",
+)
 def get_max_rows_per_eval(ctx: OrgContext = Depends(get_current_org)):
     """Get the max rows per eval"""
     return {"max_rows_per_eval": effective_max_rows_per_eval(ctx.org_uuid)}
 
 
-@router.get("/me/max-scored-traces", summary="Get own max scored traces")
+@router.get(
+    "/me/max-scored-traces",
+    response_model=MaxScoredTracesResponse,
+    summary="Get own max scored traces",
+)
 def get_max_scored_traces(ctx: OrgContext = Depends(get_current_org)):
     """Get the max traces scored automatically"""
     return {"max_scored_traces": effective_max_scored_traces(ctx.org_uuid)}

@@ -573,6 +573,7 @@ def invoke_eval_only_cli(
     *,
     timeout_seconds: int = CLI_TIMEOUT_SECONDS,
     parallel: int = CLI_PARALLEL,
+    env: dict[str, str] | None = None,
 ) -> EvalOnlyCliResult:
     """Score one batch with `calibrate-agent llm --eval-only`.
 
@@ -615,6 +616,7 @@ def invoke_eval_only_cli(
                 text=True,
                 start_new_session=True,
                 cwd=str(tmp_path),
+                env=env,
             )
             try:
                 proc.wait(timeout=timeout_seconds)
@@ -758,6 +760,7 @@ def process_claimed_runs(
     clock, because an invocation can run for many minutes and reusing the claim
     time would write a backoff `available_at` that is already in the past.
     """
+    import provider_keys
     from db import settle_trace_eval_run_completed, settle_trace_eval_run_terminal
 
     prepare_now = now or utc_now()
@@ -826,7 +829,8 @@ def process_claimed_runs(
     invoke_fn = invoke or invoke_eval_only_cli
     try:
         cli_result = invoke_fn(
-            config, dataset, timeout_seconds=timeout_seconds, parallel=CLI_PARALLEL
+            config, dataset, timeout_seconds=timeout_seconds, parallel=CLI_PARALLEL,
+            env=provider_keys.provider_env(claimed[0]["org_uuid"]),
         )
     except Exception as exc:
         logger.exception("trace-scoring: eval-only invocation raised")

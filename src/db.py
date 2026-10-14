@@ -388,6 +388,23 @@ def init_db():
             "ON api_keys(key_prefix) WHERE deleted_at IS NULL"
         )
 
+        # Hard deleted: a removed key must leave no encrypted copy behind.
+        cursor.execute(
+            """
+            CREATE TABLE IF NOT EXISTS org_provider_keys (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                org_uuid TEXT NOT NULL,
+                provider TEXT NOT NULL,
+                encrypted_value TEXT NOT NULL,
+                masked_value TEXT NOT NULL,
+                created_by_user_id TEXT,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                UNIQUE (org_uuid, provider)
+            )
+        """
+        )
+
         cursor.execute(
             """
             CREATE TABLE IF NOT EXISTS agents (
@@ -10880,7 +10897,7 @@ def create_trace_with_eval_run(
     conversation_id: Optional[str] = None,
     metadata: Optional[Any] = None,
     labels: Optional[List[str]] = None,
-    max_scored_traces: int,
+    max_scored_traces: Optional[int],
     batch_size: int,
     wait_seconds: Optional[int] = None,
     max_wait_seconds: Optional[int] = None,
@@ -10888,7 +10905,8 @@ def create_trace_with_eval_run(
     """Insert a trace, and if trace scoring is on for the agent, its scoring run.
 
     The run is `pending`, or `skipped` with error `over_limit` when the
-    workspace already holds `max_scored_traces` non-skipped runs. Which
+    workspace already holds `max_scored_traces` non-skipped runs (None: no
+    limit). Which
     evaluators run is resolved by the worker, not here.
 
     A pending run is held rather than made claimable at once, so one agent's
@@ -10924,7 +10942,8 @@ def create_trace_with_eval_run(
         )
         if scoring_on:
             over_limit = (
-                _scored_trace_count(cur, org_uuid, max_scored_traces)
+                max_scored_traces is not None
+                and _scored_trace_count(cur, org_uuid, max_scored_traces)
                 >= max_scored_traces
             )
             if over_limit:
@@ -11686,3 +11705,110 @@ def defer_trace_eval_run(
             )
         conn.commit()
         return True
+
+
+def upsert_org_provider_key(
+    org_uuid: str,
+    provider: str,
+    encrypted_value: str,
+    masked_value: str,
+    user_id: Optional[str],
+) -> Dict[str, Any]:
+    with get_db_connection() as conn:
+        conn.execute(
+            "INSERT INTO org_provider_keys "
+            "(org_uuid, provider, encrypted_value, masked_value, created_by_user_id) "
+            "VALUES (?, ?, ?, ?, ?) "
+            "ON CONFLICT (org_uuid, provider) DO UPDATE SET "
+            "encrypted_value = excluded.encrypted_value, "
+            "masked_value = excluded.masked_value, "
+            "created_by_user_id = excluded.created_by_user_id, "
+            "updated_at = CURRENT_TIMESTAMP",
+            (org_uuid, provider, encrypted_value, masked_value, user_id),
+        )
+        conn.commit()
+        return dict(
+            conn.execute(
+                "SELECT * FROM org_provider_keys WHERE org_uuid = ? AND provider = ?",
+                (org_uuid, provider),
+            ).fetchone()
+        )
+
+
+def list_org_provider_keys(org_uuid: str) -> List[Dict[str, Any]]:
+    with get_db_connection() as conn:
+        rows = conn.execute(
+            "SELECT * FROM org_provider_keys WHERE org_uuid = ? ORDER BY provider",
+            (org_uuid,),
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+
+def delete_org_provider_key(org_uuid: str, provider: str) -> bool:
+    with get_db_connection() as conn:
+        cur = conn.execute(
+            "DELETE FROM org_provider_keys WHERE org_uuid = ? AND provider = ?",
+            (org_uuid, provider),
+        )
+        conn.commit()
+        return cur.rowcount > 0
+
+
+def org_has_provider_keys(org_uuid: str) -> bool:
+    with get_db_connection() as conn:
+        return (
+            conn.execute(
+                "SELECT 1 FROM org_provider_keys WHERE org_uuid = ? LIMIT 1",
+                (org_uuid,),
+            ).fetchone()
+            is not None
+        )
+
+
+def org_has_active_jobs(org_uuid: str) -> bool:
+    """Whether any eval, agent-test or simulation job of the org is queued or running."""
+    with get_db_connection() as conn:
+        return (
+            conn.execute(
+                "SELECT 1 FROM jobs WHERE org_uuid = ? AND deleted_at IS NULL "
+                "AND status IN ('queued', 'in_progress') "
+                "UNION ALL SELECT 1 FROM agent_test_jobs j "
+                "JOIN agents a ON a.uuid = j.agent_id WHERE a.org_uuid = ? "
+                "AND j.status IN ('queued', 'in_progress') "
+                "UNION ALL SELECT 1 FROM simulation_jobs j "
+                "JOIN simulations s ON s.uuid = j.simulation_id WHERE s.org_uuid = ? "
+                "AND j.status IN ('queued', 'in_progress') LIMIT 1",
+                (org_uuid, org_uuid, org_uuid),
+            ).fetchone()
+            is not None
+        )
+
+
+def trim_pending_trace_runs_over_cap(org_uuid: str, cap: int) -> int:
+    """Skip, as `over_limit`, the org's pending runs past what `cap` allows.
+
+    Keeps the oldest pending runs that fit beside the processing and completed
+    ones, counted the way `_scored_trace_count` counts them. Returns how many
+    runs were skipped.
+    """
+    now = trace_scoring.utc_now()
+    with get_db_connection() as conn:
+        cur = conn.cursor()
+        cur.execute("BEGIN IMMEDIATE")
+        used = cur.execute(
+            "SELECT COUNT(*) FROM trace_eval_runs r "
+            "JOIN traces t ON t.uuid = r.trace_uuid AND t.deleted_at IS NULL "
+            "WHERE r.org_uuid = ? AND r.status IN ('processing', 'completed')",
+            (org_uuid,),
+        ).fetchone()[0]
+        cur.execute(
+            "UPDATE trace_eval_runs SET status = 'skipped', error = 'over_limit', "
+            "updated_at = ?, completed_at = ? "
+            "WHERE uuid IN (SELECT uuid FROM trace_eval_runs "
+            "WHERE org_uuid = ? AND status = 'pending' "
+            "ORDER BY created_at ASC, id ASC LIMIT -1 OFFSET ?)",
+            (now, now, org_uuid, max(0, cap - used)),
+        )
+        skipped = cur.rowcount
+        conn.commit()
+        return skipped

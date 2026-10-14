@@ -39,6 +39,7 @@ These are **not read directly** by most backend modules; they are passed through
 | **`ELEVENLABS_API_KEY`**             | ElevenLabs TTS.                                                                                                                                                                                                                                          |
 | **`OPENROUTER_API_KEY`**             | OpenRouter key for LLM/judge flows and [`GET /openrouter/providers`](src/main.py). If unset, that endpoint returns `null` (OpenRouter treated as disabled).                                                                                              |
 | **`OPENROUTER_ALLOWED_PROVIDERS`**   | Optional comma-separated OpenRouter **provider slugs**. If empty/unset, [`GET /openrouter/providers`](src/main.py) reports all providers (`"providers": "all"`). If set, the response lists only those slugs after fetching the catalog from OpenRouter. |
+| **`PROVIDER_KEYS_ENCRYPTION_KEY`**   | Fernet key that encrypts the AI provider keys a workspace saves through `/provider-keys`. If unset, saving a key answers 503. Changing it makes every saved key unreadable, so those workspaces must add their keys again. Generate one with `uv run python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"`. |
 
 ---
 

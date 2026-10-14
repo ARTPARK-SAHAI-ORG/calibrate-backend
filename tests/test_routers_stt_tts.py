@@ -1459,3 +1459,102 @@ def test_stt_import_needs_the_artifact_bucket(client, monkeypatch):
 
     resp = _post_import(client, auth, ds_uuid, archive)
     assert resp.status_code == 500
+
+
+def _eval_job(job_type, details):
+    import os
+
+    import db
+
+    user_uuid = db.create_user("P", "K", f"pk-{os.urandom(4).hex()}@x.com")
+    org_uuid = db.get_personal_org_for_user(user_uuid)["uuid"]
+    job = db.create_job(
+        job_type=job_type, org_uuid=org_uuid, user_id=user_uuid,
+        status="in_progress", details=details,
+    )
+    return job, org_uuid
+
+
+def _run_with_env(module, run, env):
+    """Run one STT/TTS worker with Popen stopped at spawn; return what it saw."""
+    from unittest.mock import MagicMock
+
+    seen = {}
+
+    def popen(cmd, **kw):
+        seen.update(kw)
+        raise RuntimeError("stop")
+
+    def fake_env(org):
+        seen["org"] = org
+        return env
+
+    with patch(f"{module}.provider_env", side_effect=fake_env), \
+            patch(f"{module}.subprocess.Popen", side_effect=popen), \
+            patch(f"{module}.get_s3_client", return_value=MagicMock()), \
+            patch(f"{module}.try_start_queued_job"):
+        run()
+    return seen
+
+
+@pytest.mark.parametrize("env", [None, {"OPENAI_API_KEY": "sk-org"}])
+def test_stt_and_tts_spawn_with_the_workspace_provider_env(env):
+    from routers.stt import STTEvaluationRequest, run_evaluation_task
+    from routers.tts import TTSEvaluationRequest, run_tts_evaluation_task
+
+    stt_job, stt_org = _eval_job("stt-eval", {"evaluators": []})
+    with patch("routers.stt.download_file_from_s3"):
+        seen = _run_with_env(
+            "routers.stt",
+            lambda: run_evaluation_task(
+                stt_job,
+                STTEvaluationRequest(
+                    audio_paths=["s3://b/k.wav"], texts=["hi"],
+                    providers=["openai"], language="en",
+                ),
+                "b",
+            ),
+            env,
+        )
+    assert seen["org"] == stt_org
+    assert seen["env"] == env
+
+    tts_job, tts_org = _eval_job("tts-eval", {"evaluators": []})
+    seen = _run_with_env(
+        "routers.tts",
+        lambda: run_tts_evaluation_task(
+            tts_job,
+            TTSEvaluationRequest(texts=["hi"], providers=["cartesia"], language="en"),
+            "b",
+        ),
+        env,
+    )
+    assert seen["org"] == tts_org
+    assert seen["env"] == env
+
+
+def test_stt_run_fails_with_the_unreadable_keys_message():
+    import db
+    from unittest.mock import MagicMock
+
+    from routers.stt import STTEvaluationRequest, run_evaluation_task
+
+    message = "Your saved provider keys cannot be read. Add them again in Workspace settings."
+    job, _ = _eval_job("stt-eval", {"evaluators": []})
+    with patch("routers.stt.provider_env", side_effect=RuntimeError(message)), \
+            patch("routers.stt.subprocess.Popen") as popen, \
+            patch("routers.stt.download_file_from_s3"), \
+            patch("routers.stt.get_s3_client", return_value=MagicMock()), \
+            patch("routers.stt.try_start_queued_job"):
+        run_evaluation_task(
+            job,
+            STTEvaluationRequest(
+                audio_paths=["s3://b/k.wav"], texts=["hi"],
+                providers=["openai"], language="en",
+            ),
+            "b",
+        )
+    popen.assert_not_called()
+    row = db.get_job(job)
+    assert row["status"] == "failed"
+    assert message in row["results"]["error"]

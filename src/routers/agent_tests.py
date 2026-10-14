@@ -70,6 +70,7 @@ from llm_judge import (
 )
 from routers.agents import AgentSummary, to_agent_summary
 from routers.org_limits import effective_max_rows_per_eval, enforce_max_rows_per_eval
+from provider_keys import provider_env
 from shared_enums import (
     AGENT_INTERACTION_TYPES,
     DEFAULT_AGENT_INTERACTION_TYPE,
@@ -2782,6 +2783,7 @@ def run_llm_test_task(
                         text=True,
                         start_new_session=True,
                         cwd=str(temp_path),
+                        env=provider_env(agent.get("org_uuid")),
                     )
 
                     # Poll for process completion while updating intermediate results
@@ -3269,7 +3271,7 @@ def _run_tests_for_agents(
             )
             continue
 
-        if len(tests) > max_rows:
+        if max_rows is not None and len(tests) > max_rows:
             skipped.append(
                 BatchTestSkip(
                     agent_name=agent.get("name", ""),
@@ -4153,6 +4155,7 @@ def run_benchmark_task(
                         text=True,
                         start_new_session=True,
                         cwd=str(temp_path),
+                        env=provider_env(agent.get("org_uuid")),
                     )
 
                     # Poll for process completion while updating intermediate results

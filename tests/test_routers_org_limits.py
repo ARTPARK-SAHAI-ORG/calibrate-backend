@@ -148,6 +148,7 @@ def test_me_returns_every_effective_limit(client, monkeypatch):
         "max_traces": org_limits.DEFAULT_MAX_TRACES,
         "trace_scoring_batch_size": org_limits.DEFAULT_TRACE_SCORING_BATCH_SIZE,
         "max_concurrent_trace_scoring_batches": org_limits.DEFAULT_MAX_CONCURRENT_TRACE_SCORING_BATCHES,
+        "uses_own_provider_keys": False,
     }
 
     created = client.post(
@@ -171,4 +172,38 @@ def test_me_returns_every_effective_limit(client, monkeypatch):
         "max_traces": 13,
         "trace_scoring_batch_size": 14,
         "max_concurrent_trace_scoring_batches": 15,
+        "uses_own_provider_keys": False,
     }
+
+
+def test_own_provider_keys_lift_only_the_spend_limits(client, monkeypatch):
+    import provider_keys
+
+    h, org = _signup_as_superadmin(client, monkeypatch)
+    client.post(
+        "/org-limits",
+        json={"org_uuid": org, "limits": {"max_rows_per_eval": 3, "max_scored_traces": 4, "max_traces": 5}},
+        headers=h,
+    )
+    monkeypatch.setattr(provider_keys, "org_uses_own_keys", lambda o: o == org)
+
+    me = client.get("/org-limits/me", headers=h).json()
+    assert me["max_rows_per_eval"] is None
+    assert me["max_scored_traces"] is None
+    assert me["max_traces"] == 5
+    assert me["trace_scoring_batch_size"] == org_limits.DEFAULT_TRACE_SCORING_BATCH_SIZE
+    assert me["uses_own_provider_keys"] is True
+    assert client.get("/org-limits/me/max-rows-per-eval", headers=h).json() == {
+        "max_rows_per_eval": None
+    }
+    assert client.get("/org-limits/me/max-scored-traces", headers=h).json() == {
+        "max_scored_traces": None
+    }
+    assert org_limits.effective_max_traces(org) == 5
+    org_limits.enforce_max_rows_per_eval(org, 10_000)
+    # The stored values survive, so deleting the keys brings them back.
+    assert client.get(f"/org-limits/{org}", headers=h).json()["limits"]["max_rows_per_eval"] == 3
+
+    monkeypatch.setattr(provider_keys, "org_uses_own_keys", lambda o: False)
+    assert org_limits.effective_max_rows_per_eval(org) == 3
+    assert org_limits.effective_max_scored_traces(org) == 4
