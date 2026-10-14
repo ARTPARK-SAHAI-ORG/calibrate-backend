@@ -2194,7 +2194,7 @@ class AnnotationUpsertRequest(BaseModel):
     )
     value: Optional[Dict[str, Any]] = Field(
         None,
-        description="Annotation value, e.g. `{'value': <bool|number|string>, 'reasoning'?: str}`. `null` clears the cell",
+        description="Annotation value, e.g. `{'value': <bool|number|string>, 'reasoning'?: str}`. `null` removes the stored annotation",
     )
 
 
@@ -2238,7 +2238,10 @@ def upsert_annotation_endpoint(
     )
     if job.get("status") == "pending":
         update_annotation_job_status(payload.job_id, "in_progress")
-    return {"uuid": annotation_uuid, "message": "Annotation saved"}
+    return {
+        "uuid": annotation_uuid,
+        "message": "Annotation saved" if annotation_uuid else "Annotation removed",
+    }
 
 
 # ============ Evaluator runs (run linked evaluators on all items) ============

@@ -1023,7 +1023,7 @@ class PublicAnnotationEntry(BaseModel):
         examples=[_EXAMPLE_EVALUATOR_UUID],
     )
     value: Optional[Dict[str, Any]] = Field(
-        None, description="Judgement payload. Its shape depends on the evaluator's output type. `null` to clear"
+        None, description="Judgement payload. Its shape depends on the evaluator's output type. `null` removes the stored judgement"
     )
 
 
@@ -1088,7 +1088,8 @@ def upsert_public_annotations(
             evaluator_id=entry.evaluator_id,
             value=entry.value,
         )
-        saved_uuids.append(annotation_uuid)
+        if annotation_uuid:
+            saved_uuids.append(annotation_uuid)
 
     if job["status"] == "pending":
         update_annotation_job_status(job["uuid"], "in_progress")
@@ -1100,8 +1101,9 @@ def upsert_public_annotations(
     # what makes a job whose evaluators are all optional still
     # require the annotator to visit each item, rather than completing on the
     # first save. We re-check on every save (including post-completion edits)
-    # so the status remains accurate. `completed_at` is preserved on subsequent
-    # edits — it marks the first time the job was fully filled.
+    # so the status remains accurate: removing a required answer moves a
+    # completed job back to `in_progress` and clears `completed_at`, which is
+    # set again when the job is next fully filled.
     # Both the items AND the evaluator set are read from the job's snapshot
     # so post-creation link/unlink on the parent task can't shift the
     # completion bar under the annotator.
@@ -1136,6 +1138,10 @@ def upsert_public_annotations(
     if completed and job["status"] != "completed":
         update_annotation_job_status(
             job["uuid"], "completed", set_completed_at=True
+        )
+    elif not completed and job["status"] == "completed":
+        update_annotation_job_status(
+            job["uuid"], "in_progress", clear_completed_at=True
         )
 
     final_status = "completed" if completed else "in_progress"

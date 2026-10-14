@@ -3080,15 +3080,136 @@ def test_all_optional_job_still_needs_every_item_touched(client):
     )
     assert first.json()["status"] == "in_progress"
 
-    # A blank judgement still counts as visiting the item.
-    second = client.post(
+    # A null judgement stores nothing, so the item is still unvisited.
+    blank = client.post(
         f"/public/annotation-jobs/{token}/annotations",
         json={
             "item_id": items[1],
             "annotations": [{"evaluator_id": ev_a["uuid"], "value": None}],
         },
     )
+    assert blank.json()["status"] == "in_progress"
+
+    second = client.post(
+        f"/public/annotation-jobs/{token}/annotations",
+        json={
+            "item_id": items[1],
+            "annotations": [{"evaluator_id": ev_a["uuid"], "value": {"value": False}}],
+        },
+    )
     assert second.json()["status"] == "completed"
+
+
+def _one_item_job_pair(client):
+    h = _signup(client)["headers"]
+    llm_ev = _llm_evaluator(client, h)
+    task_uuid = client.post(
+        "/annotation-tasks",
+        json={
+            "name": f"rm-{uuid.uuid4().hex[:6]}",
+            "type": "llm",
+            "evaluator_ids": [llm_ev["uuid"]],
+        },
+        headers=h,
+    ).json()["uuid"]
+    items = client.post(
+        f"/annotation-tasks/{task_uuid}/items",
+        json={"items": [{"payload": llm_item_payload("i1")}]},
+        headers=h,
+    ).json()["item_ids"]
+    ann_ids = [
+        client.post(
+            "/annotators", json={"name": f"a-{uuid.uuid4().hex[:6]}"}, headers=h
+        ).json()["uuid"]
+        for _ in range(2)
+    ]
+    jobs = client.post(
+        f"/annotation-tasks/{task_uuid}/jobs",
+        json={"annotator_ids": ann_ids, "item_ids": items},
+        headers=h,
+    ).json()["jobs"]
+    return h, llm_ev["uuid"], task_uuid, items[0], jobs
+
+
+def test_public_null_value_removes_answer_and_reopens_job(client):
+    import db as db_mod
+    from annotation_metrics import aggregate_agreement
+
+    _, ev_id, task_uuid, item_id, (job_a, job_b) = _one_item_job_pair(client)
+    url_a = f"/public/annotation-jobs/{job_a['public_token']}/annotations"
+
+    def save(url, entries):
+        r = client.post(url, json={"item_id": item_id, "annotations": entries})
+        assert r.status_code == 200, r.text
+        return r.json()
+
+    first = save(
+        url_a,
+        [
+            {"evaluator_id": ev_id, "value": {"value": True}},
+            {"evaluator_id": None, "value": {"comment": "looks fine"}},
+        ],
+    )
+    save(
+        f"/public/annotation-jobs/{job_b['public_token']}/annotations",
+        [{"evaluator_id": ev_id, "value": {"value": True}}],
+    )
+    assert first["status"] == "completed"
+    assert db_mod.get_annotation_job(job_a["uuid"])["completed_at"] is not None
+    assert aggregate_agreement(db_mod.get_annotations_for_task(task_uuid))[0] == 1.0
+
+    removed = save(
+        url_a,
+        [
+            {"evaluator_id": ev_id, "value": None},
+            {"evaluator_id": None, "value": None},
+        ],
+    )
+    assert removed == {"saved": [], "count": 0, "status": "in_progress"}
+    form = client.get(f"/public/annotation-jobs/{job_a['public_token']}").json()
+    assert form["annotations"] == []
+    stored = db_mod.get_annotation_job(job_a["uuid"])
+    assert stored["status"] == "in_progress"
+    assert stored["completed_at"] is None
+    assert aggregate_agreement(db_mod.get_annotations_for_task(task_uuid))[0] is None
+
+    again = save(url_a, [{"evaluator_id": ev_id, "value": {"value": False}}])
+    assert again["status"] == "completed"
+    assert again["saved"] == [first["saved"][0]]
+    form = client.get(f"/public/annotation-jobs/{job_a['public_token']}").json()
+    assert [a["value"] for a in form["annotations"]] == [{"value": False}]
+    stored = db_mod.get_annotation_job(job_a["uuid"])
+    assert stored["status"] == "completed"
+    assert stored["completed_at"] is not None
+    assert aggregate_agreement(db_mod.get_annotations_for_task(task_uuid))[0] == 0.0
+
+
+def test_null_value_on_empty_slot_is_a_no_op(client):
+    import db as db_mod
+
+    h, ev_id, task_uuid, item_id, (job_a, _) = _one_item_job_pair(client)
+    r = client.post(
+        f"/public/annotation-jobs/{job_a['public_token']}/annotations",
+        json={
+            "item_id": item_id,
+            "annotations": [
+                {"evaluator_id": ev_id, "value": None},
+                {"evaluator_id": None, "value": None},
+            ],
+        },
+    )
+    assert r.status_code == 200, r.text
+    assert r.json() == {"saved": [], "count": 0, "status": "in_progress"}
+    assert db_mod.get_annotations_for_job(job_a["uuid"]) == []
+
+    authed = client.post(
+        f"/annotation-tasks/{task_uuid}/annotations",
+        json={"job_id": job_a["uuid"], "item_id": item_id, "evaluator_id": ev_id, "value": None},
+        headers=h,
+    )
+    assert authed.status_code == 200, authed.text
+    assert authed.json() == {"uuid": None, "message": "Annotation removed"}
+    assert db_mod.get_annotations_for_job(job_a["uuid"]) == []
 
 
 def test_job_form_settings_round_trip(client):
