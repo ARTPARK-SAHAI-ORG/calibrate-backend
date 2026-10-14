@@ -3246,3 +3246,141 @@ def test_convert_select_all_score_filter_matching_nothing_is_rejected(client):
     )
     assert res.status_code == 400, res.text
     assert res.json()["detail"] == "No traces matched the filters"
+
+
+# ---------------------------------------------------------------------------
+# Conversations
+# ---------------------------------------------------------------------------
+
+
+def _set_created_at(trace_uuid: str, ts: str) -> None:
+    with db.get_db_connection() as conn:
+        conn.execute("UPDATE traces SET created_at = ? WHERE uuid = ?", (ts, trace_uuid))
+        conn.commit()
+
+
+def test_conversations_are_jwt_only(client):
+    h = _signup(client)
+    key_headers = _api_key_headers(client, h)
+    assert client.get("/traces/conversations").status_code in (401, 403)
+    assert (
+        client.get("/traces/conversations", headers=key_headers).status_code
+        in (401, 403)
+    )
+
+
+def test_conversations_group_turns_and_leave_out_traces_without_an_id(client):
+    h, agent_a = _signup_with_agent(client)
+    agent_b = _create_agent(client, h)["uuid"]
+    first = _post_trace(client, h, _payload(agent_a, _mid(), "conv-x"))
+    last = _post_trace(client, h, _payload(agent_a, _mid(), "conv-x"))
+    other_agent = _post_trace(client, h, _payload(agent_b, _mid(), "conv-x"))
+    _post_trace(client, h, _payload(agent_a, _mid(), conversation_id=None))
+    _set_created_at(first["uuid"], "2026-01-01 10:00:00")
+    _set_created_at(last["uuid"], "2026-01-01 10:05:00")
+    _set_created_at(other_agent["uuid"], "2026-01-01 09:00:00")
+
+    res = client.get("/traces/conversations", headers=h)
+    assert res.status_code == 200, res.text
+    body = res.json()
+    assert body["total"] == 2
+    newest, older = body["items"]
+    assert newest["agent_id"] == agent_a
+    assert newest["conversation_id"] == "conv-x"
+    assert newest["turn_count"] == 2
+    assert newest["first_turn_at"] == "2026-01-01T10:00:00Z"
+    assert newest["last_turn_at"] == "2026-01-01T10:05:00Z"
+    assert newest["last_turn"]["uuid"] == last["uuid"]
+    assert "results" in newest["last_turn"]
+    assert older["agent_id"] == agent_b and older["turn_count"] == 1
+
+    only_b = client.get(
+        "/traces/conversations", params={"agent_id": agent_b}, headers=h
+    ).json()
+    assert [c["agent_id"] for c in only_b["items"]] == [agent_b]
+
+
+def test_conversation_filters_pick_conversations_but_count_every_turn(client):
+    h, agent_id = _signup_with_agent(client)
+    _post_trace(client, h, _payload(agent_id, _mid(), "conv-a", labels=["vip"]))
+    _post_trace(client, h, _payload(agent_id, _mid(), "conv-a"))
+    _post_trace(client, h, _payload(agent_id, _mid(), "conv-b"))
+
+    body = client.get(
+        "/traces/conversations", params={"labels": "vip"}, headers=h
+    ).json()
+    assert body["total"] == 1
+    assert body["items"][0]["conversation_id"] == "conv-a"
+    assert body["items"][0]["turn_count"] == 2
+
+
+def test_conversations_paginate(client):
+    h, agent_id = _signup_with_agent(client)
+    for i in range(3):
+        trace = _post_trace(client, h, _payload(agent_id, _mid(), f"conv-{i}"))
+        _set_created_at(trace["uuid"], f"2026-01-01 10:0{i}:00")
+
+    page = client.get(
+        "/traces/conversations", params={"limit": 2, "offset": 1}, headers=h
+    ).json()
+    assert page["total"] == 3
+    assert [c["conversation_id"] for c in page["items"]] == ["conv-1", "conv-0"]
+    empty = client.get(
+        "/traces/conversations", params={"offset": 5}, headers=h
+    ).json()
+    assert empty["items"] == [] and empty["total"] == 3
+
+
+def test_conversations_reject_bad_limits(client):
+    h = _signup(client)
+    assert (
+        client.get(
+            "/traces/conversations", params={"limit": MAX_LIST_LIMIT + 1}, headers=h
+        ).status_code
+        == 422
+    )
+    too_many = [("labels", f"l{i}") for i in range(MAX_LABELS + 1)]
+    assert (
+        client.get("/traces/conversations", params=too_many, headers=h).status_code
+        == 422
+    )
+
+
+def test_list_and_select_all_delete_filter_by_conversation(client):
+    h, agent_id = _signup_with_agent(client)
+    _post_trace(client, h, _payload(agent_id, _mid(), "conv-a"))
+    _post_trace(client, h, _payload(agent_id, _mid(), "conv-a"))
+    kept = _post_trace(client, h, _payload(agent_id, _mid(), "conv-b"))
+
+    turns = client.get(
+        "/traces",
+        params={"conversation_id": "conv-a", "include_score_averages": "true"},
+        headers=h,
+    ).json()
+    assert turns["total"] == 2
+    assert {t["conversation_id"] for t in turns["items"]} == {"conv-a"}
+
+    deleted = client.post(
+        "/traces/bulk-delete",
+        json={"select_all": True, "agent_id": agent_id, "conversation_id": "conv-a"},
+        headers=h,
+    )
+    assert deleted.json() == {"deleted": 2}
+    remaining = client.get("/traces", headers=h).json()["items"]
+    assert [t["uuid"] for t in remaining] == [kept["uuid"]]
+
+
+def test_an_empty_conversation_id_is_rejected_not_ignored(client):
+    h, agent_id = _signup_with_agent(client)
+    _post_trace(client, h, _payload(agent_id, _mid(), "conv-a"))
+    assert (
+        client.get("/traces", params={"conversation_id": ""}, headers=h).status_code
+        == 422
+    )
+    res = client.post(
+        "/traces/bulk-delete",
+        json={"select_all": True, "agent_id": agent_id, "conversation_id": ""},
+        headers=h,
+    )
+    assert res.status_code == 422
+    assert client.get("/traces", headers=h).json()["total"] == 1
