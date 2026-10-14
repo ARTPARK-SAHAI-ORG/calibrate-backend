@@ -1623,7 +1623,7 @@ def _build_calibrate_config(
     Args:
         agent: Agent dict with config
         tests: List of test dicts with config
-        model: Optional model override. If None, uses agent's llm.model or defaults to gpt-4.1
+        model: Optional model override. If None, uses agent's llm.model or defaults to openai/gpt-4.1
 
     Returns:
         Tuple of (config, evaluators_by_test_id).
@@ -1881,7 +1881,7 @@ def _build_calibrate_config(
     # Calibrate agent mode
     if model is None:
         llm_config = agent_config.get("llm", {})
-        model = llm_config.get("model", "gpt-4.1")
+        model = llm_config.get("model", "openai/gpt-4.1")
 
     agent_tools = get_tools_for_agent(agent["uuid"])
     tool_configs = build_tool_configs(agent_tools)

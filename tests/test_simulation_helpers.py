@@ -202,3 +202,16 @@ def test_simulation_config_marks_the_call_as_an_evaluation():
         "Authorization": "Bearer t",
         "X-Calibrate-Eval": "1",
     }
+
+
+def test_simulation_model_fallback_is_an_openrouter_id(monkeypatch):
+    from routers.simulations import _build_calibrate_simulation_config
+
+    monkeypatch.delenv("DEFAULT_AGENT_LLM_MODEL", raising=False)
+    config = _build_calibrate_simulation_config(
+        {"type": "agent", "uuid": "a", "config": {}},
+        personas=[{"description": "p", "config": {}}],
+        scenarios=[{"description": "s"}],
+        evaluators=[],
+    )
+    assert config["params"] == {"model": "openai/gpt-4.1"}

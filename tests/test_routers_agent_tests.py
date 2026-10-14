@@ -5468,3 +5468,10 @@ def test_batch_run_does_not_skip_when_the_workspace_has_no_row_limit():
 
     assert [r.task_id for r in result.runs] == [NONEXISTENT_UUID_2]
     assert result.skipped == []
+
+
+def test_build_calibrate_config_model_fallback_is_an_openrouter_id():
+    from routers.agent_tests import _build_calibrate_config
+
+    config, _ = _build_calibrate_config({"type": "agent", "uuid": "a", "config": {}}, [])
+    assert config["params"]["model"] == "openai/gpt-4.1"

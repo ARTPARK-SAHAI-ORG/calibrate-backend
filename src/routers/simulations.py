@@ -1279,10 +1279,8 @@ def _build_calibrate_simulation_config(
 
     # Calibrate agent mode
     llm_config = agent_config.get("llm", {})
-    # Shares DEFAULT_AGENT_LLM_MODEL with new-agent creation. Hardcoded fallback
-    # stays "gpt-4.1" to preserve runtime behavior for legacy agents created
-    # before agent-create defaults were wired up.
-    model = llm_config.get("model", env_str("DEFAULT_AGENT_LLM_MODEL", "gpt-4.1"))
+    # calibrate sends the model to OpenRouter, so the fallback needs the provider prefix.
+    model = llm_config.get("model", env_str("DEFAULT_AGENT_LLM_MODEL", "openai/gpt-4.1"))
 
     agent_tools = get_tools_for_agent(agent["uuid"])
     tool_configs = build_tool_configs(agent_tools)
