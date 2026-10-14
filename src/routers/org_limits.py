@@ -122,7 +122,7 @@ class OwnLimitsResponse(BaseModel):
         description="Maximum scoring batches your workspace may run at once"
     )
     uses_own_provider_keys: bool = Field(
-        description="Whether your workspace uses its own AI provider keys"
+        description="Whether your workspace's runs use only its own AI provider keys instead of Calibrate's"
     )
 
 
@@ -223,20 +223,20 @@ def get_own_limits(ctx: OrgContext = Depends(get_current_org)):
 @router.get(
     "/me/max-rows-per-eval",
     response_model=MaxRowsPerEvalResponse,
-    summary="Get own max rows per eval",
+    summary="Get own maximum rows per eval run",
 )
 def get_max_rows_per_eval(ctx: OrgContext = Depends(get_current_org)):
-    """Get the max rows per eval"""
+    """Get the most dataset rows one eval run in your workspace may process"""
     return {"max_rows_per_eval": effective_max_rows_per_eval(ctx.org_uuid)}
 
 
 @router.get(
     "/me/max-scored-traces",
     response_model=MaxScoredTracesResponse,
-    summary="Get own max scored traces",
+    summary="Get own maximum scored traces",
 )
 def get_max_scored_traces(ctx: OrgContext = Depends(get_current_org)):
-    """Get the max traces scored automatically"""
+    """Get how many traces your workspace may have scored automatically"""
     return {"max_scored_traces": effective_max_scored_traces(ctx.org_uuid)}
 
 

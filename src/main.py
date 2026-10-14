@@ -700,8 +700,8 @@ async def list_available_providers(
 ) -> Dict[str, Any]:
     """
     List the AI providers your evaluations can run with. When your workspace has
-    its own AI provider keys, lists only the providers it has keys for. Does not
-    check that the keys work. `/provider-status` does that.
+    its own AI provider keys, lists only the providers it has keys for.
+    `/provider-status` checks whether the keys work.
     """
     if credentials:
         try:
