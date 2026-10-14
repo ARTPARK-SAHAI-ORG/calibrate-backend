@@ -137,6 +137,15 @@ def test_check_provider_key_reports_error():
         assert asyncio.run(pk.check_provider_key("openai", "bad")) == "401 Unauthorized"
 
 
+def test_check_provider_key_names_the_provider_when_the_key_is_refused():
+    for status in ("HTTP 401", "HTTP 403"):
+        proc = _process(_events("deepgram", {"status": "fail", "error": f'{status}: {{"err_msg":"Invalid credentials."}}'}))
+        with patch("asyncio.create_subprocess_exec", AsyncMock(return_value=proc)):
+            assert asyncio.run(pk.check_provider_key("deepgram", "bad")) == (
+                "Deepgram did not accept this key. Check that you copied the full API key."
+            )
+
+
 def test_check_provider_key_unparseable_output():
     proc = _process(b"garbage")
     with patch("asyncio.create_subprocess_exec", AsyncMock(return_value=proc)):
