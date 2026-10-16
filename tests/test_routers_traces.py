@@ -3387,22 +3387,31 @@ def test_an_empty_conversation_id_is_rejected_not_ignored(client):
     assert client.get("/traces", headers=h).json()["total"] == 1
 
 
-def test_first_user_content_reads_the_first_user_turn():
-    from routers.traces import _first_user_content
-
-    assert _first_user_content("one prompt") == "one prompt"
-    assert (
-        _first_user_content(
-            [
-                {"role": "system", "content": "s"},
-                {"role": "user", "content": "first"},
-                {"role": "user", "content": "second"},
-            ]
-        )
-        == "first"
+def test_conversation_first_message_comes_from_its_oldest_trace(client):
+    h, agent_id = _signup_with_agent(client)
+    # A caller that sends only the new message with each turn.
+    first = _post_trace(
+        client, h,
+        _payload(agent_id, _mid(), "conv-a", input=[{"role": "user", "content": "first question"}]),
     )
-    assert _first_user_content([{"role": "system", "content": "s"}]) is None
-    assert _first_user_content(None) is None
+    later = _post_trace(
+        client, h,
+        _payload(agent_id, _mid(), "conv-a", input=[{"role": "user", "content": "later question"}]),
+    )
+    _post_trace(client, h, _payload(agent_id, _mid(), "conv-b"))
+    _set_created_at(first["uuid"], "2026-01-01 10:00:00")
+    _set_created_at(later["uuid"], "2026-01-01 10:05:00")
+
+    body = client.get(
+        "/traces/conversations",
+        params={"agent_id": agent_id, "conversation_id": "conv-a"},
+        headers=h,
+    ).json()
+    assert body["total"] == 1
+    row = body["items"][0]
+    assert row["first_message_preview"] == "first question"
+    assert row["last_turn"]["input_preview"] == "later question"
+    assert "first_input" not in row
 
 
 def test_conversation_ids_list_every_id_newest_first(client):

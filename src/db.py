@@ -11086,6 +11086,7 @@ def list_trace_conversations(
     output_type: Optional[str] = None,
     labels: Optional[List[str]] = None,
     scores: Optional[List[TraceScoreFilter]] = None,
+    conversation_id: Optional[str] = None,
 ) -> Tuple[List[Dict[str, Any]], int]:
     """Return `(page, total)` of conversations, newest last turn first.
 
@@ -11093,7 +11094,9 @@ def list_trace_conversations(
     The filters pick which conversations appear (any one matching turn is
     enough); the counts, times and last turn cover the whole conversation.
     """
-    where, params = _trace_filters(org_uuid, agent_id, q, output_type, labels, scores)
+    where, params = _trace_filters(
+        org_uuid, agent_id, q, output_type, labels, scores, conversation_id
+    )
     keys = (
         "SELECT DISTINCT agent_id, conversation_id FROM traces "
         f"WHERE {where} AND conversation_id IS NOT NULL"
@@ -11127,19 +11130,33 @@ def list_trace_conversations(
         last_rows = conn.execute(
             f"""
             SELECT * FROM (
-                SELECT *, ROW_NUMBER() OVER (
-                    PARTITION BY agent_id, conversation_id
-                    ORDER BY created_at DESC, id DESC
-                ) AS rn
+                SELECT *,
+                    ROW_NUMBER() OVER (
+                        PARTITION BY agent_id, conversation_id
+                        ORDER BY created_at DESC, id DESC
+                    ) AS rn,
+                    ROW_NUMBER() OVER (
+                        PARTITION BY agent_id, conversation_id
+                        ORDER BY created_at ASC, id ASC
+                    ) AS rn_first
                 FROM traces
                 WHERE org_uuid = ? AND deleted_at IS NULL
                   AND (agent_id, conversation_id) IN (VALUES {pairs})
-            ) WHERE rn = 1
+            ) WHERE rn = 1 OR rn_first = 1
             """,
             [org_uuid] + pair_params,
         ).fetchall()
         conn.rollback()
-    last_turns = {(r["agent_id"], r["conversation_id"]): _trace_row(r) for r in last_rows}
+    last_turns = {
+        (r["agent_id"], r["conversation_id"]): _trace_row(r)
+        for r in last_rows
+        if r["rn"] == 1
+    }
+    first_inputs = {
+        (r["agent_id"], r["conversation_id"]): json.loads(r["input"])
+        for r in last_rows
+        if r["rn_first"] == 1
+    }
     return [
         {
             "agent_id": g["agent_id"],
@@ -11148,6 +11165,7 @@ def list_trace_conversations(
             "first_turn_at": _trace_iso(g["first_turn_at"]),
             "last_turn_at": _trace_iso(g["last_turn_at"]),
             "last_turn": last_turns[(g["agent_id"], g["conversation_id"])],
+            "first_input": first_inputs[(g["agent_id"], g["conversation_id"])],
         }
         for g in groups
     ], total
