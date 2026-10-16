@@ -10726,6 +10726,22 @@ def list_trace_labels(org_uuid: str, agent_id: Optional[str] = None) -> List[str
         return [row[0] for row in rows]
 
 
+def list_trace_conversation_ids(
+    org_uuid: str, agent_id: Optional[str] = None
+) -> List[str]:
+    """Every conversation ID on the live traces, newest activity first, so a
+    filter can offer the whole set rather than the conversations on screen."""
+    where, params = _trace_filters(org_uuid, agent_id)
+    with get_db_connection() as conn:
+        rows = conn.execute(
+            f"SELECT conversation_id FROM traces WHERE {where} "
+            "AND conversation_id IS NOT NULL "
+            "GROUP BY conversation_id ORDER BY MAX(created_at) DESC, conversation_id",
+            params,
+        ).fetchall()
+        return [row[0] for row in rows]
+
+
 def count_live_traces(org_uuid: str) -> int:
     """Live trace count for the workspace cap. Deliberately not agent-scoped."""
     with get_db_connection() as conn:

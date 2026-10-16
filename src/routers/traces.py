@@ -38,6 +38,7 @@ from db import (
     get_latest_trace_run_summaries,
     get_trace,
     get_traces_by_uuids,
+    list_trace_conversation_ids,
     list_trace_conversations,
     list_trace_labels,
     list_trace_scoring_runs,
@@ -490,6 +491,12 @@ class TraceResponse(BaseModel):
     created_at: str = Field(description="When the trace was created (ISO 8601 UTC)")
     updated_at: str = Field(
         description="When the trace was last updated (ISO 8601 UTC)"
+    )
+
+
+class TraceConversationIdsResponse(BaseModel):
+    conversation_ids: List[str] = Field(
+        description="Every conversation ID on your live traces, newest activity first"
     )
 
 
@@ -982,6 +989,25 @@ async def list_trace_labels_endpoint(
 ):
     """List every label in use, so a filter can offer the whole set"""
     return {"labels": list_trace_labels(ctx.org_uuid, agent_id=agent_id)}
+
+
+@router.get(
+    "/conversation-ids",
+    response_model=TraceConversationIdsResponse,
+    summary="List trace conversation IDs",
+)
+async def list_trace_conversation_ids_endpoint(
+    ctx: OrgContext = Depends(get_current_org),
+    agent_id: Optional[str] = Query(
+        None, description="Return only conversation IDs from this agent's traces"
+    ),
+):
+    """List every conversation ID in use, so a filter can offer the whole set"""
+    return {
+        "conversation_ids": list_trace_conversation_ids(
+            ctx.org_uuid, agent_id=agent_id
+        )
+    }
 
 
 @router.post(

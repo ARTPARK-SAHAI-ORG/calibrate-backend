@@ -3403,3 +3403,24 @@ def test_first_user_content_reads_the_first_user_turn():
     )
     assert _first_user_content([{"role": "system", "content": "s"}]) is None
     assert _first_user_content(None) is None
+
+
+def test_conversation_ids_list_every_id_newest_first(client):
+    h, agent_id = _signup_with_agent(client)
+    other_agent = _create_agent(client, h)["uuid"]
+    old = _post_trace(client, h, _payload(agent_id, _mid(), "conv-old"))
+    new = _post_trace(client, h, _payload(agent_id, _mid(), "conv-new"))
+    _post_trace(client, h, _payload(agent_id, _mid(), "conv-old"))
+    _post_trace(client, h, _payload(agent_id, _mid(), conversation_id=None))
+    _post_trace(client, h, _payload(other_agent, _mid(), "conv-elsewhere"))
+    with db.get_db_connection() as conn:
+        conn.execute("UPDATE traces SET created_at = '2026-01-01 10:00:00' WHERE conversation_id = 'conv-old'")
+        conn.execute("UPDATE traces SET created_at = '2026-01-02 10:00:00' WHERE uuid = ?", (new["uuid"],))
+        conn.commit()
+
+    res = client.get("/traces/conversation-ids", params={"agent_id": agent_id}, headers=h)
+    assert res.status_code == 200, res.text
+    assert res.json() == {"conversation_ids": ["conv-new", "conv-old"]}
+    assert old["uuid"] != new["uuid"]
+    key_headers = _api_key_headers(client, h)
+    assert client.get("/traces/conversation-ids", headers=key_headers).status_code in (401, 403)
