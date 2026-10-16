@@ -872,7 +872,6 @@ async def list_traces_endpoint(
 class TraceConversationSummary(BaseModel):
     conversation_id: str = Field(description="The conversation ID you sent with its turns")
     agent_id: str = Field(description=_AGENT_ID_DESCRIPTION)
-    trace_count: int = Field(description="Number of traces stored for this conversation")
     first_turn_at: str = Field(description="When the first trace in this conversation was created (ISO 8601 UTC)")
     last_turn_at: str = Field(description="When the newest trace in this conversation was created (ISO 8601 UTC)")
     first_message_preview: Optional[str] = Field(

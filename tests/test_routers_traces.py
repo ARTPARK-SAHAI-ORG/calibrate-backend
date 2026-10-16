@@ -3287,13 +3287,12 @@ def test_conversations_group_turns_and_leave_out_traces_without_an_id(client):
     newest, older = body["items"]
     assert newest["agent_id"] == agent_a
     assert newest["conversation_id"] == "conv-x"
-    assert newest["trace_count"] == 2
     assert newest["first_turn_at"] == "2026-01-01T10:00:00Z"
     assert newest["last_turn_at"] == "2026-01-01T10:05:00Z"
     assert newest["last_turn"]["uuid"] == last["uuid"]
     assert newest["first_message_preview"] == "When is my daughter's next vaccination?"
     assert "results" in newest["last_turn"]
-    assert older["agent_id"] == agent_b and older["trace_count"] == 1
+    assert older["agent_id"] == agent_b
 
     only_b = client.get(
         "/traces/conversations", params={"agent_id": agent_b}, headers=h
@@ -3301,18 +3300,20 @@ def test_conversations_group_turns_and_leave_out_traces_without_an_id(client):
     assert [c["agent_id"] for c in only_b["items"]] == [agent_b]
 
 
-def test_conversation_filters_pick_conversations_but_count_every_turn(client):
+def test_conversation_filters_pick_conversations_but_show_the_newest_trace(client):
     h, agent_id = _signup_with_agent(client)
-    _post_trace(client, h, _payload(agent_id, _mid(), "conv-a", labels=["vip"]))
-    _post_trace(client, h, _payload(agent_id, _mid(), "conv-a"))
+    matched = _post_trace(client, h, _payload(agent_id, _mid(), "conv-a", labels=["vip"]))
+    newest = _post_trace(client, h, _payload(agent_id, _mid(), "conv-a"))
     _post_trace(client, h, _payload(agent_id, _mid(), "conv-b"))
+    _set_created_at(matched["uuid"], "2026-01-01 10:00:00")
+    _set_created_at(newest["uuid"], "2026-01-01 10:05:00")
 
     body = client.get(
         "/traces/conversations", params={"labels": "vip"}, headers=h
     ).json()
     assert body["total"] == 1
     assert body["items"][0]["conversation_id"] == "conv-a"
-    assert body["items"][0]["trace_count"] == 2
+    assert body["items"][0]["last_turn"]["uuid"] == newest["uuid"]
 
 
 def test_conversations_paginate(client):
