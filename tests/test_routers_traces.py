@@ -3291,6 +3291,7 @@ def test_conversations_group_turns_and_leave_out_traces_without_an_id(client):
     assert newest["first_turn_at"] == "2026-01-01T10:00:00Z"
     assert newest["last_turn_at"] == "2026-01-01T10:05:00Z"
     assert newest["last_turn"]["uuid"] == last["uuid"]
+    assert newest["first_message_preview"] == "When is my daughter's next vaccination?"
     assert "results" in newest["last_turn"]
     assert older["agent_id"] == agent_b and older["turn_count"] == 1
 
@@ -3384,3 +3385,21 @@ def test_an_empty_conversation_id_is_rejected_not_ignored(client):
     )
     assert res.status_code == 422
     assert client.get("/traces", headers=h).json()["total"] == 1
+
+
+def test_first_user_content_reads_the_first_user_turn():
+    from routers.traces import _first_user_content
+
+    assert _first_user_content("one prompt") == "one prompt"
+    assert (
+        _first_user_content(
+            [
+                {"role": "system", "content": "s"},
+                {"role": "user", "content": "first"},
+                {"role": "user", "content": "second"},
+            ]
+        )
+        == "first"
+    )
+    assert _first_user_content([{"role": "system", "content": "s"}]) is None
+    assert _first_user_content(None) is None

@@ -613,6 +613,15 @@ def _last_user_content(stored_input: Any) -> Optional[str]:
     return None
 
 
+def _first_user_content(stored_input: Any) -> Optional[str]:
+    if isinstance(stored_input, str):
+        return stored_input
+    for turn in stored_input or []:
+        if turn.get("role") == "user" and isinstance(turn.get("content"), str):
+            return turn["content"]
+    return None
+
+
 def _turn_count(stored_input: Any) -> int:
     """A standalone prompt is the single turn it stands for."""
     return 1 if isinstance(stored_input, str) else len(stored_input or [])
@@ -868,6 +877,10 @@ class TraceConversationSummary(BaseModel):
     turn_count: int = Field(description="Number of traces stored for this conversation")
     first_turn_at: str = Field(description="When the first trace in this conversation was created (ISO 8601 UTC)")
     last_turn_at: str = Field(description="When the newest trace in this conversation was created (ISO 8601 UTC)")
+    first_message_preview: Optional[str] = Field(
+        None,
+        description="The first user message in the conversation, truncated for display",
+    )
     last_turn: TraceSummary = Field(description="The newest trace in this conversation")
 
 
@@ -922,6 +935,9 @@ async def list_trace_conversations_endpoint(
         ctx.org_uuid, [c["last_turn"]["uuid"] for c in conversations]
     )
     for c in conversations:
+        c["first_message_preview"] = _preview(
+            _first_user_content(c["last_turn"]["input"])
+        )
         c["last_turn"] = _to_summary(c["last_turn"], scoring.get(c["last_turn"]["uuid"]))
     return page_envelope(conversations, total, pagination)
 
