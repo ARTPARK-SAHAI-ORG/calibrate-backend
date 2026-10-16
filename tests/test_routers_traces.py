@@ -3287,13 +3287,13 @@ def test_conversations_group_turns_and_leave_out_traces_without_an_id(client):
     newest, older = body["items"]
     assert newest["agent_id"] == agent_a
     assert newest["conversation_id"] == "conv-x"
-    assert newest["turn_count"] == 2
+    assert newest["trace_count"] == 2
     assert newest["first_turn_at"] == "2026-01-01T10:00:00Z"
     assert newest["last_turn_at"] == "2026-01-01T10:05:00Z"
     assert newest["last_turn"]["uuid"] == last["uuid"]
     assert newest["first_message_preview"] == "When is my daughter's next vaccination?"
     assert "results" in newest["last_turn"]
-    assert older["agent_id"] == agent_b and older["turn_count"] == 1
+    assert older["agent_id"] == agent_b and older["trace_count"] == 1
 
     only_b = client.get(
         "/traces/conversations", params={"agent_id": agent_b}, headers=h
@@ -3312,7 +3312,7 @@ def test_conversation_filters_pick_conversations_but_count_every_turn(client):
     ).json()
     assert body["total"] == 1
     assert body["items"][0]["conversation_id"] == "conv-a"
-    assert body["items"][0]["turn_count"] == 2
+    assert body["items"][0]["trace_count"] == 2
 
 
 def test_conversations_paginate(client):

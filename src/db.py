@@ -11109,7 +11109,7 @@ def list_trace_conversations(
         groups = conn.execute(
             f"""
             WITH keys AS ({keys})
-            SELECT t.agent_id, t.conversation_id, COUNT(*) AS turn_count,
+            SELECT t.agent_id, t.conversation_id, COUNT(*) AS trace_count,
                    MIN(t.created_at) AS first_turn_at,
                    MAX(t.created_at) AS last_turn_at
             FROM traces t
@@ -11161,7 +11161,7 @@ def list_trace_conversations(
         {
             "agent_id": g["agent_id"],
             "conversation_id": g["conversation_id"],
-            "turn_count": g["turn_count"],
+            "trace_count": g["trace_count"],
             "first_turn_at": _trace_iso(g["first_turn_at"]),
             "last_turn_at": _trace_iso(g["last_turn_at"]),
             "last_turn": last_turns[(g["agent_id"], g["conversation_id"])],
