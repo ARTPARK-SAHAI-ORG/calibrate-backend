@@ -38,6 +38,8 @@ from db import (
     get_latest_trace_run_summaries,
     get_trace,
     get_traces_by_uuids,
+    list_trace_conversation_ids,
+    list_trace_conversations,
     list_trace_labels,
     list_trace_scoring_runs,
     list_traces,
@@ -308,7 +310,7 @@ class TraceIngest(BaseModel):
         None,
         min_length=1,
         max_length=255,
-        description="Your own ID for the conversation this turn belongs to, stored for reference only. Omit if you have none",
+        description="Your own ID for the conversation this turn belongs to. Turns sharing it are grouped into one conversation. Omit if you have none",
     )
     input: TraceInput = Field(description=_TRACE_INPUT_DESCRIPTION)
     output: TraceOutput = Field(description="What the agent produced for this turn")
@@ -492,6 +494,12 @@ class TraceResponse(BaseModel):
     )
 
 
+class TraceConversationIdsResponse(BaseModel):
+    conversation_ids: List[str] = Field(
+        description="Every conversation ID on your live traces, newest activity first"
+    )
+
+
 class TraceLabelsResponse(BaseModel):
     labels: List[str] = Field(
         description="Every label in use on your live traces, A to Z"
@@ -526,6 +534,18 @@ _FILTER_SCORE_DESCRIPTION = (
 )
 
 
+# Two agents can send the same conversation ID; without the agent, a filter on
+# it would mix their traces.
+_CONVERSATION_NEEDS_AGENT = "conversation_id needs agent_id"
+
+
+def _require_agent_for_conversation(
+    agent_id: Optional[str], conversation_id: Optional[str]
+) -> None:
+    if conversation_id and not agent_id:
+        raise HTTPException(status_code=422, detail=_CONVERSATION_NEEDS_AGENT)
+
+
 class _TraceSelection(BaseModel):
     """Either a list of IDs or `select_all` plus the same filters `GET /traces`
     takes, so a caller acting on a whole filtered set never has to name its rows."""
@@ -544,6 +564,12 @@ class _TraceSelection(BaseModel):
     )
     select_all: bool = Field(False, description=_SELECT_ALL_DESCRIPTION)
     agent_id: Optional[str] = Field(None, description=_FILTER_AGENT_DESCRIPTION)
+    conversation_id: Optional[str] = Field(
+        None,
+        min_length=1,
+        max_length=255,
+        description="With `select_all` on, act only on the turns of this conversation. Requires `agent_id`",
+    )
     q: Optional[str] = Field(None, description=_FILTER_Q_DESCRIPTION)
     output_type: Optional[Literal["response", "tool_call"]] = Field(
         None, description=_FILTER_OUTPUT_TYPE_DESCRIPTION
@@ -561,6 +587,8 @@ class _TraceSelection(BaseModel):
 
     @model_validator(mode="after")
     def _require_a_selection(self):
+        if self.conversation_id and not self.agent_id:
+            raise ValueError(_CONVERSATION_NEEDS_AGENT)
         if self.select_all:
             return self
         if not self.trace_ids:
@@ -775,6 +803,12 @@ async def list_traces_endpoint(
     agent_id: Optional[str] = Query(
         None, description="Return only traces from this agent"
     ),
+    conversation_id: Optional[str] = Query(
+        None,
+        min_length=1,
+        max_length=255,
+        description="Return only the turns of this conversation. Requires `agent_id`",
+    ),
     q: Optional[str] = Query(
         None,
         description="Return only traces containing this text in their message ID, conversation ID, conversation history, output, or metadata",
@@ -802,6 +836,7 @@ async def list_traces_endpoint(
     ),
 ):
     """List ingested traces, newest first"""
+    _require_agent_for_conversation(agent_id, conversation_id)
     if pagination.limit > MAX_LIST_LIMIT:
         raise HTTPException(
             status_code=422, detail=f"limit must be {MAX_LIST_LIMIT} or less"
@@ -824,6 +859,7 @@ async def list_traces_endpoint(
         output_type=output_type,
         labels=labels,
         scores=scores,
+        conversation_id=conversation_id,
         sort_evaluator=sort_by_evaluator,
         sort_order=sort_order,
     )
@@ -843,8 +879,87 @@ async def list_traces_endpoint(
             output_type=output_type,
             labels=labels,
             scores=scores,
+            conversation_id=conversation_id,
         )
     return body
+
+
+class TraceConversationSummary(BaseModel):
+    conversation_id: str = Field(description="The conversation ID you sent with its turns")
+    agent_id: str = Field(description=_AGENT_ID_DESCRIPTION)
+    first_turn_at: str = Field(description="When the first trace in this conversation was created (ISO 8601 UTC)")
+    last_turn_at: str = Field(description="When the newest trace in this conversation was created (ISO 8601 UTC)")
+    first_message_preview: Optional[str] = Field(
+        None,
+        description="The user message of the conversation's first trace, truncated for display",
+    )
+    last_turn: TraceSummary = Field(description="The newest trace in this conversation")
+
+
+@router.get(
+    "/conversations",
+    response_model=PaginatedResponse[TraceConversationSummary],
+    summary="List trace conversations",
+)
+async def list_trace_conversations_endpoint(
+    ctx: OrgContext = Depends(get_current_org),
+    pagination: PaginationParams = Depends(),
+    agent_id: Optional[str] = Query(
+        None, description="Return only conversations with this agent"
+    ),
+    conversation_id: Optional[str] = Query(
+        None,
+        min_length=1,
+        max_length=255,
+        description="Return only the conversation with this ID. Requires `agent_id`",
+    ),
+    q: Optional[str] = Query(
+        None,
+        description="Return only conversations with a turn containing this text in its message ID, conversation ID, conversation history, output, or metadata",
+    ),
+    output_type: Optional[Literal["response", "tool_call"]] = Query(
+        None,
+        description="Return only conversations with a turn whose output is of this kind",
+    ),
+    labels: Optional[List[TraceLabel]] = Query(
+        None,
+        description="Return only conversations with a turn carrying at least one of these labels. Repeat the parameter for each label",
+    ),
+    score: Optional[List[str]] = Query(
+        None,
+        description="Return only conversations with a turn whose latest scoring run matches every one of these conditions. " + _SCORE_CONDITION_SYNTAX,
+    ),
+):
+    """List conversations, newest turn first. Traces sent without a conversation ID are left out"""
+    _require_agent_for_conversation(agent_id, conversation_id)
+    if pagination.limit > MAX_LIST_LIMIT:
+        raise HTTPException(
+            status_code=422, detail=f"limit must be {MAX_LIST_LIMIT} or less"
+        )
+    if labels and len(labels) > MAX_LABELS:
+        raise HTTPException(
+            status_code=422, detail=f"labels accepts at most {MAX_LABELS} labels"
+        )
+    conversations, total = list_trace_conversations(
+        ctx.org_uuid,
+        limit=pagination.limit,
+        offset=pagination.offset,
+        agent_id=agent_id,
+        q=q,
+        output_type=output_type,
+        labels=labels,
+        scores=_parse_score_filters(score),
+        conversation_id=conversation_id,
+    )
+    scoring = get_latest_trace_run_summaries(
+        ctx.org_uuid, [c["last_turn"]["uuid"] for c in conversations]
+    )
+    for c in conversations:
+        c["first_message_preview"] = _preview(
+            _last_user_content(c.pop("first_input"))
+        )
+        c["last_turn"] = _to_summary(c["last_turn"], scoring.get(c["last_turn"]["uuid"]))
+    return page_envelope(conversations, total, pagination)
 
 
 class TraceUsageResponse(BaseModel):
@@ -889,6 +1004,25 @@ async def list_trace_labels_endpoint(
     return {"labels": list_trace_labels(ctx.org_uuid, agent_id=agent_id)}
 
 
+@router.get(
+    "/conversation-ids",
+    response_model=TraceConversationIdsResponse,
+    summary="List trace conversation IDs",
+)
+async def list_trace_conversation_ids_endpoint(
+    ctx: OrgContext = Depends(get_current_org),
+    agent_id: Optional[str] = Query(
+        None, description="Return only conversation IDs from this agent's traces"
+    ),
+):
+    """List every conversation ID in use, so a filter can offer the whole set"""
+    return {
+        "conversation_ids": list_trace_conversation_ids(
+            ctx.org_uuid, agent_id=agent_id
+        )
+    }
+
+
 @router.post(
     "/bulk-delete",
     response_model=BulkDeleteTracesResponse,
@@ -906,6 +1040,7 @@ async def bulk_delete_traces(
             output_type=payload.output_type,
             labels=payload.labels,
             scores=_parse_score_filters(payload.score),
+            conversation_id=payload.conversation_id,
         )
     else:
         deleted = soft_delete_traces(ctx.org_uuid, trace_ids=payload.trace_ids)
@@ -1083,6 +1218,7 @@ def convert_traces_to_tests(
             output_type=payload.output_type,
             labels=payload.labels,
             scores=_parse_score_filters(payload.score),
+            conversation_id=payload.conversation_id,
         )
         if total > MAX_CONVERT_TRACES:
             raise HTTPException(

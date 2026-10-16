@@ -1584,10 +1584,9 @@ def init_db():
         # ============ traces ============
         # Production agent turns, ingested machine-to-machine. `input`/`output`/
         # `metadata` are JSON text, same convention as every other config column.
-        # `message_id`/`conversation_id` are the caller's own labels: stored and
-        # displayed, never matched on, so they are nullable and not unique.
-        # Making them load-bearing let a customer's reused ID silently discard a
-        # turn, which is why nothing reads them now.
+        # `message_id`/`conversation_id` are the caller's own labels, nullable
+        # and not unique. `conversation_id` groups and filters turns but is never
+        # a dedupe key: that once let a customer's reused ID silently discard a turn.
         cursor.execute(
             """
             CREATE TABLE IF NOT EXISTS traces (
@@ -1616,6 +1615,11 @@ def init_db():
         cursor.execute(
             "CREATE INDEX IF NOT EXISTS idx_traces_org_created "
             "ON traces(org_uuid, deleted_at, created_at DESC, id DESC)"
+        )
+        cursor.execute(
+            "CREATE INDEX IF NOT EXISTS idx_traces_org_agent_conversation "
+            "ON traces(org_uuid, agent_id, conversation_id, created_at) "
+            "WHERE deleted_at IS NULL"
         )
         try:
             cursor.execute("ALTER TABLE traces ADD COLUMN labels TEXT DEFAULT NULL")
@@ -10637,6 +10641,7 @@ def _trace_filters(
     output_type: Optional[str] = None,
     labels: Optional[List[str]] = None,
     scores: Optional[List[TraceScoreFilter]] = None,
+    conversation_id: Optional[str] = None,
 ) -> Tuple[str, List[Any]]:
     """Build the shared WHERE clause for every live-trace query."""
     where = ["org_uuid = ?", "deleted_at IS NULL"]
@@ -10644,6 +10649,9 @@ def _trace_filters(
     if agent_id:
         where.append("agent_id = ?")
         params.append(agent_id)
+    if conversation_id:
+        where.append("conversation_id = ?")
+        params.append(conversation_id)
     if labels:
         placeholders = ",".join("?" * len(labels))
         where.append(
@@ -10713,6 +10721,22 @@ def list_trace_labels(org_uuid: str, agent_id: Optional[str] = None) -> List[str
         rows = conn.execute(
             f"SELECT DISTINCT value FROM traces, json_each(traces.labels) "
             f"WHERE {where} ORDER BY value COLLATE NOCASE, value",
+            params,
+        ).fetchall()
+        return [row[0] for row in rows]
+
+
+def list_trace_conversation_ids(
+    org_uuid: str, agent_id: Optional[str] = None
+) -> List[str]:
+    """Every conversation ID on the live traces, newest activity first, so a
+    filter can offer the whole set rather than the conversations on screen."""
+    where, params = _trace_filters(org_uuid, agent_id)
+    with get_db_connection() as conn:
+        rows = conn.execute(
+            f"SELECT conversation_id FROM traces WHERE {where} "
+            "AND conversation_id IS NOT NULL "
+            "GROUP BY conversation_id ORDER BY MAX(created_at) DESC, conversation_id",
             params,
         ).fetchall()
         return [row[0] for row in rows]
@@ -11018,6 +11042,7 @@ def list_traces(
     output_type: Optional[str] = None,
     labels: Optional[List[str]] = None,
     scores: Optional[List[TraceScoreFilter]] = None,
+    conversation_id: Optional[str] = None,
     sort_evaluator: Optional[str] = None,
     sort_order: str = "desc",
 ) -> Tuple[List[Dict[str, Any]], int]:
@@ -11027,7 +11052,9 @@ def list_traces(
     A trace that evaluator has not scored sorts last in both directions: an
     unscored trace is unknown, not a low score, so it must not lead the page.
     """
-    where, params = _trace_filters(org_uuid, agent_id, q, output_type, labels, scores)
+    where, params = _trace_filters(
+        org_uuid, agent_id, q, output_type, labels, scores, conversation_id
+    )
     order = "ORDER BY created_at DESC, id DESC"
     order_params: List[Any] = []
     if sort_evaluator:
@@ -11049,6 +11076,100 @@ def list_traces(
         return [_trace_row(r) for r in rows], total
 
 
+def list_trace_conversations(
+    org_uuid: str,
+    *,
+    limit: int,
+    offset: int,
+    agent_id: Optional[str] = None,
+    q: Optional[str] = None,
+    output_type: Optional[str] = None,
+    labels: Optional[List[str]] = None,
+    scores: Optional[List[TraceScoreFilter]] = None,
+    conversation_id: Optional[str] = None,
+) -> Tuple[List[Dict[str, Any]], int]:
+    """Return `(page, total)` of conversations, newest last turn first.
+
+    A conversation is the live traces sharing an agent and a `conversation_id`.
+    The filters pick which conversations appear (any one matching turn is
+    enough); the counts, times and last turn cover the whole conversation.
+    """
+    where, params = _trace_filters(
+        org_uuid, agent_id, q, output_type, labels, scores, conversation_id
+    )
+    keys = (
+        "SELECT DISTINCT agent_id, conversation_id FROM traces "
+        f"WHERE {where} AND conversation_id IS NOT NULL"
+    )
+    with get_db_connection() as conn:
+        # One read transaction, so a turn deleted between the two queries
+        # cannot leave a group without its last turn.
+        conn.execute("BEGIN")
+        total = conn.execute(f"SELECT COUNT(*) FROM ({keys})", params).fetchone()[0]
+        groups = conn.execute(
+            f"""
+            WITH keys AS ({keys})
+            SELECT t.agent_id, t.conversation_id,
+                   MIN(t.created_at) AS first_turn_at,
+                   MAX(t.created_at) AS last_turn_at
+            FROM traces t
+            JOIN keys k
+              ON t.agent_id = k.agent_id AND t.conversation_id = k.conversation_id
+            WHERE t.org_uuid = ? AND t.deleted_at IS NULL
+            GROUP BY t.agent_id, t.conversation_id
+            ORDER BY last_turn_at DESC, t.agent_id, t.conversation_id
+            LIMIT ? OFFSET ?
+            """,
+            params + [org_uuid, limit, offset],
+        ).fetchall()
+        if not groups:
+            conn.rollback()
+            return [], total
+        pairs = ",".join("(?, ?)" for _ in groups)
+        pair_params = [v for g in groups for v in (g["agent_id"], g["conversation_id"])]
+        last_rows = conn.execute(
+            f"""
+            SELECT * FROM (
+                SELECT *,
+                    ROW_NUMBER() OVER (
+                        PARTITION BY agent_id, conversation_id
+                        ORDER BY created_at DESC, id DESC
+                    ) AS rn,
+                    ROW_NUMBER() OVER (
+                        PARTITION BY agent_id, conversation_id
+                        ORDER BY created_at ASC, id ASC
+                    ) AS rn_first
+                FROM traces
+                WHERE org_uuid = ? AND deleted_at IS NULL
+                  AND (agent_id, conversation_id) IN (VALUES {pairs})
+            ) WHERE rn = 1 OR rn_first = 1
+            """,
+            [org_uuid] + pair_params,
+        ).fetchall()
+        conn.rollback()
+    last_turns = {
+        (r["agent_id"], r["conversation_id"]): _trace_row(r)
+        for r in last_rows
+        if r["rn"] == 1
+    }
+    first_inputs = {
+        (r["agent_id"], r["conversation_id"]): json.loads(r["input"])
+        for r in last_rows
+        if r["rn_first"] == 1
+    }
+    return [
+        {
+            "agent_id": g["agent_id"],
+            "conversation_id": g["conversation_id"],
+            "first_turn_at": _trace_iso(g["first_turn_at"]),
+            "last_turn_at": _trace_iso(g["last_turn_at"]),
+            "last_turn": last_turns[(g["agent_id"], g["conversation_id"])],
+            "first_input": first_inputs[(g["agent_id"], g["conversation_id"])],
+        }
+        for g in groups
+    ], total
+
+
 # SQLite caps a statement at 32,766 bound values, so a delete of every trace in
 # a full workspace has to be split. 500 keeps each statement small.
 _TRACE_DELETE_CHUNK = 500
@@ -11062,11 +11183,14 @@ def soft_delete_traces_matching(
     output_type: Optional[str] = None,
     labels: Optional[List[str]] = None,
     scores: Optional[List[TraceScoreFilter]] = None,
+    conversation_id: Optional[str] = None,
 ) -> int:
     """Soft-delete every live trace matching the list filters, returning the
     number of rows flipped. No UUID list, so a workspace-wide delete stays one
     statement however many traces it covers."""
-    where, params = _trace_filters(org_uuid, agent_id, q, output_type, labels, scores)
+    where, params = _trace_filters(
+        org_uuid, agent_id, q, output_type, labels, scores, conversation_id
+    )
     with get_db_connection() as conn:
         cursor = conn.execute(
             f"UPDATE traces SET deleted_at = CURRENT_TIMESTAMP, "
@@ -11223,6 +11347,7 @@ def average_trace_scores(
     output_type: Optional[str] = None,
     labels: Optional[List[str]] = None,
     scores: Optional[List[TraceScoreFilter]] = None,
+    conversation_id: Optional[str] = None,
 ) -> List[Dict[str, Any]]:
     """Mean score per evaluator over the live traces matching the list filters.
 
@@ -11236,7 +11361,9 @@ def average_trace_scores(
     than whichever version happened to sort highest. An evaluator that has
     scored nothing in the filtered set is absent rather than zero.
     """
-    where, params = _trace_filters(org_uuid, agent_id, q, output_type, labels, scores)
+    where, params = _trace_filters(
+        org_uuid, agent_id, q, output_type, labels, scores, conversation_id
+    )
     sql = f"""
         WITH matched AS (
             SELECT uuid FROM traces WHERE {where}
