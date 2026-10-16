@@ -534,6 +534,18 @@ _FILTER_SCORE_DESCRIPTION = (
 )
 
 
+# Two agents can send the same conversation ID; without the agent, a filter on
+# it would mix their traces.
+_CONVERSATION_NEEDS_AGENT = "conversation_id needs agent_id"
+
+
+def _require_agent_for_conversation(
+    agent_id: Optional[str], conversation_id: Optional[str]
+) -> None:
+    if conversation_id and not agent_id:
+        raise HTTPException(status_code=422, detail=_CONVERSATION_NEEDS_AGENT)
+
+
 class _TraceSelection(BaseModel):
     """Either a list of IDs or `select_all` plus the same filters `GET /traces`
     takes, so a caller acting on a whole filtered set never has to name its rows."""
@@ -556,7 +568,7 @@ class _TraceSelection(BaseModel):
         None,
         min_length=1,
         max_length=255,
-        description="With `select_all` on, act only on the turns of this conversation",
+        description="With `select_all` on, act only on the turns of this conversation. Requires `agent_id`",
     )
     q: Optional[str] = Field(None, description=_FILTER_Q_DESCRIPTION)
     output_type: Optional[Literal["response", "tool_call"]] = Field(
@@ -575,6 +587,8 @@ class _TraceSelection(BaseModel):
 
     @model_validator(mode="after")
     def _require_a_selection(self):
+        if self.conversation_id and not self.agent_id:
+            raise ValueError(_CONVERSATION_NEEDS_AGENT)
         if self.select_all:
             return self
         if not self.trace_ids:
@@ -793,7 +807,7 @@ async def list_traces_endpoint(
         None,
         min_length=1,
         max_length=255,
-        description="Return only the turns of this conversation",
+        description="Return only the turns of this conversation. Requires `agent_id`",
     ),
     q: Optional[str] = Query(
         None,
@@ -822,6 +836,7 @@ async def list_traces_endpoint(
     ),
 ):
     """List ingested traces, newest first"""
+    _require_agent_for_conversation(agent_id, conversation_id)
     if pagination.limit > MAX_LIST_LIMIT:
         raise HTTPException(
             status_code=422, detail=f"limit must be {MAX_LIST_LIMIT} or less"
@@ -896,7 +911,7 @@ async def list_trace_conversations_endpoint(
         None,
         min_length=1,
         max_length=255,
-        description="Return only the conversation with this ID",
+        description="Return only the conversation with this ID. Requires `agent_id`",
     ),
     q: Optional[str] = Query(
         None,
@@ -916,6 +931,7 @@ async def list_trace_conversations_endpoint(
     ),
 ):
     """List conversations, newest turn first. Traces sent without a conversation ID are left out"""
+    _require_agent_for_conversation(agent_id, conversation_id)
     if pagination.limit > MAX_LIST_LIMIT:
         raise HTTPException(
             status_code=422, detail=f"limit must be {MAX_LIST_LIMIT} or less"

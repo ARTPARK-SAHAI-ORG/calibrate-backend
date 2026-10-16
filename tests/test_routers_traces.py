@@ -3356,7 +3356,11 @@ def test_list_and_select_all_delete_filter_by_conversation(client):
 
     turns = client.get(
         "/traces",
-        params={"conversation_id": "conv-a", "include_score_averages": "true"},
+        params={
+            "agent_id": agent_id,
+            "conversation_id": "conv-a",
+            "include_score_averages": "true",
+        },
         headers=h,
     ).json()
     assert turns["total"] == 2
@@ -3434,3 +3438,21 @@ def test_conversation_ids_list_every_id_newest_first(client):
     assert old["uuid"] != new["uuid"]
     key_headers = _api_key_headers(client, h)
     assert client.get("/traces/conversation-ids", headers=key_headers).status_code in (401, 403)
+
+
+
+def test_a_conversation_filter_needs_its_agent(client):
+    h, agent_id = _signup_with_agent(client)
+    _post_trace(client, h, _payload(agent_id, _mid(), "conv-a"))
+    for path in ("/traces", "/traces/conversations"):
+        res = client.get(path, params={"conversation_id": "conv-a"}, headers=h)
+        assert res.status_code == 422, path
+        assert res.json()["detail"] == "conversation_id needs agent_id"
+    for path in ("/traces/bulk-delete", "/traces/convert-to-tests"):
+        res = client.post(
+            path,
+            json={"select_all": True, "conversation_id": "conv-a", "type": "response"},
+            headers=h,
+        )
+        assert res.status_code == 422, path
+    assert client.get("/traces", params={"agent_id": agent_id}, headers=h).json()["total"] == 1
