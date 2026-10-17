@@ -416,6 +416,12 @@ def _runs_at_live_versions(
 # Re-exported for tests; canonical home is llm_judge so agent-tests/STT/TTS can
 # share the same scalar→label mapping.
 from llm_judge import evaluator_value_name as _evaluator_value_name  # noqa: E402
+from annotation_item_filters import (  # noqa: E402
+    LABELLED_FILTER_DESCRIPTION,
+    SCORE_FILTER_DESCRIPTION,
+    filter_items,
+    parse_score_filters,
+)
 
 
 def _enrich_evaluators_with_live_version(
@@ -1727,6 +1733,8 @@ def _resolve_target_item_ids(
     select_all: bool,
     item_ids: List[str],
     q: Optional[str],
+    score: Optional[List[str]] = None,
+    labelled: Optional[bool] = None,
     items: Optional[List[Dict[str, Any]]] = None,
 ) -> List[str]:
     """Resolve the target item set for a bulk action that supports a
@@ -1737,7 +1745,9 @@ def _resolve_target_item_ids(
       (same field/match rule as the summary endpoint's `?q=`). The explicit
       `item_ids` list is ignored — `select_all` is the source of truth so
       stale checkboxes can't sneak through.
-    - `select_all=False`: returns `item_ids` verbatim. `q` is ignored.
+      `score` and `labelled` narrow it the same way the summary's do.
+    - `select_all=False`: returns `item_ids` verbatim. `q`, `score` and
+      `labelled` are ignored.
 
     Pass `items` to reuse an already-loaded task item list (avoids a second
     `get_annotation_items_for_task` round-trip). Omitted ⇒ fetched lazily and
@@ -1758,6 +1768,22 @@ def _resolve_target_item_ids(
             if isinstance((it.get("payload") or {}).get("name"), str)
             and needle in it["payload"]["name"].lower()
         ]
+    if score or labelled is not None:
+        evaluators = get_evaluators_for_annotation_task(task_uuid)
+        annotations = get_annotations_for_task(task_uuid)
+        items = filter_items(
+            items,
+            scores=parse_score_filters(score, {ev["uuid"] for ev in evaluators}),
+            labelled=labelled,
+            evaluators=evaluators,
+            runs=get_evaluator_runs_for_task(task_uuid),
+            annotations=annotations,
+            annotator_ids=set(
+                get_annotators_by_uuids(
+                    list({a["annotator_id"] for a in annotations if a.get("annotator_id")})
+                )
+            ),
+        )
     return [it["uuid"] for it in items]
 
 
@@ -1773,6 +1799,14 @@ class BulkDeleteItemsRequest(BaseModel):
     q: Optional[str] = Field(
         None,
         description="Case-insensitive substring filter on `payload.name`. Applies only when `select_all=true`",
+    )
+    score: Optional[List[str]] = Field(
+        default=None,
+        description=SCORE_FILTER_DESCRIPTION + ". Applies only when `select_all=true`",
+    )
+    labelled: Optional[bool] = Field(
+        None,
+        description=LABELLED_FILTER_DESCRIPTION + ". Applies only when `select_all=true`",
     )
 
 
@@ -1792,6 +1826,8 @@ def bulk_delete_items(
         select_all=payload.select_all,
         item_ids=payload.item_ids,
         q=payload.q,
+        score=payload.score,
+        labelled=payload.labelled,
     )
     if not target_ids:
         raise HTTPException(
@@ -1864,6 +1900,14 @@ class CreateJobsRequest(BaseModel):
     q: Optional[str] = Field(
         None,
         description="Case-insensitive substring filter on `payload.name`. Applies only when `select_all=true`",
+    )
+    score: Optional[List[str]] = Field(
+        default=None,
+        description=SCORE_FILTER_DESCRIPTION + ". Applies only when `select_all=true`",
+    )
+    labelled: Optional[bool] = Field(
+        None,
+        description=LABELLED_FILTER_DESCRIPTION + ". Applies only when `select_all=true`",
     )
     evaluator_ids: Optional[List[str]] = Field(
         None,
@@ -1970,6 +2014,8 @@ def create_jobs(
         select_all=payload.select_all,
         item_ids=payload.item_ids,
         q=payload.q,
+        score=payload.score,
+        labelled=payload.labelled,
     )
     if not target_ids:
         raise HTTPException(
@@ -2204,6 +2250,14 @@ class EvaluatorRunStartRequest(BaseModel):
         None,
         description="Case-insensitive substring filter on `payload.name`. Applies only when `select_all=true`",
     )
+    score: Optional[List[str]] = Field(
+        default=None,
+        description=SCORE_FILTER_DESCRIPTION + ". Applies only when `select_all=true`",
+    )
+    labelled: Optional[bool] = Field(
+        None,
+        description=LABELLED_FILTER_DESCRIPTION + ". Applies only when `select_all=true`",
+    )
 
 
 @router.post("/{task_uuid}/evaluator-runs", response_model=EvaluatorRunLaunchResponse, summary="Run evaluators on items", tags=["Public API"])
@@ -2245,6 +2299,8 @@ def start_evaluator_run(
             select_all=True,
             item_ids=[],
             q=payload.q,
+            score=payload.score,
+            labelled=payload.labelled,
             items=all_items,  # reuse the list already fetched above
         )
         if not target_ids:
@@ -3073,6 +3129,8 @@ def task_summary(
         False,
         description="When true, keep only rows where the evaluator disagreed with at least one annotator",
     ),
+    score: Optional[List[str]] = Query(None, description=SCORE_FILTER_DESCRIPTION),
+    labelled: Optional[bool] = Query(None, description=LABELLED_FILTER_DESCRIPTION),
     ctx: OrgContext = Depends(get_org_jwt_or_api_key),
     search: _SummarySearch = Depends(),
     sort: _SummarySort = Depends(),
@@ -3090,6 +3148,7 @@ def task_summary(
     # `/annotation-agreement/trend`.
     runs = get_evaluator_runs_for_task(task_uuid)
     annotations = get_annotations_for_task(task_uuid)
+    scores = parse_score_filters(score, {ev["uuid"] for ev in evaluators})
 
     # Optional single-item filter. Validate it belongs to the task before
     # narrowing so a bad id 404s instead of silently returning empty rows.
@@ -3109,8 +3168,8 @@ def task_summary(
     # `items` is the full in-scope set (task-wide or filtered by item_id/q).
     # scoped_item_ids / the annotator union / run_count read from it so the
     # top-level evaluators[] and annotators[] column headers stay stable across
-    # pages. `total_items` and the slice are taken after the disagreement filter
-    # below, so paging covers only the matching items.
+    # pages. `total_items` and the slice are taken after the disagreement,
+    # score and labelled filters below, so paging covers only matching items.
 
     # Sort the in-scope items before pagination so paging is stable across
     # requests. Mechanics live in `pagination.make_sort_params`.
@@ -3334,6 +3393,15 @@ def task_summary(
     # filter below then drops the agreeing rows within each surviving item.
     if disagreement_only:
         items = [it for it in items if _item_disagrees(it)]
+    items = filter_items(
+        items,
+        scores=scores,
+        labelled=labelled,
+        evaluators=evaluators,
+        runs=runs,
+        annotations=annotations,
+        annotator_ids={a["uuid"] for a in annotators},
+    )
     total_items = len(items)
     paged_items = items[pagination.offset : pagination.offset + pagination.limit]
     # Sign TTS audio once per page item; rows below reuse the same payload dict.
