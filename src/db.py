@@ -11949,9 +11949,10 @@ def trim_pending_trace_runs_over_cap(org_uuid: str, cap: int) -> int:
         cur.execute(
             "UPDATE trace_eval_runs SET status = 'skipped', error = 'over_limit', "
             "updated_at = ?, completed_at = ? "
-            "WHERE uuid IN (SELECT uuid FROM trace_eval_runs "
-            "WHERE org_uuid = ? AND status = 'pending' "
-            "ORDER BY created_at ASC, id ASC LIMIT -1 OFFSET ?)",
+            "WHERE uuid IN (SELECT r.uuid FROM trace_eval_runs r "
+            "JOIN traces t ON t.uuid = r.trace_uuid AND t.deleted_at IS NULL "
+            "WHERE r.org_uuid = ? AND r.status = 'pending' "
+            "ORDER BY r.created_at ASC, r.id ASC LIMIT -1 OFFSET ?)",
             (now, now, org_uuid, max(0, cap - used)),
         )
         skipped = cur.rowcount
