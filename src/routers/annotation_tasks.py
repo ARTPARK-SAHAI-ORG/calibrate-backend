@@ -386,6 +386,9 @@ from annotation_metrics import (
     evaluator_human_pair_agreement,
     evaluator_result_summary,
     human_result_summary,
+    live_scale_bounds,
+    ScaleBounds,
+    Scales,
     per_item_agreement,
     has_any_comparable_pair,
     trend_series,
@@ -427,6 +430,17 @@ def _enrich_evaluators_with_live_version(
         ev["scale_max"] = scale_max
         ev["variables"] = version.get("variables") if version else None
     return evaluators
+
+
+def _scales_from_evaluators(evaluators: List[Dict[str, Any]]) -> Scales:
+    """Rubric bounds per evaluator, read off an evaluator list that already
+    carries `scale_min`/`scale_max`, so agreement divides rating differences
+    by the rubric width without another version read."""
+    return {
+        ev["uuid"]: (ev.get("scale_min"), ev.get("scale_max"))
+        for ev in evaluators
+        if ev.get("uuid")
+    }
 
 
 router = APIRouter(prefix="/annotation-tasks", tags=["annotation-tasks"])
@@ -639,11 +653,13 @@ def get_annotation_task_endpoint(
     for r in all_runs:
         runs_by_item.setdefault(r["item_id"], []).append(r)
     evaluator_ids = [e["uuid"] for e in evaluators]
+    scales = _scales_from_evaluators(evaluators)
     for item in items:
         item["agreement"] = per_item_agreement(
             annotations_by_item.get(item["uuid"], []),
             runs_by_item.get(item["uuid"], []),
             evaluator_ids,
+            scales,
         )
     # Same all-time flag the list endpoint sets, so the detail view agrees.
     # Aggregated agreement filters runs to each evaluator's live version.
@@ -2602,12 +2618,15 @@ def list_evaluator_run_jobs(
 
 
 def _human_agreement_for_run(
-    task_uuid: str, job_runs: List[Dict[str, Any]]
+    task_uuid: str,
+    job_runs: List[Dict[str, Any]],
+    scales: Optional[Scales] = None,
 ) -> Dict[str, Any]:
     """Build the `human_agreement` block returned alongside an evaluator-run
     job. Restricted to slots (item_id, evaluator_id) actually exercised by
     THIS job's runs — annotations on items/evaluators not in the run are
-    ignored even if present elsewhere on the task.
+    ignored even if present elsewhere on the task. `scales` carries each
+    evaluator's rubric bounds, taken from the version the job pinned.
 
     Shape:
         {
@@ -2662,7 +2681,7 @@ def _human_agreement_for_run(
             version_by_evaluator[ev_id] = r.get("evaluator_version_id")
     for ev_id in evaluator_ids_in_run:
         agreement, pair_count = aggregate_human_evaluator_agreement(
-            relevant_annotations, job_runs, ev_id
+            relevant_annotations, job_runs, ev_id, scales
         )
         # Items with at least one human annotation on this evaluator.
         item_count = len(
@@ -2713,6 +2732,7 @@ def _human_agreement_for_run(
             item_annotations,
             runs_by_item.get(item_id, []),
             evaluator_ids_in_run,
+            scales,
         )
         # Drop evaluator slots with zero human pair count so the FE only
         # renders cells that actually compare to a human.
@@ -2834,7 +2854,9 @@ def get_evaluator_run_job(
     # surfaced here — `(evaluator_id, evaluator_version_id)` on each run
     # row keys back into the top-level evaluators[] block.
     shaped["runs"] = _strip_run_evaluator_blocks(raw_runs)
-    shaped["human_agreement"] = _human_agreement_for_run(task_uuid, raw_runs)
+    shaped["human_agreement"] = _human_agreement_for_run(
+        task_uuid, raw_runs, _scales_from_evaluators(shaped["evaluators"])
+    )
     # Frozen item snapshot — what calibrate actually saw, regardless of
     # any post-submit edits / soft-deletes on the source annotation_items.
     # Empty for legacy jobs created before snapshotting (those will be
@@ -2972,19 +2994,25 @@ def _evaluator_alignment_block(
     linked_evaluators: List[Dict[str, Any]],
     bucket: str,
     days: int,
+    scales: Optional[Scales] = None,
 ) -> List[Dict[str, Any]]:
     """For each evaluator linked to the task, compute current agreement vs
     humans + a cumulative trend series. Always returns one entry per linked
     evaluator (with `current=None, pair_count=0` when there's no overlap yet)."""
     evaluator_ids = [e["uuid"] for e in linked_evaluators]
     series_by_id = trend_series_human_evaluator(
-        annotations, evaluator_runs, evaluator_ids, bucket=bucket, days=days
+        annotations,
+        evaluator_runs,
+        evaluator_ids,
+        bucket=bucket,
+        days=days,
+        scales=scales,
     )
     out: List[Dict[str, Any]] = []
     for ev in linked_evaluators:
         ev_id = ev["uuid"]
         cur, pairs = aggregate_human_evaluator_agreement(
-            annotations, evaluator_runs, ev_id
+            annotations, evaluator_runs, ev_id, scales
         )
         out.append(
             {
@@ -3021,11 +3049,18 @@ def task_agreement(
     linked = get_evaluators_for_annotation_task(task_uuid)
     runs = runs_at_live_versions(get_evaluator_runs_for_task(task_uuid), linked)
 
-    hh_current, hh_pairs = aggregate_agreement(annotations)
-    hh_series = trend_series(annotations, bucket=bucket, days=days)
+    # Human-vs-human slots can sit on an evaluator the task no longer links,
+    # so the bounds are loaded for those too.
+    scales = live_scale_bounds(
+        [e["uuid"] for e in linked]
+        + [a["evaluator_id"] for a in annotations if a.get("evaluator_id")]
+    )
+
+    hh_current, hh_pairs = aggregate_agreement(annotations, scales)
+    hh_series = trend_series(annotations, bucket=bucket, days=days, scales=scales)
 
     evaluators_block = _evaluator_alignment_block(
-        annotations, runs, linked, bucket, days
+        annotations, runs, linked, bucket, days, scales
     )
 
     return {
@@ -3238,6 +3273,9 @@ def task_summary(
         version_cache[version_id] = meta
         return meta
 
+    def _version_scale(version_id: Optional[str]) -> ScaleBounds:
+        meta = _version_meta(version_id) or {}
+        return (meta.get("scale_min"), meta.get("scale_max"))
 
     def _scalar_and_reasoning(value: Any) -> tuple:
         if isinstance(value, dict):
@@ -3280,16 +3318,21 @@ def task_summary(
         return out
 
     def _evaluator_agreement(
-        run_value: Any, slot_human_scalars: List[Any]
+        run_value: Any,
+        slot_human_scalars: List[Any],
+        version_id: Optional[str],
     ) -> Optional[float]:
         """Evaluator-vs-human agreement for one (item, evaluator, version) slot,
         or None when the evaluator produced no value or there are no human
         labels. Shares `evaluator_human_pair_agreement` with the task-level
-        rollup so the two endpoints stay consistent."""
+        rollup so the two endpoints stay consistent. Ratings are divided by the
+        rubric width of the version the row shows."""
         eval_scalar = _scalar(run_value) if run_value is not None else None
         if eval_scalar is None or not slot_human_scalars:
             return None
-        total, pairs = evaluator_human_pair_agreement(eval_scalar, slot_human_scalars)
+        total, pairs = evaluator_human_pair_agreement(
+            eval_scalar, slot_human_scalars, _version_scale(version_id)
+        )
         return _round_agreement(total / pairs) if pairs > 0 else None
 
     def _is_disagreement(agreement: Optional[float]) -> bool:
@@ -3310,7 +3353,9 @@ def task_summary(
                 run = latest_run.get((item_uuid, ev_id, version_id))
                 run_value = run.get("value") if run else None
                 if _is_disagreement(
-                    _evaluator_agreement(run_value, slot_human_scalars)
+                    _evaluator_agreement(
+                        run_value, slot_human_scalars, version_id
+                    )
                 ):
                     return True
         return False
@@ -3347,7 +3392,9 @@ def task_summary(
                 }
             slot_human_scalars = _slot_human_scalars(item["uuid"], ev_id)
 
-            hh_mean, hh_pairs = _pairwise_agreement(slot_human_scalars)
+            hh_mean, hh_pairs = _pairwise_agreement(
+                slot_human_scalars, _version_scale(live_v)
+            )
             human_agreement = (
                 _round_agreement(hh_mean) if hh_pairs > 0 else None
             )
@@ -3359,7 +3406,7 @@ def task_summary(
                 version_meta = _version_meta(version_id)
 
                 evaluator_agreement = _evaluator_agreement(
-                    run_value, slot_human_scalars
+                    run_value, slot_human_scalars, version_id
                 )
 
                 rows.append(

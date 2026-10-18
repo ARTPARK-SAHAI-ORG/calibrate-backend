@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
+import uuid
 
 import pytest
 
 from annotation_metrics import (
     _classify,
+    live_scale_bounds,
     _pairwise_agreement,
     _scalar,
     aggregate_agreement,
@@ -540,3 +542,193 @@ def test_human_result_summary():
         "true_count": None,
         "mean": 3.5,
     }
+
+
+# ============ Rating divider: the evaluator's rubric width ============
+
+_ONE_TO_FIVE = (1, 5)
+
+
+def _rating_annotations(values_by_annotator, evaluator_id="e1"):
+    return [
+        {
+            "item_id": "i1",
+            "evaluator_id": evaluator_id,
+            "annotator_id": annotator,
+            "value": {"value": value},
+        }
+        for annotator, value in values_by_annotator.items()
+    ]
+
+
+def test_rating_pair_one_point_apart_scores_by_rubric_width():
+    # 3 vs 4 on a 1-to-5 rubric: one step out of a width of 4 → 1 - 1/4.
+    assert _pairwise_agreement([3, 4], _ONE_TO_FIVE) == (0.75, 1)
+    # The two ends of the same rubric agree on nothing.
+    assert _pairwise_agreement([1, 5], _ONE_TO_FIVE) == (0.0, 1)
+
+
+def test_third_annotator_cannot_raise_the_first_pair():
+    # Adding a 1 keeps 3-vs-4 at 0.75; mean = (0.75 + 0.5 + 0.25) / 3.
+    mean, pairs = _pairwise_agreement([3, 4, 1], _ONE_TO_FIVE)
+    assert pairs == 3 and mean == 0.5
+    # Without the rubric the outlier widens the divider and lifts 3-vs-4
+    # from 0.0 to 2/3 — the behaviour the rubric width replaces.
+    loose_mean, loose_pairs = _pairwise_agreement([3, 4, 1])
+    assert loose_pairs == 3 and round(loose_mean, 4) == 0.3333
+    assert _pairwise_agreement([3, 4]) == (0.0, 1)
+
+
+def test_unusable_rubric_falls_back_to_the_observed_range():
+    # A rating evaluator whose scale will not parse, and a zero-width one.
+    assert _pairwise_agreement([3, 4], (None, None)) == (0.0, 1)
+    assert _pairwise_agreement([3, 4], (3, 3)) == (0.0, 1)
+    assert _pairwise_agreement([3, 4], (5, 1)) == (0.0, 1)
+
+
+def test_scales_map_is_looked_up_per_slot():
+    annotations = _rating_annotations({"a": 3, "b": 4}) + [
+        # Row-level overall annotation: no evaluator, so no rubric to find.
+        {"item_id": "i1", "evaluator_id": None, "annotator_id": "a", "value": {"value": 3}},
+        {"item_id": "i1", "evaluator_id": None, "annotator_id": "b", "value": {"value": 4}},
+    ]
+    scales = {"e1": _ONE_TO_FIVE}
+    # e1's slot scores 0.75, the evaluator-less slot falls back to 0.0.
+    assert aggregate_agreement(annotations, scales) == (0.375, 2)
+    # An evaluator missing from the map falls back for its own slot only.
+    assert aggregate_agreement(annotations, {"other": _ONE_TO_FIVE}) == (0.0, 2)
+
+
+def test_rating_agreement_unchanged_without_a_map():
+    annotations = _rating_annotations({"a": 3, "b": 4})
+    runs = [
+        {
+            "item_id": "i1",
+            "evaluator_id": "e1",
+            "value": {"value": 5},
+            "created_at": "2024-01-01 00:00:00",
+        }
+    ]
+    assert aggregate_agreement(annotations) == (0.0, 1)
+    assert aggregate_agreement_for_annotator(annotations, "a") == (0.0, 1)
+    # Observed range over the evaluator's 5 and the humans' 3 and 4 is 2.
+    assert aggregate_human_evaluator_agreement(annotations, runs, "e1") == (0.25, 2)
+    assert evaluator_human_pair_agreement(5, [3, 4]) == (0.5, 2)
+    item = per_item_agreement(annotations, runs, ["e1"])
+    assert item["human_human"]["agreement"] == 0.0
+    assert item["evaluators"][0]["agreement"] == 0.25
+
+
+def test_rating_agreement_with_a_map():
+    annotations = _rating_annotations({"a": 3, "b": 4})
+    runs = [
+        {
+            "item_id": "i1",
+            "evaluator_id": "e1",
+            "value": {"value": 5},
+            "created_at": "2024-01-01 00:00:00",
+        }
+    ]
+    scales = {"e1": _ONE_TO_FIVE}
+    assert aggregate_agreement(annotations, scales) == (0.75, 1)
+    assert aggregate_agreement_for_annotator(annotations, "a", scales) == (0.75, 1)
+    # Evaluator said 5: 1 - 2/4 against the 3, 1 - 1/4 against the 4.
+    assert aggregate_human_evaluator_agreement(annotations, runs, "e1", scales) == (
+        0.625,
+        2,
+    )
+    assert evaluator_human_pair_agreement(5, [3, 4], _ONE_TO_FIVE) == (1.25, 2)
+    item = per_item_agreement(annotations, runs, ["e1"], scales)
+    assert item["human_human"]["agreement"] == 0.75
+    assert item["evaluators"][0]["agreement"] == 0.625
+
+
+def test_trend_series_carry_the_map_down():
+    now = datetime(2024, 1, 31, tzinfo=timezone.utc)
+    annotations = [
+        {**a, "task_id": "t1", "updated_at": "2024-01-30 00:00:00"}
+        for a in _rating_annotations({"a": 3, "b": 4})
+    ]
+    runs = [
+        {
+            "item_id": "i1",
+            "evaluator_id": "e1",
+            "evaluator_version_id": "v1",
+            "task_id": "t1",
+            "value": {"value": 5},
+            "completed_at": "2024-01-30 00:00:00",
+        }
+    ]
+    scales = {"e1": _ONE_TO_FIVE}
+    assert trend_series(annotations, "week", 7, now=now)[-1]["agreement"] == 0.0
+    assert (
+        trend_series(annotations, "week", 7, now=now, scales=scales)[-1]["agreement"]
+        == 0.75
+    )
+    assert (
+        trend_series_for_annotator(
+            annotations, "a", "week", 7, now=now, scales=scales
+        )[-1]["agreement"]
+        == 0.75
+    )
+    assert (
+        trend_series_human_evaluator(
+            annotations, runs, ["e1"], "week", 7, now=now, scales=scales
+        )["e1"][-1]["agreement"]
+        == 0.625
+    )
+    breakdown = trend_series_evaluator_breakdown(
+        annotations,
+        runs,
+        "e1",
+        version_ids=["v1"],
+        task_ids=["t1"],
+        bucket="week",
+        days=7,
+        now=now,
+        scales=scales,
+    )
+    assert breakdown["overall"][-1]["agreement"] == 0.625
+    assert breakdown["by_version"]["v1"][-1]["agreement"] == 0.625
+    assert breakdown["by_task"]["t1"][-1]["agreement"] == 0.625
+
+
+def test_live_scale_bounds_reads_the_live_version():
+    import db as db_mod
+
+    user_uuid = db_mod.create_user(
+        "Scale", "Bounds", f"scale-{uuid.uuid4().hex[:8]}@example.com"
+    )
+    org = db_mod.get_personal_org_for_user(user_uuid)
+    rating = db_mod.create_evaluator(
+        name=f"rating-{uuid.uuid4().hex[:8]}",
+        output_type="rating",
+        owner_user_id=user_uuid,
+        org_uuid=org["uuid"],
+    )
+    stale = db_mod.create_evaluator_version(
+        rating,
+        judge_model="m",
+        system_prompt="p",
+        output_config={"scale": [{"value": i, "name": str(i)} for i in (1, 2, 3)]},
+    )
+    live = db_mod.create_evaluator_version(
+        rating,
+        judge_model="m",
+        system_prompt="p",
+        output_config={"scale": [{"value": i, "name": str(i)} for i in (1, 3, 5)]},
+    )
+    db_mod.set_evaluator_live_version(rating, live["uuid"])
+    binary = db_mod.create_evaluator(
+        name=f"binary-{uuid.uuid4().hex[:8]}",
+        owner_user_id=user_uuid,
+        org_uuid=org["uuid"],
+    )
+
+    bounds = live_scale_bounds([rating, binary, None, "missing-evaluator"])
+    # The live version's rubric, not the earlier 1-to-3 one.
+    assert bounds[rating] == (1, 5)
+    # A binary evaluator has no live version here, and an unknown id is absent.
+    assert binary not in bounds and "missing-evaluator" not in bounds
+    assert stale["uuid"] != live["uuid"]
+    assert live_scale_bounds([]) == {}

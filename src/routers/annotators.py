@@ -17,8 +17,18 @@ from db import (
 from auth_utils import get_current_org, get_org_jwt_or_api_key, OrgContext
 from annotation_metrics import (
     aggregate_agreement_for_annotator,
+    live_scale_bounds,
+    Scales,
     trend_series_for_annotator,
 )
+
+
+def _scales_for_annotations(annotations: List[Dict[str, Any]]) -> Scales:
+    """Rubric bounds for every evaluator these annotations touch, in two bulk
+    queries, so the list and the detail view score ratings the same way."""
+    return live_scale_bounds(
+        a["evaluator_id"] for a in annotations if a.get("evaluator_id")
+    )
 
 
 router = APIRouter(prefix="/annotators", tags=["annotators"])
@@ -103,10 +113,11 @@ def list_annotators(ctx: OrgContext = Depends(get_org_jwt_or_api_key)):
         return []
     jobs_count_by_annotator = get_job_counts_for_org_annotators(ctx.org_uuid)
     all_annotations = get_annotations_for_org(ctx.org_uuid)
+    scales = _scales_for_annotations(all_annotations)
     out: List[Dict[str, Any]] = []
     for a in annotators:
         agreement, pairs = aggregate_agreement_for_annotator(
-            all_annotations, a["uuid"]
+            all_annotations, a["uuid"], scales
         )
         out.append(
             {
@@ -143,11 +154,12 @@ def get_annotator_endpoint(
     annotations = get_annotations_for_annotator_overlap_slots(
         org_uuid=ctx.org_uuid, annotator_id=annotator_uuid
     )
+    scales = _scales_for_annotations(annotations)
     current, pair_count = aggregate_agreement_for_annotator(
-        annotations, annotator_uuid
+        annotations, annotator_uuid, scales
     )
     series = trend_series_for_annotator(
-        annotations, annotator_uuid, bucket=bucket, days=days
+        annotations, annotator_uuid, bucket=bucket, days=days, scales=scales
     )
 
     return {

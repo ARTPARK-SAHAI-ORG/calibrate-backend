@@ -4,10 +4,10 @@ Pairwise mean agreement on shared rows. Each (item, evaluator_id) is treated as
 its own annotation slot; a row-level overall annotation has evaluator_id=None.
 
 For binary judgements: agreement = 1.0 if equal else 0.0.
-For numeric (rating) judgements: agreement = 1 - |a - b| / span, where span is
-the observed range across all paired numeric judgements (defaults to 1.0 if all
-ratings are equal). This keeps the metric in [0, 1] without needing the
-evaluator's scale config.
+For numeric (rating) judgements: agreement = 1 - |a - b| / divider, where the
+divider is the width of the evaluator's configured rubric (scale_max -
+scale_min). Callers supply those bounds per evaluator; without them the divider
+falls back to the observed range across the paired numeric judgements.
 
 For mixed types within a slot, only same-type pairs contribute.
 """
@@ -17,6 +17,11 @@ from __future__ import annotations
 from datetime import datetime, timedelta, timezone
 from itertools import combinations
 from typing import Any, Dict, Iterable, Iterator, List, Optional, Sequence, Tuple
+
+# One evaluator's rubric bounds as `(scale_min, scale_max)`, and the per-slot
+# lookup callers pass down: `{evaluator_id: bounds}`.
+ScaleBounds = Tuple[Optional[float], Optional[float]]
+Scales = Dict[str, ScaleBounds]
 
 
 # All agreement floats returned to callers are rounded to this many decimal
@@ -59,12 +64,18 @@ def _classify(scalar: Any) -> Optional[str]:
     return None
 
 
-def _span(values: Iterable[Any]) -> float:
-    """Numeric range across `values`, used to normalise rating differences.
+def _divider(values: Iterable[Any], scale: Optional[ScaleBounds] = None) -> float:
+    """What a rating difference is divided by: the rubric's own width.
 
-    1.0 when nothing is numeric, or when every numeric value is equal, so the
-    score stays in [0, 1] without reading the evaluator's configured scale.
+    Falls back to the numeric range across `values` when no usable bounds are
+    supplied, so a slot whose evaluator is unknown (a row-level overall
+    annotation carries no evaluator) or whose rubric will not parse still
+    scores in [0, 1] instead of dividing by zero.
     """
+    if scale:
+        low, high = scale
+        if low is not None and high is not None and high > low:
+            return float(high - low)
     numerics = [v for v in values if _classify(v) == "numeric"]
     span = max(numerics) - min(numerics) if numerics else 1.0
     return float(span) if span > 0 else 1.0
@@ -83,16 +94,19 @@ def _pair_score(value_a: Any, value_b: Any, span: float) -> Optional[float]:
 
 def _pairwise_agreement(
     values: List[Any],
+    scale: Optional[ScaleBounds] = None,
 ) -> Tuple[float, int]:
     """Mean pairwise agreement and pair count over a single annotation slot.
 
-    Returns (mean_agreement, pair_count). pair_count == 0 ⇒ no comparable pairs.
+    `scale` is the slot evaluator's rubric bounds, used to divide rating
+    differences. Returns (mean_agreement, pair_count). pair_count == 0 ⇒ no
+    comparable pairs.
     """
     present = [v for v in values if v is not None]
     if len(present) < 2:
         return (0.0, 0)
 
-    span = _span(present)
+    span = _divider(present, scale)
     total = 0.0
     pairs = 0
     for value_a, value_b in combinations(present, 2):
@@ -108,6 +122,30 @@ def _pairwise_agreement(
 
 def _slot_key(annotation: Dict[str, Any]) -> Tuple[str, Optional[str]]:
     return (annotation["item_id"], annotation.get("evaluator_id"))
+
+
+def live_scale_bounds(evaluator_ids: Iterable[str]) -> Scales:
+    """Each evaluator's rubric bounds, read from its live version, in two
+    bulk queries. For callers that already hold a version's `output_config`,
+    build the map from `llm_judge._scale_bounds` directly instead."""
+    from db import get_evaluator_versions_by_uuids, get_evaluators_by_uuids
+    from llm_judge import _scale_bounds
+
+    ids = {e for e in evaluator_ids if e}
+    if not ids:
+        return {}
+    live_version_by_evaluator = {
+        uuid: ev["live_version_id"]
+        for uuid, ev in get_evaluators_by_uuids(list(ids)).items()
+        if ev.get("live_version_id")
+    }
+    versions = get_evaluator_versions_by_uuids(
+        list(live_version_by_evaluator.values())
+    )
+    return {
+        uuid: _scale_bounds((versions.get(version_id) or {}).get("output_config"))
+        for uuid, version_id in live_version_by_evaluator.items()
+    }
 
 
 def filter_runs_to_live_versions(
@@ -147,11 +185,14 @@ def runs_at_live_versions(
 
 def aggregate_agreement(
     annotations: Iterable[Dict[str, Any]],
+    scales: Optional[Scales] = None,
 ) -> Tuple[Optional[float], int]:
     """Mean pairwise agreement across every (item, evaluator) slot that has ≥2
     distinct annotators in the supplied annotation list.
 
-    Returns (mean_agreement | None if no comparable pairs, total_pair_count).
+    `scales` maps an evaluator to its rubric bounds, looked up per slot to
+    divide rating differences. Returns (mean_agreement | None if no comparable
+    pairs, total_pair_count).
     """
     # Group by (item_id, evaluator_id), dedup per annotator (latest wins — but
     # input is already the upserted row, so one annotator contributes once).
@@ -170,10 +211,12 @@ def aggregate_agreement(
 
     total_weighted = 0.0
     total_pairs = 0
-    for slot, per_annotator in by_slot.items():
+    for (_item_id, ev_id), per_annotator in by_slot.items():
         if len(per_annotator) < 2:
             continue
-        mean, pairs = _pairwise_agreement(list(per_annotator.values()))
+        mean, pairs = _pairwise_agreement(
+            list(per_annotator.values()), (scales or {}).get(ev_id)
+        )
         if pairs == 0:
             continue
         total_weighted += mean * pairs
@@ -372,13 +415,14 @@ def human_result_summary(
 def evaluator_human_pair_agreement(
     eval_value: Any,
     human_values: Iterable[Any],
+    scale: Optional[ScaleBounds] = None,
 ) -> Tuple[float, int]:
     """One-slot evaluator-vs-human agreement: pair the evaluator's value with
     each human's value on the same slot and return (sum_of_scores, pair_count).
 
     Same scoring rules as `_pairwise_agreement`:
       - binary / categorical: 1.0 if equal, 0.0 otherwise
-      - numeric: 1 - |a - b| / span, where span spans this slot's values
+      - numeric: 1 - |a - b| / the rubric width in `scale`
 
     Pairs of mismatched type are skipped (don't contribute to the count).
 
@@ -393,7 +437,7 @@ def evaluator_human_pair_agreement(
     humans = list(human_values)
     if not humans:
         return (0.0, 0)
-    span = _span([eval_value, *humans])
+    span = _divider([eval_value, *humans], scale)
     total = 0.0
     pairs = 0
     for hv in humans:
@@ -409,6 +453,7 @@ def aggregate_human_evaluator_agreement(
     annotations: Iterable[Dict[str, Any]],
     evaluator_runs: Iterable[Dict[str, Any]],
     evaluator_id: str,
+    scales: Optional[Scales] = None,
 ) -> Tuple[Optional[float], int]:
     """Mean pairwise agreement between one evaluator's machine judgements and
     every human annotation on the matching slot.
@@ -417,8 +462,7 @@ def aggregate_human_evaluator_agreement(
     at least one human annotated, pair the evaluator value with each human's
     latest value and score:
       - bool / categorical: 1.0 if equal else 0.0
-      - numeric: 1 - |a - b| / span (span derived per slot from the values
-        participating in pairs)
+      - numeric: 1 - |a - b| / the evaluator's rubric width from `scales`
     Mean weighted by pair count. (None, 0) if no comparable pairs."""
     eval_by_slot = _latest_evaluator_value_per_slot(evaluator_runs, evaluator_id)
     if not eval_by_slot:
@@ -448,7 +492,7 @@ def aggregate_human_evaluator_agreement(
         if not humans:
             continue
         slot_total, slot_pairs = evaluator_human_pair_agreement(
-            eval_val, humans.values()
+            eval_val, humans.values(), (scales or {}).get(evaluator_id)
         )
         total_weighted += slot_total
         total_pairs += slot_pairs
@@ -481,6 +525,7 @@ def per_item_agreement(
     annotations_for_item: Iterable[Dict[str, Any]],
     evaluator_runs_for_item: Iterable[Dict[str, Any]],
     evaluator_ids: Iterable[str],
+    scales: Optional[Scales] = None,
 ) -> Dict[str, Any]:
     """Compute, for one item: human-vs-human agreement across all evaluators
     annotated, plus per-evaluator human-vs-evaluator agreement. Returns:
@@ -494,11 +539,11 @@ def per_item_agreement(
     """
     annotations_list = list(annotations_for_item)
     runs_list = list(evaluator_runs_for_item)
-    hh, hh_pairs = aggregate_agreement(annotations_list)
+    hh, hh_pairs = aggregate_agreement(annotations_list, scales)
     out_evaluators: List[Dict[str, Any]] = []
     for ev_id in evaluator_ids:
         agree, pairs = aggregate_human_evaluator_agreement(
-            annotations_list, runs_list, ev_id
+            annotations_list, runs_list, ev_id, scales
         )
         out_evaluators.append(
             {
@@ -520,6 +565,7 @@ def trend_series_human_evaluator(
     bucket: str,
     days: int,
     now: Optional[datetime] = None,
+    scales: Optional[Scales] = None,
 ) -> Dict[str, List[Dict[str, Any]]]:
     """Per-evaluator cumulative agreement trend over time, bucketed.
 
@@ -541,7 +587,7 @@ def trend_series_human_evaluator(
     ):
         for ev_id in evaluator_ids:
             agreement, pair_count = aggregate_human_evaluator_agreement(
-                visible_ann, visible_runs, ev_id
+                visible_ann, visible_runs, ev_id, scales
             )
             out[ev_id].append(
                 {**meta, "agreement": agreement, "pair_count": pair_count}
@@ -558,6 +604,7 @@ def trend_series_evaluator_breakdown(
     bucket: str,
     days: int,
     now: Optional[datetime] = None,
+    scales: Optional[Scales] = None,
 ) -> Dict[str, Any]:
     """Single-pass cumulative agreement trend for one evaluator, broken down by
     version and task simultaneously.
@@ -606,19 +653,19 @@ def trend_series_evaluator_breakdown(
                 visible_runs_by_task[tid].append(r)
 
         agree, pairs = aggregate_human_evaluator_agreement(
-            visible_ann_all, visible_runs_all, evaluator_id
+            visible_ann_all, visible_runs_all, evaluator_id, scales
         )
         out_overall.append({**meta, "agreement": agree, "pair_count": pairs})
 
         for vid in version_ids:
             agree, pairs = aggregate_human_evaluator_agreement(
-                visible_ann_all, visible_runs_by_version[vid], evaluator_id
+                visible_ann_all, visible_runs_by_version[vid], evaluator_id, scales
             )
             out_by_version[vid].append({**meta, "agreement": agree, "pair_count": pairs})
 
         for tid in task_ids:
             agree, pairs = aggregate_human_evaluator_agreement(
-                visible_ann_by_task[tid], visible_runs_by_task[tid], evaluator_id
+                visible_ann_by_task[tid], visible_runs_by_task[tid], evaluator_id, scales
             )
             out_by_task[tid].append({**meta, "agreement": agree, "pair_count": pairs})
 
@@ -632,6 +679,7 @@ def trend_series_evaluator_breakdown(
 def aggregate_agreement_for_annotator(
     annotations: Iterable[Dict[str, Any]],
     annotator_id: str,
+    scales: Optional[Scales] = None,
 ) -> Tuple[Optional[float], int]:
     """Mean pairwise agreement between `annotator_id` and every other annotator
     on slots where both participated.
@@ -653,11 +701,11 @@ def aggregate_agreement_for_annotator(
 
     total_weighted = 0.0
     total_pairs = 0
-    for per_annotator in by_slot.values():
+    for (_item_id, ev_id), per_annotator in by_slot.items():
         if annotator_id not in per_annotator or len(per_annotator) < 2:
             continue
         my_val = per_annotator[annotator_id]
-        span = _span(per_annotator.values())
+        span = _divider(per_annotator.values(), (scales or {}).get(ev_id))
         for other_id, other_val in per_annotator.items():
             if other_id == annotator_id:
                 continue
@@ -676,6 +724,7 @@ def trend_series(
     bucket: str,
     days: int,
     now: Optional[datetime] = None,
+    scales: Optional[Scales] = None,
 ) -> List[Dict[str, Any]]:
     """Group annotations into buckets by `updated_at`, compute per-bucket
     pairwise agreement using ALL annotations whose updated_at <= bucket end.
@@ -688,7 +737,7 @@ def trend_series(
     for meta, (visible,), _added in _bucketed_streams(
         bucket, days, now, [(annotations, _ANNOTATION_TS)]
     ):
-        agreement, pair_count = aggregate_agreement(visible)
+        agreement, pair_count = aggregate_agreement(visible, scales)
         out.append({**meta, "agreement": agreement, "pair_count": pair_count})
     return out
 
@@ -699,6 +748,7 @@ def trend_series_for_annotator(
     bucket: str,
     days: int,
     now: Optional[datetime] = None,
+    scales: Optional[Scales] = None,
 ) -> List[Dict[str, Any]]:
     """Cumulative trend of `annotator_id`'s pairwise agreement with other
     annotators, bucketed by updated_at."""
@@ -707,7 +757,7 @@ def trend_series_for_annotator(
         bucket, days, now, [(annotations, _ANNOTATION_TS)]
     ):
         agreement, pair_count = aggregate_agreement_for_annotator(
-            visible, annotator_id
+            visible, annotator_id, scales
         )
         out.append({**meta, "agreement": agreement, "pair_count": pair_count})
     return out
