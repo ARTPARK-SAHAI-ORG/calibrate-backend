@@ -18,7 +18,7 @@ from org_scope import ensure_owned_evaluator
 from annotation_metrics import (
     aggregate_agreement,
     aggregate_human_evaluator_agreement,
-    filter_runs_to_live_versions,
+    runs_at_live_versions,
     trend_series,
     trend_series_evaluator_breakdown,
     trend_series_human_evaluator,
@@ -58,21 +58,12 @@ def agreement_trend(
     hh_current, hh_pairs = aggregate_agreement(annotations)
     hh_series = trend_series(annotations, bucket=bucket, days=days)
 
-    evaluator_ids = []
-    seen = set()
-    for r in raw_runs:
-        ev_id = r.get("evaluator_id")
-        if ev_id and ev_id not in seen:
-            seen.add(ev_id)
-            evaluator_ids.append(ev_id)
+    evaluator_ids = list(
+        dict.fromkeys(r["evaluator_id"] for r in raw_runs if r.get("evaluator_id"))
+    )
 
     evaluator_meta = get_evaluators_by_uuids(evaluator_ids)
-    live_version_by_evaluator: Dict[str, Optional[str]] = {
-        ev_id: (evaluator_meta.get(ev_id) or {}).get("live_version_id")
-        for ev_id in evaluator_ids
-    }
-
-    runs = filter_runs_to_live_versions(raw_runs, live_version_by_evaluator)
+    runs = runs_at_live_versions(raw_runs, evaluator_meta.values())
 
     series_by_id = trend_series_human_evaluator(
         annotations, runs, evaluator_ids, bucket=bucket, days=days
@@ -147,19 +138,12 @@ def evaluator_agreement_trend(
     version_number_by_id = {v["uuid"]: v["version_number"] for v in all_versions}
     live_version_id = evaluator.get("live_version_id")
 
-    seen_versions: List[str] = []
-    seen_v_set: set = set()
-    seen_tasks: List[str] = []
-    seen_t_set: set = set()
-    for r in runs:
-        vid = r.get("evaluator_version_id")
-        if vid and vid not in seen_v_set:
-            seen_v_set.add(vid)
-            seen_versions.append(vid)
-        tid = r.get("task_id")
-        if tid and tid not in seen_t_set:
-            seen_t_set.add(tid)
-            seen_tasks.append(tid)
+    seen_versions = list(
+        dict.fromkeys(
+            r["evaluator_version_id"] for r in runs if r.get("evaluator_version_id")
+        )
+    )
+    seen_tasks = list(dict.fromkeys(r["task_id"] for r in runs if r.get("task_id")))
 
     breakdown = trend_series_evaluator_breakdown(
         annotations, runs, evaluator_uuid,

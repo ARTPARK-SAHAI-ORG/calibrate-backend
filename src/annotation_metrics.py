@@ -15,7 +15,8 @@ For mixed types within a slot, only same-type pairs contribute.
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
-from typing import Any, Dict, Iterable, List, Optional, Tuple
+from itertools import combinations
+from typing import Any, Dict, Iterable, Iterator, List, Optional, Sequence, Tuple
 
 
 # All agreement floats returned to callers are rounded to this many decimal
@@ -58,6 +59,28 @@ def _classify(scalar: Any) -> Optional[str]:
     return None
 
 
+def _span(values: Iterable[Any]) -> float:
+    """Numeric range across `values`, used to normalise rating differences.
+
+    1.0 when nothing is numeric, or when every numeric value is equal, so the
+    score stays in [0, 1] without reading the evaluator's configured scale.
+    """
+    numerics = [v for v in values if _classify(v) == "numeric"]
+    span = max(numerics) - min(numerics) if numerics else 1.0
+    return float(span) if span > 0 else 1.0
+
+
+def _pair_score(value_a: Any, value_b: Any, span: float) -> Optional[float]:
+    """Agreement for one pair of judgements, or None when the two are not
+    comparable: different kinds, or either one unclassifiable."""
+    kind = _classify(value_a)
+    if kind is None or kind != _classify(value_b):
+        return None
+    if kind == "numeric":
+        return 1.0 - abs(value_a - value_b) / span
+    return 1.0 if value_a == value_b else 0.0
+
+
 def _pairwise_agreement(
     values: List[Any],
 ) -> Tuple[float, int]:
@@ -65,32 +88,19 @@ def _pairwise_agreement(
 
     Returns (mean_agreement, pair_count). pair_count == 0 ⇒ no comparable pairs.
     """
-    classified = [(_classify(v), v) for v in values if v is not None]
-    if len(classified) < 2:
+    present = [v for v in values if v is not None]
+    if len(present) < 2:
         return (0.0, 0)
 
-    # Find numeric span (across this slot) for normalisation.
-    numerics = [v for k, v in classified if k == "numeric"]
-    if numerics:
-        span = max(numerics) - min(numerics)
-        if span <= 0:
-            span = 1.0
-    else:
-        span = 1.0
-
+    span = _span(present)
     total = 0.0
     pairs = 0
-    for i in range(len(classified)):
-        for j in range(i + 1, len(classified)):
-            ki, vi = classified[i]
-            kj, vj = classified[j]
-            if ki != kj:
-                continue
-            if ki == "binary" or ki == "categorical":
-                total += 1.0 if vi == vj else 0.0
-            elif ki == "numeric":
-                total += 1.0 - abs(vi - vj) / span
-            pairs += 1
+    for value_a, value_b in combinations(present, 2):
+        score = _pair_score(value_a, value_b, span)
+        if score is None:
+            continue
+        total += score
+        pairs += 1
     if pairs == 0:
         return (0.0, 0)
     return (total / pairs, pairs)
@@ -116,17 +126,23 @@ def filter_runs_to_live_versions(
     map) are dropped — without a live version there's no contribution to
     "live agreement" by definition.
     """
-    out: List[Dict[str, Any]] = []
-    for r in runs:
-        ev_id = r.get("evaluator_id")
-        if not ev_id:
-            continue
-        live_v = live_version_by_evaluator.get(ev_id)
-        if not live_v:
-            continue
-        if r.get("evaluator_version_id") == live_v:
-            out.append(r)
-    return out
+    return [
+        r
+        for r in runs
+        if (live_v := live_version_by_evaluator.get(r.get("evaluator_id") or ""))
+        and r.get("evaluator_version_id") == live_v
+    ]
+
+
+def runs_at_live_versions(
+    runs: Iterable[Dict[str, Any]],
+    evaluators: Iterable[Dict[str, Any]],
+) -> List[Dict[str, Any]]:
+    """Keep only runs at each given evaluator's live version, so aggregated
+    agreement never mixes in an experimental version's judgements."""
+    return filter_runs_to_live_versions(
+        runs, {e["uuid"]: e.get("live_version_id") for e in evaluators}
+    )
 
 
 def aggregate_agreement(
@@ -211,6 +227,59 @@ def build_buckets(
     return list(reversed(buckets))
 
 
+# Timestamp fields to read, in order of preference, per kind of row.
+_ANNOTATION_TS = ("updated_at", "created_at")
+_RUN_TS = ("completed_at", "created_at")
+
+
+def _bucketed_streams(
+    bucket: str,
+    days: int,
+    now: Optional[datetime],
+    streams: Sequence[Tuple[Iterable[Dict[str, Any]], Tuple[str, ...]]],
+) -> Iterator[
+    Tuple[Dict[str, str], List[List[Dict[str, Any]]], List[List[Dict[str, Any]]]]
+]:
+    """Walk the buckets once, yielding per bucket: the bucket's start/end meta
+    dict, every stream's rows timestamped up to the bucket end, and the rows
+    that bucket added.
+
+    Each stream is `(rows, timestamp_fields)`; the first field a row carries is
+    its timestamp, and a row with none or an unparseable one is dropped. The
+    cumulative lists are reused across buckets, so read them before advancing.
+    """
+    parsed: List[List[Tuple[datetime, Dict[str, Any]]]] = []
+    for rows, ts_fields in streams:
+        dated: List[Tuple[datetime, Dict[str, Any]]] = []
+        for row in rows:
+            ts = next((row.get(f) for f in ts_fields if row.get(f)), None)
+            if not ts:
+                continue
+            try:
+                dated.append((_parse_ts(ts), row))
+            except ValueError:
+                continue
+        dated.sort(key=lambda pair: pair[0])
+        parsed.append(dated)
+
+    next_idx = [0] * len(parsed)
+    visible: List[List[Dict[str, Any]]] = [[] for _ in parsed]
+    for start, end in build_buckets(bucket, days, now=now):
+        added: List[List[Dict[str, Any]]] = []
+        for stream_no, dated in enumerate(parsed):
+            new_rows: List[Dict[str, Any]] = []
+            while next_idx[stream_no] < len(dated) and dated[next_idx[stream_no]][0] <= end:
+                new_rows.append(dated[next_idx[stream_no]][1])
+                next_idx[stream_no] += 1
+            visible[stream_no].extend(new_rows)
+            added.append(new_rows)
+        yield (
+            {"bucket_start": _fmt_ts(start), "bucket_end": _fmt_ts(end)},
+            visible,
+            added,
+        )
+
+
 def _latest_evaluator_value_per_slot(
     evaluator_runs: Iterable[Dict[str, Any]],
     evaluator_id: Optional[str] = None,
@@ -239,6 +308,18 @@ def _latest_evaluator_value_per_slot(
     return out
 
 
+def _value_summary(values: List[Any]) -> Dict[str, Any]:
+    """Roll judgement values up into `{count, true_count, mean}`. `true_count`
+    is set for binary values and `mean` for numeric ones; the other stays None."""
+    bools = [v for v in values if isinstance(v, bool)]
+    numbers = [v for v in values if isinstance(v, (int, float)) and not isinstance(v, bool)]
+    return {
+        "count": len(values),
+        "true_count": sum(1 for v in bools if v) if bools else None,
+        "mean": _round_agreement(sum(numbers) / len(numbers)) if numbers else None,
+    }
+
+
 def evaluator_result_summary(
     evaluator_runs: Iterable[Dict[str, Any]],
     evaluator_id: str,
@@ -249,19 +330,14 @@ def evaluator_result_summary(
     two screens can't disagree. `true_count` is set for binary values and
     `mean` for numeric ones; the other stays None.
     """
-    values = [
-        value
-        for (value, _ts) in _latest_evaluator_value_per_slot(
-            evaluator_runs, evaluator_id
-        ).values()
-    ]
-    bools = [v for v in values if isinstance(v, bool)]
-    numbers = [v for v in values if isinstance(v, (int, float)) and not isinstance(v, bool)]
-    return {
-        "count": len(values),
-        "true_count": sum(1 for v in bools if v) if bools else None,
-        "mean": _round_agreement(sum(numbers) / len(numbers)) if numbers else None,
-    }
+    return _value_summary(
+        [
+            value
+            for (value, _ts) in _latest_evaluator_value_per_slot(
+                evaluator_runs, evaluator_id
+            ).values()
+        ]
+    )
 
 
 def human_result_summary(
@@ -290,13 +366,7 @@ def human_result_summary(
     values = list(by_pair.values())
     if not values:
         return None
-    bools = [v for v in values if isinstance(v, bool)]
-    numbers = [v for v in values if isinstance(v, (int, float)) and not isinstance(v, bool)]
-    return {
-        "count": len(values),
-        "true_count": sum(1 for v in bools if v) if bools else None,
-        "mean": _round_agreement(sum(numbers) / len(numbers)) if numbers else None,
-    }
+    return _value_summary(values)
 
 
 def evaluator_human_pair_agreement(
@@ -323,19 +393,14 @@ def evaluator_human_pair_agreement(
     humans = list(human_values)
     if not humans:
         return (0.0, 0)
-    numerics = [v for v in (eval_value, *humans) if _classify(v) == "numeric"]
-    span = (max(numerics) - min(numerics)) if numerics else 1.0
-    if span <= 0:
-        span = 1.0
+    span = _span([eval_value, *humans])
     total = 0.0
     pairs = 0
     for hv in humans:
-        if _classify(hv) != eval_kind:
+        score = _pair_score(eval_value, hv, span)
+        if score is None:
             continue
-        if eval_kind in ("binary", "categorical"):
-            total += 1.0 if eval_value == hv else 0.0
-        elif eval_kind == "numeric":
-            total += 1.0 - abs(eval_value - hv) / span
+        total += score
         pairs += 1
     return (total, pairs)
 
@@ -464,66 +529,22 @@ def trend_series_human_evaluator(
 
     Returns `{evaluator_id: [{bucket_start, bucket_end, agreement, pair_count}, ...]}`.
     """
-    buckets = build_buckets(bucket, days, now=now)
     if not evaluator_ids:
         return {}
-    if not annotations and not evaluator_runs:
-        empty = [
-            {
-                "bucket_start": _fmt_ts(s),
-                "bucket_end": _fmt_ts(e),
-                "agreement": None,
-                "pair_count": 0,
-            }
-            for (s, e) in buckets
-        ]
-        return {ev_id: list(empty) for ev_id in evaluator_ids}
-
-    parsed_ann: List[Tuple[datetime, Dict[str, Any]]] = []
-    for a in annotations:
-        ts = a.get("updated_at") or a.get("created_at")
-        if not ts:
-            continue
-        try:
-            parsed_ann.append((_parse_ts(ts), a))
-        except ValueError:
-            continue
-    parsed_ann.sort(key=lambda x: x[0])
-
-    parsed_runs: List[Tuple[datetime, Dict[str, Any]]] = []
-    for r in evaluator_runs:
-        ts = r.get("completed_at") or r.get("created_at")
-        if not ts:
-            continue
-        try:
-            parsed_runs.append((_parse_ts(ts), r))
-        except ValueError:
-            continue
-    parsed_runs.sort(key=lambda x: x[0])
 
     out: Dict[str, List[Dict[str, Any]]] = {ev_id: [] for ev_id in evaluator_ids}
-    ann_idx = 0
-    run_idx = 0
-    visible_ann: List[Dict[str, Any]] = []
-    visible_runs: List[Dict[str, Any]] = []
-    for (start, end) in buckets:
-        while ann_idx < len(parsed_ann) and parsed_ann[ann_idx][0] <= end:
-            visible_ann.append(parsed_ann[ann_idx][1])
-            ann_idx += 1
-        while run_idx < len(parsed_runs) and parsed_runs[run_idx][0] <= end:
-            visible_runs.append(parsed_runs[run_idx][1])
-            run_idx += 1
+    for meta, (visible_ann, visible_runs), _added in _bucketed_streams(
+        bucket,
+        days,
+        now,
+        [(annotations, _ANNOTATION_TS), (evaluator_runs, _RUN_TS)],
+    ):
         for ev_id in evaluator_ids:
             agreement, pair_count = aggregate_human_evaluator_agreement(
                 visible_ann, visible_runs, ev_id
             )
             out[ev_id].append(
-                {
-                    "bucket_start": _fmt_ts(start),
-                    "bucket_end": _fmt_ts(end),
-                    "agreement": agreement,
-                    "pair_count": pair_count,
-                }
+                {**meta, "agreement": agreement, "pair_count": pair_count}
             )
     return out
 
@@ -551,56 +572,12 @@ def trend_series_evaluator_breakdown(
             "by_task":    {task_id:    [series ...]},
         }
     """
-    buckets = build_buckets(bucket, days, now=now)
-
-    def _empty() -> List[Dict[str, Any]]:
-        return [
-            {
-                "bucket_start": _fmt_ts(s),
-                "bucket_end": _fmt_ts(e),
-                "agreement": None,
-                "pair_count": 0,
-            }
-            for (s, e) in buckets
-        ]
-
-    if not annotations and not runs:
-        return {
-            "overall": _empty(),
-            "by_version": {vid: _empty() for vid in version_ids},
-            "by_task": {tid: _empty() for tid in task_ids},
-        }
-
-    parsed_ann: List[Tuple[datetime, Dict[str, Any]]] = []
-    for a in annotations:
-        ts = a.get("updated_at") or a.get("created_at")
-        if not ts:
-            continue
-        try:
-            parsed_ann.append((_parse_ts(ts), a))
-        except ValueError:
-            continue
-    parsed_ann.sort(key=lambda x: x[0])
-
-    parsed_runs: List[Tuple[datetime, Dict[str, Any]]] = []
-    for r in runs:
-        ts = r.get("completed_at") or r.get("created_at")
-        if not ts:
-            continue
-        try:
-            parsed_runs.append((_parse_ts(ts), r))
-        except ValueError:
-            continue
-    parsed_runs.sort(key=lambda x: x[0])
-
     version_id_set = set(version_ids)
     task_id_set = set(task_ids)
 
     # Pre-separated visible accumulators — populated as we advance through
     # buckets so each aggregate call works on an already-filtered slice.
-    visible_ann_all: List[Dict[str, Any]] = []
     visible_ann_by_task: Dict[str, List[Dict[str, Any]]] = {tid: [] for tid in task_ids}
-    visible_runs_all: List[Dict[str, Any]] = []
     visible_runs_by_version: Dict[str, List[Dict[str, Any]]] = {vid: [] for vid in version_ids}
     visible_runs_by_task: Dict[str, List[Dict[str, Any]]] = {tid: [] for tid in task_ids}
 
@@ -608,30 +585,25 @@ def trend_series_evaluator_breakdown(
     out_by_version: Dict[str, List[Dict[str, Any]]] = {vid: [] for vid in version_ids}
     out_by_task: Dict[str, List[Dict[str, Any]]] = {tid: [] for tid in task_ids}
 
-    ann_idx = 0
-    run_idx = 0
-
-    for start, end in buckets:
-        while ann_idx < len(parsed_ann) and parsed_ann[ann_idx][0] <= end:
-            a = parsed_ann[ann_idx][1]
-            visible_ann_all.append(a)
+    for (
+        meta,
+        (visible_ann_all, visible_runs_all),
+        (new_ann, new_runs),
+    ) in _bucketed_streams(
+        bucket, days, now, [(annotations, _ANNOTATION_TS), (runs, _RUN_TS)]
+    ):
+        for a in new_ann:
             tid = a.get("task_id")
             if tid in task_id_set:
                 visible_ann_by_task[tid].append(a)
-            ann_idx += 1
 
-        while run_idx < len(parsed_runs) and parsed_runs[run_idx][0] <= end:
-            r = parsed_runs[run_idx][1]
-            visible_runs_all.append(r)
+        for r in new_runs:
             vid = r.get("evaluator_version_id")
             if vid in version_id_set:
                 visible_runs_by_version[vid].append(r)
             tid = r.get("task_id")
             if tid in task_id_set:
                 visible_runs_by_task[tid].append(r)
-            run_idx += 1
-
-        meta = {"bucket_start": _fmt_ts(start), "bucket_end": _fmt_ts(end)}
 
         agree, pairs = aggregate_human_evaluator_agreement(
             visible_ann_all, visible_runs_all, evaluator_id
@@ -681,34 +653,18 @@ def aggregate_agreement_for_annotator(
 
     total_weighted = 0.0
     total_pairs = 0
-    for slot, per_annotator in by_slot.items():
-        if annotator_id not in per_annotator:
-            continue
-        if len(per_annotator) < 2:
+    for per_annotator in by_slot.values():
+        if annotator_id not in per_annotator or len(per_annotator) < 2:
             continue
         my_val = per_annotator[annotator_id]
-        my_kind = _classify(my_val)
-        if my_kind is None:
-            continue
-        # Numeric span across this slot, for normalisation.
-        numerics = [
-            v
-            for v in per_annotator.values()
-            if _classify(v) == "numeric"
-        ]
-        span = max(numerics) - min(numerics) if numerics else 1.0
-        if span <= 0:
-            span = 1.0
+        span = _span(per_annotator.values())
         for other_id, other_val in per_annotator.items():
             if other_id == annotator_id:
                 continue
-            other_kind = _classify(other_val)
-            if other_kind != my_kind:
+            score = _pair_score(my_val, other_val, span)
+            if score is None:
                 continue
-            if my_kind in ("binary", "categorical"):
-                total_weighted += 1.0 if my_val == other_val else 0.0
-            elif my_kind == "numeric":
-                total_weighted += 1.0 - abs(my_val - other_val) / span
+            total_weighted += score
             total_pairs += 1
     if total_pairs == 0:
         return (None, 0)
@@ -728,45 +684,12 @@ def trend_series(
     enough annotators, every subsequent bucket still benefits from those
     judgements. This matches the intuition "average alignment so far."
     """
-    buckets = build_buckets(bucket, days, now=now)
-    if not annotations:
-        return [
-            {
-                "bucket_start": _fmt_ts(s),
-                "bucket_end": _fmt_ts(e),
-                "agreement": None,
-                "pair_count": 0,
-            }
-            for (s, e) in buckets
-        ]
-    # Pre-parse timestamps once.
-    parsed: List[Tuple[datetime, Dict[str, Any]]] = []
-    for a in annotations:
-        ts = a.get("updated_at") or a.get("created_at")
-        if not ts:
-            continue
-        try:
-            parsed.append((_parse_ts(ts), a))
-        except ValueError:
-            continue
-    parsed.sort(key=lambda x: x[0])
-
     out: List[Dict[str, Any]] = []
-    idx = 0
-    visible: List[Dict[str, Any]] = []
-    for (start, end) in buckets:
-        while idx < len(parsed) and parsed[idx][0] <= end:
-            visible.append(parsed[idx][1])
-            idx += 1
+    for meta, (visible,), _added in _bucketed_streams(
+        bucket, days, now, [(annotations, _ANNOTATION_TS)]
+    ):
         agreement, pair_count = aggregate_agreement(visible)
-        out.append(
-            {
-                "bucket_start": _fmt_ts(start),
-                "bucket_end": _fmt_ts(end),
-                "agreement": agreement,
-                "pair_count": pair_count,
-            }
-        )
+        out.append({**meta, "agreement": agreement, "pair_count": pair_count})
     return out
 
 
@@ -779,44 +702,12 @@ def trend_series_for_annotator(
 ) -> List[Dict[str, Any]]:
     """Cumulative trend of `annotator_id`'s pairwise agreement with other
     annotators, bucketed by updated_at."""
-    buckets = build_buckets(bucket, days, now=now)
-    if not annotations:
-        return [
-            {
-                "bucket_start": _fmt_ts(s),
-                "bucket_end": _fmt_ts(e),
-                "agreement": None,
-                "pair_count": 0,
-            }
-            for (s, e) in buckets
-        ]
-    parsed: List[Tuple[datetime, Dict[str, Any]]] = []
-    for a in annotations:
-        ts = a.get("updated_at") or a.get("created_at")
-        if not ts:
-            continue
-        try:
-            parsed.append((_parse_ts(ts), a))
-        except ValueError:
-            continue
-    parsed.sort(key=lambda x: x[0])
-
     out: List[Dict[str, Any]] = []
-    idx = 0
-    visible: List[Dict[str, Any]] = []
-    for (start, end) in buckets:
-        while idx < len(parsed) and parsed[idx][0] <= end:
-            visible.append(parsed[idx][1])
-            idx += 1
+    for meta, (visible,), _added in _bucketed_streams(
+        bucket, days, now, [(annotations, _ANNOTATION_TS)]
+    ):
         agreement, pair_count = aggregate_agreement_for_annotator(
             visible, annotator_id
         )
-        out.append(
-            {
-                "bucket_start": _fmt_ts(start),
-                "bucket_end": _fmt_ts(end),
-                "agreement": agreement,
-                "pair_count": pair_count,
-            }
-        )
+        out.append({**meta, "agreement": agreement, "pair_count": pair_count})
     return out
