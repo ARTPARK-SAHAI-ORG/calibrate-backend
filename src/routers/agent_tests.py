@@ -69,7 +69,11 @@ from llm_judge import (
     evaluator_value_name,
 )
 from routers.agents import AgentSummary, to_agent_summary
-from routers.org_limits import effective_max_rows_per_eval, enforce_max_rows_per_eval
+from routers.org_limits import (
+    effective_max_rows_per_eval,
+    enforce_max_rows_per_eval,
+    record_limit_hit,
+)
 from provider_keys import provider_env
 from shared_enums import (
     AGENT_INTERACTION_TYPES,
@@ -3221,7 +3225,7 @@ def run_agent_test(
                 detail="No tests linked to this agent. Link tests first or provide test_uuids.",
             )
 
-    enforce_max_rows_per_eval(ctx.org_uuid, len(tests))
+    enforce_max_rows_per_eval(ctx.org_uuid, len(tests), "test_run")
 
     # Get S3 configuration
     try:
@@ -3272,6 +3276,9 @@ def _run_tests_for_agents(
             continue
 
         if max_rows is not None and len(tests) > max_rows:
+            record_limit_hit(
+                org_uuid, "max_rows_per_eval", "test_run", len(tests), max_rows
+            )
             skipped.append(
                 BatchTestSkip(
                     agent_name=agent.get("name", ""),
@@ -4548,7 +4555,9 @@ def run_agent_benchmark(
     else:
         tests = linked_tests
 
-    enforce_max_rows_per_eval(ctx.org_uuid, len(tests) * len(request.models))
+    enforce_max_rows_per_eval(
+        ctx.org_uuid, len(tests) * len(request.models), "model_comparison"
+    )
 
     # Get S3 configuration
     try:

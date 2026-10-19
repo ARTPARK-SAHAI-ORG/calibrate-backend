@@ -721,7 +721,7 @@ def evaluate_tts(
 
     request.texts = texts
 
-    enforce_max_rows_per_eval(ctx.org_uuid, len(texts))
+    enforce_max_rows_per_eval(ctx.org_uuid, len(texts), "tts")
 
     try:
         s3_bucket = get_s3_output_config()
@@ -817,7 +817,7 @@ def retry_tts_evaluation(
         expected_type="tts",
     )
 
-    enforce_max_rows_per_eval(ctx.org_uuid, len(resolved.texts))
+    enforce_max_rows_per_eval(ctx.org_uuid, len(resolved.texts), "tts")
 
     rerun_details = {
         "texts": resolved.texts,

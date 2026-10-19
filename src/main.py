@@ -79,6 +79,7 @@ from routers.organizations import invites_router
 from routers.api_keys import router as api_keys_router
 from routers.traces import router as traces_router
 from routers.provider_keys import router as provider_keys_router
+from routers.admin import router as admin_router
 from utils import (
     LOCAL_ARTIFACTS_URL_PREFIX,
     generate_presigned_upload_url,
@@ -548,6 +549,7 @@ app.include_router(invites_router)
 app.include_router(api_keys_router)
 app.include_router(traces_router)
 app.include_router(provider_keys_router)
+app.include_router(admin_router)
 # Public (no-auth) sharing endpoints — must be registered without any auth dependency
 app.include_router(public_router)
 

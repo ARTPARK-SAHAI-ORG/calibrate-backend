@@ -5,15 +5,17 @@ scored automatically, and trace scoring batch size and concurrency. Members read
 the effective values via `/me`.
 """
 
+import logging
 import os
 import sqlite3
 
-from fastapi import APIRouter, HTTPException, Depends, Path
-from typing import Dict, Optional
+from fastapi import APIRouter, HTTPException, Depends, Path, Response
+from typing import Dict, Literal, Optional
 
 from pydantic import BaseModel, Field
 
 from db import (
+    create_limit_hit,
     create_org_limits,
     get_member_role,
     get_organization,
@@ -24,7 +26,18 @@ from db import (
 from auth_utils import get_current_org, OrgContext, require_superadmin, is_superadmin_user
 import provider_keys
 
+logger = logging.getLogger(__name__)
+
 router = APIRouter(prefix="/org-limits", tags=["org-limits"])
+
+EvalKind = Literal[
+    "test_run",
+    "model_comparison",
+    "simulation",
+    "stt",
+    "tts",
+    "labelling_evaluator_run",
+]
 
 DEFAULT_MAX_ROWS_PER_EVAL = int(os.getenv("DEFAULT_MAX_ROWS_PER_EVAL", "20"))
 DEFAULT_MAX_SCORED_TRACES = int(os.getenv("DEFAULT_MAX_SCORED_TRACES", "100"))
@@ -198,10 +211,25 @@ def effective_max_concurrent_trace_scoring_batches(org_uuid: str) -> int:
     return _effective_limit(org_uuid, "max_concurrent_trace_scoring_batches")
 
 
-def enforce_max_rows_per_eval(org_uuid: str, rows: int) -> None:
+def record_limit_hit(
+    org_uuid: str,
+    limit_name: str,
+    kind: Optional[str],
+    requested: Optional[int],
+    cap: Optional[int],
+) -> None:
+    """Record a refusal for analytics. Never raises: the caller's own answer wins."""
+    try:
+        create_limit_hit(org_uuid, limit_name, kind, requested, cap)
+    except Exception:
+        logger.exception(f"Could not record a {limit_name} limit hit for {org_uuid}")
+
+
+def enforce_max_rows_per_eval(org_uuid: str, rows: int, kind: EvalKind) -> None:
     """Reject a run that would process more rows than the workspace allows."""
     cap = effective_max_rows_per_eval(org_uuid)
     if cap is not None and rows > cap:
+        record_limit_hit(org_uuid, "max_rows_per_eval", kind, rows, cap)
         raise HTTPException(
             status_code=400,
             detail=(
@@ -238,6 +266,35 @@ def get_max_rows_per_eval(ctx: OrgContext = Depends(get_current_org)):
 def get_max_scored_traces(ctx: OrgContext = Depends(get_current_org)):
     """Get how many traces your workspace may have scored automatically"""
     return {"max_scored_traces": effective_max_scored_traces(ctx.org_uuid)}
+
+
+class LimitHitCreate(BaseModel):
+    limit_name: Literal["max_rows_per_eval"] = Field(
+        description="The limit the run went over",
+        examples=["max_rows_per_eval"],
+    )
+    kind: Optional[EvalKind] = Field(
+        None,
+        description="What kind of evaluation was refused, or `null` when unknown",
+        examples=["test_run"],
+    )
+    requested: int = Field(
+        ge=0,
+        description="How many rows the refused run would have processed",
+        examples=[600],
+    )
+
+
+@router.post("/hits", status_code=204, summary="Record a limit hit")
+def record_limit_hit_endpoint(
+    data: LimitHitCreate, ctx: OrgContext = Depends(get_current_org)
+):
+    """Record that a run in your workspace was stopped before it started for going over a limit"""
+    cap = effective_limits(ctx.org_uuid)[data.limit_name]
+    # Only a run that really was over the limit is a hit.
+    if cap is not None and data.requested > cap:
+        record_limit_hit(ctx.org_uuid, data.limit_name, data.kind, data.requested, cap)
+    return Response(status_code=204)
 
 
 @router.post("", response_model=OrgLimitsCreateResponse, summary="Create workspace limits")
