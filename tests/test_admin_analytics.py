@@ -97,6 +97,8 @@ def _seed(conn):
         (A, "completed", None, "2026-10-10 10:00:00", "2026-10-11 01:00:00"),
         (A, "failed", "judge unreachable", "2026-10-12 05:00:00", None),
         (A, "skipped", "over_limit", "2026-10-12 06:00:00", None),
+        # Same workspace, same hour: still one limit hit.
+        (A, "skipped", "over_limit", "2026-10-12 06:40:00", None),
         (B, "skipped", "trace_deleted", "2026-10-12 06:00:00", None),
     ]:
         _ins(conn, "trace_eval_runs", uuid=str(uuid.uuid4()), trace_uuid=traces[0], org_uuid=org,
@@ -239,15 +241,15 @@ def test_numbers_for_a_period(env):
         {**ZERO_RANGE, "org_uuid": C, "name": "Bob personal", "is_personal": True, "members": 1,
          "last_active_at": None},
     ]
-    assert body["failures_total"] == 4
+    # A failed trace scoring is not an evaluation, so it is not listed.
+    assert body["failures_total"] == 3
     assert [(f["kind"], f["error"], f["org_name"]) for f in body["failures"]] == [
-        ("trace_scoring", "judge unreachable", "Acme"),
         ("tts", "tts down", "Alice personal"),
         ("simulation", None, "Acme"),
         ("test_run", "boom", "Acme"),
     ]
-    assert body["failures"][0]["id"] == failed_scoring
-    assert body["failures"][3] == {"id": failed_test, "created_at": "2026-10-11T08:00:00Z",
+    assert failed_scoring not in [f["id"] for f in body["failures"]]
+    assert body["failures"][2] == {"id": failed_test, "created_at": "2026-10-11T08:00:00Z",
                                    "org_uuid": A, "org_name": "Acme", "kind": "test_run",
                                    "error": "boom"}
     assert body["limit_hits_total"] == 2

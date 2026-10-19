@@ -98,7 +98,7 @@ class Failure(BaseModel):
     org_uuid: str = Field(description="Workspace ID")
     org_name: str = Field(description="Workspace name")
     kind: str = Field(
-        description="What failed: `test_run`, `model_comparison`, `simulation`, `stt`, `tts`, `labelling_evaluator_run` or `trace_scoring`"
+        description="What failed: `test_run`, `model_comparison`, `simulation`, `stt`, `tts` or `labelling_evaluator_run`"
     )
     error: Optional[str] = Field(description="The error recorded for the run")
 

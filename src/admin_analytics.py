@@ -71,6 +71,14 @@ evals AS (
      WHERE j.deleted_at IS NULL AND j.type IN ('stt-eval', 'tts-eval', 'annotation-eval')
 )""".format(err=_ERR)
 
+# Every trace sent after the scoring cap is left unscored with its own row.
+# Count those as one hit per workspace per hour, the same rule the trace cap
+# uses when it records its own hits.
+_SCORING_CAP_HITS = """
+    SELECT org_uuid, MIN(created_at) AS created_at FROM trace_eval_runs
+     WHERE status = 'skipped' AND error = 'over_limit'
+     GROUP BY org_uuid, strftime('%Y-%m-%d %H', datetime(created_at))"""
+
 # Everything counted per workspace per day: (org_uuid, ts, metric, cost).
 _EVENTS = """
 events AS (
@@ -90,11 +98,11 @@ events AS (
                 JOIN annotation_tasks t ON t.uuid = j.task_id
                WHERE an.deleted_at IS NULL AND j.deleted_at IS NULL AND t.deleted_at IS NULL
     UNION ALL SELECT org_uuid, created_at, 'limit_hits', NULL FROM limit_hits
-    UNION ALL SELECT org_uuid, created_at, 'limit_hits', NULL
-                FROM trace_eval_runs WHERE status = 'skipped' AND error = 'over_limit'
-)"""
+    UNION ALL SELECT org_uuid, created_at, 'limit_hits', NULL FROM ({cap_hits})
+)""".format(cap_hits=_SCORING_CAP_HITS)
 
 _DAY = "date(datetime({col}, :tz))"
+
 _ISO = "strftime('%Y-%m-%dT%H:%M:%SZ', datetime({col}))"
 
 
@@ -213,9 +221,7 @@ def get_analytics(start: Optional[date], end: date, tz_offset_minutes: int) -> d
         in_range = f"""org_uuid IN (SELECT uuid FROM valid_orgs)
                        AND {_DAY.format(col="ts")} BETWEEN :lo AND :hi"""
         failures_sql = f"""WITH {_VALID_ORGS}, {_EVALS}, f AS (
-                SELECT id, ts, org_uuid, kind, error FROM evals WHERE status = 'failed'
-                UNION ALL SELECT uuid, created_at, org_uuid, 'trace_scoring', error
-                            FROM trace_eval_runs WHERE status = 'failed')"""
+                SELECT id, ts, org_uuid, kind, error FROM evals WHERE status = 'failed')"""
         failures_total = q(f"{failures_sql} SELECT COUNT(*) FROM f WHERE {in_range}")[0][0]
         failures = q(
             f"""{failures_sql}
@@ -229,7 +235,7 @@ def get_analytics(start: Optional[date], end: date, tz_offset_minutes: int) -> d
         hits_sql = f"""WITH {_VALID_ORGS}, h AS (
                 SELECT created_at AS ts, org_uuid, limit_name, kind, requested, cap FROM limit_hits
                 UNION ALL SELECT created_at, org_uuid, 'max_scored_traces', 'trace_scoring', NULL, NULL
-                            FROM trace_eval_runs WHERE status = 'skipped' AND error = 'over_limit')"""
+                            FROM ({_SCORING_CAP_HITS}))"""
         hits_total = q(f"{hits_sql} SELECT COUNT(*) FROM h WHERE {in_range}")[0][0]
         hits = q(
             f"""{hits_sql}
