@@ -3872,7 +3872,7 @@ def list_superadmins(server_email: str) -> List[Dict[str, Any]]:
         cursor = conn.cursor()
         cursor.execute(
             "SELECT * FROM users WHERE role = 'superadmin' OR email = ? ORDER BY created_at, id",
-            (normalize_email(server_email),),
+            (normalize_email(server_email) or None,),
         )
         return [dict(row) for row in cursor.fetchall()]
 

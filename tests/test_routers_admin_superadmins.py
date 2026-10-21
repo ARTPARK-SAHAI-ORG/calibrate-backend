@@ -91,3 +91,13 @@ def test_database_refuses_an_unknown_role(client):
     uid, _, _ = _signup(client)
     with pytest.raises(Exception):
         db.set_user_role(uid, "owner")
+
+
+def test_unset_server_email_lists_no_one_extra():
+    with db.get_db_connection() as conn:
+        conn.execute(
+            "INSERT OR IGNORE INTO users (uuid, first_name, last_name, email) VALUES (?, '', '', '')",
+            (str(uuid.uuid4()),),
+        )
+        conn.commit()
+    assert all(u["email"] for u in db.list_superadmins(""))
