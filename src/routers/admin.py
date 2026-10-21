@@ -24,12 +24,12 @@ class AccessResponse(BaseModel):
 
 
 class Superadmin(BaseModel):
-    uuid: str = Field(description="User ID")
-    email: str = Field(description="Email the superadmin signs in with")
-    first_name: str = Field(description="First name")
-    last_name: str = Field(description="Last name")
+    uuid: str = Field(description="Superadmin's user ID")
+    email: str = Field(description="Superadmin's email address")
+    first_name: str = Field(description="Superadmin's given name")
+    last_name: str = Field(description="Superadmin's family name")
     can_remove: bool = Field(
-        description="Whether the superadmin can be removed. False for the one set in the server settings"
+        description="Whether you can remove this superadmin. False for the superadmin set when Calibrate was deployed"
     )
 
 
@@ -183,7 +183,7 @@ def get_superadmins(user_id: str = Depends(require_superadmin)):
     return [_superadmin(u) for u in list_superadmins(auth_utils.SUPERADMIN_EMAIL)]
 
 
-@router.post("/superadmins", response_model=Superadmin, summary="Add a superadmin")
+@router.post("/superadmins", response_model=Superadmin, summary="Add superadmin")
 def add_superadmin(data: SuperadminAdd, user_id: str = Depends(require_superadmin)):
     """Make an existing Calibrate account a superadmin"""
     user = get_user_by_email(data.email)
@@ -193,12 +193,12 @@ def add_superadmin(data: SuperadminAdd, user_id: str = Depends(require_superadmi
     return _superadmin(user)
 
 
-@router.delete("/superadmins/{user_uuid}", status_code=204, summary="Remove a superadmin")
+@router.delete("/superadmins/{user_uuid}", status_code=204, summary="Remove superadmin")
 def remove_superadmin(
     user_uuid: str = Path(description="User ID of the superadmin to remove"),
     user_id: str = Depends(require_superadmin),
 ):
-    """Take superadmin access away from a user"""
+    """Take superadmin access away from a user. Their account stays, and the superadmin set when Calibrate was deployed cannot be removed"""
     user = get_user(user_uuid)
     if is_server_superadmin(user):
         raise HTTPException(
