@@ -2062,14 +2062,10 @@ def _run_totals(
     return len(test_results), passed
 
 
-def _model_result(
-    model: str,
-    test_results: List[Dict[str, Any]],
-    metrics_data: Optional[dict],
-    success: Optional[bool],
-    message: str,
+def _run_result(
+    test_results: List[Dict[str, Any]], metrics_data: Optional[dict]
 ) -> Dict[str, Any]:
-    """One benchmark model's stored result.
+    """The stored fields a single run and each benchmark model share.
 
     Rows stay plain dicts: calibrate emits `judge_results` as a dict keyed by
     evaluator name and the read path reshapes it, so building a `ModelResult`
@@ -2078,9 +2074,6 @@ def _model_result(
     total, passed = _run_totals(metrics_data, test_results)
     metrics = metrics_data or {}
     return {
-        "model": model,
-        "success": success,
-        "message": message,
         "total_tests": total,
         "passed": passed,
         "failed": total - passed,
@@ -2090,6 +2083,27 @@ def _model_result(
         "total_tokens": metrics.get("total_tokens"),
         **run_counts(metrics_data, test_results),
         "test_results": test_results,
+    }
+
+
+def _model_result(
+    model: str,
+    test_results: List[Dict[str, Any]],
+    metrics_data: Optional[dict],
+    success: Optional[bool],
+    message: Optional[str] = None,
+) -> Dict[str, Any]:
+    if message is None:
+        message = (
+            f"Benchmark completed successfully for {model}"
+            if metrics_data
+            else f"Benchmark completed for {model}"
+        )
+    return {
+        "model": model,
+        "success": success,
+        "message": message,
+        **_run_result(test_results, metrics_data),
     }
 
 
@@ -2473,7 +2487,7 @@ def _as_calibrate_row(row: Dict[str, Any]) -> Dict[str, Any]:
 def fill_run_summaries(
     results: Dict[str, Any],
     details: Dict[str, Any],
-    evaluator_cache: Optional[Dict[str, Optional[Dict[str, Any]]]] = None,
+    evaluator_cache: Dict[str, Optional[Dict[str, Any]]],
 ) -> None:
     """Give a run, or each model of a benchmark, its pass rate, likely range
     and totals for each evaluator.
@@ -2924,8 +2938,7 @@ def run_llm_test_task(
                         test_case = results_data[i].get("test_case", {})
                         r["name"] = test_case.get("name")
 
-                total_tests, passed = _run_totals(metrics_data, test_results)
-                metrics = metrics_data or {}
+                run_result = _run_result(test_results, metrics_data)
 
                 # Upload results to S3 (calibrate ``logs``/``results.log`` per model, run-level ``logs``, etc.)
                 results_prefix = f"agent-tests/runs/{task_id}"
@@ -2941,22 +2954,15 @@ def run_llm_test_task(
                     task_id,
                     status=TaskStatus.DONE.value,
                     results={
-                        "total_tests": total_tests,
-                        "passed": passed,
-                        "failed": total_tests - passed,
-                        **_summary_fields(metrics_data),
-                        "latency_ms": metrics.get("latency_ms"),
-                        "cost": metrics.get("cost"),
-                        "total_tokens": metrics.get("total_tokens"),
-                        **run_counts(metrics_data, test_results),
-                        "test_results": test_results,
+                        **run_result,
                         "results_s3_prefix": results_prefix,
                         "error": None,
                     },
                 )
 
                 logger.info(
-                    f"LLM test task {task_id} completed: {passed}/{total_tests} passed"
+                    f"LLM test task {task_id} completed: "
+                    f"{run_result['passed']}/{run_result['total_tests']} passed"
                 )
 
             except subprocess.CalledProcessError as e:
@@ -4264,11 +4270,6 @@ def run_benchmark_task(
                                 test_results,
                                 metrics_data,
                                 True,
-                                (
-                                    f"Benchmark completed successfully for {model}"
-                                    if metrics_data
-                                    else f"Benchmark completed for {model}"
-                                ),
                             )
                         )
                     else:
@@ -4667,11 +4668,6 @@ def _benchmark_model_result(
         test_results,
         metrics_data,
         True,
-        (
-            f"Benchmark completed successfully for {model}"
-            if metrics_data
-            else f"Benchmark completed for {model}"
-        ),
     )
 
 

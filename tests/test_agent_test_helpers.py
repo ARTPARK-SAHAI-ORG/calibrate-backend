@@ -980,26 +980,6 @@ def test_fill_run_summaries_works_ranges_out_from_the_rows():
     assert round(entry["ci"]["low"], 1) == 53.1
 
 
-def test_fill_run_summaries_keeps_what_calibrate_wrote():
-    from routers.agent_tests import fill_run_summaries
-
-    stored = [{"metric_key": "Correctness", "name": "Correctness", "ci": None}]
-    model = {
-        "pass_rate": 50.0,
-        "pass_rate_ci": None,
-        "evaluator_summary": stored,
-        "test_results": [_stored_row(True, True)],
-    }
-    results = {"model_results": [model, "junk"]}
-
-    fill_run_summaries(results, {}, {})
-
-    assert model["pass_rate"] == 50.0
-    assert model["pass_rate_ci"] is None
-    assert model["evaluator_summary"] is stored
-    assert "pass_rate" not in results
-
-
 def _old_benchmark_model():
     """A benchmark model stored before calibrate wrote ranges."""
     return {
@@ -1038,7 +1018,7 @@ def test_fill_run_summaries_adds_a_range_to_stored_totals_it_can_match():
 def test_fill_run_summaries_with_nothing_answered():
     from routers.agent_tests import fill_run_summaries
 
-    results = {"model_results": [{"test_results": None}]}
+    results = {"model_results": [{"test_results": None}, "junk"]}
     fill_run_summaries(results, {}, {})
     model = results["model_results"][0]
     assert model["pass_rate"] is None
@@ -1075,22 +1055,6 @@ def test_model_result_still_running_reports_unanswered_cases():
     assert out["stopped_early"] is False
     assert "pass_rate_ci" not in out
     assert out["evaluator_summary"] is None
-
-
-def test_model_result_carries_calibrate_ranges():
-    from routers.agent_tests import _model_result
-
-    metrics = {
-        "total": 2,
-        "passed": 2,
-        "pass_rate": 100.0,
-        "pass_rate_ci": {"low": 34.2, "high": 100.0},
-        "criteria": {"C": {"type": "binary", "passed": 2, "total": 2, "ci": None}},
-    }
-    out = _model_result("m", [], metrics, True, "Done")
-    assert out["pass_rate"] == 100.0
-    assert out["pass_rate_ci"] == {"low": 34.2, "high": 100.0}
-    assert out["evaluator_summary"][0]["metric_key"] == "C"
 
 
 def test_test_uuid_by_calibrate_id_reads_the_frozen_arrays():

@@ -1917,7 +1917,8 @@ def test_run_detail_uses_the_ranges_calibrate_wrote(client):
     body = client.get(f"/agent-tests/run/{job_id}", headers=h).json()
     assert body["pass_rate"] == 90.0
     assert body["pass_rate_ci"] == {"low": 70.0, "high": 97.0}
-    assert body["evaluator_summary"][0]["metric_key"] == "C"
+    (entry,) = body["evaluator_summary"]
+    assert (entry["metric_key"], entry["ci"]) == ("C", None)
 
 
 def _seed_raw_run(agent, evaluators, rows):
