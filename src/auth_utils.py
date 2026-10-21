@@ -112,35 +112,29 @@ async def get_current_user_id(
 SUPERADMIN_EMAIL = os.getenv("SUPERADMIN_EMAIL", "").strip()
 
 
+def is_server_superadmin(user: Optional[dict]) -> bool:
+    """Whether `user` is the superadmin named by SUPERADMIN_EMAIL, who cannot be removed."""
+    from db import normalize_email
+
+    return bool(SUPERADMIN_EMAIL and user) and user.get("email", "") == normalize_email(
+        SUPERADMIN_EMAIL
+    )
+
+
 def is_superadmin_user(user_id: str) -> bool:
-    """Return True if `user_id` belongs to the configured superadmin email."""
-    if not SUPERADMIN_EMAIL:
-        return False
     from db import get_user
 
     user = get_user(user_id)
-    return bool(user) and user.get("email", "") == SUPERADMIN_EMAIL
+    return bool(user) and (user.get("role") == "superadmin" or is_server_superadmin(user))
 
 
 async def require_superadmin(
     credentials: HTTPAuthorizationCredentials = Depends(security),
 ) -> str:
-    """
-    FastAPI dependency that requires the caller to be a superadmin.
-
-    Extracts the email from the JWT and checks it against SUPERADMIN_EMAIL.
-    Returns the user UUID if authorized.
-
-    Raises:
-        HTTPException: 401 if token invalid, 403 if not superadmin
-    """
+    """FastAPI dependency: the caller's user UUID, or 403 if they are not a superadmin."""
     user_id = await get_current_user_id(credentials)
-
-    payload = decode_token(credentials.credentials)
-    email = payload.get("email", "")
-    if not SUPERADMIN_EMAIL or email != SUPERADMIN_EMAIL:
+    if not is_superadmin_user(user_id):
         raise HTTPException(status_code=403, detail="Superadmin access required")
-
     return user_id
 
 
@@ -185,11 +179,6 @@ async def get_current_org(
     """
     user_id = await get_current_user_id(credentials)
 
-    payload = decode_token(credentials.credentials) or {}
-    is_superadmin = (
-        bool(SUPERADMIN_EMAIL) and payload.get("email", "") == SUPERADMIN_EMAIL
-    )
-
     # Import lazily to dodge the circular dependency (db imports nothing from
     # auth_utils, but routers import both — keeping db out of module-load
     # makes the dep graph robust against future moves).
@@ -200,7 +189,7 @@ async def get_current_org(
         if role is None:
             # Superadmin bypass: grant owner-level access to any existing org
             # without requiring membership.
-            if is_superadmin and get_organization(x_org_uuid) is not None:
+            if is_superadmin_user(user_id) and get_organization(x_org_uuid) is not None:
                 return OrgContext(user_id=user_id, org_uuid=x_org_uuid, role="owner")
             raise HTTPException(status_code=404, detail="Organization not found")
         return OrgContext(user_id=user_id, org_uuid=x_org_uuid, role=role)

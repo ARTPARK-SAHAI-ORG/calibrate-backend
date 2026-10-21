@@ -1218,6 +1218,14 @@ def init_db():
         except sqlite3.OperationalError:
             pass
 
+        try:
+            cursor.execute(
+                "ALTER TABLE users ADD COLUMN role TEXT NOT NULL DEFAULT 'user' "
+                "CHECK (role IN ('user', 'superadmin'))"
+            )
+        except sqlite3.OperationalError:
+            pass
+
         # Add user_id column to all relevant tables if not present (migration)
         tables_with_user_id = [
             "agents",
@@ -3856,6 +3864,26 @@ def get_user_by_email(email: str) -> Optional[Dict[str, Any]]:
         if row:
             return dict(row)
         return None
+
+
+def list_superadmins(server_email: str) -> List[Dict[str, Any]]:
+    """Users whose role is superadmin, plus the user with `server_email`."""
+    with get_db_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            "SELECT * FROM users WHERE role = 'superadmin' OR email = ? ORDER BY created_at, id",
+            (normalize_email(server_email) or None,),
+        )
+        return [dict(row) for row in cursor.fetchall()]
+
+
+def set_user_role(user_uuid: str, role: str) -> None:
+    with get_db_connection() as conn:
+        conn.execute(
+            "UPDATE users SET role = ?, updated_at = CURRENT_TIMESTAMP WHERE uuid = ?",
+            (role, user_uuid),
+        )
+        conn.commit()
 
 
 def get_all_users() -> List[Dict[str, Any]]:

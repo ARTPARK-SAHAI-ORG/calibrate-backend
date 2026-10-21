@@ -95,7 +95,7 @@ All application code lives under `src/` and runs with `src/` as the working dire
 - `src/main.py` — FastAPI app, lifespan hooks (job recovery on startup), custom HTTP-Basic-auth'd `/docs` routes, Sentry/OTEL setup, router wiring
 - `src/db.py` — single-file SQLite layer (~7000 lines). All schema DDL, migrations (wrapped in `try/except sqlite3.OperationalError` — see architecture.md gotcha on `DEFAULT CURRENT_TIMESTAMP`), and CRUD. Soft deletes (`deleted_at IS NULL` filter) everywhere.
 - `src/utils.py` — S3 helpers, presigned URLs, `build_tool_configs()`, process-group kill helpers, job-queue registry (`register_job_starter`, `can_start_*_job`, `try_start_queued_*_job`), `TaskStatus` enum, `is_job_timed_out()`, Sentry capture helper
-- `src/auth_utils.py` — JWT verification, `get_current_user_id` dependency, `require_superadmin`
+- `src/auth_utils.py` — JWT verification, `get_current_user_id` dependency, `require_superadmin`. A superadmin is a user with `users.role = superadmin` OR the `SUPERADMIN_EMAIL` user (who cannot be removed); every check goes through `is_superadmin_user`, never the email inside the token. Superadmins add and remove each other via `/admin/superadmins` (JWT-only)
 - `src/org_scope.py` — shared org-ownership guards (`ensure_owned_agent`, `ensure_owned_evaluator`) used by routers that link evaluators; 404 on cross-org access
 - `src/dataset_utils.py` — `resolve_dataset_inputs()` / `inject_dataset_item_ids()` shared by STT and TTS routers
 - `src/job_recovery.py` — on startup, kills orphaned process groups and restarts `in_progress` jobs

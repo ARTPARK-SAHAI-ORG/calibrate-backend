@@ -3,17 +3,38 @@
 from datetime import date, datetime, timedelta, timezone
 from typing import List, Optional
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Path, Query, Response
 from pydantic import BaseModel, Field
 
 import admin_analytics
-from auth_utils import get_current_user_id, is_superadmin_user, require_superadmin
+import auth_utils
+from auth_utils import (
+    get_current_user_id,
+    is_server_superadmin,
+    is_superadmin_user,
+    require_superadmin,
+)
+from db import get_user, get_user_by_email, list_superadmins, set_user_role
 
 router = APIRouter(prefix="/admin", tags=["admin"])
 
 
 class AccessResponse(BaseModel):
     is_superadmin: bool = Field(description="Whether you can open the superadmin pages")
+
+
+class Superadmin(BaseModel):
+    uuid: str = Field(description="Superadmin's user ID")
+    email: str = Field(description="Superadmin's email address")
+    first_name: str = Field(description="Superadmin's given name")
+    last_name: str = Field(description="Superadmin's family name")
+    can_remove: bool = Field(
+        description="Whether you can remove this superadmin. False for the superadmin set when Calibrate was deployed"
+    )
+
+
+class SuperadminAdd(BaseModel):
+    email: str = Field(min_length=1, description="Email of the Calibrate account to make a superadmin")
 
 
 class Totals(BaseModel):
@@ -144,3 +165,46 @@ def get_analytics(
     if start and end < start:
         raise HTTPException(status_code=422, detail="end must not be before start")
     return admin_analytics.get_analytics(start, end, tz_offset_minutes)
+
+
+def _superadmin(user: dict) -> Superadmin:
+    return Superadmin(
+        uuid=user["uuid"],
+        email=user["email"],
+        first_name=user["first_name"],
+        last_name=user["last_name"],
+        can_remove=not is_server_superadmin(user),
+    )
+
+
+@router.get("/superadmins", response_model=List[Superadmin], summary="List superadmins")
+def get_superadmins(user_id: str = Depends(require_superadmin)):
+    """List everyone who can open the superadmin pages, oldest account first"""
+    return [_superadmin(u) for u in list_superadmins(auth_utils.SUPERADMIN_EMAIL)]
+
+
+@router.post("/superadmins", response_model=Superadmin, summary="Add superadmin")
+def add_superadmin(data: SuperadminAdd, user_id: str = Depends(require_superadmin)):
+    """Make an existing Calibrate account a superadmin"""
+    user = get_user_by_email(data.email)
+    if user is None:
+        raise HTTPException(status_code=404, detail="No Calibrate account uses this email")
+    set_user_role(user["uuid"], "superadmin")
+    return _superadmin(user)
+
+
+@router.delete("/superadmins/{user_uuid}", status_code=204, summary="Remove superadmin")
+def remove_superadmin(
+    user_uuid: str = Path(description="User ID of the superadmin to remove"),
+    user_id: str = Depends(require_superadmin),
+):
+    """Take superadmin access away from a user. Their account stays, and the superadmin set when Calibrate was deployed cannot be removed"""
+    user = get_user(user_uuid)
+    if is_server_superadmin(user):
+        raise HTTPException(
+            status_code=400, detail="This superadmin is set by the server and cannot be removed"
+        )
+    if user is None or user["role"] != "superadmin":
+        raise HTTPException(status_code=404, detail="Superadmin not found")
+    set_user_role(user_uuid, "user")
+    return Response(status_code=204)

@@ -68,7 +68,7 @@ These are **not read directly** by most backend modules; they are passed through
 | **`RESEND_API_KEY`**       | [Resend](https://resend.com) API key used to send transactional email ([`src/mailer.py`](src/mailer.py)). Leave empty to disable sending: nothing is sent and the app logs that email is off, so local development and CI need no configuration. Subjects and wording live in hosted Resend templates, created once with [`scripts/create_email_templates.py`](scripts/create_email_templates.py); a sending key is enough to send, a full-access key is needed to create them. |
 | **`EMAIL_FROM`**           | Sender address on outgoing email, e.g. `Calibrate <hello@example.com>`. Default **`Calibrate <onboarding@resend.dev>`**, which only works for Resend test sends. Set a verified domain in production.                                             |
 | **`FRONTEND_URL`**         | Base URL of the frontend, used to build the links inside emails. Default **`http://localhost:3000`**. A trailing slash is stripped.                                                                                                                |
-| **`SUPERADMIN_EMAIL`**     | Email address allowed to mutate **user limit** endpoints (`POST`/`PUT`/`DELETE` on user-limits). Enforced by [`require_superadmin`](src/auth_utils.py).                                                               |
+| **`SUPERADMIN_EMAIL`**     | Email of the first superadmin. That person can open the Analytics page, change workspace limits, open any workspace, and add or remove other superadmins. Other superadmins are stored in `users.role`; this one cannot be removed. Checked by [`is_superadmin_user`](src/auth_utils.py). |
 
 ---
 
