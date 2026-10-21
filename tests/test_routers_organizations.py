@@ -216,11 +216,14 @@ def test_update_workspace_with_nothing_to_change_is_rejected(client):
     [
         {"model_benchmarking": {"run_models_in_paralel": False}},
         {"model_bencmarking": {"run_models_in_parallel": False}},
+        {"model_benchmarking": {"run_models_in_parallel": None}},
+        {"model_benchmarking": {"show_likely_ranges": None}},
     ],
-    ids=["unknown key", "unknown section"],
+    ids=["unknown key", "unknown section", "null parallel", "null ranges"],
 )
 def test_a_setting_we_do_not_have_is_refused(client, settings):
-    """A misspelt setting is rejected rather than stored where nothing reads it."""
+    """A misspelt setting, or one set to null, is rejected rather than stored
+    where nothing reads it or where every later read of the workspace fails."""
     auth = _signup(client)
     h = auth["headers"]
     org = client.post("/organizations", json={"name": "Strict"}, headers=h).json()
@@ -232,7 +235,10 @@ def test_a_setting_we_do_not_have_is_refused(client, settings):
 
     saved = client.get("/organizations", headers=h).json()
     unchanged = next(o for o in saved if o["uuid"] == org["uuid"])
-    assert unchanged["settings"]["model_benchmarking"]["run_models_in_parallel"] is True
+    assert unchanged["settings"]["model_benchmarking"] == {
+        "run_models_in_parallel": True,
+        "show_likely_ranges": False,
+    }
 
 
 def test_non_member_cannot_change_the_settings(client):

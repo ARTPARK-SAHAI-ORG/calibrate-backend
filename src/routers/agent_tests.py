@@ -2480,8 +2480,11 @@ def fill_run_summaries(
 
     A run whose metrics.json did not carry them (it finished before calibrate
     wrote them, or it is still going) has them worked out from its stored rows
-    by the same calibrate functions. Call this before `_enrich_*`, which turns
-    each row's `judge_results` from calibrate's dict into a list.
+    by the same calibrate functions. Stored evaluator totals are kept and only
+    gain a range, since the recount matches evaluators by the names in
+    `calibrate_config`, which older runs never stored. Call this before
+    `_enrich_*`, which turns each row's `judge_results` from calibrate's dict
+    into a list.
     """
     evaluators = {
         e["name"]: e
@@ -2498,9 +2501,15 @@ def fill_run_summaries(
                 if isinstance(r, dict) and r.get("passed") is not None
             ]
             container.update(pass_rate_summary(rows))
-            container["evaluator_summary"] = _build_evaluator_summary(
-                aggregate_criteria(rows, evaluators)
-            )
+            recount = _build_evaluator_summary(aggregate_criteria(rows, evaluators))
+            stored = container.get("evaluator_summary")
+            if stored:
+                ci_by_key = {e["metric_key"]: e["ci"] for e in recount or []}
+                for entry in stored:
+                    if isinstance(entry, dict) and entry.get("ci") is None:
+                        entry["ci"] = ci_by_key.get(entry.get("metric_key"))
+            else:
+                container["evaluator_summary"] = recount
         _enrich_evaluator_summary(container.get("evaluator_summary"), evaluator_cache)
 
 

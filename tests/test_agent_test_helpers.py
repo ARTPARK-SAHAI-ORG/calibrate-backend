@@ -1000,6 +1000,41 @@ def test_fill_run_summaries_keeps_what_calibrate_wrote():
     assert "pass_rate" not in results
 
 
+def _old_benchmark_model():
+    """A benchmark model stored before calibrate wrote ranges."""
+    return {
+        "evaluator_summary": [
+            {"metric_key": "Correctness", "type": "binary", "passed": 1, "total": 1},
+            "junk",
+        ],
+        "test_results": [_stored_row(True, True)],
+    }
+
+
+def test_fill_run_summaries_keeps_stored_totals_it_cannot_match():
+    from routers.agent_tests import fill_run_summaries
+
+    model = _old_benchmark_model()
+    fill_run_summaries({"model_results": [model]}, {}, {})
+
+    entry = model["evaluator_summary"][0]
+    assert (entry["passed"], entry["total"], entry["ci"]) == (1, 1, None)
+    assert model["pass_rate"] == 100.0
+
+
+def test_fill_run_summaries_adds_a_range_to_stored_totals_it_can_match():
+    from calibrate_agent.llm.summary import wilson_interval
+
+    from routers.agent_tests import fill_run_summaries
+
+    model = _old_benchmark_model()
+    fill_run_summaries({"model_results": [model]}, _DETAILS, {})
+
+    entry = model["evaluator_summary"][0]
+    assert (entry["passed"], entry["total"]) == (1, 1)
+    assert entry["ci"] == wilson_interval(1, 1)
+
+
 def test_fill_run_summaries_with_nothing_answered():
     from routers.agent_tests import fill_run_summaries
 

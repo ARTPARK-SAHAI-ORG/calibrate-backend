@@ -67,11 +67,11 @@ class OrganizationSettings(BaseModel):
 class ModelBenchmarkingSettingsUpdate(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    run_models_in_parallel: Optional[bool] = Field(
+    run_models_in_parallel: bool = Field(
         None,
         description=f"{_RUN_MODELS_IN_PARALLEL_DESCRIPTION}. Omit to leave it as it is",
     )
-    show_likely_ranges: Optional[bool] = Field(
+    show_likely_ranges: bool = Field(
         None,
         description=f"{_SHOW_LIKELY_RANGES_DESCRIPTION}. Omit to leave it as it is",
     )
