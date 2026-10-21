@@ -3236,7 +3236,11 @@ def test_writing_one_setting_leaves_the_others_alone(user):
             ).fetchone()["settings"]
         )
     assert written == {
-        "model_benchmarking": {"run_models_in_parallel": True, "second_key": "kept"},
+        "model_benchmarking": {
+            "run_models_in_parallel": True,
+            "second_key": "kept",
+            "show_likely_ranges": False,
+        },
         "second_section": {"a_key": "kept"},
     }
 

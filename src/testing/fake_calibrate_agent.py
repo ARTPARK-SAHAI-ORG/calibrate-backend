@@ -28,6 +28,8 @@ FAKE_COST = 0.001
 FAKE_TOKENS = 42
 FAKE_WER = 0.0
 FAKE_TTFB = 0.5
+# Every case passes, so the range tops out at 100; the low end is canned.
+FAKE_PASS_RATE_CI = {"low": 80.0, "high": 100.0}
 # Sarvam judge bundle (included by default; suppressed by `--skip-llm-judges`).
 FAKE_SARVAM_LLM_WER = 0.0
 FAKE_SARVAM_LLM_CER = 0.0
@@ -144,6 +146,8 @@ def _metrics_aggregate(ev: Dict[str, Any], n: int) -> Dict[str, Any]:
             "count": n,
             "scale_min": _ev_scale_min(ev),
             "scale_max": sm,
+            # Every score is scale_max, so the range around the mean is a point.
+            "ci": {"low": sm, "high": sm},
         }
     return {
         "type": "binary",
@@ -152,6 +156,7 @@ def _metrics_aggregate(ev: Dict[str, Any], n: int) -> Dict[str, Any]:
         "evaluator_id": uid,
         "passed": n,
         "total": n,
+        "ci": FAKE_PASS_RATE_CI,
     }
 
 
@@ -239,6 +244,8 @@ def _write_llm_model_dir(
             {
                 "total": n,
                 "passed": n,
+                "pass_rate": 100.0,
+                "pass_rate_ci": FAKE_PASS_RATE_CI,
                 # Aggregate perf blocks are dicts, not scalars: latency is
                 # percentiles {p50,p95,p99,count}; cost/tokens are
                 # {mean,min,max,count}. The run-status/benchmark readers pass

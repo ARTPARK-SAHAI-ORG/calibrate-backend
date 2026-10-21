@@ -43,10 +43,17 @@ _RUN_MODELS_IN_PARALLEL_DESCRIPTION = (
 )
 
 
+_SHOW_LIKELY_RANGES_DESCRIPTION = (
+    "Whether results pages show the range each pass rate and score would "
+    "likely fall in if the run were repeated"
+)
+
+
 class ModelBenchmarkingSettings(BaseModel):
     run_models_in_parallel: bool = Field(
         description=_RUN_MODELS_IN_PARALLEL_DESCRIPTION
     )
+    show_likely_ranges: bool = Field(description=_SHOW_LIKELY_RANGES_DESCRIPTION)
 
 
 class OrganizationSettings(BaseModel):
@@ -63,6 +70,10 @@ class ModelBenchmarkingSettingsUpdate(BaseModel):
     run_models_in_parallel: Optional[bool] = Field(
         None,
         description=f"{_RUN_MODELS_IN_PARALLEL_DESCRIPTION}. Omit to leave it as it is",
+    )
+    show_likely_ranges: Optional[bool] = Field(
+        None,
+        description=f"{_SHOW_LIKELY_RANGES_DESCRIPTION}. Omit to leave it as it is",
     )
 
 

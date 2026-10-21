@@ -130,13 +130,33 @@ def test_a_new_workspace_reads_every_setting_at_its_default(client):
     org = client.post(
         "/organizations", json={"name": "Parallel"}, headers=auth["headers"]
     ).json()
-    assert org["settings"] == {"model_benchmarking": {"run_models_in_parallel": True}}
+    defaults = {
+        "model_benchmarking": {
+            "run_models_in_parallel": True,
+            "show_likely_ranges": False,
+        }
+    }
+    assert org["settings"] == defaults
 
     listed = client.get("/organizations", headers=auth["headers"]).json()
-    assert all(
-        o["settings"] == {"model_benchmarking": {"run_models_in_parallel": True}}
-        for o in listed
+    assert all(o["settings"] == defaults for o in listed)
+
+
+def test_showing_likely_ranges_is_remembered_beside_the_other_setting(client):
+    auth = _signup(client)
+    h = auth["headers"]
+    org = client.post("/organizations", json={"name": "Ranges"}, headers=h).json()
+
+    resp = client.patch(
+        f"/organizations/{org['uuid']}",
+        json={"settings": {"model_benchmarking": {"show_likely_ranges": True}}},
+        headers=h,
     )
+    assert resp.status_code == 200
+    assert resp.json()["settings"]["model_benchmarking"] == {
+        "run_models_in_parallel": True,
+        "show_likely_ranges": True,
+    }
 
 
 def test_running_models_one_after_another_is_remembered(client):

@@ -10,41 +10,30 @@ from unittest.mock import patch
 import pytest
 
 
-def test_read_agent_test_results_json_missing(tmp_path):
-    from routers.agent_tests import _read_agent_test_results_json
+def test_read_agent_test_json_missing(tmp_path):
+    from routers.agent_tests import _read_agent_test_json
 
-    assert _read_agent_test_results_json(None) is None
-    assert _read_agent_test_results_json(tmp_path / "missing") is None
+    assert _read_agent_test_json(None, "results.json") is None
+    assert _read_agent_test_json(tmp_path / "missing", "results.json") is None
+    assert _read_agent_test_json(tmp_path, "metrics.json") is None
 
 
-def test_read_agent_test_results_json_found(tmp_path):
-    from routers.agent_tests import _read_agent_test_results_json
+def test_read_agent_test_json_found(tmp_path):
+    from routers.agent_tests import _read_agent_test_json
 
     sub = tmp_path / "sub"
     sub.mkdir()
     (sub / "results.json").write_text(json.dumps([{"x": 1}]))
-    assert _read_agent_test_results_json(tmp_path) == [{"x": 1}]
+    (tmp_path / "metrics.json").write_text(json.dumps({"a": 1}))
+    assert _read_agent_test_json(tmp_path, "results.json") == [{"x": 1}]
+    assert _read_agent_test_json(tmp_path, "metrics.json") == {"a": 1}
 
 
-def test_read_agent_test_results_json_malformed(tmp_path):
-    from routers.agent_tests import _read_agent_test_results_json
+def test_read_agent_test_json_malformed(tmp_path):
+    from routers.agent_tests import _read_agent_test_json
 
     (tmp_path / "results.json").write_text("{not json")
-    assert _read_agent_test_results_json(tmp_path) is None
-
-
-def test_read_agent_test_metrics_json_missing(tmp_path):
-    from routers.agent_tests import _read_agent_test_metrics_json
-
-    assert _read_agent_test_metrics_json(None) is None
-    assert _read_agent_test_metrics_json(tmp_path / "missing") is None
-
-
-def test_read_agent_test_metrics_json_found(tmp_path):
-    from routers.agent_tests import _read_agent_test_metrics_json
-
-    (tmp_path / "metrics.json").write_text(json.dumps({"a": 1}))
-    assert _read_agent_test_metrics_json(tmp_path) == {"a": 1}
+    assert _read_agent_test_json(tmp_path, "results.json") is None
 
 
 def test_parse_agent_test_results():
@@ -611,29 +600,33 @@ def test_build_evaluator_summary():
     from routers.agent_tests import _build_evaluator_summary
 
     assert _build_evaluator_summary(None) is None
-    assert _build_evaluator_summary({"criteria": "not-a-dict"}) is None
+    assert _build_evaluator_summary("not-a-dict") is None
+    assert _build_evaluator_summary({"Skipped": {"type": "other"}}) is None
 
     out = _build_evaluator_summary(
         {
-            "criteria": {
-                "Safety": {
-                    "type": "binary",
-                    "passed": 4,
-                    "total": 5,
-                    "evaluator_id": "ev-1",
-                },
-                "Quality": {
-                    "type": "rating",
-                    "mean": 3.5,
-                    "evaluator_id": "ev-2",
-                },
-                "Skipped": {"type": "other"},
-                "AlsoSkipped": "not-a-dict",
-            }
+            "Safety": {
+                "type": "binary",
+                "passed": 4,
+                "total": 5,
+                "evaluator_id": "ev-1",
+                "ci": {"low": 37.6, "high": 96.4},
+            },
+            "Quality": {
+                "type": "rating",
+                "mean": 3.5,
+                "evaluator_id": "ev-2",
+            },
+            "Skipped": {"type": "other"},
+            "AlsoSkipped": "not-a-dict",
         }
     )
-    assert any(e["type"] == "binary" for e in out)
-    assert any(e["type"] == "rating" for e in out)
+    by_key = {e["metric_key"]: e for e in out}
+    assert set(by_key) == {"Safety", "Quality"}
+    assert by_key["Safety"]["ci"] == {"low": 37.6, "high": 96.4}
+    assert by_key["Safety"]["evaluator_uuid"] == "ev-1"
+    # A criteria block written before calibrate added ranges has none.
+    assert by_key["Quality"]["ci"] is None
 
 
 def test_update_agent_test_intermediate_results_stores_perf_aggregates(tmp_path):
@@ -935,38 +928,134 @@ def test_auto_run_name_falls_back_for_an_unknown_job_type():
     assert _auto_run_name("something-else", 1) == "Job"
 
 
-def test_evaluator_totals_from_rows_ignores_malformed_verdicts():
-    """Rows come from stored JSON, so an old or imported run can hold anything.
-    Junk is skipped rather than counted or crashed on."""
-    from routers.agent_tests import evaluator_totals_from_rows
+def _stored_row(passed, match=None, unanswered=False, test_type="response"):
+    """A case row as the workers store it: calibrate's `judge_results` dict."""
+    return {
+        "passed": passed,
+        "unanswered": unanswered,
+        "test_case": {
+            "evaluation": {"type": test_type, "criteria": [{"name": "Correctness"}]}
+        },
+        "judge_results": (
+            {"Correctness": {"match": match}} if match is not None else None
+        ),
+    }
 
-    block = [
-        {"uuid": "ev-bin", "name": "Correctness", "output_type": "binary"},
-        {"uuid": "ev-rate", "name": "Helpfulness", "output_type": "rating"},
-    ]
+
+_DETAILS = {
+    "calibrate_config": {
+        "evaluators": [
+            {"name": "Correctness", "type": "binary", "id": "ev-1"},
+            "junk",
+        ]
+    }
+}
+
+
+def test_fill_run_summaries_works_ranges_out_from_the_rows():
+    """A run whose metrics.json carried no ranges (older, or still going) gets
+    them from calibrate's own functions over its stored rows. Rows with no
+    verdict yet and rows that produced no answer are left out."""
+    from routers.agent_tests import fill_run_summaries
+
+    rows = (
+        [_stored_row(True, True)] * 15
+        + [_stored_row(False, False)] * 5
+        + [_stored_row(None), _stored_row(False, unanswered=True), "junk"]
+    )
+    results = {"test_results": rows}
+
+    with patch("db.get_evaluator", return_value={"uuid": "ev-1", "name": "Right"}):
+        fill_run_summaries(results, _DETAILS, {})
+
+    assert results["pass_rate"] == 75.0
+    ci = results["pass_rate_ci"]
+    assert (round(ci["low"], 1), round(ci["high"], 1)) == (53.1, 88.8)
+    (entry,) = results["evaluator_summary"]
+    assert (entry["passed"], entry["total"]) == (15, 20)
+    assert entry["metric_key"] == "Correctness"
+    # The current name, the same refresh a benchmark's totals get.
+    assert entry["name"] == "Right"
+    assert entry["evaluator_uuid"] == "ev-1"
+    assert round(entry["ci"]["low"], 1) == 53.1
+
+
+def test_fill_run_summaries_keeps_what_calibrate_wrote():
+    from routers.agent_tests import fill_run_summaries
+
+    stored = [{"metric_key": "Correctness", "name": "Correctness", "ci": None}]
+    model = {
+        "pass_rate": 50.0,
+        "pass_rate_ci": None,
+        "evaluator_summary": stored,
+        "test_results": [_stored_row(True, True)],
+    }
+    results = {"model_results": [model, "junk"]}
+
+    fill_run_summaries(results, {}, {})
+
+    assert model["pass_rate"] == 50.0
+    assert model["pass_rate_ci"] is None
+    assert model["evaluator_summary"] is stored
+    assert "pass_rate" not in results
+
+
+def test_fill_run_summaries_with_nothing_answered():
+    from routers.agent_tests import fill_run_summaries
+
+    results = {"model_results": [{"test_results": None}]}
+    fill_run_summaries(results, {}, {})
+    model = results["model_results"][0]
+    assert model["pass_rate"] is None
+    assert model["pass_rate_ci"] is None
+    assert model["evaluator_summary"] is None
+
+
+def test_verdict_counts_and_run_totals():
+    from routers.agent_tests import _run_totals, _verdict_counts
+
+    assert _verdict_counts([True, False, None, True]) == (2, 1)
+    rows = [{"passed": True}, {"passed": False}, {"passed": None}]
+    assert _run_totals(None, rows) == (3, 1)
+    assert _run_totals({"total": 9, "passed": 4}, rows) == (9, 4)
+    # A merged re-judge counts `turns` instead of `total`.
+    assert _run_totals({"turns": 7, "passed": 2}, rows) == (7, 2)
+    assert _run_totals({"passed": 1}, rows) == (3, 1)
+
+
+def test_model_result_still_running_reports_unanswered_cases():
+    """A model still running counts the cases that produced no answer, the
+    same as a finished one."""
+    from routers.agent_tests import _model_result
+
     rows = [
-        "junk",
-        {"judge_results": ["junk", {"match": True}]},
-        {"judge_results": [{"evaluator_uuid": "ev-bin", "match": True}]},
-        {"judge_results": [{"evaluator_uuid": "ev-bin", "match": False}]},
-        {"judge_results": [{"evaluator_uuid": "ev-rate", "score": "high"}]},
-        # Judged by nothing yet: no verdict either way, so it counts for neither.
-        {"judge_results": [{"evaluator_uuid": "ev-bin", "match": None}]},
+        {"passed": True},
+        {"passed": False, "unanswered": True},
+        {"passed": None},
     ]
+    out = _model_result("m", rows, None, None, "Running...")
 
-    totals = evaluator_totals_from_rows(rows, block)
+    assert (out["total_tests"], out["passed"], out["failed"]) == (3, 1, 2)
+    assert out["unanswered_tests"] == 1
+    assert out["stopped_early"] is False
+    assert "pass_rate_ci" not in out
+    assert out["evaluator_summary"] is None
 
-    # The entry with no evaluator id and the non-dict entry are skipped, and the
-    # rating evaluator drops out because nothing it collected is a number.
-    assert [t["evaluator_uuid"] for t in totals] == ["ev-bin"]
-    assert (totals[0]["passed"], totals[0]["total"]) == (1, 2)
 
+def test_model_result_carries_calibrate_ranges():
+    from routers.agent_tests import _model_result
 
-def test_evaluator_totals_from_rows_needs_both_rows_and_evaluators():
-    from routers.agent_tests import evaluator_totals_from_rows
-
-    assert evaluator_totals_from_rows(None, [{"uuid": "e"}]) is None
-    assert evaluator_totals_from_rows([{"judge_results": []}], None) is None
+    metrics = {
+        "total": 2,
+        "passed": 2,
+        "pass_rate": 100.0,
+        "pass_rate_ci": {"low": 34.2, "high": 100.0},
+        "criteria": {"C": {"type": "binary", "passed": 2, "total": 2, "ci": None}},
+    }
+    out = _model_result("m", [], metrics, True, "Done")
+    assert out["pass_rate"] == 100.0
+    assert out["pass_rate_ci"] == {"low": 34.2, "high": 100.0}
+    assert out["evaluator_summary"][0]["metric_key"] == "C"
 
 
 def test_test_uuid_by_calibrate_id_reads_the_frozen_arrays():

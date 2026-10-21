@@ -84,6 +84,11 @@ def test_run_llm_test_task_end_to_end_with_fake_cli():
     assert set(results["latency_ms"]) == {"p50", "p95", "p99", "count"}
     assert set(results["cost"]) == {"mean", "min", "max", "count"}
     assert set(results["total_tokens"]) == {"mean", "min", "max", "count"}
+    from testing.fake_calibrate_agent import FAKE_PASS_RATE_CI
+
+    assert results["pass_rate"] == 100.0
+    assert results["pass_rate_ci"] == FAKE_PASS_RATE_CI
+    assert [e["ci"] for e in results["evaluator_summary"]] == [FAKE_PASS_RATE_CI]
     from routers.agent_tests import TestRunStatusResponse
 
     TestRunStatusResponse(
@@ -196,10 +201,16 @@ def test_run_benchmark_task_multi_model_end_to_end_with_fake_cli():
     assert job["results"]["leaderboard_summary"], "leaderboard should be populated"
     # The real CLI writes `(passed / total) * 100`, so an all-pass run is 100.0.
     # A fake on a 0-1 scale would show a full pass rate as 1% in the UI.
+    from testing.fake_calibrate_agent import FAKE_PASS_RATE_CI
+
     for m in models:
-        for aggregate in by_model[m]["evaluator_summary"] or []:
-            if aggregate.get("type") == "binary":
-                assert aggregate["pass_rate"] == 100.0
+        assert by_model[m]["pass_rate"] == 100.0
+        assert by_model[m]["pass_rate_ci"] == FAKE_PASS_RATE_CI
+        assert by_model[m]["evaluator_summary"]
+        for aggregate in by_model[m]["evaluator_summary"]:
+            assert aggregate["type"] == "binary"
+            assert aggregate["pass_rate"] == 100.0
+            assert aggregate["ci"] == FAKE_PASS_RATE_CI
 
 
 def _make_eval_job(job_type, details):

@@ -1750,22 +1750,51 @@ def _seed_summary_tab_job(client, h, agent):
                 "tc_a": snapshot,
                 "tc_b": snapshot,
                 "tc_c": snapshot,
-            }
+            },
+            "calibrate_config": {
+                "evaluators": [
+                    {"name": "Correctness", "type": "binary", "id": binary_uuid},
+                    {
+                        "name": "Helpfulness",
+                        "type": "rating",
+                        "id": rating_uuid,
+                        "scale_min": 1,
+                        "scale_max": 5,
+                    },
+                ]
+            },
         },
     )
 
     def case(case_id, test_type, match, score):
+        # Stored the way the workers store it: calibrate's dict keyed by
+        # evaluator name. A tool-call case carries no verdicts.
+        judged = test_type != "tool_call"
         return {
             "name": case_id,
             "test_case_id": case_id,
             "passed": match,
             "reasoning": "because",
             "output": {"response": "hi"},
-            "test_case": {"name": case_id, "evaluation": {"type": test_type}},
-            "judge_results": [
-                {"evaluator_uuid": binary_uuid, "match": match},
-                {"evaluator_uuid": rating_uuid, "score": score},
-            ],
+            "test_case": {
+                "name": case_id,
+                "evaluation": {
+                    "type": test_type,
+                    "criteria": (
+                        [{"name": "Correctness"}, {"name": "Helpfulness"}]
+                        if judged
+                        else None
+                    ),
+                },
+            },
+            "judge_results": (
+                {
+                    "Correctness": {"match": match, "evaluator_id": binary_uuid},
+                    "Helpfulness": {"score": score, "evaluator_id": rating_uuid},
+                }
+                if judged
+                else None
+            ),
         }
 
     update_agent_test_job(
@@ -1834,8 +1863,9 @@ def test_run_detail_test_type_absent_when_the_case_does_not_record_it(client):
 
 
 def test_run_detail_reports_per_evaluator_totals(client):
-    """A single run has never stored calibrate's per-evaluator block, so the
-    totals are counted from the rows and are there in both modes."""
+    """A run whose stored data has no ranges gets its totals, pass rate and
+    likely ranges worked out from the rows by calibrate, in both modes. The
+    tool-call case is judged by no evaluator, the same as in a benchmark."""
     h = _signup(client)["headers"]
     agent = _create_agent(client, h)
     job_id, binary_uuid, rating_uuid = _seed_summary_tab_job(client, h, agent)
@@ -1844,63 +1874,95 @@ def test_run_detail_reports_per_evaluator_totals(client):
         body = client.get(
             f"/agent-tests/run/{job_id}", params=params, headers=h
         ).json()
+        assert round(body["pass_rate"], 2) == 66.67
+        assert set(body["pass_rate_ci"]) == {"low", "high"}
         by_uuid = {e["evaluator_uuid"]: e for e in body["evaluator_summary"]}
 
         binary = by_uuid[binary_uuid]
         assert binary["type"] == "binary"
         assert binary["name"] == "Correctness"
-        assert (binary["passed"], binary["total"]) == (2, 3)
+        assert (binary["passed"], binary["total"]) == (2, 2)
         # Out of 100, matching what calibrate writes for a benchmark.
-        assert binary["pass_rate"] == 2 / 3 * 100
+        assert binary["pass_rate"] == 100.0
+        assert binary["ci"]["high"] == 100.0
 
         rating = by_uuid[rating_uuid]
         assert rating["type"] == "rating"
-        assert (rating["mean"], rating["min"], rating["max"]) == (3.0, 1, 5)
-        assert rating["count"] == 3
+        assert (rating["mean"], rating["min"], rating["max"]) == (4.0, 3, 5)
+        assert rating["count"] == 2
         assert (rating["scale_min"], rating["scale_max"]) == (1, 5)
+        assert 1 <= rating["ci"]["low"] <= rating["ci"]["high"] <= 5
+
+
+def test_run_detail_uses_the_ranges_calibrate_wrote(client):
+    from db import create_agent_test_job, update_agent_test_job
+
+    h = _signup(client)["headers"]
+    agent = _create_agent(client, h)
+    job_id = create_agent_test_job(
+        agent_id=agent["uuid"], job_type="llm-unit-test", details={}
+    )
+    summary = [{"metric_key": "C", "name": "C", "type": "binary", "ci": None}]
+    update_agent_test_job(
+        job_id,
+        status="done",
+        results={
+            "pass_rate": 90.0,
+            "pass_rate_ci": {"low": 70.0, "high": 97.0},
+            "evaluator_summary": summary,
+            "test_results": [],
+        },
+    )
+
+    body = client.get(f"/agent-tests/run/{job_id}", headers=h).json()
+    assert body["pass_rate"] == 90.0
+    assert body["pass_rate_ci"] == {"low": 70.0, "high": 97.0}
+    assert body["evaluator_summary"][0]["metric_key"] == "C"
+
+
+def _seed_raw_run(agent, evaluators, rows):
+    """A finished run stored the way the workers store it."""
+    from db import create_agent_test_job, update_agent_test_job
+
+    job_id = create_agent_test_job(
+        agent_id=agent["uuid"],
+        job_type="llm-unit-test",
+        details={"calibrate_config": {"evaluators": evaluators}},
+    )
+    update_agent_test_job(job_id, status="done", results={"test_results": rows})
+    return job_id
+
+
+def _raw_row(name, passed, verdicts):
+    return {
+        "name": name,
+        "test_case_id": name,
+        "passed": passed,
+        "test_case": {
+            "name": name,
+            "evaluation": {
+                "type": "response",
+                "criteria": [{"name": n} for n in verdicts],
+            },
+        },
+        "judge_results": {n: {"match": m} for n, m in verdicts.items()},
+    }
 
 
 def test_run_detail_totals_key_two_same_named_evaluators_apart(client):
     """`metric_key` is calibrate's own key, which carries a suffix when two
     evaluators share a display name. Reading the current name instead would give
     both entries the same key and collapse them into one card."""
-    from db import create_agent_test_job, update_agent_test_job
-
     h = _signup(client)["headers"]
     agent = _create_agent(client, h)
     first, second = str(uuid.uuid4()), str(uuid.uuid4())
-    job_id = create_agent_test_job(
-        agent_id=agent["uuid"],
-        job_type="llm-unit-test",
-        details={
-            "evaluators_by_test_id": {
-                "tc_a": [
-                    {"uuid": first, "name": "Correctness", "output_type": "binary"},
-                    {
-                        "uuid": second,
-                        "name": "Correctness-a1b2c3d4",
-                        "output_type": "binary",
-                    },
-                ]
-            }
-        },
-    )
-    update_agent_test_job(
-        job_id,
-        status="done",
-        results={
-            "test_results": [
-                {
-                    "name": "tc_a",
-                    "test_case_id": "tc_a",
-                    "passed": True,
-                    "judge_results": [
-                        {"evaluator_uuid": first, "match": True},
-                        {"evaluator_uuid": second, "match": False},
-                    ],
-                }
-            ]
-        },
+    job_id = _seed_raw_run(
+        agent,
+        [
+            {"name": "Correctness", "type": "binary", "id": first},
+            {"name": "Correctness-a1b2c3d4", "type": "binary", "id": second},
+        ],
+        [_raw_row("tc_a", True, {"Correctness": True, "Correctness-a1b2c3d4": False})],
     )
 
     body = client.get(f"/agent-tests/run/{job_id}", headers=h).json()
@@ -1910,15 +1972,27 @@ def test_run_detail_totals_key_two_same_named_evaluators_apart(client):
 
 def test_run_detail_totals_skip_an_evaluator_with_no_verdict(client):
     """A run still going has evaluators that have judged nothing yet. They stay
-    out of the totals rather than showing as a zero."""
+    out of the totals rather than showing as a zero, and a case still running
+    counts for nothing."""
     h = _signup(client)["headers"]
     agent = _create_agent(client, h)
-    job_id = _seed_run_job(client, h, agent)
+    job_id = _seed_raw_run(
+        agent,
+        [
+            {"name": "Judged", "type": "binary", "id": str(uuid.uuid4())},
+            {"name": "Waiting", "type": "binary", "id": str(uuid.uuid4())},
+        ],
+        [
+            _raw_row("tc_pass", True, {"Judged": True}),
+            _raw_row("tc_fail", False, {"Judged": False}),
+            {"name": "tc_pending", "passed": None, "judge_results": None},
+        ],
+    )
 
     body = client.get(f"/agent-tests/run/{job_id}", headers=h).json()
-    # The seeded rows judge one evaluator; the pending row judges none.
-    assert len(body["evaluator_summary"]) == 1
+    assert [e["metric_key"] for e in body["evaluator_summary"]] == ["Judged"]
     assert body["evaluator_summary"][0]["total"] == 2
+    assert body["pass_rate"] == 50.0
 
 
 def test_run_detail_has_no_totals_before_anything_is_judged(client):
