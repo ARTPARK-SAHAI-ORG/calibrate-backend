@@ -2312,7 +2312,9 @@ def start_evaluator_run(
     except EvaluatorResolutionError as e:
         raise HTTPException(status_code=400, detail=str(e))
 
-    enforce_max_rows_per_eval(ctx.org_uuid, len(items) * len(resolved))
+    enforce_max_rows_per_eval(
+        ctx.org_uuid, len(items) * len(resolved), "labelling_evaluator_run"
+    )
 
     # Validate item payload shape early so we 400 instead of failing async.
     try:

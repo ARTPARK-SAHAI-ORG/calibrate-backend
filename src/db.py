@@ -1259,6 +1259,31 @@ def init_db():
         except sqlite3.OperationalError:
             pass
 
+        # What the run cost in USD, copied out of `results` whenever they are
+        # written so analytics can add it up without parsing every blob.
+        try:
+            cursor.execute("ALTER TABLE agent_test_jobs ADD COLUMN cost REAL")
+        except sqlite3.OperationalError:
+            pass
+
+        # One row each time a workspace is refused for going over a limit.
+        cursor.execute(
+            """
+            CREATE TABLE IF NOT EXISTS limit_hits (
+                uuid TEXT PRIMARY KEY,
+                org_uuid TEXT NOT NULL,
+                limit_name TEXT NOT NULL,
+                kind TEXT,
+                requested INTEGER,
+                cap INTEGER,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+            """
+        )
+        cursor.execute(
+            "CREATE INDEX IF NOT EXISTS idx_limit_hits_created ON limit_hits(created_at)"
+        )
+
         # Workspace invite link. One live token per workspace: creating a new
         # one overwrites the old, revoking sets both back to NULL.
         for col in ("invite_token TEXT DEFAULT NULL", "invite_token_created_at TIMESTAMP DEFAULT NULL"):
@@ -1801,6 +1826,13 @@ def init_db():
             conn.commit()
             if filled:
                 logger.info(f"Backfilled jobs-list header columns on {filled} row(s)")
+
+        if not _schema_migration_applied(cursor, AGENT_TEST_JOB_COST_BACKFILL_MIGRATION):
+            filled = _backfill_agent_test_job_cost(cursor)
+            _mark_schema_migration_applied(cursor, AGENT_TEST_JOB_COST_BACKFILL_MIGRATION)
+            conn.commit()
+            if filled:
+                logger.info(f"Backfilled cost on {filled} agent test job(s)")
 
         conn.commit()
 
@@ -3032,6 +3064,46 @@ def _backfill_jobs_summary_columns(cursor: sqlite3.Cursor) -> int:
     cursor.execute("SELECT changes()")
     row = cursor.fetchone()
     return int(row[0]) if row else 0
+
+
+AGENT_TEST_JOB_COST_BACKFILL_MIGRATION = "backfill_agent_test_job_cost_v1"
+
+
+def agent_test_job_cost(results: Any) -> Optional[float]:
+    """USD cost of a test run or model comparison from its `results`.
+
+    A comparison is the sum of every model's cost; None when nothing has one.
+    """
+    if not isinstance(results, dict):
+        return None
+    if "model_results" in results:
+        costs = [m.get("cost") for m in results.get("model_results") or [] if isinstance(m, dict)]
+    else:
+        costs = [results.get("cost")]
+    costs = [c for c in costs if isinstance(c, (int, float)) and not isinstance(c, bool)]
+    return float(sum(costs)) if costs else None
+
+
+def _backfill_agent_test_job_cost(cursor: sqlite3.Cursor) -> int:
+    """One-time migration: fill `agent_test_jobs.cost` for rows written before it."""
+    # A run's results can be several MB, so read them one at a time on a
+    # cursor of their own rather than all at once.
+    reader = cursor.connection.cursor()
+    reader.execute(
+        "SELECT uuid, results FROM agent_test_jobs WHERE cost IS NULL AND results IS NOT NULL"
+    )
+    filled = 0
+    for job_uuid, results_json in reader:
+        try:
+            cost = agent_test_job_cost(json.loads(results_json))
+        except (TypeError, ValueError):
+            continue
+        if cost is not None:
+            cursor.execute(
+                "UPDATE agent_test_jobs SET cost = ? WHERE uuid = ?", (cost, job_uuid)
+            )
+            filled += 1
+    return filled
 
 
 FORK_DEFAULT_EVALUATORS_MIGRATION = "fork_default_evaluators_per_org_v1"
@@ -7588,10 +7660,18 @@ def create_agent_test_job(
         results_json = json.dumps(results) if results is not None else None
         cursor.execute(
             """
-            INSERT INTO agent_test_jobs (uuid, agent_id, type, status, details, results)
-            VALUES (?, ?, ?, ?, ?, ?)
+            INSERT INTO agent_test_jobs (uuid, agent_id, type, status, details, results, cost)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
             """,
-            (job_uuid, agent_id, job_type, status, details_json, results_json),
+            (
+                job_uuid,
+                agent_id,
+                job_type,
+                status,
+                details_json,
+                results_json,
+                agent_test_job_cost(results),
+            ),
         )
         conn.commit()
         logger.info(
@@ -7897,6 +7977,8 @@ def update_agent_test_job(
     if results is not None:
         updates.append("results = ?")
         params.append(json.dumps(results))
+        updates.append("cost = ?")
+        params.append(agent_test_job_cost(results))
 
     if details is not None:
         with get_db_connection() as conn:
@@ -8635,6 +8717,37 @@ def create_org_limits(org_uuid: str, limits: "OrgLimits") -> str:
         conn.commit()
         logger.info(f"Created org_limits for org {org_uuid} with UUID: {row_uuid}")
         return row_uuid
+
+
+def create_limit_hit(
+    org_uuid: str,
+    limit_name: str,
+    kind: Optional[str],
+    requested: Optional[int],
+    cap: Optional[int],
+) -> None:
+    """Record that a workspace was refused for going over a limit.
+
+    A client keeps sending traces after the trace cap, so that limit is
+    recorded at most once per workspace per hour.
+    """
+    with get_db_connection() as conn:
+        conn.execute(
+            """
+            INSERT INTO limit_hits (uuid, org_uuid, limit_name, kind, requested, cap)
+            SELECT ?, ?, ?, ?, ?, ?
+            WHERE ? != 'max_traces' OR NOT EXISTS (
+                SELECT 1 FROM limit_hits
+                WHERE org_uuid = ? AND limit_name = 'max_traces'
+                  AND created_at > datetime('now', '-1 hour')
+            )
+            """,
+            (
+                str(uuid.uuid4()), org_uuid, limit_name, kind, requested, cap,
+                limit_name, org_uuid,
+            ),
+        )
+        conn.commit()
 
 
 def get_org_limits(org_uuid: str) -> Optional[Dict[str, Any]]:

@@ -50,7 +50,7 @@ from db import (
 )
 from org_scope import ensure_owned_agent
 from pagination import PaginatedResponse, PaginationParams, page_envelope
-from routers.org_limits import effective_limits
+from routers.org_limits import effective_limits, record_limit_hit
 
 # Reuse the tests router's validation so a converted test accepts exactly what
 # POST /tests does (evaluator visible to the workspace, evaluator_type matches).
@@ -724,6 +724,7 @@ async def ingest_trace(
     cap = limits["max_traces"]
     current = count_live_traces(ctx.org_uuid)
     if current >= cap:
+        record_limit_hit(ctx.org_uuid, "max_traces", "trace", current + 1, cap)
         raise HTTPException(
             status_code=429,
             detail={

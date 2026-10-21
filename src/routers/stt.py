@@ -737,7 +737,7 @@ def evaluate_stt(
     request.audio_paths = audio_paths
     request.texts = texts
 
-    enforce_max_rows_per_eval(ctx.org_uuid, len(texts))
+    enforce_max_rows_per_eval(ctx.org_uuid, len(texts), "stt")
 
     try:
         s3_bucket = get_s3_output_config()
@@ -1042,7 +1042,7 @@ def retry_stt_evaluation(
         expected_type="stt",
     )
 
-    enforce_max_rows_per_eval(ctx.org_uuid, len(resolved.texts))
+    enforce_max_rows_per_eval(ctx.org_uuid, len(resolved.texts), "stt")
 
     rerun_details = {
         "audio_paths": resolved.audio_paths or [],

@@ -288,6 +288,13 @@ def test_ingest_cap_returns_429(client, monkeypatch):
     assert detail["current"] == 1
     assert detail["max_traces"] == 1
     assert "hint" in detail
+    with db.get_db_connection() as conn:
+        rows = conn.execute(
+            "SELECT limit_name, kind, requested, cap FROM limit_hits WHERE org_uuid = "
+            "(SELECT org_uuid FROM agents WHERE uuid = ?)",
+            (agent_id,),
+        ).fetchall()
+    assert [tuple(r) for r in rows] == [("max_traces", "trace", 2, 1)]
 
 
 def test_ingest_without_ids_stores_null_labels(client):
