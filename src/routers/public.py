@@ -857,7 +857,7 @@ def get_public_annotation_eval(
         # The parent task was deleted out from under the share link.
         raise HTTPException(status_code=404, detail="Not found")
 
-    job_runs = get_evaluator_runs_for_job(job["uuid"])
+    evaluator_runs_in_this_job = get_evaluator_runs_for_job(job["uuid"])
     details = job.get("details") or {}
 
     # Forward only the safe-to-share keys from the raw `details` blob. Strip
@@ -882,7 +882,7 @@ def get_public_annotation_eval(
     # public responses shaped the same way.
     public_details.pop("evaluators", None)
 
-    evaluators_block = _build_evaluators_block_for_eval_job(details, job_runs)
+    evaluators_block = _build_evaluators_block_for_eval_job(details, evaluator_runs_in_this_job)
 
     return PublicAnnotationEvalResponse(
         task_id=task_uuid,
@@ -904,8 +904,8 @@ def get_public_annotation_eval(
         # Per-run `evaluator` / `evaluator_version` blobs are intentionally
         # not surfaced — `(evaluator_id, evaluator_version_id)` on each run
         # keys back into the top-level evaluators[] block.
-        runs=_strip_run_evaluator_blocks(job_runs),
-        human_agreement=_human_agreement_for_run(task_uuid, job_runs),
+        runs=_strip_run_evaluator_blocks(evaluator_runs_in_this_job),
+        human_agreement=_human_agreement_for_run(task_uuid, evaluator_runs_in_this_job),
         error=shaped.get("error"),
     )
 

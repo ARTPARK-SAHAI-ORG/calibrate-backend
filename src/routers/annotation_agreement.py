@@ -19,7 +19,7 @@ from annotation_metrics import (
     aggregate_agreement,
     aggregate_human_evaluator_agreement,
     runs_at_live_versions,
-    scales_for,
+    rating_scales_for,
     trend_series,
     trend_series_evaluator_breakdown,
     trend_series_human_evaluator,
@@ -56,10 +56,10 @@ def agreement_trend(
         annotations = get_annotations_for_org(ctx.org_uuid)
         all_evaluator_version_runs = get_evaluator_runs_for_org(ctx.org_uuid)
 
-    scales = scales_for(annotations, all_evaluator_version_runs)
-    annotator_agreement, annotator_pair_count = aggregate_agreement(annotations, scales)
+    rating_scales = rating_scales_for(annotations, all_evaluator_version_runs)
+    annotator_agreement, annotator_pair_count = aggregate_agreement(annotations, rating_scales)
     annotator_agreement_trend = trend_series(
-        annotations, bucket=bucket, days=days, scales=scales
+        annotations, bucket=bucket, days=days, rating_scales=rating_scales
     )
 
     evaluator_ids = list(
@@ -81,21 +81,21 @@ def agreement_trend(
         evaluator_ids,
         bucket=bucket,
         days=days,
-        scales=scales,
+        rating_scales=rating_scales,
     )
     evaluators_block = []
-    for ev_id in evaluator_ids:
-        ev = evaluator_meta.get(ev_id) or {}
+    for evaluator_id in evaluator_ids:
+        evaluator = evaluator_meta.get(evaluator_id) or {}
         evaluator_agreement, evaluator_pair_count = aggregate_human_evaluator_agreement(
-            annotations, live_evaluator_version_runs, ev_id, scales
+            annotations, live_evaluator_version_runs, evaluator_id, rating_scales
         )
         evaluators_block.append(
             {
-                "evaluator_id": ev_id,
-                "name": ev.get("name"),
+                "evaluator_id": evaluator_id,
+                "name": evaluator.get("name"),
                 "current": evaluator_agreement,
                 "pair_count": evaluator_pair_count,
-                "series": evaluator_trends.get(ev_id, []),
+                "series": evaluator_trends.get(evaluator_id, []),
             }
         )
 
@@ -176,7 +176,7 @@ def evaluator_agreement_trend(
         task_ids=seen_tasks,
         bucket=bucket,
         days=days,
-        scales=scales_for(annotations, evaluator_runs),
+        rating_scales=rating_scales_for(annotations, evaluator_runs),
     )
 
     def _last(series: List[Dict[str, Any]]) -> tuple:
