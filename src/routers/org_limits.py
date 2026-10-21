@@ -25,19 +25,14 @@ from db import (
 )
 from auth_utils import get_current_org, OrgContext, require_superadmin, is_superadmin_user
 import provider_keys
+from admin_analytics import EVAL_FIELDS
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/org-limits", tags=["org-limits"])
 
-EvalKind = Literal[
-    "test_run",
-    "model_comparison",
-    "simulation",
-    "stt",
-    "tts",
-    "labelling_evaluator_run",
-]
+# The kinds of run a limit hit can name: the same list the analytics count.
+EvalKind = Literal[tuple(EVAL_FIELDS)]
 
 DEFAULT_MAX_ROWS_PER_EVAL = int(os.getenv("DEFAULT_MAX_ROWS_PER_EVAL", "20"))
 DEFAULT_MAX_SCORED_TRACES = int(os.getenv("DEFAULT_MAX_SCORED_TRACES", "100"))
