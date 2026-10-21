@@ -51,38 +51,47 @@ def agreement_trend(
         if not task or task.get("org_uuid") != ctx.org_uuid:
             raise HTTPException(status_code=404, detail="Annotation task not found")
         annotations = get_annotations_for_task(task_id)
-        raw_runs = get_evaluator_runs_for_task(task_id)
+        all_version_runs = get_evaluator_runs_for_task(task_id)
     else:
         annotations = get_annotations_for_org(ctx.org_uuid)
-        raw_runs = get_evaluator_runs_for_org(ctx.org_uuid)
+        all_version_runs = get_evaluator_runs_for_org(ctx.org_uuid)
 
-    scales = scales_for(annotations, raw_runs)
-    hh_current, hh_pairs = aggregate_agreement(annotations, scales)
-    hh_series = trend_series(annotations, bucket=bucket, days=days, scales=scales)
+    scales = scales_for(annotations, all_version_runs)
+    annotator_agreement, annotator_pair_count = aggregate_agreement(annotations, scales)
+    annotator_agreement_trend = trend_series(
+        annotations, bucket=bucket, days=days, scales=scales
+    )
 
     evaluator_ids = list(
-        dict.fromkeys(r["evaluator_id"] for r in raw_runs if r.get("evaluator_id"))
+        dict.fromkeys(
+            r["evaluator_id"] for r in all_version_runs if r.get("evaluator_id")
+        )
     )
 
     evaluator_meta = get_evaluators_by_uuids(evaluator_ids)
-    runs = runs_at_live_versions(raw_runs, evaluator_meta.values())
+    live_version_runs = runs_at_live_versions(all_version_runs, evaluator_meta.values())
 
-    series_by_id = trend_series_human_evaluator(
-        annotations, runs, evaluator_ids, bucket=bucket, days=days, scales=scales
+    evaluator_trends = trend_series_human_evaluator(
+        annotations,
+        live_version_runs,
+        evaluator_ids,
+        bucket=bucket,
+        days=days,
+        scales=scales,
     )
     evaluators_block = []
     for ev_id in evaluator_ids:
         ev = evaluator_meta.get(ev_id) or {}
-        cur, pairs = aggregate_human_evaluator_agreement(
-            annotations, runs, ev_id, scales
+        evaluator_agreement, evaluator_pair_count = aggregate_human_evaluator_agreement(
+            annotations, live_version_runs, ev_id, scales
         )
         evaluators_block.append(
             {
                 "evaluator_id": ev_id,
                 "name": ev.get("name"),
-                "current": cur,
-                "pair_count": pairs,
-                "series": series_by_id.get(ev_id, []),
+                "current": evaluator_agreement,
+                "pair_count": evaluator_pair_count,
+                "series": evaluator_trends.get(ev_id, []),
             }
         )
 
@@ -91,9 +100,9 @@ def agreement_trend(
         "days": days,
         "task_id": task_id,
         "human_human": {
-            "current": hh_current,
-            "pair_count": hh_pairs,
-            "series": hh_series,
+            "current": annotator_agreement,
+            "pair_count": annotator_pair_count,
+            "series": annotator_agreement_trend,
         },
         "evaluators": evaluators_block,
     }
@@ -134,28 +143,36 @@ def evaluator_agreement_trend(
     else:
         annotations = get_annotations_for_org(ctx.org_uuid)
 
-    runs = get_evaluator_runs_for_evaluator_org_scoped(
+    evaluator_runs = get_evaluator_runs_for_evaluator_org_scoped(
         evaluator_uuid, ctx.org_uuid, task_id=task_id, version_id=version_id
     )
 
-    all_versions = get_evaluator_versions(evaluator_uuid, include_deleted=True) if runs else []
+    all_versions = (
+        get_evaluator_versions(evaluator_uuid, include_deleted=True)
+        if evaluator_runs
+        else []
+    )
     version_number_by_id = {v["uuid"]: v["version_number"] for v in all_versions}
     live_version_id = evaluator.get("live_version_id")
 
     seen_versions = list(
         dict.fromkeys(
-            r["evaluator_version_id"] for r in runs if r.get("evaluator_version_id")
+            r["evaluator_version_id"]
+            for r in evaluator_runs
+            if r.get("evaluator_version_id")
         )
     )
-    seen_tasks = list(dict.fromkeys(r["task_id"] for r in runs if r.get("task_id")))
+    seen_tasks = list(
+        dict.fromkeys(r["task_id"] for r in evaluator_runs if r.get("task_id"))
+    )
 
     breakdown = trend_series_evaluator_breakdown(
-        annotations, runs, evaluator_uuid,
+        annotations, evaluator_runs, evaluator_uuid,
         version_ids=seen_versions,
         task_ids=seen_tasks,
         bucket=bucket,
         days=days,
-        scales=scales_for(annotations, runs),
+        scales=scales_for(annotations, evaluator_runs),
     )
 
     def _last(series: List[Dict[str, Any]]) -> tuple:
@@ -169,14 +186,14 @@ def evaluator_agreement_trend(
     versions_block: List[Dict[str, Any]] = []
     for vid in seen_versions:
         series = breakdown["by_version"][vid]
-        cur, pairs = _last(series)
+        agreement, pair_count = _last(series)
         versions_block.append(
             {
                 "version_id": vid,
                 "version_number": version_number_by_id.get(vid),
                 "is_live": vid == live_version_id,
-                "current": cur,
-                "pair_count": pairs,
+                "current": agreement,
+                "pair_count": pair_count,
                 "series": series,
             }
         )
@@ -184,20 +201,20 @@ def evaluator_agreement_trend(
     tasks_block: List[Dict[str, Any]] = []
     for tid in seen_tasks:
         series = breakdown["by_task"][tid]
-        cur, pairs = _last(series)
+        agreement, pair_count = _last(series)
         task_meta = task_meta_by_id.get(tid) or {}
         tasks_block.append(
             {
                 "task_id": tid,
                 "task_name": task_meta.get("name"),
-                "current": cur,
-                "pair_count": pairs,
+                "current": agreement,
+                "pair_count": pair_count,
                 "series": series,
             }
         )
 
     overall_series = breakdown["overall"]
-    overall_cur, overall_pairs = _last(overall_series)
+    overall_agreement, overall_pair_count = _last(overall_series)
 
     return {
         "evaluator_id": evaluator_uuid,
@@ -206,8 +223,8 @@ def evaluator_agreement_trend(
         "days": days,
         "filters": {"task_id": task_id, "version_id": version_id},
         "overall": {
-            "current": overall_cur,
-            "pair_count": overall_pairs,
+            "current": overall_agreement,
+            "pair_count": overall_pair_count,
             "series": overall_series,
         },
         "versions": versions_block,

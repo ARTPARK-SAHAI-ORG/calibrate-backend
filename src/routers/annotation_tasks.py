@@ -2414,7 +2414,7 @@ def _enrich_runs_with_live_evaluator(
 
 def _build_evaluators_block_for_eval_job(
     job_details: Optional[Dict[str, Any]],
-    raw_runs: List[Dict[str, Any]],
+    job_runs: List[Dict[str, Any]],
 ) -> List[Dict[str, Any]]:
     """Build the top-level `evaluators[]` block returned alongside an
     evaluator-run job detail response. Mirrors the shape used by the
@@ -2444,7 +2444,7 @@ def _build_evaluators_block_for_eval_job(
         if slot[0] and slot not in seen:
             seen.add(slot)
             slots.append(slot)
-    for r in raw_runs or []:
+    for r in job_runs or []:
         slot = (r.get("evaluator_id"), r.get("evaluator_version_id"))
         if slot[0] and slot not in seen:
             seen.add(slot)
@@ -2827,19 +2827,19 @@ def get_evaluator_run_job(
     ):
         raise HTTPException(status_code=404, detail="Job not found")
     shaped = _shape_eval_job_for_response(job)
-    raw_runs = get_evaluator_runs_for_job(job_uuid)
+    job_runs = get_evaluator_runs_for_job(job_uuid)
     # Top-level evaluators[] mirrors the labelling-job viewer shape so the
     # FE reads `output_config.scale` from one consistent place across the
     # two surfaces. Each entry pins the version the job ran against.
     shaped["evaluators"] = _build_evaluators_block_for_eval_job(
-        job.get("details"), raw_runs
+        job.get("details"), job_runs
     )
     _strip_details_evaluators(shaped)
     # Per-run `evaluator` / `evaluator_version` are intentionally NOT
     # surfaced here — `(evaluator_id, evaluator_version_id)` on each run
     # row keys back into the top-level evaluators[] block.
-    shaped["runs"] = _strip_run_evaluator_blocks(raw_runs)
-    shaped["human_agreement"] = _human_agreement_for_run(task_uuid, raw_runs)
+    shaped["runs"] = _strip_run_evaluator_blocks(job_runs)
+    shaped["human_agreement"] = _human_agreement_for_run(task_uuid, job_runs)
     # Frozen item snapshot — what calibrate actually saw, regardless of
     # any post-submit edits / soft-deletes on the source annotation_items.
     # Empty for legacy jobs created before snapshotting (those will be
@@ -2983,7 +2983,7 @@ def _evaluator_alignment_block(
     humans + a cumulative trend series. Always returns one entry per linked
     evaluator (with `current=None, pair_count=0` when there's no overlap yet)."""
     evaluator_ids = [e["uuid"] for e in linked_evaluators]
-    series_by_id = trend_series_human_evaluator(
+    evaluator_trends = trend_series_human_evaluator(
         annotations,
         evaluator_runs,
         evaluator_ids,
@@ -2994,16 +2994,16 @@ def _evaluator_alignment_block(
     out: List[Dict[str, Any]] = []
     for ev in linked_evaluators:
         ev_id = ev["uuid"]
-        cur, pairs = aggregate_human_evaluator_agreement(
+        evaluator_agreement, evaluator_pair_count = aggregate_human_evaluator_agreement(
             annotations, evaluator_runs, ev_id, scales
         )
         out.append(
             {
                 "evaluator_id": ev_id,
                 "name": ev.get("name"),
-                "current": cur,
-                "pair_count": pairs,
-                "series": series_by_id.get(ev_id, []),
+                "current": evaluator_agreement,
+                "pair_count": evaluator_pair_count,
+                "series": evaluator_trends.get(ev_id, []),
                 "result": evaluator_result_summary(evaluator_runs, ev_id),
                 "human_result": human_result_summary(annotations, ev_id),
             }
@@ -3030,14 +3030,18 @@ def task_agreement(
     _ensure_owned_task(task_uuid, ctx.org_uuid)
     annotations = get_annotations_for_task(task_uuid)
     linked = get_evaluators_for_annotation_task(task_uuid)
-    runs = runs_at_live_versions(get_evaluator_runs_for_task(task_uuid), linked)
+    live_version_runs = runs_at_live_versions(
+        get_evaluator_runs_for_task(task_uuid), linked
+    )
 
-    scales = scales_for(annotations, runs)
-    hh_current, hh_pairs = aggregate_agreement(annotations, scales)
-    hh_series = trend_series(annotations, bucket=bucket, days=days, scales=scales)
+    scales = scales_for(annotations, live_version_runs)
+    annotator_agreement, annotator_pair_count = aggregate_agreement(annotations, scales)
+    annotator_agreement_trend = trend_series(
+        annotations, bucket=bucket, days=days, scales=scales
+    )
 
     evaluators_block = _evaluator_alignment_block(
-        annotations, runs, linked, bucket, days, scales
+        annotations, live_version_runs, linked, bucket, days, scales
     )
 
     return {
@@ -3045,9 +3049,9 @@ def task_agreement(
         "bucket": bucket,
         "days": days,
         "human_human": {
-            "current": hh_current,
-            "pair_count": hh_pairs,
-            "series": hh_series,
+            "current": annotator_agreement,
+            "pair_count": annotator_pair_count,
+            "series": annotator_agreement_trend,
         },
         "evaluators": evaluators_block,
     }
@@ -3364,11 +3368,13 @@ def task_summary(
                 }
             slot_human_scalars = _slot_human_scalars(item["uuid"], ev_id)
 
-            hh_mean, hh_pairs = _pairwise_agreement(
+            row_annotator_agreement, row_annotator_pair_count = _pairwise_agreement(
                 slot_human_scalars, _version_scale(live_v)
             )
             human_agreement = (
-                _round_agreement(hh_mean) if hh_pairs > 0 else None
+                _round_agreement(row_annotator_agreement)
+                if row_annotator_pair_count > 0
+                else None
             )
 
             for version_id in _version_row_keys(ev_id, live_v):
