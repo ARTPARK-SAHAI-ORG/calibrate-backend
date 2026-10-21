@@ -1,11 +1,20 @@
 import logging
+import tempfile
+import uuid
+import wave
+from pathlib import Path as FilePath
 from typing import List, Literal, Optional
 
-from fastapi import APIRouter, HTTPException, Depends, Path, Query
+from fastapi import APIRouter, HTTPException, Depends, File, Form, Path, Query, UploadFile
 from pydantic import BaseModel, Field
 
-from auth_utils import get_current_org, OrgContext
-from utils import presign_audio_path
+from auth_utils import get_current_org, get_org_jwt_or_api_key, OrgContext
+from utils import (
+    get_s3_client,
+    get_s3_output_config,
+    presign_audio_path,
+    upload_file_to_s3,
+)
 from db import (
     ensure_name_unique,
     create_dataset,
@@ -29,6 +38,10 @@ router = APIRouter(prefix="/datasets", tags=["datasets"])
 
 _EXAMPLE_DATASET_UUID = "f47ac10b-58cc-4372-a567-0e02b2c3d479"
 _EXAMPLE_ITEM_UUID = "6ba7b810-9dad-11d1-80b4-00c04fd430c8"
+
+# Match the web app's STT upload limits (calibrate-frontend src/constants/limits.tsx).
+MAX_UPLOAD_AUDIO_BYTES = 5 * 1024 * 1024
+MAX_UPLOAD_AUDIO_SECONDS = 60
 
 
 # ── Request / Response models ────────────────────────────────────────────────
@@ -134,6 +147,23 @@ def _item_row_to_response(row: dict) -> DatasetItemResponse:
     )
 
 
+def _append_items(dataset_id: str, items: List[dict]) -> List[DatasetItemResponse]:
+    new_uuids = add_dataset_items(dataset_id, items)
+    return [_item_row_to_response(i) for i in get_dataset_items_by_uuids(new_uuids)]
+
+
+def _wav_duration_seconds(path: str) -> float:
+    """Return the clip length, or raise ValueError when the file is not a readable WAV."""
+    try:
+        with wave.open(path, "rb") as clip:
+            rate = clip.getframerate()
+            if rate <= 0:
+                raise ValueError("WAV header has no sample rate")
+            return clip.getnframes() / rate
+    except (wave.Error, EOFError) as exc:
+        raise ValueError(str(exc)) from exc
+
+
 def _dataset_row_to_response(
     row: dict, item_count: int, eval_count: int = 0
 ) -> DatasetResponse:
@@ -195,13 +225,18 @@ def list_datasets(
     ]
 
 
-@router.get("/{dataset_id}", response_model=DatasetDetailResponse, summary="Get dataset")
+@router.get(
+    "/{dataset_id}",
+    response_model=DatasetDetailResponse,
+    summary="Get dataset",
+    tags=["Public API"],
+)
 def get_dataset_detail(
     dataset_id: str = Path(
         description="The dataset to retrieve",
         examples=["f47ac10b-58cc-4372-a567-0e02b2c3d479"],
     ),
-    ctx: OrgContext = Depends(get_current_org),
+    ctx: OrgContext = Depends(get_org_jwt_or_api_key),
 ):
     """Get a dataset with all of its items"""
     row = get_dataset(dataset_id, org_uuid=ctx.org_uuid)
@@ -294,10 +329,65 @@ def add_items(
 
     _validate_items_for_type(row["type"], items)
 
-    item_dicts = [{"audio_path": i.audio_path, "text": i.text} for i in items]
-    new_uuids = add_dataset_items(dataset_id, item_dicts)
+    return _append_items(
+        dataset_id, [{"audio_path": i.audio_path, "text": i.text} for i in items]
+    )
 
-    return [_item_row_to_response(i) for i in get_dataset_items_by_uuids(new_uuids)]
+
+@router.post(
+    "/{dataset_id}/items/upload",
+    response_model=DatasetItemResponse,
+    status_code=201,
+    summary="Upload STT dataset item",
+    tags=["Public API"],
+)
+def upload_stt_item(
+    dataset_id: str = Path(
+        description="The STT dataset to add the item to",
+        examples=["f47ac10b-58cc-4372-a567-0e02b2c3d479"],
+    ),
+    audio: UploadFile = File(
+        description="WAV file of the spoken audio, at most 5 MB and 60 seconds long"
+    ),
+    text: str = Form(description="Ground-truth transcript of the audio"),
+    ctx: OrgContext = Depends(get_org_jwt_or_api_key),
+):
+    """Upload one audio clip with its transcript and append it to an STT dataset"""
+    row = get_dataset(dataset_id, org_uuid=ctx.org_uuid)
+    if not row:
+        raise HTTPException(status_code=404, detail="Dataset not found")
+    if row["type"] != "stt":
+        raise HTTPException(
+            status_code=400, detail="Audio uploads are only accepted for STT datasets"
+        )
+
+    data = audio.file.read(MAX_UPLOAD_AUDIO_BYTES + 1)
+    if len(data) > MAX_UPLOAD_AUDIO_BYTES:
+        raise HTTPException(status_code=413, detail="Audio file must be at most 5 MB")
+
+    try:
+        s3_bucket = get_s3_output_config()
+    except ValueError as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+    s3_key = f"stt/media/{uuid.uuid4()}.wav"
+    with tempfile.TemporaryDirectory() as temp_dir:
+        local_path = str(FilePath(temp_dir) / "audio.wav")
+        with open(local_path, "wb") as f:
+            f.write(data)
+        try:
+            duration = _wav_duration_seconds(local_path)
+        except ValueError:
+            raise HTTPException(status_code=400, detail="Audio file must be a WAV file")
+        if duration > MAX_UPLOAD_AUDIO_SECONDS:
+            raise HTTPException(
+                status_code=400, detail="Audio must be at most 60 seconds long"
+            )
+        upload_file_to_s3(get_s3_client(), local_path, s3_bucket, s3_key)
+
+    return _append_items(
+        dataset_id, [{"audio_path": f"s3://{s3_bucket}/{s3_key}", "text": text}]
+    )[0]
 
 
 @router.patch(

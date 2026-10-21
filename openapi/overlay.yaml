@@ -614,3 +614,32 @@ actions:
           and optional metadata. Use this to capture live traffic for later
           review and conversion into tests. Fails with 429 once the workspace
           hits its trace limit.
+  - target: $.paths['/datasets/{dataset_id}'].get
+    update:
+      x-speakeasy-group: datasets
+      x-speakeasy-name-override: get
+      x-speakeasy-mcp:
+        name: get-dataset
+        title: Get dataset
+        scopes: [read]
+        readOnlyHint: true
+        openWorldHint: true
+        description: |
+          Get one dataset in the caller's org with all of its items, each with
+          a download link for its audio (STT) and its text.
+  - target: $.paths['/datasets/{dataset_id}/items/upload'].post
+    update:
+      x-speakeasy-group: datasets
+      x-speakeasy-name-override: upload_item
+      x-speakeasy-mcp:
+        name: upload-dataset-item
+        title: Upload STT dataset item
+        scopes: [write]
+        readOnlyHint: false
+        destructiveHint: false
+        idempotentHint: false
+        openWorldHint: true
+        description: |
+          Upload one WAV clip (at most 5 MB and 60 seconds) with its
+          ground-truth transcript and append it to an STT dataset in the
+          caller's org.

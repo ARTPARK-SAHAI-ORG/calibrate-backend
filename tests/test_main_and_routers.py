@@ -152,7 +152,10 @@ def test_public_api_docs_are_unauthenticated_and_filtered(client, monkeypatch):
     assert "/tts/evaluate" not in paths
     assert not any(p.startswith("/simulations") for p in paths)
     assert "/jobs" not in paths
-    assert not any(p.startswith("/datasets") for p in paths)  # STT/TTS-only; deferred with them
+    assert {p: sorted(ops) for p, ops in paths.items() if p.startswith("/datasets")} == {
+        "/datasets/{dataset_id}": ["get"],
+        "/datasets/{dataset_id}/items/upload": ["post"],
+    }
     # personas + scenarios are simulation-only; deferred with simulations.
     assert not any(p.startswith("/personas") for p in paths)
     assert not any(p.startswith("/scenarios") for p in paths)

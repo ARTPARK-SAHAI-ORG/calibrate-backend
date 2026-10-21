@@ -168,3 +168,11 @@ paths:
     post:
       x-fern-sdk-group-name: traces
       x-fern-sdk-method-name: create
+  /datasets/{dataset_id}:
+    get:
+      x-fern-sdk-group-name: datasets
+      x-fern-sdk-method-name: get
+  /datasets/{dataset_id}/items/upload:
+    post:
+      x-fern-sdk-group-name: datasets
+      x-fern-sdk-method-name: upload_item
