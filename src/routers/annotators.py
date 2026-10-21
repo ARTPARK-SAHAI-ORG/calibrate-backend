@@ -16,9 +16,9 @@ from db import (
 )
 from auth_utils import get_current_org, get_org_jwt_or_api_key, OrgContext
 from annotation_metrics import (
-    aggregate_agreement_for_annotator,
+    agreement_of_annotator_with_others,
     rating_scales_for,
-    trend_series_for_annotator,
+    agreement_of_annotator_with_others_over_time,
 )
 
 
@@ -107,7 +107,7 @@ def list_annotators(ctx: OrgContext = Depends(get_org_jwt_or_api_key)):
     rating_scales = rating_scales_for(all_annotations)
     out: List[Dict[str, Any]] = []
     for a in annotators:
-        agreement, pairs = aggregate_agreement_for_annotator(
+        agreement, pairs = agreement_of_annotator_with_others(
             all_annotations, a["uuid"], rating_scales
         )
         out.append(
@@ -146,10 +146,10 @@ def get_annotator_endpoint(
         org_uuid=ctx.org_uuid, annotator_id=annotator_uuid
     )
     rating_scales = rating_scales_for(annotations)
-    current, pair_count = aggregate_agreement_for_annotator(
+    current, pair_count = agreement_of_annotator_with_others(
         annotations, annotator_uuid, rating_scales
     )
-    series = trend_series_for_annotator(
+    series = agreement_of_annotator_with_others_over_time(
         annotations, annotator_uuid, bucket=bucket, days=days, rating_scales=rating_scales
     )
 

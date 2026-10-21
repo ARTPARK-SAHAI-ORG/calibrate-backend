@@ -1177,10 +1177,10 @@ def test_delete_annotation_job(client):
 
     # Sanity: pre-delete pairwise agreement is 1.0 (both annotators agreed).
     import db as db_mod
-    from annotation_metrics import aggregate_agreement
+    from annotation_metrics import agreement_between_annotators
 
     pre = db_mod.get_annotations_for_task(task_uuid)
-    pre_pairwise, _ = aggregate_agreement(pre)
+    pre_pairwise, _ = agreement_between_annotators(pre)
     assert pre_pairwise == 1.0
 
     # 404 when job UUID doesn't match path task
@@ -1223,10 +1223,10 @@ def test_delete_annotation_job(client):
     assert survivor.status_code == 200
 
     # Pairwise agreement: ann_a's contribution is gone, so the slot now has
-    # only one annotator and contributes nothing — `aggregate_agreement`
+    # only one annotator and contributes nothing — `agreement_between_annotators`
     # returns None when there are no overlapping pairs.
     annotations = db_mod.get_annotations_for_task(task_uuid)
-    pairwise, _ = aggregate_agreement(annotations)
+    pairwise, _ = agreement_between_annotators(annotations)
     assert pairwise is None
 
     # Double-delete → 404
@@ -1283,9 +1283,9 @@ def test_bulk_delete_annotation_jobs(client):
         )
 
     import db as db_mod
-    from annotation_metrics import aggregate_agreement
+    from annotation_metrics import agreement_between_annotators
 
-    pre_pairwise, _ = aggregate_agreement(db_mod.get_annotations_for_task(task_uuid))
+    pre_pairwise, _ = agreement_between_annotators(db_mod.get_annotations_for_task(task_uuid))
     assert pre_pairwise == 1.0
 
     # Empty payload → 400
@@ -1342,7 +1342,7 @@ def test_bulk_delete_annotation_jobs(client):
     )
 
     # Only one annotator left → no pairwise overlap → None.
-    post_pairwise, _ = aggregate_agreement(db_mod.get_annotations_for_task(task_uuid))
+    post_pairwise, _ = agreement_between_annotators(db_mod.get_annotations_for_task(task_uuid))
     assert post_pairwise is None
 
     # Re-running with the same payload now transitions zero rows.
@@ -3071,7 +3071,7 @@ def _one_item_job_pair(client):
 
 def test_public_null_value_removes_answer_and_reopens_job(client):
     import db as db_mod
-    from annotation_metrics import aggregate_agreement
+    from annotation_metrics import agreement_between_annotators
 
     _, ev_id, task_uuid, item_id, (job_a, job_b) = _one_item_job_pair(client)
     url_a = f"/public/annotation-jobs/{job_a['public_token']}/annotations"
@@ -3094,7 +3094,7 @@ def test_public_null_value_removes_answer_and_reopens_job(client):
     )
     assert first["status"] == "completed"
     assert db_mod.get_annotation_job(job_a["uuid"])["completed_at"] is not None
-    assert aggregate_agreement(db_mod.get_annotations_for_task(task_uuid))[0] == 1.0
+    assert agreement_between_annotators(db_mod.get_annotations_for_task(task_uuid))[0] == 1.0
 
     removed = save(
         url_a,
@@ -3109,7 +3109,7 @@ def test_public_null_value_removes_answer_and_reopens_job(client):
     stored = db_mod.get_annotation_job(job_a["uuid"])
     assert stored["status"] == "in_progress"
     assert stored["completed_at"] is None
-    assert aggregate_agreement(db_mod.get_annotations_for_task(task_uuid))[0] is None
+    assert agreement_between_annotators(db_mod.get_annotations_for_task(task_uuid))[0] is None
 
     again = save(url_a, [{"evaluator_id": ev_id, "value": {"value": False}}])
     assert again["status"] == "completed"
@@ -3119,7 +3119,7 @@ def test_public_null_value_removes_answer_and_reopens_job(client):
     stored = db_mod.get_annotation_job(job_a["uuid"])
     assert stored["status"] == "completed"
     assert stored["completed_at"] is not None
-    assert aggregate_agreement(db_mod.get_annotations_for_task(task_uuid))[0] == 0.0
+    assert agreement_between_annotators(db_mod.get_annotations_for_task(task_uuid))[0] == 0.0
 
 
 def test_null_value_on_empty_slot_is_a_no_op(client):

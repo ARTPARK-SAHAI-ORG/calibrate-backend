@@ -16,13 +16,13 @@ from db import (
 from auth_utils import get_current_org, OrgContext
 from org_scope import ensure_owned_evaluator
 from annotation_metrics import (
-    aggregate_agreement,
-    aggregate_human_evaluator_agreement,
-    runs_at_live_versions,
+    agreement_between_annotators,
+    agreement_between_judge_and_annotators,
+    keep_runs_from_live_versions_of,
     rating_scales_for,
-    trend_series,
-    trend_series_evaluator_breakdown,
-    trend_series_human_evaluator,
+    agreement_between_annotators_over_time,
+    agreement_between_judge_and_annotators_over_time_by_version_and_task,
+    agreement_between_judge_and_annotators_over_time,
 )
 
 
@@ -57,8 +57,8 @@ def agreement_trend(
         all_evaluator_version_runs = get_evaluator_runs_for_org(ctx.org_uuid)
 
     rating_scales = rating_scales_for(annotations, all_evaluator_version_runs)
-    annotator_agreement, annotator_pair_count = aggregate_agreement(annotations, rating_scales)
-    annotator_agreement_trend = trend_series(
+    annotator_agreement, annotator_pair_count = agreement_between_annotators(annotations, rating_scales)
+    annotator_agreement_trend = agreement_between_annotators_over_time(
         annotations, bucket=bucket, days=days, rating_scales=rating_scales
     )
 
@@ -71,11 +71,11 @@ def agreement_trend(
     )
 
     evaluator_meta = get_evaluators_by_uuids(evaluator_ids)
-    live_evaluator_version_runs = runs_at_live_versions(
+    live_evaluator_version_runs = keep_runs_from_live_versions_of(
         all_evaluator_version_runs, evaluator_meta.values()
     )
 
-    evaluator_trends = trend_series_human_evaluator(
+    evaluator_trends = agreement_between_judge_and_annotators_over_time(
         annotations,
         live_evaluator_version_runs,
         evaluator_ids,
@@ -86,7 +86,7 @@ def agreement_trend(
     evaluators_block = []
     for evaluator_id in evaluator_ids:
         evaluator = evaluator_meta.get(evaluator_id) or {}
-        evaluator_agreement, evaluator_pair_count = aggregate_human_evaluator_agreement(
+        evaluator_agreement, evaluator_pair_count = agreement_between_judge_and_annotators(
             annotations, live_evaluator_version_runs, evaluator_id, rating_scales
         )
         evaluators_block.append(
@@ -170,7 +170,7 @@ def evaluator_agreement_trend(
         dict.fromkeys(r["task_id"] for r in evaluator_runs if r.get("task_id"))
     )
 
-    breakdown = trend_series_evaluator_breakdown(
+    breakdown = agreement_between_judge_and_annotators_over_time_by_version_and_task(
         annotations, evaluator_runs, evaluator_uuid,
         version_ids=seen_versions,
         task_ids=seen_tasks,

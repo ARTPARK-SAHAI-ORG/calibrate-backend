@@ -381,19 +381,19 @@ _SummaryProjection = make_projection_params(
     ]
 )
 from annotation_metrics import (
-    aggregate_agreement,
-    aggregate_human_evaluator_agreement,
-    evaluator_human_pair_agreement,
-    evaluator_result_summary,
-    human_result_summary,
-    per_item_agreement,
-    has_any_comparable_pair,
-    trend_series,
-    trend_series_human_evaluator,
-    runs_at_live_versions,
+    agreement_between_annotators,
+    agreement_between_judge_and_annotators,
+    judge_and_annotators_agreement_on_item,
+    judge_answer_summary,
+    annotator_answer_summary,
+    agreement_on_item,
+    has_answers_to_compare,
+    agreement_between_annotators_over_time,
+    agreement_between_judge_and_annotators_over_time,
+    keep_runs_from_live_versions_of,
     rating_scales_for,
-    _pairwise_agreement,
-    _scalar,
+    _mean_agreement_between_answers,
+    _extract_answer,
     _round_agreement,
 )
 
@@ -600,8 +600,8 @@ def list_annotation_tasks(
     for task in page:
         linked = evaluators_by_task.get(task["uuid"], [])
         task["evaluators"] = linked
-        runs = runs_at_live_versions(runs_by_task.get(task["uuid"], []), linked)
-        task["has_agreement"] = has_any_comparable_pair(
+        runs = keep_runs_from_live_versions_of(runs_by_task.get(task["uuid"], []), linked)
+        task["has_agreement"] = has_answers_to_compare(
             annotations_by_task.get(task["uuid"], []),
             runs,
             [e["uuid"] for e in linked],
@@ -642,7 +642,7 @@ def get_annotation_task_endpoint(
     evaluator_ids = [e["uuid"] for e in evaluators]
     rating_scales = rating_scales_for(all_annotations, all_runs)
     for item in items:
-        item["agreement"] = per_item_agreement(
+        item["agreement"] = agreement_on_item(
             annotations_by_item.get(item["uuid"], []),
             runs_by_item.get(item["uuid"], []),
             evaluator_ids,
@@ -650,9 +650,9 @@ def get_annotation_task_endpoint(
         )
     # Same all-time flag the list endpoint sets, so the detail view agrees.
     # Aggregated agreement filters runs to each evaluator's live version.
-    task["has_agreement"] = has_any_comparable_pair(
+    task["has_agreement"] = has_answers_to_compare(
         all_annotations,
-        runs_at_live_versions(all_runs, evaluators),
+        keep_runs_from_live_versions_of(all_runs, evaluators),
         evaluator_ids,
     )
     # TTS items store audio as an S3 key; sign it so the Items tab can play it.
@@ -1438,7 +1438,7 @@ def bulk_create_items(
                 )
             # Validate the value shape on every entry so a malformed dict
             # can't slip through and silently zero out of the agreement
-            # aggregates (`annotation_metrics._scalar` only recognises
+            # aggregates (`annotation_metrics._extract_answer` only recognises
             # the keys `value`, `score`, `rating`, `label`, `binary`).
             # Bulk uploads are the only ingress path that doesn't go
             # through the public form's typed widget, so the canonical
@@ -2624,7 +2624,7 @@ def _human_agreement_for_run(
           ]
         }
 
-    `evaluators[].agreement` reuses `aggregate_human_evaluator_agreement` —
+    `evaluators[].agreement` reuses `agreement_between_judge_and_annotators` —
     so it agrees with the task-level alignment block by construction.
     `items[]` only includes items where at least one human annotation exists
     on an evaluator that this job ran (no humans → no row, by design)."""
@@ -2665,7 +2665,7 @@ def _human_agreement_for_run(
             version_by_evaluator[evaluator_id] = run.get("evaluator_version_id")
     rating_scales = rating_scales_for(relevant_annotations, evaluator_runs_in_this_job)
     for evaluator_id in evaluator_ids_in_run:
-        agreement, pair_count = aggregate_human_evaluator_agreement(
+        agreement, pair_count = agreement_between_judge_and_annotators(
             relevant_annotations, evaluator_runs_in_this_job, evaluator_id, rating_scales
         )
         # Items with at least one human annotation on this evaluator.
@@ -2713,7 +2713,7 @@ def _human_agreement_for_run(
 
     item_blocks: List[Dict[str, Any]] = []
     for item_id, item_annotations in annotations_by_item.items():
-        per_item = per_item_agreement(
+        per_item = agreement_on_item(
             item_annotations,
             runs_by_item.get(item_id, []),
             evaluator_ids_in_run,
@@ -2983,7 +2983,7 @@ def _evaluator_alignment_block(
     humans + a cumulative trend series. Always returns one entry per linked
     evaluator (with `current=None, pair_count=0` when there's no overlap yet)."""
     evaluator_ids = [e["uuid"] for e in linked_evaluators]
-    evaluator_trends = trend_series_human_evaluator(
+    evaluator_trends = agreement_between_judge_and_annotators_over_time(
         annotations,
         evaluator_runs,
         evaluator_ids,
@@ -2994,7 +2994,7 @@ def _evaluator_alignment_block(
     out: List[Dict[str, Any]] = []
     for evaluator in linked_evaluators:
         evaluator_id = evaluator["uuid"]
-        evaluator_agreement, evaluator_pair_count = aggregate_human_evaluator_agreement(
+        evaluator_agreement, evaluator_pair_count = agreement_between_judge_and_annotators(
             annotations, evaluator_runs, evaluator_id, rating_scales
         )
         out.append(
@@ -3004,8 +3004,8 @@ def _evaluator_alignment_block(
                 "current": evaluator_agreement,
                 "pair_count": evaluator_pair_count,
                 "series": evaluator_trends.get(evaluator_id, []),
-                "result": evaluator_result_summary(evaluator_runs, evaluator_id),
-                "human_result": human_result_summary(annotations, evaluator_id),
+                "result": judge_answer_summary(evaluator_runs, evaluator_id),
+                "human_result": annotator_answer_summary(annotations, evaluator_id),
             }
         )
     return out
@@ -3030,13 +3030,13 @@ def task_agreement(
     _ensure_owned_task(task_uuid, ctx.org_uuid)
     annotations = get_annotations_for_task(task_uuid)
     linked = get_evaluators_for_annotation_task(task_uuid)
-    live_evaluator_version_runs = runs_at_live_versions(
+    live_evaluator_version_runs = keep_runs_from_live_versions_of(
         get_evaluator_runs_for_task(task_uuid), linked
     )
 
     rating_scales = rating_scales_for(annotations, live_evaluator_version_runs)
-    annotator_agreement, annotator_pair_count = aggregate_agreement(annotations, rating_scales)
-    annotator_agreement_trend = trend_series(
+    annotator_agreement, annotator_pair_count = agreement_between_annotators(annotations, rating_scales)
+    annotator_agreement_trend = agreement_between_annotators_over_time(
         annotations, bucket=bucket, days=days, rating_scales=rating_scales
     )
 
@@ -3293,7 +3293,7 @@ def task_summary(
             a = latest_ann.get((item_uuid, ev_id, annotator["uuid"]))
             if a is None:
                 continue
-            scalar = _scalar(a.get("value"))
+            scalar = _extract_answer(a.get("value"))
             if scalar is not None:
                 out.append(scalar)
         return out
@@ -3303,12 +3303,12 @@ def task_summary(
     ) -> Optional[float]:
         """Evaluator-vs-human agreement for one (item, evaluator, version) slot,
         or None when the evaluator produced no value or there are no human
-        labels. Shares `evaluator_human_pair_agreement` with the task-level
+        labels. Shares `judge_and_annotators_agreement_on_item` with the task-level
         rollup so the two endpoints stay consistent."""
-        eval_scalar = _scalar(run_value) if run_value is not None else None
+        eval_scalar = _extract_answer(run_value) if run_value is not None else None
         if eval_scalar is None or not slot_human_scalars:
             return None
-        score_total, pair_count = evaluator_human_pair_agreement(
+        score_total, pair_count = judge_and_annotators_agreement_on_item(
             eval_scalar, slot_human_scalars, _rating_scale_of_version(version_id)
         )
         return _round_agreement(score_total / pair_count) if pair_count > 0 else None
@@ -3368,7 +3368,7 @@ def task_summary(
                 }
             slot_human_scalars = _slot_human_scalars(item["uuid"], ev_id)
 
-            row_annotator_agreement, row_annotator_pair_count = _pairwise_agreement(
+            row_annotator_agreement, row_annotator_pair_count = _mean_agreement_between_answers(
                 slot_human_scalars, _rating_scale_of_version(live_version_id)
             )
             human_agreement = (
