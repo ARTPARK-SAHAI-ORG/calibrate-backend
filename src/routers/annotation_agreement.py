@@ -51,12 +51,12 @@ def agreement_trend(
         if not task or task.get("org_uuid") != ctx.org_uuid:
             raise HTTPException(status_code=404, detail="Annotation task not found")
         annotations = get_annotations_for_task(task_id)
-        all_version_runs = get_evaluator_runs_for_task(task_id)
+        all_evaluator_version_runs = get_evaluator_runs_for_task(task_id)
     else:
         annotations = get_annotations_for_org(ctx.org_uuid)
-        all_version_runs = get_evaluator_runs_for_org(ctx.org_uuid)
+        all_evaluator_version_runs = get_evaluator_runs_for_org(ctx.org_uuid)
 
-    scales = scales_for(annotations, all_version_runs)
+    scales = scales_for(annotations, all_evaluator_version_runs)
     annotator_agreement, annotator_pair_count = aggregate_agreement(annotations, scales)
     annotator_agreement_trend = trend_series(
         annotations, bucket=bucket, days=days, scales=scales
@@ -64,16 +64,20 @@ def agreement_trend(
 
     evaluator_ids = list(
         dict.fromkeys(
-            r["evaluator_id"] for r in all_version_runs if r.get("evaluator_id")
+            r["evaluator_id"]
+            for r in all_evaluator_version_runs
+            if r.get("evaluator_id")
         )
     )
 
     evaluator_meta = get_evaluators_by_uuids(evaluator_ids)
-    live_version_runs = runs_at_live_versions(all_version_runs, evaluator_meta.values())
+    live_evaluator_version_runs = runs_at_live_versions(
+        all_evaluator_version_runs, evaluator_meta.values()
+    )
 
     evaluator_trends = trend_series_human_evaluator(
         annotations,
-        live_version_runs,
+        live_evaluator_version_runs,
         evaluator_ids,
         bucket=bucket,
         days=days,
@@ -83,7 +87,7 @@ def agreement_trend(
     for ev_id in evaluator_ids:
         ev = evaluator_meta.get(ev_id) or {}
         evaluator_agreement, evaluator_pair_count = aggregate_human_evaluator_agreement(
-            annotations, live_version_runs, ev_id, scales
+            annotations, live_evaluator_version_runs, ev_id, scales
         )
         evaluators_block.append(
             {

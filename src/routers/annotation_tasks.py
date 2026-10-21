@@ -3030,18 +3030,18 @@ def task_agreement(
     _ensure_owned_task(task_uuid, ctx.org_uuid)
     annotations = get_annotations_for_task(task_uuid)
     linked = get_evaluators_for_annotation_task(task_uuid)
-    live_version_runs = runs_at_live_versions(
+    live_evaluator_version_runs = runs_at_live_versions(
         get_evaluator_runs_for_task(task_uuid), linked
     )
 
-    scales = scales_for(annotations, live_version_runs)
+    scales = scales_for(annotations, live_evaluator_version_runs)
     annotator_agreement, annotator_pair_count = aggregate_agreement(annotations, scales)
     annotator_agreement_trend = trend_series(
         annotations, bucket=bucket, days=days, scales=scales
     )
 
     evaluators_block = _evaluator_alignment_block(
-        annotations, live_version_runs, linked, bucket, days, scales
+        annotations, live_evaluator_version_runs, linked, bucket, days, scales
     )
 
     return {
