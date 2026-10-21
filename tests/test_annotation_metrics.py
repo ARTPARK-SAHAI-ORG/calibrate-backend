@@ -20,6 +20,7 @@ from annotation_metrics import (
     has_any_comparable_pair,
     human_result_summary,
     per_item_agreement,
+    runs_at_live_versions,
     trend_series,
     trend_series_evaluator_breakdown,
     trend_series_for_annotator,
@@ -77,6 +78,15 @@ def test_pairwise_agreement_branches():
     assert _pairwise_agreement([None, None]) == (0.0, 0)
 
 
+def test_pairwise_agreement_skips_unclassifiable_values():
+    # The public labelling route stores whatever value it is handed, so a slot
+    # can hold a list. Two of those are not a comparable pair.
+    assert _pairwise_agreement([[1], [1]]) == (0.0, 0)
+    assert _pairwise_agreement([[1], "a"]) == (0.0, 0)
+    # A real pair alongside a list still scores on its own.
+    assert _pairwise_agreement([[1], True, True]) == (1.0, 1)
+
+
 def test_filter_runs_to_live_versions():
     runs = [
         {"evaluator_id": "e1", "evaluator_version_id": "v-live"},
@@ -87,6 +97,20 @@ def test_filter_runs_to_live_versions():
     out = filter_runs_to_live_versions(runs, {"e1": "v-live", "e2": None})
     assert len(out) == 1
     assert out[0]["evaluator_id"] == "e1"
+
+
+def test_runs_at_live_versions():
+    runs = [
+        {"evaluator_id": "e1", "evaluator_version_id": "v-live"},
+        {"evaluator_id": "e1", "evaluator_version_id": "v-stale"},
+        {"evaluator_id": "e2", "evaluator_version_id": "v2"},
+    ]
+    evaluators = [
+        {"uuid": "e1", "live_version_id": "v-live"},
+        {"uuid": "e2", "live_version_id": None},
+    ]
+    out = runs_at_live_versions(runs, evaluators)
+    assert out == [{"evaluator_id": "e1", "evaluator_version_id": "v-live"}]
 
 
 def test_aggregate_agreement_empty_and_full():
@@ -430,6 +454,61 @@ def test_trend_series_evaluator_breakdown():
     )
     assert "v1" in out["by_version"]
     assert "t1" in out["by_task"]
+
+
+def test_trend_series_evaluator_breakdown_ignores_other_versions_and_tasks():
+    now = datetime(2024, 1, 31, tzinfo=timezone.utc)
+    annotations = [
+        {
+            "item_id": "i1",
+            "evaluator_id": "e1",
+            "annotator_id": "a",
+            "value": {"value": True},
+            "task_id": "t1",
+            "updated_at": "2024-01-26 12:00:00",
+        },
+        # Another task, left out of the requested list
+        {
+            "item_id": "i2",
+            "evaluator_id": "e1",
+            "annotator_id": "a",
+            "value": {"value": True},
+            "task_id": "t2",
+            "updated_at": "2024-01-26 12:00:00",
+        },
+    ]
+    runs = [
+        {
+            "item_id": "i1",
+            "evaluator_id": "e1",
+            "evaluator_version_id": "v1",
+            "task_id": "t1",
+            "value": {"value": True},
+            "completed_at": "2024-01-26 12:00:00",
+        },
+        # Another version and another task, both left out
+        {
+            "item_id": "i2",
+            "evaluator_id": "e1",
+            "evaluator_version_id": "v2",
+            "task_id": "t2",
+            "value": {"value": False},
+            "completed_at": "2024-01-26 12:00:00",
+        },
+    ]
+    out = trend_series_evaluator_breakdown(
+        annotations, runs, "e1", ["v1"], ["t1"], "week", 14, now=now
+    )
+    # The overall series sees both items; the scoped series see only t1/v1.
+    assert out["overall"][-1]["pair_count"] == 2
+    assert out["by_version"]["v1"][-1] == {
+        "bucket_start": out["overall"][-1]["bucket_start"],
+        "bucket_end": out["overall"][-1]["bucket_end"],
+        "agreement": 1.0,
+        "pair_count": 1,
+    }
+    assert out["by_task"]["t1"][-1]["pair_count"] == 1
+    assert out["by_task"]["t1"][-1]["agreement"] == 1.0
 
 
 def test_human_result_summary():

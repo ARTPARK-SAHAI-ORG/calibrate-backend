@@ -6,10 +6,10 @@ a separate token for read-write access.
 """
 
 import logging
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Union
 
 from fastapi import APIRouter, HTTPException, Query, Path
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field, StrictBool, StrictFloat, StrictInt
 
 from db import (
     DEFAULT_EVALUATORS_SEED,
@@ -1014,6 +1014,24 @@ def get_public_annotation_job(
     return _build_annotation_job_payload(job, read_only=False)
 
 
+class PublicAnnotationValue(BaseModel):
+    """One judgement, and whatever the annotator wrote alongside it."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    value: Optional[Union[StrictBool, StrictInt, StrictFloat]] = Field(
+        None,
+        description="Judgement itself: a bool for a binary evaluator, a number on the rubric's scale for a rating one",
+        examples=[True],
+    )
+    reasoning: Optional[str] = Field(
+        None, description="Why the annotator chose that judgement"
+    )
+    comment: Optional[str] = Field(
+        None, description="A note on the row, carried by the row-level entry"
+    )
+
+
 class PublicAnnotationEntry(BaseModel):
     evaluator_id: Optional[str] = Field(
         None,
@@ -1022,8 +1040,8 @@ class PublicAnnotationEntry(BaseModel):
         description="Evaluator ID this judgement is for. `null` marks a row-level overall annotation",
         examples=[_EXAMPLE_EVALUATOR_UUID],
     )
-    value: Optional[Dict[str, Any]] = Field(
-        None, description="Judgement payload. Its shape depends on the evaluator's output type. `null` removes the stored judgement"
+    value: Optional[PublicAnnotationValue] = Field(
+        None, description="Judgement to record. `null` removes the stored judgement"
     )
 
 
@@ -1086,7 +1104,11 @@ def upsert_public_annotations(
             job_id=job["uuid"],
             item_id=payload.item_id,
             evaluator_id=entry.evaluator_id,
-            value=entry.value,
+            value=(
+                entry.value.model_dump(exclude_unset=True)
+                if entry.value is not None
+                else None
+            ),
         )
         if annotation_uuid:
             saved_uuids.append(annotation_uuid)

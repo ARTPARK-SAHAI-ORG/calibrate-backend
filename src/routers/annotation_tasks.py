@@ -390,27 +390,11 @@ from annotation_metrics import (
     has_any_comparable_pair,
     trend_series,
     trend_series_human_evaluator,
-    filter_runs_to_live_versions,
+    runs_at_live_versions,
     _pairwise_agreement,
     _scalar,
     _round_agreement,
 )
-
-
-def _live_version_map(evaluators: List[Dict[str, Any]]) -> Dict[str, Optional[str]]:
-    return {e["uuid"]: e.get("live_version_id") for e in evaluators}
-
-
-def _runs_at_live_versions(
-    runs: List[Dict[str, Any]], evaluators: List[Dict[str, Any]]
-) -> List[Dict[str, Any]]:
-    """Keep only runs at each linked evaluator's live version.
-
-    Single definition of the live-version filter shared by the `/agreement`
-    endpoint and the list endpoint's `has_agreement` flag, so the two can't
-    drift on what counts as agreement.
-    """
-    return filter_runs_to_live_versions(runs, _live_version_map(evaluators))
 
 
 # Re-exported for tests; canonical home is llm_judge so agent-tests/STT/TTS can
@@ -615,7 +599,7 @@ def list_annotation_tasks(
     for task in page:
         linked = evaluators_by_task.get(task["uuid"], [])
         task["evaluators"] = linked
-        runs = _runs_at_live_versions(runs_by_task.get(task["uuid"], []), linked)
+        runs = runs_at_live_versions(runs_by_task.get(task["uuid"], []), linked)
         task["has_agreement"] = has_any_comparable_pair(
             annotations_by_task.get(task["uuid"], []),
             runs,
@@ -665,7 +649,7 @@ def get_annotation_task_endpoint(
     # Aggregated agreement filters runs to each evaluator's live version.
     task["has_agreement"] = has_any_comparable_pair(
         all_annotations,
-        _runs_at_live_versions(all_runs, evaluators),
+        runs_at_live_versions(all_runs, evaluators),
         evaluator_ids,
     )
     # TTS items store audio as an S3 key; sign it so the Items tab can play it.
@@ -3035,7 +3019,7 @@ def task_agreement(
     _ensure_owned_task(task_uuid, ctx.org_uuid)
     annotations = get_annotations_for_task(task_uuid)
     linked = get_evaluators_for_annotation_task(task_uuid)
-    runs = _runs_at_live_versions(get_evaluator_runs_for_task(task_uuid), linked)
+    runs = runs_at_live_versions(get_evaluator_runs_for_task(task_uuid), linked)
 
     hh_current, hh_pairs = aggregate_agreement(annotations)
     hh_series = trend_series(annotations, bucket=bucket, days=days)
