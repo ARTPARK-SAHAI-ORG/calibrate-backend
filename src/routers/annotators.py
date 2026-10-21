@@ -17,6 +17,7 @@ from db import (
 from auth_utils import get_current_org, get_org_jwt_or_api_key, OrgContext
 from annotation_metrics import (
     aggregate_agreement_for_annotator,
+    scales_for,
     trend_series_for_annotator,
 )
 
@@ -103,10 +104,11 @@ def list_annotators(ctx: OrgContext = Depends(get_org_jwt_or_api_key)):
         return []
     jobs_count_by_annotator = get_job_counts_for_org_annotators(ctx.org_uuid)
     all_annotations = get_annotations_for_org(ctx.org_uuid)
+    scales = scales_for(all_annotations)
     out: List[Dict[str, Any]] = []
     for a in annotators:
         agreement, pairs = aggregate_agreement_for_annotator(
-            all_annotations, a["uuid"]
+            all_annotations, a["uuid"], scales
         )
         out.append(
             {
@@ -143,11 +145,12 @@ def get_annotator_endpoint(
     annotations = get_annotations_for_annotator_overlap_slots(
         org_uuid=ctx.org_uuid, annotator_id=annotator_uuid
     )
+    scales = scales_for(annotations)
     current, pair_count = aggregate_agreement_for_annotator(
-        annotations, annotator_uuid
+        annotations, annotator_uuid, scales
     )
     series = trend_series_for_annotator(
-        annotations, annotator_uuid, bucket=bucket, days=days
+        annotations, annotator_uuid, bucket=bucket, days=days, scales=scales
     )
 
     return {

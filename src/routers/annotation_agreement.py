@@ -19,6 +19,7 @@ from annotation_metrics import (
     aggregate_agreement,
     aggregate_human_evaluator_agreement,
     runs_at_live_versions,
+    scales_for,
     trend_series,
     trend_series_evaluator_breakdown,
     trend_series_human_evaluator,
@@ -55,8 +56,9 @@ def agreement_trend(
         annotations = get_annotations_for_org(ctx.org_uuid)
         raw_runs = get_evaluator_runs_for_org(ctx.org_uuid)
 
-    hh_current, hh_pairs = aggregate_agreement(annotations)
-    hh_series = trend_series(annotations, bucket=bucket, days=days)
+    scales = scales_for(annotations, raw_runs)
+    hh_current, hh_pairs = aggregate_agreement(annotations, scales)
+    hh_series = trend_series(annotations, bucket=bucket, days=days, scales=scales)
 
     evaluator_ids = list(
         dict.fromkeys(r["evaluator_id"] for r in raw_runs if r.get("evaluator_id"))
@@ -66,12 +68,14 @@ def agreement_trend(
     runs = runs_at_live_versions(raw_runs, evaluator_meta.values())
 
     series_by_id = trend_series_human_evaluator(
-        annotations, runs, evaluator_ids, bucket=bucket, days=days
+        annotations, runs, evaluator_ids, bucket=bucket, days=days, scales=scales
     )
     evaluators_block = []
     for ev_id in evaluator_ids:
         ev = evaluator_meta.get(ev_id) or {}
-        cur, pairs = aggregate_human_evaluator_agreement(annotations, runs, ev_id)
+        cur, pairs = aggregate_human_evaluator_agreement(
+            annotations, runs, ev_id, scales
+        )
         evaluators_block.append(
             {
                 "evaluator_id": ev_id,
@@ -151,6 +155,7 @@ def evaluator_agreement_trend(
         task_ids=seen_tasks,
         bucket=bucket,
         days=days,
+        scales=scales_for(annotations, runs),
     )
 
     def _last(series: List[Dict[str, Any]]) -> tuple:

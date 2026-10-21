@@ -2977,19 +2977,25 @@ def _evaluator_alignment_block(
     linked_evaluators: List[Dict[str, Any]],
     bucket: str,
     days: int,
+    scales: Dict[str, Any],
 ) -> List[Dict[str, Any]]:
     """For each evaluator linked to the task, compute current agreement vs
     humans + a cumulative trend series. Always returns one entry per linked
     evaluator (with `current=None, pair_count=0` when there's no overlap yet)."""
     evaluator_ids = [e["uuid"] for e in linked_evaluators]
     series_by_id = trend_series_human_evaluator(
-        annotations, evaluator_runs, evaluator_ids, bucket=bucket, days=days
+        annotations,
+        evaluator_runs,
+        evaluator_ids,
+        bucket=bucket,
+        days=days,
+        scales=scales,
     )
     out: List[Dict[str, Any]] = []
     for ev in linked_evaluators:
         ev_id = ev["uuid"]
         cur, pairs = aggregate_human_evaluator_agreement(
-            annotations, evaluator_runs, ev_id
+            annotations, evaluator_runs, ev_id, scales
         )
         out.append(
             {
@@ -3026,11 +3032,12 @@ def task_agreement(
     linked = get_evaluators_for_annotation_task(task_uuid)
     runs = runs_at_live_versions(get_evaluator_runs_for_task(task_uuid), linked)
 
-    hh_current, hh_pairs = aggregate_agreement(annotations)
-    hh_series = trend_series(annotations, bucket=bucket, days=days)
+    scales = scales_for(annotations, runs)
+    hh_current, hh_pairs = aggregate_agreement(annotations, scales)
+    hh_series = trend_series(annotations, bucket=bucket, days=days, scales=scales)
 
     evaluators_block = _evaluator_alignment_block(
-        annotations, runs, linked, bucket, days
+        annotations, runs, linked, bucket, days, scales
     )
 
     return {
