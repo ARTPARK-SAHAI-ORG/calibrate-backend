@@ -112,6 +112,22 @@ def test_api_key_uploads_item_and_reads_dataset(client, uploads):
     assert [i["text"] for i in detail.json()["items"]] == ["first", "corrected text"]
 
 
+def test_api_key_creates_dataset_in_its_workspace(client, uploads):
+    h = _signup(client)
+    key = _api_key(client, h)
+    name = f"agent-{uuid.uuid4().hex[:8]}"
+
+    resp = client.post("/datasets", json={"name": name, "dataset_type": "stt"}, headers=key)
+
+    assert resp.status_code == 201, resp.text
+    ds = resp.json()
+    assert (ds["name"], ds["dataset_type"], ds["item_count"]) == (name, "stt", 0)
+    assert client.get(f"/datasets/{ds['uuid']}", headers=h).status_code == 200
+    assert _upload(client, key, ds["uuid"], _wav(1)).status_code == 201
+    again = client.post("/datasets", json={"name": name, "dataset_type": "stt"}, headers=key)
+    assert again.status_code == 409
+
+
 def test_other_workspace_dataset_is_refused(client, uploads):
     other_ds = _dataset(client, _signup(client))
     key = _api_key(client, _signup(client))
@@ -143,7 +159,7 @@ def test_non_wav_is_refused(client, uploads):
     assert uploads == []
 
 
-def test_over_5_mb_is_refused(client, uploads):
+def test_over_size_limit_is_refused(client, uploads):
     h = _signup(client)
     data = b"\x00" * (datasets_router.MAX_UPLOAD_AUDIO_BYTES + 1)
     resp = _upload(client, _api_key(client, h), _dataset(client, h), data)
@@ -151,14 +167,14 @@ def test_over_5_mb_is_refused(client, uploads):
     assert uploads == []
 
 
-def test_over_60_seconds_is_refused(client, uploads):
+def test_over_length_limit_is_refused(client, uploads):
     h = _signup(client)
     ds = _dataset(client, h)
     key = _api_key(client, h)
-    # 61 s at 8 kHz mono 16-bit is under 1 MB, so the length check is what refuses it.
-    assert _upload(client, key, ds, _wav(61)).status_code == 400
+    # 8 kHz mono 16-bit keeps 10 minutes under 10 MB, so the length check is what refuses it.
+    assert _upload(client, key, ds, _wav(datasets_router.MAX_UPLOAD_AUDIO_SECONDS + 1)).status_code == 400
     assert uploads == []
-    assert _upload(client, key, ds, _wav(60)).status_code == 201
+    assert _upload(client, key, ds, _wav(datasets_router.MAX_UPLOAD_AUDIO_SECONDS)).status_code == 201
 
 
 def test_missing_bucket_config_is_a_server_error(client, uploads, monkeypatch):

@@ -39,9 +39,9 @@ router = APIRouter(prefix="/datasets", tags=["datasets"])
 _EXAMPLE_DATASET_UUID = "f47ac10b-58cc-4372-a567-0e02b2c3d479"
 _EXAMPLE_ITEM_UUID = "6ba7b810-9dad-11d1-80b4-00c04fd430c8"
 
-# Match the web app's STT upload limits (calibrate-frontend src/constants/limits.tsx).
-MAX_UPLOAD_AUDIO_BYTES = 5 * 1024 * 1024
-MAX_UPLOAD_AUDIO_SECONDS = 60
+# Caps an API key holder storing arbitrary files in the bucket.
+MAX_UPLOAD_AUDIO_BYTES = 25 * 1024 * 1024
+MAX_UPLOAD_AUDIO_SECONDS = 10 * 60
 
 
 # ── Request / Response models ────────────────────────────────────────────────
@@ -181,10 +181,16 @@ def _dataset_row_to_response(
 # ── Routes ───────────────────────────────────────────────────────────────────
 
 
-@router.post("", response_model=DatasetResponse, status_code=201, summary="Create dataset")
+@router.post(
+    "",
+    response_model=DatasetResponse,
+    status_code=201,
+    summary="Create dataset",
+    tags=["Public API"],
+)
 def create_new_dataset(
     request: DatasetCreateRequest,
-    ctx: OrgContext = Depends(get_current_org),
+    ctx: OrgContext = Depends(get_org_jwt_or_api_key),
 ):
     """Create a new empty dataset. Add items separately"""
     with ensure_name_unique("datasets", request.name, ctx.org_uuid, entity="Dataset"):
@@ -347,7 +353,7 @@ def upload_stt_item(
         examples=["f47ac10b-58cc-4372-a567-0e02b2c3d479"],
     ),
     audio: UploadFile = File(
-        description="WAV file of the spoken audio, at most 5 MB and 60 seconds long"
+        description="WAV file of the spoken audio, at most 25 MB and 10 minutes long"
     ),
     text: str = Form(description="Ground-truth transcript of the audio"),
     ctx: OrgContext = Depends(get_org_jwt_or_api_key),
@@ -363,7 +369,7 @@ def upload_stt_item(
 
     data = audio.file.read(MAX_UPLOAD_AUDIO_BYTES + 1)
     if len(data) > MAX_UPLOAD_AUDIO_BYTES:
-        raise HTTPException(status_code=413, detail="Audio file must be at most 5 MB")
+        raise HTTPException(status_code=413, detail="Audio file must be at most 25 MB")
 
     try:
         s3_bucket = get_s3_output_config()
@@ -381,7 +387,7 @@ def upload_stt_item(
             raise HTTPException(status_code=400, detail="Audio file must be a WAV file")
         if duration > MAX_UPLOAD_AUDIO_SECONDS:
             raise HTTPException(
-                status_code=400, detail="Audio must be at most 60 seconds long"
+                status_code=400, detail="Audio must be at most 10 minutes long"
             )
         upload_file_to_s3(get_s3_client(), local_path, s3_bucket, s3_key)
 

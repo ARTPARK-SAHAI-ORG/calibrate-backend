@@ -153,6 +153,7 @@ def test_public_api_docs_are_unauthenticated_and_filtered(client, monkeypatch):
     assert not any(p.startswith("/simulations") for p in paths)
     assert "/jobs" not in paths
     assert {p: sorted(ops) for p, ops in paths.items() if p.startswith("/datasets")} == {
+        "/datasets": ["post"],
         "/datasets/{dataset_id}": ["get"],
         "/datasets/{dataset_id}/items/upload": ["post"],
     }
