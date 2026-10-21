@@ -81,7 +81,6 @@ from routers.annotation_tasks import (
     _strip_details_evaluators,
     _strip_run_evaluator_blocks,
     _human_agreement_for_run,
-    _scales_from_evaluators,
     _shape_eval_job_for_response,
 )
 from annotation_eval_runner import (
@@ -906,9 +905,7 @@ def get_public_annotation_eval(
         # not surfaced — `(evaluator_id, evaluator_version_id)` on each run
         # keys back into the top-level evaluators[] block.
         runs=_strip_run_evaluator_blocks(raw_runs),
-        human_agreement=_human_agreement_for_run(
-            task_uuid, raw_runs, _scales_from_evaluators(evaluators_block)
-        ),
+        human_agreement=_human_agreement_for_run(task_uuid, raw_runs),
         error=shaped.get("error"),
     )
 

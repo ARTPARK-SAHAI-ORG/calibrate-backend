@@ -9,7 +9,7 @@ import pytest
 
 from annotation_metrics import (
     _classify,
-    live_scale_bounds,
+    scales_for,
     _pairwise_agreement,
     _scalar,
     aggregate_agreement,
@@ -693,7 +693,7 @@ def test_trend_series_carry_the_map_down():
     assert breakdown["by_task"]["t1"][-1]["agreement"] == 0.625
 
 
-def test_live_scale_bounds_reads_the_live_version():
+def test_scales_for_reads_the_live_version_and_each_judge_version():
     import db as db_mod
 
     user_uuid = db_mod.create_user(
@@ -725,10 +725,45 @@ def test_live_scale_bounds_reads_the_live_version():
         org_uuid=org["uuid"],
     )
 
-    bounds = live_scale_bounds([rating, binary, None, "missing-evaluator"])
-    # The live version's rubric, not the earlier 1-to-3 one.
+    annotations = [
+        {"evaluator_id": e} for e in (rating, binary, None, "missing-evaluator")
+    ]
+    runs = [{"evaluator_id": rating, "evaluator_version_id": stale["uuid"]}]
+    bounds = scales_for(annotations, runs)
+    # Human labels record no version, so they get the live rubric.
     assert bounds[rating] == (1, 5)
+    # A judge score gets the rubric of the version that gave it.
+    assert bounds[stale["uuid"]] == (1, 3)
     # A binary evaluator has no live version here, and an unknown id is absent.
     assert binary not in bounds and "missing-evaluator" not in bounds
-    assert stale["uuid"] != live["uuid"]
-    assert live_scale_bounds([]) == {}
+    assert scales_for([]) == {}
+
+
+def test_judge_score_is_divided_by_its_own_versions_width():
+    # The judge scored on an older 1-to-4 version; the live version rates 1 to 2.
+    scales = {"e1": (1, 2), "v-old": (1, 4)}
+    annotations = [
+        {"item_id": "i1", "evaluator_id": "e1", "annotator_id": "a", "value": {"value": 1}}
+    ]
+    runs = [
+        {
+            "item_id": "i1",
+            "evaluator_id": "e1",
+            "evaluator_version_id": "v-old",
+            "value": {"value": 2},
+            "completed_at": "2024-01-01 00:00:00",
+        }
+    ]
+    assert aggregate_human_evaluator_agreement(annotations, runs, "e1", scales) == (
+        round(1 - 1 / 3, 4),
+        1,
+    )
+
+
+def test_agreement_never_goes_below_zero():
+    # Labels 3 apart, given before the rubric was narrowed to 1 to 2.
+    annotations = [
+        {"item_id": "i1", "evaluator_id": "e1", "annotator_id": a, "value": {"value": v}}
+        for a, v in (("a", 1), ("b", 4))
+    ]
+    assert aggregate_agreement(annotations, {"e1": (1, 2)}) == (0.0, 1)

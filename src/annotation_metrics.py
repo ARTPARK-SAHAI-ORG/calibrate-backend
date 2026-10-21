@@ -5,9 +5,10 @@ its own annotation slot; a row-level overall annotation has evaluator_id=None.
 
 For binary judgements: agreement = 1.0 if equal else 0.0.
 For numeric (rating) judgements: agreement = 1 - |a - b| / divider, where the
-divider is the width of the evaluator's configured rubric (scale_max -
-scale_min). Callers supply those bounds per evaluator; without them the divider
-falls back to the observed range across the paired numeric judgements.
+divider is the rubric's width (scale_max - scale_min): the width of the version
+a judge score came from, or of the evaluator's live version for human labels,
+which record no version. It is never narrower than the values compared, so a
+label given on an older, wider scale cannot push agreement below 0.
 
 For mixed types within a slot, only same-type pairs contribute.
 """
@@ -18,8 +19,8 @@ from datetime import datetime, timedelta, timezone
 from itertools import combinations
 from typing import Any, Dict, Iterable, Iterator, List, Optional, Sequence, Tuple
 
-# One evaluator's rubric bounds as `(scale_min, scale_max)`, and the per-slot
-# lookup callers pass down: `{evaluator_id: bounds}`.
+# Rubric bounds as `(scale_min, scale_max)`, keyed by evaluator uuid (its live
+# version) and by version uuid (the version a judge score came from).
 ScaleBounds = Tuple[Optional[float], Optional[float]]
 Scales = Dict[str, ScaleBounds]
 
@@ -65,19 +66,15 @@ def _classify(scalar: Any) -> Optional[str]:
 
 
 def _divider(values: Iterable[Any], scale: Optional[ScaleBounds] = None) -> float:
-    """What a rating difference is divided by: the rubric's own width.
-
-    Falls back to the numeric range across `values` when no usable bounds are
-    supplied, so a slot whose evaluator is unknown (a row-level overall
-    annotation carries no evaluator) or whose rubric will not parse still
-    scores in [0, 1] instead of dividing by zero.
-    """
+    """What a rating difference is divided by: the rubric's width, widened to
+    the range of `values` when they fall outside it, and that range alone when
+    no usable bounds are known."""
+    numerics = [v for v in values if _classify(v) == "numeric"]
+    span = max(numerics) - min(numerics) if numerics else 0
     if scale:
         low, high = scale
         if low is not None and high is not None and high > low:
-            return float(high - low)
-    numerics = [v for v in values if _classify(v) == "numeric"]
-    span = max(numerics) - min(numerics) if numerics else 1.0
+            span = max(span, high - low)
     return float(span) if span > 0 else 1.0
 
 
@@ -124,28 +121,32 @@ def _slot_key(annotation: Dict[str, Any]) -> Tuple[str, Optional[str]]:
     return (annotation["item_id"], annotation.get("evaluator_id"))
 
 
-def live_scale_bounds(evaluator_ids: Iterable[str]) -> Scales:
-    """Each evaluator's rubric bounds, read from its live version, in two
-    bulk queries. For callers that already hold a version's `output_config`,
-    build the map from `llm_judge._scale_bounds` directly instead."""
+def scales_for(
+    annotations: Iterable[Dict[str, Any]],
+    runs: Iterable[Dict[str, Any]] = (),
+) -> Scales:
+    """Rubric bounds for every evaluator, and every judge version, these rows
+    mention. Two queries however many rows."""
     from db import get_evaluator_versions_by_uuids, get_evaluators_by_uuids
     from llm_judge import _scale_bounds
 
-    ids = {e for e in evaluator_ids if e}
-    if not ids:
+    runs = list(runs)
+    evaluator_ids = {r.get("evaluator_id") for r in [*annotations, *runs]} - {None}
+    if not evaluator_ids:
         return {}
-    live_version_by_evaluator = {
+    live = {
         uuid: ev["live_version_id"]
-        for uuid, ev in get_evaluators_by_uuids(list(ids)).items()
+        for uuid, ev in get_evaluators_by_uuids(list(evaluator_ids)).items()
         if ev.get("live_version_id")
     }
-    versions = get_evaluator_versions_by_uuids(
-        list(live_version_by_evaluator.values())
+    version_ids = set(live.values()) | (
+        {r.get("evaluator_version_id") for r in runs} - {None}
     )
-    return {
-        uuid: _scale_bounds((versions.get(version_id) or {}).get("output_config"))
-        for uuid, version_id in live_version_by_evaluator.items()
+    bounds = {
+        uuid: _scale_bounds(version.get("output_config"))
+        for uuid, version in get_evaluator_versions_by_uuids(list(version_ids)).items()
     }
+    return {**bounds, **{ev: bounds[v] for ev, v in live.items() if v in bounds}}
 
 
 def filter_runs_to_live_versions(
@@ -190,10 +191,13 @@ def aggregate_agreement(
     """Mean pairwise agreement across every (item, evaluator) slot that has ≥2
     distinct annotators in the supplied annotation list.
 
-    `scales` maps an evaluator to its rubric bounds, looked up per slot to
-    divide rating differences. Returns (mean_agreement | None if no comparable
-    pairs, total_pair_count).
+    Rating differences are divided by each evaluator's live rubric width,
+    looked up when `scales` is not given. Returns (mean_agreement | None if no
+    comparable pairs, total_pair_count).
     """
+    annotations = list(annotations)
+    if scales is None:
+        scales = scales_for(annotations)
     # Group by (item_id, evaluator_id), dedup per annotator (latest wins — but
     # input is already the upserted row, so one annotator contributes once).
     by_slot: Dict[Tuple[str, Optional[str]], Dict[str, Any]] = {}
@@ -215,7 +219,7 @@ def aggregate_agreement(
         if len(per_annotator) < 2:
             continue
         mean, pairs = _pairwise_agreement(
-            list(per_annotator.values()), (scales or {}).get(ev_id)
+            list(per_annotator.values()), scales.get(ev_id)
         )
         if pairs == 0:
             continue
@@ -326,11 +330,11 @@ def _bucketed_streams(
 def _latest_evaluator_value_per_slot(
     evaluator_runs: Iterable[Dict[str, Any]],
     evaluator_id: Optional[str] = None,
-) -> Dict[Tuple[str, str], Tuple[Any, str]]:
+) -> Dict[Tuple[str, str], Tuple[Any, str, Optional[str]]]:
     """Pick the most recent evaluator_run per (item_id, evaluator_id) pair.
-    Returns `{(item_id, evaluator_id): (scalar_value, completed_at_or_created_at)}`.
-    Filters to a single evaluator_id when supplied."""
-    out: Dict[Tuple[str, str], Tuple[Any, str]] = {}
+    Returns `{(item_id, evaluator_id): (scalar_value, completed_at_or_created_at,
+    evaluator_version_id)}`. Filters to a single evaluator_id when supplied."""
+    out: Dict[Tuple[str, str], Tuple[Any, str, Optional[str]]] = {}
     for r in evaluator_runs:
         ev_id = r.get("evaluator_id")
         if not ev_id:
@@ -347,7 +351,7 @@ def _latest_evaluator_value_per_slot(
         slot = (item_id, ev_id)
         existing = out.get(slot)
         if existing is None or ts > existing[1]:
-            out[slot] = (scalar, ts)
+            out[slot] = (scalar, ts, r.get("evaluator_version_id"))
     return out
 
 
@@ -376,7 +380,7 @@ def evaluator_result_summary(
     return _value_summary(
         [
             value
-            for (value, _ts) in _latest_evaluator_value_per_slot(
+            for (value, _ts, _version) in _latest_evaluator_value_per_slot(
                 evaluator_runs, evaluator_id
             ).values()
         ]
@@ -462,11 +466,16 @@ def aggregate_human_evaluator_agreement(
     at least one human annotated, pair the evaluator value with each human's
     latest value and score:
       - bool / categorical: 1.0 if equal else 0.0
-      - numeric: 1 - |a - b| / the evaluator's rubric width from `scales`
+      - numeric: 1 - |a - b| / the rubric width of the version the judge score
+        came from, looked up when `scales` is not given
     Mean weighted by pair count. (None, 0) if no comparable pairs."""
+    annotations = list(annotations)
+    evaluator_runs = list(evaluator_runs)
     eval_by_slot = _latest_evaluator_value_per_slot(evaluator_runs, evaluator_id)
     if not eval_by_slot:
         return (None, 0)
+    if scales is None:
+        scales = scales_for(annotations, evaluator_runs)
 
     # Group human annotations by (item, evaluator) slot, keeping latest per
     # annotator. Annotations are sorted ascending by updated_at so overwriting
@@ -487,12 +496,14 @@ def aggregate_human_evaluator_agreement(
 
     total_weighted = 0.0
     total_pairs = 0
-    for slot, (eval_val, _ts) in eval_by_slot.items():
+    for slot, (eval_val, _ts, version_id) in eval_by_slot.items():
         humans = human_by_slot.get(slot)
         if not humans:
             continue
         slot_total, slot_pairs = evaluator_human_pair_agreement(
-            eval_val, humans.values(), (scales or {}).get(evaluator_id)
+            eval_val,
+            humans.values(),
+            scales.get(version_id, scales.get(evaluator_id)),
         )
         total_weighted += slot_total
         total_pairs += slot_pairs
@@ -511,11 +522,12 @@ def has_any_comparable_pair(
     evaluators both judged (human-vs-evaluator). False otherwise."""
     annotations_list = list(annotations)
     runs_list = list(evaluator_runs)
-    if aggregate_agreement(annotations_list)[1] > 0:
+    # The divider cannot change a pair count, so no rubric lookup.
+    if aggregate_agreement(annotations_list, {})[1] > 0:
         return True
     for ev_id in evaluator_ids:
         if aggregate_human_evaluator_agreement(
-            annotations_list, runs_list, ev_id
+            annotations_list, runs_list, ev_id, {}
         )[1] > 0:
             return True
     return False
@@ -539,6 +551,8 @@ def per_item_agreement(
     """
     annotations_list = list(annotations_for_item)
     runs_list = list(evaluator_runs_for_item)
+    if scales is None:
+        scales = scales_for(annotations_list, runs_list)
     hh, hh_pairs = aggregate_agreement(annotations_list, scales)
     out_evaluators: List[Dict[str, Any]] = []
     for ev_id in evaluator_ids:
@@ -577,6 +591,8 @@ def trend_series_human_evaluator(
     """
     if not evaluator_ids:
         return {}
+    if scales is None:
+        scales = scales_for(annotations, evaluator_runs)
 
     out: Dict[str, List[Dict[str, Any]]] = {ev_id: [] for ev_id in evaluator_ids}
     for meta, (visible_ann, visible_runs), _added in _bucketed_streams(
@@ -619,6 +635,8 @@ def trend_series_evaluator_breakdown(
             "by_task":    {task_id:    [series ...]},
         }
     """
+    if scales is None:
+        scales = scales_for(annotations, runs)
     version_id_set = set(version_ids)
     task_id_set = set(task_ids)
 
@@ -688,6 +706,9 @@ def aggregate_agreement_for_annotator(
     AND at least one other annotator contribute. Each pair is `annotator_id`
     vs one other annotator.
     """
+    annotations = list(annotations)
+    if scales is None:
+        scales = scales_for(annotations)
     by_slot: Dict[Tuple[str, Optional[str]], Dict[str, Any]] = {}
     for a in annotations:
         slot = _slot_key(a)
@@ -705,7 +726,7 @@ def aggregate_agreement_for_annotator(
         if annotator_id not in per_annotator or len(per_annotator) < 2:
             continue
         my_val = per_annotator[annotator_id]
-        span = _divider(per_annotator.values(), (scales or {}).get(ev_id))
+        span = _divider(per_annotator.values(), scales.get(ev_id))
         for other_id, other_val in per_annotator.items():
             if other_id == annotator_id:
                 continue
@@ -733,6 +754,8 @@ def trend_series(
     enough annotators, every subsequent bucket still benefits from those
     judgements. This matches the intuition "average alignment so far."
     """
+    if scales is None:
+        scales = scales_for(annotations)
     out: List[Dict[str, Any]] = []
     for meta, (visible,), _added in _bucketed_streams(
         bucket, days, now, [(annotations, _ANNOTATION_TS)]
@@ -752,6 +775,8 @@ def trend_series_for_annotator(
 ) -> List[Dict[str, Any]]:
     """Cumulative trend of `annotator_id`'s pairwise agreement with other
     annotators, bucketed by updated_at."""
+    if scales is None:
+        scales = scales_for(annotations)
     out: List[Dict[str, Any]] = []
     for meta, (visible,), _added in _bucketed_streams(
         bucket, days, now, [(annotations, _ANNOTATION_TS)]
