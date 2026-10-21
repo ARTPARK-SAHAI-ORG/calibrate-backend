@@ -114,8 +114,11 @@ def _empty_activity() -> dict:
     return out
 
 
-def _add_cost(a: Optional[float], b: Optional[float]) -> Optional[float]:
-    return b if a is None else (a if b is None else a + b)
+def _add_row(act: dict, r) -> None:
+    """Add one grouped row's count, and its cost when it has one."""
+    act[r["metric"]] += r["n"]
+    if r["cost"] is not None:
+        act["cost"] = (act["cost"] or 0) + r["cost"]
 
 
 def _summarise(rows, new_users_by_day, items_by_org, lo: str, hi: str) -> dict:
@@ -125,8 +128,7 @@ def _summarise(rows, new_users_by_day, items_by_org, lo: str, hi: str) -> dict:
     for r in rows:
         if not lo <= r["day"] <= hi:
             continue
-        act[r["metric"]] += r["n"]
-        act["cost"] = _add_cost(act["cost"], r["cost"])
+        _add_row(act, r)
         if r["metric"] in ACTIVE_METRICS:
             active.add(r["org_uuid"])
     act["evaluations"] = sum(act[k] for k in EVAL_KINDS)
@@ -222,10 +224,9 @@ def get_analytics(start: Optional[date], end: date, tz_offset_minutes: int) -> d
                        AND {_DAY.format(col="ts")} BETWEEN :lo AND :hi"""
         failures_sql = f"""WITH {_VALID_ORGS}, {_EVALS}, f AS (
                 SELECT id, ts, org_uuid, kind, error FROM evals WHERE status = 'failed')"""
-        failures_total = q(f"{failures_sql} SELECT COUNT(*) FROM f WHERE {in_range}")[0][0]
         failures = q(
             f"""{failures_sql}
-                SELECT f.id, {_ISO.format(col="f.ts")} AS created_at, f.org_uuid,
+                SELECT COUNT(*) OVER () AS total, f.id, {_ISO.format(col="f.ts")} AS created_at, f.org_uuid,
                        v.name AS org_name, f.kind, f.error
                   FROM f JOIN valid_orgs v ON v.uuid = f.org_uuid
                  WHERE {in_range}
@@ -236,10 +237,9 @@ def get_analytics(start: Optional[date], end: date, tz_offset_minutes: int) -> d
                 SELECT created_at AS ts, org_uuid, limit_name, kind, requested, cap FROM limit_hits
                 UNION ALL SELECT created_at, org_uuid, 'max_scored_traces', 'trace_scoring', NULL, NULL
                             FROM ({_SCORING_CAP_HITS}))"""
-        hits_total = q(f"{hits_sql} SELECT COUNT(*) FROM h WHERE {in_range}")[0][0]
         hits = q(
             f"""{hits_sql}
-                SELECT {_ISO.format(col="h.ts")} AS created_at, h.org_uuid, v.name AS org_name,
+                SELECT COUNT(*) OVER () AS total, {_ISO.format(col="h.ts")} AS created_at, h.org_uuid, v.name AS org_name,
                        h.limit_name, h.kind, h.requested, h.cap
                   FROM h JOIN valid_orgs v ON v.uuid = h.org_uuid
                  WHERE {in_range}
@@ -275,8 +275,7 @@ def get_analytics(start: Optional[date], end: date, tz_offset_minutes: int) -> d
 
     per_org = defaultdict(_empty_activity)
     for r in current_rows:
-        per_org[r["org_uuid"]][r["metric"]] += r["n"]
-        per_org[r["org_uuid"]]["cost"] = _add_cost(per_org[r["org_uuid"]]["cost"], r["cost"])
+        _add_row(per_org[r["org_uuid"]], r)
     workspaces = []
     for o in orgs:
         a = per_org[o["uuid"]]
@@ -307,12 +306,14 @@ def get_analytics(start: Optional[date], end: date, tz_offset_minutes: int) -> d
         ),
         "per_day": per_day,
         "workspaces": workspaces,
-        "failures": [dict(r) for r in failures],
-        "failures_total": failures_total,
-        "limit_hits": [dict(r) for r in hits],
-        "limit_hits_total": hits_total,
+        "failures": [_without_total(r) for r in failures],
+        "failures_total": failures[0]["total"] if failures else 0,
+        "limit_hits": [_without_total(r) for r in hits],
+        "limit_hits_total": hits[0]["total"] if hits else 0,
     }
 
 
-def today_in_offset(tz_offset_minutes: int) -> date:
-    return (datetime.now(timezone.utc) + timedelta(minutes=tz_offset_minutes)).date()
+def _without_total(row) -> dict:
+    out = dict(row)
+    del out["total"]
+    return out

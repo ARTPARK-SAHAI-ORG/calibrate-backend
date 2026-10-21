@@ -1,6 +1,6 @@
 """Usage numbers across every workspace. Superadmin only."""
 
-from datetime import date
+from datetime import date, datetime, timedelta, timezone
 from typing import List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query
@@ -22,11 +22,7 @@ class Totals(BaseModel):
     evaluations_running: int = Field(description="Evaluations queued or in progress right now")
 
 
-class Activity(BaseModel):
-    new_users: int = Field(description="Users who signed up in the period")
-    active_workspaces: int = Field(
-        description="Workspaces that started an evaluation, received a trace, or collected a label in the period"
-    )
+class PeriodCounts(BaseModel):
     evaluations: int = Field(description="Evaluations started in the period, of every kind")
     failed_evaluations: int = Field(description="Evaluations started in the period that failed")
     test_runs: int = Field(description="Test runs started in the period")
@@ -48,6 +44,13 @@ class Activity(BaseModel):
     limit_hits: int = Field(description="Times a workspace was stopped by a limit in the period")
 
 
+class Activity(PeriodCounts):
+    new_users: int = Field(description="Users who signed up in the period")
+    active_workspaces: int = Field(
+        description="Workspaces that started an evaluation, received a trace, or collected a label in the period"
+    )
+
+
 class DayCounts(BaseModel):
     date: str = Field(description="The day, in the requested time offset (YYYY-MM-DD)")
     new_users: int = Field(description="Users who signed up that day")
@@ -65,7 +68,7 @@ class DayCounts(BaseModel):
     labelling_jobs_finished: int = Field(description="Labelling jobs finished that day")
 
 
-class WorkspaceRow(BaseModel):
+class WorkspaceRow(PeriodCounts):
     org_uuid: str = Field(description="Workspace ID")
     name: str = Field(description="Workspace name")
     is_personal: bool = Field(description="Whether this is someone's personal workspace")
@@ -73,23 +76,6 @@ class WorkspaceRow(BaseModel):
     last_active_at: Optional[str] = Field(
         description="When the workspace last started an evaluation, received a trace, or collected a label, all time (ISO 8601 UTC)"
     )
-    evaluations: int = Field(description="Evaluations started in the period")
-    failed_evaluations: int = Field(description="Evaluations started in the period that failed")
-    test_runs: int = Field(description="Test runs started in the period")
-    model_comparisons: int = Field(description="Model comparisons started in the period")
-    simulations: int = Field(description="Simulation runs started in the period")
-    stt: int = Field(description="Speech to text evaluations started in the period")
-    tts: int = Field(description="Text to speech evaluations started in the period")
-    labelling_evaluator_runs: int = Field(description="Evaluator runs over labelling items started in the period")
-    cost: Optional[float] = Field(
-        description="Cost in USD of the test runs and model comparisons started in the period"
-    )
-    traces_received: int = Field(description="Traces received in the period")
-    traces_scored: int = Field(description="Traces scored in the period")
-    labelling_jobs_finished: int = Field(description="Labelling jobs finished in the period")
-    labels_collected: int = Field(description="Labels collected in the period")
-    items_labelled: int = Field(description="Distinct items that got at least one label in the period")
-    limit_hits: int = Field(description="Times the workspace was stopped by a limit in the period")
 
 
 class Failure(BaseModel):
@@ -154,7 +140,7 @@ def get_analytics(
     user_id: str = Depends(require_superadmin),
 ):
     """Get usage across every workspace for a period. Superadmin only"""
-    end = end or admin_analytics.today_in_offset(tz_offset_minutes)
+    end = end or (datetime.now(timezone.utc) + timedelta(minutes=tz_offset_minutes)).date()
     if start and end < start:
         raise HTTPException(status_code=422, detail="end must not be before start")
     return admin_analytics.get_analytics(start, end, tz_offset_minutes)
