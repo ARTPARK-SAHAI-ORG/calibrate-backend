@@ -3490,6 +3490,11 @@ def test_rating_agreement_divides_by_the_rubric_width(client):
     trend = client.get("/annotation-agreement/trend", headers=h).json()
     assert trend["human_human"]["current"] == 0.75
     assert trend["evaluators"][0]["current"] == 0.625
+    task_trend = client.get(
+        "/annotation-agreement/trend", params={"task_id": task_uuid}, headers=h
+    ).json()
+    assert task_trend["human_human"]["current"] == 0.75
+    assert task_trend["evaluators"][0]["current"] == 0.625
     ev_trend = client.get(
         f"/annotation-agreement/evaluator/{ev['uuid']}/trend", headers=h
     ).json()
