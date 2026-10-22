@@ -65,9 +65,9 @@ def agreement_trend(
 
     evaluator_ids = list(
         dict.fromkeys(
-            run["evaluator_id"]
-            for run in all_evaluator_version_runs
-            if run.get("evaluator_id")
+            row["evaluator_id"]
+            for row in [*all_evaluator_version_runs, *annotations]
+            if row.get("evaluator_id")
         )
     )
 

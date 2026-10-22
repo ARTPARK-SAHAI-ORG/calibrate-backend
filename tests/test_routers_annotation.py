@@ -2001,6 +2001,105 @@ def test_workspace_trend_leaves_out_deleted_evaluators(client):
     assert trend_evaluator_ids() == []
 
 
+def test_workspace_trend_lists_evaluators_that_were_only_labelled(client):
+    """Evaluator A has judge scores and labels, B and C only labels. B is
+    listed after A with no judge numbers but its annotators' agreement. C is
+    left out once deleted."""
+    import db as db_mod
+    from annotation_eval_runner import ANNOTATION_EVAL_JOB_TYPE
+
+    auth = _signup(client)
+    h = auth["headers"]
+    judged, labelled_only, deleted = (
+        _evaluator_with_scale(client, h, "binary", _PASS_FAIL_SCALE) for _ in range(3)
+    )
+    task_uuid = client.post(
+        "/annotation-tasks",
+        json={
+            "name": f"t-{uuid.uuid4().hex[:6]}",
+            "type": "llm",
+            "evaluator_ids": [judged["uuid"], labelled_only["uuid"], deleted["uuid"]],
+        },
+        headers=h,
+    ).json()["uuid"]
+    item_ids = client.post(
+        f"/annotation-tasks/{task_uuid}/items",
+        json={"items": [{"payload": llm_item_payload(f"i{index}")} for index in range(2)]},
+        headers=h,
+    ).json()["item_ids"]
+    annotator_ids = [
+        client.post("/annotators", json={"name": f"a-{uuid.uuid4().hex[:6]}"}, headers=h).json()["uuid"]
+        for _ in range(2)
+    ]
+    jobs = client.post(
+        f"/annotation-tasks/{task_uuid}/jobs",
+        json={"annotator_ids": annotator_ids, "item_ids": item_ids},
+        headers=h,
+    ).json()["jobs"]
+    job_of = {job["annotator_id"]: job for job in jobs}
+    for annotator_id, answers_per_item in zip(annotator_ids, ((True, True), (True, False))):
+        for item_id, answer in zip(item_ids, answers_per_item):
+            assert client.post(
+                f"/public/annotation-jobs/{job_of[annotator_id]['public_token']}/annotations",
+                json={
+                    "item_id": item_id,
+                    "annotations": [
+                        {"evaluator_id": evaluator["uuid"], "value": {"value": answer}}
+                        for evaluator in (judged, labelled_only, deleted)
+                    ],
+                },
+            ).status_code == 200
+    eval_job = db_mod.create_job(
+        job_type=ANNOTATION_EVAL_JOB_TYPE,
+        org_uuid=db_mod.get_personal_org_for_user(auth["user_uuid"])["uuid"],
+        user_id=auth["user_uuid"],
+        status="done",
+        details={"task_id": task_uuid},
+    )
+    db_mod.create_evaluator_runs([
+        {
+            "job_id": eval_job,
+            "item_id": item_id,
+            "evaluator_id": judged["uuid"],
+            "evaluator_version_id": judged["version_uuid"],
+            "status": "completed",
+            "value": {"value": True},
+        }
+        for item_id in item_ids
+    ])
+    assert client.delete(f"/evaluators/{deleted['uuid']}", headers=h).status_code == 200
+
+    for params in ({}, {"task_id": task_uuid}):
+        trend = client.get("/annotation-agreement/trend", params=params, headers=h).json()
+        assert [row["evaluator_id"] for row in trend["evaluators"]] == [
+            judged["uuid"], labelled_only["uuid"]
+        ]
+        labelled_only_row = trend["evaluators"][1]
+        assert {
+            key: labelled_only_row[key]
+            for key in ("current", "pair_count", "kappa", "kappa_type", "kappa_blank_reason", "chance_agreement")
+        } == {
+            "current": None, "pair_count": 0, "kappa": None, "kappa_type": None,
+            "kappa_blank_reason": None, "chance_agreement": None,
+        }
+        assert labelled_only_row["series"] and all(
+            point["agreement"] is None for point in labelled_only_row["series"]
+        )
+        # Annotators agree on the first item only. Answers true 3 of 4 times:
+        # chance 0.625, so kappa (0.5 - 0.625) / 0.375.
+        assert {
+            key: value for key, value in labelled_only_row["inter_annotator"].items() if key != "series"
+        } == {
+            "current": 0.5, "pair_count": 2, "kappa": -0.3333, "kappa_type": "fleiss",
+            "kappa_blank_reason": None, "chance_agreement": 0.625,
+        }
+        # Only the judged evaluator adds pairs: true against true, true on the
+        # first item, and true against true, false on the second.
+        assert {
+            key: value for key, value in trend["evaluators_with_humans"].items() if key != "series"
+        } == {"current": 0.75, "pair_count": 4}
+
+
 def test_summary_comment_cleared_in_newer_job_wipes_older(client):
     """When the same annotator has multiple jobs on the same task (e.g. admin
     re-assigns items in a fresh batch), the (job_id, item_id, evaluator=NULL)
