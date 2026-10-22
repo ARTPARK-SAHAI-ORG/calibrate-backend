@@ -121,6 +121,13 @@ class DatasetDetailResponse(DatasetResponse):
 # ── Helpers ──────────────────────────────────────────────────────────────────
 
 
+def _required_text(text: str) -> str:
+    text = text.strip()
+    if not text:
+        raise HTTPException(status_code=400, detail="Dataset item text cannot be empty")
+    return text
+
+
 def _validate_items_for_type(dataset_type: str, items: List[DatasetItemIn]) -> None:
     """Raise HTTPException if items are inconsistent with the dataset type."""
     for item in items:
@@ -336,7 +343,8 @@ def add_items(
     _validate_items_for_type(row["type"], items)
 
     return _append_items(
-        dataset_id, [{"audio_path": i.audio_path, "text": i.text} for i in items]
+        dataset_id,
+        [{"audio_path": i.audio_path, "text": _required_text(i.text)} for i in items],
     )
 
 
@@ -366,6 +374,7 @@ def upload_stt_item(
         raise HTTPException(
             status_code=400, detail="Audio uploads are only accepted for STT datasets"
         )
+    text = _required_text(text)
 
     data = audio.file.read(MAX_UPLOAD_AUDIO_BYTES + 1)
     if len(data) > MAX_UPLOAD_AUDIO_BYTES:
