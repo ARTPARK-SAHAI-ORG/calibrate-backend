@@ -2082,22 +2082,15 @@ def test_workspace_trend_lists_evaluators_that_were_only_labelled(client):
             "current": None, "pair_count": 0, "kappa": None, "kappa_type": None,
             "kappa_blank_reason": None, "chance_agreement": None,
         }
-        assert labelled_only_row["series"] and all(
-            point["agreement"] is None for point in labelled_only_row["series"]
-        )
         # Annotators agree on the first item only. Answers true 3 of 4 times:
         # chance 0.625, so kappa (0.5 - 0.625) / 0.375.
-        assert {
-            key: value for key, value in labelled_only_row["inter_annotator"].items() if key != "series"
-        } == {
+        assert labelled_only_row["inter_annotator"] == {
             "current": 0.5, "pair_count": 2, "kappa": -0.3333, "kappa_type": "fleiss",
             "kappa_blank_reason": None, "chance_agreement": 0.625,
         }
         # Only the judged evaluator adds pairs: true against true, true on the
         # first item, and true against true, false on the second.
-        assert {
-            key: value for key, value in trend["evaluators_with_humans"].items() if key != "series"
-        } == {"current": 0.75, "pair_count": 4}
+        assert trend["evaluators_with_humans"] == {"current": 0.75, "pair_count": 4}
 
 
 def test_summary_comment_cleared_in_newer_job_wipes_older(client):
@@ -3858,18 +3851,15 @@ def test_kappa_sits_beside_every_agreement_over_many_items(client):
     # Now, over all 4 items, and earlier, over items 0 and 3. Every kappa is
     # (agreement - chance) / (1 - chance).
     binary_judge_now = kappa(0.75, "cohen", 0.5)
-    binary_judge_earlier = kappa(1.0, "cohen", 0.5)
     # Rating judge 3, 4, 1, 5 against 3, 4, 2, 5 and 3, 5, 2, 4: agreement
     # 7/8, chance 10/16.
     rating_judge_now = kappa(0.6667, "linear_weighted_cohen", 0.625)
     rating_judge_earlier = kappa(0.75, "linear_weighted_cohen", 0.75)
     # Annotators on the binary evaluator: true 5 of 8 answers, chance 0.53125.
     binary_annotators_now = kappa(0.4667, "fleiss", 0.5312)
-    binary_annotators_earlier = kappa(1.0, "fleiss", 0.5)
     # Annotators on the rating evaluator: 2, 3, 4, 5 a quarter each, chance
-    # 11/16. Earlier 3, 3, 4, 5, chance 0.78125.
+    # 11/16.
     rating_annotators_now = kappa(0.6, "linear_weighted_fleiss", 0.6875)
-    rating_annotators_earlier = kappa(0.4286, "linear_weighted_fleiss", 0.7812)
     one_annotator_now = [
         {"answer_kind": "binary", **kappa(0.5, "cohen", 0.5)},
         {"answer_kind": "rating", **kappa(0.6, "linear_weighted_cohen", 0.6875)},
@@ -3899,38 +3889,29 @@ def test_kappa_sits_beside_every_agreement_over_many_items(client):
             if not point["pair_count"]
         )
 
-    def assert_shaped_as_on_main(block):
-        assert set(block) == {"current", "pair_count", "series"}
-        assert all(set(point) == point_keys_on_main for point in block["series"])
+    def assert_current_only(block, kappa_now=None):
+        assert "series" not in block
+        if kappa_now is not None:
+            assert kappa_of(block) == kappa_now
 
     def by_evaluator_id(entries):
         return {entry["evaluator_id"]: entry for entry in entries}
 
     def assert_agreement_blocks(response):
-        assert_shaped_as_on_main(response["human_human"])
-        assert response["human_human"]["current"] == 0.8125
-        evaluators_with_humans = response["evaluators_with_humans"]
-        assert_shaped_as_on_main(evaluators_with_humans)
+        assert {"bucket", "days"}.isdisjoint(response)
+        assert response["human_human"] == {"current": 0.8125, "pair_count": 8}
         # Each judge compared 8 pairs at 7/8.
-        assert (evaluators_with_humans["current"], evaluators_with_humans["pair_count"]) == (0.875, 16)
-        # Earlier, 4 binary pairs at 1 and 4 rating pairs at 0.9375.
-        assert earliest_point_with_pairs(evaluators_with_humans["series"])["agreement"] == round(
-            (4 * 1 + 4 * 0.9375) / 8, 4
-        )
+        assert response["evaluators_with_humans"] == {"current": 0.875, "pair_count": 16}
         evaluator_agreement = by_evaluator_id(response["evaluators"])
         binary = evaluator_agreement[binary_evaluator["uuid"]]
         rating = evaluator_agreement[rating_evaluator["uuid"]]
         assert rating["current"] == 0.875
-        assert_kappa_now_and_earlier(binary, binary_judge_now, binary_judge_earlier)
-        assert_kappa_now_and_earlier(rating, rating_judge_now, rating_judge_earlier)
+        assert_current_only(binary, binary_judge_now)
+        assert_current_only(rating, rating_judge_now)
         assert binary["inter_annotator"]["current"] == 0.75
-        assert_kappa_now_and_earlier(
-            binary["inter_annotator"], binary_annotators_now, binary_annotators_earlier
-        )
+        assert_current_only(binary["inter_annotator"], binary_annotators_now)
         assert rating["inter_annotator"]["current"] == 0.875
-        assert_kappa_now_and_earlier(
-            rating["inter_annotator"], rating_annotators_now, rating_annotators_earlier
-        )
+        assert_current_only(rating["inter_annotator"], rating_annotators_now)
 
     agreement = client.get(f"/annotation-tasks/{task_uuid}/agreement", headers=h).json()
     assert_agreement_blocks(agreement)
@@ -4036,10 +4017,7 @@ def test_kappa_blank_reason_follows_the_answers_compared(client):
             for response in (task_agreement, workspace_trend)
             if response["evaluators"]
         ]
-        flat_blocks = [
-            *inter_annotator_blocks,
-            *(block["series"][-1] for block in inter_annotator_blocks),
-        ]
+        flat_blocks = inter_annotator_blocks
         kappa_by_kind_entries = [
             *(entry for annotator in listed for entry in annotator["kappa_by_kind"]),
             *detail["stats"]["kappa_by_kind"],
@@ -4056,9 +4034,7 @@ def test_kappa_blank_reason_follows_the_answers_compared(client):
     assert blank_reasons_and_chance_agreements() == {("too_few_items", None)}
     # A linked evaluator with no judge scores adds nothing to the overall.
     task_agreement = client.get(f"/annotation-tasks/{task_uuid}/agreement", headers=h).json()
-    assert {key: value for key, value in task_agreement["evaluators_with_humans"].items() if key != "series"} == {
-        "current": None, "pair_count": 0
-    }
+    assert task_agreement["evaluators_with_humans"] == {"current": None, "pair_count": 0}
     assert task_agreement["evaluators"][0]["current"] is None
     for job in jobs:
         _post_answers(client, job, llm_ev["uuid"], {item_ids[1]: True})

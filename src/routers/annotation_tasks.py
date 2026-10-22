@@ -271,9 +271,6 @@ class HumanAgreementBlock(BaseModel):
     pair_count: int = Field(
         description="How many annotator pairs the current value averages over"
     )
-    series: List[Dict[str, Any]] = Field(
-        description="Agreement over time, one point per time bucket"
-    )
 
 
 class EvaluatorsWithHumansBlock(HumanAgreementBlock):
@@ -288,8 +285,6 @@ class EvaluatorsWithHumansBlock(HumanAgreementBlock):
 class TaskAgreementResponse(BaseModel):
     model_config = ConfigDict(extra="allow")
     task_id: str = Field(description="ID of the task", examples=[_EXAMPLE_ID])
-    bucket: str = Field(description="Time bucket used for the trend series")
-    days: int = Field(description="Length of the trailing window in days")
     human_human: HumanAgreementBlock = Field(
         description="Agreement between annotators who labelled the same items"
     )
@@ -400,7 +395,6 @@ from annotation_metrics import (
     annotator_answer_summary,
     agreement_on_item,
     has_answers_to_compare,
-    agreement_between_annotators_over_time,
     agreement_of_each_evaluator_with_annotators,
     kappa_of_one_kind,
     keep_runs_from_live_versions_of,
@@ -3004,12 +2998,10 @@ def _agreement_per_linked_evaluator(
     annotations: List[Dict[str, Any]],
     evaluator_runs: List[Dict[str, Any]],
     linked_evaluators: List[Dict[str, Any]],
-    bucket: str,
-    days: int,
     rating_scales: Dict[str, Any],
 ) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
     """For each evaluator linked to the task, its judge's agreement with the
-    annotators now and over time. Always returns one entry per linked
+    annotators. Always returns one entry per linked
     evaluator (with `current=None, pair_count=0` when there's no overlap yet).
     Also returns the agreement over all of them."""
     evaluator_id_to_agreement, agreement_of_all_evaluators = (
@@ -3017,8 +3009,6 @@ def _agreement_per_linked_evaluator(
             annotations,
             evaluator_runs,
             [evaluator["uuid"] for evaluator in linked_evaluators],
-            bucket=bucket,
-            days=days,
             rating_scales=rating_scales,
         )
     )
@@ -3041,13 +3031,6 @@ def task_agreement(
         description="Annotation task to act on",
         examples=["f47ac10b-58cc-4372-a567-0e02b2c3d479"],
     ),
-    bucket: Literal["week", "month", "year"] = Query(
-        "week",
-        description="How to bucket points in the trend series",
-    ),
-    days: int = Query(
-        90, ge=1, le=3650, description="Trailing window in days for the trend series"
-    ),
     ctx: OrgContext = Depends(get_org_jwt_or_api_key),
 ):
     """Get human-vs-human and human-vs-evaluator agreement metrics for a task"""
@@ -3062,27 +3045,18 @@ def task_agreement(
     annotator_agreement, annotator_pair_count = agreement_between_annotators(
         annotations, rating_scales
     )
-    annotator_agreement_over_time = agreement_between_annotators_over_time(
-        annotations, bucket=bucket, days=days, rating_scales=rating_scales
-    )
-
     agreement_per_evaluator, agreement_of_all_evaluators = _agreement_per_linked_evaluator(
         annotations,
         live_evaluator_version_runs,
         linked_evaluators,
-        bucket,
-        days,
         rating_scales,
     )
 
     return {
         "task_id": task_uuid,
-        "bucket": bucket,
-        "days": days,
         "human_human": {
             "current": annotator_agreement,
             "pair_count": annotator_pair_count,
-            "series": annotator_agreement_over_time,
         },
         "evaluators_with_humans": agreement_of_all_evaluators,
         "evaluators": agreement_per_evaluator,

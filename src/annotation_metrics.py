@@ -943,14 +943,15 @@ def _trend_point(
     bucket_start_and_end: Dict[str, str],
     agreement: Optional[float],
     pair_count: int,
-    kappa_by_kind: Optional[List[Dict[str, Any]]] = None,
+    kappa_by_kind: List[Dict[str, Any]],
 ) -> Dict[str, Any]:
-    """A trend point, with the kappa fields of a number over one evaluator
-    when `kappa_by_kind` is given."""
-    point = {**bucket_start_and_end, "agreement": agreement, "pair_count": pair_count}
-    if kappa_by_kind is not None:
-        point.update(kappa_of_one_kind(kappa_by_kind))
-    return point
+    """A trend point for a number over one evaluator, with its kappa fields."""
+    return {
+        **bucket_start_and_end,
+        "agreement": agreement,
+        "pair_count": pair_count,
+        **kappa_of_one_kind(kappa_by_kind),
+    }
 
 
 class _AgreementBetweenAnnotatorsSoFar:
@@ -1328,29 +1329,6 @@ def _answer_pairs_compared_between_annotator_and_others(
     )
 
 
-def agreement_between_annotators_over_time(
-    annotations: List[Dict[str, Any]],
-    bucket: str,
-    days: int,
-    now: Optional[datetime] = None,
-    rating_scales: RatingScales = _NO_RATING_SCALES,
-) -> List[Dict[str, Any]]:
-    """Agreement between annotators at the end of each time bucket, counting
-    every annotation updated by then. Once an item has enough annotators,
-    every later bucket keeps counting it, so the trend reads as "agreement so
-    far"."""
-    agreement_so_far = _AgreementBetweenAnnotatorsSoFar(rating_scales)
-    agreement_over_time: List[Dict[str, Any]] = []
-    for bucket_start_and_end, (annotations_new_in_bucket,) in _rows_new_in_each_time_bucket(
-        bucket, days, now, [(annotations, _ANNOTATION_TIMESTAMP_FIELDS)]
-    ):
-        agreement_so_far.add_annotations(annotations_new_in_bucket)
-        agreement_over_time.append(
-            _trend_point(bucket_start_and_end, *agreement_so_far.agreement())
-        )
-    return agreement_over_time
-
-
 def agreement_of_annotator_with_others_over_time(
     annotations: List[Dict[str, Any]],
     annotator_id: str,
@@ -1391,76 +1369,18 @@ def agreement_of_each_evaluator_with_annotators(
     annotations: List[Dict[str, Any]],
     evaluator_runs: List[Dict[str, Any]],
     evaluator_ids: List[str],
-    bucket: str,
-    days: int,
-    now: Optional[datetime] = None,
     rating_scales: RatingScales = _NO_RATING_SCALES,
 ) -> Tuple[Dict[str, Dict[str, Any]], Dict[str, Any]]:
     """For each of `evaluator_ids`, its judge's agreement with the annotators
-    now and at the end of each time bucket, with its kappa, and the
-    annotators' agreement with each other on it (`inter_annotator`), likewise.
-    A trend counts every annotation updated and every judge score completed
-    (or created) by the bucket's end. Also returns the judges' agreement with
-    the annotators over all of `evaluator_ids`, weighted by pair count:
-    `{current, pair_count, series}`."""
-    evaluator_ids = list(dict.fromkeys(evaluator_ids))
-    judge_agreement_so_far_per_evaluator = {
-        evaluator_id: _AgreementBetweenJudgeAndAnnotatorsSoFar(evaluator_id, rating_scales)
-        for evaluator_id in evaluator_ids
-    }
-    annotator_agreement_so_far_per_evaluator = {
-        evaluator_id: _AgreementBetweenAnnotatorsSoFar(rating_scales, with_kappa=True)
-        for evaluator_id in evaluator_ids
-    }
-    evaluator_id_to_judge_agreement_over_time: Dict[str, List[Dict[str, Any]]] = {
-        evaluator_id: [] for evaluator_id in evaluator_ids
-    }
-    evaluator_id_to_annotator_agreement_over_time: Dict[str, List[Dict[str, Any]]] = {
-        evaluator_id: [] for evaluator_id in evaluator_ids
-    }
-    agreement_of_all_judges_over_time: List[Dict[str, Any]] = []
-    for (
-        bucket_start_and_end,
-        (annotations_new_in_bucket, evaluator_runs_new_in_bucket),
-    ) in _rows_new_in_each_time_bucket(
-        bucket,
-        days,
-        now,
-        [
-            (annotations, _ANNOTATION_TIMESTAMP_FIELDS),
-            (evaluator_runs, _EVALUATOR_RUN_TIMESTAMP_FIELDS),
-        ],
-    ):
-        evaluator_id_to_new_annotations = _rows_per_evaluator(annotations_new_in_bucket)
-        evaluator_id_to_new_evaluator_runs = _rows_per_evaluator(evaluator_runs_new_in_bucket)
-        for evaluator_id in evaluator_ids:
-            judge_agreement_so_far = judge_agreement_so_far_per_evaluator[evaluator_id]
-            judge_agreement_so_far.add_rows(
-                evaluator_id_to_new_annotations.get(evaluator_id, ()),
-                evaluator_id_to_new_evaluator_runs.get(evaluator_id, ()),
-            )
-            evaluator_id_to_judge_agreement_over_time[evaluator_id].append(
-                _trend_point(bucket_start_and_end, *judge_agreement_so_far.agreement_and_kappa())
-            )
-            annotator_agreement_so_far = annotator_agreement_so_far_per_evaluator[evaluator_id]
-            annotator_agreement_so_far.add_annotations(
-                evaluator_id_to_new_annotations.get(evaluator_id, ())
-            )
-            evaluator_id_to_annotator_agreement_over_time[evaluator_id].append(
-                _trend_point(bucket_start_and_end, *annotator_agreement_so_far.agreement_and_kappa())
-            )
-        agreement_of_all_judges_over_time.append(
-            _trend_point(
-                bucket_start_and_end,
-                *_mean_agreement_of_judges(judge_agreement_so_far_per_evaluator.values()),
-            )
-        )
-
+    with its kappa, and the annotators' agreement with each other on it
+    (`inter_annotator`), likewise. Also returns the judges' agreement with the
+    annotators over all of `evaluator_ids`, weighted by pair count:
+    `{current, pair_count}`."""
     evaluator_id_to_annotations = _rows_per_evaluator(annotations)
     evaluator_id_to_evaluator_runs = _rows_per_evaluator(evaluator_runs)
     evaluator_id_to_agreement: Dict[str, Dict[str, Any]] = {}
-    current_judge_agreement_so_far_per_evaluator = []
-    for evaluator_id in evaluator_ids:
+    judge_agreement_so_far_per_evaluator = []
+    for evaluator_id in dict.fromkeys(evaluator_ids):
         judge_agreement_so_far = _AgreementBetweenJudgeAndAnnotatorsSoFar(
             evaluator_id, rating_scales
         )
@@ -1468,7 +1388,7 @@ def agreement_of_each_evaluator_with_annotators(
             evaluator_id_to_annotations.get(evaluator_id, ()),
             evaluator_id_to_evaluator_runs.get(evaluator_id, ()),
         )
-        current_judge_agreement_so_far_per_evaluator.append(judge_agreement_so_far)
+        judge_agreement_so_far_per_evaluator.append(judge_agreement_so_far)
         judge_agreement, judge_pair_count, judge_kappa_by_kind = (
             judge_agreement_so_far.agreement_and_kappa()
         )
@@ -1481,19 +1401,16 @@ def agreement_of_each_evaluator_with_annotators(
             "current": judge_agreement,
             "pair_count": judge_pair_count,
             **kappa_of_one_kind(judge_kappa_by_kind),
-            "series": evaluator_id_to_judge_agreement_over_time[evaluator_id],
             "inter_annotator": {
                 "current": annotator_agreement,
                 "pair_count": annotator_pair_count,
                 **kappa_of_one_kind(annotator_kappa_by_kind),
-                "series": evaluator_id_to_annotator_agreement_over_time[evaluator_id],
             },
         }
     agreement_of_all_judges, pair_count_of_all_judges = _mean_agreement_of_judges(
-        current_judge_agreement_so_far_per_evaluator
+        judge_agreement_so_far_per_evaluator
     )
     return evaluator_id_to_agreement, {
         "current": agreement_of_all_judges,
         "pair_count": pair_count_of_all_judges,
-        "series": agreement_of_all_judges_over_time,
     }

@@ -19,7 +19,6 @@ from annotation_metrics import (
     agreement_between_annotators,
     keep_runs_from_live_versions_of,
     rating_scales_for,
-    agreement_between_annotators_over_time,
     agreement_between_judge_and_annotators_over_time_by_version_and_task,
     agreement_of_each_evaluator_with_annotators,
 )
@@ -28,23 +27,15 @@ from annotation_metrics import (
 router = APIRouter(prefix="/annotation-agreement", tags=["annotation-agreement"])
 
 
-@router.get("/trend", summary="Get workspace agreement trend")
+@router.get("/trend", summary="Get workspace agreement")
 def agreement_trend(
-    bucket: str = Query(
-        "week",
-        pattern="^(week|month|year)$",
-        description="Time bucket for the trend series (`week`, `month`, or `year`)",
-    ),
-    days: int = Query(
-        90, ge=1, le=3650, description="Trailing window in days for the trend series"
-    ),
     task_id: Optional[str] = Query(
         None,
-        description="Annotation task to scope metrics to. Omit for workspace-wide trends",
+        description="Annotation task to scope metrics to. Omit for the whole workspace",
     ),
     ctx: OrgContext = Depends(get_current_org),
 ):
-    """Get human-vs-human agreement trends and human alignment for each evaluator"""
+    """Get human-vs-human agreement and human alignment for each evaluator"""
     if task_id:
         task = get_annotation_task(task_id)
         if not task or task.get("org_uuid") != ctx.org_uuid:
@@ -58,9 +49,6 @@ def agreement_trend(
     rating_scales = rating_scales_for(annotations, all_evaluator_version_runs)
     annotator_agreement, annotator_pair_count = agreement_between_annotators(
         annotations, rating_scales
-    )
-    annotator_agreement_over_time = agreement_between_annotators_over_time(
-        annotations, bucket=bucket, days=days, rating_scales=rating_scales
     )
 
     evaluator_ids = list(
@@ -86,8 +74,6 @@ def agreement_trend(
             annotations,
             live_evaluator_version_runs,
             evaluator_ids,
-            bucket=bucket,
-            days=days,
             rating_scales=rating_scales,
         )
     )
@@ -101,13 +87,10 @@ def agreement_trend(
     ]
 
     return {
-        "bucket": bucket,
-        "days": days,
         "task_id": task_id,
         "human_human": {
             "current": annotator_agreement,
             "pair_count": annotator_pair_count,
-            "series": annotator_agreement_over_time,
         },
         "evaluators_with_humans": agreement_of_all_evaluators,
         "evaluators": agreement_per_evaluator,

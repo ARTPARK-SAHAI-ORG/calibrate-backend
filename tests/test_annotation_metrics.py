@@ -21,7 +21,6 @@ from annotation_metrics import (
     annotator_answer_summary,
     agreement_on_item,
     keep_runs_from_live_versions_of,
-    agreement_between_annotators_over_time,
     agreement_between_judge_and_annotators_over_time_by_version_and_task,
     agreement_of_annotator_with_others_over_time,
     agreement_and_kappa_between_annotators,
@@ -354,44 +353,6 @@ def test_aggregate_agreement_for_annotator():
     assert pairs >= 2
 
 
-def test_trend_series_empty_returns_buckets():
-    now = datetime(2024, 1, 31, tzinfo=timezone.utc)
-    series = agreement_between_annotators_over_time([], "week", 14, now=now)
-    assert all(b["agreement"] is None for b in series)
-    assert all(b["pair_count"] == 0 for b in series)
-
-
-def test_trend_series_populated():
-    now = datetime(2024, 1, 31, tzinfo=timezone.utc)
-    annotations = [
-        {
-            "item_id": "i1",
-            "evaluator_id": "e1",
-            "annotator_id": "a",
-            "value": {"value": True},
-            "updated_at": "2024-01-25 12:00:00",
-        },
-        {
-            "item_id": "i1",
-            "evaluator_id": "e1",
-            "annotator_id": "b",
-            "value": {"value": True},
-            "updated_at": "2024-01-26 12:00:00",
-        },
-        # Malformed timestamp → skipped
-        {
-            "item_id": "i2",
-            "annotator_id": "a",
-            "value": {"value": True},
-            "updated_at": "garbage",
-        },
-        # No timestamp → skipped
-        {"item_id": "i3", "annotator_id": "a", "value": {"value": True}},
-    ]
-    series = agreement_between_annotators_over_time(annotations, "week", 14, now=now)
-    assert any(b["pair_count"] > 0 for b in series)
-
-
 def test_trend_series_for_annotator():
     now = datetime(2024, 1, 31, tzinfo=timezone.utc)
     annotations = [
@@ -424,57 +385,13 @@ def test_trend_series_for_annotator():
     assert all(b["agreement"] is None for b in empty)
 
 
-def test_trend_series_human_evaluator_branches():
-    now = datetime(2024, 1, 31, tzinfo=timezone.utc)
-    # Empty evaluator list
-    no_evaluators, no_evaluators_overall = agreement_of_each_evaluator_with_annotators(
-        [], [], [], "week", 14, now=now
+def test_agreement_of_each_evaluator_with_no_evaluators_or_no_data():
+    assert agreement_of_each_evaluator_with_annotators([], [], []) == (
+        {}, {"current": None, "pair_count": 0}
     )
-    assert no_evaluators == {}
-    assert no_evaluators_overall["series"] and all(
-        b["agreement"] is None for b in no_evaluators_overall["series"]
-    )
-
-    # No data path
-    empty, _ = agreement_of_each_evaluator_with_annotators([], [], ["e1"], "week", 14, now=now)
-    assert all(b["agreement"] is None for b in empty["e1"]["series"])
-
-    annotations = [
-        {
-            "item_id": "i1",
-            "evaluator_id": "e1",
-            "annotator_id": "a",
-            "value": {"value": True},
-            "updated_at": "2024-01-26 12:00:00",
-        }
-    ]
-    runs = [
-        {
-            "item_id": "i1",
-            "evaluator_id": "e1",
-            "evaluator_version_id": "v1",
-            "value": {"value": True},
-            "completed_at": "2024-01-26 13:00:00",
-        },
-        # malformed ts → skipped
-        {
-            "item_id": "i2",
-            "evaluator_id": "e1",
-            "evaluator_version_id": "v1",
-            "value": {"value": True},
-            "completed_at": "garbage",
-        },
-        # no ts → skipped
-        {
-            "item_id": "i3",
-            "evaluator_id": "e1",
-            "value": {"value": True},
-        },
-    ]
-    series, _ = agreement_of_each_evaluator_with_annotators(
-        annotations, runs, ["e1"], "week", 14, now=now
-    )
-    assert "e1" in series
+    evaluator_id_to_agreement, _ = agreement_of_each_evaluator_with_annotators([], [], ["e1"])
+    assert evaluator_id_to_agreement["e1"]["current"] is None
+    assert evaluator_id_to_agreement["e1"]["inter_annotator"]["current"] is None
 
 
 def test_trend_series_evaluator_breakdown():
@@ -736,11 +653,6 @@ def test_trend_series_carry_the_map_down():
         }
     ]
     rating_scales = {"e1": _ONE_TO_FIVE}
-    assert agreement_between_annotators_over_time(annotations, "week", 7, now=now)[-1]["agreement"] == 0.0
-    assert (
-        agreement_between_annotators_over_time(annotations, "week", 7, now=now, rating_scales=rating_scales)[-1]["agreement"]
-        == 0.75
-    )
     assert (
         agreement_of_annotator_with_others_over_time(
             annotations, "a", "week", 7, now=now, rating_scales=rating_scales
@@ -749,8 +661,8 @@ def test_trend_series_carry_the_map_down():
     )
     assert (
         agreement_of_each_evaluator_with_annotators(
-            annotations, runs, ["e1"], "week", 7, now=now, rating_scales=rating_scales
-        )[0]["e1"]["series"][-1]["agreement"]
+            annotations, runs, ["e1"], rating_scales=rating_scales
+        )[0]["e1"]["current"]
         == 0.625
     )
     breakdown = agreement_between_judge_and_annotators_over_time_by_version_and_task(
@@ -865,17 +777,10 @@ def _rows_timestamped_up_to(rows, timestamp_fields, bucket_end):
 
 def _assert_over_time_agreement_equals_agreement_on_rows_up_to_each_bucket_end(
     annotations, evaluator_runs, rating_scales, annotator_id, evaluator_id,
-    requested_evaluator_ids, requested_version_ids, requested_task_ids, bucket, days, now,
+    requested_version_ids, requested_task_ids, bucket, days, now,
 ):
     expected_points = []
-    expected_annotator_series = []
     expected_annotator_with_others_series = []
-    requested_evaluator_ids = list(dict.fromkeys(requested_evaluator_ids))
-    expected_evaluator_id_to_series = {identifier: [] for identifier in requested_evaluator_ids}
-    expected_evaluator_id_to_inter_annotator_series = {
-        identifier: [] for identifier in requested_evaluator_ids
-    }
-    expected_all_judges_series = []
     expected_breakdown = {
         "overall": [],
         "by_version": {identifier: [] for identifier in requested_version_ids},
@@ -905,31 +810,9 @@ def _assert_over_time_agreement_equals_agreement_on_rows_up_to_each_bucket_end(
 
         annotations_so_far = _rows_timestamped_up_to(annotations, ("updated_at", "created_at"), bucket_end)
         evaluator_runs_so_far = _rows_timestamped_up_to(evaluator_runs, ("completed_at", "created_at"), bucket_end)
-        expected_annotator_series.append({
-            **bucket_start_and_end,
-            **dict(zip(("agreement", "pair_count"), agreement_between_annotators(annotations_so_far, rating_scales))),
-        })
         expected_annotator_with_others_series.append(
             point_by_kind(agreement_and_kappa_of_annotator_with_others(annotations_so_far, annotator_id, rating_scales))
         )
-        _, agreement_of_all_judges_now = agreement_of_each_evaluator_with_annotators(
-            annotations_so_far, evaluator_runs_so_far, requested_evaluator_ids, bucket, days, now, rating_scales
-        )
-        expected_all_judges_series.append({
-            **bucket_start_and_end,
-            "agreement": agreement_of_all_judges_now["current"],
-            "pair_count": agreement_of_all_judges_now["pair_count"],
-        })
-        for identifier in requested_evaluator_ids:
-            expected_evaluator_id_to_series[identifier].append(point(
-                agreement_and_kappa_between_judge_and_annotators(annotations_so_far, evaluator_runs_so_far, identifier, rating_scales)
-            ))
-            expected_evaluator_id_to_inter_annotator_series[identifier].append(point(
-                agreement_and_kappa_between_annotators(
-                    [annotation for annotation in annotations_so_far if annotation.get("evaluator_id") == identifier],
-                    rating_scales,
-                )
-            ))
         expected_breakdown["overall"].append(point(
             agreement_and_kappa_between_judge_and_annotators(annotations_so_far, evaluator_runs_so_far, evaluator_id, rating_scales)
         ))
@@ -952,28 +835,14 @@ def _assert_over_time_agreement_equals_agreement_on_rows_up_to_each_bucket_end(
                 )
             ))
 
-    assert agreement_between_annotators_over_time(
-        annotations, bucket, days, now=now, rating_scales=rating_scales
-    ) == expected_annotator_series
     assert agreement_of_annotator_with_others_over_time(
         annotations, annotator_id, bucket, days, now=now, rating_scales=rating_scales
     ) == expected_annotator_with_others_series
-    evaluator_id_to_agreement, agreement_of_all_judges = agreement_of_each_evaluator_with_annotators(
-        annotations, evaluator_runs, requested_evaluator_ids, bucket, days, now=now, rating_scales=rating_scales
-    )
-    assert {
-        identifier: agreement["series"] for identifier, agreement in evaluator_id_to_agreement.items()
-    } == expected_evaluator_id_to_series
-    assert {
-        identifier: agreement["inter_annotator"]["series"]
-        for identifier, agreement in evaluator_id_to_agreement.items()
-    } == expected_evaluator_id_to_inter_annotator_series
-    assert agreement_of_all_judges["series"] == expected_all_judges_series
     assert agreement_between_judge_and_annotators_over_time_by_version_and_task(
         annotations, evaluator_runs, evaluator_id, requested_version_ids, requested_task_ids,
         bucket, days, now=now, rating_scales=rating_scales,
     ) == expected_breakdown
-    return expected_annotator_series, expected_points
+    return expected_annotator_with_others_series, expected_points
 
 
 def _check_a_random_trend_case(randomizer, answer_choices, now):
@@ -1041,13 +910,12 @@ def _check_a_random_trend_case(randomizer, answer_choices, now):
             if randomizer.random() < 0.7
         },
     ])
-    _annotator_series, expected_points = _assert_over_time_agreement_equals_agreement_on_rows_up_to_each_bucket_end(
+    _annotator_with_others_series, expected_points = _assert_over_time_agreement_equals_agreement_on_rows_up_to_each_bucket_end(
         annotations,
         evaluator_runs,
         rating_scales,
         annotator_id=randomizer.choice([*annotator_ids, "never-annotated"]),
         evaluator_id=randomizer.choice(evaluator_ids),
-        requested_evaluator_ids=randomizer.choices([*evaluator_ids, "unknown"], k=randomizer.randint(1, 3)),
         requested_version_ids=randomizer.choices([*version_ids, "unknown"], k=randomizer.randint(0, 3)),
         requested_task_ids=randomizer.choices([*task_ids, "unknown"], k=randomizer.randint(0, 3)),
         bucket=bucket,
@@ -1076,7 +944,7 @@ def test_over_time_agreement_equals_agreement_on_rows_up_to_each_bucket_end():
             })
     order_sensitive_series, _order_sensitive_points = _assert_over_time_agreement_equals_agreement_on_rows_up_to_each_bucket_end(
         order_sensitive_annotations, [], {"e5": (1, 5), "e4": (1, 4)}, "a", "e5",
-        ["e5"], [], [], "week", 35, now,
+        [], [], "week", 35, now,
     )
     assert order_sensitive_series[-1]["agreement"] == 0.7187
 
@@ -1103,8 +971,13 @@ def test_over_time_agreement_equals_agreement_on_rows_up_to_each_bucket_end():
             single_kind_randomizer.choice(single_kind_answer_choices),
             now,
         )
-        kappa_point_count += sum(1 for point in expected_points if point.get("kappa") is not None)
-    assert kappa_point_count > 400
+        kappa_point_count += sum(
+            1
+            for point in expected_points
+            if point.get("kappa") is not None
+            or any(entry["kappa"] is not None for entry in point.get("kappa_by_kind", []))
+        )
+    assert kappa_point_count > 200
 
 
 def _annotations_from_answers(answers_per_item, evaluator_id="e1", item_prefix="i"):
@@ -1336,61 +1209,45 @@ def test_kinds_are_never_combined_into_one_kappa():
 
 
 def test_each_evaluator_reports_its_inter_annotator_kappa_and_the_overall_is_weighted_by_pairs():
-    now = datetime(2024, 1, 31, tzinfo=timezone.utc)
-    annotations = [
-        {**annotation, "updated_at": "2024-01-30 00:00:00"}
-        for annotation in _correctness_and_conciseness_annotations()
-    ]
+    annotations = _correctness_and_conciseness_annotations()
     conciseness_judge = [
-        {**run, "item_id": "r0", "evaluator_id": "conciseness", "completed_at": "2024-01-30 00:00:00"}
-        for run in _judge_runs_from_answers([4])
+        {**run, "item_id": "r0", "evaluator_id": "conciseness"} for run in _judge_runs_from_answers([4])
     ]
     evaluator_id_to_agreement, agreement_of_all_evaluators = (
         agreement_of_each_evaluator_with_annotators(
-            annotations, conciseness_judge, ["correctness", "conciseness"], "week", 7, now,
-            _CONCISENESS_SCALE,
+            annotations, conciseness_judge, ["correctness", "conciseness"], _CONCISENESS_SCALE
         )
     )
     conciseness = evaluator_id_to_agreement["conciseness"]
     # Annotator answers 1, 1, 1, 2: chance 0.75^2 + 2 * 0.75 * 0.25 * 0.75 +
     # 0.25^2 = 0.90625, so kappa (0.875 - 0.90625) / 0.09375.
-    assert {key: value for key, value in conciseness["inter_annotator"].items() if key != "series"} == {
+    assert conciseness["inter_annotator"] == {
         "current": 0.875, "pair_count": 2, "kappa": -0.3333,
         "kappa_type": "linear_weighted_fleiss", "kappa_blank_reason": None,
         "chance_agreement": round(0.90625, 4),
     }
-    assert conciseness["inter_annotator"]["series"][-1]["kappa"] == -0.3333
-    assert {key: value for key, value in evaluator_id_to_agreement["correctness"]["inter_annotator"].items() if key != "series"} == {
+    assert evaluator_id_to_agreement["correctness"]["inter_annotator"] == {
         "current": 1.0, "pair_count": 2, "kappa": None, "kappa_type": "fleiss",
         "kappa_blank_reason": "everyone_agreed", "chance_agreement": 1.0,
     }
     # The judge's 4 against the two 1s: 1 - 3/4 each, on one item.
-    assert {key: value for key, value in conciseness.items() if key not in ("series", "inter_annotator")} == {
+    assert {key: value for key, value in conciseness.items() if key != "inter_annotator"} == {
         "current": 0.25, "pair_count": 2, "kappa": None, "kappa_type": "linear_weighted_cohen",
         "kappa_blank_reason": "too_few_items", "chance_agreement": None,
     }
     assert evaluator_id_to_agreement["correctness"]["current"] is None
-    assert {key: value for key, value in agreement_of_all_evaluators.items() if key != "series"} == {
-        "current": 0.25, "pair_count": 2
-    }
+    assert agreement_of_all_evaluators == {"current": 0.25, "pair_count": 2}
 
     # A Correctness judge that agrees on both items adds 4 pairs at 1: the
     # overall is (2 * 0.25 + 4 * 1) / 6, not the mean of 0.25 and 1.
     correctness_judge = [
-        {**run, "evaluator_id": "correctness", "completed_at": "2024-01-30 00:00:00"}
-        for run in _judge_runs_from_answers([True, True])
+        {**run, "evaluator_id": "correctness"} for run in _judge_runs_from_answers([True, True])
     ]
     _, agreement_of_all_evaluators = agreement_of_each_evaluator_with_annotators(
         annotations, conciseness_judge + correctness_judge, ["correctness", "conciseness"],
-        "week", 7, now, _CONCISENESS_SCALE,
+        _CONCISENESS_SCALE,
     )
-    assert agreement_of_all_evaluators["current"] == 0.75
-    assert agreement_of_all_evaluators["pair_count"] == 6
-    assert agreement_of_all_evaluators["series"][-1] == {
-        **{key: agreement_of_all_evaluators["series"][-1][key] for key in ("bucket_start", "bucket_end")},
-        "agreement": 0.75,
-        "pair_count": 6,
-    }
+    assert agreement_of_all_evaluators == {"current": 0.75, "pair_count": 6}
 
 
 def _textbook_fleiss_kappa(answers_per_item, categories, weight):
