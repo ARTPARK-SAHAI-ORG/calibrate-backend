@@ -16,6 +16,8 @@ from db import (
 )
 from auth_utils import get_current_org, get_org_jwt_or_api_key, OrgContext
 from annotation_metrics import (
+    KAPPA_DESCRIPTION,
+    KAPPA_TYPE_DESCRIPTION,
     KappaType,
     agreement_and_kappa_of_annotator_with_others,
     rating_scales_for,
@@ -58,13 +60,8 @@ class AnnotatorResponse(BaseModel):
     pair_count: Optional[int] = Field(
         None, description="Number of comparable annotation pairs behind the current agreement score"
     )
-    kappa: Optional[float] = Field(
-        None,
-        description="Current agreement corrected for the agreement expected by chance, where 0 is chance level and 1 is perfect agreement",
-    )
-    kappa_type: Optional[KappaType] = Field(
-        None, description="Which kappa statistic `kappa` is"
-    )
+    kappa: Optional[float] = Field(None, description=KAPPA_DESCRIPTION)
+    kappa_type: Optional[KappaType] = Field(None, description=KAPPA_TYPE_DESCRIPTION)
 
 
 class AnnotatorCreateResponse(BaseModel):

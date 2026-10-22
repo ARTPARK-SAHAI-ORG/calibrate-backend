@@ -16,11 +16,22 @@ push agreement below 0.
 Answers of different kinds, such as a true/false and a rating, are not compared.
 
 Kappa corrects an agreement number for the agreement expected by chance:
-(agreement - chance_agreement) / (1 - chance_agreement). Chance agreement draws
-one answer from each side of the pairs compared, weighted the same way as a
-real pair. Annotators with each other use Fleiss' kappa, both sides drawn from
-every annotator answer. A judge against annotators, and one annotator against
-the others, use Cohen's kappa, each side drawn from its own answers.
+(agreement - chance_agreement) / (1 - chance_agreement), over the same pairs
+that agreement number compared. Chance agreement is how much two answers drawn
+at random would agree, weighed the same way as a real pair. For each evaluator
+the answers are drawn from its compared pairs on every item:
+
+- Annotators with each other use Fleiss' kappa. Both answers come from one pool
+  in which an annotator's answer counts once for every other annotator it was
+  compared with on that item, so an item counts as much as its pairs, as in the
+  agreement number. When every item has the same number of annotators this is
+  exactly Fleiss' kappa.
+- A judge against annotators, and one annotator against the others, use Cohen's
+  kappa. Each answer of a pair is drawn from its own side.
+
+Ratings are compared over each item's largest possible rating gap, raised to
+the spread of the evaluator's compared ratings, and chance agreement is
+averaged over the items' gaps weighted by pair count.
 """
 
 from __future__ import annotations
@@ -44,9 +55,24 @@ _NO_RATING_SCALES: RatingScales = {}
 KappaType = Literal[
     "fleiss", "linear_weighted_fleiss", "cohen", "linear_weighted_cohen", "mixed"
 ]
-# Per (item_id, evaluator_id): (largest_possible_rating_gap, first_answers,
-# second_answers, pair_count), the answers on each side of the pairs compared.
-AnswersCompared = Tuple[float, List[Any], List[Any], int]
+KappaFamily = Literal["fleiss", "cohen"]
+AgreementAndKappa = Tuple[Optional[float], int, Optional[float], Optional[KappaType]]
+# The largest possible rating gap one item's answers were compared over, and
+# each pair compared as (first_answer, second_answer, agreement).
+AnswerPairsCompared = Tuple[float, List[Tuple[Any, Any, float]]]
+
+KAPPA_DESCRIPTION = (
+    "Current agreement corrected for the agreement expected by chance, where 0 "
+    "is chance level and 1 is perfect agreement"
+)
+KAPPA_TYPE_DESCRIPTION = (
+    "Which kappa statistic `kappa` is:\n\n"
+    "- `fleiss`: Fleiss' kappa between annotators, on answers that either match or do not\n"
+    "- `linear_weighted_fleiss`: Fleiss' kappa between annotators on ratings, giving partial credit to close ratings\n"
+    "- `cohen`: Cohen's kappa between the evaluator and the annotators, or between one annotator and the others, on answers that either match or do not\n"
+    "- `linear_weighted_cohen`: Cohen's kappa between the evaluator and the annotators, or between one annotator and the others, on ratings, giving partial credit to close ratings\n"
+    "- `mixed`: a kappa over several evaluators whose answers are of different kinds, some ratings and some not\n"
+)
 
 
 # All agreement floats returned to callers are rounded to this many decimal
@@ -120,6 +146,56 @@ def _agreement_between_two_answers(
     return 1.0 if first_answer == second_answer else 0.0
 
 
+def _answer_pairs_compared(
+    answer_pairs: Iterable[Tuple[Any, Any]], largest_possible_rating_gap: float
+) -> List[Tuple[Any, Any, float]]:
+    """The pairs whose two answers can be compared, each with its agreement."""
+    answer_pairs_compared: List[Tuple[Any, Any, float]] = []
+    for first_answer, second_answer in answer_pairs:
+        agreement = _agreement_between_two_answers(
+            first_answer, second_answer, largest_possible_rating_gap
+        )
+        if agreement is not None:
+            answer_pairs_compared.append((first_answer, second_answer, agreement))
+    return answer_pairs_compared
+
+
+def _agreement_total_and_pair_count(
+    answer_pairs_compared: List[Tuple[Any, Any, float]],
+) -> Tuple[float, int]:
+    agreement_total = 0.0
+    for _first_answer, _second_answer, agreement in answer_pairs_compared:
+        agreement_total += agreement
+    return (agreement_total, len(answer_pairs_compared))
+
+
+def _mean_agreement_of_pairs(
+    answer_pairs_compared: List[Tuple[Any, Any, float]],
+) -> Tuple[float, int]:
+    agreement_total, pair_count = _agreement_total_and_pair_count(answer_pairs_compared)
+    if pair_count == 0:
+        return (0.0, 0)
+    return (agreement_total / pair_count, pair_count)
+
+
+def _answer_pairs_compared_between_annotators(
+    answers: List[Any],
+    rating_scale: Optional[RatingScale] = None,
+) -> AnswerPairsCompared:
+    """Every pair of `answers` given to one item for one evaluator that can be
+    compared, and the largest possible rating gap they were compared over."""
+    given_answers = [answer for answer in answers if answer is not None]
+    largest_possible_rating_gap = _largest_possible_rating_gap(
+        given_answers, rating_scale
+    )
+    return (
+        largest_possible_rating_gap,
+        _answer_pairs_compared(
+            combinations(given_answers, 2), largest_possible_rating_gap
+        ),
+    )
+
+
 def _mean_agreement_between_answers(
     answers: List[Any],
     rating_scale: Optional[RatingScale] = None,
@@ -128,26 +204,9 @@ def _mean_agreement_between_answers(
     evaluator, and how many pairs that mean covers. `rating_scale` is that
     evaluator's rating scale. Returns (0.0, 0) when no two answers can be
     compared."""
-    given_answers = [answer for answer in answers if answer is not None]
-    if len(given_answers) < 2:
-        return (0.0, 0)
-
-    largest_possible_rating_gap = _largest_possible_rating_gap(
-        given_answers, rating_scale
+    return _mean_agreement_of_pairs(
+        _answer_pairs_compared_between_annotators(answers, rating_scale)[1]
     )
-    agreement_total = 0.0
-    pair_count = 0
-    for first_answer, second_answer in combinations(given_answers, 2):
-        agreement = _agreement_between_two_answers(
-            first_answer, second_answer, largest_possible_rating_gap
-        )
-        if agreement is None:
-            continue
-        agreement_total += agreement
-        pair_count += 1
-    if pair_count == 0:
-        return (0.0, 0)
-    return (agreement_total / pair_count, pair_count)
 
 
 def _record_annotator_answers(
@@ -525,6 +584,27 @@ def annotator_answer_summary(
     return _answer_summary(answers)
 
 
+def _answer_pairs_compared_between_judge_and_annotators(
+    judge_answer: Any,
+    annotator_answers: Iterable[Any],
+    rating_scale: Optional[RatingScale] = None,
+) -> AnswerPairsCompared:
+    """The judge's answer paired with each annotator answer on one item that
+    can be compared with it, and the largest possible rating gap they were
+    compared over."""
+    annotator_answer_list = list(annotator_answers)
+    largest_possible_rating_gap = _largest_possible_rating_gap(
+        [judge_answer, *annotator_answer_list], rating_scale
+    )
+    return (
+        largest_possible_rating_gap,
+        _answer_pairs_compared(
+            ((judge_answer, annotator_answer) for annotator_answer in annotator_answer_list),
+            largest_possible_rating_gap,
+        ),
+    )
+
+
 def judge_and_annotators_agreement_on_item(
     judge_answer: Any,
     annotator_answers: Iterable[Any],
@@ -540,25 +620,11 @@ def judge_and_annotators_agreement_on_item(
     wanting one item's mean divides the two itself, treating a count of 0 as
     None.
     """
-    if _answer_kind(judge_answer) is None:
-        return (0.0, 0)
-    annotator_answer_list = list(annotator_answers)
-    if not annotator_answer_list:
-        return (0.0, 0)
-    largest_possible_rating_gap = _largest_possible_rating_gap(
-        [judge_answer, *annotator_answer_list], rating_scale
+    return _agreement_total_and_pair_count(
+        _answer_pairs_compared_between_judge_and_annotators(
+            judge_answer, annotator_answers, rating_scale
+        )[1]
     )
-    agreement_total = 0.0
-    pair_count = 0
-    for annotator_answer in annotator_answer_list:
-        agreement = _agreement_between_two_answers(
-            judge_answer, annotator_answer, largest_possible_rating_gap
-        )
-        if agreement is None:
-            continue
-        agreement_total += agreement
-        pair_count += 1
-    return (agreement_total, pair_count)
 
 
 def agreement_between_judge_and_annotators(
@@ -706,9 +772,9 @@ def _chance_agreement(
     second_answer_counts: Counter,
     largest_possible_rating_gap: float,
 ) -> float:
-    """Expected agreement between one answer drawn from each side, weighted by
-    `_agreement_between_two_answers`. The gap is raised to the spread of the
-    ratings pooled."""
+    """Expected agreement between one answer drawn from each pool, each pair
+    weighted by `_agreement_between_two_answers`. The gap is raised to the
+    spread of the ratings pooled."""
     ratings = [
         answer
         for answer in [*first_answer_counts, *second_answer_counts]
@@ -731,52 +797,62 @@ def _chance_agreement(
 
 def _kappa(
     agreement: float,
-    item_and_evaluator_to_answers_compared: Dict[
-        Tuple[str, Optional[str]], AnswersCompared
+    item_and_evaluator_to_answer_pairs_compared: Dict[
+        Tuple[str, Optional[str]], AnswerPairsCompared
     ],
-    kappa_family: str,
+    kappa_family: KappaFamily,
 ) -> Tuple[Optional[float], Optional[KappaType]]:
     """`agreement` corrected for chance, and which kappa it is: `kappa_family`,
     `linear_weighted_` in front for ratings, or `mixed` when the evaluators
-    pooled differ. Chance agreement is worked out per evaluator and largest
-    possible rating gap, then averaged weighted by pair count, the way
-    `agreement` is. None when an evaluator's answers are of more than one kind,
-    or when chance agreement is 1."""
-    group_to_first_answer_counts: Dict[Tuple[Optional[str], float], Counter] = (
-        defaultdict(Counter)
-    )
-    group_to_second_answer_counts: Dict[Tuple[Optional[str], float], Counter] = (
-        defaultdict(Counter)
-    )
-    group_to_pair_count: Dict[Tuple[Optional[str], float], int] = defaultdict(int)
+    pooled differ. Each evaluator's answer pools cover its compared pairs on
+    every item. Chance agreement is worked out for each largest possible
+    rating gap those pairs used, then averaged weighted by pair count, the way
+    `agreement` is. None when one evaluator compared answers of more than one
+    kind, or when chance agreement is 1."""
+    evaluator_id_to_first_answer_counts: Dict[Optional[str], Counter] = defaultdict(Counter)
+    evaluator_id_to_second_answer_counts: Dict[Optional[str], Counter] = defaultdict(Counter)
     evaluator_id_to_answer_kinds: Dict[Optional[str], set] = defaultdict(set)
+    evaluator_id_and_rating_gap_to_pair_count: Dict[Tuple[Optional[str], float], int] = (
+        defaultdict(int)
+    )
     for (_item_id, evaluator_id), (
         largest_possible_rating_gap,
-        first_answers,
-        second_answers,
-        pair_count,
-    ) in item_and_evaluator_to_answers_compared.items():
-        if pair_count == 0:
+        answer_pairs_compared,
+    ) in item_and_evaluator_to_answer_pairs_compared.items():
+        if not answer_pairs_compared:
             continue
-        group = (evaluator_id, largest_possible_rating_gap)
-        group_to_first_answer_counts[group].update(first_answers)
-        group_to_second_answer_counts[group].update(second_answers)
-        group_to_pair_count[group] += pair_count
+        first_answers = [
+            first_answer for first_answer, _second_answer, _agreement in answer_pairs_compared
+        ]
+        second_answers = [
+            second_answer for _first_answer, second_answer, _agreement in answer_pairs_compared
+        ]
+        if kappa_family == "fleiss":
+            # One pool holding each answer once per pair it is in.
+            first_answers = second_answers = first_answers + second_answers
+        evaluator_id_to_first_answer_counts[evaluator_id].update(first_answers)
+        evaluator_id_to_second_answer_counts[evaluator_id].update(second_answers)
         evaluator_id_to_answer_kinds[evaluator_id].update(
-            _answer_kind(answer) for answer in [*first_answers, *second_answers]
+            _answer_kind(first_answer) for first_answer in first_answers
         )
+        evaluator_id_and_rating_gap_to_pair_count[
+            (evaluator_id, largest_possible_rating_gap)
+        ] += len(answer_pairs_compared)
     if any(len(answer_kinds) > 1 for answer_kinds in evaluator_id_to_answer_kinds.values()):
         return (None, None)
 
     chance_agreement = math.fsum(
         _chance_agreement(
-            group_to_first_answer_counts[group],
-            group_to_second_answer_counts[group],
-            group[1],
+            evaluator_id_to_first_answer_counts[evaluator_id],
+            evaluator_id_to_second_answer_counts[evaluator_id],
+            largest_possible_rating_gap,
         )
         * pair_count
-        for group, pair_count in group_to_pair_count.items()
-    ) / sum(group_to_pair_count.values())
+        for (
+            evaluator_id,
+            largest_possible_rating_gap,
+        ), pair_count in evaluator_id_and_rating_gap_to_pair_count.items()
+    ) / sum(evaluator_id_and_rating_gap_to_pair_count.values())
     if 1 - chance_agreement < 1e-12:
         return (None, None)
     kappa_types = {
@@ -791,11 +867,11 @@ def _kappa(
 
 def _agreement_and_kappa(
     agreement_totals_and_pair_counts: Iterable[Tuple[float, int]],
-    item_and_evaluator_to_answers_compared: Dict[
-        Tuple[str, Optional[str]], AnswersCompared
+    item_and_evaluator_to_answer_pairs_compared: Dict[
+        Tuple[str, Optional[str]], AnswerPairsCompared
     ],
-    kappa_family: str,
-) -> Tuple[Optional[float], int, Optional[float], Optional[KappaType]]:
+    kappa_family: KappaFamily,
+) -> AgreementAndKappa:
     """Rounded mean agreement from `(agreement_total, pair_count)` parts, the
     pair count it covers, and its kappa and kappa type, or
     (None, 0, None, None) when no pair counts."""
@@ -811,15 +887,15 @@ def _agreement_and_kappa(
         return (None, 0, None, None)
     agreement = agreement_total / pair_count_total
     kappa, kappa_type = _kappa(
-        agreement, item_and_evaluator_to_answers_compared, kappa_family
+        agreement, item_and_evaluator_to_answer_pairs_compared, kappa_family
     )
     return (_round_agreement(agreement), pair_count_total, kappa, kappa_type)
 
 
-def _series_point(
-    bucket_start_and_end: Dict[str, str], agreement_so_far: Any
+def _trend_point(
+    bucket_start_and_end: Dict[str, str], agreement_and_kappa: AgreementAndKappa
 ) -> Dict[str, Any]:
-    agreement, pair_count, kappa, kappa_type = agreement_so_far.agreement_and_kappa()
+    agreement, pair_count, kappa, kappa_type = agreement_and_kappa
     return {
         **bucket_start_and_end,
         "agreement": agreement,
@@ -841,34 +917,29 @@ class _AgreementBetweenAnnotatorsSoFar:
         self.item_and_evaluator_to_agreement_total_and_pair_count: Dict[
             Tuple[str, Optional[str]], Tuple[float, int]
         ] = {}
-        self.item_and_evaluator_to_answers_compared: Dict[
-            Tuple[str, Optional[str]], AnswersCompared
+        self.item_and_evaluator_to_answer_pairs_compared: Dict[
+            Tuple[str, Optional[str]], AnswerPairsCompared
         ] = {}
 
     def add_annotations(self, annotations: Iterable[Dict[str, Any]]) -> None:
         for item_and_evaluator in _record_annotator_answers(
             self.item_and_evaluator_to_annotator_answers, annotations
         ):
-            annotator_answers = list(
-                self.item_and_evaluator_to_annotator_answers[item_and_evaluator].values()
+            answer_pairs_compared = _answer_pairs_compared_between_annotators(
+                list(self.item_and_evaluator_to_annotator_answers[item_and_evaluator].values()),
+                self.rating_scales.get(item_and_evaluator[1]),
             )
-            rating_scale = self.rating_scales.get(item_and_evaluator[1])
-            agreement_on_this_item, pair_count_on_this_item = (
-                _mean_agreement_between_answers(annotator_answers, rating_scale)
+            agreement_on_this_item, pair_count_on_this_item = _mean_agreement_of_pairs(
+                answer_pairs_compared[1]
             )
             self.item_and_evaluator_to_agreement_total_and_pair_count[
                 item_and_evaluator
             ] = (agreement_on_this_item * pair_count_on_this_item, pair_count_on_this_item)
-            self.item_and_evaluator_to_answers_compared[item_and_evaluator] = (
-                _largest_possible_rating_gap(annotator_answers, rating_scale),
-                annotator_answers,
-                annotator_answers,
-                pair_count_on_this_item,
+            self.item_and_evaluator_to_answer_pairs_compared[item_and_evaluator] = (
+                answer_pairs_compared
             )
 
-    def agreement_and_kappa(
-        self,
-    ) -> Tuple[Optional[float], int, Optional[float], Optional[KappaType]]:
+    def agreement_and_kappa(self) -> AgreementAndKappa:
         return _agreement_and_kappa(
             (
                 self.item_and_evaluator_to_agreement_total_and_pair_count[
@@ -876,15 +947,15 @@ class _AgreementBetweenAnnotatorsSoFar:
                 ]
                 for item_and_evaluator in self.item_and_evaluator_to_annotator_answers
             ),
-            self.item_and_evaluator_to_answers_compared,
+            self.item_and_evaluator_to_answer_pairs_compared,
             "fleiss",
         )
 
 
 class _AgreementOfAnnotatorWithOthersSoFar:
-    """`agreement_of_annotator_with_others` over every annotation added so
-    far, rescoring only the (item, evaluator) pairs that new annotations
-    answer."""
+    """`agreement_and_kappa_of_annotator_with_others` over every annotation
+    added so far, rescoring only the (item, evaluator) pairs that new
+    annotations answer."""
 
     def __init__(self, annotator_id: str, rating_scales: RatingScales) -> None:
         self.annotator_id = annotator_id
@@ -892,54 +963,32 @@ class _AgreementOfAnnotatorWithOthersSoFar:
         self.item_and_evaluator_to_annotator_answers: Dict[
             Tuple[str, Optional[str]], Dict[str, Any]
         ] = {}
-        self.item_and_evaluator_to_agreements_with_others: Dict[
-            Tuple[str, Optional[str]], List[float]
-        ] = {}
-        self.item_and_evaluator_to_answers_compared: Dict[
-            Tuple[str, Optional[str]], AnswersCompared
+        self.item_and_evaluator_to_answer_pairs_compared: Dict[
+            Tuple[str, Optional[str]], AnswerPairsCompared
         ] = {}
 
     def add_annotations(self, annotations: Iterable[Dict[str, Any]]) -> None:
         for item_and_evaluator in _record_annotator_answers(
             self.item_and_evaluator_to_annotator_answers, annotations
         ):
-            annotator_id_to_answer = self.item_and_evaluator_to_annotator_answers[
-                item_and_evaluator
-            ]
-            rating_scale = self.rating_scales.get(item_and_evaluator[1])
-            self.item_and_evaluator_to_agreements_with_others[item_and_evaluator] = (
-                _agreements_of_annotator_with_others_on_item(
-                    self.annotator_id, annotator_id_to_answer, rating_scale
+            self.item_and_evaluator_to_answer_pairs_compared[item_and_evaluator] = (
+                _answer_pairs_compared_between_annotator_and_others(
+                    self.annotator_id,
+                    self.item_and_evaluator_to_annotator_answers[item_and_evaluator],
+                    self.rating_scales.get(item_and_evaluator[1]),
                 )
             )
-            if self.annotator_id not in annotator_id_to_answer:
-                continue
-            this_annotator_answer = annotator_id_to_answer[self.annotator_id]
-            other_annotator_answers = [
-                other_annotator_answer
-                for other_annotator_id, other_annotator_answer in annotator_id_to_answer.items()
-                if other_annotator_id != self.annotator_id
-                and _answer_kind(other_annotator_answer) == _answer_kind(this_annotator_answer)
-            ]
-            self.item_and_evaluator_to_answers_compared[item_and_evaluator] = (
-                _largest_possible_rating_gap(annotator_id_to_answer.values(), rating_scale),
-                [this_annotator_answer] * len(other_annotator_answers),
-                other_annotator_answers,
-                len(other_annotator_answers),
-            )
 
-    def agreement_and_kappa(
-        self,
-    ) -> Tuple[Optional[float], int, Optional[float], Optional[KappaType]]:
+    def agreement_and_kappa(self) -> AgreementAndKappa:
         return _agreement_and_kappa(
             (
                 (agreement, 1)
                 for item_and_evaluator in self.item_and_evaluator_to_annotator_answers
-                for agreement in self.item_and_evaluator_to_agreements_with_others[
-                    item_and_evaluator
-                ]
+                for _this_annotator_answer, _other_annotator_answer, agreement in (
+                    self.item_and_evaluator_to_answer_pairs_compared[item_and_evaluator][1]
+                )
             ),
-            self.item_and_evaluator_to_answers_compared,
+            self.item_and_evaluator_to_answer_pairs_compared,
             "cohen",
         )
 
@@ -961,8 +1010,8 @@ class _AgreementBetweenJudgeAndAnnotatorsSoFar:
         self.item_and_evaluator_to_agreement_total_and_pair_count: Dict[
             Tuple[str, str], Tuple[float, int]
         ] = {}
-        self.item_and_evaluator_to_answers_compared: Dict[
-            Tuple[str, str], AnswersCompared
+        self.item_and_evaluator_to_answer_pairs_compared: Dict[
+            Tuple[str, str], AnswerPairsCompared
         ] = {}
 
     def add_rows(
@@ -994,31 +1043,21 @@ class _AgreementBetweenJudgeAndAnnotatorsSoFar:
             judge_answer, _scored_at, judge_version_id = (
                 judge_answer_scored_at_and_version_id
             )
-            rating_scale = self.rating_scales.get(
-                judge_version_id, self.rating_scales.get(self.evaluator_id)
+            answer_pairs_compared = _answer_pairs_compared_between_judge_and_annotators(
+                judge_answer,
+                annotator_id_to_answer.values(),
+                self.rating_scales.get(
+                    judge_version_id, self.rating_scales.get(self.evaluator_id)
+                ),
             )
             self.item_and_evaluator_to_agreement_total_and_pair_count[
                 item_and_evaluator
-            ] = judge_and_annotators_agreement_on_item(
-                judge_answer, annotator_id_to_answer.values(), rating_scale
-            )
-            annotator_answers_compared = [
-                annotator_answer
-                for annotator_answer in annotator_id_to_answer.values()
-                if _answer_kind(annotator_answer) == _answer_kind(judge_answer)
-            ]
-            self.item_and_evaluator_to_answers_compared[item_and_evaluator] = (
-                _largest_possible_rating_gap(
-                    [judge_answer, *annotator_id_to_answer.values()], rating_scale
-                ),
-                [judge_answer] * len(annotator_answers_compared),
-                annotator_answers_compared,
-                len(annotator_answers_compared),
+            ] = _agreement_total_and_pair_count(answer_pairs_compared[1])
+            self.item_and_evaluator_to_answer_pairs_compared[item_and_evaluator] = (
+                answer_pairs_compared
             )
 
-    def agreement_and_kappa(
-        self,
-    ) -> Tuple[Optional[float], int, Optional[float], Optional[KappaType]]:
+    def agreement_and_kappa(self) -> AgreementAndKappa:
         return _agreement_and_kappa(
             (
                 self.item_and_evaluator_to_agreement_total_and_pair_count[
@@ -1028,7 +1067,7 @@ class _AgreementBetweenJudgeAndAnnotatorsSoFar:
                 if item_and_evaluator
                 in self.item_and_evaluator_to_agreement_total_and_pair_count
             ),
-            self.item_and_evaluator_to_answers_compared,
+            self.item_and_evaluator_to_answer_pairs_compared,
             "cohen",
         )
 
@@ -1036,7 +1075,7 @@ class _AgreementBetweenJudgeAndAnnotatorsSoFar:
 def agreement_and_kappa_between_annotators(
     annotations: Iterable[Dict[str, Any]],
     rating_scales: RatingScales = _NO_RATING_SCALES,
-) -> Tuple[Optional[float], int, Optional[float], Optional[KappaType]]:
+) -> AgreementAndKappa:
     """`agreement_between_annotators`, with Fleiss' kappa and its type after
     the agreement and pair count."""
     agreement_so_far = _AgreementBetweenAnnotatorsSoFar(rating_scales)
@@ -1049,7 +1088,7 @@ def agreement_and_kappa_between_judge_and_annotators(
     evaluator_runs: Iterable[Dict[str, Any]],
     evaluator_id: str,
     rating_scales: RatingScales = _NO_RATING_SCALES,
-) -> Tuple[Optional[float], int, Optional[float], Optional[KappaType]]:
+) -> AgreementAndKappa:
     """`agreement_between_judge_and_annotators`, with Cohen's kappa and its
     type after the agreement and pair count."""
     agreement_so_far = _AgreementBetweenJudgeAndAnnotatorsSoFar(evaluator_id, rating_scales)
@@ -1061,9 +1100,11 @@ def agreement_and_kappa_of_annotator_with_others(
     annotations: Iterable[Dict[str, Any]],
     annotator_id: str,
     rating_scales: RatingScales = _NO_RATING_SCALES,
-) -> Tuple[Optional[float], int, Optional[float], Optional[KappaType]]:
-    """`agreement_of_annotator_with_others`, with Cohen's kappa and its type
-    after the agreement and pair count."""
+) -> AgreementAndKappa:
+    """Mean agreement between `annotator_id` and every other annotator, over
+    the items and evaluators they both answered, how many pairs that covers,
+    and Cohen's kappa and its type. Each pair is `annotator_id` against one
+    other annotator."""
     agreement_so_far = _AgreementOfAnnotatorWithOthersSoFar(annotator_id, rating_scales)
     agreement_so_far.add_annotations(annotations)
     return agreement_so_far.agreement_and_kappa()
@@ -1082,7 +1123,8 @@ def agreement_between_judge_and_annotators_over_time(
     bucket, counting every annotation updated and every judge score completed
     (or created) by then.
 
-    Returns `{evaluator_id: [{bucket_start, bucket_end, agreement, pair_count, kappa, kappa_type}, ...]}`.
+    Returns `{evaluator_id: [{bucket_start, bucket_end, agreement, pair_count,
+    kappa, kappa_type}, ...]}`.
     """
     if not evaluator_ids:
         return {}
@@ -1110,7 +1152,10 @@ def agreement_between_judge_and_annotators_over_time(
             agreement_so_far.add_rows(annotations_new_in_bucket, evaluator_runs_new_in_bucket)
         for evaluator_id in evaluator_ids:
             evaluator_id_to_agreement_over_time[evaluator_id].append(
-                _series_point(bucket_start_and_end, evaluator_id_to_agreement_so_far[evaluator_id])
+                _trend_point(
+                    bucket_start_and_end,
+                    evaluator_id_to_agreement_so_far[evaluator_id].agreement_and_kappa(),
+                )
             )
     return evaluator_id_to_agreement_over_time
 
@@ -1195,15 +1240,20 @@ def agreement_between_judge_and_annotators_over_time_by_version_and_task(
             )
 
         overall_agreement_over_time.append(
-            _series_point(bucket_start_and_end, overall_agreement_so_far)
+            _trend_point(bucket_start_and_end, overall_agreement_so_far.agreement_and_kappa())
         )
         for version_id in version_ids:
             version_id_to_agreement_over_time[version_id].append(
-                _series_point(bucket_start_and_end, version_id_to_agreement_so_far[version_id])
+                _trend_point(
+                    bucket_start_and_end,
+                    version_id_to_agreement_so_far[version_id].agreement_and_kappa(),
+                )
             )
         for task_id in task_ids:
             task_id_to_agreement_over_time[task_id].append(
-                _series_point(bucket_start_and_end, task_id_to_agreement_so_far[task_id])
+                _trend_point(
+                    bucket_start_and_end, task_id_to_agreement_so_far[task_id].agreement_and_kappa()
+                )
             )
 
     return {
@@ -1213,53 +1263,31 @@ def agreement_between_judge_and_annotators_over_time_by_version_and_task(
     }
 
 
-def agreement_of_annotator_with_others(
-    annotations: Iterable[Dict[str, Any]],
-    annotator_id: str,
-    rating_scales: RatingScales = _NO_RATING_SCALES,
-) -> Tuple[Optional[float], int]:
-    """Mean agreement between `annotator_id` and every other annotator, over
-    the items and evaluators they both answered, and how many pairs that
-    covers. Each pair is `annotator_id` against one other annotator."""
-    agreement_total = 0.0
-    pair_count_total = 0
-    for (
-        (_item_id, evaluator_id),
-        annotator_id_to_answer,
-    ) in _annotator_answers_per_item_and_evaluator(annotations).items():
-        for agreement in _agreements_of_annotator_with_others_on_item(
-            annotator_id, annotator_id_to_answer, rating_scales.get(evaluator_id)
-        ):
-            agreement_total += agreement
-            pair_count_total += 1
-    if pair_count_total == 0:
-        return (None, 0)
-    return (_round_agreement(agreement_total / pair_count_total), pair_count_total)
-
-
-def _agreements_of_annotator_with_others_on_item(
+def _answer_pairs_compared_between_annotator_and_others(
     annotator_id: str,
     annotator_id_to_answer: Dict[str, Any],
     rating_scale: Optional[RatingScale],
-) -> List[float]:
-    """Agreement between `annotator_id` and each other annotator on one item
-    for one evaluator, skipping answers that cannot be compared."""
-    if annotator_id not in annotator_id_to_answer or len(annotator_id_to_answer) < 2:
-        return []
-    this_annotator_answer = annotator_id_to_answer[annotator_id]
+) -> AnswerPairsCompared:
+    """`annotator_id`'s answer on one item for one evaluator paired with each
+    other annotator's answer that can be compared with it, and the largest
+    possible rating gap they were compared over."""
     largest_possible_rating_gap = _largest_possible_rating_gap(
         annotator_id_to_answer.values(), rating_scale
     )
-    agreements: List[float] = []
-    for other_annotator_id, other_annotator_answer in annotator_id_to_answer.items():
-        if other_annotator_id == annotator_id:
-            continue
-        agreement = _agreement_between_two_answers(
-            this_annotator_answer, other_annotator_answer, largest_possible_rating_gap
-        )
-        if agreement is not None:
-            agreements.append(agreement)
-    return agreements
+    if annotator_id not in annotator_id_to_answer:
+        return (largest_possible_rating_gap, [])
+    this_annotator_answer = annotator_id_to_answer[annotator_id]
+    return (
+        largest_possible_rating_gap,
+        _answer_pairs_compared(
+            (
+                (this_annotator_answer, other_annotator_answer)
+                for other_annotator_id, other_annotator_answer in annotator_id_to_answer.items()
+                if other_annotator_id != annotator_id
+            ),
+            largest_possible_rating_gap,
+        ),
+    )
 
 
 def agreement_between_annotators_over_time(
@@ -1280,7 +1308,7 @@ def agreement_between_annotators_over_time(
     ):
         agreement_so_far.add_annotations(annotations_new_in_bucket)
         agreement_over_time.append(
-            _series_point(bucket_start_and_end, agreement_so_far)
+            _trend_point(bucket_start_and_end, agreement_so_far.agreement_and_kappa())
         )
     return agreement_over_time
 
@@ -1293,8 +1321,8 @@ def agreement_of_annotator_with_others_over_time(
     now: Optional[datetime] = None,
     rating_scales: RatingScales = _NO_RATING_SCALES,
 ) -> List[Dict[str, Any]]:
-    """`agreement_of_annotator_with_others` at the end of each time bucket,
-    counting every annotation updated by then."""
+    """`agreement_and_kappa_of_annotator_with_others` at the end of each time
+    bucket, counting every annotation updated by then."""
     agreement_so_far = _AgreementOfAnnotatorWithOthersSoFar(annotator_id, rating_scales)
     agreement_over_time: List[Dict[str, Any]] = []
     for bucket_start_and_end, (annotations_new_in_bucket,) in _rows_new_in_each_time_bucket(
@@ -1302,6 +1330,6 @@ def agreement_of_annotator_with_others_over_time(
     ):
         agreement_so_far.add_annotations(annotations_new_in_bucket)
         agreement_over_time.append(
-            _series_point(bucket_start_and_end, agreement_so_far)
+            _trend_point(bucket_start_and_end, agreement_so_far.agreement_and_kappa())
         )
     return agreement_over_time

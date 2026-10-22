@@ -77,7 +77,7 @@ from annotation_eval_runner import (
     start_annotation_eval_job,
     TOOL_CALL_EVALUATOR_TYPE,
 )
-from annotation_metrics import KappaType
+from annotation_metrics import KAPPA_DESCRIPTION, KAPPA_TYPE_DESCRIPTION, KappaType
 from utils import (
     utc_now,
     job_slot,
@@ -272,12 +272,8 @@ class HumanAgreementBlock(BaseModel):
     pair_count: int = Field(
         description="How many annotator pairs the current value averages over"
     )
-    kappa: Optional[float] = Field(
-        description="Current agreement corrected for the agreement expected by chance, where 0 is chance level and 1 is perfect agreement"
-    )
-    kappa_type: Optional[KappaType] = Field(
-        description="Which kappa statistic `kappa` is"
-    )
+    kappa: Optional[float] = Field(description=KAPPA_DESCRIPTION)
+    kappa_type: Optional[KappaType] = Field(description=KAPPA_TYPE_DESCRIPTION)
     series: List[Dict[str, Any]] = Field(
         description="Agreement over time, one point per time bucket"
     )
@@ -2632,7 +2628,7 @@ def _human_agreement_for_run(
           ]
         }
 
-    `evaluators[].agreement` reuses `agreement_between_judge_and_annotators` —
+    `evaluators[].agreement` reuses `agreement_and_kappa_between_judge_and_annotators` —
     so it agrees with the task-level alignment block by construction.
     `items[]` only includes items where at least one human annotation exists
     on an evaluator that this job ran (no humans → no row, by design)."""

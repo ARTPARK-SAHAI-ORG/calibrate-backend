@@ -204,11 +204,7 @@ def evaluator_agreement_trend(
     def _latest_agreement_and_kappa(
         agreement_per_bucket: List[Dict[str, Any]],
     ) -> Dict[str, Any]:
-        latest_bucket = (
-            agreement_per_bucket[-1]
-            if agreement_per_bucket
-            else {"agreement": None, "pair_count": 0, "kappa": None, "kappa_type": None}
-        )
+        latest_bucket = agreement_per_bucket[-1]
         return {
             "current": latest_bucket["agreement"],
             "pair_count": latest_bucket["pair_count"],
