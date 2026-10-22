@@ -33,7 +33,8 @@ RANGE_METRICS = DAY_METRICS + ("limit_hits",)
 LIST_LIMIT = 100
 ALL_TIME_START = "0000-01-01"
 
-_STUB_USER = "(u.password_hash IS NULL AND u.first_name = '')"
+# Not a real user yet: an invite stub, or a signup whose email link was never opened.
+_STUB_USER = "(u.email_verified_at IS NULL)"
 
 # Workspaces that count: not deleted, and not the personal workspace of a stub user.
 _VALID_ORGS = f"""

@@ -12,7 +12,7 @@ from auth_utils import create_access_token
 # Periods used below: this one is 2026-10-10..12, the previous one 2026-10-07..09.
 Q = {"start": "2026-10-10", "end": "2026-10-12"}
 
-ADMIN, ALICE, BOB, STUB = (str(uuid.uuid4()) for _ in range(4))
+ADMIN, ALICE, BOB, STUB, PENDING = (str(uuid.uuid4()) for _ in range(5))
 A, B, C, STUB_ORG, GONE = (str(uuid.uuid4()) for _ in range(5))
 
 
@@ -29,9 +29,11 @@ def _seed(conn):
         (ALICE, "Alice", "alice@example.com", "x", "2026-10-11T09:00:00"),
         (BOB, "Bob", "bob@example.com", "x", "2026-10-08 10:00:00"),
         (STUB, "", "stub@example.com", None, "2026-10-11 10:00:00"),
+        # Signed up but never opened the email link: has a name, not a real user yet.
+        (PENDING, "Pat", "pending@example.com", None, "2026-10-11 10:00:00"),
     ]:
         _ins(conn, "users", uuid=uid, first_name=first, last_name="", email=email,
-             password_hash=pw, created_at=at)
+             password_hash=pw, created_at=at, email_verified_at=at if pw else None)
     for org, name, by, personal, deleted in [
         (A, "Acme", ALICE, 0, None),
         (B, "Alice personal", ALICE, 1, None),
