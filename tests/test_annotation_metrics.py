@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
+import random
 import uuid
 
 import pytest
@@ -767,3 +768,200 @@ def test_agreement_never_goes_below_zero():
         for a, v in (("a", 1), ("b", 4))
     ]
     assert agreement_between_annotators(annotations, {"e1": (1, 2)}) == (0.0, 1)
+
+
+def _rows_timestamped_up_to(rows, timestamp_fields, bucket_end):
+    """Rows whose first set timestamp field parses and falls on or before
+    `bucket_end`, oldest first, ties in their given order."""
+    timestamped_rows = []
+    for row in rows:
+        timestamp = next((row.get(field) for field in timestamp_fields if row.get(field)), None)
+        try:
+            parsed_timestamp = datetime.strptime(timestamp, "%Y-%m-%d %H:%M:%S").replace(
+                tzinfo=timezone.utc
+            )
+        except (TypeError, ValueError):
+            continue
+        if parsed_timestamp <= bucket_end:
+            timestamped_rows.append((parsed_timestamp, row))
+    timestamped_rows.sort(key=lambda timestamp_and_row: timestamp_and_row[0])
+    return [row for _timestamp, row in timestamped_rows]
+
+
+def _assert_over_time_agreement_equals_agreement_on_rows_up_to_each_bucket_end(
+    annotations, evaluator_runs, rating_scales, annotator_id, evaluator_id,
+    requested_evaluator_ids, requested_version_ids, requested_task_ids, bucket, days, now,
+):
+    expected_annotator_series = []
+    expected_annotator_with_others_series = []
+    expected_evaluator_id_to_series = {identifier: [] for identifier in requested_evaluator_ids}
+    expected_breakdown = {
+        "overall": [],
+        "by_version": {identifier: [] for identifier in requested_version_ids},
+        "by_task": {identifier: [] for identifier in requested_task_ids},
+    }
+    for bucket_start, bucket_end in build_time_buckets(bucket, days, now=now):
+        bucket_start_and_end = {
+            "bucket_start": bucket_start.strftime("%Y-%m-%d %H:%M:%S"),
+            "bucket_end": bucket_end.strftime("%Y-%m-%d %H:%M:%S"),
+        }
+
+        def point(agreement_and_pair_count):
+            agreement, pair_count = agreement_and_pair_count
+            return {**bucket_start_and_end, "agreement": agreement, "pair_count": pair_count}
+
+        annotations_so_far = _rows_timestamped_up_to(annotations, ("updated_at", "created_at"), bucket_end)
+        evaluator_runs_so_far = _rows_timestamped_up_to(evaluator_runs, ("completed_at", "created_at"), bucket_end)
+        expected_annotator_series.append(
+            point(agreement_between_annotators(annotations_so_far, rating_scales))
+        )
+        expected_annotator_with_others_series.append(
+            point(agreement_of_annotator_with_others(annotations_so_far, annotator_id, rating_scales))
+        )
+        for identifier in requested_evaluator_ids:
+            expected_evaluator_id_to_series[identifier].append(point(
+                agreement_between_judge_and_annotators(annotations_so_far, evaluator_runs_so_far, identifier, rating_scales)
+            ))
+        expected_breakdown["overall"].append(point(
+            agreement_between_judge_and_annotators(annotations_so_far, evaluator_runs_so_far, evaluator_id, rating_scales)
+        ))
+        for version_id in requested_version_ids:
+            expected_breakdown["by_version"][version_id].append(point(
+                agreement_between_judge_and_annotators(
+                    annotations_so_far,
+                    [run for run in evaluator_runs_so_far if run.get("evaluator_version_id") == version_id],
+                    evaluator_id,
+                    rating_scales,
+                )
+            ))
+        for task_id in requested_task_ids:
+            expected_breakdown["by_task"][task_id].append(point(
+                agreement_between_judge_and_annotators(
+                    [annotation for annotation in annotations_so_far if annotation.get("task_id") == task_id],
+                    [run for run in evaluator_runs_so_far if run.get("task_id") == task_id],
+                    evaluator_id,
+                    rating_scales,
+                )
+            ))
+
+    assert agreement_between_annotators_over_time(
+        annotations, bucket, days, now=now, rating_scales=rating_scales
+    ) == expected_annotator_series
+    assert agreement_of_annotator_with_others_over_time(
+        annotations, annotator_id, bucket, days, now=now, rating_scales=rating_scales
+    ) == expected_annotator_with_others_series
+    assert agreement_between_judge_and_annotators_over_time(
+        annotations, evaluator_runs, requested_evaluator_ids, bucket, days, now=now, rating_scales=rating_scales
+    ) == expected_evaluator_id_to_series
+    assert agreement_between_judge_and_annotators_over_time_by_version_and_task(
+        annotations, evaluator_runs, evaluator_id, requested_version_ids, requested_task_ids,
+        bucket, days, now=now, rating_scales=rating_scales,
+    ) == expected_breakdown
+    return expected_annotator_series
+
+
+def test_over_time_agreement_equals_agreement_on_rows_up_to_each_bucket_end():
+    now = datetime(2024, 6, 30, 12, tzinfo=timezone.utc)
+
+    # These 16 agreements, added one at a time, total 11.499999999999998, so the
+    # mean rounds to 0.7187; a correctly rounded sum gives 11.5 and 0.7188.
+    rating_gap_and_scale_per_item = [
+        (1, "e5"), (0, "e5"), (0, "e5"), (0, "e5"), (3, "e5"), (2, "e5"), (0, "e5"), (0, "e5"),
+        (2, "e4"), (0, "e5"), (0, "e5"), (0, "e5"), (1, "e4"), (2, "e5"), (2, "e5"), (4, "e5"),
+    ]
+    order_sensitive_annotations = []
+    for item_index, (rating_gap, evaluator_id) in enumerate(rating_gap_and_scale_per_item):
+        updated_at = (now - timedelta(days=30 - item_index)).strftime("%Y-%m-%d %H:%M:%S")
+        for annotator_id, rating in (("a", 1), ("b", 1 + rating_gap)):
+            order_sensitive_annotations.append({
+                "item_id": f"i{item_index}", "evaluator_id": evaluator_id, "annotator_id": annotator_id,
+                "value": {"value": rating}, "updated_at": updated_at,
+            })
+    order_sensitive_series = _assert_over_time_agreement_equals_agreement_on_rows_up_to_each_bucket_end(
+        order_sensitive_annotations, [], {"e5": (1, 5), "e4": (1, 4)}, "a", "e5",
+        ["e5"], [], [], "week", 35, now,
+    )
+    assert order_sensitive_series[-1]["agreement"] == 0.7187
+
+    randomizer = random.Random(20261022)
+    bucket_and_days_choices = [("week", 35), ("month", 120), ("year", 800)]
+    answer_choices = [
+        True, False, {"value": True}, {"value": False}, 1, 2, 3, 5, 2.5,
+        {"value": 4}, {"score": 1}, "good", "bad", None, {"value": None},
+        {"comment": "no answer"},
+    ]
+    for _case in range(400):
+        bucket, days = randomizer.choice(bucket_and_days_choices)
+        item_ids = [f"i{index}" for index in range(randomizer.randint(1, 6))]
+        evaluator_ids = [f"e{index}" for index in range(randomizer.randint(1, 3))]
+        annotator_ids = [f"a{index}" for index in range(randomizer.randint(1, 4))]
+        version_ids = [f"v{index}" for index in range(randomizer.randint(1, 3))]
+        task_ids = [f"t{index}" for index in range(randomizer.randint(1, 3))]
+        # A small pool of moments makes ties; some fall before the window or after now.
+        moments = [
+            (now - timedelta(days=randomizer.uniform(-3, days + 40))).replace(microsecond=0)
+            for _ in range(randomizer.randint(1, 8))
+        ]
+
+        def random_timestamp():
+            roll = randomizer.random()
+            if roll < 0.05:
+                return None
+            if roll < 0.08:
+                return "not a timestamp"
+            moment = randomizer.choice(moments)
+            if roll < 0.11:
+                # Parses, but sorts differently as text.
+                return f"{moment.year}-{moment.month}-{moment.day} {moment.hour}:{moment.minute}:{moment.second}"
+            return moment.strftime("%Y-%m-%d %H:%M:%S")
+
+        def mostly(choices, rare_choice):
+            return rare_choice if randomizer.random() < 0.1 else randomizer.choice(choices)
+
+        annotations = []
+        for _ in range(randomizer.randint(0, 25)):
+            annotation = {
+                "item_id": randomizer.choice(item_ids),
+                "evaluator_id": randomizer.choice([*evaluator_ids, None]),
+                "annotator_id": mostly(annotator_ids, None),
+                "task_id": randomizer.choice(task_ids),
+                "value": randomizer.choice(answer_choices),
+                "created_at": random_timestamp(),
+            }
+            if randomizer.random() < 0.8:
+                annotation["updated_at"] = random_timestamp()
+            annotations.append(annotation)
+        evaluator_runs = []
+        for _ in range(randomizer.randint(0, 15)):
+            run = {
+                "item_id": mostly(item_ids, None),
+                "evaluator_id": mostly(evaluator_ids, None),
+                "evaluator_version_id": randomizer.choice([*version_ids, None]),
+                "task_id": randomizer.choice(task_ids),
+                "value": randomizer.choice(answer_choices),
+                "created_at": random_timestamp(),
+            }
+            if randomizer.random() < 0.8:
+                run["completed_at"] = random_timestamp()
+            evaluator_runs.append(run)
+        rating_scales = randomizer.choice([
+            {},
+            {
+                identifier: randomizer.choice([(1, 5), (1, 3), (0, 10), (3, 3), (None, None)])
+                for identifier in [*evaluator_ids, *version_ids]
+                if randomizer.random() < 0.7
+            },
+        ])
+        _assert_over_time_agreement_equals_agreement_on_rows_up_to_each_bucket_end(
+            annotations,
+            evaluator_runs,
+            rating_scales,
+            annotator_id=randomizer.choice([*annotator_ids, "never-annotated"]),
+            evaluator_id=randomizer.choice(evaluator_ids),
+            requested_evaluator_ids=randomizer.choices([*evaluator_ids, "unknown"], k=randomizer.randint(1, 3)),
+            requested_version_ids=randomizer.choices([*version_ids, "unknown"], k=randomizer.randint(0, 3)),
+            requested_task_ids=randomizer.choices([*task_ids, "unknown"], k=randomizer.randint(0, 3)),
+            bucket=bucket,
+            days=days,
+            now=now,
+        )
