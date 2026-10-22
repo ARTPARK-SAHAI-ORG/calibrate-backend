@@ -428,15 +428,15 @@ def _reset_link(client, email, email_on) -> str:
 
 
 @pytest.mark.parametrize(
-    "make_link, column, endpoint, lifetime",
+    "make_link, column, endpoint, lifetime, expired_detail",
     [
-        (_verify_link, "verify_sent_at", "/auth/verify-email", 24 * 3600),
-        (_reset_link, "reset_sent_at", "/auth/reset-password", 3600),
+        (_verify_link, "verify_sent_at", "/auth/verify-email", 24 * 3600, "expired_token"),
+        (_reset_link, "reset_sent_at", "/auth/reset-password", 3600, "invalid_or_expired_token"),
     ],
 )
 @pytest.mark.parametrize("age_offset, works", [(-60, True), (1, False)])
 def test_link_works_until_the_time_the_email_states(
-    client, email_on, make_link, column, endpoint, lifetime, age_offset, works
+    client, email_on, make_link, column, endpoint, lifetime, expired_detail, age_offset, works
 ):
     """The emails promise 24 hours and 1 hour: a link a minute short of that
     still works, and one a second past it does not."""
@@ -449,7 +449,42 @@ def test_link_works_until_the_time_the_email_states(
         assert resp.status_code == 200, resp.text
     else:
         assert resp.status_code == 400
-        assert resp.json()["detail"] == "invalid_or_expired_token"
+        assert resp.json()["detail"] == expired_detail
+
+
+def test_an_expired_link_says_so_and_can_ask_for_a_new_one(client, email_on):
+    email = _email("resend")
+    token = _verify_link(client, email, email_on)
+    _backdate(email, "verify_sent_at", 24 * 3600 + 1)
+
+    resp = client.post("/auth/verify-email", json={"token": token})
+    assert resp.status_code == 400
+    assert resp.json()["detail"] == "expired_token"
+
+    email_on.clear()
+    resp = client.post(
+        "/auth/resend-verification", json={"token": token, "next": "/invite/tok"}
+    )
+    assert resp.status_code == 202, resp.text
+    assert resp.json() == {"status": "sent", "email": email}
+    assert len(email_on) == 1
+    params = _link_params(email_on[0])
+    assert params["callbackUrl"] == "/invite/tok"
+    # The new link works, and the expired one cannot ask again
+    assert client.post("/auth/verify-email", json={"token": params["token"]}).status_code == 200
+    assert client.post("/auth/resend-verification", json={"token": token}).status_code == 400
+
+
+def test_a_replaced_link_cannot_ask_for_a_new_one(client, email_on):
+    email = _email("replaced")
+    old = _verify_link(client, email, email_on)
+    _backdate(email, "verify_sent_at", 61)
+    _signup(client, email)  # a newer link replaces the old one
+
+    assert client.post("/auth/verify-email", json={"token": old}).json()["detail"] == (
+        "invalid_or_expired_token"
+    )
+    assert client.post("/auth/resend-verification", json={"token": old}).status_code == 400
 
 
 def test_a_made_up_link_is_refused(client, email_on):

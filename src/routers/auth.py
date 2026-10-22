@@ -68,6 +68,8 @@ class LoginResponse(BaseModel):
 RESEND_COOLDOWN_SECONDS = 60
 VERIFY_LINK_SECONDS = 24 * 3600
 RESET_LINK_SECONDS = 3600
+# An expired link is still recognised for this long, so its page can offer a new one.
+ANY_AGE_SECONDS = 10 * 365 * 24 * 3600
 
 
 def _login_response(user: dict, message: str) -> LoginResponse:
@@ -266,6 +268,19 @@ class VerifyEmailRequest(BaseModel):
     token: str = Field(min_length=1, description="Token from the verification link")
 
 
+class ResendVerificationRequest(BaseModel):
+    token: str = Field(min_length=1, description="Token from the expired verification link")
+    next: Optional[str] = Field(
+        None,
+        description="Page to return to after following the emailed link. Only a path starting with `/` is kept",
+    )
+
+
+class ResendVerificationResponse(BaseModel):
+    status: Literal["sent"] = Field(description="Always `sent`: a new verification link was emailed")
+    email: str = Field(description="Address the new verification link was sent to")
+
+
 class ForgotPasswordRequest(BaseModel):
     email: str = Field(description="Email address for your account")
     next: Optional[str] = Field(
@@ -365,8 +380,12 @@ def login(request: CredentialLoginRequest):
 @router.post("/verify-email", response_model=LoginResponse, summary="Verify email address")
 def verify_email(request: VerifyEmailRequest):
     """Finish signing up with the token from the verification email and receive a JWT plus your profile"""
-    user = get_user_by_token("verify", _hash_token(request.token), VERIFY_LINK_SECONDS)
+    token_hash = _hash_token(request.token)
+    user = get_user_by_token("verify", token_hash, VERIFY_LINK_SECONDS)
     if user is None:
+        # Still the latest link, only too old: the page can offer a new one.
+        if get_user_by_token("verify", token_hash, ANY_AGE_SECONDS):
+            raise HTTPException(status_code=400, detail="expired_token")
         raise HTTPException(status_code=400, detail="invalid_or_expired_token")
 
     mark_email_verified(user["uuid"], user["verify_password_hash"])
@@ -376,6 +395,23 @@ def verify_email(request: VerifyEmailRequest):
 
     logger.info(f"User confirmed email: {user['email']} (UUID: {user['uuid']})")
     return _login_response(user, "Email confirmed")
+
+
+@router.post(
+    "/resend-verification",
+    response_model=ResendVerificationResponse,
+    status_code=202,
+    summary="Resend verification email",
+)
+def resend_verification(request: ResendVerificationRequest):
+    """Email a new verification link in place of an expired one"""
+    user = get_user_by_token("verify", _hash_token(request.token), ANY_AGE_SECONDS)
+    # Only the latest link can ask for another: verifying clears it and a newer
+    # link replaces it, so a used or replaced link cannot send a new email.
+    if user is None:
+        raise HTTPException(status_code=400, detail="invalid_or_expired_token")
+    _send_token_email(user, "verify", request.next)
+    return ResendVerificationResponse(status="sent", email=user["email"])
 
 
 @router.post(
