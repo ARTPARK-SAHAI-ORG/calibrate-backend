@@ -455,36 +455,56 @@ def test_link_works_until_the_time_the_email_states(
 def test_an_expired_link_says_so_and_can_ask_for_a_new_one(client, email_on):
     email = _email("resend")
     token = _verify_link(client, email, email_on)
+    assert _link_params(email_on[-1])["email"] == email
     _backdate(email, "verify_sent_at", 24 * 3600 + 1)
 
-    resp = client.post("/auth/verify-email", json={"token": token})
+    resp = client.post("/auth/verify-email", json={"token": token, "email": email})
     assert resp.status_code == 400
     assert resp.json()["detail"] == "expired_token"
 
     email_on.clear()
     resp = client.post(
-        "/auth/resend-verification", json={"token": token, "next": "/invite/tok"}
+        "/auth/resend-verification", json={"email": email, "next": "/invite/tok"}
     )
     assert resp.status_code == 202, resp.text
     assert resp.json() == {"status": "sent", "email": email}
     assert len(email_on) == 1
     params = _link_params(email_on[0])
     assert params["callbackUrl"] == "/invite/tok"
-    # The new link works, and the expired one cannot ask again
     assert client.post("/auth/verify-email", json={"token": params["token"]}).status_code == 200
-    assert client.post("/auth/resend-verification", json={"token": token}).status_code == 400
 
 
-def test_a_replaced_link_cannot_ask_for_a_new_one(client, email_on):
+def test_a_replaced_link_can_still_ask_for_a_new_one(client, email_on):
     email = _email("replaced")
     old = _verify_link(client, email, email_on)
     _backdate(email, "verify_sent_at", 61)
     _signup(client, email)  # a newer link replaces the old one
 
-    assert client.post("/auth/verify-email", json={"token": old}).json()["detail"] == (
-        "invalid_or_expired_token"
-    )
-    assert client.post("/auth/resend-verification", json={"token": old}).status_code == 400
+    resp = client.post("/auth/verify-email", json={"token": old, "email": email})
+    assert resp.json()["detail"] == "expired_token"
+    _backdate(email, "verify_sent_at", 61)
+    email_on.clear()
+    assert client.post("/auth/resend-verification", json={"email": email}).status_code == 202
+    assert len(email_on) == 1
+
+
+def test_a_used_link_says_the_email_is_already_verified(client, email_on):
+    email = _email("used")
+    token = _verify_link(client, email, email_on)
+    assert client.post("/auth/verify-email", json={"token": token}).status_code == 200
+
+    resp = client.post("/auth/verify-email", json={"token": token, "email": email})
+    assert resp.json()["detail"] == "already_verified"
+    # Nothing is waiting, so asking for a new link sends nothing
+    email_on.clear()
+    assert client.post("/auth/resend-verification", json={"email": email}).status_code == 202
+    assert email_on == []
+
+
+def test_resend_for_an_unknown_address_sends_nothing(client, email_on):
+    resp = client.post("/auth/resend-verification", json={"email": _email("nobody")})
+    assert resp.status_code == 202
+    assert email_on == []
 
 
 def test_a_made_up_link_is_refused(client, email_on):

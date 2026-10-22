@@ -18,6 +18,7 @@ from db import (
     create_user_with_password,
     get_user,
     get_user_by_token,
+    normalize_email,
     list_organizations_for_user,
     mark_email_verified,
     set_user_token,
@@ -68,8 +69,6 @@ class LoginResponse(BaseModel):
 RESEND_COOLDOWN_SECONDS = 60
 VERIFY_LINK_SECONDS = 24 * 3600
 RESET_LINK_SECONDS = 3600
-# An expired link is still recognised for this long, so its page can offer a new one.
-ANY_AGE_SECONDS = 10 * 365 * 24 * 3600
 
 
 def _login_response(user: dict, message: str) -> LoginResponse:
@@ -131,6 +130,10 @@ def _send_token_email(
         else ("reset-password", RESET_PASSWORD_TEMPLATE)
     )
     url = f"{frontend_url()}/{page}?token={token}"
+    if kind == "verify":
+        # A newer link replaces this one, so the address is what lets an old
+        # link's page still ask for a new email.
+        url += "&email=" + quote(user["email"], safe="")
     # Only a path on the frontend itself; `//host` and `/\host` leave the site.
     if next_path and next_path.startswith("/") and not next_path.startswith(("//", "/\\")):
         url += "&callbackUrl=" + quote(next_path, safe="")
@@ -266,10 +269,13 @@ class VerificationSentResponse(BaseModel):
 
 class VerifyEmailRequest(BaseModel):
     token: str = Field(min_length=1, description="Token from the verification link")
+    email: Optional[str] = Field(
+        None, description="Address from the verification link, used to say whether it is already verified"
+    )
 
 
 class ResendVerificationRequest(BaseModel):
-    token: str = Field(min_length=1, description="Token from the expired verification link")
+    email: str = Field(description="Address to send a new verification link to")
     next: Optional[str] = Field(
         None,
         description="Page to return to after following the emailed link. Only a path starting with `/` is kept",
@@ -277,7 +283,9 @@ class ResendVerificationRequest(BaseModel):
 
 
 class ResendVerificationResponse(BaseModel):
-    status: Literal["sent"] = Field(description="Always `sent`: a new verification link was emailed")
+    status: Literal["sent"] = Field(
+        description="Always `sent`, whether or not the address has a signup waiting to be verified"
+    )
     email: str = Field(description="Address the new verification link was sent to")
 
 
@@ -380,13 +388,13 @@ def login(request: CredentialLoginRequest):
 @router.post("/verify-email", response_model=LoginResponse, summary="Verify email address")
 def verify_email(request: VerifyEmailRequest):
     """Finish signing up with the token from the verification email and receive a JWT plus your profile"""
-    token_hash = _hash_token(request.token)
-    user = get_user_by_token("verify", token_hash, VERIFY_LINK_SECONDS)
+    user = get_user_by_token("verify", _hash_token(request.token), VERIFY_LINK_SECONDS)
     if user is None:
-        # Still the latest link, only too old: the page can offer a new one.
-        if get_user_by_token("verify", token_hash, ANY_AGE_SECONDS):
-            raise HTTPException(status_code=400, detail="expired_token")
-        raise HTTPException(status_code=400, detail="invalid_or_expired_token")
+        owner = get_user_by_email(request.email) if request.email else None
+        if owner and owner["email_verified_at"]:
+            raise HTTPException(status_code=400, detail="already_verified")
+        # Too old, used, or replaced by a newer link: the page offers a new one.
+        raise HTTPException(status_code=400, detail="expired_token")
 
     mark_email_verified(user["uuid"], user["verify_password_hash"])
     user = get_user(user["uuid"])
@@ -404,14 +412,13 @@ def verify_email(request: VerifyEmailRequest):
     summary="Resend verification email",
 )
 def resend_verification(request: ResendVerificationRequest):
-    """Email a new verification link in place of an expired one"""
-    user = get_user_by_token("verify", _hash_token(request.token), ANY_AGE_SECONDS)
-    # Only the latest link can ask for another: verifying clears it and a newer
-    # link replaces it, so a used or replaced link cannot send a new email.
-    if user is None:
-        raise HTTPException(status_code=400, detail="invalid_or_expired_token")
-    _send_token_email(user, "verify", request.next)
-    return ResendVerificationResponse(status="sent", email=user["email"])
+    """Email a new verification link to an address whose signup is waiting to be verified"""
+    user = get_user_by_email(request.email)
+    # Only a signup still waiting, so the link has a password to set; the answer
+    # is the same either way, so it never says which addresses have one.
+    if email_enabled() and user and not user["email_verified_at"] and user["verify_password_hash"]:
+        _send_token_email(user, "verify", request.next)
+    return ResendVerificationResponse(status="sent", email=normalize_email(request.email))
 
 
 @router.post(
