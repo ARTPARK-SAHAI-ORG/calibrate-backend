@@ -507,6 +507,27 @@ def test_resend_for_an_unknown_address_sends_nothing(client, email_on):
     assert email_on == []
 
 
+def test_a_reset_link_can_be_checked_without_using_it(client, email_on):
+    email = _email("check")
+    token = _reset_link(client, email, email_on)
+
+    assert client.post("/auth/check-reset-link", json={"token": token}).json() == {"valid": True}
+    # Checking does not use it up
+    assert client.post(
+        "/auth/reset-password", json={"token": token, "password": "new-pass"}
+    ).status_code == 200
+    resp = client.post("/auth/check-reset-link", json={"token": token})
+    assert resp.status_code == 400
+    assert resp.json()["detail"] == "invalid_or_expired_token"
+
+
+def test_an_expired_reset_link_fails_the_check(client, email_on):
+    email = _email("checkold")
+    token = _reset_link(client, email, email_on)
+    _backdate(email, "reset_sent_at", 3601)
+    assert client.post("/auth/check-reset-link", json={"token": token}).status_code == 400
+
+
 def test_a_made_up_link_is_refused(client, email_on):
     assert client.post("/auth/verify-email", json={"token": "made-up"}).status_code == 400
 

@@ -303,6 +303,14 @@ class ForgotPasswordResponse(BaseModel):
     )
 
 
+class CheckResetLinkRequest(BaseModel):
+    token: str = Field(min_length=1, description="Token from the reset link")
+
+
+class CheckResetLinkResponse(BaseModel):
+    valid: Literal[True] = Field(description="Always `true`: the link can still set a new password")
+
+
 class ResetPasswordRequest(BaseModel):
     token: str = Field(min_length=1, description="Token from the reset link")
     password: str = Field(..., min_length=6, description="New account password")
@@ -434,6 +442,18 @@ def forgot_password(request: ForgotPasswordRequest):
     if email_enabled() and user and (user["email_verified_at"] or user["verify_token_hash"]):
         _send_token_email(user, "reset", request.next)
     return ForgotPasswordResponse(status="sent")
+
+
+@router.post(
+    "/check-reset-link",
+    response_model=CheckResetLinkResponse,
+    summary="Check reset link",
+)
+def check_reset_link(request: CheckResetLinkRequest):
+    """Check that a reset link still works, without using it, so the page can say so before asking for a password"""
+    if get_user_by_token("reset", _hash_token(request.token), RESET_LINK_SECONDS) is None:
+        raise HTTPException(status_code=400, detail="invalid_or_expired_token")
+    return CheckResetLinkResponse(valid=True)
 
 
 @router.post("/reset-password", response_model=LoginResponse, summary="Reset password")
