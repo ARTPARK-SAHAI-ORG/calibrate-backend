@@ -130,10 +130,9 @@ def _send_token_email(
         else ("reset-password", RESET_PASSWORD_TEMPLATE)
     )
     url = f"{frontend_url()}/{page}?token={token}"
-    if kind == "verify":
-        # A newer link replaces this one, so the address is what lets an old
-        # link's page still ask for a new email.
-        url += "&email=" + quote(user["email"], safe="")
+    # A newer link replaces this one, so the address is what lets an old
+    # link's page still ask for a new email without anyone typing it.
+    url += "&email=" + quote(user["email"], safe="")
     # Only a path on the frontend itself; `//host` and `/\host` leave the site.
     if next_path and next_path.startswith("/") and not next_path.startswith(("//", "/\\")):
         url += "&callbackUrl=" + quote(next_path, safe="")

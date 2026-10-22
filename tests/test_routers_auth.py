@@ -382,6 +382,7 @@ def test_reset_password_sets_the_new_password_and_logs_in(client, email_on):
         f"{auth_mod.frontend_url()}/reset-password?token="
     )
     assert params["callbackUrl"] == "/agents"
+    assert params["email"] == email
 
     assert client.post(
         "/auth/reset-password", json={"token": params["token"], "password": "short"}
