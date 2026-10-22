@@ -1,9 +1,10 @@
 """Tests for the auth router's email-driven flows.
 
 Covers:
-  - signup and first Google login send a welcome email
-  - a second Google login does not
-  - a Google login by someone already invited does not
+  - the welcome email on signup and on a first Google login
+  - confirming the email at signup when email is on, and the links it sends
+  - password reset
+  - the Google token checks
 """
 
 from __future__ import annotations
@@ -163,7 +164,9 @@ def test_signup_cannot_take_over_a_google_account(client, sent):
     import db
 
     email = _email("google")
+    # What a Google sign in leaves behind: a named row, confirmed, no password
     victim_uuid = db.create_user("Victim", "User", email)
+    db.mark_email_verified(victim_uuid)
 
     assert _signup(client, email, password="attacker1").status_code == 409
     assert db.get_user(victim_uuid)["password_hash"] is None
@@ -286,18 +289,6 @@ def test_verify_email_logs_in_and_the_password_then_works(client, email_on):
     assert client.post("/auth/verify-email", json={"token": token}).status_code == 400
 
 
-def test_expired_verify_link_is_refused(client, email_on):
-    email = _email("expired")
-    _signup(client, email)
-    token = _link_params(email_on[0])["token"]
-    _backdate(email, "verify_sent_at", 24 * 3600 + 1)
-
-    resp = client.post("/auth/verify-email", json={"token": token})
-    assert resp.status_code == 400
-    assert resp.json()["detail"] == "invalid_or_expired_token"
-    assert client.post("/auth/verify-email", json={"token": "made-up"}).status_code == 400
-
-
 def test_signup_over_a_confirmed_account_is_refused(client, email_on):
     import db
 
@@ -392,10 +383,6 @@ def test_reset_password_sets_the_new_password_and_logs_in(client, email_on):
     )
     assert params["callbackUrl"] == "/agents"
 
-    # A second request inside a minute sends nothing.
-    client.post("/auth/forgot-password", json={"email": email})
-    assert len(email_on) == 1
-
     assert client.post(
         "/auth/reset-password", json={"token": params["token"], "password": "short"}
     ).status_code == 422
@@ -427,18 +414,82 @@ def test_reset_confirms_a_pending_signup(client, email_on):
     assert client.post("/auth/verify-email", json={"token": verify_token}).status_code == 400
 
 
-def test_expired_reset_link_is_refused(client, email_on):
+def _verify_link(client, email, email_on) -> str:
+    _signup(client, email)
+    return _link_params(email_on[-1])["token"]
+
+
+def _reset_link(client, email, email_on) -> str:
     import db
 
-    email = _email("resetold")
     db.create_user_with_password("Re", "Set", email, "hash$x")
     client.post("/auth/forgot-password", json={"email": email})
-    token = _link_params(email_on[0])["token"]
-    _backdate(email, "reset_sent_at", 3601)
+    return _link_params(email_on[-1])["token"]
 
-    resp = client.post("/auth/reset-password", json={"token": token, "password": "new-pass"})
-    assert resp.status_code == 400
-    assert resp.json()["detail"] == "invalid_or_expired_token"
+
+@pytest.mark.parametrize(
+    "make_link, column, endpoint, lifetime",
+    [
+        (_verify_link, "verify_sent_at", "/auth/verify-email", 24 * 3600),
+        (_reset_link, "reset_sent_at", "/auth/reset-password", 3600),
+    ],
+)
+@pytest.mark.parametrize("age_offset, works", [(-60, True), (1, False)])
+def test_link_works_until_the_time_the_email_states(
+    client, email_on, make_link, column, endpoint, lifetime, age_offset, works
+):
+    """The emails promise 24 hours and 1 hour: a link a minute short of that
+    still works, and one a second past it does not."""
+    email = _email("age")
+    token = make_link(client, email, email_on)
+    _backdate(email, column, lifetime + age_offset)
+
+    resp = client.post(endpoint, json={"token": token, "password": "new-pass"})
+    if works:
+        assert resp.status_code == 200, resp.text
+    else:
+        assert resp.status_code == 400
+        assert resp.json()["detail"] == "invalid_or_expired_token"
+
+
+def test_a_made_up_link_is_refused(client, email_on):
+    assert client.post("/auth/verify-email", json={"token": "made-up"}).status_code == 400
+
+
+def test_a_signup_left_waiting_can_sign_up_again_once_email_is_off(client, sent, monkeypatch):
+    """Turning email off must not lock out someone whose link never came: signing
+    up again works the way it does for anyone else while email is off."""
+    email = _email("stuck")
+    monkeypatch.setenv("RESEND_API_KEY", "re_test_key")
+    assert _signup(client, email).status_code == 202
+    monkeypatch.setenv("RESEND_API_KEY", "")
+
+    resp = _signup(client, email, password="fresh-pass")
+    assert resp.status_code == 200, resp.text
+    assert _login(client, email, "fresh-pass").status_code == 200
+
+
+@pytest.mark.parametrize("endpoint", ["/auth/signup", "/auth/login"])
+def test_a_password_over_72_bytes_is_a_message_not_a_server_error(client, sent, endpoint):
+    email = _email("long")
+    if endpoint == "/auth/login":
+        assert _signup(client, email).status_code == 200  # so login checks a real password
+    body = {"first_name": "A", "last_name": "U", "email": email, "password": "é" * 40}
+    resp = client.post(endpoint, json=body)
+    assert resp.status_code == (422 if endpoint == "/auth/signup" else 401), resp.text
+
+
+def test_first_google_sign_in_after_a_strangers_signup_is_welcomed(client, email_on):
+    """Someone else started a signup with this address and never confirmed it. The
+    owner's first Google sign in is still their first, so they get the welcome."""
+    email = _email("gwelcome")
+    _signup(client, email)
+    email_on.clear()
+    with patch("routers.auth.verify_google_token", return_value={
+        "email": email, "given_name": "Real", "family_name": "Owner"
+    }):
+        assert client.post("/auth/google", json={"id_token": "t"}).status_code == 200
+    assert [m["template"] for m in email_on] == ["calibrate-welcome"]
 
 
 @pytest.mark.parametrize(

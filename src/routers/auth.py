@@ -90,14 +90,28 @@ def _hash_token(token: str) -> str:
     return hashlib.sha256(token.encode("utf-8")).hexdigest()
 
 
+# bcrypt refuses anything longer, which was a server error instead of a message.
+MAX_PASSWORD_BYTES = 72
+
+
 def _hash_password(password: str) -> str:
+    if len(password.encode("utf-8")) > MAX_PASSWORD_BYTES:
+        raise HTTPException(status_code=422, detail="Password is too long")
     return bcrypt.hashpw(password.encode("utf-8"), bcrypt.gensalt()).decode("utf-8")
 
 
 def _password_matches(password: str, password_hash: Optional[str]) -> bool:
-    return bool(password_hash) and bcrypt.checkpw(
-        password.encode("utf-8"), password_hash.encode("utf-8")
-    )
+    # No stored password can be that long, so a longer one simply does not match.
+    if not password_hash or len(password.encode("utf-8")) > MAX_PASSWORD_BYTES:
+        return False
+    return bcrypt.checkpw(password.encode("utf-8"), password_hash.encode("utf-8"))
+
+
+def _send_welcome_unless_invited(user: dict) -> None:
+    """Welcome a newly confirmed account, unless an invite to someone else's workspace already emailed them."""
+    orgs = list_organizations_for_user(user["uuid"])
+    if all(org["created_by_user_id"] == user["uuid"] for org in orgs):
+        _send_welcome_email(user["email"], user["first_name"])
 
 
 def _send_token_email(
@@ -196,7 +210,10 @@ async def google_login(request: GoogleLoginRequest):
             status_code=400, detail="Email not provided in Google token"
         )
 
-    is_new = get_user_by_email(email) is None
+    existing = get_user_by_email(email)
+    # A row nobody confirmed (an invite stub, or a signup someone else started
+    # with this address) still means this is the person's first real sign in.
+    first_sign_in = existing is None or not existing["email_verified_at"]
 
     user = get_or_create_user(
         email=email,
@@ -208,8 +225,8 @@ async def google_login(request: GoogleLoginRequest):
     # (possibly started by someone else) must stop being usable.
     mark_email_verified(user["uuid"])
 
-    if is_new:
-        _send_welcome_email(user["email"], user["first_name"])
+    if first_sign_in:
+        _send_welcome_unless_invited(user)
 
     logger.info(f"User logged in: {email} (UUID: {user['uuid']})")
     return _login_response(user, "Login successful")
@@ -355,9 +372,7 @@ def verify_email(request: VerifyEmailRequest):
     mark_email_verified(user["uuid"], user["verify_password_hash"])
     user = get_user(user["uuid"])
 
-    # Someone added to a shared workspace was already emailed the invite.
-    if all(org["is_personal"] for org in list_organizations_for_user(user["uuid"])):
-        _send_welcome_email(user["email"], user["first_name"])
+    _send_welcome_unless_invited(user)
 
     logger.info(f"User confirmed email: {user['email']} (UUID: {user['uuid']})")
     return _login_response(user, "Email confirmed")

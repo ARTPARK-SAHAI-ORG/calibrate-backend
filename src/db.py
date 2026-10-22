@@ -4021,19 +4021,15 @@ def create_user_with_password(
     with get_db_connection() as conn:
         cursor = conn.cursor()
         cursor.execute(
-            "SELECT uuid, password_hash, first_name, last_name FROM users WHERE email = ?", (email,)
+            "SELECT uuid, email_verified_at FROM users WHERE email = ?", (email,)
         )
         existing = cursor.fetchone()
         if existing is not None:
-            # Only a stub left by an org invite (no password, no name) may be
-            # claimed. A Google account also has no password, so checking the
-            # password alone let anyone set one on it and log in as its owner.
-            is_invite_stub = (
-                existing["password_hash"] is None
-                and not existing["first_name"]
-                and not existing["last_name"]
-            )
-            if not is_invite_stub:
+            # Only a row nobody has confirmed may be claimed: an invite stub, or
+            # a signup left waiting on its link when email was later turned off.
+            # A Google account has no password either, so checking the password
+            # alone let anyone set one on it and log in as its owner.
+            if existing["email_verified_at"] is not None:
                 raise ValueError("email already registered")
             # Hydrate the stub user row in place; preserve its uuid so any
             # existing organization_members rows keep working.
@@ -4043,6 +4039,8 @@ def create_user_with_password(
                 UPDATE users
                    SET first_name = ?, last_name = ?, password_hash = ?,
                        email_verified_at = CURRENT_TIMESTAMP,
+                       verify_token_hash = NULL, verify_password_hash = NULL,
+                       verify_sent_at = NULL, reset_token_hash = NULL, reset_sent_at = NULL,
                        updated_at = CURRENT_TIMESTAMP
                  WHERE uuid = ?
                 """,

@@ -295,7 +295,7 @@ TEMPLATES = [
             heading="Reset your password, {{{NAME}}}",
             sub="Click the button below to choose a new password for your Calibrate account.",
             button="Choose a new password",
-            note="This link works for 1 hour. If you did not ask for this, you can ignore this email. Your password stays the same.",
+            note="This link works for 1 hour. If you did not ask for this, you can ignore this email and nothing will change.",
         ),
         "variables": [NAME_VAR, URL_VAR],
     },

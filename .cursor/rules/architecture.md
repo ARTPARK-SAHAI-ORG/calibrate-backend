@@ -211,7 +211,7 @@ The `users` table supports two authentication methods. Columns:
 | `created_at`    | TIMESTAMP | Default CURRENT_TIMESTAMP                                          |
 | `updated_at`    | TIMESTAMP | Default CURRENT_TIMESTAMP                                          |
 
-**Two auth paths for the same table**: The `email` column is the shared identifier. Google OAuth users have `password_hash` as NULL (authenticated via Google tokens). Email/password users have `password_hash` set (authenticated via bcrypt). Both use the same `email` column — there is no separate `username` column.
+**Two auth paths for the same table**: The `email` column is the shared identifier. Google OAuth users have `password_hash` as NULL (authenticated via Google tokens). Email/password users have `password_hash` set (authenticated via bcrypt). When email sending is on (`RESEND_API_KEY`), a new email/password signup keeps `password_hash` NULL until its emailed link is opened: the password waits in `verify_password_hash`, and `email_verified_at` is NULL until then. `verify_token_hash` / `reset_token_hash` hold the sha256 of the one-time links, with `verify_sent_at` / `reset_sent_at` for their age. Both use the same `email` column — there is no separate `username` column.
 
 ### Design Patterns
 
@@ -255,8 +255,11 @@ Each router follows a consistent pattern:
 #### Authentication
 
 - `POST /auth/google` - Google OAuth login (returns JWT access token)
-- `POST /auth/signup` - Register with first name, last name, email, and password (returns JWT access token)
-- `POST /auth/login` - Login with email and password (returns JWT access token)
+- `POST /auth/signup` - Register with first name, last name, email, and password (returns JWT access token; with email on, returns 202 and emails a confirmation link instead)
+- `POST /auth/login` - Login with email and password (returns JWT access token; 403 `email_not_verified`, with a new link sent, for a signup not confirmed yet)
+- `POST /auth/verify-email` - Open the confirmation link's token (returns JWT access token)
+- `POST /auth/forgot-password` - Email a password reset link (always 202)
+- `POST /auth/reset-password` - Set a new password with the reset link's token (returns JWT access token)
 
 All three auth endpoints return the same `LoginResponse` format (`access_token`, `token_type`, `user`, `message`).
 
