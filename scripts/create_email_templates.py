@@ -281,7 +281,7 @@ TEMPLATES = [
         "subject": "Confirm your email address for Calibrate",
         "html": layout(
             heading="Confirm your email, {{{NAME}}}",
-            sub="Click the button below to confirm this is your email address and finish creating your Calibrate account.",
+            sub="Confirm your email to finish creating your Calibrate account.",
             button="Confirm my email",
             note="This link works for 24 hours. If you did not ask for this, you can ignore this email.",
         ),
