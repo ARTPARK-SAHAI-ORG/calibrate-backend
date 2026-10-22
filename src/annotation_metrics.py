@@ -58,7 +58,10 @@ KappaType = Literal[
 KappaFamily = Literal["fleiss", "cohen"]
 AnnotatorsKappaType = Literal["fleiss", "linear_weighted_fleiss", "mixed"]
 AnnotatorVsOthersKappaType = Literal["cohen", "linear_weighted_cohen", "mixed"]
-AgreementAndKappa = Tuple[Optional[float], int, Optional[float], Optional[KappaType]]
+KappaBlankReason = Literal["too_few_items", "everyone_agreed"]
+AgreementAndKappa = Tuple[
+    Optional[float], int, Optional[float], Optional[KappaType], Optional[KappaBlankReason]
+]
 # The largest possible rating gap one item's answers were compared over, and
 # each pair compared as (first_answer, second_answer, agreement).
 AnswerPairsCompared = Tuple[float, List[Tuple[Any, Any, float]]]
@@ -66,6 +69,11 @@ AnswerPairsCompared = Tuple[float, List[Tuple[Any, Any, float]]]
 KAPPA_DESCRIPTION = (
     "Agreement corrected for the agreement expected by chance, where 1 is perfect "
     "agreement, 0 is chance level, and below 0 is worse than chance"
+)
+KAPPA_BLANK_REASON_DESCRIPTION = (
+    "Why `kappa` is blank when answers were compared:\n\n"
+    "- `too_few_items`: every compared answer is on a single item, and one item cannot show the agreement expected by chance\n"
+    "- `everyone_agreed`: every compared answer is the same, so agreement cannot be told apart from chance\n"
 )
 _MIXED_KAPPA_LINE = (
     "- `mixed`: a kappa over several evaluators, where some are answered with ratings and some are not\n"
@@ -728,15 +736,17 @@ def _kappa(
         Tuple[str, Optional[str]], AnswerPairsCompared
     ],
     kappa_family: KappaFamily,
-) -> Tuple[Optional[float], Optional[KappaType]]:
-    """`agreement` corrected for chance, and which kappa it is: `kappa_family`,
+) -> Tuple[Optional[float], Optional[KappaType], Optional[KappaBlankReason]]:
+    """`agreement` corrected for chance, which kappa it is, and why it is blank
+    when it is. The type is `kappa_family`,
     `linear_weighted_` in front for ratings, or `mixed` when the evaluators
     pooled differ. Each evaluator's answer pools cover its compared pairs on
     every item. Chance agreement is worked out for each largest possible
     rating gap those pairs used, then averaged weighted by pair count, the way
-    `agreement` is. None when the pairs come from a single item (one item
-    cannot show chance, and its kappa would always read 0), when one evaluator
-    compared answers of more than one kind, or when chance agreement is 1."""
+    `agreement` is. Blank with `too_few_items` when the pairs come from a
+    single item (one item cannot show chance, and its kappa would always read
+    0), with no reason when one evaluator compared answers of more than one
+    kind, and with `everyone_agreed` when chance agreement is 1."""
     evaluator_id_to_first_answer_counts: Dict[Optional[str], Counter] = defaultdict(Counter)
     evaluator_id_to_second_answer_counts: Dict[Optional[str], Counter] = defaultdict(Counter)
     evaluator_id_to_answer_kinds: Dict[Optional[str], set] = defaultdict(set)
@@ -761,10 +771,10 @@ def _kappa(
         evaluator_id_and_rating_gap_to_pair_count[
             (evaluator_id, largest_possible_rating_gap)
         ] += len(answer_pairs_compared)
-    if len(compared_item_ids) < 2 or any(
-        len(answer_kinds) > 1 for answer_kinds in evaluator_id_to_answer_kinds.values()
-    ):
-        return (None, None)
+    if len(compared_item_ids) < 2:
+        return (None, None, "too_few_items")
+    if any(len(answer_kinds) > 1 for answer_kinds in evaluator_id_to_answer_kinds.values()):
+        return (None, None, None)
 
     chance_agreement = math.fsum(
         _chance_agreement(
@@ -779,7 +789,7 @@ def _kappa(
         ), pair_count in evaluator_id_and_rating_gap_to_pair_count.items()
     ) / sum(evaluator_id_and_rating_gap_to_pair_count.values())
     if 1 - chance_agreement < 1e-12:
-        return (None, None)
+        return (None, None, "everyone_agreed")
     kappa_types = {
         f"linear_weighted_{kappa_family}" if answer_kinds == {"numeric"} else kappa_family
         for answer_kinds in evaluator_id_to_answer_kinds.values()
@@ -787,6 +797,7 @@ def _kappa(
     return (
         _round_agreement((agreement - chance_agreement) / (1 - chance_agreement)),
         kappa_types.pop() if len(kappa_types) == 1 else "mixed",
+        None,
     )
 
 
@@ -798,8 +809,8 @@ def _agreement_and_kappa(
     kappa_family: KappaFamily,
 ) -> AgreementAndKappa:
     """Rounded mean agreement from `(agreement_total, pair_count)` parts, the
-    pair count it covers, and its kappa and kappa type, or
-    (None, 0, None, None) when no pair counts."""
+    pair count it covers, its kappa and kappa type, and why the kappa is
+    blank, or (None, 0, None, None, None) when no pair counts."""
     # Added one at a time, in the order the items were first answered: another
     # order, or subtracting from a running total, can change the rounded result.
     agreement_total = 0.0
@@ -808,24 +819,26 @@ def _agreement_and_kappa(
         agreement_total += part_agreement_total
         pair_count_total += part_pair_count
     if pair_count_total == 0:
-        return (None, 0, None, None)
+        return (None, 0, None, None, None)
     agreement = agreement_total / pair_count_total
-    kappa, kappa_type = _kappa(
-        agreement, item_and_evaluator_to_answer_pairs_compared, kappa_family
+    return (
+        _round_agreement(agreement),
+        pair_count_total,
+        *_kappa(agreement, item_and_evaluator_to_answer_pairs_compared, kappa_family),
     )
-    return (_round_agreement(agreement), pair_count_total, kappa, kappa_type)
 
 
 def _trend_point(
     bucket_start_and_end: Dict[str, str], agreement_and_kappa: AgreementAndKappa
 ) -> Dict[str, Any]:
-    agreement, pair_count, kappa, kappa_type = agreement_and_kappa
+    agreement, pair_count, kappa, kappa_type, kappa_blank_reason = agreement_and_kappa
     return {
         **bucket_start_and_end,
         "agreement": agreement,
         "pair_count": pair_count,
         "kappa": kappa,
         "kappa_type": kappa_type,
+        "kappa_blank_reason": kappa_blank_reason,
     }
 
 
@@ -989,7 +1002,7 @@ def agreement_and_kappa_between_annotators(
     two or more of them answered, how many pairs of answers that covers, and
     Fleiss' kappa and its type. Ratings use each evaluator's live rating scale
     from `rating_scales` (see `rating_scales_for`). Returns
-    (None, 0, None, None) when nothing can be compared."""
+    (None, 0, None, None, None) when nothing can be compared."""
     agreement_so_far = _AgreementBetweenAnnotatorsSoFar(rating_scales)
     agreement_so_far.add_annotations(annotations)
     return agreement_so_far.agreement_and_kappa()
@@ -1006,8 +1019,8 @@ def agreement_and_kappa_between_judge_and_annotators(
     Cohen's kappa and its type. On each item the judge's latest score is
     compared with each annotator's latest answer. A rating gap is divided by
     the largest possible gap on the scale, from `rating_scales`, of the version
-    the judge score came from. Returns (None, 0, None, None) when nothing can
-    be compared."""
+    the judge score came from. Returns (None, 0, None, None, None) when nothing
+    can be compared."""
     agreement_so_far = _AgreementBetweenJudgeAndAnnotatorsSoFar(evaluator_id, rating_scales)
     agreement_so_far.add_rows(annotations, evaluator_runs)
     return agreement_so_far.agreement_and_kappa()
@@ -1041,7 +1054,7 @@ def agreement_between_judge_and_annotators_over_time(
     (or created) by then.
 
     Returns `{evaluator_id: [{bucket_start, bucket_end, agreement, pair_count,
-    kappa, kappa_type}, ...]}`.
+    kappa, kappa_type, kappa_blank_reason}, ...]}`.
     """
     if not evaluator_ids:
         return {}
@@ -1097,7 +1110,7 @@ def agreement_between_judge_and_annotators_over_time_by_version_and_task(
 
     Returns:
         {
-            "overall":    [{bucket_start, bucket_end, agreement, pair_count, kappa, kappa_type}, ...],
+            "overall":    [{bucket_start, bucket_end, agreement, pair_count, kappa, kappa_type, kappa_blank_reason}, ...],
             "by_version": {version_id: [...]},
             "by_task":    {task_id:    [...]},
         }

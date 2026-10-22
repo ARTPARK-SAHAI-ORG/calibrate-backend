@@ -3749,19 +3749,23 @@ def test_kappa_sits_beside_every_agreement_over_many_items(client):
 
     # Now, over all 4 items, and earlier, over items 0 and 3. The annotator
     # numbers pool both evaluators, so their type is `mixed`.
-    annotators_now = {"kappa": 0.52, "kappa_type": "mixed"}
-    annotators_earlier = {"kappa": 0.8261, "kappa_type": "mixed"}
-    binary_judge_now = {"kappa": 0.75, "kappa_type": "cohen"}
-    binary_judge_earlier = {"kappa": 1.0, "kappa_type": "cohen"}
+    annotators_now = {"kappa": 0.52, "kappa_type": "mixed", "kappa_blank_reason": None}
+    annotators_earlier = {"kappa": 0.8261, "kappa_type": "mixed", "kappa_blank_reason": None}
+    binary_judge_now = {"kappa": 0.75, "kappa_type": "cohen", "kappa_blank_reason": None}
+    binary_judge_earlier = {"kappa": 1.0, "kappa_type": "cohen", "kappa_blank_reason": None}
     # Rating judge 3, 4, 1, 5 against 3, 4, 2, 5 and 3, 5, 2, 4: agreement
     # 7/8, chance 10/16, kappa (0.875 - 0.625) / 0.375.
-    rating_judge_now = {"kappa": 0.6667, "kappa_type": "linear_weighted_cohen"}
-    rating_judge_earlier = {"kappa": 0.75, "kappa_type": "linear_weighted_cohen"}
-    one_annotator_now = {"kappa": 0.5385, "kappa_type": "mixed"}
-    one_annotator_earlier = {"kappa": 0.8333, "kappa_type": "mixed"}
+    rating_judge_now = {"kappa": 0.6667, "kappa_type": "linear_weighted_cohen", "kappa_blank_reason": None}
+    rating_judge_earlier = {"kappa": 0.75, "kappa_type": "linear_weighted_cohen", "kappa_blank_reason": None}
+    one_annotator_now = {"kappa": 0.5385, "kappa_type": "mixed", "kappa_blank_reason": None}
+    one_annotator_earlier = {"kappa": 0.8333, "kappa_type": "mixed", "kappa_blank_reason": None}
 
     def kappa_of(block):
-        return {"kappa": block["kappa"], "kappa_type": block["kappa_type"]}
+        return {
+            "kappa": block["kappa"],
+            "kappa_type": block["kappa_type"],
+            "kappa_blank_reason": block["kappa_blank_reason"],
+        }
 
     def assert_kappa_now_and_earlier(block, expected_now, expected_earlier):
         assert kappa_of(block) == expected_now
@@ -3771,6 +3775,11 @@ def test_kappa_sits_beside_every_agreement_over_many_items(client):
         )
         assert earliest_point_with_pairs["pair_count"] < block["series"][-1]["pair_count"]
         assert kappa_of(earliest_point_with_pairs) == expected_earlier
+        assert all(
+            kappa_of(point) == {"kappa": None, "kappa_type": None, "kappa_blank_reason": None}
+            for point in block["series"]
+            if not point["pair_count"]
+        )
 
     def by_evaluator_id(entries):
         return {entry["evaluator_id"]: entry for entry in entries}
@@ -3811,9 +3820,14 @@ def test_kappa_sits_beside_every_agreement_over_many_items(client):
     assert kappa_of(run_agreement[binary_evaluator["uuid"]]) == binary_judge_now
     assert kappa_of(run_agreement[rating_evaluator["uuid"]]) == rating_judge_now
     assert len(run_detail["human_agreement"]["items"]) == 4
-    assert all("kappa" not in item for item in run_detail["human_agreement"]["items"])
     assert all(
-        "kappa" not in item_evaluator_agreement
+        key not in item
+        for item in run_detail["human_agreement"]["items"]
+        for key in ("kappa", "kappa_blank_reason")
+    )
+    assert all(
+        key not in item_evaluator_agreement
+        for key in ("kappa", "kappa_blank_reason")
         for item in run_detail["human_agreement"]["items"]
         for item_evaluator_agreement in item["evaluators"]
     )
@@ -3836,14 +3850,70 @@ def test_kappa_sits_beside_every_agreement_over_many_items(client):
     # One item cannot show chance, so per-item numbers carry no kappa.
     task_items = client.get(f"/annotation-tasks/{task_uuid}", headers=h).json()["items"]
     assert len(task_items) == 4
-    assert all("kappa" not in item["agreement"]["human_human"] for item in task_items)
     assert all(
-        "kappa" not in item_evaluator_agreement
+        key not in item["agreement"]["human_human"]
+        for item in task_items
+        for key in ("kappa", "kappa_blank_reason")
+    )
+    assert all(
+        key not in item_evaluator_agreement
+        for key in ("kappa", "kappa_blank_reason")
         for item in task_items
         for item_evaluator_agreement in item["agreement"]["evaluators"]
     )
     summary_rows = client.get(f"/annotation-tasks/{task_uuid}/summary", headers=h).json()["rows"]
-    assert summary_rows and all("kappa" not in row for row in summary_rows)
+    assert summary_rows and all(
+        key not in row for row in summary_rows for key in ("kappa", "kappa_blank_reason")
+    )
+
+
+def test_kappa_blank_reason_follows_the_answers_compared(client):
+    """Two annotators agree on one item, then on a second: kappa is blank
+    first for too few items, then because everyone agreed."""
+    h = _signup(client)["headers"]
+    llm_ev = _llm_evaluator(client, h)
+    task_uuid = client.post(
+        "/annotation-tasks",
+        json={"name": f"t-{uuid.uuid4().hex[:6]}", "type": "llm", "evaluator_ids": [llm_ev["uuid"]]},
+        headers=h,
+    ).json()["uuid"]
+    item_ids = client.post(
+        f"/annotation-tasks/{task_uuid}/items",
+        json={"items": [{"payload": llm_item_payload("one")}, {"payload": llm_item_payload("two")}]},
+        headers=h,
+    ).json()["item_ids"]
+    annotator_ids = [
+        client.post("/annotators", json={"name": f"a-{uuid.uuid4().hex[:6]}"}, headers=h).json()["uuid"]
+        for _ in range(2)
+    ]
+    jobs = client.post(
+        f"/annotation-tasks/{task_uuid}/jobs",
+        json={"annotator_ids": annotator_ids, "item_ids": item_ids},
+        headers=h,
+    ).json()["jobs"]
+
+    def blank_reasons():
+        task_agreement = client.get(f"/annotation-tasks/{task_uuid}/agreement", headers=h).json()
+        workspace_trend = client.get("/annotation-agreement/trend", headers=h).json()
+        listed = client.get("/annotators", headers=h).json()
+        detail = client.get(f"/annotators/{annotator_ids[0]}", headers=h).json()
+        return {
+            task_agreement["human_human"]["kappa_blank_reason"],
+            task_agreement["human_human"]["series"][-1]["kappa_blank_reason"],
+            workspace_trend["human_human"]["kappa_blank_reason"],
+            workspace_trend["human_human"]["series"][-1]["kappa_blank_reason"],
+            *(annotator["kappa_blank_reason"] for annotator in listed),
+            detail["stats"]["kappa_blank_reason"],
+            detail["trend"]["series"][-1]["kappa_blank_reason"],
+        }
+
+    for job in jobs:
+        _post_answers(client, job, llm_ev["uuid"], {item_ids[0]: True})
+    assert blank_reasons() == {"too_few_items"}
+    for job in jobs:
+        _post_answers(client, job, llm_ev["uuid"], {item_ids[1]: True})
+    assert blank_reasons() == {"everyone_agreed"}
+
 
 # ---------------------------------------------------------------------------
 # Typed item payloads

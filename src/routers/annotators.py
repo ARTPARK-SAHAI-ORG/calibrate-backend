@@ -17,8 +17,10 @@ from db import (
 from auth_utils import get_current_org, get_org_jwt_or_api_key, OrgContext
 from annotation_metrics import (
     ANNOTATOR_VS_OTHERS_KAPPA_TYPE_DESCRIPTION,
+    KAPPA_BLANK_REASON_DESCRIPTION,
     KAPPA_DESCRIPTION,
     AnnotatorVsOthersKappaType,
+    KappaBlankReason,
     agreement_and_kappa_of_annotator_with_others,
     rating_scales_for,
     agreement_of_annotator_with_others_over_time,
@@ -63,6 +65,9 @@ class AnnotatorResponse(BaseModel):
     kappa: Optional[float] = Field(None, description=KAPPA_DESCRIPTION)
     kappa_type: Optional[AnnotatorVsOthersKappaType] = Field(
         None, description=ANNOTATOR_VS_OTHERS_KAPPA_TYPE_DESCRIPTION
+    )
+    kappa_blank_reason: Optional[KappaBlankReason] = Field(
+        None, description=KAPPA_BLANK_REASON_DESCRIPTION
     )
 
 
@@ -114,8 +119,10 @@ def list_annotators(ctx: OrgContext = Depends(get_org_jwt_or_api_key)):
     rating_scales = rating_scales_for(all_annotations)
     annotators_with_agreement: List[Dict[str, Any]] = []
     for annotator in annotators:
-        agreement, pair_count, kappa, kappa_type = agreement_and_kappa_of_annotator_with_others(
-            all_annotations, annotator["uuid"], rating_scales
+        agreement, pair_count, kappa, kappa_type, kappa_blank_reason = (
+            agreement_and_kappa_of_annotator_with_others(
+                all_annotations, annotator["uuid"], rating_scales
+            )
         )
         annotators_with_agreement.append(
             {
@@ -125,6 +132,7 @@ def list_annotators(ctx: OrgContext = Depends(get_org_jwt_or_api_key)):
                 "pair_count": pair_count if pair_count else None,
                 "kappa": kappa,
                 "kappa_type": kappa_type,
+                "kappa_blank_reason": kappa_blank_reason,
             }
         )
     return annotators_with_agreement
@@ -155,7 +163,7 @@ def get_annotator_endpoint(
         org_uuid=ctx.org_uuid, annotator_id=annotator_uuid
     )
     rating_scales = rating_scales_for(annotations)
-    current_agreement, pair_count, kappa, kappa_type = (
+    current_agreement, pair_count, kappa, kappa_type, kappa_blank_reason = (
         agreement_and_kappa_of_annotator_with_others(annotations, annotator_uuid, rating_scales)
     )
     agreement_over_time = agreement_of_annotator_with_others_over_time(
@@ -178,6 +186,7 @@ def get_annotator_endpoint(
             "pair_count": pair_count,
             "kappa": kappa,
             "kappa_type": kappa_type,
+            "kappa_blank_reason": kappa_blank_reason,
             "jobs_count": len(jobs),
         },
         "trend": {

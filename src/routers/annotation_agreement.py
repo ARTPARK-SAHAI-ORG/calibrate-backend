@@ -57,9 +57,13 @@ def agreement_trend(
         all_evaluator_version_runs = get_evaluator_runs_for_org(ctx.org_uuid)
 
     rating_scales = rating_scales_for(annotations, all_evaluator_version_runs)
-    annotator_agreement, annotator_pair_count, annotator_kappa, annotator_kappa_type = (
-        agreement_and_kappa_between_annotators(annotations, rating_scales)
-    )
+    (
+        annotator_agreement,
+        annotator_pair_count,
+        annotator_kappa,
+        annotator_kappa_type,
+        annotator_kappa_blank_reason,
+    ) = agreement_and_kappa_between_annotators(annotations, rating_scales)
     annotator_agreement_over_time = agreement_between_annotators_over_time(
         annotations, bucket=bucket, days=days, rating_scales=rating_scales
     )
@@ -95,10 +99,14 @@ def agreement_trend(
     agreement_per_evaluator = []
     for evaluator_id in evaluator_ids:
         evaluator = evaluator_id_to_evaluator[evaluator_id]
-        evaluator_agreement, evaluator_pair_count, evaluator_kappa, evaluator_kappa_type = (
-            agreement_and_kappa_between_judge_and_annotators(
-                annotations, live_evaluator_version_runs, evaluator_id, rating_scales
-            )
+        (
+            evaluator_agreement,
+            evaluator_pair_count,
+            evaluator_kappa,
+            evaluator_kappa_type,
+            evaluator_kappa_blank_reason,
+        ) = agreement_and_kappa_between_judge_and_annotators(
+            annotations, live_evaluator_version_runs, evaluator_id, rating_scales
         )
         agreement_per_evaluator.append(
             {
@@ -108,6 +116,7 @@ def agreement_trend(
                 "pair_count": evaluator_pair_count,
                 "kappa": evaluator_kappa,
                 "kappa_type": evaluator_kappa_type,
+                "kappa_blank_reason": evaluator_kappa_blank_reason,
                 "series": evaluator_id_to_agreement_over_time.get(evaluator_id, []),
             }
         )
@@ -121,6 +130,7 @@ def agreement_trend(
             "pair_count": annotator_pair_count,
             "kappa": annotator_kappa,
             "kappa_type": annotator_kappa_type,
+            "kappa_blank_reason": annotator_kappa_blank_reason,
             "series": annotator_agreement_over_time,
         },
         "evaluators": agreement_per_evaluator,
@@ -210,6 +220,7 @@ def evaluator_agreement_trend(
             "pair_count": latest_bucket["pair_count"],
             "kappa": latest_bucket["kappa"],
             "kappa_type": latest_bucket["kappa_type"],
+            "kappa_blank_reason": latest_bucket["kappa_blank_reason"],
         }
 
     task_id_to_task = get_annotation_tasks_by_uuids(task_ids_with_scores)
