@@ -151,25 +151,31 @@ def test_tts_dataset_refuses_upload(client, uploads):
     assert uploads == []
 
 
-def test_blank_text_is_refused_and_text_is_trimmed(client, uploads):
+def test_text_is_trimmed_and_may_be_empty(client, uploads):
     h = _signup(client)
     ds = _dataset(client, h)
     key = _api_key(client, h)
-    for text in ("", "   "):
-        assert _upload(client, key, ds, _wav(1), text=text).status_code == 400
-        bulk = client.post(
-            f"/datasets/{ds}/items",
-            json=[
-                {"audio_path": "s3://test-bucket/stt/media/a.wav", "text": "fine"},
-                {"audio_path": "s3://test-bucket/stt/media/b.wav", "text": text},
-            ],
-            headers=h,
-        )
-        assert bulk.status_code == 400
-    assert uploads == []
-    assert client.get(f"/datasets/{ds}", headers=h).json()["items"] == []
 
     assert _upload(client, key, ds, _wav(1), text="  House number 12  ").json()["text"] == "House number 12"
+    assert _upload(client, key, ds, _wav(1), text="   ").json()["text"] == ""
+    assert _upload(client, key, ds, _wav(1), text="").json()["text"] == ""
+
+    bulk = client.post(
+        f"/datasets/{ds}/items",
+        json=[
+            {"audio_path": "s3://test-bucket/stt/media/a.wav", "text": " hi "},
+            {"audio_path": "s3://test-bucket/stt/media/b.wav", "text": "   "},
+        ],
+        headers=h,
+    )
+    assert bulk.status_code == 201, bulk.text
+    assert [i["text"] for i in bulk.json()] == ["hi", ""]
+
+    item = bulk.json()[0]["uuid"]
+    for sent, stored in (("  edited  ", "edited"), ("   ", "")):
+        patched = client.patch(f"/datasets/{ds}/items/{item}", json={"text": sent}, headers=h)
+        assert patched.status_code == 200, patched.text
+        assert patched.json()["text"] == stored
 
 
 def test_non_wav_is_refused(client, uploads):

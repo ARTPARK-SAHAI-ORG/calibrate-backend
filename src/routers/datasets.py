@@ -121,13 +121,6 @@ class DatasetDetailResponse(DatasetResponse):
 # ── Helpers ──────────────────────────────────────────────────────────────────
 
 
-def _required_text(text: str) -> str:
-    text = text.strip()
-    if not text:
-        raise HTTPException(status_code=400, detail="Dataset item text cannot be empty")
-    return text
-
-
 def _validate_items_for_type(dataset_type: str, items: List[DatasetItemIn]) -> None:
     """Raise HTTPException if items are inconsistent with the dataset type."""
     for item in items:
@@ -344,7 +337,7 @@ def add_items(
 
     return _append_items(
         dataset_id,
-        [{"audio_path": i.audio_path, "text": _required_text(i.text)} for i in items],
+        [{"audio_path": i.audio_path, "text": i.text.strip()} for i in items],
     )
 
 
@@ -374,7 +367,6 @@ def upload_stt_item(
         raise HTTPException(
             status_code=400, detail="Audio uploads are only accepted for STT datasets"
         )
-    text = _required_text(text)
 
     data = audio.file.read(MAX_UPLOAD_AUDIO_BYTES + 1)
     if len(data) > MAX_UPLOAD_AUDIO_BYTES:
@@ -401,7 +393,7 @@ def upload_stt_item(
         upload_file_to_s3(get_s3_client(), local_path, s3_bucket, s3_key)
 
     return _append_items(
-        dataset_id, [{"audio_path": f"s3://{s3_bucket}/{s3_key}", "text": text}]
+        dataset_id, [{"audio_path": f"s3://{s3_bucket}/{s3_key}", "text": text.strip()}]
     )[0]
 
 
@@ -445,7 +437,11 @@ def update_item(
     updated = update_dataset_item(
         item_uuid,
         dataset_id,
-        text=request.text if "text" in request.model_fields_set else None,
+        text=(
+            request.text.strip()
+            if "text" in request.model_fields_set and request.text is not None
+            else None
+        ),
         audio_path=(
             request.audio_path if "audio_path" in request.model_fields_set else ...
         ),
