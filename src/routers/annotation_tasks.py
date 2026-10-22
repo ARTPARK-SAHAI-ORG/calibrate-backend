@@ -77,7 +77,11 @@ from annotation_eval_runner import (
     start_annotation_eval_job,
     TOOL_CALL_EVALUATOR_TYPE,
 )
-from annotation_metrics import KAPPA_DESCRIPTION, KAPPA_TYPE_DESCRIPTION, KappaType
+from annotation_metrics import (
+    ANNOTATORS_KAPPA_TYPE_DESCRIPTION,
+    KAPPA_DESCRIPTION,
+    AnnotatorsKappaType,
+)
 from utils import (
     utc_now,
     job_slot,
@@ -273,7 +277,9 @@ class HumanAgreementBlock(BaseModel):
         description="How many annotator pairs the current value averages over"
     )
     kappa: Optional[float] = Field(description=KAPPA_DESCRIPTION)
-    kappa_type: Optional[KappaType] = Field(description=KAPPA_TYPE_DESCRIPTION)
+    kappa_type: Optional[AnnotatorsKappaType] = Field(
+        description=ANNOTATORS_KAPPA_TYPE_DESCRIPTION
+    )
     series: List[Dict[str, Any]] = Field(
         description="Agreement over time, one point per time bucket"
     )

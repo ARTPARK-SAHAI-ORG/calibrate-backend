@@ -56,22 +56,31 @@ KappaType = Literal[
     "fleiss", "linear_weighted_fleiss", "cohen", "linear_weighted_cohen", "mixed"
 ]
 KappaFamily = Literal["fleiss", "cohen"]
+AnnotatorsKappaType = Literal["fleiss", "linear_weighted_fleiss", "mixed"]
+AnnotatorVsOthersKappaType = Literal["cohen", "linear_weighted_cohen", "mixed"]
 AgreementAndKappa = Tuple[Optional[float], int, Optional[float], Optional[KappaType]]
 # The largest possible rating gap one item's answers were compared over, and
 # each pair compared as (first_answer, second_answer, agreement).
 AnswerPairsCompared = Tuple[float, List[Tuple[Any, Any, float]]]
 
 KAPPA_DESCRIPTION = (
-    "Current agreement corrected for the agreement expected by chance, where 0 "
-    "is chance level and 1 is perfect agreement"
+    "Agreement corrected for the agreement expected by chance, where 1 is perfect "
+    "agreement, 0 is chance level, and below 0 is worse than chance"
 )
-KAPPA_TYPE_DESCRIPTION = (
-    "Which kappa statistic `kappa` is:\n\n"
+_MIXED_KAPPA_LINE = (
+    "- `mixed`: a kappa over several evaluators, where some are answered with ratings and some are not\n"
+)
+ANNOTATORS_KAPPA_TYPE_DESCRIPTION = (
+    "The kind of kappa reported in `kappa`:\n\n"
     "- `fleiss`: Fleiss' kappa between annotators, on answers that either match or do not\n"
-    "- `linear_weighted_fleiss`: Fleiss' kappa between annotators on ratings, giving partial credit to close ratings\n"
-    "- `cohen`: Cohen's kappa between the evaluator and the annotators, or between one annotator and the others, on answers that either match or do not\n"
-    "- `linear_weighted_cohen`: Cohen's kappa between the evaluator and the annotators, or between one annotator and the others, on ratings, giving partial credit to close ratings\n"
-    "- `mixed`: a kappa over several evaluators whose answers are of different kinds, some ratings and some not\n"
+    "- `linear_weighted_fleiss`: Fleiss' kappa between annotators, on ratings, giving partial credit to close ratings\n"
+    + _MIXED_KAPPA_LINE
+)
+ANNOTATOR_VS_OTHERS_KAPPA_TYPE_DESCRIPTION = (
+    "The kind of kappa reported in `kappa`:\n\n"
+    "- `cohen`: Cohen's kappa between this annotator and the others, on answers that either match or do not\n"
+    "- `linear_weighted_cohen`: Cohen's kappa between this annotator and the others, on ratings, giving partial credit to close ratings\n"
+    + _MIXED_KAPPA_LINE
 )
 
 
