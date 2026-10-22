@@ -13,8 +13,6 @@ from annotation_metrics import (
     rating_scales_for,
     _mean_agreement_between_answers,
     _extract_answer,
-    agreement_between_annotators,
-    agreement_between_judge_and_annotators,
     build_time_buckets,
     judge_and_annotators_agreement_on_item,
     judge_answer_summary,
@@ -119,18 +117,18 @@ def test_runs_at_live_versions():
 
 
 def test_aggregate_agreement_empty_and_full():
-    assert agreement_between_annotators([]) == (None, 0)
+    assert agreement_and_kappa_between_annotators([])[:2] == (None, 0)
     # Two annotators agreeing on one slot
     annotations = [
         {"item_id": "i1", "evaluator_id": "e1", "annotator_id": "a", "value": {"value": True}},
         {"item_id": "i1", "evaluator_id": "e1", "annotator_id": "b", "value": {"value": True}},
     ]
-    agree, pairs = agreement_between_annotators(annotations)
+    agree, pairs = agreement_and_kappa_between_annotators(annotations)[:2]
     assert agree == 1.0 and pairs == 1
     # Skip rows missing scalar / annotator
     annotations.append({"item_id": "i2", "evaluator_id": "e1", "annotator_id": None, "value": {"value": True}})
     annotations.append({"item_id": "i3", "evaluator_id": "e1", "annotator_id": "a", "value": {"other": 1}})
-    agree, pairs = agreement_between_annotators(annotations)
+    agree, pairs = agreement_and_kappa_between_annotators(annotations)[:2]
     assert pairs == 1
 
 
@@ -193,7 +191,7 @@ def test_evaluator_result_summary():
 
 
 def test_aggregate_human_evaluator_agreement_empty():
-    agree, pairs = agreement_between_judge_and_annotators([], [], "e1")
+    agree, pairs = agreement_and_kappa_between_judge_and_annotators([], [], "e1")[:2]
     assert agree is None and pairs == 0
 
     annotations = [
@@ -208,7 +206,7 @@ def test_aggregate_human_evaluator_agreement_empty():
         # Missing fields — filtered
         {"evaluator_id": "e1", "value": {"value": True}},
     ]
-    agree, pairs = agreement_between_judge_and_annotators(annotations, runs, "e1")
+    agree, pairs = agreement_and_kappa_between_judge_and_annotators(annotations, runs, "e1")[:2]
     # Latest evaluator value is False; human said True → disagreement
     assert agree == 0.0 and pairs == 1
 
@@ -286,8 +284,8 @@ def test_has_answers_to_compare_matches_scoring_every_pair():
         }
 
     def compare_by_scoring_every_pair(annotations, evaluator_runs, evaluator_ids):
-        return agreement_between_annotators(annotations)[1] > 0 or any(
-            agreement_between_judge_and_annotators(
+        return agreement_and_kappa_between_annotators(annotations)[1] > 0 or any(
+            agreement_and_kappa_between_judge_and_annotators(
                 annotations, evaluator_runs, evaluator_id
             )[1] > 0
             for evaluator_id in evaluator_ids
@@ -661,9 +659,9 @@ def test_rating_scales_map_is_looked_up_per_slot():
     ]
     rating_scales = {"e1": _ONE_TO_FIVE}
     # e1's slot scores 0.75, the evaluator-less slot falls back to 0.0.
-    assert agreement_between_annotators(annotations, rating_scales) == (0.375, 2)
+    assert agreement_and_kappa_between_annotators(annotations, rating_scales)[:2] == (0.375, 2)
     # An evaluator missing from the map falls back for its own slot only.
-    assert agreement_between_annotators(annotations, {"other": _ONE_TO_FIVE}) == (0.0, 2)
+    assert agreement_and_kappa_between_annotators(annotations, {"other": _ONE_TO_FIVE})[:2] == (0.0, 2)
 
 
 def test_rating_agreement_unchanged_without_a_map():
@@ -676,10 +674,10 @@ def test_rating_agreement_unchanged_without_a_map():
             "created_at": "2024-01-01 00:00:00",
         }
     ]
-    assert agreement_between_annotators(annotations) == (0.0, 1)
+    assert agreement_and_kappa_between_annotators(annotations)[:2] == (0.0, 1)
     assert agreement_and_kappa_of_annotator_with_others(annotations, "a")[:2] == (0.0, 1)
     # Observed range over the evaluator's 5 and the humans' 3 and 4 is 2.
-    assert agreement_between_judge_and_annotators(annotations, runs, "e1") == (0.25, 2)
+    assert agreement_and_kappa_between_judge_and_annotators(annotations, runs, "e1")[:2] == (0.25, 2)
     assert judge_and_annotators_agreement_on_item(5, [3, 4]) == (0.5, 2)
     item = agreement_on_item(annotations, runs, ["e1"])
     assert item["human_human"]["agreement"] == 0.0
@@ -697,10 +695,10 @@ def test_rating_agreement_with_a_map():
         }
     ]
     rating_scales = {"e1": _ONE_TO_FIVE}
-    assert agreement_between_annotators(annotations, rating_scales) == (0.75, 1)
+    assert agreement_and_kappa_between_annotators(annotations, rating_scales)[:2] == (0.75, 1)
     assert agreement_and_kappa_of_annotator_with_others(annotations, "a", rating_scales)[:2] == (0.75, 1)
     # Evaluator said 5: 1 - 2/4 against the 3, 1 - 1/4 against the 4.
-    assert agreement_between_judge_and_annotators(annotations, runs, "e1", rating_scales) == (
+    assert agreement_and_kappa_between_judge_and_annotators(annotations, runs, "e1", rating_scales)[:2] == (
         0.625,
         2,
     )
@@ -821,7 +819,7 @@ def test_judge_score_is_divided_by_its_own_versions_width():
             "completed_at": "2024-01-01 00:00:00",
         }
     ]
-    assert agreement_between_judge_and_annotators(annotations, runs, "e1", rating_scales) == (
+    assert agreement_and_kappa_between_judge_and_annotators(annotations, runs, "e1", rating_scales)[:2] == (
         round(1 - 1 / 3, 4),
         1,
     )
@@ -833,7 +831,7 @@ def test_agreement_never_goes_below_zero():
         {"item_id": "i1", "evaluator_id": "e1", "annotator_id": a, "value": {"value": v}}
         for a, v in (("a", 1), ("b", 4))
     ]
-    assert agreement_between_annotators(annotations, {"e1": (1, 2)}) == (0.0, 1)
+    assert agreement_and_kappa_between_annotators(annotations, {"e1": (1, 2)})[:2] == (0.0, 1)
 
 
 def _rows_timestamped_up_to(rows, timestamp_fields, bucket_end):
@@ -852,18 +850,6 @@ def _rows_timestamped_up_to(rows, timestamp_fields, bucket_end):
             timestamped_rows.append((parsed_timestamp, row))
     timestamped_rows.sort(key=lambda timestamp_and_row: timestamp_and_row[0])
     return [row for _timestamp, row in timestamped_rows]
-
-
-def _agreement_and_kappa_between_annotators_checked(*arguments):
-    agreement_and_kappa = agreement_and_kappa_between_annotators(*arguments)
-    assert agreement_and_kappa[:2] == agreement_between_annotators(*arguments)
-    return agreement_and_kappa
-
-
-def _agreement_and_kappa_between_judge_and_annotators_checked(*arguments):
-    agreement_and_kappa = agreement_and_kappa_between_judge_and_annotators(*arguments)
-    assert agreement_and_kappa[:2] == agreement_between_judge_and_annotators(*arguments)
-    return agreement_and_kappa
 
 
 def _assert_over_time_agreement_equals_agreement_on_rows_up_to_each_bucket_end(
@@ -896,21 +882,21 @@ def _assert_over_time_agreement_equals_agreement_on_rows_up_to_each_bucket_end(
         annotations_so_far = _rows_timestamped_up_to(annotations, ("updated_at", "created_at"), bucket_end)
         evaluator_runs_so_far = _rows_timestamped_up_to(evaluator_runs, ("completed_at", "created_at"), bucket_end)
         expected_annotator_series.append(
-            point(_agreement_and_kappa_between_annotators_checked(annotations_so_far, rating_scales))
+            point(agreement_and_kappa_between_annotators(annotations_so_far, rating_scales))
         )
         expected_annotator_with_others_series.append(
             point(agreement_and_kappa_of_annotator_with_others(annotations_so_far, annotator_id, rating_scales))
         )
         for identifier in requested_evaluator_ids:
             expected_evaluator_id_to_series[identifier].append(point(
-                _agreement_and_kappa_between_judge_and_annotators_checked(annotations_so_far, evaluator_runs_so_far, identifier, rating_scales)
+                agreement_and_kappa_between_judge_and_annotators(annotations_so_far, evaluator_runs_so_far, identifier, rating_scales)
             ))
         expected_breakdown["overall"].append(point(
-            _agreement_and_kappa_between_judge_and_annotators_checked(annotations_so_far, evaluator_runs_so_far, evaluator_id, rating_scales)
+            agreement_and_kappa_between_judge_and_annotators(annotations_so_far, evaluator_runs_so_far, evaluator_id, rating_scales)
         ))
         for version_id in requested_version_ids:
             expected_breakdown["by_version"][version_id].append(point(
-                _agreement_and_kappa_between_judge_and_annotators_checked(
+                agreement_and_kappa_between_judge_and_annotators(
                     annotations_so_far,
                     [run for run in evaluator_runs_so_far if run.get("evaluator_version_id") == version_id],
                     evaluator_id,
@@ -919,7 +905,7 @@ def _assert_over_time_agreement_equals_agreement_on_rows_up_to_each_bucket_end(
             ))
         for task_id in requested_task_ids:
             expected_breakdown["by_task"][task_id].append(point(
-                _agreement_and_kappa_between_judge_and_annotators_checked(
+                agreement_and_kappa_between_judge_and_annotators(
                     [annotation for annotation in annotations_so_far if annotation.get("task_id") == task_id],
                     [run for run in evaluator_runs_so_far if run.get("task_id") == task_id],
                     evaluator_id,
