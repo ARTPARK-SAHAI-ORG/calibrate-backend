@@ -601,16 +601,42 @@ def has_answers_to_compare(
     evaluator_ids: Iterable[str],
 ) -> bool:
     """True if any item has two answers that can be compared: from two
-    annotators, or from an annotator and one of the given evaluators' judges."""
-    annotation_list = list(annotations)
+    annotators, or from an annotator and one of the given evaluators' judges.
+    Two answers can be compared when they are of the same known kind."""
+    item_and_evaluator_to_annotator_answer_kinds: Dict[
+        Tuple[str, Optional[str]], set
+    ] = {}
+    for (
+        item_and_evaluator,
+        annotator_id_to_answer,
+    ) in _annotator_answers_per_item_and_evaluator(annotations).items():
+        annotator_answer_kinds = set()
+        for answer in annotator_id_to_answer.values():
+            answer_kind = _answer_kind(answer)
+            if answer_kind is None:
+                continue
+            if answer_kind in annotator_answer_kinds:
+                return True
+            annotator_answer_kinds.add(answer_kind)
+        item_and_evaluator_to_annotator_answer_kinds[item_and_evaluator] = (
+            annotator_answer_kinds
+        )
+
     evaluator_run_list = list(evaluator_runs)
-    if agreement_between_annotators(annotation_list)[1] > 0:
-        return True
     for evaluator_id in evaluator_ids:
-        if agreement_between_judge_and_annotators(
-            annotation_list, evaluator_run_list, evaluator_id
-        )[1] > 0:
-            return True
+        for item_and_evaluator, (
+            judge_answer,
+            _scored_at,
+            _judge_version_id,
+        ) in _latest_judge_answer_per_item_and_evaluator(
+            evaluator_run_list, evaluator_id
+        ).items():
+            if _answer_kind(
+                judge_answer
+            ) in item_and_evaluator_to_annotator_answer_kinds.get(
+                item_and_evaluator, ()
+            ):
+                return True
     return False
 
 

@@ -254,6 +254,68 @@ def test_has_any_comparable_pair_accepts_iterables():
     assert has_answers_to_compare(ann_gen, run_gen, ev_gen) is True
 
 
+
+def test_has_answers_to_compare_matches_scoring_every_pair():
+    random_generator = random.Random(749)
+    possible_stored_values = [
+        True, False, 0, 1, 3, 2.5, "yes", "no", [1, 2], None,
+        {"value": [1, 2]}, {"value": 4}, {"value": False}, {"score": True},
+        {"label": "a"}, {"rating": 2}, {"comment": "only a comment"},
+        {"value": None, "score": 5}, {"value": {"nested": 1}},
+    ]
+    possible_timestamps = ["2024-01-01 00:00:00", "2024-01-02 00:00:00", None]
+
+    def random_annotation():
+        return {
+            "item_id": random_generator.choice(["i1", "i2", "i3"]),
+            "evaluator_id": random_generator.choice(["e1", "e2", "e3", None]),
+            "annotator_id": random_generator.choice(["a1", "a2", "a3", None]),
+            "value": random_generator.choice(possible_stored_values),
+        }
+
+    def random_evaluator_run():
+        return {
+            "item_id": random_generator.choice(["i1", "i2", "i3", None]),
+            "evaluator_id": random_generator.choice(["e1", "e2", "e3", None, ""]),
+            "value": random_generator.choice(possible_stored_values),
+            "completed_at": random_generator.choice(possible_timestamps),
+            "created_at": random_generator.choice(possible_timestamps),
+            "evaluator_version_id": random_generator.choice(["v1", "v2", None]),
+        }
+
+    def compare_by_scoring_every_pair(annotations, evaluator_runs, evaluator_ids):
+        return agreement_between_annotators(annotations)[1] > 0 or any(
+            agreement_between_judge_and_annotators(
+                annotations, evaluator_runs, evaluator_id
+            )[1] > 0
+            for evaluator_id in evaluator_ids
+        )
+
+    results_seen = set()
+    for _ in range(3000):
+        annotations = [
+            random_annotation() for _ in range(random_generator.randint(0, 6))
+        ]
+        evaluator_runs = [
+            random_evaluator_run() for _ in range(random_generator.randint(0, 6))
+        ]
+        evaluator_ids = random_generator.sample(
+            ["e1", "e2", "e3", "evaluator_with_no_runs", None],
+            random_generator.randint(0, 3),
+        )
+        expected = compare_by_scoring_every_pair(
+            annotations, evaluator_runs, evaluator_ids
+        )
+        if random_generator.random() < 0.5:
+            actual = has_answers_to_compare(
+                iter(annotations), iter(evaluator_runs), iter(evaluator_ids)
+            )
+        else:
+            actual = has_answers_to_compare(annotations, evaluator_runs, evaluator_ids)
+        assert actual is expected, (annotations, evaluator_runs, evaluator_ids)
+        results_seen.add(actual)
+    assert results_seen == {True, False}
+
 def test_per_item_agreement_shape():
     ann = [
         {"item_id": "i1", "evaluator_id": "e1", "annotator_id": "a", "value": {"value": True}},
