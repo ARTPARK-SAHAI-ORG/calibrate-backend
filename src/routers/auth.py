@@ -157,14 +157,9 @@ class CredentialLoginRequest(BaseModel):
 @router.post("/signup", response_model=LoginResponse, summary="Sign up with email and password")
 def signup(request: SignupRequest):
     """Create an account with email and password and receive a JWT plus your profile"""
-    # 409 if email already has a password; invite stub rows (no password yet) are hydrated in place.
-    # A row may already exist as a stub created by an org invite (no
-    # password_hash set). `create_user_with_password` hydrates that stub in
-    # place; it raises ValueError("email already registered") if the row
-    # already has a password set.
+    # An invite stub row is hydrated in place; any other existing account
+    # (password or Google) makes `create_user_with_password` raise, which is a 409.
     existing = get_user_by_email(request.email)
-    if existing and existing.get("password_hash"):
-        raise HTTPException(status_code=409, detail="Email already taken")
 
     password_hash = bcrypt.hashpw(
         request.password.encode("utf-8"), bcrypt.gensalt()

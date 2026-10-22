@@ -155,3 +155,19 @@ def test_signup_does_not_welcome_someone_already_invited(client, sent):
 
     assert _signup(client, invited).status_code == 200
     assert sent == []
+
+
+def test_signup_cannot_take_over_a_google_account(client, sent):
+    """A Google account has no password. Signing up with its email must not
+    set one, or anyone could log in as that person."""
+    import db
+
+    email = _email("google")
+    victim_uuid = db.create_user("Victim", "User", email)
+
+    assert _signup(client, email, password="attacker1").status_code == 409
+    assert db.get_user(victim_uuid)["password_hash"] is None
+    login = client.post(
+        "/auth/login", json={"email": email, "password": "attacker1"}
+    )
+    assert login.status_code == 401
