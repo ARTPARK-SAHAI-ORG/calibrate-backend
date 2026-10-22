@@ -614,3 +614,47 @@ actions:
           and optional metadata. Use this to capture live traffic for later
           review and conversion into tests. Fails with 429 once the workspace
           hits its trace limit.
+  - target: $.paths['/datasets'].post
+    update:
+      x-speakeasy-group: datasets
+      x-speakeasy-name-override: create
+      x-speakeasy-mcp:
+        name: create-dataset
+        title: Create dataset
+        scopes: [write]
+        readOnlyHint: false
+        destructiveHint: false
+        idempotentHint: false
+        openWorldHint: true
+        description: |
+          Create an empty STT or TTS dataset in the caller's org. The name must
+          be unique in the workspace (409 otherwise). Add items separately.
+  - target: $.paths['/datasets/{dataset_id}'].get
+    update:
+      x-speakeasy-group: datasets
+      x-speakeasy-name-override: get
+      x-speakeasy-mcp:
+        name: get-dataset
+        title: Get dataset
+        scopes: [read]
+        readOnlyHint: true
+        openWorldHint: true
+        description: |
+          Get one dataset in the caller's org with all of its items, each with
+          a download link for its audio (STT) and its text.
+  - target: $.paths['/datasets/{dataset_id}/items/upload'].post
+    update:
+      x-speakeasy-group: datasets
+      x-speakeasy-name-override: upload_item
+      x-speakeasy-mcp:
+        name: upload-dataset-item
+        title: Upload STT dataset item
+        scopes: [write]
+        readOnlyHint: false
+        destructiveHint: false
+        idempotentHint: false
+        openWorldHint: true
+        description: |
+          Upload one WAV clip (at most 25 MB and 10 minutes) with its
+          ground-truth transcript and append it to an STT dataset in the
+          caller's org.
