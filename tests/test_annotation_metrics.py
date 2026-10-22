@@ -28,6 +28,9 @@ from annotation_metrics import (
     agreement_between_judge_and_annotators_over_time_by_version_and_task,
     agreement_of_annotator_with_others_over_time,
     agreement_between_judge_and_annotators_over_time,
+    agreement_and_kappa_between_annotators,
+    agreement_and_kappa_between_judge_and_annotators,
+    agreement_and_kappa_of_annotator_with_others,
 )
 
 
@@ -571,6 +574,8 @@ def test_trend_series_evaluator_breakdown_ignores_other_versions_and_tasks():
         "bucket_end": out["overall"][-1]["bucket_end"],
         "agreement": 1.0,
         "pair_count": 1,
+        "kappa": None,
+        "kappa_type": None,
     }
     assert out["by_task"]["t1"][-1]["pair_count"] == 1
     assert out["by_task"]["t1"][-1]["agreement"] == 1.0
@@ -850,10 +855,29 @@ def _rows_timestamped_up_to(rows, timestamp_fields, bucket_end):
     return [row for _timestamp, row in timestamped_rows]
 
 
+def _agreement_and_kappa_between_annotators_checked(*arguments):
+    agreement_and_kappa = agreement_and_kappa_between_annotators(*arguments)
+    assert agreement_and_kappa[:2] == agreement_between_annotators(*arguments)
+    return agreement_and_kappa
+
+
+def _agreement_and_kappa_of_annotator_with_others_checked(*arguments):
+    agreement_and_kappa = agreement_and_kappa_of_annotator_with_others(*arguments)
+    assert agreement_and_kappa[:2] == agreement_of_annotator_with_others(*arguments)
+    return agreement_and_kappa
+
+
+def _agreement_and_kappa_between_judge_and_annotators_checked(*arguments):
+    agreement_and_kappa = agreement_and_kappa_between_judge_and_annotators(*arguments)
+    assert agreement_and_kappa[:2] == agreement_between_judge_and_annotators(*arguments)
+    return agreement_and_kappa
+
+
 def _assert_over_time_agreement_equals_agreement_on_rows_up_to_each_bucket_end(
     annotations, evaluator_runs, rating_scales, annotator_id, evaluator_id,
     requested_evaluator_ids, requested_version_ids, requested_task_ids, bucket, days, now,
 ):
+    expected_points = []
     expected_annotator_series = []
     expected_annotator_with_others_series = []
     expected_evaluator_id_to_series = {identifier: [] for identifier in requested_evaluator_ids}
@@ -868,28 +892,32 @@ def _assert_over_time_agreement_equals_agreement_on_rows_up_to_each_bucket_end(
             "bucket_end": bucket_end.strftime("%Y-%m-%d %H:%M:%S"),
         }
 
-        def point(agreement_and_pair_count):
-            agreement, pair_count = agreement_and_pair_count
-            return {**bucket_start_and_end, "agreement": agreement, "pair_count": pair_count}
+        def point(agreement_and_kappa):
+            agreement, pair_count, kappa, kappa_type = agreement_and_kappa
+            expected_points.append({
+                **bucket_start_and_end, "agreement": agreement, "pair_count": pair_count,
+                "kappa": kappa, "kappa_type": kappa_type,
+            })
+            return expected_points[-1]
 
         annotations_so_far = _rows_timestamped_up_to(annotations, ("updated_at", "created_at"), bucket_end)
         evaluator_runs_so_far = _rows_timestamped_up_to(evaluator_runs, ("completed_at", "created_at"), bucket_end)
         expected_annotator_series.append(
-            point(agreement_between_annotators(annotations_so_far, rating_scales))
+            point(_agreement_and_kappa_between_annotators_checked(annotations_so_far, rating_scales))
         )
         expected_annotator_with_others_series.append(
-            point(agreement_of_annotator_with_others(annotations_so_far, annotator_id, rating_scales))
+            point(_agreement_and_kappa_of_annotator_with_others_checked(annotations_so_far, annotator_id, rating_scales))
         )
         for identifier in requested_evaluator_ids:
             expected_evaluator_id_to_series[identifier].append(point(
-                agreement_between_judge_and_annotators(annotations_so_far, evaluator_runs_so_far, identifier, rating_scales)
+                _agreement_and_kappa_between_judge_and_annotators_checked(annotations_so_far, evaluator_runs_so_far, identifier, rating_scales)
             ))
         expected_breakdown["overall"].append(point(
-            agreement_between_judge_and_annotators(annotations_so_far, evaluator_runs_so_far, evaluator_id, rating_scales)
+            _agreement_and_kappa_between_judge_and_annotators_checked(annotations_so_far, evaluator_runs_so_far, evaluator_id, rating_scales)
         ))
         for version_id in requested_version_ids:
             expected_breakdown["by_version"][version_id].append(point(
-                agreement_between_judge_and_annotators(
+                _agreement_and_kappa_between_judge_and_annotators_checked(
                     annotations_so_far,
                     [run for run in evaluator_runs_so_far if run.get("evaluator_version_id") == version_id],
                     evaluator_id,
@@ -898,7 +926,7 @@ def _assert_over_time_agreement_equals_agreement_on_rows_up_to_each_bucket_end(
             ))
         for task_id in requested_task_ids:
             expected_breakdown["by_task"][task_id].append(point(
-                agreement_between_judge_and_annotators(
+                _agreement_and_kappa_between_judge_and_annotators_checked(
                     [annotation for annotation in annotations_so_far if annotation.get("task_id") == task_id],
                     [run for run in evaluator_runs_so_far if run.get("task_id") == task_id],
                     evaluator_id,
@@ -919,7 +947,7 @@ def _assert_over_time_agreement_equals_agreement_on_rows_up_to_each_bucket_end(
         annotations, evaluator_runs, evaluator_id, requested_version_ids, requested_task_ids,
         bucket, days, now=now, rating_scales=rating_scales,
     ) == expected_breakdown
-    return expected_annotator_series
+    return expected_annotator_series, expected_points
 
 
 def test_over_time_agreement_equals_agreement_on_rows_up_to_each_bucket_end():
@@ -939,7 +967,7 @@ def test_over_time_agreement_equals_agreement_on_rows_up_to_each_bucket_end():
                 "item_id": f"i{item_index}", "evaluator_id": evaluator_id, "annotator_id": annotator_id,
                 "value": {"value": rating}, "updated_at": updated_at,
             })
-    order_sensitive_series = _assert_over_time_agreement_equals_agreement_on_rows_up_to_each_bucket_end(
+    order_sensitive_series, _order_sensitive_points = _assert_over_time_agreement_equals_agreement_on_rows_up_to_each_bucket_end(
         order_sensitive_annotations, [], {"e5": (1, 5), "e4": (1, 4)}, "a", "e5",
         ["e5"], [], [], "week", 35, now,
     )
@@ -947,12 +975,20 @@ def test_over_time_agreement_equals_agreement_on_rows_up_to_each_bucket_end():
 
     randomizer = random.Random(20261022)
     bucket_and_days_choices = [("week", 35), ("month", 120), ("year", 800)]
-    answer_choices = [
+    mixed_answer_choices = [
         True, False, {"value": True}, {"value": False}, 1, 2, 3, 5, 2.5,
         {"value": 4}, {"score": 1}, "good", "bad", None, {"value": None},
         {"comment": "no answer"},
     ]
+    # One kind of answer per case, so most cases have a kappa to compare.
+    answer_choices_per_kind = [
+        mixed_answer_choices,
+        [True, False, {"value": True}, {"value": False}, None],
+        [1, 2, 3, 5, 2.5, {"value": 4}, {"score": 1}, {"value": None}],
+    ]
+    kappa_point_count = 0
     for _case in range(400):
+        answer_choices = randomizer.choice(answer_choices_per_kind)
         bucket, days = randomizer.choice(bucket_and_days_choices)
         item_ids = [f"i{index}" for index in range(randomizer.randint(1, 6))]
         evaluator_ids = [f"e{index}" for index in range(randomizer.randint(1, 3))]
@@ -1014,7 +1050,7 @@ def test_over_time_agreement_equals_agreement_on_rows_up_to_each_bucket_end():
                 if randomizer.random() < 0.7
             },
         ])
-        _assert_over_time_agreement_equals_agreement_on_rows_up_to_each_bucket_end(
+        _annotator_series, expected_points = _assert_over_time_agreement_equals_agreement_on_rows_up_to_each_bucket_end(
             annotations,
             evaluator_runs,
             rating_scales,
@@ -1027,3 +1063,184 @@ def test_over_time_agreement_equals_agreement_on_rows_up_to_each_bucket_end():
             days=days,
             now=now,
         )
+        kappa_point_count += sum(1 for point in expected_points if point["kappa"] is not None)
+    assert kappa_point_count > 1000
+
+
+def _annotations_from_answers(answers_per_item, evaluator_id="e1", item_prefix="i"):
+    return [
+        {
+            "item_id": f"{item_prefix}{item_index}",
+            "evaluator_id": evaluator_id,
+            "annotator_id": f"a{annotator_index}",
+            "value": {"value": answer},
+        }
+        for item_index, answers in enumerate(answers_per_item)
+        for annotator_index, answer in enumerate(answers)
+    ]
+
+
+def _judge_runs_from_answers(answers, evaluator_id="e1"):
+    return [
+        {
+            "item_id": f"i{item_index}",
+            "evaluator_id": evaluator_id,
+            "value": {"value": answer},
+            "created_at": "2024-01-01 00:00:00",
+        }
+        for item_index, answer in enumerate(answers)
+    ]
+
+
+def test_fleiss_kappa_on_pass_fail_answers():
+    annotations = _annotations_from_answers(
+        [(True, True), (True, True), (True, False), (False, False)]
+    )
+    # Chance: 5 of 8 answers are true, so (5/8)^2 + (3/8)^2 = 0.53125.
+    assert agreement_and_kappa_between_annotators(annotations) == (0.75, 4, 0.4667, "fleiss")
+    assert round((0.75 - 0.53125) / (1 - 0.53125), 4) == 0.4667
+
+
+def test_cohen_kappa_between_judge_and_annotator():
+    annotations = _annotations_from_answers([(True,), (False,), (False,), (False,)])
+    runs = _judge_runs_from_answers([True, True, False, False])
+    # Chance: 0.5 * 0.25 + 0.5 * 0.75 = 0.5.
+    assert agreement_and_kappa_between_judge_and_annotators(annotations, runs, "e1") == (
+        0.75, 4, 0.5, "cohen"
+    )
+
+
+def test_cohen_kappa_of_one_annotator_with_the_others():
+    annotations = _annotations_from_answers(
+        [(True, True), (True, True), (True, False), (False, False)]
+    )
+    # a0 said true 3 of 4 times and a1 2 of 4: chance 0.75 * 0.5 + 0.25 * 0.5.
+    assert agreement_and_kappa_of_annotator_with_others(annotations, "a0") == (
+        0.75, 4, 0.5, "cohen"
+    )
+
+
+def test_linear_weighted_cohen_kappa_on_a_one_to_five_scale():
+    annotations = _annotations_from_answers([(4,), (4,), (1,), (1,)])
+    runs = _judge_runs_from_answers([5, 4, 2, 1])
+    # Agreement: 1 - 1/4, 1, 1 - 1/4, 1, so 0.875.
+    # Chance: each judge answer 1/4 of the time, each annotator answer 1/2,
+    # and the weights of the 8 combinations add up to 4.5, so 4.5 / 8 = 0.5625.
+    assert agreement_and_kappa_between_judge_and_annotators(
+        annotations, runs, "e1", {"e1": _ONE_TO_FIVE}
+    ) == (0.875, 4, 0.7143, "linear_weighted_cohen")
+    assert round((0.875 - 0.5625) / (1 - 0.5625), 4) == 0.7143
+
+
+def test_chance_agreement_widens_the_gap_to_the_pooled_ratings():
+    # No scale: each item divides by its own gap of 1, so both disagree fully.
+    # Pooled, the ratings 1, 2, 2, 3 span 2, and chance agreement over that gap
+    # is 0.625.
+    annotations = _annotations_from_answers([(1, 2), (2, 3)])
+    assert agreement_and_kappa_between_annotators(annotations) == (
+        0.0, 2, round(-0.625 / 0.375, 4), "linear_weighted_fleiss"
+    )
+
+
+def test_combined_kappa_of_two_kinds_of_evaluator_is_mixed():
+    annotations = _annotations_from_answers([(True, True), (False, False)]) + (
+        _annotations_from_answers([(1, 5), (5, 5)], evaluator_id="e2", item_prefix="r")
+    )
+    # Chance: 0.5 for e1 and 1/16 + 9/16 for e2, each over 2 pairs.
+    combined_chance_agreement = (2 * 0.5 + 2 * 0.625) / 4
+    assert agreement_and_kappa_between_annotators(annotations, {"e2": _ONE_TO_FIVE}) == (
+        0.75,
+        4,
+        round((0.75 - combined_chance_agreement) / (1 - combined_chance_agreement), 4),
+        "mixed",
+    )
+
+
+def test_kappa_is_none_when_it_cannot_be_worked_out():
+    assert agreement_and_kappa_between_annotators([]) == (None, 0, None, None)
+    assert agreement_and_kappa_between_judge_and_annotators([], [], "e1") == (
+        None, 0, None, None
+    )
+    assert agreement_and_kappa_of_annotator_with_others([], "a0") == (None, 0, None, None)
+    every_answer_the_same = _annotations_from_answers([(True, True), (True, True)])
+    assert agreement_and_kappa_between_annotators(every_answer_the_same) == (
+        1.0, 2, None, None
+    )
+    one_evaluator_with_two_kinds = _annotations_from_answers([(True, True), (3, 4)])
+    assert agreement_and_kappa_between_annotators(
+        one_evaluator_with_two_kinds, {"e1": _ONE_TO_FIVE}
+    ) == (0.875, 2, None, None)
+
+
+def _textbook_fleiss_kappa(answers_per_item, categories, weight):
+    """Fleiss' kappa for items that all have the same number of raters, with
+    an agreement weight between two categories (1 for an exact match)."""
+    rater_count = len(answers_per_item[0])
+    item_count = len(answers_per_item)
+    category_counts_per_item = [
+        {category: list(answers).count(category) for category in categories}
+        for answers in answers_per_item
+    ]
+    observed_agreement = sum(
+        (
+            sum(
+                weight(first, second) * counts[first] * counts[second]
+                for first in categories
+                for second in categories
+            )
+            - rater_count
+        )
+        / (rater_count * (rater_count - 1))
+        for counts in category_counts_per_item
+    ) / item_count
+    category_shares = {
+        category: sum(counts[category] for counts in category_counts_per_item)
+        / (item_count * rater_count)
+        for category in categories
+    }
+    expected_agreement = sum(
+        weight(first, second) * category_shares[first] * category_shares[second]
+        for first in categories
+        for second in categories
+    )
+    if 1 - expected_agreement < 1e-12:
+        return None
+    return (observed_agreement - expected_agreement) / (1 - expected_agreement)
+
+
+@pytest.mark.parametrize(
+    "categories, weight, rating_scales, kappa_type",
+    [
+        ([True, False], lambda first, second: float(first == second), {}, "fleiss"),
+        (
+            [1, 2, 3, 4, 5],
+            lambda first, second: 1 - abs(first - second) / 4,
+            {"e1": _ONE_TO_FIVE},
+            "linear_weighted_fleiss",
+        ),
+    ],
+)
+def test_fleiss_kappa_matches_the_textbook_formula_when_every_item_has_the_same_raters(
+    categories, weight, rating_scales, kappa_type
+):
+    randomizer = random.Random(3141)
+    kappa_count = 0
+    for _case in range(300):
+        rater_count = randomizer.randint(2, 5)
+        answers_per_item = [
+            [randomizer.choice(categories) for _rater in range(rater_count)]
+            for _item in range(randomizer.randint(1, 8))
+        ]
+        _agreement, _pair_count, kappa, returned_kappa_type = (
+            agreement_and_kappa_between_annotators(
+                _annotations_from_answers(answers_per_item), rating_scales
+            )
+        )
+        expected_kappa = _textbook_fleiss_kappa(answers_per_item, categories, weight)
+        if expected_kappa is None:
+            assert (kappa, returned_kappa_type) == (None, None)
+            continue
+        kappa_count += 1
+        assert kappa == pytest.approx(expected_kappa, abs=5.1e-5)
+        assert returned_kappa_type == kappa_type
+    assert kappa_count > 250

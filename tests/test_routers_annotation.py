@@ -3634,6 +3634,155 @@ def test_rating_agreement_divides_by_the_rubric_width(client):
     public = client.get(f"/public/annotation-eval/{token}").json()
     assert public["human_agreement"]["evaluators"][0]["agreement"] == 0.625
 
+
+def test_kappa_sits_beside_every_agreement_over_many_items(client):
+    """Two annotators and a judge answer pass/fail on four items. Annotators
+    a and b: (T,T), (T,T), (T,F), (F,F), Fleiss' kappa 0.4667. Judge T, T,
+    F, F against both: agreement 0.875, chance 0.5, Cohen's kappa 0.75. Each
+    annotator against the other: Cohen's kappa 0.5."""
+    import db as db_mod
+    from annotation_eval_runner import ANNOTATION_EVAL_JOB_TYPE
+
+    auth = _signup(client)
+    h = auth["headers"]
+    ev = client.post(
+        "/evaluators",
+        json={
+            "name": f"binary-{uuid.uuid4().hex[:6]}",
+            "evaluator_type": "llm",
+            "output_type": "binary",
+            "version": {
+                "judge_model": "openai/gpt-4",
+                "system_prompt": "Judge it",
+                "output_config": {
+                    "scale": [
+                        {"value": True, "name": "Pass"},
+                        {"value": False, "name": "Fail"},
+                    ]
+                },
+            },
+        },
+        headers=h,
+    ).json()
+    task_uuid = client.post(
+        "/annotation-tasks",
+        json={
+            "name": f"t-{uuid.uuid4().hex[:6]}",
+            "type": "llm",
+            "evaluator_ids": [ev["uuid"]],
+        },
+        headers=h,
+    ).json()["uuid"]
+    item_ids = client.post(
+        f"/annotation-tasks/{task_uuid}/items",
+        json={"items": [{"payload": llm_item_payload(f"i{index}")} for index in range(4)]},
+        headers=h,
+    ).json()["item_ids"]
+
+    for name, answers in (("rater-a", (True, True, True, False)), ("rater-b", (True, True, False, False))):
+        annotator = client.post(
+            "/annotators", json={"name": f"{name}-{uuid.uuid4().hex[:6]}"}, headers=h
+        ).json()
+        job = client.post(
+            f"/annotation-tasks/{task_uuid}/jobs",
+            json={"annotator_ids": [annotator["uuid"]], "item_ids": item_ids},
+            headers=h,
+        ).json()["jobs"][0]
+        for item_id, answer in zip(item_ids, answers):
+            assert client.post(
+                f"/public/annotation-jobs/{job['public_token']}/annotations",
+                json={
+                    "item_id": item_id,
+                    "annotations": [{"evaluator_id": ev["uuid"], "value": {"value": answer}}],
+                },
+            ).status_code == 200
+
+    org_uuid = db_mod.get_personal_org_for_user(auth["user_uuid"])["uuid"]
+    eval_job = db_mod.create_job(
+        job_type=ANNOTATION_EVAL_JOB_TYPE,
+        org_uuid=org_uuid,
+        user_id=auth["user_uuid"],
+        status="done",
+        details={"task_id": task_uuid},
+    )
+    db_mod.create_evaluator_runs(
+        [
+            {
+                "job_id": eval_job,
+                "item_id": item_id,
+                "evaluator_id": ev["uuid"],
+                "evaluator_version_id": ev["version_uuid"],
+                "status": "completed",
+                "value": {"value": answer},
+            }
+            for item_id, answer in zip(item_ids, (True, True, False, False))
+        ]
+    )
+
+    fleiss = {"kappa": 0.4667, "kappa_type": "fleiss"}
+    judge_cohen = {"kappa": 0.75, "kappa_type": "cohen"}
+    annotator_cohen = {"kappa": 0.5, "kappa_type": "cohen"}
+
+    def kappa_of(block):
+        return {"kappa": block["kappa"], "kappa_type": block["kappa_type"]}
+
+    def assert_current_and_latest_point(block, expected):
+        assert kappa_of(block) == expected
+        assert kappa_of(block["series"][-1]) == expected
+        assert all({"kappa", "kappa_type"} <= set(point) for point in block["series"])
+
+    agreement = client.get(f"/annotation-tasks/{task_uuid}/agreement", headers=h).json()
+    assert agreement["human_human"]["current"] == 0.75
+    assert_current_and_latest_point(agreement["human_human"], fleiss)
+    assert agreement["evaluators"][0]["current"] == 0.875
+    assert_current_and_latest_point(agreement["evaluators"][0], judge_cohen)
+
+    for params in ({}, {"task_id": task_uuid}):
+        trend = client.get("/annotation-agreement/trend", params=params, headers=h).json()
+        assert_current_and_latest_point(trend["human_human"], fleiss)
+        assert_current_and_latest_point(trend["evaluators"][0], judge_cohen)
+
+    evaluator_trend = client.get(
+        f"/annotation-agreement/evaluator/{ev['uuid']}/trend", headers=h
+    ).json()
+    assert_current_and_latest_point(evaluator_trend["overall"], judge_cohen)
+    assert_current_and_latest_point(evaluator_trend["versions"][0], judge_cohen)
+    assert_current_and_latest_point(evaluator_trend["tasks"][0], judge_cohen)
+
+    run_detail = client.get(
+        f"/annotation-tasks/{task_uuid}/evaluator-runs/{eval_job}", headers=h
+    ).json()
+    assert kappa_of(run_detail["human_agreement"]["evaluators"][0]) == judge_cohen
+    assert len(run_detail["human_agreement"]["items"]) == 4
+    assert all("kappa" not in item for item in run_detail["human_agreement"]["items"])
+    assert all(
+        "kappa" not in evaluator_agreement
+        for item in run_detail["human_agreement"]["items"]
+        for evaluator_agreement in item["evaluators"]
+    )
+    token = uuid.uuid4().hex
+    db_mod.update_job_visibility(eval_job, True, token)
+    public = client.get(f"/public/annotation-eval/{token}").json()
+    assert kappa_of(public["human_agreement"]["evaluators"][0]) == judge_cohen
+
+    listed = client.get("/annotators", headers=h).json()
+    assert [kappa_of(annotator) for annotator in listed] == [annotator_cohen, annotator_cohen]
+    detail = client.get(f"/annotators/{listed[0]['uuid']}", headers=h).json()
+    assert kappa_of(detail["stats"]) == annotator_cohen
+    assert kappa_of(detail["trend"]["series"][-1]) == annotator_cohen
+
+    # One item cannot show chance, so per-item numbers carry no kappa.
+    task_items = client.get(f"/annotation-tasks/{task_uuid}", headers=h).json()["items"]
+    assert len(task_items) == 4
+    assert all("kappa" not in item["agreement"]["human_human"] for item in task_items)
+    assert all(
+        "kappa" not in evaluator_agreement
+        for item in task_items
+        for evaluator_agreement in item["agreement"]["evaluators"]
+    )
+    summary_rows = client.get(f"/annotation-tasks/{task_uuid}/summary", headers=h).json()["rows"]
+    assert summary_rows and all("kappa" not in row for row in summary_rows)
+
 # ---------------------------------------------------------------------------
 # Typed item payloads
 # ---------------------------------------------------------------------------
