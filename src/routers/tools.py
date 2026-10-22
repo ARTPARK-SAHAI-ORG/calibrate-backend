@@ -4,6 +4,7 @@ from pydantic import BaseModel, Field, model_validator
 
 from db import create_tool, get_tool, get_all_tools, update_tool, delete_tool, ensure_name_unique
 from auth_utils import get_current_org, OrgContext
+from utils import public_url_error
 
 
 router = APIRouter(prefix="/tools", tags=["tools"])
@@ -61,6 +62,11 @@ def _validate_tool_config_params(config: Optional[Dict[str, Any]]) -> None:
         return
     _reject_duplicate_param_ids(config.get("parameters"))
     webhook = config.get("webhook")
+    if config.get("type") == "webhook" or webhook is not None:
+        url = webhook.get("url") if isinstance(webhook, dict) else None
+        error = public_url_error(url)
+        if error:
+            raise ValueError(f"webhook url {error}")
     if isinstance(webhook, dict):
         _reject_duplicate_param_ids(webhook.get("queryParameters"))
         body = webhook.get("body")

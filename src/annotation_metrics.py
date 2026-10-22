@@ -134,17 +134,19 @@ def _mean_agreement_between_answers(
     return (agreement_total / pair_count, pair_count)
 
 
-def _annotator_answers_per_item_and_evaluator(
-    annotations: Iterable[Dict[str, Any]],
-    only_evaluator_id: Optional[str] = None,
-) -> Dict[Tuple[str, Optional[str]], Dict[str, Any]]:
-    """`{(item_id, evaluator_id): {annotator_id: answer}}`, keeping each
-    annotator's latest answer. Annotations arrive sorted by `updated_at`
-    ascending, so a later one simply overwrites. Only annotations for
-    `only_evaluator_id` are kept when it is given."""
+def _record_annotator_answers(
     item_and_evaluator_to_annotator_answers: Dict[
         Tuple[str, Optional[str]], Dict[str, Any]
-    ] = {}
+    ],
+    annotations: Iterable[Dict[str, Any]],
+    only_evaluator_id: Optional[str] = None,
+) -> Dict[Tuple[str, Optional[str]], None]:
+    """Add each annotator's answer to `{(item_id, evaluator_id): {annotator_id:
+    answer}}`, a later annotation overwriting an earlier one, and return the
+    `(item_id, evaluator_id)` pairs that got an answer, in the order first
+    reached. Only annotations for `only_evaluator_id` are kept when it is
+    given."""
+    item_and_evaluator_pairs_answered: Dict[Tuple[str, Optional[str]], None] = {}
     for annotation in annotations:
         evaluator_id = annotation.get("evaluator_id")
         if only_evaluator_id is not None and evaluator_id != only_evaluator_id:
@@ -159,6 +161,24 @@ def _annotator_answers_per_item_and_evaluator(
         item_and_evaluator_to_annotator_answers.setdefault(item_and_evaluator, {})[
             annotator_id
         ] = answer
+        item_and_evaluator_pairs_answered[item_and_evaluator] = None
+    return item_and_evaluator_pairs_answered
+
+
+def _annotator_answers_per_item_and_evaluator(
+    annotations: Iterable[Dict[str, Any]],
+    only_evaluator_id: Optional[str] = None,
+) -> Dict[Tuple[str, Optional[str]], Dict[str, Any]]:
+    """`{(item_id, evaluator_id): {annotator_id: answer}}`, keeping each
+    annotator's latest answer. Annotations arrive sorted by `updated_at`
+    ascending, so a later one simply overwrites. Only annotations for
+    `only_evaluator_id` are kept when it is given."""
+    item_and_evaluator_to_annotator_answers: Dict[
+        Tuple[str, Optional[str]], Dict[str, Any]
+    ] = {}
+    _record_annotator_answers(
+        item_and_evaluator_to_annotator_answers, annotations, only_evaluator_id
+    )
     return item_and_evaluator_to_annotator_answers
 
 
@@ -318,22 +338,20 @@ _ANNOTATION_TIMESTAMP_FIELDS = ("updated_at", "created_at")
 _EVALUATOR_RUN_TIMESTAMP_FIELDS = ("completed_at", "created_at")
 
 
-def _rows_up_to_each_time_bucket(
+def _rows_new_in_each_time_bucket(
     bucket: str,
     days: int,
     now: Optional[datetime],
     row_streams: Sequence[Tuple[Iterable[Dict[str, Any]], Tuple[str, ...]]],
-) -> Iterator[
-    Tuple[Dict[str, str], List[List[Dict[str, Any]]], List[List[Dict[str, Any]]]]
-]:
+) -> Iterator[Tuple[Dict[str, str], List[List[Dict[str, Any]]]]]:
     """Walk the time buckets once. For each bucket, yield its start and end,
-    every stream's rows timestamped up to the bucket's end, and the rows that
-    bucket added.
+    and every stream's rows timestamped after the previous bucket's end and up
+    to this bucket's end, oldest first. The first bucket also takes every row
+    older than it.
 
     Each stream is `(rows, timestamp_fields)`; a row's timestamp is the first of
     those fields it carries, and a row with none, or one that will not parse,
-    is dropped. The lists of rows so far are reused from one bucket to the
-    next, so read them before asking for the next bucket.
+    is dropped.
     """
     rows_sorted_by_time_per_stream: List[List[Tuple[datetime, Dict[str, Any]]]] = []
     for rows, timestamp_fields in row_streams:
@@ -352,9 +370,6 @@ def _rows_up_to_each_time_bucket(
         rows_sorted_by_time_per_stream.append(timestamped_rows)
 
     next_row_index_per_stream = [0] * len(rows_sorted_by_time_per_stream)
-    rows_so_far_per_stream: List[List[Dict[str, Any]]] = [
-        [] for _ in rows_sorted_by_time_per_stream
-    ]
     for bucket_start, bucket_end in build_time_buckets(bucket, days, now=now):
         rows_new_in_bucket_per_stream: List[List[Dict[str, Any]]] = []
         for stream_index, timestamped_rows in enumerate(rows_sorted_by_time_per_stream):
@@ -368,28 +383,29 @@ def _rows_up_to_each_time_bucket(
                     timestamped_rows[next_row_index_per_stream[stream_index]][1]
                 )
                 next_row_index_per_stream[stream_index] += 1
-            rows_so_far_per_stream[stream_index].extend(rows_new_in_bucket)
             rows_new_in_bucket_per_stream.append(rows_new_in_bucket)
         yield (
             {
                 "bucket_start": _format_timestamp(bucket_start),
                 "bucket_end": _format_timestamp(bucket_end),
             },
-            rows_so_far_per_stream,
             rows_new_in_bucket_per_stream,
         )
 
 
-def _latest_judge_answer_per_item_and_evaluator(
-    evaluator_runs: Iterable[Dict[str, Any]],
-    only_evaluator_id: Optional[str] = None,
-) -> Dict[Tuple[str, str], Tuple[Any, str, Optional[str]]]:
-    """The most recent judge score per (item_id, evaluator_id), as
-    `{(item_id, evaluator_id): (answer, scored_at, evaluator_version_id)}`.
-    Only scores from `only_evaluator_id` are kept when it is given."""
+def _record_latest_judge_answers(
     item_and_evaluator_to_latest_judge_answer: Dict[
         Tuple[str, str], Tuple[Any, str, Optional[str]]
-    ] = {}
+    ],
+    evaluator_runs: Iterable[Dict[str, Any]],
+    only_evaluator_id: Optional[str] = None,
+) -> Dict[Tuple[str, str], None]:
+    """Add judge scores to `{(item_id, evaluator_id): (answer, scored_at,
+    evaluator_version_id)}`, a score replacing the kept one only when scored
+    strictly later, and return the `(item_id, evaluator_id)` pairs whose kept
+    score changed. Only scores from `only_evaluator_id` are kept when it is
+    given."""
+    item_and_evaluator_pairs_rescored: Dict[Tuple[str, str], None] = {}
     for run in evaluator_runs:
         evaluator_id = run.get("evaluator_id")
         if not evaluator_id:
@@ -411,6 +427,23 @@ def _latest_judge_answer_per_item_and_evaluator(
                 scored_at,
                 run.get("evaluator_version_id"),
             )
+            item_and_evaluator_pairs_rescored[item_and_evaluator] = None
+    return item_and_evaluator_pairs_rescored
+
+
+def _latest_judge_answer_per_item_and_evaluator(
+    evaluator_runs: Iterable[Dict[str, Any]],
+    only_evaluator_id: Optional[str] = None,
+) -> Dict[Tuple[str, str], Tuple[Any, str, Optional[str]]]:
+    """The most recent judge score per (item_id, evaluator_id), as
+    `{(item_id, evaluator_id): (answer, scored_at, evaluator_version_id)}`.
+    Only scores from `only_evaluator_id` are kept when it is given."""
+    item_and_evaluator_to_latest_judge_answer: Dict[
+        Tuple[str, str], Tuple[Any, str, Optional[str]]
+    ] = {}
+    _record_latest_judge_answers(
+        item_and_evaluator_to_latest_judge_answer, evaluator_runs, only_evaluator_id
+    )
     return item_and_evaluator_to_latest_judge_answer
 
 
@@ -568,16 +601,42 @@ def has_answers_to_compare(
     evaluator_ids: Iterable[str],
 ) -> bool:
     """True if any item has two answers that can be compared: from two
-    annotators, or from an annotator and one of the given evaluators' judges."""
-    annotation_list = list(annotations)
+    annotators, or from an annotator and one of the given evaluators' judges.
+    Two answers can be compared when they are of the same known kind."""
+    item_and_evaluator_to_annotator_answer_kinds: Dict[
+        Tuple[str, Optional[str]], set
+    ] = {}
+    for (
+        item_and_evaluator,
+        annotator_id_to_answer,
+    ) in _annotator_answers_per_item_and_evaluator(annotations).items():
+        annotator_answer_kinds = set()
+        for answer in annotator_id_to_answer.values():
+            answer_kind = _answer_kind(answer)
+            if answer_kind is None:
+                continue
+            if answer_kind in annotator_answer_kinds:
+                return True
+            annotator_answer_kinds.add(answer_kind)
+        item_and_evaluator_to_annotator_answer_kinds[item_and_evaluator] = (
+            annotator_answer_kinds
+        )
+
     evaluator_run_list = list(evaluator_runs)
-    if agreement_between_annotators(annotation_list)[1] > 0:
-        return True
     for evaluator_id in evaluator_ids:
-        if agreement_between_judge_and_annotators(
-            annotation_list, evaluator_run_list, evaluator_id
-        )[1] > 0:
-            return True
+        for item_and_evaluator, (
+            judge_answer,
+            _scored_at,
+            _judge_version_id,
+        ) in _latest_judge_answer_per_item_and_evaluator(
+            evaluator_run_list, evaluator_id
+        ).items():
+            if _answer_kind(
+                judge_answer
+            ) in item_and_evaluator_to_annotator_answer_kinds.get(
+                item_and_evaluator, ()
+            ):
+                return True
     return False
 
 
@@ -626,6 +685,169 @@ def agreement_on_item(
     }
 
 
+def _mean_of_agreement_totals(
+    agreement_totals_and_pair_counts: Iterable[Tuple[float, int]],
+) -> Tuple[Optional[float], int]:
+    """Rounded mean agreement from `(agreement_total, pair_count)` parts, and
+    the pair count it covers, or (None, 0) when no pair counts."""
+    # Added one at a time, in the order agreement_between_annotators and its
+    # siblings add them: another order, or subtracting from a running total,
+    # can change the rounded result.
+    agreement_total = 0.0
+    pair_count_total = 0
+    for part_agreement_total, part_pair_count in agreement_totals_and_pair_counts:
+        agreement_total += part_agreement_total
+        pair_count_total += part_pair_count
+    if pair_count_total == 0:
+        return (None, 0)
+    return (_round_agreement(agreement_total / pair_count_total), pair_count_total)
+
+
+class _AgreementBetweenAnnotatorsSoFar:
+    """`agreement_between_annotators` over every annotation added so far,
+    rescoring only the (item, evaluator) pairs that new annotations answer."""
+
+    def __init__(self, rating_scales: RatingScales) -> None:
+        self.rating_scales = rating_scales
+        self.item_and_evaluator_to_annotator_answers: Dict[
+            Tuple[str, Optional[str]], Dict[str, Any]
+        ] = {}
+        self.item_and_evaluator_to_agreement_total_and_pair_count: Dict[
+            Tuple[str, Optional[str]], Tuple[float, int]
+        ] = {}
+
+    def add_annotations(self, annotations: Iterable[Dict[str, Any]]) -> None:
+        for item_and_evaluator in _record_annotator_answers(
+            self.item_and_evaluator_to_annotator_answers, annotations
+        ):
+            agreement_on_this_item, pair_count_on_this_item = (
+                _mean_agreement_between_answers(
+                    list(
+                        self.item_and_evaluator_to_annotator_answers[
+                            item_and_evaluator
+                        ].values()
+                    ),
+                    self.rating_scales.get(item_and_evaluator[1]),
+                )
+            )
+            self.item_and_evaluator_to_agreement_total_and_pair_count[
+                item_and_evaluator
+            ] = (agreement_on_this_item * pair_count_on_this_item, pair_count_on_this_item)
+
+    def agreement(self) -> Tuple[Optional[float], int]:
+        return _mean_of_agreement_totals(
+            self.item_and_evaluator_to_agreement_total_and_pair_count[
+                item_and_evaluator
+            ]
+            for item_and_evaluator in self.item_and_evaluator_to_annotator_answers
+        )
+
+
+class _AgreementOfAnnotatorWithOthersSoFar:
+    """`agreement_of_annotator_with_others` over every annotation added so
+    far, rescoring only the (item, evaluator) pairs that new annotations
+    answer."""
+
+    def __init__(self, annotator_id: str, rating_scales: RatingScales) -> None:
+        self.annotator_id = annotator_id
+        self.rating_scales = rating_scales
+        self.item_and_evaluator_to_annotator_answers: Dict[
+            Tuple[str, Optional[str]], Dict[str, Any]
+        ] = {}
+        self.item_and_evaluator_to_agreements_with_others: Dict[
+            Tuple[str, Optional[str]], List[float]
+        ] = {}
+
+    def add_annotations(self, annotations: Iterable[Dict[str, Any]]) -> None:
+        for item_and_evaluator in _record_annotator_answers(
+            self.item_and_evaluator_to_annotator_answers, annotations
+        ):
+            self.item_and_evaluator_to_agreements_with_others[item_and_evaluator] = (
+                _agreements_of_annotator_with_others_on_item(
+                    self.annotator_id,
+                    self.item_and_evaluator_to_annotator_answers[item_and_evaluator],
+                    self.rating_scales.get(item_and_evaluator[1]),
+                )
+            )
+
+    def agreement(self) -> Tuple[Optional[float], int]:
+        return _mean_of_agreement_totals(
+            (agreement, 1)
+            for item_and_evaluator in self.item_and_evaluator_to_annotator_answers
+            for agreement in self.item_and_evaluator_to_agreements_with_others[
+                item_and_evaluator
+            ]
+        )
+
+
+class _AgreementBetweenJudgeAndAnnotatorsSoFar:
+    """`agreement_between_judge_and_annotators` over every row added so far,
+    rescoring only the (item, evaluator) pairs that new rows answer or
+    rescore."""
+
+    def __init__(self, evaluator_id: str, rating_scales: RatingScales) -> None:
+        self.evaluator_id = evaluator_id
+        self.rating_scales = rating_scales
+        self.item_and_evaluator_to_annotator_answers: Dict[
+            Tuple[str, Optional[str]], Dict[str, Any]
+        ] = {}
+        self.item_and_evaluator_to_judge_answer: Dict[
+            Tuple[str, str], Tuple[Any, str, Optional[str]]
+        ] = {}
+        self.item_and_evaluator_to_agreement_total_and_pair_count: Dict[
+            Tuple[str, str], Tuple[float, int]
+        ] = {}
+
+    def add_rows(
+        self,
+        annotations: Iterable[Dict[str, Any]],
+        evaluator_runs: Iterable[Dict[str, Any]],
+    ) -> None:
+        item_and_evaluator_pairs_changed = {
+            **_record_annotator_answers(
+                self.item_and_evaluator_to_annotator_answers,
+                annotations,
+                only_evaluator_id=self.evaluator_id,
+            ),
+            **_record_latest_judge_answers(
+                self.item_and_evaluator_to_judge_answer,
+                evaluator_runs,
+                only_evaluator_id=self.evaluator_id,
+            ),
+        }
+        for item_and_evaluator in item_and_evaluator_pairs_changed:
+            judge_answer_scored_at_and_version_id = (
+                self.item_and_evaluator_to_judge_answer.get(item_and_evaluator)
+            )
+            annotator_id_to_answer = self.item_and_evaluator_to_annotator_answers.get(
+                item_and_evaluator
+            )
+            if judge_answer_scored_at_and_version_id is None or not annotator_id_to_answer:
+                continue
+            judge_answer, _scored_at, judge_version_id = (
+                judge_answer_scored_at_and_version_id
+            )
+            self.item_and_evaluator_to_agreement_total_and_pair_count[
+                item_and_evaluator
+            ] = judge_and_annotators_agreement_on_item(
+                judge_answer,
+                annotator_id_to_answer.values(),
+                self.rating_scales.get(
+                    judge_version_id, self.rating_scales.get(self.evaluator_id)
+                ),
+            )
+
+    def agreement(self) -> Tuple[Optional[float], int]:
+        return _mean_of_agreement_totals(
+            self.item_and_evaluator_to_agreement_total_and_pair_count[
+                item_and_evaluator
+            ]
+            for item_and_evaluator in self.item_and_evaluator_to_judge_answer
+            if item_and_evaluator
+            in self.item_and_evaluator_to_agreement_total_and_pair_count
+        )
+
+
 def agreement_between_judge_and_annotators_over_time(
     annotations: List[Dict[str, Any]],
     evaluator_runs: List[Dict[str, Any]],
@@ -644,14 +866,17 @@ def agreement_between_judge_and_annotators_over_time(
     if not evaluator_ids:
         return {}
 
+    evaluator_id_to_agreement_so_far = {
+        evaluator_id: _AgreementBetweenJudgeAndAnnotatorsSoFar(evaluator_id, rating_scales)
+        for evaluator_id in evaluator_ids
+    }
     evaluator_id_to_agreement_over_time: Dict[str, List[Dict[str, Any]]] = {
         evaluator_id: [] for evaluator_id in evaluator_ids
     }
     for (
         bucket_start_and_end,
-        (annotations_so_far, evaluator_runs_so_far),
-        _rows_new_in_bucket,
-    ) in _rows_up_to_each_time_bucket(
+        (annotations_new_in_bucket, evaluator_runs_new_in_bucket),
+    ) in _rows_new_in_each_time_bucket(
         bucket,
         days,
         now,
@@ -660,10 +885,10 @@ def agreement_between_judge_and_annotators_over_time(
             (evaluator_runs, _EVALUATOR_RUN_TIMESTAMP_FIELDS),
         ],
     ):
+        for agreement_so_far in evaluator_id_to_agreement_so_far.values():
+            agreement_so_far.add_rows(annotations_new_in_bucket, evaluator_runs_new_in_bucket)
         for evaluator_id in evaluator_ids:
-            agreement, pair_count = agreement_between_judge_and_annotators(
-                annotations_so_far, evaluator_runs_so_far, evaluator_id, rating_scales
-            )
+            agreement, pair_count = evaluator_id_to_agreement_so_far[evaluator_id].agreement()
             evaluator_id_to_agreement_over_time[evaluator_id].append(
                 {**bucket_start_and_end, "agreement": agreement, "pair_count": pair_count}
             )
@@ -695,19 +920,16 @@ def agreement_between_judge_and_annotators_over_time_by_version_and_task(
             "by_task":    {task_id:    [...]},
         }
     """
-    wanted_version_ids = set(version_ids)
-    wanted_task_ids = set(task_ids)
-
-    # Kept up to date bucket by bucket, so each agreement call reads an
-    # already-filtered list instead of filtering every row again.
-    task_id_to_annotations_so_far: Dict[str, List[Dict[str, Any]]] = {
-        task_id: [] for task_id in task_ids
+    overall_agreement_so_far = _AgreementBetweenJudgeAndAnnotatorsSoFar(
+        evaluator_id, rating_scales
+    )
+    version_id_to_agreement_so_far = {
+        version_id: _AgreementBetweenJudgeAndAnnotatorsSoFar(evaluator_id, rating_scales)
+        for version_id in version_ids
     }
-    version_id_to_evaluator_runs_so_far: Dict[str, List[Dict[str, Any]]] = {
-        version_id: [] for version_id in version_ids
-    }
-    task_id_to_evaluator_runs_so_far: Dict[str, List[Dict[str, Any]]] = {
-        task_id: [] for task_id in task_ids
+    task_id_to_agreement_so_far = {
+        task_id: _AgreementBetweenJudgeAndAnnotatorsSoFar(evaluator_id, rating_scales)
+        for task_id in task_ids
     }
 
     overall_agreement_over_time: List[Dict[str, Any]] = []
@@ -720,9 +942,8 @@ def agreement_between_judge_and_annotators_over_time_by_version_and_task(
 
     for (
         bucket_start_and_end,
-        (all_annotations_so_far, all_evaluator_runs_so_far),
         (annotations_new_in_bucket, evaluator_runs_new_in_bucket),
-    ) in _rows_up_to_each_time_bucket(
+    ) in _rows_new_in_each_time_bucket(
         bucket,
         days,
         now,
@@ -731,44 +952,39 @@ def agreement_between_judge_and_annotators_over_time_by_version_and_task(
             (evaluator_runs, _EVALUATOR_RUN_TIMESTAMP_FIELDS),
         ],
     ):
-        for annotation in annotations_new_in_bucket:
-            task_id = annotation.get("task_id")
-            if task_id in wanted_task_ids:
-                task_id_to_annotations_so_far[task_id].append(annotation)
-
-        for run in evaluator_runs_new_in_bucket:
-            version_id = run.get("evaluator_version_id")
-            if version_id in wanted_version_ids:
-                version_id_to_evaluator_runs_so_far[version_id].append(run)
-            task_id = run.get("task_id")
-            if task_id in wanted_task_ids:
-                task_id_to_evaluator_runs_so_far[task_id].append(run)
-
-        agreement, pair_count = agreement_between_judge_and_annotators(
-            all_annotations_so_far, all_evaluator_runs_so_far, evaluator_id, rating_scales
+        overall_agreement_so_far.add_rows(
+            annotations_new_in_bucket, evaluator_runs_new_in_bucket
         )
+        for version_id, agreement_so_far in version_id_to_agreement_so_far.items():
+            agreement_so_far.add_rows(
+                annotations_new_in_bucket,
+                [
+                    run
+                    for run in evaluator_runs_new_in_bucket
+                    if run.get("evaluator_version_id") == version_id
+                ],
+            )
+        for task_id, agreement_so_far in task_id_to_agreement_so_far.items():
+            agreement_so_far.add_rows(
+                [
+                    annotation
+                    for annotation in annotations_new_in_bucket
+                    if annotation.get("task_id") == task_id
+                ],
+                [run for run in evaluator_runs_new_in_bucket if run.get("task_id") == task_id],
+            )
+
+        agreement, pair_count = overall_agreement_so_far.agreement()
         overall_agreement_over_time.append(
             {**bucket_start_and_end, "agreement": agreement, "pair_count": pair_count}
         )
-
         for version_id in version_ids:
-            agreement, pair_count = agreement_between_judge_and_annotators(
-                all_annotations_so_far,
-                version_id_to_evaluator_runs_so_far[version_id],
-                evaluator_id,
-                rating_scales,
-            )
+            agreement, pair_count = version_id_to_agreement_so_far[version_id].agreement()
             version_id_to_agreement_over_time[version_id].append(
                 {**bucket_start_and_end, "agreement": agreement, "pair_count": pair_count}
             )
-
         for task_id in task_ids:
-            agreement, pair_count = agreement_between_judge_and_annotators(
-                task_id_to_annotations_so_far[task_id],
-                task_id_to_evaluator_runs_so_far[task_id],
-                evaluator_id,
-                rating_scales,
-            )
+            agreement, pair_count = task_id_to_agreement_so_far[task_id].agreement()
             task_id_to_agreement_over_time[task_id].append(
                 {**bucket_start_and_end, "agreement": agreement, "pair_count": pair_count}
             )
@@ -794,25 +1010,39 @@ def agreement_of_annotator_with_others(
         (_item_id, evaluator_id),
         annotator_id_to_answer,
     ) in _annotator_answers_per_item_and_evaluator(annotations).items():
-        if annotator_id not in annotator_id_to_answer or len(annotator_id_to_answer) < 2:
-            continue
-        this_annotator_answer = annotator_id_to_answer[annotator_id]
-        largest_possible_rating_gap = _largest_possible_rating_gap(
-            annotator_id_to_answer.values(), rating_scales.get(evaluator_id)
-        )
-        for other_annotator_id, other_annotator_answer in annotator_id_to_answer.items():
-            if other_annotator_id == annotator_id:
-                continue
-            agreement = _agreement_between_two_answers(
-                this_annotator_answer, other_annotator_answer, largest_possible_rating_gap
-            )
-            if agreement is None:
-                continue
+        for agreement in _agreements_of_annotator_with_others_on_item(
+            annotator_id, annotator_id_to_answer, rating_scales.get(evaluator_id)
+        ):
             agreement_total += agreement
             pair_count_total += 1
     if pair_count_total == 0:
         return (None, 0)
     return (_round_agreement(agreement_total / pair_count_total), pair_count_total)
+
+
+def _agreements_of_annotator_with_others_on_item(
+    annotator_id: str,
+    annotator_id_to_answer: Dict[str, Any],
+    rating_scale: Optional[RatingScale],
+) -> List[float]:
+    """Agreement between `annotator_id` and each other annotator on one item
+    for one evaluator, skipping answers that cannot be compared."""
+    if annotator_id not in annotator_id_to_answer or len(annotator_id_to_answer) < 2:
+        return []
+    this_annotator_answer = annotator_id_to_answer[annotator_id]
+    largest_possible_rating_gap = _largest_possible_rating_gap(
+        annotator_id_to_answer.values(), rating_scale
+    )
+    agreements: List[float] = []
+    for other_annotator_id, other_annotator_answer in annotator_id_to_answer.items():
+        if other_annotator_id == annotator_id:
+            continue
+        agreement = _agreement_between_two_answers(
+            this_annotator_answer, other_annotator_answer, largest_possible_rating_gap
+        )
+        if agreement is not None:
+            agreements.append(agreement)
+    return agreements
 
 
 def agreement_between_annotators_over_time(
@@ -826,17 +1056,13 @@ def agreement_between_annotators_over_time(
     every annotation updated by then. Once an item has enough annotators,
     every later bucket keeps counting it, so the trend reads as "agreement so
     far"."""
+    agreement_so_far = _AgreementBetweenAnnotatorsSoFar(rating_scales)
     agreement_over_time: List[Dict[str, Any]] = []
-    for (
-        bucket_start_and_end,
-        (annotations_so_far,),
-        _rows_new_in_bucket,
-    ) in _rows_up_to_each_time_bucket(
+    for bucket_start_and_end, (annotations_new_in_bucket,) in _rows_new_in_each_time_bucket(
         bucket, days, now, [(annotations, _ANNOTATION_TIMESTAMP_FIELDS)]
     ):
-        agreement, pair_count = agreement_between_annotators(
-            annotations_so_far, rating_scales
-        )
+        agreement_so_far.add_annotations(annotations_new_in_bucket)
+        agreement, pair_count = agreement_so_far.agreement()
         agreement_over_time.append(
             {**bucket_start_and_end, "agreement": agreement, "pair_count": pair_count}
         )
@@ -853,17 +1079,13 @@ def agreement_of_annotator_with_others_over_time(
 ) -> List[Dict[str, Any]]:
     """`agreement_of_annotator_with_others` at the end of each time bucket,
     counting every annotation updated by then."""
+    agreement_so_far = _AgreementOfAnnotatorWithOthersSoFar(annotator_id, rating_scales)
     agreement_over_time: List[Dict[str, Any]] = []
-    for (
-        bucket_start_and_end,
-        (annotations_so_far,),
-        _rows_new_in_bucket,
-    ) in _rows_up_to_each_time_bucket(
+    for bucket_start_and_end, (annotations_new_in_bucket,) in _rows_new_in_each_time_bucket(
         bucket, days, now, [(annotations, _ANNOTATION_TIMESTAMP_FIELDS)]
     ):
-        agreement, pair_count = agreement_of_annotator_with_others(
-            annotations_so_far, annotator_id, rating_scales
-        )
+        agreement_so_far.add_annotations(annotations_new_in_bucket)
+        agreement, pair_count = agreement_so_far.agreement()
         agreement_over_time.append(
             {**bucket_start_and_end, "agreement": agreement, "pair_count": pair_count}
         )
