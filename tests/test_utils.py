@@ -136,11 +136,35 @@ def test_build_tool_configs_structured_and_webhook():
             "config": {"parameters": []},
         },
     ]
-    out = build_tool_configs(tools)
+    with patch(
+        "utils.socket.getaddrinfo", return_value=[(2, 1, 6, "", ("93.184.215.14", 0))]
+    ):
+        out = build_tool_configs(tools)
     assert out[0]["type"] == "structured_output"
     assert out[1]["type"] == "webhook"
     assert out[1]["webhook"] == {"url": "https://x"}
     assert out[2]["type"] == "structured_output"
+
+
+def test_build_tool_configs_refuses_a_saved_internal_webhook_url():
+    """A tool saved before the save-time check existed must still not reach
+    the server's own network when a run starts."""
+    from fastapi import HTTPException
+
+    tools = [
+        {
+            "name": "meta",
+            "description": "d",
+            "config": {
+                "type": "webhook",
+                "webhook": {"url": "http://169.254.169.254/latest/meta-data/"},
+            },
+        }
+    ]
+    with pytest.raises(HTTPException) as exc:
+        build_tool_configs(tools)
+    assert exc.value.status_code == 400
+    assert "meta" in exc.value.detail
 
 
 # ---------------------------------------------------------------------------
