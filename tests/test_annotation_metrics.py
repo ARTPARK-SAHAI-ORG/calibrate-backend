@@ -1057,7 +1057,7 @@ def test_over_time_agreement_equals_agreement_on_rows_up_to_each_bucket_end():
             now,
         )
         kappa_point_count += sum(1 for point in expected_points if point["kappa"] is not None)
-    assert kappa_point_count > 1000
+    assert kappa_point_count > 500
 
 
 def _annotations_from_answers(answers_per_item, evaluator_id="e1", item_prefix="i"):
@@ -1248,6 +1248,22 @@ def _textbook_fleiss_kappa(answers_per_item, categories, weight):
     return (observed_agreement - expected_agreement) / (1 - expected_agreement)
 
 
+def test_kappa_is_blank_when_only_one_item_was_compared():
+    # One judge answer against one annotator answer: chance equals the
+    # agreement itself, so kappa would always read 0.
+    assert agreement_and_kappa_between_judge_and_annotators(
+        _annotations_from_answers([(1,)]),
+        _judge_runs_from_answers([0]),
+        "e1",
+        {"e1": (0, 2)},
+    ) == (0.5, 1, None, None)
+    assert agreement_and_kappa_between_annotators(
+        _annotations_from_answers([[True, False, False]])
+    )[2:] == (None, None)
+    two_items = _annotations_from_answers([[True, False], [True, True]])
+    assert agreement_and_kappa_between_annotators(two_items)[2] is not None
+
+
 @pytest.mark.parametrize(
     "categories, weight, rating_scales, kappa_type",
     [
@@ -1277,7 +1293,7 @@ def test_fleiss_kappa_matches_the_textbook_formula_when_every_item_has_the_same_
             )
         )
         expected_kappa = _textbook_fleiss_kappa(answers_per_item, categories, weight)
-        if expected_kappa is None:
+        if expected_kappa is None or len(answers_per_item) == 1:
             assert (kappa, returned_kappa_type) == (None, None)
             continue
         kappa_count += 1

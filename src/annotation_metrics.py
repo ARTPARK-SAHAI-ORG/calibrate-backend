@@ -734,18 +734,21 @@ def _kappa(
     pooled differ. Each evaluator's answer pools cover its compared pairs on
     every item. Chance agreement is worked out for each largest possible
     rating gap those pairs used, then averaged weighted by pair count, the way
-    `agreement` is. None when one evaluator compared answers of more than one
-    kind, or when chance agreement is 1."""
+    `agreement` is. None when the pairs come from a single item (one item
+    cannot show chance, and its kappa would always read 0), when one evaluator
+    compared answers of more than one kind, or when chance agreement is 1."""
     evaluator_id_to_first_answer_counts: Dict[Optional[str], Counter] = defaultdict(Counter)
     evaluator_id_to_second_answer_counts: Dict[Optional[str], Counter] = defaultdict(Counter)
     evaluator_id_to_answer_kinds: Dict[Optional[str], set] = defaultdict(set)
     evaluator_id_and_rating_gap_to_pair_count: Counter = Counter()
-    for (_item_id, evaluator_id), (
+    compared_item_ids: set = set()
+    for (item_id, evaluator_id), (
         largest_possible_rating_gap,
         answer_pairs_compared,
     ) in item_and_evaluator_to_answer_pairs_compared.items():
         if not answer_pairs_compared:
             continue
+        compared_item_ids.add(item_id)
         first_answers, second_answers, _agreements = map(list, zip(*answer_pairs_compared))
         if kappa_family == "fleiss":
             # One pool holding each answer once per pair it is in.
@@ -758,7 +761,9 @@ def _kappa(
         evaluator_id_and_rating_gap_to_pair_count[
             (evaluator_id, largest_possible_rating_gap)
         ] += len(answer_pairs_compared)
-    if any(len(answer_kinds) > 1 for answer_kinds in evaluator_id_to_answer_kinds.values()):
+    if len(compared_item_ids) < 2 or any(
+        len(answer_kinds) > 1 for answer_kinds in evaluator_id_to_answer_kinds.values()
+    ):
         return (None, None)
 
     chance_agreement = math.fsum(
