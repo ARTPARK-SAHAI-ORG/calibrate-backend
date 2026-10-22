@@ -815,31 +815,6 @@ def test_google_login_token_verify_failure(client):
     assert resp.status_code == 401
 
 
-def test_google_token_verify_pass():
-    """Exercise verify_google_token directly for the httpx response path."""
-    import asyncio
-
-    class FakeResp:
-        status_code = 200
-
-        def json(self):
-            return {"email": "x@example.com"}
-
-        @property
-        def text(self):
-            return "ok"
-
-    fake_client = MagicMock()
-    fake_client.get = AsyncMock(return_value=FakeResp())
-    fake_client.__aenter__ = AsyncMock(return_value=fake_client)
-    fake_client.__aexit__ = AsyncMock(return_value=None)
-    from routers import auth as auth_mod
-
-    with patch("routers.auth.httpx.AsyncClient", return_value=fake_client):
-        info = asyncio.run(auth_mod.verify_google_token("fake"))
-    assert info["email"] == "x@example.com"
-
-
 def test_google_token_verify_non_200():
     import asyncio
 

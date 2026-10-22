@@ -1226,6 +1226,32 @@ def init_db():
         except sqlite3.OperationalError:
             pass
 
+        try:
+            cursor.execute(
+                "ALTER TABLE users ADD COLUMN email_verified_at TIMESTAMP DEFAULT NULL"
+            )
+            # Runs once, when the column is first added: every password and
+            # Google account that already exists counts as confirmed. Invite
+            # stubs (no password, no name) stay unconfirmed.
+            cursor.execute(
+                "UPDATE users SET email_verified_at = CURRENT_TIMESTAMP "
+                "WHERE password_hash IS NOT NULL OR first_name != '' OR last_name != ''"
+            )
+        except sqlite3.OperationalError:
+            pass
+
+        for column in (
+            "verify_token_hash TEXT",
+            "verify_password_hash TEXT",
+            "verify_sent_at TIMESTAMP",
+            "reset_token_hash TEXT",
+            "reset_sent_at TIMESTAMP",
+        ):
+            try:
+                cursor.execute(f"ALTER TABLE users ADD COLUMN {column} DEFAULT NULL")
+            except sqlite3.OperationalError:
+                pass
+
         # Add user_id column to all relevant tables if not present (migration)
         tables_with_user_id = [
             "agents",
@@ -1273,6 +1299,19 @@ def init_db():
             cursor.execute("ALTER TABLE agent_test_jobs ADD COLUMN cost REAL")
         except sqlite3.OperationalError:
             pass
+
+        # Every verify or reset link ever sent, so a used or replaced link
+        # still says whose account it was for.
+        cursor.execute(
+            """
+            CREATE TABLE IF NOT EXISTS auth_links (
+                token_hash TEXT PRIMARY KEY,
+                user_uuid TEXT NOT NULL,
+                kind TEXT NOT NULL,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+            """
+        )
 
         # One row each time a workspace is refused for going over a limit.
         cursor.execute(
@@ -1414,17 +1453,20 @@ def init_db():
             default_user_uuid = default_user_row["uuid"]
             logger.info(f"Default user already exists with UUID: {default_user_uuid}")
         else:
-            # Create the default user
+            # Create the default user. A real address is an account someone
+            # owns, so it is verified and cannot be claimed by a signup; with no
+            # address the row is only a placeholder and is not counted as a user.
             default_user_uuid = str(uuid.uuid4())
             cursor.execute(
                 """
-                INSERT INTO users (uuid, first_name, last_name, email)
-                VALUES (?, ?, ?, ?)
+                INSERT INTO users (uuid, first_name, last_name, email, email_verified_at)
+                VALUES (?, ?, ?, ?, CASE WHEN ? != '' THEN CURRENT_TIMESTAMP END)
                 """,
                 (
                     default_user_uuid,
                     DEFAULT_USER_FIRST_NAME,
                     DEFAULT_USER_LAST_NAME,
+                    default_user_email_normalized,
                     default_user_email_normalized,
                 ),
             )
@@ -3995,19 +4037,15 @@ def create_user_with_password(
     with get_db_connection() as conn:
         cursor = conn.cursor()
         cursor.execute(
-            "SELECT uuid, password_hash, first_name, last_name FROM users WHERE email = ?", (email,)
+            "SELECT uuid, email_verified_at FROM users WHERE email = ?", (email,)
         )
         existing = cursor.fetchone()
         if existing is not None:
-            # Only a stub left by an org invite (no password, no name) may be
-            # claimed. A Google account also has no password, so checking the
-            # password alone let anyone set one on it and log in as its owner.
-            is_invite_stub = (
-                existing["password_hash"] is None
-                and not existing["first_name"]
-                and not existing["last_name"]
-            )
-            if not is_invite_stub:
+            # Only a row nobody has confirmed may be claimed: an invite stub, or
+            # a signup left waiting on its link when email was later turned off.
+            # A Google account has no password either, so checking the password
+            # alone let anyone set one on it and log in as its owner.
+            if existing["email_verified_at"] is not None:
                 raise ValueError("email already registered")
             # Hydrate the stub user row in place; preserve its uuid so any
             # existing organization_members rows keep working.
@@ -4016,6 +4054,8 @@ def create_user_with_password(
                 """
                 UPDATE users
                    SET first_name = ?, last_name = ?, password_hash = ?,
+                       email_verified_at = CURRENT_TIMESTAMP,
+                       """ + _CLEAR_LINKS + """,
                        updated_at = CURRENT_TIMESTAMP
                  WHERE uuid = ?
                 """,
@@ -4025,8 +4065,9 @@ def create_user_with_password(
             user_uuid = str(uuid.uuid4())
             cursor.execute(
                 """
-                INSERT INTO users (uuid, first_name, last_name, email, password_hash)
-                VALUES (?, ?, ?, ?, ?)
+                INSERT INTO users
+                    (uuid, first_name, last_name, email, password_hash, email_verified_at)
+                VALUES (?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
                 """,
                 (user_uuid, first_name, last_name, email, password_hash),
             )
@@ -4046,6 +4087,116 @@ def create_user_with_password(
         conn.commit()
         logger.info(f"Created user (email/password auth) with UUID: {user_uuid}")
         return user_uuid
+
+
+# Voids every pending verify and reset link; shared by both ways an address gets verified.
+_CLEAR_LINKS = (
+    "verify_token_hash = NULL, verify_password_hash = NULL, verify_sent_at = NULL, "
+    "reset_token_hash = NULL, reset_sent_at = NULL"
+)
+
+
+def _check_link_kind(kind: str) -> None:
+    # The kind is put into column names, so only these two may ever reach SQL.
+    if kind not in ("verify", "reset"):
+        raise ValueError("kind must be verify or reset")
+
+
+def set_user_token(
+    user_uuid: str,
+    kind: str,
+    token_hash: str,
+    cooldown_seconds: int,
+    first_name: Optional[str] = None,
+    last_name: Optional[str] = None,
+    verify_password_hash: Optional[str] = None,
+) -> bool:
+    """Store a new `verify` or `reset` token hash, plus any given signup fields.
+
+    Changes nothing and returns False when the previous token of that kind was
+    sent less than `cooldown_seconds` ago. Leaving the password alone too means
+    the link already in the inbox can never be redirected to a password typed
+    by someone else.
+    """
+    _check_link_kind(kind)
+    with get_db_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            f"""
+            UPDATE users
+               SET {kind}_token_hash = ?, {kind}_sent_at = CURRENT_TIMESTAMP,
+                   first_name = COALESCE(?, first_name),
+                   last_name = COALESCE(?, last_name),
+                   verify_password_hash = COALESCE(?, verify_password_hash),
+                   updated_at = CURRENT_TIMESTAMP
+             WHERE uuid = ?
+               AND ({kind}_sent_at IS NULL OR {kind}_sent_at <= datetime('now', ?))
+            """,
+            (
+                token_hash,
+                first_name,
+                last_name,
+                verify_password_hash,
+                user_uuid,
+                f"-{cooldown_seconds} seconds",
+            ),
+        )
+        stored = cursor.rowcount > 0
+        if stored:
+            cursor.execute(
+                "INSERT INTO auth_links (token_hash, user_uuid, kind) VALUES (?, ?, ?)",
+                (token_hash, user_uuid, kind),
+            )
+        conn.commit()
+        return stored
+
+
+def get_user_by_token(
+    kind: str, token_hash: str, max_age_seconds: int
+) -> Optional[Dict[str, Any]]:
+    """The user holding this `verify` or `reset` token, if it is younger than `max_age_seconds`."""
+    _check_link_kind(kind)
+    with get_db_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            f"""
+            SELECT * FROM users
+             WHERE {kind}_token_hash = ? AND {kind}_sent_at > datetime('now', ?)
+            """,
+            (token_hash, f"-{max_age_seconds} seconds"),
+        )
+        row = cursor.fetchone()
+        return dict(row) if row else None
+
+
+def get_link_owner(kind: str, token_hash: str) -> Optional[Dict[str, Any]]:
+    """The user a `verify` or `reset` link was issued to, even once it is used, replaced or too old."""
+    with get_db_connection() as conn:
+        row = conn.execute(
+            """
+            SELECT u.* FROM auth_links l JOIN users u ON u.uuid = l.user_uuid
+             WHERE l.kind = ? AND l.token_hash = ?
+            """,
+            (kind, token_hash),
+        ).fetchone()
+        return dict(row) if row else None
+
+
+def mark_email_verified(user_uuid: str, password_hash: Optional[str] = None) -> None:
+    """Confirm the address, optionally set the password, and void every pending link."""
+    with get_db_connection() as conn:
+        conn.execute(
+            """
+            UPDATE users
+               SET password_hash = COALESCE(?, password_hash),
+                   email_verified_at = COALESCE(email_verified_at, CURRENT_TIMESTAMP),
+                   """ + _CLEAR_LINKS + """,
+                   updated_at = CURRENT_TIMESTAMP
+             WHERE uuid = ?
+            """,
+            (password_hash, user_uuid),
+        )
+        conn.commit()
 
 
 # ============ Organizations (multi-tenant) ============
