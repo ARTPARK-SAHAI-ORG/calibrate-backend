@@ -3983,9 +3983,9 @@ def create_user_with_password(
     If a stub user (created by an org invite before signup — no
     `password_hash`, no name) already exists for this email, we hydrate that
     row instead of inserting a new one. This is what lets an invited person
-    sign up later and immediately see any orgs they were pre-added to. We
-    refuse to overwrite an existing password_hash to avoid an account-takeover
-    vector via /signup with someone else's email.
+    sign up later and immediately see any orgs they were pre-added to. Any
+    other existing row, including a Google account with no password, raises
+    ValueError so /signup cannot take over someone else's account.
 
     Email is normalized to lowercase before lookup/insert so it matches the
     same normalization done by `add_organization_member` — otherwise an
@@ -3995,11 +3995,19 @@ def create_user_with_password(
     with get_db_connection() as conn:
         cursor = conn.cursor()
         cursor.execute(
-            "SELECT uuid, password_hash FROM users WHERE email = ?", (email,)
+            "SELECT uuid, password_hash, first_name, last_name FROM users WHERE email = ?", (email,)
         )
         existing = cursor.fetchone()
         if existing is not None:
-            if existing["password_hash"] is not None:
+            # Only a stub left by an org invite (no password, no name) may be
+            # claimed. A Google account also has no password, so checking the
+            # password alone let anyone set one on it and log in as its owner.
+            is_invite_stub = (
+                existing["password_hash"] is None
+                and not existing["first_name"]
+                and not existing["last_name"]
+            )
+            if not is_invite_stub:
                 raise ValueError("email already registered")
             # Hydrate the stub user row in place; preserve its uuid so any
             # existing organization_members rows keep working.
