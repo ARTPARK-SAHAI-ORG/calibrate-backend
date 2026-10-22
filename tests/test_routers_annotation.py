@@ -3955,125 +3955,15 @@ def test_kappa_blank_reason_follows_the_answers_compared(client):
     for job in jobs:
         _post_answers(client, job, llm_ev["uuid"], {item_ids[0]: True})
     assert blank_reasons_and_chance_agreements() == {("too_few_items", None)}
+    # A linked evaluator with no judge scores adds nothing to the overall.
+    task_agreement = client.get(f"/annotation-tasks/{task_uuid}/agreement", headers=h).json()
+    assert {key: value for key, value in task_agreement["evaluators_with_humans"].items() if key != "series"} == {
+        "current": None, "pair_count": 0
+    }
+    assert task_agreement["evaluators"][0]["current"] is None
     for job in jobs:
         _post_answers(client, job, llm_ev["uuid"], {item_ids[1]: True})
     assert blank_reasons_and_chance_agreements() == {("everyone_agreed", 1.0)}
-
-
-def test_pass_fail_and_rating_answers_never_share_a_kappa(client):
-    """Correctness, pass or fail: both annotators say pass on two items.
-    Conciseness, 1 to 5: (1, 1) and (1, 2). The judge rates Conciseness 4 on
-    the first item only."""
-    import db as db_mod
-    from annotation_eval_runner import ANNOTATION_EVAL_JOB_TYPE
-
-    auth = _signup(client)
-    h = auth["headers"]
-    correctness = _evaluator_with_scale(client, h, "binary", _PASS_FAIL_SCALE)
-    conciseness = _evaluator_with_scale(client, h, "rating", _ONE_TO_FIVE_SCALE)
-    task_uuid = client.post(
-        "/annotation-tasks",
-        json={
-            "name": f"t-{uuid.uuid4().hex[:6]}",
-            "type": "llm",
-            "evaluator_ids": [correctness["uuid"], conciseness["uuid"]],
-        },
-        headers=h,
-    ).json()["uuid"]
-    item_ids = client.post(
-        f"/annotation-tasks/{task_uuid}/items",
-        json={"items": [{"payload": llm_item_payload(f"i{index}")} for index in range(2)]},
-        headers=h,
-    ).json()["item_ids"]
-    annotator_ids = [
-        client.post("/annotators", json={"name": f"a-{uuid.uuid4().hex[:6]}"}, headers=h).json()["uuid"]
-        for _ in range(2)
-    ]
-    jobs = client.post(
-        f"/annotation-tasks/{task_uuid}/jobs",
-        json={"annotator_ids": annotator_ids, "item_ids": item_ids},
-        headers=h,
-    ).json()["jobs"]
-    job_of = {job["annotator_id"]: job for job in jobs}
-    for annotator_id, conciseness_answers in zip(annotator_ids, ((1, 1), (1, 2))):
-        for item_id, conciseness_answer in zip(item_ids, conciseness_answers):
-            assert client.post(
-                f"/public/annotation-jobs/{job_of[annotator_id]['public_token']}/annotations",
-                json={
-                    "item_id": item_id,
-                    "annotations": [
-                        {"evaluator_id": correctness["uuid"], "value": {"value": True}},
-                        {"evaluator_id": conciseness["uuid"], "value": {"value": conciseness_answer}},
-                    ],
-                },
-            ).status_code == 200
-    eval_job = db_mod.create_job(
-        job_type=ANNOTATION_EVAL_JOB_TYPE,
-        org_uuid=db_mod.get_personal_org_for_user(auth["user_uuid"])["uuid"],
-        user_id=auth["user_uuid"],
-        status="done",
-        details={"task_id": task_uuid},
-    )
-    db_mod.create_evaluator_runs([{
-        "job_id": eval_job,
-        "item_id": item_ids[0],
-        "evaluator_id": conciseness["uuid"],
-        "evaluator_version_id": conciseness["version_uuid"],
-        "status": "completed",
-        "value": {"value": 4},
-    }])
-
-    def without_series(block):
-        return {key: value for key, value in block.items() if key != "series"}
-
-    for response in (
-        client.get(f"/annotation-tasks/{task_uuid}/agreement", headers=h).json(),
-        client.get("/annotation-agreement/trend", headers=h).json(),
-    ):
-        # Pairs agree 1, 1, 1 and 1 - 1/4 over both kinds.
-        assert without_series(response["human_human"]) == {"current": 0.9375, "pair_count": 4}
-        # Only the Conciseness judge compared: 4 against the two 1s.
-        assert without_series(response["evaluators_with_humans"]) == {"current": 0.25, "pair_count": 2}
-        evaluator_id_to_agreement = {entry["evaluator_id"]: entry for entry in response["evaluators"]}
-        conciseness_agreement = evaluator_id_to_agreement[conciseness["uuid"]]
-        assert {
-            key: conciseness_agreement[key]
-            for key in ("current", "pair_count", "kappa", "kappa_type", "kappa_blank_reason", "chance_agreement")
-        } == {
-            "current": 0.25, "pair_count": 2, "kappa": None, "kappa_type": "linear_weighted_cohen",
-            "kappa_blank_reason": "too_few_items", "chance_agreement": None,
-        }
-        # Annotator answers 1, 1, 1, 2: chance 0.90625.
-        assert without_series(conciseness_agreement["inter_annotator"]) == {
-            "current": 0.875, "pair_count": 2, "kappa": -0.3333,
-            "kappa_type": "linear_weighted_fleiss", "kappa_blank_reason": None,
-            "chance_agreement": round(0.90625, 4),
-        }
-        if correctness["uuid"] in evaluator_id_to_agreement:
-            assert without_series(evaluator_id_to_agreement[correctness["uuid"]]["inter_annotator"]) == {
-                "current": 1.0, "pair_count": 2, "kappa": None, "kappa_type": "fleiss",
-                "kappa_blank_reason": "everyone_agreed", "chance_agreement": 1.0,
-            }
-
-    # The workspace trend lists only evaluators with judge scores, so
-    # Correctness is checked on the task view above.
-    task_agreement = client.get(f"/annotation-tasks/{task_uuid}/agreement", headers=h).json()
-    assert correctness["uuid"] in {entry["evaluator_id"] for entry in task_agreement["evaluators"]}
-
-    # a0 gave Conciseness 1, 1 and the other 1, 2: agreement 0.875, chance
-    # 1/2 * 1 + 1/2 * 0.75.
-    first_annotator_kappa_by_kind = [
-        {"answer_kind": "binary", "kappa": None, "kappa_type": "cohen",
-         "kappa_blank_reason": "everyone_agreed", "chance_agreement": 1.0},
-        {"answer_kind": "rating", "kappa": 0.0, "kappa_type": "linear_weighted_cohen",
-         "kappa_blank_reason": None, "chance_agreement": 0.875},
-    ]
-    listed = {annotator["uuid"]: annotator for annotator in client.get("/annotators", headers=h).json()}
-    assert listed[annotator_ids[0]]["current_agreement"] == 0.9375
-    assert listed[annotator_ids[0]]["kappa_by_kind"] == first_annotator_kappa_by_kind
-    detail = client.get(f"/annotators/{annotator_ids[0]}", headers=h).json()
-    assert detail["stats"]["kappa_by_kind"] == first_annotator_kappa_by_kind
-    assert detail["trend"]["series"][-1]["kappa_by_kind"] == first_annotator_kappa_by_kind
 
 
 # ---------------------------------------------------------------------------

@@ -16,13 +16,12 @@ from db import (
 from auth_utils import get_current_org, OrgContext
 from org_scope import ensure_owned_evaluator
 from annotation_metrics import (
-    agreement_and_kappa_between_annotators,
+    agreement_between_annotators,
     keep_runs_from_live_versions_of,
     rating_scales_for,
     agreement_between_annotators_over_time,
     agreement_between_judge_and_annotators_over_time_by_version_and_task,
     agreement_of_each_evaluator_with_annotators,
-    trend_without_kappa,
 )
 
 
@@ -57,7 +56,7 @@ def agreement_trend(
         all_evaluator_version_runs = get_evaluator_runs_for_org(ctx.org_uuid)
 
     rating_scales = rating_scales_for(annotations, all_evaluator_version_runs)
-    annotator_agreement, annotator_pair_count, _ = agreement_and_kappa_between_annotators(
+    annotator_agreement, annotator_pair_count = agreement_between_annotators(
         annotations, rating_scales
     )
     annotator_agreement_over_time = agreement_between_annotators_over_time(
@@ -108,7 +107,7 @@ def agreement_trend(
         "human_human": {
             "current": annotator_agreement,
             "pair_count": annotator_pair_count,
-            "series": trend_without_kappa(annotator_agreement_over_time),
+            "series": annotator_agreement_over_time,
         },
         "evaluators_with_humans": agreement_of_all_evaluators,
         "evaluators": agreement_per_evaluator,

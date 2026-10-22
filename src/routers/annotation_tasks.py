@@ -276,15 +276,12 @@ class HumanAgreementBlock(BaseModel):
     )
 
 
-class EvaluatorsWithHumansBlock(BaseModel):
+class EvaluatorsWithHumansBlock(HumanAgreementBlock):
     current: Optional[float] = Field(
         description="Current mean agreement between the evaluators and the annotators, weighted by how many pairs each evaluator compared"
     )
     pair_count: int = Field(
         description="How many evaluator and annotator pairs the current value averages over"
-    )
-    series: List[Dict[str, Any]] = Field(
-        description="Agreement over time, one point per time bucket"
     )
 
 
@@ -396,7 +393,7 @@ _SummaryProjection = make_projection_params(
     ]
 )
 from annotation_metrics import (
-    agreement_and_kappa_between_annotators,
+    agreement_between_annotators,
     agreement_and_kappa_between_judge_and_annotators,
     judge_and_annotators_agreement_on_item,
     judge_answer_summary,
@@ -407,7 +404,6 @@ from annotation_metrics import (
     agreement_of_each_evaluator_with_annotators,
     kappa_of_one_kind,
     keep_runs_from_live_versions_of,
-    trend_without_kappa,
     rating_scales_for,
     _mean_agreement_between_answers,
     _extract_answer,
@@ -3063,7 +3059,7 @@ def task_agreement(
     )
 
     rating_scales = rating_scales_for(annotations, live_evaluator_version_runs)
-    annotator_agreement, annotator_pair_count, _ = agreement_and_kappa_between_annotators(
+    annotator_agreement, annotator_pair_count = agreement_between_annotators(
         annotations, rating_scales
     )
     annotator_agreement_over_time = agreement_between_annotators_over_time(
@@ -3086,7 +3082,7 @@ def task_agreement(
         "human_human": {
             "current": annotator_agreement,
             "pair_count": annotator_pair_count,
-            "series": trend_without_kappa(annotator_agreement_over_time),
+            "series": annotator_agreement_over_time,
         },
         "evaluators_with_humans": agreement_of_all_evaluators,
         "evaluators": agreement_per_evaluator,
