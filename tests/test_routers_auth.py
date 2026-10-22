@@ -171,3 +171,356 @@ def test_signup_cannot_take_over_a_google_account(client, sent):
         "/auth/login", json={"email": email, "password": "attacker1"}
     )
     assert login.status_code == 401
+
+
+# ---------------------------------------------------------------------------
+# Email verification and password reset (on only when RESEND_API_KEY is set)
+# ---------------------------------------------------------------------------
+
+from urllib.parse import parse_qs, urlparse  # noqa: E402
+
+
+@pytest.fixture
+def email_on(monkeypatch, sent):
+    monkeypatch.setenv("RESEND_API_KEY", "re_test_key")
+    return sent
+
+
+def _link_params(message) -> dict:
+    query = parse_qs(urlparse(message["variables"]["URL"]).query)
+    return {key: values[0] for key, values in query.items()}
+
+
+def _backdate(email: str, column: str, seconds: int) -> None:
+    import db
+
+    with db.get_db_connection() as conn:
+        conn.execute(
+            f"UPDATE users SET {column} = datetime('now', ?) WHERE email = ?",
+            (f"-{seconds} seconds", email),
+        )
+        conn.commit()
+
+
+def _signup_next(client, email, password="passw0rd", next_path=None):
+    body = {"first_name": "A", "last_name": "U", "email": email, "password": password}
+    if next_path is not None:
+        body["next"] = next_path
+    return client.post("/auth/signup", json=body)
+
+
+def _login(client, email, password="passw0rd"):
+    return client.post("/auth/login", json={"email": email, "password": password})
+
+
+def test_signup_with_email_on_sends_a_link_and_no_token(client, email_on):
+    import routers.auth as auth_mod
+
+    email = _email("verify")
+    resp = _signup(client, email.upper())
+
+    assert resp.status_code == 202
+    assert resp.json() == {
+        "status": "verification_sent",
+        "email": email,
+        "already_pending": False,
+    }
+    assert "access_token" not in resp.json()
+    assert len(email_on) == 1
+    assert email_on[0]["to"] == email
+    assert email_on[0]["template"] == auth_mod.VERIFY_EMAIL_TEMPLATE
+    assert email_on[0]["variables"]["NAME"] == "A"
+    url = email_on[0]["variables"]["URL"]
+    assert url.startswith(f"{auth_mod.frontend_url()}/verify-email?token=")
+    assert "callbackUrl" not in url
+
+
+def test_login_before_confirming_is_refused_and_resends(client, email_on):
+    email = _email("unconfirmed")
+    _signup(client, email)
+    _backdate(email, "verify_sent_at", 61)
+    first_token = _link_params(email_on[0])["token"]
+
+    resp = _login(client, email)
+    assert resp.status_code == 403
+    assert resp.json()["detail"] == "email_not_verified"
+    assert len(email_on) == 2
+    assert _link_params(email_on[1])["token"] != first_token
+
+    assert _login(client, email, "wrong-pass").status_code == 401
+    assert len(email_on) == 2
+
+
+def test_resend_waits_a_minute(client, email_on):
+    email = _email("cooldown")
+    assert _signup(client, email).status_code == 202
+    token = _link_params(email_on[0])["token"]
+
+    again = _signup(client, email, password="other-pass")
+    assert again.status_code == 202
+    assert _login(client, email).status_code == 403
+    assert len(email_on) == 1
+
+    # The first link still works, with the first password.
+    resp = client.post("/auth/verify-email", json={"token": token})
+    assert resp.status_code == 200
+    assert _login(client, email).status_code == 200
+    assert _login(client, email, "other-pass").status_code == 401
+
+
+def test_verify_email_logs_in_and_the_password_then_works(client, email_on):
+    import routers.auth as auth_mod
+
+    email = _email("confirm")
+    _signup(client, email)
+    token = _link_params(email_on[0])["token"]
+
+    resp = client.post("/auth/verify-email", json={"token": token})
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["access_token"]
+    assert body["user"]["email"] == email
+    assert email_on[-1]["template"] == auth_mod.WELCOME_TEMPLATE
+
+    assert _login(client, email).status_code == 200
+    assert client.post("/auth/verify-email", json={"token": token}).status_code == 400
+
+
+def test_expired_verify_link_is_refused(client, email_on):
+    email = _email("expired")
+    _signup(client, email)
+    token = _link_params(email_on[0])["token"]
+    _backdate(email, "verify_sent_at", 24 * 3600 + 1)
+
+    resp = client.post("/auth/verify-email", json={"token": token})
+    assert resp.status_code == 400
+    assert resp.json()["detail"] == "invalid_or_expired_token"
+    assert client.post("/auth/verify-email", json={"token": "made-up"}).status_code == 400
+
+
+def test_signup_over_a_confirmed_account_is_refused(client, email_on):
+    import db
+
+    email = _email("taken")
+    db.create_user_with_password("Real", "Owner", email, "hash$x")
+    resp = _signup(client, email)
+    assert resp.status_code == 409
+    assert resp.json()["detail"] == "Email already taken"
+    assert email_on == []
+
+
+def test_signup_over_an_invite_needs_the_link_before_the_workspace(client, email_on):
+    import db
+
+    owner = db.create_user("Own", "Er", _email("owner"))
+    org_uuid = db.create_organization("Shared team", owner)
+    invited = _email("invitee")
+    db.add_organization_member(org_uuid, invited)
+
+    assert _signup(client, invited).status_code == 202
+    assert _login(client, invited).status_code == 403
+
+    token = _link_params(email_on[0])["token"]
+    resp = client.post("/auth/verify-email", json={"token": token})
+    assert resp.status_code == 200
+    orgs = client.get(
+        "/organizations",
+        headers={"Authorization": f"Bearer {resp.json()['access_token']}"},
+    ).json()
+    assert org_uuid in [o["uuid"] for o in orgs]
+    # The invite already emailed them, so no welcome.
+    assert len(email_on) == 1
+
+
+def test_second_signup_before_confirming_replaces_the_link(client, email_on):
+    email = _email("again")
+    _signup(client, email)
+    old_token = _link_params(email_on[0])["token"]
+    _backdate(email, "verify_sent_at", 61)
+
+    resp = _signup(client, email, password="newer-pass")
+    assert resp.status_code == 202
+    assert resp.json()["already_pending"] is True
+    new_token = _link_params(email_on[1])["token"]
+
+    assert client.post("/auth/verify-email", json={"token": old_token}).status_code == 400
+    assert client.post("/auth/verify-email", json={"token": new_token}).status_code == 200
+    assert _login(client, email, "newer-pass").status_code == 200
+
+
+def test_forgot_password_for_an_unknown_email_sends_nothing(client, email_on):
+    resp = client.post("/auth/forgot-password", json={"email": _email("nobody")})
+    assert resp.status_code == 202
+    assert resp.json() == {"status": "sent"}
+    assert email_on == []
+
+
+def test_forgot_password_skips_a_bare_invite(client, email_on):
+    import db
+
+    owner = db.create_user("Own", "Er", _email("owner2"))
+    org_uuid = db.create_organization("Team two", owner)
+    invited = _email("stub")
+    db.add_organization_member(org_uuid, invited)
+
+    assert client.post("/auth/forgot-password", json={"email": invited}).status_code == 202
+    assert email_on == []
+
+
+def test_forgot_password_with_email_off_sends_nothing(client, sent):
+    email = _email("off")
+    assert _signup(client, email).status_code == 200
+    sent.clear()
+    assert client.post("/auth/forgot-password", json={"email": email}).status_code == 202
+    assert sent == []
+
+
+def test_reset_password_sets_the_new_password_and_logs_in(client, email_on):
+    import db
+    import routers.auth as auth_mod
+
+    email = _email("reset")
+    db.create_user_with_password("Re", "Set", email, auth_mod._hash_password("old-pass"))
+
+    resp = client.post("/auth/forgot-password", json={"email": email, "next": "/agents"})
+    assert resp.status_code == 202
+    assert len(email_on) == 1
+    assert email_on[0]["template"] == auth_mod.RESET_PASSWORD_TEMPLATE
+    params = _link_params(email_on[0])
+    assert email_on[0]["variables"]["URL"].startswith(
+        f"{auth_mod.frontend_url()}/reset-password?token="
+    )
+    assert params["callbackUrl"] == "/agents"
+
+    # A second request inside a minute sends nothing.
+    client.post("/auth/forgot-password", json={"email": email})
+    assert len(email_on) == 1
+
+    assert client.post(
+        "/auth/reset-password", json={"token": params["token"], "password": "short"}
+    ).status_code == 422
+
+    resp = client.post(
+        "/auth/reset-password", json={"token": params["token"], "password": "new-pass"}
+    )
+    assert resp.status_code == 200
+    assert resp.json()["access_token"]
+    assert _login(client, email, "new-pass").status_code == 200
+    assert _login(client, email, "old-pass").status_code == 401
+    assert client.post(
+        "/auth/reset-password", json={"token": params["token"], "password": "again-pass"}
+    ).status_code == 400
+
+
+def test_reset_confirms_a_pending_signup(client, email_on):
+    email = _email("pendreset")
+    _signup(client, email)
+    verify_token = _link_params(email_on[0])["token"]
+
+    client.post("/auth/forgot-password", json={"email": email})
+    reset_token = _link_params(email_on[1])["token"]
+    resp = client.post(
+        "/auth/reset-password", json={"token": reset_token, "password": "chosen-pass"}
+    )
+    assert resp.status_code == 200
+    assert _login(client, email, "chosen-pass").status_code == 200
+    assert client.post("/auth/verify-email", json={"token": verify_token}).status_code == 400
+
+
+def test_expired_reset_link_is_refused(client, email_on):
+    import db
+
+    email = _email("resetold")
+    db.create_user_with_password("Re", "Set", email, "hash$x")
+    client.post("/auth/forgot-password", json={"email": email})
+    token = _link_params(email_on[0])["token"]
+    _backdate(email, "reset_sent_at", 3601)
+
+    resp = client.post("/auth/reset-password", json={"token": token, "password": "new-pass"})
+    assert resp.status_code == 400
+    assert resp.json()["detail"] == "invalid_or_expired_token"
+
+
+@pytest.mark.parametrize(
+    "next_path, expected",
+    [
+        ("/agents?tab=1", "/agents?tab=1"),
+        ("//evil.example.com", None),
+        ("/\\evil.example.com", None),
+        ("https://evil.example.com", None),
+        ("", None),
+    ],
+)
+def test_callback_is_added_only_for_a_path_on_the_site(client, email_on, next_path, expected):
+    _signup_next(client, _email("next"), next_path=next_path)
+    assert _link_params(email_on[0]).get("callbackUrl") == expected
+
+
+def _tokeninfo(info: dict):
+    from unittest.mock import AsyncMock, MagicMock
+
+    class FakeResp:
+        status_code = 200
+        text = "ok"
+
+        def json(self):
+            return info
+
+    fake_client = MagicMock()
+    fake_client.get = AsyncMock(return_value=FakeResp())
+    fake_client.__aenter__ = AsyncMock(return_value=fake_client)
+    fake_client.__aexit__ = AsyncMock(return_value=None)
+    return patch("routers.auth.httpx.AsyncClient", return_value=fake_client)
+
+
+@pytest.mark.parametrize(
+    "client_id, extra",
+    [
+        ("our-client", {"aud": "someone-else", "email_verified": "true"}),
+        ("our-client", {"aud": "our-client", "email_verified": "false"}),
+        ("our-client", {"aud": "our-client"}),
+        ("", {"aud": "", "email_verified": "true"}),
+    ],
+)
+def test_google_token_must_be_ours_and_verified(client, sent, monkeypatch, client_id, extra):
+    monkeypatch.setenv("GOOGLE_CLIENT_ID", client_id)
+    email = _email("gaud")
+    with _tokeninfo({"email": email, **extra}):
+        resp = client.post("/auth/google", json={"id_token": "x"})
+    assert resp.status_code == 401
+    assert resp.json()["detail"] == "Invalid Google token"
+    import db
+
+    assert db.get_user_by_email(email) is None
+
+
+def test_google_token_with_our_audience_logs_in(client, sent, monkeypatch):
+    monkeypatch.setenv("GOOGLE_CLIENT_ID", "our-client")
+    email = _email("gok")
+    with _tokeninfo({"email": email, "aud": "our-client", "email_verified": True}):
+        resp = client.post("/auth/google", json={"id_token": "x"})
+    assert resp.status_code == 200
+    import db
+
+    assert db.get_user_by_email(email)["email_verified_at"]
+
+
+def test_google_login_voids_a_pending_signup(client, email_on):
+    import db
+    import routers.auth as auth_mod
+
+    email = _email("gpending")
+    _signup(client, email, password="attacker1")
+    token = _link_params(email_on[0])["token"]
+
+    async def _fake_verify(id_token: str) -> dict:
+        return {"email": email, "given_name": "Real", "family_name": "Owner"}
+
+    with patch.object(auth_mod, "verify_google_token", _fake_verify):
+        assert client.post("/auth/google", json={"id_token": "x"}).status_code == 200
+
+    assert client.post("/auth/verify-email", json={"token": token}).status_code == 400
+    assert _login(client, email, "attacker1").status_code == 401
+    row = db.get_user_by_email(email)
+    assert row["password_hash"] is None
+    assert row["verify_password_hash"] is None

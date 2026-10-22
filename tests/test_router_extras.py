@@ -815,15 +815,17 @@ def test_google_login_token_verify_failure(client):
     assert resp.status_code == 401
 
 
-def test_google_token_verify_pass():
+def test_google_token_verify_pass(monkeypatch):
     """Exercise verify_google_token directly for the httpx response path."""
     import asyncio
+
+    monkeypatch.setenv("GOOGLE_CLIENT_ID", "our-client")
 
     class FakeResp:
         status_code = 200
 
         def json(self):
-            return {"email": "x@example.com"}
+            return {"email": "x@example.com", "aud": "our-client", "email_verified": "true"}
 
         @property
         def text(self):

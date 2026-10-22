@@ -20,6 +20,8 @@ WELCOME_TEMPLATE = "calibrate-welcome"
 WORKSPACE_INVITE_TEMPLATE = "calibrate-workspace-invite"
 MEMBER_JOINED_TEMPLATE = "calibrate-member-joined"
 MEMBER_ADDED_TEMPLATE = "calibrate-member-added"
+VERIFY_EMAIL_TEMPLATE = "calibrate-verify-email"
+RESET_PASSWORD_TEMPLATE = "calibrate-reset-password"
 
 # Bounded, and its threads are joined at interpreter exit, so an unauthenticated
 # endpoint cannot spawn threads without limit and a shutdown does not drop a
@@ -33,13 +35,18 @@ def _strip_markup(value: str) -> str:
     return str(value).replace("<", "").replace(">", "")
 
 
+def email_enabled() -> bool:
+    """True when a Resend key is set. Also switches on email verification at signup."""
+    return bool(env_str("RESEND_API_KEY", ""))
+
+
 def send_email(to: str, template: str, variables: dict[str, str]) -> None:
     """Send one email, off the request thread so a slow provider never delays a response."""
-    api_key = env_str("RESEND_API_KEY", "")
-    if not api_key:
+    if not email_enabled():
         logger.info("RESEND_API_KEY unset, email disabled: not sending to %s", to)
         return
 
+    api_key = env_str("RESEND_API_KEY", "")
     sender = env_str("EMAIL_FROM", "Calibrate <onboarding@resend.dev>")
     safe = {key: _strip_markup(value) for key, value in variables.items()}
 

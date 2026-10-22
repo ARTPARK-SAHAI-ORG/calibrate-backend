@@ -168,6 +168,7 @@ def video(youtube_id: str, caption: str) -> str:
 
 
 URL_VAR = {"key": "URL", "type": "string", "fallback": APP_URL}
+NAME_VAR = {"key": "NAME", "type": "string", "fallback": "there"}
 WORKSPACE_VAR = {"key": "WORKSPACE", "type": "string", "fallback": "a workspace"}
 INVITER_VAR = {"key": "INVITER", "type": "string", "fallback": "Someone"}
 MEMBER_VAR = {"key": "MEMBER", "type": "string", "fallback": "Someone"}
@@ -237,7 +238,7 @@ TEMPLATES = [
             note=f'Learn more about Calibrate {textlink("here", LEARN)}',
         ),
         "variables": [
-            {"key": "NAME", "type": "string", "fallback": "there"},
+            NAME_VAR,
             URL_VAR,
         ],
     },
@@ -273,6 +274,30 @@ TEMPLATES = [
             button="View members",
         ),
         "variables": [MEMBER_VAR, WORKSPACE_VAR, INVITER_VAR, URL_VAR],
+    },
+    {
+        "alias": "calibrate-verify-email",
+        "name": "Calibrate verify email",
+        "subject": "Confirm your email address for Calibrate",
+        "html": layout(
+            heading="Confirm your email, {{{NAME}}}",
+            sub="Click the button below to confirm this is your email address and finish creating your Calibrate account.",
+            button="Confirm my email",
+            note="This link works for 24 hours. If you did not ask for this, you can ignore this email.",
+        ),
+        "variables": [NAME_VAR, URL_VAR],
+    },
+    {
+        "alias": "calibrate-reset-password",
+        "name": "Calibrate reset password",
+        "subject": "Reset your Calibrate password",
+        "html": layout(
+            heading="Reset your password, {{{NAME}}}",
+            sub="Click the button below to choose a new password for your Calibrate account.",
+            button="Choose a new password",
+            note="This link works for 1 hour. If you did not ask for this, you can ignore this email. Your password stays the same.",
+        ),
+        "variables": [NAME_VAR, URL_VAR],
     },
 ]
 
