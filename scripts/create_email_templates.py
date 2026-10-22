@@ -280,8 +280,8 @@ TEMPLATES = [
         "name": "Calibrate verify email",
         "subject": "Verify your email address for Calibrate",
         "html": layout(
-            heading="Verify your email",
-            sub="Verify your email to finish creating your Calibrate account.",
+            heading="",
+            sub="You need to verify your email to finish creating your Calibrate account.",
             button="Verify",
             note="This link works for 24 hours. If you did not ask for this, you can ignore this email.",
         ),
@@ -292,7 +292,7 @@ TEMPLATES = [
         "name": "Calibrate reset password",
         "subject": "Reset your Calibrate password",
         "html": layout(
-            heading="Reset your password",
+            heading="",
             sub="Choose a new password for your Calibrate account.",
             button="Reset password",
             note="This link works for 1 hour. If you did not ask for this, you can ignore this email and nothing will change.",

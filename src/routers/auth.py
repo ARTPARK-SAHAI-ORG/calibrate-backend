@@ -256,14 +256,14 @@ class VerificationSentResponse(BaseModel):
     status: Literal["verification_sent"] = Field(
         description="Always `verification_sent`: open the emailed link to finish signing up"
     )
-    email: str = Field(description="Address the confirmation link was sent to")
+    email: str = Field(description="Address the verification link was sent to")
     already_pending: bool = Field(
-        description="Whether an earlier signup for this address was still waiting to be confirmed"
+        description="Whether an earlier signup for this address was still waiting to be verified"
     )
 
 
 class VerifyEmailRequest(BaseModel):
-    token: str = Field(min_length=1, description="Token from the confirmation link")
+    token: str = Field(min_length=1, description="Token from the verification link")
 
 
 class ForgotPasswordRequest(BaseModel):
@@ -292,7 +292,7 @@ class ResetPasswordRequest(BaseModel):
     summary="Sign up with email and password",
 )
 def signup(request: SignupRequest):
-    """Create an account with email and password, confirmed through an emailed link when email is on"""
+    """Create an account with email and password, verified through an emailed link when email is on"""
     if not email_enabled():
         # An invite stub row is hydrated in place; any other existing account
         # (password or Google) makes `create_user_with_password` raise, which is a 409.
@@ -362,9 +362,9 @@ def login(request: CredentialLoginRequest):
     raise HTTPException(status_code=401, detail="Invalid email or password")
 
 
-@router.post("/verify-email", response_model=LoginResponse, summary="Confirm email address")
+@router.post("/verify-email", response_model=LoginResponse, summary="Verify email address")
 def verify_email(request: VerifyEmailRequest):
-    """Finish signing up with the token from the confirmation email and receive a JWT plus your profile"""
+    """Finish signing up with the token from the verification email and receive a JWT plus your profile"""
     user = get_user_by_token("verify", _hash_token(request.token), VERIFY_LINK_SECONDS)
     if user is None:
         raise HTTPException(status_code=400, detail="invalid_or_expired_token")
