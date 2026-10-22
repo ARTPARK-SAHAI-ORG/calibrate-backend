@@ -255,13 +255,16 @@ Each router follows a consistent pattern:
 #### Authentication
 
 - `POST /auth/google` - Google OAuth login (returns JWT access token)
-- `POST /auth/signup` - Register with first name, last name, email, and password (returns JWT access token; with email on, returns 202 and emails a confirmation link instead)
-- `POST /auth/login` - Login with email and password (returns JWT access token; 403 `email_not_verified`, with a new link sent, for a signup not confirmed yet)
-- `POST /auth/verify-email` - Open the confirmation link's token (returns JWT access token)
+- `POST /auth/signup` - Register with first name, last name, email, and password (returns JWT access token; with email on, returns 202 and emails a verification link instead)
+- `POST /auth/login` - Login with email and password (returns JWT access token; with email on, 403 `email_not_verified`, with a new link sent, for a signup not verified yet)
+- `POST /auth/verify-email` - Open the verification link's token (returns JWT access token; 400 `already_verified` or `expired_token` when the link no longer works)
+- `POST /auth/resend-verification` - Email a new verification link to the account an earlier verification link (even a used or replaced one) was for (202; 400 `invalid_or_expired_token` for an unknown link, `already_verified` when that account is verified)
 - `POST /auth/forgot-password` - Email a password reset link (always 202)
+- `POST /auth/check-reset-link` - Say whether a reset link still works without using it (400 `invalid_or_expired_token` when not)
+- `POST /auth/resend-reset` - Email a new reset link to the account an earlier reset link was for (202; 400 `invalid_or_expired_token` for an unknown link)
 - `POST /auth/reset-password` - Set a new password with the reset link's token (returns JWT access token)
 
-All three auth endpoints return the same `LoginResponse` format (`access_token`, `token_type`, `user`, `message`).
+`/auth/google`, `/auth/signup` (with email off), `/auth/login`, `/auth/verify-email` and `/auth/reset-password` return the same `LoginResponse` format (`access_token`, `token_type`, `user`, `message`).
 
 **JWT Token Usage**: After login/signup, all API requests must include the JWT token in the Authorization header:
 

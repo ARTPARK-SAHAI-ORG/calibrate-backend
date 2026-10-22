@@ -228,12 +228,15 @@ def test_email_verified_backfill_runs_once(tmp_path, monkeypatch):
     conn.commit()
     conn.close()
     monkeypatch.setattr(db, "DB_PATH", path)
+    monkeypatch.setattr(db, "DEFAULT_USER_EMAIL", "default@example.com")
 
     db.init_db()
     verified = lambda email: db.get_user_by_email(email)["email_verified_at"]  # noqa: E731
     assert verified("pw@example.com")
     assert verified("g@example.com")
     assert verified("stub@example.com") is None
+    # Inserted after the backfill, so it must be verified on insert.
+    assert verified("default@example.com")
 
     pending = db.create_user("Pending", "Signup", "pending@example.com")
     db.init_db()
@@ -261,6 +264,10 @@ def test_user_tokens_cooldown_expiry_and_clearing():
     assert db.get_user_by_token("verify", "h1", 3600) is None
 
     db.mark_email_verified(user_uuid, "final-hash")
+    # The link record outlives the token on the users row.
+    assert db.get_link_owner("verify", "h1")["uuid"] == user_uuid
+    assert db.get_link_owner("verify", "h2") is None  # never stored: the minute had not passed
+    assert db.get_link_owner("reset", "h1") is None
     row = db.get_user(user_uuid)
     assert row["password_hash"] == "final-hash"
     assert row["email_verified_at"]

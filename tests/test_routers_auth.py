@@ -2,7 +2,7 @@
 
 Covers:
   - the welcome email on signup and on a first Google login
-  - confirming the email at signup when email is on, and the links it sends
+  - verifying the email at signup when email is on, and the links it sends
   - password reset
   - the Google token checks
 """
@@ -45,16 +45,11 @@ def _email(prefix: str = "auth") -> str:
     return f"{prefix}-{uuid.uuid4().hex[:8]}@example.com"
 
 
-def _signup(client, email: str, password: str = "passw0rd"):
-    return client.post(
-        "/auth/signup",
-        json={
-            "first_name": "A",
-            "last_name": "U",
-            "email": email,
-            "password": password,
-        },
-    )
+def _signup(client, email: str, password: str = "passw0rd", next_path=None):
+    body = {"first_name": "A", "last_name": "U", "email": email, "password": password}
+    if next_path is not None:
+        body["next"] = next_path
+    return client.post("/auth/signup", json=body)
 
 
 def test_signup_sends_one_welcome_email(client, sent):
@@ -205,13 +200,6 @@ def _backdate(email: str, column: str, seconds: int) -> None:
         conn.commit()
 
 
-def _signup_next(client, email, password="passw0rd", next_path=None):
-    body = {"first_name": "A", "last_name": "U", "email": email, "password": password}
-    if next_path is not None:
-        body["next"] = next_path
-    return client.post("/auth/signup", json=body)
-
-
 def _login(client, email, password="passw0rd"):
     return client.post("/auth/login", json={"email": email, "password": password})
 
@@ -232,10 +220,10 @@ def test_signup_with_email_on_sends_a_link_and_no_token(client, email_on):
     assert len(email_on) == 1
     assert email_on[0]["to"] == email
     assert email_on[0]["template"] == auth_mod.VERIFY_EMAIL_TEMPLATE
-    assert email_on[0]["variables"]["NAME"] == "A"
     url = email_on[0]["variables"]["URL"]
+    assert email_on[0]["variables"] == {"URL": url}
     assert url.startswith(f"{auth_mod.frontend_url()}/verify-email?token=")
-    assert "callbackUrl" not in url
+    assert "callbackUrl" not in url and "email=" not in url
 
 
 def test_login_before_confirming_is_refused_and_resends(client, email_on):
@@ -283,10 +271,10 @@ def test_verify_email_logs_in_and_the_password_then_works(client, email_on):
     body = resp.json()
     assert body["access_token"]
     assert body["user"]["email"] == email
+    assert body["message"] == "Email verified"
     assert email_on[-1]["template"] == auth_mod.WELCOME_TEMPLATE
 
     assert _login(client, email).status_code == 200
-    assert client.post("/auth/verify-email", json={"token": token}).status_code == 400
 
 
 def test_signup_over_a_confirmed_account_is_refused(client, email_on):
@@ -382,7 +370,8 @@ def test_reset_password_sets_the_new_password_and_logs_in(client, email_on):
         f"{auth_mod.frontend_url()}/reset-password?token="
     )
     assert params["callbackUrl"] == "/agents"
-    assert params["email"] == email
+    assert "email" not in params
+    assert email_on[0]["variables"] == {"URL": email_on[0]["variables"]["URL"]}
 
     assert client.post(
         "/auth/reset-password", json={"token": params["token"], "password": "short"}
@@ -456,20 +445,19 @@ def test_link_works_until_the_time_the_email_states(
 def test_an_expired_link_says_so_and_can_ask_for_a_new_one(client, email_on):
     email = _email("resend")
     token = _verify_link(client, email, email_on)
-    assert _link_params(email_on[-1])["email"] == email
     _backdate(email, "verify_sent_at", 24 * 3600 + 1)
 
-    resp = client.post("/auth/verify-email", json={"token": token, "email": email})
+    resp = client.post("/auth/verify-email", json={"token": token})
     assert resp.status_code == 400
     assert resp.json()["detail"] == "expired_token"
 
     email_on.clear()
     resp = client.post(
-        "/auth/resend-verification", json={"email": email, "next": "/invite/tok"}
+        "/auth/resend-verification", json={"token": token, "next": "/invite/tok"}
     )
     assert resp.status_code == 202, resp.text
     assert resp.json() == {"status": "sent", "email": email}
-    assert len(email_on) == 1
+    assert len(email_on) == 1 and email_on[0]["to"] == email
     params = _link_params(email_on[0])
     assert params["callbackUrl"] == "/invite/tok"
     assert client.post("/auth/verify-email", json={"token": params["token"]}).status_code == 200
@@ -481,12 +469,15 @@ def test_a_replaced_link_can_still_ask_for_a_new_one(client, email_on):
     _backdate(email, "verify_sent_at", 61)
     _signup(client, email)  # a newer link replaces the old one
 
-    resp = client.post("/auth/verify-email", json={"token": old, "email": email})
+    resp = client.post("/auth/verify-email", json={"token": old})
     assert resp.json()["detail"] == "expired_token"
     _backdate(email, "verify_sent_at", 61)
     email_on.clear()
-    assert client.post("/auth/resend-verification", json={"email": email}).status_code == 202
-    assert len(email_on) == 1
+    resp = client.post("/auth/resend-verification", json={"token": old})
+    assert resp.status_code == 202
+    assert resp.json()["email"] == email
+    new = _link_params(email_on[0])["token"]
+    assert client.post("/auth/verify-email", json={"token": new}).status_code == 200
 
 
 def test_a_used_link_says_the_email_is_already_verified(client, email_on):
@@ -494,18 +485,54 @@ def test_a_used_link_says_the_email_is_already_verified(client, email_on):
     token = _verify_link(client, email, email_on)
     assert client.post("/auth/verify-email", json={"token": token}).status_code == 200
 
-    resp = client.post("/auth/verify-email", json={"token": token, "email": email})
+    resp = client.post("/auth/verify-email", json={"token": token})
     assert resp.json()["detail"] == "already_verified"
-    # Nothing is waiting, so asking for a new link sends nothing
     email_on.clear()
-    assert client.post("/auth/resend-verification", json={"email": email}).status_code == 202
+    resp = client.post("/auth/resend-verification", json={"token": token})
+    assert resp.status_code == 400
+    assert resp.json()["detail"] == "already_verified"
     assert email_on == []
 
 
-def test_resend_for_an_unknown_address_sends_nothing(client, email_on):
-    resp = client.post("/auth/resend-verification", json={"email": _email("nobody")})
-    assert resp.status_code == 202
+@pytest.mark.parametrize("endpoint", ["/auth/resend-verification", "/auth/resend-reset"])
+def test_resend_from_a_made_up_link_is_refused(client, email_on, endpoint):
+    resp = client.post(endpoint, json={"token": "made-up"})
+    assert resp.status_code == 400
+    assert resp.json()["detail"] == "invalid_or_expired_token"
     assert email_on == []
+
+
+def test_a_verify_link_cannot_resend_a_reset_link(client, email_on):
+    token = _verify_link(client, _email("kind"), email_on)
+    assert client.post("/auth/resend-reset", json={"token": token}).status_code == 400
+
+
+@pytest.mark.parametrize("how", ["expired", "used", "replaced"])
+def test_any_old_reset_link_can_ask_for_a_new_one(client, email_on, how):
+    email = _email("rresend")
+    token = _reset_link(client, email, email_on)
+    if how == "expired":
+        _backdate(email, "reset_sent_at", 3601)
+    elif how == "used":
+        assert client.post(
+            "/auth/reset-password", json={"token": token, "password": "used-pass"}
+        ).status_code == 200
+    else:
+        _backdate(email, "reset_sent_at", 61)
+        client.post("/auth/forgot-password", json={"email": email})
+    assert client.post("/auth/check-reset-link", json={"token": token}).status_code == 400
+    _backdate(email, "reset_sent_at", 61)
+    email_on.clear()
+
+    resp = client.post("/auth/resend-reset", json={"token": token, "next": "/agents"})
+    assert resp.status_code == 202, resp.text
+    assert resp.json() == {"status": "sent", "email": email}
+    params = _link_params(email_on[0])
+    assert params["callbackUrl"] == "/agents"
+    assert client.post(
+        "/auth/reset-password", json={"token": params["token"], "password": "new-pass"}
+    ).status_code == 200
+    assert _login(client, email, "new-pass").status_code == 200
 
 
 def test_a_reset_link_can_be_checked_without_using_it(client, email_on):
@@ -530,7 +557,31 @@ def test_an_expired_reset_link_fails_the_check(client, email_on):
 
 
 def test_a_made_up_link_is_refused(client, email_on):
-    assert client.post("/auth/verify-email", json={"token": "made-up"}).status_code == 400
+    resp = client.post("/auth/verify-email", json={"token": "made-up"})
+    assert resp.status_code == 400
+    assert resp.json()["detail"] == "expired_token"
+
+
+def test_a_password_over_72_bytes_leaves_no_account_behind(client, email_on):
+    import db
+
+    email = _email("longon")
+    assert _signup(client, email, password="é" * 40).status_code == 422
+    assert db.get_user_by_email(email) is None
+    assert email_on == []
+
+
+def test_a_pending_password_with_email_off_is_a_plain_wrong_password(client, sent, monkeypatch):
+    """With email off nothing can be sent, so there is no link to point the person to."""
+    email = _email("offlogin")
+    monkeypatch.setenv("RESEND_API_KEY", "re_test_key")
+    _signup(client, email)
+    monkeypatch.setenv("RESEND_API_KEY", "")
+    sent.clear()
+
+    resp = _login(client, email)
+    assert resp.status_code == 401
+    assert sent == []
 
 
 def test_a_signup_left_waiting_can_sign_up_again_once_email_is_off(client, sent, monkeypatch):
@@ -541,9 +592,13 @@ def test_a_signup_left_waiting_can_sign_up_again_once_email_is_off(client, sent,
     assert _signup(client, email).status_code == 202
     monkeypatch.setenv("RESEND_API_KEY", "")
 
+    sent.clear()
+
     resp = _signup(client, email, password="fresh-pass")
     assert resp.status_code == 200, resp.text
     assert _login(client, email, "fresh-pass").status_code == 200
+    # A row already existed, but nobody had been welcomed yet.
+    assert [m["template"] for m in sent] == ["calibrate-welcome"]
 
 
 @pytest.mark.parametrize("endpoint", ["/auth/signup", "/auth/login"])
@@ -580,7 +635,7 @@ def test_first_google_sign_in_after_a_strangers_signup_is_welcomed(client, email
     ],
 )
 def test_callback_is_added_only_for_a_path_on_the_site(client, email_on, next_path, expected):
-    _signup_next(client, _email("next"), next_path=next_path)
+    _signup(client, _email("next"), next_path=next_path)
     assert _link_params(email_on[0]).get("callbackUrl") == expected
 
 

@@ -1300,6 +1300,19 @@ def init_db():
         except sqlite3.OperationalError:
             pass
 
+        # Every verify or reset link ever sent, so a used or replaced link
+        # still says whose account it was for.
+        cursor.execute(
+            """
+            CREATE TABLE IF NOT EXISTS auth_links (
+                token_hash TEXT PRIMARY KEY,
+                user_uuid TEXT NOT NULL,
+                kind TEXT NOT NULL,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+            """
+        )
+
         # One row each time a workspace is refused for going over a limit.
         cursor.execute(
             """
@@ -1440,17 +1453,20 @@ def init_db():
             default_user_uuid = default_user_row["uuid"]
             logger.info(f"Default user already exists with UUID: {default_user_uuid}")
         else:
-            # Create the default user
+            # Create the default user. A real address is an account someone
+            # owns, so it is verified and cannot be claimed by a signup; with no
+            # address the row is only a placeholder and is not counted as a user.
             default_user_uuid = str(uuid.uuid4())
             cursor.execute(
                 """
-                INSERT INTO users (uuid, first_name, last_name, email)
-                VALUES (?, ?, ?, ?)
+                INSERT INTO users (uuid, first_name, last_name, email, email_verified_at)
+                VALUES (?, ?, ?, ?, CASE WHEN ? != '' THEN CURRENT_TIMESTAMP END)
                 """,
                 (
                     default_user_uuid,
                     DEFAULT_USER_FIRST_NAME,
                     DEFAULT_USER_LAST_NAME,
+                    default_user_email_normalized,
                     default_user_email_normalized,
                 ),
             )
@@ -4039,8 +4055,7 @@ def create_user_with_password(
                 UPDATE users
                    SET first_name = ?, last_name = ?, password_hash = ?,
                        email_verified_at = CURRENT_TIMESTAMP,
-                       verify_token_hash = NULL, verify_password_hash = NULL,
-                       verify_sent_at = NULL, reset_token_hash = NULL, reset_sent_at = NULL,
+                       """ + _CLEAR_LINKS + """,
                        updated_at = CURRENT_TIMESTAMP
                  WHERE uuid = ?
                 """,
@@ -4074,6 +4089,19 @@ def create_user_with_password(
         return user_uuid
 
 
+# Voids every pending verify and reset link; shared by both ways an address gets verified.
+_CLEAR_LINKS = (
+    "verify_token_hash = NULL, verify_password_hash = NULL, verify_sent_at = NULL, "
+    "reset_token_hash = NULL, reset_sent_at = NULL"
+)
+
+
+def _check_link_kind(kind: str) -> None:
+    # The kind is put into column names, so only these two may ever reach SQL.
+    if kind not in ("verify", "reset"):
+        raise ValueError("kind must be verify or reset")
+
+
 def set_user_token(
     user_uuid: str,
     kind: str,
@@ -4090,8 +4118,7 @@ def set_user_token(
     the link already in the inbox can never be redirected to a password typed
     by someone else.
     """
-    if kind not in ("verify", "reset"):
-        raise ValueError("kind must be verify or reset")
+    _check_link_kind(kind)
     with get_db_connection() as conn:
         cursor = conn.cursor()
         cursor.execute(
@@ -4114,16 +4141,21 @@ def set_user_token(
                 f"-{cooldown_seconds} seconds",
             ),
         )
+        stored = cursor.rowcount > 0
+        if stored:
+            cursor.execute(
+                "INSERT INTO auth_links (token_hash, user_uuid, kind) VALUES (?, ?, ?)",
+                (token_hash, user_uuid, kind),
+            )
         conn.commit()
-        return cursor.rowcount > 0
+        return stored
 
 
 def get_user_by_token(
     kind: str, token_hash: str, max_age_seconds: int
 ) -> Optional[Dict[str, Any]]:
     """The user holding this `verify` or `reset` token, if it is younger than `max_age_seconds`."""
-    if kind not in ("verify", "reset"):
-        raise ValueError("kind must be verify or reset")
+    _check_link_kind(kind)
     with get_db_connection() as conn:
         cursor = conn.cursor()
         cursor.execute(
@@ -4137,6 +4169,19 @@ def get_user_by_token(
         return dict(row) if row else None
 
 
+def get_link_owner(kind: str, token_hash: str) -> Optional[Dict[str, Any]]:
+    """The user a `verify` or `reset` link was issued to, even once it is used, replaced or too old."""
+    with get_db_connection() as conn:
+        row = conn.execute(
+            """
+            SELECT u.* FROM auth_links l JOIN users u ON u.uuid = l.user_uuid
+             WHERE l.kind = ? AND l.token_hash = ?
+            """,
+            (kind, token_hash),
+        ).fetchone()
+        return dict(row) if row else None
+
+
 def mark_email_verified(user_uuid: str, password_hash: Optional[str] = None) -> None:
     """Confirm the address, optionally set the password, and void every pending link."""
     with get_db_connection() as conn:
@@ -4145,8 +4190,7 @@ def mark_email_verified(user_uuid: str, password_hash: Optional[str] = None) -> 
             UPDATE users
                SET password_hash = COALESCE(?, password_hash),
                    email_verified_at = COALESCE(email_verified_at, CURRENT_TIMESTAMP),
-                   verify_token_hash = NULL, verify_password_hash = NULL,
-                   verify_sent_at = NULL, reset_token_hash = NULL, reset_sent_at = NULL,
+                   """ + _CLEAR_LINKS + """,
                    updated_at = CURRENT_TIMESTAMP
              WHERE uuid = ?
             """,
