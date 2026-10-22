@@ -3635,6 +3635,27 @@ def test_rating_agreement_divides_by_the_rubric_width(client):
     assert public["human_agreement"]["evaluators"][0]["agreement"] == 0.625
 
 
+def _evaluator_with_scale(client, h, output_type, scale):
+    return client.post(
+        "/evaluators",
+        json={
+            "name": f"{output_type}-{uuid.uuid4().hex[:6]}",
+            "evaluator_type": "llm",
+            "output_type": output_type,
+            "version": {
+                "judge_model": "openai/gpt-4",
+                "system_prompt": "Judge it",
+                "output_config": {"scale": scale},
+            },
+        },
+        headers=h,
+    ).json()
+
+
+_PASS_FAIL_SCALE = [{"value": True, "name": "Pass"}, {"value": False, "name": "Fail"}]
+_ONE_TO_FIVE_SCALE = [{"value": value, "name": str(value)} for value in range(1, 6)]
+
+
 def test_kappa_sits_beside_every_agreement_over_many_items(client):
     """Two annotators and a judge answer four items on a pass/fail evaluator
     and on a 1-to-5 rating evaluator. Items 0 and 3 were answered 40 days ago,
@@ -3645,28 +3666,8 @@ def test_kappa_sits_beside_every_agreement_over_many_items(client):
     auth = _signup(client)
     h = auth["headers"]
 
-    def create_evaluator(output_type, scale):
-        return client.post(
-            "/evaluators",
-            json={
-                "name": f"{output_type}-{uuid.uuid4().hex[:6]}",
-                "evaluator_type": "llm",
-                "output_type": output_type,
-                "version": {
-                    "judge_model": "openai/gpt-4",
-                    "system_prompt": "Judge it",
-                    "output_config": {"scale": scale},
-                },
-            },
-            headers=h,
-        ).json()
-
-    binary_evaluator = create_evaluator(
-        "binary", [{"value": True, "name": "Pass"}, {"value": False, "name": "Fail"}]
-    )
-    rating_evaluator = create_evaluator(
-        "rating", [{"value": value, "name": str(value)} for value in range(1, 6)]
-    )
+    binary_evaluator = _evaluator_with_scale(client, h, "binary", _PASS_FAIL_SCALE)
+    rating_evaluator = _evaluator_with_scale(client, h, "rating", _ONE_TO_FIVE_SCALE)
     task_uuid = client.post(
         "/annotation-tasks",
         json={
@@ -3747,64 +3748,96 @@ def test_kappa_sits_beside_every_agreement_over_many_items(client):
         )
         conn.commit()
 
-    # Now, over all 4 items, and earlier, over items 0 and 3. The annotator
-    # numbers pool both evaluators, so their type is `mixed`.
-    annotators_now = {"kappa": 0.52, "kappa_type": "mixed", "kappa_blank_reason": None}
-    annotators_earlier = {"kappa": 0.8261, "kappa_type": "mixed", "kappa_blank_reason": None}
-    binary_judge_now = {"kappa": 0.75, "kappa_type": "cohen", "kappa_blank_reason": None}
-    binary_judge_earlier = {"kappa": 1.0, "kappa_type": "cohen", "kappa_blank_reason": None}
+    def kappa(kappa_value, kappa_type, chance_agreement, kappa_blank_reason=None):
+        return {
+            "kappa": kappa_value,
+            "kappa_type": kappa_type,
+            "kappa_blank_reason": kappa_blank_reason,
+            "chance_agreement": chance_agreement,
+        }
+
+    # Now, over all 4 items, and earlier, over items 0 and 3. Every kappa is
+    # (agreement - chance) / (1 - chance).
+    binary_judge_now = kappa(0.75, "cohen", 0.5)
+    binary_judge_earlier = kappa(1.0, "cohen", 0.5)
     # Rating judge 3, 4, 1, 5 against 3, 4, 2, 5 and 3, 5, 2, 4: agreement
-    # 7/8, chance 10/16, kappa (0.875 - 0.625) / 0.375.
-    rating_judge_now = {"kappa": 0.6667, "kappa_type": "linear_weighted_cohen", "kappa_blank_reason": None}
-    rating_judge_earlier = {"kappa": 0.75, "kappa_type": "linear_weighted_cohen", "kappa_blank_reason": None}
-    one_annotator_now = {"kappa": 0.5385, "kappa_type": "mixed", "kappa_blank_reason": None}
-    one_annotator_earlier = {"kappa": 0.8333, "kappa_type": "mixed", "kappa_blank_reason": None}
+    # 7/8, chance 10/16.
+    rating_judge_now = kappa(0.6667, "linear_weighted_cohen", 0.625)
+    rating_judge_earlier = kappa(0.75, "linear_weighted_cohen", 0.75)
+    # Annotators on the binary evaluator: true 5 of 8 answers, chance 0.53125.
+    binary_annotators_now = kappa(0.4667, "fleiss", 0.5312)
+    binary_annotators_earlier = kappa(1.0, "fleiss", 0.5)
+    # Annotators on the rating evaluator: 2, 3, 4, 5 a quarter each, chance
+    # 11/16. Earlier 3, 3, 4, 5, chance 0.78125.
+    rating_annotators_now = kappa(0.6, "linear_weighted_fleiss", 0.6875)
+    rating_annotators_earlier = kappa(0.4286, "linear_weighted_fleiss", 0.7812)
+    one_annotator_now = [
+        {"answer_kind": "binary", **kappa(0.5, "cohen", 0.5)},
+        {"answer_kind": "rating", **kappa(0.6, "linear_weighted_cohen", 0.6875)},
+    ]
+    one_annotator_earlier = [
+        {"answer_kind": "binary", **kappa(1.0, "cohen", 0.5)},
+        {"answer_kind": "rating", **kappa(0.5, "linear_weighted_cohen", 0.75)},
+    ]
+    kappa_keys = ("kappa", "kappa_type", "kappa_blank_reason", "chance_agreement")
+    point_keys_on_main = {"bucket_start", "bucket_end", "agreement", "pair_count"}
 
     def kappa_of(block):
-        return {
-            "kappa": block["kappa"],
-            "kappa_type": block["kappa_type"],
-            "kappa_blank_reason": block["kappa_blank_reason"],
-        }
+        return {key: block[key] for key in kappa_keys}
+
+    def earliest_point_with_pairs(series):
+        point = next(point for point in series if point["pair_count"])
+        assert point["pair_count"] < series[-1]["pair_count"]
+        return point
 
     def assert_kappa_now_and_earlier(block, expected_now, expected_earlier):
         assert kappa_of(block) == expected_now
         assert kappa_of(block["series"][-1]) == expected_now
-        earliest_point_with_pairs = next(
-            point for point in block["series"] if point["pair_count"]
-        )
-        assert earliest_point_with_pairs["pair_count"] < block["series"][-1]["pair_count"]
-        assert kappa_of(earliest_point_with_pairs) == expected_earlier
+        assert kappa_of(earliest_point_with_pairs(block["series"])) == expected_earlier
         assert all(
-            kappa_of(point) == {"kappa": None, "kappa_type": None, "kappa_blank_reason": None}
+            kappa_of(point) == dict.fromkeys(kappa_keys)
             for point in block["series"]
             if not point["pair_count"]
         )
 
+    def assert_shaped_as_on_main(block):
+        assert set(block) == {"current", "pair_count", "series"}
+        assert all(set(point) == point_keys_on_main for point in block["series"])
+
     def by_evaluator_id(entries):
         return {entry["evaluator_id"]: entry for entry in entries}
 
-    agreement = client.get(f"/annotation-tasks/{task_uuid}/agreement", headers=h).json()
-    assert agreement["human_human"]["current"] == 0.8125
-    assert_kappa_now_and_earlier(agreement["human_human"], annotators_now, annotators_earlier)
-    evaluator_agreement = by_evaluator_id(agreement["evaluators"])
-    assert_kappa_now_and_earlier(
-        evaluator_agreement[binary_evaluator["uuid"]], binary_judge_now, binary_judge_earlier
-    )
-    assert evaluator_agreement[rating_evaluator["uuid"]]["current"] == 0.875
-    assert_kappa_now_and_earlier(
-        evaluator_agreement[rating_evaluator["uuid"]], rating_judge_now, rating_judge_earlier
-    )
-
-    for params in ({}, {"task_id": task_uuid}):
-        trend = client.get("/annotation-agreement/trend", params=params, headers=h).json()
-        assert_kappa_now_and_earlier(trend["human_human"], annotators_now, annotators_earlier)
-        trend_by_evaluator = by_evaluator_id(trend["evaluators"])
-        assert_kappa_now_and_earlier(
-            trend_by_evaluator[binary_evaluator["uuid"]], binary_judge_now, binary_judge_earlier
+    def assert_agreement_blocks(response):
+        assert_shaped_as_on_main(response["human_human"])
+        assert response["human_human"]["current"] == 0.8125
+        evaluators_with_humans = response["evaluators_with_humans"]
+        assert_shaped_as_on_main(evaluators_with_humans)
+        # Each judge compared 8 pairs at 7/8.
+        assert (evaluators_with_humans["current"], evaluators_with_humans["pair_count"]) == (0.875, 16)
+        # Earlier, 4 binary pairs at 1 and 4 rating pairs at 0.9375.
+        assert earliest_point_with_pairs(evaluators_with_humans["series"])["agreement"] == round(
+            (4 * 1 + 4 * 0.9375) / 8, 4
         )
+        evaluator_agreement = by_evaluator_id(response["evaluators"])
+        binary = evaluator_agreement[binary_evaluator["uuid"]]
+        rating = evaluator_agreement[rating_evaluator["uuid"]]
+        assert rating["current"] == 0.875
+        assert_kappa_now_and_earlier(binary, binary_judge_now, binary_judge_earlier)
+        assert_kappa_now_and_earlier(rating, rating_judge_now, rating_judge_earlier)
+        assert binary["inter_annotator"]["current"] == 0.75
         assert_kappa_now_and_earlier(
-            trend_by_evaluator[rating_evaluator["uuid"]], rating_judge_now, rating_judge_earlier
+            binary["inter_annotator"], binary_annotators_now, binary_annotators_earlier
+        )
+        assert rating["inter_annotator"]["current"] == 0.875
+        assert_kappa_now_and_earlier(
+            rating["inter_annotator"], rating_annotators_now, rating_annotators_earlier
+        )
+
+    agreement = client.get(f"/annotation-tasks/{task_uuid}/agreement", headers=h).json()
+    assert_agreement_blocks(agreement)
+    for params in ({}, {"task_id": task_uuid}):
+        assert_agreement_blocks(
+            client.get("/annotation-agreement/trend", params=params, headers=h).json()
         )
 
     evaluator_trend = client.get(
@@ -3823,11 +3856,11 @@ def test_kappa_sits_beside_every_agreement_over_many_items(client):
     assert all(
         key not in item
         for item in run_detail["human_agreement"]["items"]
-        for key in ("kappa", "kappa_blank_reason")
+        for key in kappa_keys
     )
     assert all(
         key not in item_evaluator_agreement
-        for key in ("kappa", "kappa_blank_reason")
+        for key in kappa_keys
         for item in run_detail["human_agreement"]["items"]
         for item_evaluator_agreement in item["evaluators"]
     )
@@ -3838,14 +3871,18 @@ def test_kappa_sits_beside_every_agreement_over_many_items(client):
     assert kappa_of(public_agreement[rating_evaluator["uuid"]]) == rating_judge_now
 
     listed = client.get("/annotators", headers=h).json()
-    assert [kappa_of(annotator) for annotator in listed] == [one_annotator_now, one_annotator_now]
+    assert [annotator["current_agreement"] for annotator in listed] == [0.8125, 0.8125]
+    assert [annotator["kappa_by_kind"] for annotator in listed] == [one_annotator_now] * 2
+    assert all(key not in annotator for annotator in listed for key in kappa_keys)
     detail = client.get(f"/annotators/{listed[0]['uuid']}", headers=h).json()
-    assert kappa_of(detail["stats"]) == one_annotator_now
-    assert_kappa_now_and_earlier(
-        {**detail["stats"], "series": detail["trend"]["series"]},
-        one_annotator_now,
-        one_annotator_earlier,
-    )
+    assert detail["stats"]["current_agreement"] == 0.8125
+    assert detail["stats"]["kappa_by_kind"] == one_annotator_now
+    assert all(key not in detail["stats"] for key in kappa_keys)
+    series = detail["trend"]["series"]
+    assert series[-1]["kappa_by_kind"] == one_annotator_now
+    assert earliest_point_with_pairs(series)["kappa_by_kind"] == one_annotator_earlier
+    assert all(point["kappa_by_kind"] == [] for point in series if not point["pair_count"])
+    assert all(set(point) == point_keys_on_main | {"kappa_by_kind"} for point in series)
 
     # One item cannot show chance, so per-item numbers carry no kappa.
     task_items = client.get(f"/annotation-tasks/{task_uuid}", headers=h).json()["items"]
@@ -3853,18 +3890,16 @@ def test_kappa_sits_beside_every_agreement_over_many_items(client):
     assert all(
         key not in item["agreement"]["human_human"]
         for item in task_items
-        for key in ("kappa", "kappa_blank_reason")
+        for key in kappa_keys
     )
     assert all(
         key not in item_evaluator_agreement
-        for key in ("kappa", "kappa_blank_reason")
+        for key in kappa_keys
         for item in task_items
         for item_evaluator_agreement in item["agreement"]["evaluators"]
     )
     summary_rows = client.get(f"/annotation-tasks/{task_uuid}/summary", headers=h).json()["rows"]
-    assert summary_rows and all(
-        key not in row for row in summary_rows for key in ("kappa", "kappa_blank_reason")
-    )
+    assert summary_rows and all(key not in row for row in summary_rows for key in kappa_keys)
 
 
 def test_kappa_blank_reason_follows_the_answers_compared(client):
@@ -3892,27 +3927,153 @@ def test_kappa_blank_reason_follows_the_answers_compared(client):
         headers=h,
     ).json()["jobs"]
 
-    def blank_reasons():
+    def blank_reasons_and_chance_agreements():
         task_agreement = client.get(f"/annotation-tasks/{task_uuid}/agreement", headers=h).json()
         workspace_trend = client.get("/annotation-agreement/trend", headers=h).json()
         listed = client.get("/annotators", headers=h).json()
         detail = client.get(f"/annotators/{annotator_ids[0]}", headers=h).json()
+        inter_annotator_blocks = [
+            response["evaluators"][0]["inter_annotator"]
+            for response in (task_agreement, workspace_trend)
+            if response["evaluators"]
+        ]
+        flat_blocks = [
+            *inter_annotator_blocks,
+            *(block["series"][-1] for block in inter_annotator_blocks),
+        ]
+        kappa_by_kind_entries = [
+            *(entry for annotator in listed for entry in annotator["kappa_by_kind"]),
+            *detail["stats"]["kappa_by_kind"],
+            *detail["trend"]["series"][-1]["kappa_by_kind"],
+        ]
+        assert inter_annotator_blocks and len(kappa_by_kind_entries) == 4
         return {
-            task_agreement["human_human"]["kappa_blank_reason"],
-            task_agreement["human_human"]["series"][-1]["kappa_blank_reason"],
-            workspace_trend["human_human"]["kappa_blank_reason"],
-            workspace_trend["human_human"]["series"][-1]["kappa_blank_reason"],
-            *(annotator["kappa_blank_reason"] for annotator in listed),
-            detail["stats"]["kappa_blank_reason"],
-            detail["trend"]["series"][-1]["kappa_blank_reason"],
+            (block["kappa_blank_reason"], block["chance_agreement"])
+            for block in flat_blocks + kappa_by_kind_entries
         }
 
     for job in jobs:
         _post_answers(client, job, llm_ev["uuid"], {item_ids[0]: True})
-    assert blank_reasons() == {"too_few_items"}
+    assert blank_reasons_and_chance_agreements() == {("too_few_items", None)}
     for job in jobs:
         _post_answers(client, job, llm_ev["uuid"], {item_ids[1]: True})
-    assert blank_reasons() == {"everyone_agreed"}
+    assert blank_reasons_and_chance_agreements() == {("everyone_agreed", 1.0)}
+
+
+def test_pass_fail_and_rating_answers_never_share_a_kappa(client):
+    """Correctness, pass or fail: both annotators say pass on two items.
+    Conciseness, 1 to 5: (1, 1) and (1, 2). The judge rates Conciseness 4 on
+    the first item only."""
+    import db as db_mod
+    from annotation_eval_runner import ANNOTATION_EVAL_JOB_TYPE
+
+    auth = _signup(client)
+    h = auth["headers"]
+    correctness = _evaluator_with_scale(client, h, "binary", _PASS_FAIL_SCALE)
+    conciseness = _evaluator_with_scale(client, h, "rating", _ONE_TO_FIVE_SCALE)
+    task_uuid = client.post(
+        "/annotation-tasks",
+        json={
+            "name": f"t-{uuid.uuid4().hex[:6]}",
+            "type": "llm",
+            "evaluator_ids": [correctness["uuid"], conciseness["uuid"]],
+        },
+        headers=h,
+    ).json()["uuid"]
+    item_ids = client.post(
+        f"/annotation-tasks/{task_uuid}/items",
+        json={"items": [{"payload": llm_item_payload(f"i{index}")} for index in range(2)]},
+        headers=h,
+    ).json()["item_ids"]
+    annotator_ids = [
+        client.post("/annotators", json={"name": f"a-{uuid.uuid4().hex[:6]}"}, headers=h).json()["uuid"]
+        for _ in range(2)
+    ]
+    jobs = client.post(
+        f"/annotation-tasks/{task_uuid}/jobs",
+        json={"annotator_ids": annotator_ids, "item_ids": item_ids},
+        headers=h,
+    ).json()["jobs"]
+    job_of = {job["annotator_id"]: job for job in jobs}
+    for annotator_id, conciseness_answers in zip(annotator_ids, ((1, 1), (1, 2))):
+        for item_id, conciseness_answer in zip(item_ids, conciseness_answers):
+            assert client.post(
+                f"/public/annotation-jobs/{job_of[annotator_id]['public_token']}/annotations",
+                json={
+                    "item_id": item_id,
+                    "annotations": [
+                        {"evaluator_id": correctness["uuid"], "value": {"value": True}},
+                        {"evaluator_id": conciseness["uuid"], "value": {"value": conciseness_answer}},
+                    ],
+                },
+            ).status_code == 200
+    eval_job = db_mod.create_job(
+        job_type=ANNOTATION_EVAL_JOB_TYPE,
+        org_uuid=db_mod.get_personal_org_for_user(auth["user_uuid"])["uuid"],
+        user_id=auth["user_uuid"],
+        status="done",
+        details={"task_id": task_uuid},
+    )
+    db_mod.create_evaluator_runs([{
+        "job_id": eval_job,
+        "item_id": item_ids[0],
+        "evaluator_id": conciseness["uuid"],
+        "evaluator_version_id": conciseness["version_uuid"],
+        "status": "completed",
+        "value": {"value": 4},
+    }])
+
+    def without_series(block):
+        return {key: value for key, value in block.items() if key != "series"}
+
+    for response in (
+        client.get(f"/annotation-tasks/{task_uuid}/agreement", headers=h).json(),
+        client.get("/annotation-agreement/trend", headers=h).json(),
+    ):
+        # Pairs agree 1, 1, 1 and 1 - 1/4 over both kinds.
+        assert without_series(response["human_human"]) == {"current": 0.9375, "pair_count": 4}
+        # Only the Conciseness judge compared: 4 against the two 1s.
+        assert without_series(response["evaluators_with_humans"]) == {"current": 0.25, "pair_count": 2}
+        evaluator_id_to_agreement = {entry["evaluator_id"]: entry for entry in response["evaluators"]}
+        conciseness_agreement = evaluator_id_to_agreement[conciseness["uuid"]]
+        assert {
+            key: conciseness_agreement[key]
+            for key in ("current", "pair_count", "kappa", "kappa_type", "kappa_blank_reason", "chance_agreement")
+        } == {
+            "current": 0.25, "pair_count": 2, "kappa": None, "kappa_type": "linear_weighted_cohen",
+            "kappa_blank_reason": "too_few_items", "chance_agreement": None,
+        }
+        # Annotator answers 1, 1, 1, 2: chance 0.90625.
+        assert without_series(conciseness_agreement["inter_annotator"]) == {
+            "current": 0.875, "pair_count": 2, "kappa": -0.3333,
+            "kappa_type": "linear_weighted_fleiss", "kappa_blank_reason": None,
+            "chance_agreement": round(0.90625, 4),
+        }
+        if correctness["uuid"] in evaluator_id_to_agreement:
+            assert without_series(evaluator_id_to_agreement[correctness["uuid"]]["inter_annotator"]) == {
+                "current": 1.0, "pair_count": 2, "kappa": None, "kappa_type": "fleiss",
+                "kappa_blank_reason": "everyone_agreed", "chance_agreement": 1.0,
+            }
+
+    # The workspace trend lists only evaluators with judge scores, so
+    # Correctness is checked on the task view above.
+    task_agreement = client.get(f"/annotation-tasks/{task_uuid}/agreement", headers=h).json()
+    assert correctness["uuid"] in {entry["evaluator_id"] for entry in task_agreement["evaluators"]}
+
+    # a0 gave Conciseness 1, 1 and the other 1, 2: agreement 0.875, chance
+    # 1/2 * 1 + 1/2 * 0.75.
+    first_annotator_kappa_by_kind = [
+        {"answer_kind": "binary", "kappa": None, "kappa_type": "cohen",
+         "kappa_blank_reason": "everyone_agreed", "chance_agreement": 1.0},
+        {"answer_kind": "rating", "kappa": 0.0, "kappa_type": "linear_weighted_cohen",
+         "kappa_blank_reason": None, "chance_agreement": 0.875},
+    ]
+    listed = {annotator["uuid"]: annotator for annotator in client.get("/annotators", headers=h).json()}
+    assert listed[annotator_ids[0]]["current_agreement"] == 0.9375
+    assert listed[annotator_ids[0]]["kappa_by_kind"] == first_annotator_kappa_by_kind
+    detail = client.get(f"/annotators/{annotator_ids[0]}", headers=h).json()
+    assert detail["stats"]["kappa_by_kind"] == first_annotator_kappa_by_kind
+    assert detail["trend"]["series"][-1]["kappa_by_kind"] == first_annotator_kappa_by_kind
 
 
 # ---------------------------------------------------------------------------

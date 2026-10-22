@@ -1,4 +1,4 @@
-from typing import Optional, List, Dict, Any, Union
+from typing import Optional, List, Dict, Any, Tuple, Union
 from fastapi import APIRouter, HTTPException, Depends, Path, Query
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 from typing import Literal
@@ -76,13 +76,6 @@ from annotation_eval_runner import (
     required_evaluator_ids_for_item,
     start_annotation_eval_job,
     TOOL_CALL_EVALUATOR_TYPE,
-)
-from annotation_metrics import (
-    ANNOTATORS_KAPPA_TYPE_DESCRIPTION,
-    KAPPA_BLANK_REASON_DESCRIPTION,
-    KAPPA_DESCRIPTION,
-    AnnotatorsKappaType,
-    KappaBlankReason,
 )
 from utils import (
     utc_now,
@@ -278,12 +271,17 @@ class HumanAgreementBlock(BaseModel):
     pair_count: int = Field(
         description="How many annotator pairs the current value averages over"
     )
-    kappa: Optional[float] = Field(description=KAPPA_DESCRIPTION)
-    kappa_type: Optional[AnnotatorsKappaType] = Field(
-        description=ANNOTATORS_KAPPA_TYPE_DESCRIPTION
+    series: List[Dict[str, Any]] = Field(
+        description="Agreement over time, one point per time bucket"
     )
-    kappa_blank_reason: Optional[KappaBlankReason] = Field(
-        description=KAPPA_BLANK_REASON_DESCRIPTION
+
+
+class EvaluatorsWithHumansBlock(BaseModel):
+    current: Optional[float] = Field(
+        description="Current mean agreement between the evaluators and the annotators, weighted by how many pairs each evaluator compared"
+    )
+    pair_count: int = Field(
+        description="How many evaluator and annotator pairs the current value averages over"
     )
     series: List[Dict[str, Any]] = Field(
         description="Agreement over time, one point per time bucket"
@@ -297,6 +295,9 @@ class TaskAgreementResponse(BaseModel):
     days: int = Field(description="Length of the trailing window in days")
     human_human: HumanAgreementBlock = Field(
         description="Agreement between annotators who labelled the same items"
+    )
+    evaluators_with_humans: EvaluatorsWithHumansBlock = Field(
+        description="Agreement between the evaluators and the annotators, across every evaluator in `evaluators`"
     )
     evaluators: List[Dict[str, Any]] = Field(
         description="Agreement between each evaluator and the annotators, plus that evaluator's own results and the human results, one entry per linked evaluator"
@@ -403,8 +404,10 @@ from annotation_metrics import (
     agreement_on_item,
     has_answers_to_compare,
     agreement_between_annotators_over_time,
-    agreement_between_judge_and_annotators_over_time,
+    agreement_of_each_evaluator_with_annotators,
+    kappa_of_one_kind,
     keep_runs_from_live_versions_of,
+    trend_without_kappa,
     rating_scales_for,
     _mean_agreement_between_answers,
     _extract_answer,
@@ -2632,7 +2635,8 @@ def _human_agreement_for_run(
             { "evaluator_id": str, "evaluator_version_id": str|None,
               "agreement": float|None, "pair_count": int,
               "kappa": float|None, "kappa_type": str|None,
-              "kappa_blank_reason": str|None, "item_count": int }
+              "kappa_blank_reason": str|None, "chance_agreement": float|None,
+              "item_count": int }
           ],
           "items": [
             { "item_id": str, "annotator_count": int,
@@ -2681,10 +2685,8 @@ def _human_agreement_for_run(
             evaluator_id_to_version_id[evaluator_id] = run.get("evaluator_version_id")
     rating_scales = rating_scales_for(annotations_on_this_jobs_items, evaluator_runs_in_this_job)
     for evaluator_id in evaluator_ids_in_this_job:
-        agreement, pair_count, kappa, kappa_type, kappa_blank_reason = (
-            agreement_and_kappa_between_judge_and_annotators(
-                annotations_on_this_jobs_items, evaluator_runs_in_this_job, evaluator_id, rating_scales
-            )
+        agreement, pair_count, kappa_by_kind = agreement_and_kappa_between_judge_and_annotators(
+            annotations_on_this_jobs_items, evaluator_runs_in_this_job, evaluator_id, rating_scales
         )
         # Items with at least one human annotation on this evaluator.
         item_count = len(
@@ -2700,9 +2702,7 @@ def _human_agreement_for_run(
                 "evaluator_version_id": evaluator_id_to_version_id.get(evaluator_id),
                 "agreement": agreement,
                 "pair_count": pair_count,
-                "kappa": kappa,
-                "kappa_type": kappa_type,
-                "kappa_blank_reason": kappa_blank_reason,
+                **kappa_of_one_kind(kappa_by_kind),
                 "item_count": item_count,
             }
         )
@@ -3011,48 +3011,32 @@ def _agreement_per_linked_evaluator(
     bucket: str,
     days: int,
     rating_scales: Dict[str, Any],
-) -> List[Dict[str, Any]]:
+) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
     """For each evaluator linked to the task, its judge's agreement with the
     annotators now and over time. Always returns one entry per linked
-    evaluator (with `current=None, pair_count=0` when there's no overlap yet)."""
-    evaluator_ids = [evaluator["uuid"] for evaluator in linked_evaluators]
-    evaluator_id_to_agreement_over_time = (
-        agreement_between_judge_and_annotators_over_time(
+    evaluator (with `current=None, pair_count=0` when there's no overlap yet).
+    Also returns the agreement over all of them."""
+    evaluator_id_to_agreement, agreement_of_all_evaluators = (
+        agreement_of_each_evaluator_with_annotators(
             annotations,
             evaluator_runs,
-            evaluator_ids,
+            [evaluator["uuid"] for evaluator in linked_evaluators],
             bucket=bucket,
             days=days,
             rating_scales=rating_scales,
         )
     )
-    agreement_per_evaluator: List[Dict[str, Any]] = []
-    for evaluator in linked_evaluators:
-        evaluator_id = evaluator["uuid"]
-        (
-            evaluator_agreement,
-            evaluator_pair_count,
-            evaluator_kappa,
-            evaluator_kappa_type,
-            evaluator_kappa_blank_reason,
-        ) = agreement_and_kappa_between_judge_and_annotators(
-            annotations, evaluator_runs, evaluator_id, rating_scales
-        )
-        agreement_per_evaluator.append(
-            {
-                "evaluator_id": evaluator_id,
-                "name": evaluator.get("name"),
-                "current": evaluator_agreement,
-                "pair_count": evaluator_pair_count,
-                "kappa": evaluator_kappa,
-                "kappa_type": evaluator_kappa_type,
-                "kappa_blank_reason": evaluator_kappa_blank_reason,
-                "series": evaluator_id_to_agreement_over_time.get(evaluator_id, []),
-                "result": judge_answer_summary(evaluator_runs, evaluator_id),
-                "human_result": annotator_answer_summary(annotations, evaluator_id),
-            }
-        )
-    return agreement_per_evaluator
+    agreement_per_evaluator = [
+        {
+            "evaluator_id": evaluator["uuid"],
+            "name": evaluator.get("name"),
+            **evaluator_id_to_agreement[evaluator["uuid"]],
+            "result": judge_answer_summary(evaluator_runs, evaluator["uuid"]),
+            "human_result": annotator_answer_summary(annotations, evaluator["uuid"]),
+        }
+        for evaluator in linked_evaluators
+    ]
+    return agreement_per_evaluator, agreement_of_all_evaluators
 
 
 @router.get("/{task_uuid}/agreement", response_model=TaskAgreementResponse, summary="Get task agreement", tags=["Public API"])
@@ -3079,18 +3063,14 @@ def task_agreement(
     )
 
     rating_scales = rating_scales_for(annotations, live_evaluator_version_runs)
-    (
-        annotator_agreement,
-        annotator_pair_count,
-        annotator_kappa,
-        annotator_kappa_type,
-        annotator_kappa_blank_reason,
-    ) = agreement_and_kappa_between_annotators(annotations, rating_scales)
+    annotator_agreement, annotator_pair_count, _ = agreement_and_kappa_between_annotators(
+        annotations, rating_scales
+    )
     annotator_agreement_over_time = agreement_between_annotators_over_time(
         annotations, bucket=bucket, days=days, rating_scales=rating_scales
     )
 
-    agreement_per_evaluator = _agreement_per_linked_evaluator(
+    agreement_per_evaluator, agreement_of_all_evaluators = _agreement_per_linked_evaluator(
         annotations,
         live_evaluator_version_runs,
         linked_evaluators,
@@ -3106,11 +3086,9 @@ def task_agreement(
         "human_human": {
             "current": annotator_agreement,
             "pair_count": annotator_pair_count,
-            "kappa": annotator_kappa,
-            "kappa_type": annotator_kappa_type,
-            "kappa_blank_reason": annotator_kappa_blank_reason,
-            "series": annotator_agreement_over_time,
+            "series": trend_without_kappa(annotator_agreement_over_time),
         },
+        "evaluators_with_humans": agreement_of_all_evaluators,
         "evaluators": agreement_per_evaluator,
     }
 

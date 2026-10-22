@@ -17,12 +17,12 @@ from auth_utils import get_current_org, OrgContext
 from org_scope import ensure_owned_evaluator
 from annotation_metrics import (
     agreement_and_kappa_between_annotators,
-    agreement_and_kappa_between_judge_and_annotators,
     keep_runs_from_live_versions_of,
     rating_scales_for,
     agreement_between_annotators_over_time,
     agreement_between_judge_and_annotators_over_time_by_version_and_task,
-    agreement_between_judge_and_annotators_over_time,
+    agreement_of_each_evaluator_with_annotators,
+    trend_without_kappa,
 )
 
 
@@ -57,13 +57,9 @@ def agreement_trend(
         all_evaluator_version_runs = get_evaluator_runs_for_org(ctx.org_uuid)
 
     rating_scales = rating_scales_for(annotations, all_evaluator_version_runs)
-    (
-        annotator_agreement,
-        annotator_pair_count,
-        annotator_kappa,
-        annotator_kappa_type,
-        annotator_kappa_blank_reason,
-    ) = agreement_and_kappa_between_annotators(annotations, rating_scales)
+    annotator_agreement, annotator_pair_count, _ = agreement_and_kappa_between_annotators(
+        annotations, rating_scales
+    )
     annotator_agreement_over_time = agreement_between_annotators_over_time(
         annotations, bucket=bucket, days=days, rating_scales=rating_scales
     )
@@ -86,8 +82,8 @@ def agreement_trend(
         all_evaluator_version_runs, evaluator_id_to_evaluator.values()
     )
 
-    evaluator_id_to_agreement_over_time = (
-        agreement_between_judge_and_annotators_over_time(
+    evaluator_id_to_agreement, agreement_of_all_evaluators = (
+        agreement_of_each_evaluator_with_annotators(
             annotations,
             live_evaluator_version_runs,
             evaluator_ids,
@@ -96,30 +92,14 @@ def agreement_trend(
             rating_scales=rating_scales,
         )
     )
-    agreement_per_evaluator = []
-    for evaluator_id in evaluator_ids:
-        evaluator = evaluator_id_to_evaluator[evaluator_id]
-        (
-            evaluator_agreement,
-            evaluator_pair_count,
-            evaluator_kappa,
-            evaluator_kappa_type,
-            evaluator_kappa_blank_reason,
-        ) = agreement_and_kappa_between_judge_and_annotators(
-            annotations, live_evaluator_version_runs, evaluator_id, rating_scales
-        )
-        agreement_per_evaluator.append(
-            {
-                "evaluator_id": evaluator_id,
-                "name": evaluator.get("name"),
-                "current": evaluator_agreement,
-                "pair_count": evaluator_pair_count,
-                "kappa": evaluator_kappa,
-                "kappa_type": evaluator_kappa_type,
-                "kappa_blank_reason": evaluator_kappa_blank_reason,
-                "series": evaluator_id_to_agreement_over_time.get(evaluator_id, []),
-            }
-        )
+    agreement_per_evaluator = [
+        {
+            "evaluator_id": evaluator_id,
+            "name": evaluator_id_to_evaluator[evaluator_id].get("name"),
+            **evaluator_id_to_agreement[evaluator_id],
+        }
+        for evaluator_id in evaluator_ids
+    ]
 
     return {
         "bucket": bucket,
@@ -128,11 +108,9 @@ def agreement_trend(
         "human_human": {
             "current": annotator_agreement,
             "pair_count": annotator_pair_count,
-            "kappa": annotator_kappa,
-            "kappa_type": annotator_kappa_type,
-            "kappa_blank_reason": annotator_kappa_blank_reason,
-            "series": annotator_agreement_over_time,
+            "series": trend_without_kappa(annotator_agreement_over_time),
         },
+        "evaluators_with_humans": agreement_of_all_evaluators,
         "evaluators": agreement_per_evaluator,
     }
 
@@ -221,6 +199,7 @@ def evaluator_agreement_trend(
             "kappa": latest_bucket["kappa"],
             "kappa_type": latest_bucket["kappa_type"],
             "kappa_blank_reason": latest_bucket["kappa_blank_reason"],
+            "chance_agreement": latest_bucket["chance_agreement"],
         }
 
     task_id_to_task = get_annotation_tasks_by_uuids(task_ids_with_scores)
