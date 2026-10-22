@@ -16,8 +16,9 @@ from db import (
 )
 from auth_utils import get_current_org, get_org_jwt_or_api_key, OrgContext
 from annotation_metrics import (
-    aggregate_agreement_for_annotator,
-    trend_series_for_annotator,
+    agreement_of_annotator_with_others,
+    rating_scales_for,
+    agreement_of_annotator_with_others_over_time,
 )
 
 
@@ -103,20 +104,21 @@ def list_annotators(ctx: OrgContext = Depends(get_org_jwt_or_api_key)):
         return []
     jobs_count_by_annotator = get_job_counts_for_org_annotators(ctx.org_uuid)
     all_annotations = get_annotations_for_org(ctx.org_uuid)
-    out: List[Dict[str, Any]] = []
-    for a in annotators:
-        agreement, pairs = aggregate_agreement_for_annotator(
-            all_annotations, a["uuid"]
+    rating_scales = rating_scales_for(all_annotations)
+    annotators_with_agreement: List[Dict[str, Any]] = []
+    for annotator in annotators:
+        agreement, pair_count = agreement_of_annotator_with_others(
+            all_annotations, annotator["uuid"], rating_scales
         )
-        out.append(
+        annotators_with_agreement.append(
             {
-                **a,
-                "jobs_count": jobs_count_by_annotator.get(a["uuid"], 0),
+                **annotator,
+                "jobs_count": jobs_count_by_annotator.get(annotator["uuid"], 0),
                 "current_agreement": agreement,
-                "pair_count": pairs if pairs else None,
+                "pair_count": pair_count if pair_count else None,
             }
         )
-    return out
+    return annotators_with_agreement
 
 
 @router.get("/{annotator_uuid}", summary="Get annotator")
@@ -143,11 +145,16 @@ def get_annotator_endpoint(
     annotations = get_annotations_for_annotator_overlap_slots(
         org_uuid=ctx.org_uuid, annotator_id=annotator_uuid
     )
-    current, pair_count = aggregate_agreement_for_annotator(
-        annotations, annotator_uuid
+    rating_scales = rating_scales_for(annotations)
+    current_agreement, pair_count = agreement_of_annotator_with_others(
+        annotations, annotator_uuid, rating_scales
     )
-    series = trend_series_for_annotator(
-        annotations, annotator_uuid, bucket=bucket, days=days
+    agreement_over_time = agreement_of_annotator_with_others_over_time(
+        annotations,
+        annotator_uuid,
+        bucket=bucket,
+        days=days,
+        rating_scales=rating_scales,
     )
 
     return {
@@ -158,14 +165,14 @@ def get_annotator_endpoint(
             "updated_at": annotator["updated_at"],
         },
         "stats": {
-            "current_agreement": current,
+            "current_agreement": current_agreement,
             "pair_count": pair_count,
             "jobs_count": len(jobs),
         },
         "trend": {
             "bucket": bucket,
             "days": days,
-            "series": series,
+            "series": agreement_over_time,
         },
         "jobs": jobs,
     }

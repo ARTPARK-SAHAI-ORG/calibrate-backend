@@ -1177,10 +1177,10 @@ def test_delete_annotation_job(client):
 
     # Sanity: pre-delete pairwise agreement is 1.0 (both annotators agreed).
     import db as db_mod
-    from annotation_metrics import aggregate_agreement
+    from annotation_metrics import agreement_between_annotators
 
     pre = db_mod.get_annotations_for_task(task_uuid)
-    pre_pairwise, _ = aggregate_agreement(pre)
+    pre_pairwise, _ = agreement_between_annotators(pre)
     assert pre_pairwise == 1.0
 
     # 404 when job UUID doesn't match path task
@@ -1223,10 +1223,10 @@ def test_delete_annotation_job(client):
     assert survivor.status_code == 200
 
     # Pairwise agreement: ann_a's contribution is gone, so the slot now has
-    # only one annotator and contributes nothing — `aggregate_agreement`
+    # only one annotator and contributes nothing — `agreement_between_annotators`
     # returns None when there are no overlapping pairs.
     annotations = db_mod.get_annotations_for_task(task_uuid)
-    pairwise, _ = aggregate_agreement(annotations)
+    pairwise, _ = agreement_between_annotators(annotations)
     assert pairwise is None
 
     # Double-delete → 404
@@ -1283,9 +1283,9 @@ def test_bulk_delete_annotation_jobs(client):
         )
 
     import db as db_mod
-    from annotation_metrics import aggregate_agreement
+    from annotation_metrics import agreement_between_annotators
 
-    pre_pairwise, _ = aggregate_agreement(db_mod.get_annotations_for_task(task_uuid))
+    pre_pairwise, _ = agreement_between_annotators(db_mod.get_annotations_for_task(task_uuid))
     assert pre_pairwise == 1.0
 
     # Empty payload → 400
@@ -1342,7 +1342,7 @@ def test_bulk_delete_annotation_jobs(client):
     )
 
     # Only one annotator left → no pairwise overlap → None.
-    post_pairwise, _ = aggregate_agreement(db_mod.get_annotations_for_task(task_uuid))
+    post_pairwise, _ = agreement_between_annotators(db_mod.get_annotations_for_task(task_uuid))
     assert post_pairwise is None
 
     # Re-running with the same payload now transitions zero rows.
@@ -3071,7 +3071,7 @@ def _one_item_job_pair(client):
 
 def test_public_null_value_removes_answer_and_reopens_job(client):
     import db as db_mod
-    from annotation_metrics import aggregate_agreement
+    from annotation_metrics import agreement_between_annotators
 
     _, ev_id, task_uuid, item_id, (job_a, job_b) = _one_item_job_pair(client)
     url_a = f"/public/annotation-jobs/{job_a['public_token']}/annotations"
@@ -3094,7 +3094,7 @@ def test_public_null_value_removes_answer_and_reopens_job(client):
     )
     assert first["status"] == "completed"
     assert db_mod.get_annotation_job(job_a["uuid"])["completed_at"] is not None
-    assert aggregate_agreement(db_mod.get_annotations_for_task(task_uuid))[0] == 1.0
+    assert agreement_between_annotators(db_mod.get_annotations_for_task(task_uuid))[0] == 1.0
 
     removed = save(
         url_a,
@@ -3109,7 +3109,7 @@ def test_public_null_value_removes_answer_and_reopens_job(client):
     stored = db_mod.get_annotation_job(job_a["uuid"])
     assert stored["status"] == "in_progress"
     assert stored["completed_at"] is None
-    assert aggregate_agreement(db_mod.get_annotations_for_task(task_uuid))[0] is None
+    assert agreement_between_annotators(db_mod.get_annotations_for_task(task_uuid))[0] is None
 
     again = save(url_a, [{"evaluator_id": ev_id, "value": {"value": False}}])
     assert again["status"] == "completed"
@@ -3119,7 +3119,7 @@ def test_public_null_value_removes_answer_and_reopens_job(client):
     stored = db_mod.get_annotation_job(job_a["uuid"])
     assert stored["status"] == "completed"
     assert stored["completed_at"] is not None
-    assert aggregate_agreement(db_mod.get_annotations_for_task(task_uuid))[0] == 0.0
+    assert agreement_between_annotators(db_mod.get_annotations_for_task(task_uuid))[0] == 0.0
 
 
 def test_null_value_on_empty_slot_is_a_no_op(client):
@@ -3371,6 +3371,144 @@ def test_initial_annotations_incomplete_without_tool_call_answer(client):
     job_uuid = resp.json()["annotation_job_id"]
     assert _job_status(client, h, task_uuid, job_uuid) == "in_progress"
 
+
+# ---------------------------------------------------------------------------
+# Rating agreement uses the evaluator's rubric width
+# ---------------------------------------------------------------------------
+
+
+def test_rating_agreement_divides_by_the_rubric_width(client):
+    """Two annotators one point apart on a 1-to-5 rubric agree 0.75, and an
+    evaluator that said 5 agrees 0.625 with them. On the observed range of the
+    values alone both numbers would be 0."""
+    import db as db_mod
+    from annotation_eval_runner import ANNOTATION_EVAL_JOB_TYPE
+
+    auth = _signup(client)
+    h = auth["headers"]
+    ev = client.post(
+        "/evaluators",
+        json={
+            "name": f"rating-{uuid.uuid4().hex[:6]}",
+            "evaluator_type": "llm",
+            "output_type": "rating",
+            "version": {
+                "judge_model": "openai/gpt-4",
+                "system_prompt": "Score it",
+                "output_config": {
+                    "scale": [{"value": v, "name": str(v)} for v in range(1, 6)]
+                },
+            },
+        },
+        headers=h,
+    ).json()
+    task_uuid = client.post(
+        "/annotation-tasks",
+        json={
+            "name": f"t-{uuid.uuid4().hex[:6]}",
+            "type": "llm",
+            "evaluator_ids": [ev["uuid"]],
+        },
+        headers=h,
+    ).json()["uuid"]
+    item_id = client.post(
+        f"/annotation-tasks/{task_uuid}/items",
+        json={"items": [{"payload": llm_item_payload("i1")}]},
+        headers=h,
+    ).json()["item_ids"][0]
+
+    for name, value in (("rater-a", 3), ("rater-b", 4)):
+        annotator = client.post(
+            "/annotators",
+            json={"name": f"{name}-{uuid.uuid4().hex[:6]}"},
+            headers=h,
+        ).json()
+        job = client.post(
+            f"/annotation-tasks/{task_uuid}/jobs",
+            json={"annotator_ids": [annotator["uuid"]], "item_ids": [item_id]},
+            headers=h,
+        ).json()["jobs"][0]
+        assert (
+            client.post(
+                f"/public/annotation-jobs/{job['public_token']}/annotations",
+                json={
+                    "item_id": item_id,
+                    "annotations": [
+                        {"evaluator_id": ev["uuid"], "value": {"value": value}}
+                    ],
+                },
+            ).status_code
+            == 200
+        )
+
+    org_uuid = db_mod.get_personal_org_for_user(auth["user_uuid"])["uuid"]
+    eval_job = db_mod.create_job(
+        job_type=ANNOTATION_EVAL_JOB_TYPE,
+        org_uuid=org_uuid,
+        user_id=auth["user_uuid"],
+        status="done",
+        details={"task_id": task_uuid},
+    )
+    db_mod.create_evaluator_runs(
+        [
+            {
+                "job_id": eval_job,
+                "item_id": item_id,
+                "evaluator_id": ev["uuid"],
+                "evaluator_version_id": ev["version_uuid"],
+                "status": "completed",
+                "value": {"value": 5},
+            }
+        ]
+    )
+
+    # Summary rows: humans 3 vs 4 → 1 - 1/4; evaluator 5 vs 3 and 4 → mean of
+    # 1 - 2/4 and 1 - 1/4.
+    row = client.get(
+        f"/annotation-tasks/{task_uuid}/summary?live_only=true", headers=h
+    ).json()["rows"][0]
+    assert row["human_agreement"] == 0.75
+    assert row["evaluator_agreement"] == 0.625
+
+    # Task-level rollup reads the same rubric through the live version.
+    agreement = client.get(
+        f"/annotation-tasks/{task_uuid}/agreement", headers=h
+    ).json()
+    assert agreement["human_human"]["current"] == 0.75
+    assert agreement["evaluators"][0]["current"] == 0.625
+
+    # Task detail's per-item block, and the annotator list and detail.
+    item = client.get(f"/annotation-tasks/{task_uuid}", headers=h).json()["items"][0]
+    assert item["agreement"]["human_human"]["agreement"] == 0.75
+    assert item["agreement"]["evaluators"][0]["agreement"] == 0.625
+    listed = client.get("/annotators", headers=h).json()
+    assert {a["current_agreement"] for a in listed} == {0.75}
+    detail = client.get(f"/annotators/{listed[0]['uuid']}", headers=h).json()
+    assert detail["stats"]["current_agreement"] == 0.75
+
+    # Workspace trend and the per-evaluator trend read it too.
+    trend = client.get("/annotation-agreement/trend", headers=h).json()
+    assert trend["human_human"]["current"] == 0.75
+    assert trend["evaluators"][0]["current"] == 0.625
+    task_trend = client.get(
+        "/annotation-agreement/trend", params={"task_id": task_uuid}, headers=h
+    ).json()
+    assert task_trend["human_human"]["current"] == 0.75
+    assert task_trend["evaluators"][0]["current"] == 0.625
+    ev_trend = client.get(
+        f"/annotation-agreement/evaluator/{ev['uuid']}/trend", headers=h
+    ).json()
+    assert ev_trend["overall"]["current"] == 0.625
+
+    # The evaluator-run detail's human-agreement block, owner and shared view.
+    run_detail = client.get(
+        f"/annotation-tasks/{task_uuid}/evaluator-runs/{eval_job}", headers=h
+    ).json()
+    assert run_detail["human_agreement"]["evaluators"][0]["agreement"] == 0.625
+    token = uuid.uuid4().hex
+    db_mod.update_job_visibility(eval_job, True, token)
+    public = client.get(f"/public/annotation-eval/{token}").json()
+    assert public["human_agreement"]["evaluators"][0]["agreement"] == 0.625
 
 # ---------------------------------------------------------------------------
 # Typed item payloads
