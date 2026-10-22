@@ -10343,6 +10343,7 @@ def get_annotations_for_annotator_overlap_slots(
              WHERE t.org_uuid = ?
                AND t.deleted_at IS NULL
                AND j.deleted_at IS NULL
+               AND j.annotator_id NOT IN (SELECT uuid FROM annotators WHERE deleted_at IS NOT NULL)
                AND a.deleted_at IS NULL
                AND ai.deleted_at IS NULL
                AND (a.item_id, COALESCE(a.evaluator_id, '')) IN (
@@ -10579,6 +10580,7 @@ def get_annotations_for_item(item_id: str) -> List[Dict[str, Any]]:
              WHERE a.item_id = ?
                AND a.deleted_at IS NULL
                AND j.deleted_at IS NULL
+               AND j.annotator_id NOT IN (SELECT uuid FROM annotators WHERE deleted_at IS NOT NULL)
              ORDER BY a.created_at ASC
             """,
             (item_id,),
@@ -10615,6 +10617,7 @@ def get_annotations_for_slots(
         " WHERE j.task_id = ? "
         "   AND a.deleted_at IS NULL "
         "   AND j.deleted_at IS NULL "
+        "   AND j.annotator_id NOT IN (SELECT uuid FROM annotators WHERE deleted_at IS NOT NULL) "
         f"  AND a.item_id IN ({item_placeholders}) "
         f"  AND a.evaluator_id IN ({evaluator_placeholders}) "
     )
@@ -10654,6 +10657,7 @@ def get_annotations_for_task(
         " WHERE j.task_id = ? "
         "   AND a.deleted_at IS NULL "
         "   AND j.deleted_at IS NULL "
+        "   AND j.annotator_id NOT IN (SELECT uuid FROM annotators WHERE deleted_at IS NOT NULL) "
     )
     if not include_deleted_items:
         query += "   AND ai.deleted_at IS NULL "
@@ -10687,6 +10691,7 @@ def get_annotations_for_org(
         " WHERE t.org_uuid = ? "
         "   AND t.deleted_at IS NULL "
         "   AND j.deleted_at IS NULL "
+        "   AND j.annotator_id NOT IN (SELECT uuid FROM annotators WHERE deleted_at IS NOT NULL) "
         "   AND a.deleted_at IS NULL "
         "   AND ai.deleted_at IS NULL "
     )
@@ -10724,6 +10729,7 @@ def get_annotations_for_tasks(task_ids: List[str]) -> List[Dict[str, Any]]:
              WHERE j.task_id IN ({placeholders})
                AND a.deleted_at IS NULL
                AND j.deleted_at IS NULL
+               AND j.annotator_id NOT IN (SELECT uuid FROM annotators WHERE deleted_at IS NOT NULL)
                AND ai.deleted_at IS NULL
              ORDER BY a.updated_at ASC
             """,

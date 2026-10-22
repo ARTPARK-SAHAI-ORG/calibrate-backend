@@ -1877,6 +1877,130 @@ def test_summary_drops_comments_from_soft_deleted_annotator(client):
     assert item_doomed_only not in body["item_comments"]
 
 
+def _post_answers(client, job, evaluator_uuid, item_to_value):
+    for item_uuid, value in item_to_value.items():
+        assert (
+            client.post(
+                f"/public/annotation-jobs/{job['public_token']}/annotations",
+                json={
+                    "item_id": item_uuid,
+                    "annotations": [{"evaluator_id": evaluator_uuid, "value": {"value": value}}],
+                },
+            ).status_code
+            == 200
+        )
+
+
+def test_deleted_annotator_stops_counting_in_agreement(client):
+    import db as db_mod
+
+    auth = _signup(client)
+    h = auth["headers"]
+    llm_ev = _llm_evaluator(client, h)
+    task_uuid = client.post(
+        "/annotation-tasks",
+        json={"name": f"t-{uuid.uuid4().hex[:6]}", "type": "llm", "evaluator_ids": [llm_ev["uuid"]]},
+        headers=h,
+    ).json()["uuid"]
+    item_ids = client.post(
+        f"/annotation-tasks/{task_uuid}/items",
+        json={"items": [{"payload": llm_item_payload("one")}, {"payload": llm_item_payload("two")}]},
+        headers=h,
+    ).json()["item_ids"]
+    kept = client.post("/annotators", json={"name": "kept"}, headers=h).json()
+    doomed = client.post("/annotators", json={"name": "doomed"}, headers=h).json()
+    jobs = client.post(
+        f"/annotation-tasks/{task_uuid}/jobs",
+        json={"annotator_ids": [kept["uuid"], doomed["uuid"]], "item_ids": item_ids},
+        headers=h,
+    ).json()["jobs"]
+    job_kept = next(j for j in jobs if j["annotator_id"] == kept["uuid"])
+    job_doomed = next(j for j in jobs if j["annotator_id"] == doomed["uuid"])
+    _post_answers(client, job_kept, llm_ev["uuid"], {item_ids[0]: True, item_ids[1]: True})
+    _post_answers(client, job_doomed, llm_ev["uuid"], {item_ids[0]: True, item_ids[1]: False})
+
+    def task_list_row():
+        rows = client.get("/annotation-tasks", headers=h).json()["items"]
+        return next(t for t in rows if t["uuid"] == task_uuid)
+
+    def kept_in_annotator_list():
+        rows = client.get("/annotators", headers=h).json()
+        return next(a for a in rows if a["uuid"] == kept["uuid"])
+
+    task_agreement = client.get(f"/annotation-tasks/{task_uuid}/agreement", headers=h).json()
+    assert task_agreement["human_human"]["current"] == 0.5
+    workspace_trend = client.get("/annotation-agreement/trend", headers=h).json()
+    assert workspace_trend["human_human"]["current"] == 0.5
+    assert task_list_row()["has_agreement"] is True
+    assert client.get(f"/annotation-tasks/{task_uuid}", headers=h).json()["has_agreement"] is True
+    assert kept_in_annotator_list()["current_agreement"] == 0.5
+
+    assert client.delete(f"/annotators/{doomed['uuid']}", headers=h).status_code == 200
+
+    task_agreement = client.get(f"/annotation-tasks/{task_uuid}/agreement", headers=h).json()
+    assert task_agreement["human_human"]["current"] is None
+    workspace_trend = client.get("/annotation-agreement/trend", headers=h).json()
+    assert workspace_trend["human_human"]["current"] is None
+    assert task_list_row()["has_agreement"] is False
+    assert client.get(f"/annotation-tasks/{task_uuid}", headers=h).json()["has_agreement"] is False
+    assert kept_in_annotator_list()["current_agreement"] is None
+    item_annotations = client.get(
+        f"/annotation-tasks/{task_uuid}/items/{item_ids[1]}/annotations", headers=h
+    ).json()
+    assert {a["annotator_id"] for a in item_annotations} == {kept["uuid"]}
+    run_detail_annotations = db_mod.get_annotations_for_slots(task_uuid, item_ids, [llm_ev["uuid"]])
+    assert {a["annotator_id"] for a in run_detail_annotations} == {kept["uuid"]}
+    kept_detail = client.get(f"/annotators/{kept['uuid']}", headers=h).json()
+    assert kept_detail["stats"]["current_agreement"] is None
+    assert client.get(f"/annotators/{doomed['uuid']}", headers=h).status_code == 404
+
+
+def test_workspace_trend_leaves_out_deleted_evaluators(client):
+    import db as db_mod
+    from annotation_eval_runner import ANNOTATION_EVAL_JOB_TYPE
+
+    auth = _signup(client)
+    h = auth["headers"]
+    llm_ev = _llm_evaluator(client, h)
+    task_uuid = client.post(
+        "/annotation-tasks",
+        json={"name": f"t-{uuid.uuid4().hex[:6]}", "type": "llm", "evaluator_ids": [llm_ev["uuid"]]},
+        headers=h,
+    ).json()["uuid"]
+    item_uuid = client.post(
+        f"/annotation-tasks/{task_uuid}/items",
+        json={"items": [{"payload": llm_item_payload("one")}]},
+        headers=h,
+    ).json()["item_ids"][0]
+    eval_job = db_mod.create_job(
+        job_type=ANNOTATION_EVAL_JOB_TYPE,
+        org_uuid=db_mod.get_personal_org_for_user(auth["user_uuid"])["uuid"],
+        user_id=auth["user_uuid"],
+        status="done",
+        details={"task_id": task_uuid},
+    )
+    db_mod.create_evaluator_runs(
+        [
+            {
+                "job_id": eval_job,
+                "item_id": item_uuid,
+                "evaluator_id": llm_ev["uuid"],
+                "evaluator_version_id": llm_ev["live_version_id"],
+                "status": "completed",
+                "value": {"value": True},
+            }
+        ]
+    )
+
+    def trend_evaluator_ids():
+        trend = client.get("/annotation-agreement/trend", headers=h).json()
+        return [row["evaluator_id"] for row in trend["evaluators"]]
+
+    assert trend_evaluator_ids() == [llm_ev["uuid"]]
+    assert client.delete(f"/evaluators/{llm_ev['uuid']}", headers=h).status_code == 200
+    assert trend_evaluator_ids() == []
+
+
 def test_summary_comment_cleared_in_newer_job_wipes_older(client):
     """When the same annotator has multiple jobs on the same task (e.g. admin
     re-assigns items in a fresh batch), the (job_id, item_id, evaluator=NULL)

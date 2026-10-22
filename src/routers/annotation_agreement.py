@@ -73,6 +73,11 @@ def agreement_trend(
     )
 
     evaluator_id_to_evaluator = get_evaluators_by_uuids(evaluator_ids)
+    evaluator_ids = [
+        evaluator_id
+        for evaluator_id in evaluator_ids
+        if evaluator_id in evaluator_id_to_evaluator
+    ]
     live_evaluator_version_runs = keep_runs_from_live_versions_of(
         all_evaluator_version_runs, evaluator_id_to_evaluator.values()
     )
@@ -89,7 +94,7 @@ def agreement_trend(
     )
     agreement_per_evaluator = []
     for evaluator_id in evaluator_ids:
-        evaluator = evaluator_id_to_evaluator.get(evaluator_id) or {}
+        evaluator = evaluator_id_to_evaluator[evaluator_id]
         evaluator_agreement, evaluator_pair_count = (
             agreement_between_judge_and_annotators(
                 annotations, live_evaluator_version_runs, evaluator_id, rating_scales
