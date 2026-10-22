@@ -1215,3 +1215,19 @@ def test_is_tool_call_row_reads_object_form_replies():
     assert not is_tool_call_row(
         {"payload": {"agent_response": {"content": ""}, "output": "words"}}
     )
+
+
+@pytest.mark.parametrize(
+    "url, resolved, expected",
+    [
+        ("http://printer.local/", None, "must not point to a private network address"),
+        ("https://empty.example/", [], "hostname could not be resolved"),
+        ("https://odd.example/", [(2, 1, 6, "", ("not-an-ip", 0))], None),
+        ("https:///no-host", None, "must include a hostname"),
+    ],
+)
+def test_public_url_error_edge_cases(url, resolved, expected):
+    from utils import public_url_error
+
+    with patch("utils.socket.getaddrinfo", return_value=resolved):
+        assert public_url_error(url) == expected
