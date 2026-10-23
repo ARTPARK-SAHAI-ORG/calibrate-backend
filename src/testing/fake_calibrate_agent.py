@@ -129,6 +129,11 @@ def _write_config_json(output_dir: Path, evaluators: List[Dict[str, Any]]) -> No
         json.dump({"evaluators_map": _evaluators_map(evaluators)}, f)
 
 
+def _all_pass_range(n: int) -> Optional[Dict[str, float]]:
+    """calibrate's 95% Wilson range for n passes out of n, which reduces to this."""
+    return {"low": 100 * n / (n + 1.96**2), "high": 100.0} if n else None
+
+
 def _metrics_aggregate(ev: Dict[str, Any], n: int) -> Dict[str, Any]:
     """Per-evaluator aggregate entry for metrics.json. Must carry a ``type`` key
     so the readers recognise it as an evaluator output (not a built-in scalar)."""
@@ -144,6 +149,8 @@ def _metrics_aggregate(ev: Dict[str, Any], n: int) -> Dict[str, Any]:
             "count": n,
             "scale_min": _ev_scale_min(ev),
             "scale_max": sm,
+            # Every score is scale_max, and calibrate gives identical scores no range.
+            "ci": None,
         }
     return {
         "type": "binary",
@@ -152,6 +159,7 @@ def _metrics_aggregate(ev: Dict[str, Any], n: int) -> Dict[str, Any]:
         "evaluator_id": uid,
         "passed": n,
         "total": n,
+        "ci": _all_pass_range(n),
     }
 
 
@@ -239,6 +247,8 @@ def _write_llm_model_dir(
             {
                 "total": n,
                 "passed": n,
+                "pass_rate": 100.0,
+                "pass_rate_ci": _all_pass_range(n),
                 # Aggregate perf blocks are dicts, not scalars: latency is
                 # percentiles {p50,p95,p99,count}; cost/tokens are
                 # {mean,min,max,count}. The run-status/benchmark readers pass

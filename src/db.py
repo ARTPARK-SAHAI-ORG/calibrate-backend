@@ -4205,9 +4205,10 @@ def mark_email_verified(user_uuid: str, password_hash: Optional[str] = None) -> 
 # Every workspace setting and the value it holds until someone changes it.
 # `run_models_in_parallel` True runs the models of a comparison at the same
 # time, False runs them one after another, which is what every comparison did
-# before a workspace could remember a choice.
+# before a workspace could remember a choice. `show_likely_ranges` is read
+# only by the frontend.
 ORG_SETTINGS_DEFAULTS: Dict[str, Dict[str, Any]] = {
-    "model_benchmarking": {"run_models_in_parallel": True},
+    "model_benchmarking": {"run_models_in_parallel": True, "show_likely_ranges": False},
 }
 
 
