@@ -7,7 +7,12 @@ from fastapi import APIRouter, Depends, HTTPException, Path
 from pydantic import BaseModel, ConfigDict, Field
 from typing import List, Optional
 
-from auth_utils import get_current_user_id, is_superadmin_user
+from auth_utils import (
+    OrgContext,
+    get_current_user_id,
+    get_org_jwt_or_api_key,
+    is_superadmin_user,
+)
 from mailer import (
     MEMBER_ADDED_TEMPLATE,
     MEMBER_JOINED_TEMPLATE,
@@ -201,6 +206,30 @@ def _require_membership(org_uuid: str, user_id: str) -> str:
             return "owner"
         raise HTTPException(status_code=404, detail="Organization not found")
     return role
+
+
+class CurrentWorkspaceResponse(BaseModel):
+    uuid: str = Field(
+        min_length=36,
+        max_length=36,
+        description="Workspace ID. Put this at the front of a Calibrate web address to link straight to something in this workspace, as in `/<uuid>/tests`",
+        examples=["f47ac10b-58cc-4372-a567-0e02b2c3d479"],
+    )
+    name: str = Field(description="Workspace display name")
+
+
+@router.get(
+    "/current",
+    response_model=CurrentWorkspaceResponse,
+    summary="Get the current workspace",
+    tags=["Public API"],
+)
+def get_current_workspace(ctx: OrgContext = Depends(get_org_jwt_or_api_key)):
+    """Get the workspace your API key belongs to"""
+    org = get_organization(ctx.org_uuid)
+    if org is None:
+        raise HTTPException(status_code=404, detail="Organization not found")
+    return CurrentWorkspaceResponse(uuid=org["uuid"], name=org["name"])
 
 
 @router.get("", response_model=List[OrganizationResponse], summary="List workspaces")
