@@ -293,18 +293,17 @@ class BulkTestItem(BaseModel):
 
     @model_validator(mode="before")
     @classmethod
-    def _fold_conversation_history(cls, data: Any) -> Any:
-        if not isinstance(data, dict) or "conversation_history" not in data:
-            return data
+    def _fold_conversation_history(cls, data: Dict[str, Any]) -> Dict[str, Any]:
         data = dict(data)
-        old = data.pop("conversation_history")
-        if data.get("history") is not None and old is not None:
+        old = data.pop("conversation_history", None)
+        if old is None:
+            return data
+        if data.get("history") is not None:
             raise ValueError(
                 f"Test '{data.get('name')}' must have only one of 'history' or "
                 "'conversation_history'"
             )
-        if old is not None:
-            data["history"] = old
+        data["history"] = old
         return data
 
 
