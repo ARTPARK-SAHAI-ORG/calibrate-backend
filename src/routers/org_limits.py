@@ -48,30 +48,35 @@ class OrgLimits(BaseModel):
         gt=0,
         le=10000,
         description="Maximum dataset rows a single eval run may process",
+        examples=[DEFAULT_MAX_ROWS_PER_EVAL],
     )
     max_scored_traces: Optional[int] = Field(
         None,
         gt=0,
         le=1_000_000,
         description="Maximum traces a workspace may score automatically, counted over its lifetime",
+        examples=[DEFAULT_MAX_SCORED_TRACES],
     )
     max_traces: Optional[int] = Field(
         None,
         gt=0,
         le=1_000_000,
         description="Maximum traces a workspace may store",
+        examples=[DEFAULT_MAX_TRACES],
     )
     trace_scoring_batch_size: Optional[int] = Field(
         None,
         gt=0,
         le=1000,
         description="Maximum traces one scoring batch takes",
+        examples=[DEFAULT_TRACE_SCORING_BATCH_SIZE],
     )
     max_concurrent_trace_scoring_batches: Optional[int] = Field(
         None,
         gt=0,
         le=100,
         description="Maximum scoring batches a workspace may run at once",
+        examples=[DEFAULT_MAX_CONCURRENT_TRACE_SCORING_BATCHES],
     )
 
 
@@ -117,17 +122,24 @@ class OrgLimitsCreateResponse(BaseModel):
 
 class OwnLimitsResponse(BaseModel):
     max_rows_per_eval: Optional[int] = Field(
-        description="Maximum dataset rows a single eval run may process. No limit (`null`) while your workspace uses its own AI provider keys"
+        description="Maximum dataset rows a single eval run may process. No limit (`null`) while your workspace uses its own AI provider keys",
+        examples=[DEFAULT_MAX_ROWS_PER_EVAL],
     )
     max_scored_traces: Optional[int] = Field(
-        description="Maximum traces your workspace may score automatically, counted over its lifetime. No limit (`null`) while your workspace uses its own AI provider keys"
+        description="Maximum traces your workspace may score automatically, counted over its lifetime. No limit (`null`) while your workspace uses its own AI provider keys",
+        examples=[DEFAULT_MAX_SCORED_TRACES],
     )
-    max_traces: int = Field(description="Maximum traces your workspace may store")
+    max_traces: int = Field(
+        description="Maximum traces your workspace may store",
+        examples=[DEFAULT_MAX_TRACES],
+    )
     trace_scoring_batch_size: int = Field(
-        description="Maximum traces one scoring batch takes"
+        description="Maximum traces one scoring batch takes",
+        examples=[DEFAULT_TRACE_SCORING_BATCH_SIZE],
     )
     max_concurrent_trace_scoring_batches: int = Field(
-        description="Maximum scoring batches your workspace may run at once"
+        description="Maximum scoring batches your workspace may run at once",
+        examples=[DEFAULT_MAX_CONCURRENT_TRACE_SCORING_BATCHES],
     )
     uses_own_provider_keys: bool = Field(
         description="Whether your workspace's runs use only its own AI provider keys instead of Calibrate's"
@@ -136,13 +148,15 @@ class OwnLimitsResponse(BaseModel):
 
 class MaxRowsPerEvalResponse(BaseModel):
     max_rows_per_eval: Optional[int] = Field(
-        description="Maximum dataset rows a single eval run may process. No limit (`null`) while your workspace uses its own AI provider keys"
+        description="Maximum dataset rows a single eval run may process. No limit (`null`) while your workspace uses its own AI provider keys",
+        examples=[DEFAULT_MAX_ROWS_PER_EVAL],
     )
 
 
 class MaxScoredTracesResponse(BaseModel):
     max_scored_traces: Optional[int] = Field(
-        description="Maximum traces your workspace may score automatically, counted over its lifetime. No limit (`null`) while your workspace uses its own AI provider keys"
+        description="Maximum traces your workspace may score automatically, counted over its lifetime. No limit (`null`) while your workspace uses its own AI provider keys",
+        examples=[DEFAULT_MAX_SCORED_TRACES],
     )
 
 
