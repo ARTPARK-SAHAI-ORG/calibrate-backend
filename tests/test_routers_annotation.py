@@ -1177,10 +1177,10 @@ def test_delete_annotation_job(client):
 
     # Sanity: pre-delete pairwise agreement is 1.0 (both annotators agreed).
     import db as db_mod
-    from annotation_metrics import agreement_between_annotators
+    from annotation_metrics import agreement_and_kappa_between_annotators
 
     pre = db_mod.get_annotations_for_task(task_uuid)
-    pre_pairwise, _ = agreement_between_annotators(pre)
+    pre_pairwise, _ = agreement_and_kappa_between_annotators(pre)[:2]
     assert pre_pairwise == 1.0
 
     # 404 when job UUID doesn't match path task
@@ -1223,10 +1223,10 @@ def test_delete_annotation_job(client):
     assert survivor.status_code == 200
 
     # Pairwise agreement: ann_a's contribution is gone, so the slot now has
-    # only one annotator and contributes nothing — `agreement_between_annotators`
+    # only one annotator and contributes nothing — `agreement_and_kappa_between_annotators`
     # returns None when there are no overlapping pairs.
     annotations = db_mod.get_annotations_for_task(task_uuid)
-    pairwise, _ = agreement_between_annotators(annotations)
+    pairwise, _ = agreement_and_kappa_between_annotators(annotations)[:2]
     assert pairwise is None
 
     # Double-delete → 404
@@ -1283,9 +1283,9 @@ def test_bulk_delete_annotation_jobs(client):
         )
 
     import db as db_mod
-    from annotation_metrics import agreement_between_annotators
+    from annotation_metrics import agreement_and_kappa_between_annotators
 
-    pre_pairwise, _ = agreement_between_annotators(db_mod.get_annotations_for_task(task_uuid))
+    pre_pairwise, _ = agreement_and_kappa_between_annotators(db_mod.get_annotations_for_task(task_uuid))[:2]
     assert pre_pairwise == 1.0
 
     # Empty payload → 400
@@ -1342,7 +1342,7 @@ def test_bulk_delete_annotation_jobs(client):
     )
 
     # Only one annotator left → no pairwise overlap → None.
-    post_pairwise, _ = agreement_between_annotators(db_mod.get_annotations_for_task(task_uuid))
+    post_pairwise, _ = agreement_and_kappa_between_annotators(db_mod.get_annotations_for_task(task_uuid))[:2]
     assert post_pairwise is None
 
     # Re-running with the same payload now transitions zero rows.
@@ -1999,6 +1999,98 @@ def test_workspace_trend_leaves_out_deleted_evaluators(client):
     assert trend_evaluator_ids() == [llm_ev["uuid"]]
     assert client.delete(f"/evaluators/{llm_ev['uuid']}", headers=h).status_code == 200
     assert trend_evaluator_ids() == []
+
+
+def test_workspace_trend_lists_evaluators_that_were_only_labelled(client):
+    """Evaluator A has judge scores and labels, B and C only labels. B is
+    listed after A with no judge numbers but its annotators' agreement. C is
+    left out once deleted."""
+    import db as db_mod
+    from annotation_eval_runner import ANNOTATION_EVAL_JOB_TYPE
+
+    auth = _signup(client)
+    h = auth["headers"]
+    judged, labelled_only, deleted = (
+        _evaluator_with_scale(client, h, "binary", _PASS_FAIL_SCALE) for _ in range(3)
+    )
+    task_uuid = client.post(
+        "/annotation-tasks",
+        json={
+            "name": f"t-{uuid.uuid4().hex[:6]}",
+            "type": "llm",
+            "evaluator_ids": [judged["uuid"], labelled_only["uuid"], deleted["uuid"]],
+        },
+        headers=h,
+    ).json()["uuid"]
+    item_ids = client.post(
+        f"/annotation-tasks/{task_uuid}/items",
+        json={"items": [{"payload": llm_item_payload(f"i{index}")} for index in range(2)]},
+        headers=h,
+    ).json()["item_ids"]
+    annotator_ids = [
+        client.post("/annotators", json={"name": f"a-{uuid.uuid4().hex[:6]}"}, headers=h).json()["uuid"]
+        for _ in range(2)
+    ]
+    jobs = client.post(
+        f"/annotation-tasks/{task_uuid}/jobs",
+        json={"annotator_ids": annotator_ids, "item_ids": item_ids},
+        headers=h,
+    ).json()["jobs"]
+    job_of = {job["annotator_id"]: job for job in jobs}
+    for annotator_id, answers_per_item in zip(annotator_ids, ((True, True), (True, False))):
+        for item_id, answer in zip(item_ids, answers_per_item):
+            assert client.post(
+                f"/public/annotation-jobs/{job_of[annotator_id]['public_token']}/annotations",
+                json={
+                    "item_id": item_id,
+                    "annotations": [
+                        {"evaluator_id": evaluator["uuid"], "value": {"value": answer}}
+                        for evaluator in (judged, labelled_only, deleted)
+                    ],
+                },
+            ).status_code == 200
+    eval_job = db_mod.create_job(
+        job_type=ANNOTATION_EVAL_JOB_TYPE,
+        org_uuid=db_mod.get_personal_org_for_user(auth["user_uuid"])["uuid"],
+        user_id=auth["user_uuid"],
+        status="done",
+        details={"task_id": task_uuid},
+    )
+    db_mod.create_evaluator_runs([
+        {
+            "job_id": eval_job,
+            "item_id": item_id,
+            "evaluator_id": judged["uuid"],
+            "evaluator_version_id": judged["version_uuid"],
+            "status": "completed",
+            "value": {"value": True},
+        }
+        for item_id in item_ids
+    ])
+    assert client.delete(f"/evaluators/{deleted['uuid']}", headers=h).status_code == 200
+
+    for params in ({}, {"task_id": task_uuid}):
+        trend = client.get("/annotation-agreement/trend", params=params, headers=h).json()
+        assert [row["evaluator_id"] for row in trend["evaluators"]] == [
+            judged["uuid"], labelled_only["uuid"]
+        ]
+        labelled_only_row = trend["evaluators"][1]
+        assert {
+            key: labelled_only_row[key]
+            for key in ("current", "pair_count", "kappa", "kappa_type", "kappa_blank_reason", "chance_agreement")
+        } == {
+            "current": None, "pair_count": 0, "kappa": None, "kappa_type": None,
+            "kappa_blank_reason": None, "chance_agreement": None,
+        }
+        # Annotators agree on the first item only. Answers true 3 of 4 times:
+        # chance 0.625, so kappa (0.5 - 0.625) / 0.375.
+        assert labelled_only_row["inter_annotator"] == {
+            "current": 0.5, "pair_count": 2, "kappa": -0.3333, "kappa_type": "fleiss",
+            "kappa_blank_reason": None, "chance_agreement": 0.625,
+        }
+        # Only the judged evaluator adds pairs: true against true, true on the
+        # first item, and true against true, false on the second.
+        assert trend["evaluators_with_humans"] == {"current": 0.75, "pair_count": 4}
 
 
 def test_summary_comment_cleared_in_newer_job_wipes_older(client):
@@ -3195,7 +3287,7 @@ def _one_item_job_pair(client):
 
 def test_public_null_value_removes_answer_and_reopens_job(client):
     import db as db_mod
-    from annotation_metrics import agreement_between_annotators
+    from annotation_metrics import agreement_and_kappa_between_annotators
 
     _, ev_id, task_uuid, item_id, (job_a, job_b) = _one_item_job_pair(client)
     url_a = f"/public/annotation-jobs/{job_a['public_token']}/annotations"
@@ -3218,7 +3310,7 @@ def test_public_null_value_removes_answer_and_reopens_job(client):
     )
     assert first["status"] == "completed"
     assert db_mod.get_annotation_job(job_a["uuid"])["completed_at"] is not None
-    assert agreement_between_annotators(db_mod.get_annotations_for_task(task_uuid))[0] == 1.0
+    assert agreement_and_kappa_between_annotators(db_mod.get_annotations_for_task(task_uuid))[0] == 1.0
 
     removed = save(
         url_a,
@@ -3233,7 +3325,7 @@ def test_public_null_value_removes_answer_and_reopens_job(client):
     stored = db_mod.get_annotation_job(job_a["uuid"])
     assert stored["status"] == "in_progress"
     assert stored["completed_at"] is None
-    assert agreement_between_annotators(db_mod.get_annotations_for_task(task_uuid))[0] is None
+    assert agreement_and_kappa_between_annotators(db_mod.get_annotations_for_task(task_uuid))[0] is None
 
     again = save(url_a, [{"evaluator_id": ev_id, "value": {"value": False}}])
     assert again["status"] == "completed"
@@ -3243,7 +3335,7 @@ def test_public_null_value_removes_answer_and_reopens_job(client):
     stored = db_mod.get_annotation_job(job_a["uuid"])
     assert stored["status"] == "completed"
     assert stored["completed_at"] is not None
-    assert agreement_between_annotators(db_mod.get_annotations_for_task(task_uuid))[0] == 0.0
+    assert agreement_and_kappa_between_annotators(db_mod.get_annotations_for_task(task_uuid))[0] == 0.0
 
 
 def test_null_value_on_empty_slot_is_a_no_op(client):
@@ -3633,6 +3725,321 @@ def test_rating_agreement_divides_by_the_rubric_width(client):
     db_mod.update_job_visibility(eval_job, True, token)
     public = client.get(f"/public/annotation-eval/{token}").json()
     assert public["human_agreement"]["evaluators"][0]["agreement"] == 0.625
+
+
+def _evaluator_with_scale(client, h, output_type, scale):
+    return client.post(
+        "/evaluators",
+        json={
+            "name": f"{output_type}-{uuid.uuid4().hex[:6]}",
+            "evaluator_type": "llm",
+            "output_type": output_type,
+            "version": {
+                "judge_model": "openai/gpt-4",
+                "system_prompt": "Judge it",
+                "output_config": {"scale": scale},
+            },
+        },
+        headers=h,
+    ).json()
+
+
+_PASS_FAIL_SCALE = [{"value": True, "name": "Pass"}, {"value": False, "name": "Fail"}]
+_ONE_TO_FIVE_SCALE = [{"value": value, "name": str(value)} for value in range(1, 6)]
+
+
+def test_kappa_sits_beside_every_agreement_over_many_items(client):
+    """Two annotators and a judge answer four items on a pass/fail evaluator
+    and on a 1-to-5 rating evaluator. Items 0 and 3 were answered 40 days ago,
+    so earlier trend points carry their own kappa."""
+    import db as db_mod
+    from annotation_eval_runner import ANNOTATION_EVAL_JOB_TYPE
+
+    auth = _signup(client)
+    h = auth["headers"]
+
+    binary_evaluator = _evaluator_with_scale(client, h, "binary", _PASS_FAIL_SCALE)
+    rating_evaluator = _evaluator_with_scale(client, h, "rating", _ONE_TO_FIVE_SCALE)
+    task_uuid = client.post(
+        "/annotation-tasks",
+        json={
+            "name": f"t-{uuid.uuid4().hex[:6]}",
+            "type": "llm",
+            "evaluator_ids": [binary_evaluator["uuid"], rating_evaluator["uuid"]],
+        },
+        headers=h,
+    ).json()["uuid"]
+    item_ids = client.post(
+        f"/annotation-tasks/{task_uuid}/items",
+        json={"items": [{"payload": llm_item_payload(f"i{index}")} for index in range(4)]},
+        headers=h,
+    ).json()["item_ids"]
+
+    annotator_answers = {
+        "rater-a": {binary_evaluator["uuid"]: (True, True, True, False), rating_evaluator["uuid"]: (3, 4, 2, 5)},
+        "rater-b": {binary_evaluator["uuid"]: (True, True, False, False), rating_evaluator["uuid"]: (3, 5, 2, 4)},
+    }
+    judge_answers = {
+        binary_evaluator["uuid"]: (True, True, False, False),
+        rating_evaluator["uuid"]: (3, 4, 1, 5),
+    }
+    for name, evaluator_id_to_answers in annotator_answers.items():
+        annotator = client.post(
+            "/annotators", json={"name": f"{name}-{uuid.uuid4().hex[:6]}"}, headers=h
+        ).json()
+        job = client.post(
+            f"/annotation-tasks/{task_uuid}/jobs",
+            json={"annotator_ids": [annotator["uuid"]], "item_ids": item_ids},
+            headers=h,
+        ).json()["jobs"][0]
+        for item_index, item_id in enumerate(item_ids):
+            assert client.post(
+                f"/public/annotation-jobs/{job['public_token']}/annotations",
+                json={
+                    "item_id": item_id,
+                    "annotations": [
+                        {"evaluator_id": evaluator_id, "value": {"value": answers[item_index]}}
+                        for evaluator_id, answers in evaluator_id_to_answers.items()
+                    ],
+                },
+            ).status_code == 200
+
+    org_uuid = db_mod.get_personal_org_for_user(auth["user_uuid"])["uuid"]
+    eval_job = db_mod.create_job(
+        job_type=ANNOTATION_EVAL_JOB_TYPE,
+        org_uuid=org_uuid,
+        user_id=auth["user_uuid"],
+        status="done",
+        details={"task_id": task_uuid},
+    )
+    db_mod.create_evaluator_runs(
+        [
+            {
+                "job_id": eval_job,
+                "item_id": item_id,
+                "evaluator_id": evaluator["uuid"],
+                "evaluator_version_id": evaluator["version_uuid"],
+                "status": "completed",
+                "value": {"value": judge_answers[evaluator["uuid"]][item_index]},
+            }
+            for evaluator in (binary_evaluator, rating_evaluator)
+            for item_index, item_id in enumerate(item_ids)
+        ]
+    )
+    earlier_item_ids = (item_ids[0], item_ids[3])
+    with db_mod.get_db_connection() as conn:
+        conn.execute(
+            "UPDATE annotations SET created_at = datetime('now', '-40 days'), "
+            "updated_at = datetime('now', '-40 days') WHERE item_id IN (?, ?)",
+            earlier_item_ids,
+        )
+        conn.execute(
+            "UPDATE evaluator_runs SET created_at = datetime('now', '-40 days'), "
+            "completed_at = datetime('now', '-40 days') WHERE item_id IN (?, ?)",
+            earlier_item_ids,
+        )
+        conn.commit()
+
+    def kappa(kappa_value, kappa_type, chance_agreement, kappa_blank_reason=None):
+        return {
+            "kappa": kappa_value,
+            "kappa_type": kappa_type,
+            "kappa_blank_reason": kappa_blank_reason,
+            "chance_agreement": chance_agreement,
+        }
+
+    # Now, over all 4 items, and earlier, over items 0 and 3. Every kappa is
+    # (agreement - chance) / (1 - chance).
+    binary_judge_now = kappa(0.75, "cohen", 0.5)
+    # Rating judge 3, 4, 1, 5 against 3, 4, 2, 5 and 3, 5, 2, 4: agreement
+    # 7/8, chance 10/16.
+    rating_judge_now = kappa(0.6667, "linear_weighted_cohen", 0.625)
+    rating_judge_earlier = kappa(0.75, "linear_weighted_cohen", 0.75)
+    # Annotators on the binary evaluator: true 5 of 8 answers, chance 0.53125.
+    binary_annotators_now = kappa(0.4667, "fleiss", 0.5312)
+    # Annotators on the rating evaluator: 2, 3, 4, 5 a quarter each, chance
+    # 11/16.
+    rating_annotators_now = kappa(0.6, "linear_weighted_fleiss", 0.6875)
+    one_annotator_now = [
+        {"answer_kind": "binary", **kappa(0.5, "cohen", 0.5)},
+        {"answer_kind": "rating", **kappa(0.6, "linear_weighted_cohen", 0.6875)},
+    ]
+    one_annotator_earlier = [
+        {"answer_kind": "binary", **kappa(1.0, "cohen", 0.5)},
+        {"answer_kind": "rating", **kappa(0.5, "linear_weighted_cohen", 0.75)},
+    ]
+    kappa_keys = ("kappa", "kappa_type", "kappa_blank_reason", "chance_agreement")
+    point_keys_on_main = {"bucket_start", "bucket_end", "agreement", "pair_count"}
+
+    def kappa_of(block):
+        return {key: block[key] for key in kappa_keys}
+
+    def earliest_point_with_pairs(series):
+        point = next(point for point in series if point["pair_count"])
+        assert point["pair_count"] < series[-1]["pair_count"]
+        return point
+
+    def assert_kappa_now_and_earlier(block, expected_now, expected_earlier):
+        assert kappa_of(block) == expected_now
+        assert kappa_of(block["series"][-1]) == expected_now
+        assert kappa_of(earliest_point_with_pairs(block["series"])) == expected_earlier
+        assert all(
+            kappa_of(point) == dict.fromkeys(kappa_keys)
+            for point in block["series"]
+            if not point["pair_count"]
+        )
+
+    def assert_current_only(block, kappa_now=None):
+        assert "series" not in block
+        if kappa_now is not None:
+            assert kappa_of(block) == kappa_now
+
+    def by_evaluator_id(entries):
+        return {entry["evaluator_id"]: entry for entry in entries}
+
+    def assert_agreement_blocks(response):
+        assert {"bucket", "days"}.isdisjoint(response)
+        assert response["human_human"] == {"current": 0.8125, "pair_count": 8}
+        # Each judge compared 8 pairs at 7/8.
+        assert response["evaluators_with_humans"] == {"current": 0.875, "pair_count": 16}
+        evaluator_agreement = by_evaluator_id(response["evaluators"])
+        binary = evaluator_agreement[binary_evaluator["uuid"]]
+        rating = evaluator_agreement[rating_evaluator["uuid"]]
+        assert rating["current"] == 0.875
+        assert_current_only(binary, binary_judge_now)
+        assert_current_only(rating, rating_judge_now)
+        assert binary["inter_annotator"]["current"] == 0.75
+        assert_current_only(binary["inter_annotator"], binary_annotators_now)
+        assert rating["inter_annotator"]["current"] == 0.875
+        assert_current_only(rating["inter_annotator"], rating_annotators_now)
+
+    agreement = client.get(f"/annotation-tasks/{task_uuid}/agreement", headers=h).json()
+    assert_agreement_blocks(agreement)
+    for params in ({}, {"task_id": task_uuid}):
+        assert_agreement_blocks(
+            client.get("/annotation-agreement/trend", params=params, headers=h).json()
+        )
+
+    evaluator_trend = client.get(
+        f"/annotation-agreement/evaluator/{rating_evaluator['uuid']}/trend", headers=h
+    ).json()
+    for block in (evaluator_trend["overall"], evaluator_trend["versions"][0], evaluator_trend["tasks"][0]):
+        assert_kappa_now_and_earlier(block, rating_judge_now, rating_judge_earlier)
+
+    run_detail = client.get(
+        f"/annotation-tasks/{task_uuid}/evaluator-runs/{eval_job}", headers=h
+    ).json()
+    run_agreement = by_evaluator_id(run_detail["human_agreement"]["evaluators"])
+    assert kappa_of(run_agreement[binary_evaluator["uuid"]]) == binary_judge_now
+    assert kappa_of(run_agreement[rating_evaluator["uuid"]]) == rating_judge_now
+    assert len(run_detail["human_agreement"]["items"]) == 4
+    assert all(
+        key not in item
+        for item in run_detail["human_agreement"]["items"]
+        for key in kappa_keys
+    )
+    assert all(
+        key not in item_evaluator_agreement
+        for key in kappa_keys
+        for item in run_detail["human_agreement"]["items"]
+        for item_evaluator_agreement in item["evaluators"]
+    )
+    token = uuid.uuid4().hex
+    db_mod.update_job_visibility(eval_job, True, token)
+    public = client.get(f"/public/annotation-eval/{token}").json()
+    public_agreement = by_evaluator_id(public["human_agreement"]["evaluators"])
+    assert kappa_of(public_agreement[rating_evaluator["uuid"]]) == rating_judge_now
+
+    listed = client.get("/annotators", headers=h).json()
+    assert [annotator["current_agreement"] for annotator in listed] == [0.8125, 0.8125]
+    assert [annotator["kappa_by_kind"] for annotator in listed] == [one_annotator_now] * 2
+    assert all(key not in annotator for annotator in listed for key in kappa_keys)
+    detail = client.get(f"/annotators/{listed[0]['uuid']}", headers=h).json()
+    assert detail["stats"]["current_agreement"] == 0.8125
+    assert detail["stats"]["kappa_by_kind"] == one_annotator_now
+    assert all(key not in detail["stats"] for key in kappa_keys)
+    series = detail["trend"]["series"]
+    assert series[-1]["kappa_by_kind"] == one_annotator_now
+    assert earliest_point_with_pairs(series)["kappa_by_kind"] == one_annotator_earlier
+    assert all(point["kappa_by_kind"] == [] for point in series if not point["pair_count"])
+    assert all(set(point) == point_keys_on_main | {"kappa_by_kind"} for point in series)
+
+    # One item cannot show chance, so per-item numbers carry no kappa.
+    task_items = client.get(f"/annotation-tasks/{task_uuid}", headers=h).json()["items"]
+    assert len(task_items) == 4
+    assert all(
+        key not in item["agreement"]["human_human"]
+        for item in task_items
+        for key in kappa_keys
+    )
+    assert all(
+        key not in item_evaluator_agreement
+        for key in kappa_keys
+        for item in task_items
+        for item_evaluator_agreement in item["agreement"]["evaluators"]
+    )
+    summary_rows = client.get(f"/annotation-tasks/{task_uuid}/summary", headers=h).json()["rows"]
+    assert summary_rows and all(key not in row for row in summary_rows for key in kappa_keys)
+
+
+def test_kappa_blank_reason_follows_the_answers_compared(client):
+    """Two annotators agree on one item, then on a second: kappa is blank
+    first for too few items, then because everyone agreed."""
+    h = _signup(client)["headers"]
+    llm_ev = _llm_evaluator(client, h)
+    task_uuid = client.post(
+        "/annotation-tasks",
+        json={"name": f"t-{uuid.uuid4().hex[:6]}", "type": "llm", "evaluator_ids": [llm_ev["uuid"]]},
+        headers=h,
+    ).json()["uuid"]
+    item_ids = client.post(
+        f"/annotation-tasks/{task_uuid}/items",
+        json={"items": [{"payload": llm_item_payload("one")}, {"payload": llm_item_payload("two")}]},
+        headers=h,
+    ).json()["item_ids"]
+    annotator_ids = [
+        client.post("/annotators", json={"name": f"a-{uuid.uuid4().hex[:6]}"}, headers=h).json()["uuid"]
+        for _ in range(2)
+    ]
+    jobs = client.post(
+        f"/annotation-tasks/{task_uuid}/jobs",
+        json={"annotator_ids": annotator_ids, "item_ids": item_ids},
+        headers=h,
+    ).json()["jobs"]
+
+    def blank_reasons_and_chance_agreements():
+        task_agreement = client.get(f"/annotation-tasks/{task_uuid}/agreement", headers=h).json()
+        workspace_trend = client.get("/annotation-agreement/trend", headers=h).json()
+        listed = client.get("/annotators", headers=h).json()
+        detail = client.get(f"/annotators/{annotator_ids[0]}", headers=h).json()
+        inter_annotator_blocks = [
+            response["evaluators"][0]["inter_annotator"]
+            for response in (task_agreement, workspace_trend)
+            if response["evaluators"]
+        ]
+        flat_blocks = inter_annotator_blocks
+        kappa_by_kind_entries = [
+            *(entry for annotator in listed for entry in annotator["kappa_by_kind"]),
+            *detail["stats"]["kappa_by_kind"],
+            *detail["trend"]["series"][-1]["kappa_by_kind"],
+        ]
+        assert inter_annotator_blocks and len(kappa_by_kind_entries) == 4
+        return {
+            (block["kappa_blank_reason"], block["chance_agreement"])
+            for block in flat_blocks + kappa_by_kind_entries
+        }
+
+    for job in jobs:
+        _post_answers(client, job, llm_ev["uuid"], {item_ids[0]: True})
+    assert blank_reasons_and_chance_agreements() == {("too_few_items", None)}
+    # A linked evaluator with no judge scores adds nothing to the overall.
+    task_agreement = client.get(f"/annotation-tasks/{task_uuid}/agreement", headers=h).json()
+    assert task_agreement["evaluators_with_humans"] == {"current": None, "pair_count": 0}
+    assert task_agreement["evaluators"][0]["current"] is None
+    for job in jobs:
+        _post_answers(client, job, llm_ev["uuid"], {item_ids[1]: True})
+    assert blank_reasons_and_chance_agreements() == {("everyone_agreed", 1.0)}
+
 
 # ---------------------------------------------------------------------------
 # Typed item payloads
