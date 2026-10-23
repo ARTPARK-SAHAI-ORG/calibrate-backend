@@ -658,3 +658,22 @@ actions:
           Upload one WAV clip (at most 25 MB and 10 minutes) with its
           ground-truth transcript and append it to an STT dataset in the
           caller's org.
+  - target: $.paths['/organizations/current'].get
+    update:
+      x-speakeasy-group: workspace
+      x-speakeasy-name-override: current
+      x-speakeasy-mcp:
+        name: get-current-workspace
+        title: Get the current workspace
+        scopes: [read]
+        readOnlyHint: true
+        destructiveHint: false
+        idempotentHint: true
+        openWorldHint: true
+        description: |
+          Get the workspace the caller's API key belongs to, as its ID and
+          name. Put the ID at the front of a Calibrate web address to link
+          straight to something in that workspace, as in `/<uuid>/tests`.
+          Without it, a link opens whichever workspace the reader looked at
+          last. Requires a Calibrate API key (CALIBRATE_API_KEY).
+

@@ -180,3 +180,7 @@ paths:
     post:
       x-fern-sdk-group-name: datasets
       x-fern-sdk-method-name: upload_item
+  /organizations/current:
+    get:
+      x-fern-sdk-group-name: workspace
+      x-fern-sdk-method-name: current
