@@ -1290,7 +1290,7 @@ The `history` field uses the OpenAI chat messages format with `role` (system/use
   "tests": [
     {
       "name": "test-greeting",
-      "conversation_history": [{ "role": "user", "content": "Hello" }],
+      "history": [{ "role": "user", "content": "Hello" }],
       "evaluators": [
         {
           "evaluator_uuid": "…",
@@ -1309,7 +1309,7 @@ The `history` field uses the OpenAI chat messages format with `role` (system/use
 - `agent_uuids`: Optional list of agent UUIDs to link all created tests to. Agents are validated upfront (must exist and be owned by the user) before any tests are created. Linking failures for individual test-agent pairs are surfaced in the response `warnings` array but don't fail the request.
 - Maximum batch size is 500 tests (enforced by `BulkTestUpload.MAX_BATCH_SIZE` in the Pydantic validator)
 - Each test requires a unique `name` — validated both within the batch and against existing tests for the user
-- `conversation_history`: Required, OpenAI chat message format — stored as `history` in the config to match the single-test format
+- `history`: Required, OpenAI chat message format, stored as `history` in the config (same name as single-test create). The earlier name `conversation_history` is still accepted; sending both is a 422
 - `evaluators`: Required when `type` is `"response"` — non-empty list of `EvaluatorRef` (`evaluator_uuid`, optional `variable_values`). **`EvaluatorRef` uses `extra='forbid'`** — unknown keys (including **`version_uuid`**) produce **422**. The stored **`test_evaluators`** row pins the evaluator's **live** version at write time (no client-supplied version id). Validated in `tests.py` (`_validate_evaluators`): evaluator must exist, be visible to the user, and have **`evaluator_type == "llm"`** (STT/TTS/simulation evaluators are rejected with 400).
 - `tool_calls`: Required when `type` is `"tool_call"`, array of `{tool, arguments?, accept_any_arguments?}`
 
