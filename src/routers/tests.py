@@ -266,9 +266,14 @@ class ExpectedToolCall(BaseModel):
 
 class BulkTestItem(BaseModel):
     name: str = Field(description=_TEST_NAME_DESCRIPTION + " and within the batch")
-    conversation_history: Optional[List[ChatMessage]] = Field(
+    history: Optional[List[ChatMessage]] = Field(
         None,
         description="Ordered messages ending at the user turn the agent should answer. **Required for `response` and `conversation` batches**, and for `tool_call` batches aimed at a conversational agent",
+    )
+    conversation_history: Optional[List[ChatMessage]] = Field(
+        None,
+        deprecated=True,
+        description="Earlier name for `history`, still accepted. Send one or the other",
     )
     input: Optional[str] = Field(
         None,
@@ -285,6 +290,22 @@ class BulkTestItem(BaseModel):
         None,
         description="Extra request fields for this test, overriding the agent's `default_inputs` per key",
     )
+
+    @model_validator(mode="before")
+    @classmethod
+    def _fold_conversation_history(cls, data: Any) -> Any:
+        if not isinstance(data, dict) or "conversation_history" not in data:
+            return data
+        data = dict(data)
+        old = data.pop("conversation_history")
+        if data.get("history") is not None and old is not None:
+            raise ValueError(
+                f"Test '{data.get('name')}' must have only one of 'history' or "
+                "'conversation_history'"
+            )
+        if old is not None:
+            data["history"] = old
+        return data
 
 
 class BulkTestUpload(BaseModel):
@@ -339,16 +360,16 @@ class BulkTestUpload(BaseModel):
                     )
                 # Which one is given decides whether this test can be linked to a
                 # conversational or a general agent, so it cannot be both or neither.
-                if bool(t.input) == bool(t.conversation_history):
+                if bool(t.input) == bool(t.history):
                     raise ValueError(
                         f"Test '{t.name}' must have exactly one of 'input' or "
-                        "'conversation_history' for tool_call type"
+                        "'history' for tool_call type"
                     )
                 continue
 
-            if not t.conversation_history:
+            if not t.history:
                 raise ValueError(
-                    f"Test '{t.name}' must have at least one message in conversation_history"
+                    f"Test '{t.name}' must have at least one message in history"
                 )
             if self.type == "response":
                 if not t.evaluators:
@@ -486,7 +507,7 @@ def bulk_upload_tests(
         else:
             config = {
                 "history": [
-                    msg.model_dump(exclude_none=True) for msg in t.conversation_history
+                    msg.model_dump(exclude_none=True) for msg in t.history
                 ],
                 "evaluation": evaluation,
             }
