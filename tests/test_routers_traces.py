@@ -117,6 +117,17 @@ def _post_trace(client, h, payload):
 # ---------------------------------------------------------------------------
 
 
+def test_trace_routes_run_off_the_event_loop():
+    import inspect
+
+    from routers.traces import router
+
+    async_routes = [
+        r.path for r in router.routes if inspect.iscoroutinefunction(r.endpoint)
+    ]
+    assert async_routes == []
+
+
 def test_ingest_requires_auth(client):
     agent_id = "00000000-0000-4000-8000-000000000001"
     assert client.post("/traces", json=_payload(agent_id, _mid())).status_code in (
