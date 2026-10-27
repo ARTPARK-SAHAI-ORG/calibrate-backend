@@ -244,6 +244,8 @@ def _write_llm_model_dir(
         None,
     )
 
+    # A model listed in benchmark_models reports its demo latency and cost.
+    latency, cost = (bm["latency_ms"], bm["cost"]) if bm else (FAKE_LATENCY_MS, FAKE_COST)
     results: List[Dict[str, Any]] = []
     ref_count: Dict[str, int] = {}
     for tc in test_cases:
@@ -263,7 +265,7 @@ def _write_llm_model_dir(
         output: Dict[str, Any] = {
             "response": demo["reply"] if demo else FAKE_RESPONSE,
             "tool_calls": [],
-            "cost": FAKE_COST,
+            "cost": cost,
         }
         if demo and demo.get("expected_tool_call"):
             # The real CLI's output shape: {"tool", "arguments"} with plain values.
@@ -282,20 +284,13 @@ def _write_llm_model_dir(
                     "reasoning": demo["reasoning"] if demo else FAKE_REASONING,
                     "judge_results": judge_results,
                 },
-                "latency_ms": FAKE_LATENCY_MS,
+                "latency_ms": latency,
             }
         )
 
     n = len(results)
     passed = sum(1 for r in results if r["metrics"]["passed"])
     pass_rate = 100.0 * passed / n if n else 100.0
-    latency, cost = FAKE_LATENCY_MS, FAKE_COST
-    if bm:
-        # A model listed in benchmark_models reports its demo latency and cost.
-        latency, cost = bm["latency_ms"], bm["cost"]
-        for r in results:
-            r["latency_ms"] = latency
-            r["output"]["cost"] = cost
 
     with open(model_dir / "results.json", "w", encoding="utf-8") as f:
         json.dump(results, f)
@@ -451,10 +446,8 @@ _SARVAM_ROW_VALUES = {
 }
 
 
-def _stt_metrics(
-    evaluators: List[Dict[str, Any]], sarvam: bool, wer: float = FAKE_WER
-) -> Dict[str, Any]:
-    metrics: Dict[str, Any] = {"wer": wer}
+def _stt_metrics(evaluators: List[Dict[str, Any]], sarvam: bool) -> Dict[str, Any]:
+    metrics: Dict[str, Any] = {"wer": FAKE_WER}
     if sarvam:
         metrics.update(_SARVAM_METRICS)
     for ev in evaluators:
@@ -486,13 +479,12 @@ def _cmd_stt(opts: Dict[str, List[str]]) -> None:
     for provider in providers:
         sub = output_dir / f"{provider}_results"
         sub.mkdir(parents=True, exist_ok=True)
-        wer = ((_DEMO or {}).get("stt_dataset") or {}).get("demo_wer", {}).get(provider, FAKE_WER)
         k, ok, bad, judge = len(utterances), ev_values, ev_values, {}
         nums: Dict[str, float] = {}
         if _DEMO:
             k, ok, bad, judge = _demo_judge("stt_dataset", provider, evaluators, len(utterances))
             d = _DEMO.get("stt_dataset") or {}
-            nums = {"wer": wer}
+            nums = {"wer": d.get("demo_wer", {}).get(provider, FAKE_WER)}
             for key in ("cer", "sarvam_llm_wer", "sarvam_llm_cer"):
                 value = (d.get(f"demo_{key}") or {}).get(provider)
                 if value is not None and (sarvam or key == "cer"):
@@ -511,7 +503,7 @@ def _cmd_stt(opts: Dict[str, List[str]]) -> None:
                     + [cells[c] for c in ev_cols]
                     + [row_extra[c] for c in extra_cols]
                 )
-        metrics = _stt_metrics(evaluators, sarvam, wer)
+        metrics = _stt_metrics(evaluators, sarvam)
         metrics.update(nums)
         metrics.update(judge)
         with open(sub / "metrics.json", "w", encoding="utf-8") as f:
@@ -581,8 +573,8 @@ def _write_demo_speech_leaderboard(
 
 
 # --- Subcommand: tts --------------------------------------------------------
-def _tts_metrics(evaluators: List[Dict[str, Any]], ttfb: float = FAKE_TTFB) -> Dict[str, Any]:
-    metrics: Dict[str, Any] = {"ttfb": ttfb}
+def _tts_metrics(evaluators: List[Dict[str, Any]]) -> Dict[str, Any]:
+    metrics: Dict[str, Any] = {"ttfb": FAKE_TTFB}
     for ev in evaluators:
         name = ev.get("name")
         if name:
@@ -610,6 +602,7 @@ def _cmd_tts(opts: Dict[str, List[str]]) -> None:
         k, ok, bad, judge = len(rows), ev_values, ev_values, {}
         if _DEMO:
             k, ok, bad, judge = _demo_judge("tts_dataset", provider, evaluators, len(rows))
+            judge["ttfb"] = _DEMO["tts_dataset"]["demo_ttfb_seconds"].get(provider, FAKE_TTFB)
         sub = output_dir / f"{provider}_results"
         audios = sub / "audios"
         audios.mkdir(parents=True, exist_ok=True)
@@ -626,8 +619,7 @@ def _cmd_tts(opts: Dict[str, List[str]]) -> None:
                     [row.get("id"), row.get("text", ""), str(wav)]
                     + [(ok if idx < k else bad)[c] for c in ev_cols]
                 )
-        ttfb = ((_DEMO or {}).get("tts_dataset") or {}).get("demo_ttfb_seconds", {}).get(provider, FAKE_TTFB)
-        metrics = _tts_metrics(evaluators, ttfb)
+        metrics = _tts_metrics(evaluators)
         metrics.update(judge)
         with open(sub / "metrics.json", "w", encoding="utf-8") as f:
             json.dump(metrics, f)
