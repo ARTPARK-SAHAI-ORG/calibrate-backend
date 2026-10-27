@@ -47,6 +47,12 @@ class AnnotatorUpdate(BaseModel):
 
 class KappaOfAnswerKind(BaseModel):
     answer_kind: AnswerKind = Field(description=ANSWER_KIND_DESCRIPTION)
+    agreement: Optional[float] = Field(
+        description="Mean agreement with the other annotators over every compared pair of this kind, from 0 to 1"
+    )
+    pair_count: int = Field(
+        description="How many compared pairs of this kind the agreement averages over"
+    )
     kappa: Optional[float] = Field(description=KAPPA_DESCRIPTION)
     kappa_type: AnnotatorVsOthersKappaType = Field(
         description=ANNOTATOR_VS_OTHERS_KAPPA_TYPE_DESCRIPTION

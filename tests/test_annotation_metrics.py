@@ -966,6 +966,21 @@ def _kappa(answer_kind, kappa_type, kappa, kappa_blank_reason=None, chance_agree
     }
 
 
+def _annotator_kappa(
+    answer_kind, agreement, pair_count, kappa_type, kappa, kappa_blank_reason=None, chance_agreement=None
+):
+    """A `kappa_by_kind` entry of one annotator against the others, which also
+    carries that kind's agreement and pair count."""
+    return {
+        "answer_kind": answer_kind,
+        "agreement": agreement,
+        "pair_count": pair_count,
+        **{key: value for key, value in _kappa(
+            answer_kind, kappa_type, kappa, kappa_blank_reason, chance_agreement
+        ).items() if key != "answer_kind"},
+    }
+
+
 def test_fleiss_kappa_on_pass_fail_answers():
     annotations = _annotations_from_answers(
         [(True, True), (True, True), (True, False), (False, False)]
@@ -992,7 +1007,7 @@ def test_cohen_kappa_of_one_annotator_with_the_others():
     )
     # a0 said true 3 of 4 times and a1 2 of 4: chance 0.75 * 0.5 + 0.25 * 0.5.
     assert agreement_and_kappa_of_annotator_with_others(annotations, "a0") == (
-        0.75, 4, [_kappa("binary", "cohen", 0.5, chance_agreement=0.5)]
+        0.75, 4, [_annotator_kappa("binary", 0.75, 4, "cohen", 0.5, chance_agreement=0.5)]
     )
 
 
@@ -1122,7 +1137,7 @@ def test_kappa_uses_only_the_answers_compared():
     # a0 said true, true, false and the others true, false, false: chance
     # 2/3 * 1/3 + 1/3 * 2/3 = 4/9, so (2/3 - 4/9) / (5/9) = 0.4.
     assert agreement_and_kappa_of_annotator_with_others(annotations, "a0") == (
-        0.6667, 3, [_kappa("binary", "cohen", 0.4, chance_agreement=0.4444)]
+        0.6667, 3, [_annotator_kappa("binary", 0.6667, 3, "cohen", 0.4, chance_agreement=0.4444)]
     )
     # The judge's list on the second item compares with nothing. On the other
     # two it matches all four answers, half of them true.
@@ -1153,8 +1168,8 @@ def test_kinds_are_never_combined_into_one_kappa():
         0.9375,
         4,
         [
-            _kappa("binary", "cohen", None, "everyone_agreed", 1.0),
-            _kappa("rating", "linear_weighted_cohen", 0.0, chance_agreement=0.875),
+            _annotator_kappa("binary", 1.0, 2, "cohen", None, "everyone_agreed", 1.0),
+            _annotator_kappa("rating", 0.875, 2, "linear_weighted_cohen", 0.0, chance_agreement=0.875),
         ],
     )
 
@@ -1255,18 +1270,31 @@ def test_kappa_is_blank_for_too_few_items_unless_an_evaluator_has_two():
     ) == (1.0, 3, [_kappa("binary", "fleiss", None, "too_few_items")])
     assert agreement_and_kappa_of_annotator_with_others(
         _annotations_from_answers([[True, True]]), "a0"
-    ) == (1.0, 1, [_kappa("binary", "cohen", None, "too_few_items")])
+    ) == (1.0, 1, [_annotator_kappa("binary", 1.0, 1, "cohen", None, "too_few_items")])
     # Two items, but one per evaluator: neither evaluator can show chance.
     one_item_on_each_evaluator = _annotations_from_answers([(True, False)], evaluator_id="e") + (
         _annotations_from_answers([(True, False)], evaluator_id="f", item_prefix="j")
     )
     assert agreement_and_kappa_of_annotator_with_others(one_item_on_each_evaluator, "a0") == (
-        0.0, 2, [_kappa("binary", "cohen", None, "too_few_items")]
+        0.0, 2, [_annotator_kappa("binary", 0.0, 2, "cohen", None, "too_few_items")]
     )
     two_items = _annotations_from_answers([[True, False], [True, True]])
     assert agreement_and_kappa_between_annotators(two_items)[2] == [
         _kappa("binary", "fleiss", -0.3333, chance_agreement=0.625)
     ]
+
+
+def test_a_kinds_agreement_covers_every_pair_while_its_kappa_needs_two_items():
+    # Evaluator e: a0 says true on two items, the other true then false.
+    # Evaluator f: one item, true against false. The binary agreement covers
+    # all three pairs, 1, 0 and 0. The kappa leaves out f, which has one
+    # item: e's pairs agree 0.5, chance 1 * 0.5, so kappa 0.
+    annotations = _annotations_from_answers([(True, True), (True, False)], evaluator_id="e") + (
+        _annotations_from_answers([(True, False)], evaluator_id="f", item_prefix="j")
+    )
+    assert agreement_and_kappa_of_annotator_with_others(annotations, "a0") == (
+        0.3333, 3, [_annotator_kappa("binary", 0.3333, 3, "cohen", 0.0, chance_agreement=0.5)]
+    )
 
 
 def test_pass_fail_and_text_answers_are_pooled_apart():
@@ -1280,7 +1308,7 @@ def test_pass_fail_and_text_answers_are_pooled_apart():
     )
     # a0 always said True or "yes", the other False or "no": chance 0.
     assert agreement_and_kappa_of_annotator_with_others(annotations, "a0") == (
-        0.0, 2, [_kappa("binary", "cohen", 0.0, chance_agreement=0.0)]
+        0.0, 2, [_annotator_kappa("binary", 0.0, 2, "cohen", 0.0, chance_agreement=0.0)]
     )
 
 

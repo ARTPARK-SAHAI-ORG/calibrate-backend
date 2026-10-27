@@ -3860,9 +3860,11 @@ def test_kappa_sits_beside_every_agreement_over_many_items(client):
     # Annotators on the rating evaluator: 2, 3, 4, 5 a quarter each, chance
     # 11/16.
     rating_annotators_now = kappa(0.6, "linear_weighted_fleiss", 0.6875)
+    # One annotator against the other: 4 binary pairs agreeing on 3, and 4
+    # rating pairs agreeing 1, 0.75, 1 and 0.75.
     one_annotator_now = [
-        {"answer_kind": "binary", **kappa(0.5, "cohen", 0.5)},
-        {"answer_kind": "rating", **kappa(0.6, "linear_weighted_cohen", 0.6875)},
+        {"answer_kind": "binary", "agreement": 0.75, "pair_count": 4, **kappa(0.5, "cohen", 0.5)},
+        {"answer_kind": "rating", "agreement": 0.875, "pair_count": 4, **kappa(0.6, "linear_weighted_cohen", 0.6875)},
     ]
     kappa_keys = ("kappa", "kappa_type", "kappa_blank_reason", "chance_agreement")
 
