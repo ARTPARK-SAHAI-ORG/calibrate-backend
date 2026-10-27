@@ -11,12 +11,18 @@ Output shapes mirror the readers in ``routers/agent_tests.py``, ``stt.py``,
 ``tts.py``, ``simulations.py``, ``annotation_eval_runner.py``, and
 ``trace_scoring.py``. The constants below are asserted by the frontend
 integration tests — keep them stable.
+
+With ``FAKE_AI_DEMO=1`` as well, replies, verdicts, transcripts and numbers come
+from ``demo_replies.json`` (an AI maths tutor example used for docs
+screenshots) wherever an input matches it; everything else stays canned.
 """
 
 import csv
 import json
 import os
+import statistics
 import sys
+import wave
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -32,6 +38,35 @@ FAKE_TTFB = 0.5
 FAKE_SARVAM_LLM_WER = 0.0
 FAKE_SARVAM_LLM_CER = 0.0
 # Every evaluator verdict is a PASS; every rating is scale_max.
+
+# demo_replies.json when FAKE_AI_DEMO=1, else None. Set by `main`.
+_DEMO: Optional[Dict[str, Any]] = None
+
+
+def _demo_test(test_case: Any) -> Optional[Dict[str, Any]]:
+    """The ``demo`` block of the demo test whose ``user_message`` equals the
+    test case's last user turn (or its ``input`` when it has no history)."""
+    if not _DEMO or not isinstance(test_case, dict):
+        return None
+    text = test_case.get("input")
+    for turn in test_case.get("history") or []:
+        if isinstance(turn, dict) and turn.get("role") == "user":
+            text = turn.get("content")
+    if not isinstance(text, str):
+        return None
+    for t in _DEMO.get("tests") or []:
+        if t.get("user_message", "").strip() == text.strip():
+            return t.get("demo")
+    return None
+
+
+def _write_silent_wav(path: Path, seconds: float = 1.5) -> None:
+    """A short valid silent WAV (16 kHz mono) so audio players can load it."""
+    with wave.open(str(path), "wb") as w:
+        w.setnchannels(1)
+        w.setsampwidth(2)
+        w.setframerate(16000)
+        w.writeframes(b"\x00\x00" * int(16000 * seconds))
 
 
 # --- Argument parsing -------------------------------------------------------
@@ -129,17 +164,22 @@ def _write_config_json(output_dir: Path, evaluators: List[Dict[str, Any]]) -> No
         json.dump({"evaluators_map": _evaluators_map(evaluators)}, f)
 
 
-def _metrics_aggregate(ev: Dict[str, Any], n: int) -> Dict[str, Any]:
+def _metrics_aggregate(
+    ev: Dict[str, Any], n: int, pass_rate: float = 100.0
+) -> Dict[str, Any]:
     """Per-evaluator aggregate entry for metrics.json. Must carry a ``type`` key
-    so the readers recognise it as an evaluator output (not a built-in scalar)."""
+    so the readers recognise it as an evaluator output (not a built-in scalar).
+    Below 100, a failed case scores ``scale_min + 1`` on a rating evaluator,
+    matching the per-case demo scores."""
     uid = _ev_uuid(ev)
     if ev.get("type") == "rating":
         sm = _ev_scale_max(ev)
+        low = sm if pass_rate >= 100 else _ev_scale_min(ev) + 1
         return {
             "type": "rating",
             "evaluator_id": uid,
-            "mean": sm,
-            "min": sm,
+            "mean": sm if pass_rate >= 100 else low + (sm - low) * pass_rate / 100,
+            "min": low,
             "max": sm,
             "count": n,
             "scale_min": _ev_scale_min(ev),
@@ -148,9 +188,9 @@ def _metrics_aggregate(ev: Dict[str, Any], n: int) -> Dict[str, Any]:
     return {
         "type": "binary",
         # Out of 100, as the real CLI writes it: (passed / total) * 100.
-        "pass_rate": 100.0,
+        "pass_rate": pass_rate,
         "evaluator_id": uid,
-        "passed": n,
+        "passed": n if pass_rate >= 100 else round(n * pass_rate / 100),
         "total": n,
     }
 
@@ -162,8 +202,12 @@ def _safe_model(model: str) -> str:
 
 
 def _llm_judge_results(
-    criteria: List[Dict[str, Any]], ev_by_name: Dict[str, Dict[str, Any]]
+    criteria: List[Dict[str, Any]],
+    ev_by_name: Dict[str, Dict[str, Any]],
+    demo: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
+    passed = demo["passed"] if demo else True
+    reasoning = demo["reasoning"] if demo else FAKE_REASONING
     judge_results: Dict[str, Any] = {}
     for ref in criteria:
         if not isinstance(ref, dict):
@@ -172,11 +216,11 @@ def _llm_judge_results(
         if not name:
             continue
         ev = ev_by_name.get(name, {})
-        judgement = {"reasoning": FAKE_REASONING, "evaluator_id": _ev_uuid(ev)}
+        judgement = {"reasoning": reasoning, "evaluator_id": _ev_uuid(ev)}
         if ev.get("type") == "rating":
-            judgement["score"] = _ev_scale_max(ev)
+            judgement["score"] = _ev_scale_max(ev) if passed else _ev_scale_min(ev) + 1
         else:
-            judgement["match"] = True
+            judgement["match"] = passed
         judge_results[name] = judgement
     return judge_results
 
@@ -185,9 +229,14 @@ def _write_llm_model_dir(
     model_dir: Path,
     test_cases: List[Dict[str, Any]],
     evaluators: List[Dict[str, Any]],
+    model: str = "default",
 ) -> None:
     model_dir.mkdir(parents=True, exist_ok=True)
     ev_by_name = {ev.get("name"): ev for ev in evaluators if ev.get("name")}
+    bm = next(
+        (b for b in (_DEMO or {}).get("benchmark_models") or [] if b.get("model") == model),
+        None,
+    )
 
     results: List[Dict[str, Any]] = []
     ref_count: Dict[str, int] = {}
@@ -197,12 +246,16 @@ def _write_llm_model_dir(
         evaluation = tc.get("evaluation") or {}
         ev_type = evaluation.get("type")
         criteria = evaluation.get("criteria") or []
-        judge_results = _llm_judge_results(criteria, ev_by_name)
+        demo = _demo_test(tc)
+        # A model at 100% passes every case, so its failing cases use the pass reply.
+        if demo and not demo["passed"] and bm and bm["pass_rate"] >= 100 and demo.get("pass_reply"):
+            demo = {"reply": demo["pass_reply"], "passed": True, "reasoning": demo["pass_reasoning"]}
+        judge_results = _llm_judge_results(criteria, ev_by_name, demo)
         for name in judge_results:
             ref_count[name] = ref_count.get(name, 0) + 1
 
         output: Dict[str, Any] = {
-            "response": FAKE_RESPONSE,
+            "response": demo["reply"] if demo else FAKE_RESPONSE,
             "tool_calls": [],
             "cost": FAKE_COST,
         }
@@ -215,42 +268,51 @@ def _write_llm_model_dir(
                 "test_case": tc,
                 "output": output,
                 "metrics": {
-                    "passed": True,
-                    "reasoning": FAKE_REASONING,
+                    "passed": demo["passed"] if demo else True,
+                    "reasoning": demo["reasoning"] if demo else FAKE_REASONING,
                     "judge_results": judge_results,
                 },
                 "latency_ms": FAKE_LATENCY_MS,
             }
         )
 
+    n = len(results)
+    passed = sum(1 for r in results if r["metrics"]["passed"])
+    pass_rate, latency, cost = 100.0, FAKE_LATENCY_MS, FAKE_COST
+    if _DEMO:
+        # A model listed in benchmark_models reports its demo numbers, so the
+        # leaderboard ranks models.
+        if bm:
+            pass_rate, latency, cost = bm["pass_rate"], bm["latency_ms"], bm["cost"]
+            passed = round(n * pass_rate / 100)
+        elif n:
+            pass_rate = 100.0 * passed / n
+        for r in results:
+            r["latency_ms"] = latency
+            r["output"]["cost"] = cost
+
     with open(model_dir / "results.json", "w", encoding="utf-8") as f:
         json.dump(results, f)
 
-    n = len(results)
     criteria_agg: Dict[str, Any] = {}
     for ev in evaluators:
         name = ev.get("name")
         if not name:
             continue
-        criteria_agg[name] = _metrics_aggregate(ev, ref_count.get(name, n))
+        criteria_agg[name] = _metrics_aggregate(ev, ref_count.get(name, n), pass_rate)
 
     with open(model_dir / "metrics.json", "w", encoding="utf-8") as f:
         json.dump(
             {
                 "total": n,
-                "passed": n,
+                "passed": passed,
                 # Aggregate perf blocks are dicts, not scalars: latency is
                 # percentiles {p50,p95,p99,count}; cost/tokens are
                 # {mean,min,max,count}. The run-status/benchmark readers pass
                 # these straight into Optional[Dict] response fields, so a
                 # scalar 500s response validation.
-                "latency_ms": {
-                    "p50": FAKE_LATENCY_MS,
-                    "p95": FAKE_LATENCY_MS,
-                    "p99": FAKE_LATENCY_MS,
-                    "count": n,
-                },
-                "cost": {"mean": FAKE_COST, "min": FAKE_COST, "max": FAKE_COST, "count": n},
+                "latency_ms": {"p50": latency, "p95": latency, "p99": latency, "count": n},
+                "cost": {"mean": cost, "min": cost, "max": cost, "count": n},
                 "total_tokens": {
                     "mean": FAKE_TOKENS,
                     "min": FAKE_TOKENS,
@@ -280,6 +342,34 @@ def _write_leaderboard(
             writer.writerow([sm, "1.0"] + ["1.0" for _ in ev_names])
 
 
+def _write_demo_leaderboard(output_dir: Path, safe_models: List[str]) -> None:
+    """Leaderboard in the real CLI's columns (``tests_leaderboard.py``), built
+    from each model's metrics.json, so the benchmark page shows the demo
+    pass rate, latency and cost per model."""
+    leaderboard_dir = output_dir / "leaderboard"
+    leaderboard_dir.mkdir(parents=True, exist_ok=True)
+    metrics = {
+        sm: json.loads((output_dir / sm / "metrics.json").read_text(encoding="utf-8"))
+        for sm in safe_models
+    }
+    names = sorted({c for m in metrics.values() for c in m["criteria"]})
+    with open(leaderboard_dir / "leaderboard.csv", "w", newline="", encoding="utf-8") as f:
+        writer = csv.writer(f)
+        writer.writerow(
+            ["model", "passed", "total", "pass_rate", "latency_p50", "latency_p95",
+             "latency_p99", "cost", "total_tokens"] + names
+        )
+        for sm, m in metrics.items():
+            crit = [m["criteria"].get(c, {}) for c in names]
+            writer.writerow(
+                [sm, m["passed"], m["total"],
+                 100 * m["passed"] / m["total"] if m["total"] else "",
+                 m["latency_ms"]["p50"], m["latency_ms"]["p95"], m["latency_ms"]["p99"],
+                 m["cost"]["mean"], m["total_tokens"]["mean"]]
+                + [c.get("mean") if c.get("type") == "rating" else c.get("pass_rate") for c in crit]
+            )
+
+
 def _cmd_llm(opts: Dict[str, List[str]]) -> None:
     output_dir = Path(_first(opts, "-o", "--output"))
     config = _load_json(_first(opts, "-c", "--config"))
@@ -303,11 +393,14 @@ def _cmd_llm(opts: Dict[str, List[str]]) -> None:
     for model in models:
         safe = _safe_model(model) if model != "default" else "default"
         safe_models.append(safe)
-        _write_llm_model_dir(output_dir / safe, test_cases, evaluators)
+        _write_llm_model_dir(output_dir / safe, test_cases, evaluators, model)
 
     # Benchmark reads a leaderboard; a unit test ignores it. Harmless either way.
     if _many(opts, "-m", "--model", "--models"):
-        _write_leaderboard(output_dir, safe_models, evaluators)
+        if _DEMO:
+            _write_demo_leaderboard(output_dir, safe_models)
+        else:
+            _write_leaderboard(output_dir, safe_models, evaluators)
 
 
 
@@ -352,8 +445,10 @@ _SARVAM_ROW_VALUES = {
 }
 
 
-def _stt_metrics(evaluators: List[Dict[str, Any]], sarvam: bool) -> Dict[str, Any]:
-    metrics: Dict[str, Any] = {"wer": FAKE_WER}
+def _stt_metrics(
+    evaluators: List[Dict[str, Any]], sarvam: bool, wer: float = FAKE_WER
+) -> Dict[str, Any]:
+    metrics: Dict[str, Any] = {"wer": wer}
     if sarvam:
         metrics.update(_SARVAM_METRICS)
     for ev in evaluators:
@@ -385,24 +480,102 @@ def _cmd_stt(opts: Dict[str, List[str]]) -> None:
     for provider in providers:
         sub = output_dir / f"{provider}_results"
         sub.mkdir(parents=True, exist_ok=True)
+        wer = ((_DEMO or {}).get("stt_dataset") or {}).get("demo_wer", {}).get(provider, FAKE_WER)
+        k, ok, bad, judge = len(utterances), ev_values, ev_values, {}
+        nums: Dict[str, float] = {}
+        if _DEMO:
+            k, ok, bad, judge = _demo_judge("stt_dataset", provider, evaluators, len(utterances))
+            # Rough but plausible: CER and the Sarvam LLM scores track WER.
+            nums = {"wer": wer, "cer": round(wer * 0.6, 4)}
+            if sarvam:
+                nums.update(sarvam_llm_wer=round(wer * 0.7, 4), sarvam_llm_cer=round(wer * 0.45, 4))
+        num_cols = [c for c in ("wer", "cer") if c in nums]
+        row_extra = {c: str(nums.get(c, v)) for c, v in extra_values.items()}
         with open(sub / "results.csv", "w", newline="", encoding="utf-8") as f:
             writer = csv.writer(f)
-            writer.writerow(["id", "gt", "pred"] + ev_cols + extra_cols)
-            for utt in utterances:
+            writer.writerow(["id", "gt", "pred"] + num_cols + ev_cols + extra_cols)
+            for idx, utt in enumerate(utterances):
                 text = utt.get("text", "")
+                cells = ok if idx < k else bad
                 writer.writerow(
                     [utt.get("id"), text, text]
-                    + [ev_values[c] for c in ev_cols]
-                    + [extra_values[c] for c in extra_cols]
+                    + [nums[c] for c in num_cols]
+                    + [cells[c] for c in ev_cols]
+                    + [row_extra[c] for c in extra_cols]
                 )
+        metrics = _stt_metrics(evaluators, sarvam, wer)
+        metrics.update(nums)
+        metrics.update(judge)
         with open(sub / "metrics.json", "w", encoding="utf-8") as f:
-            json.dump(_stt_metrics(evaluators, sarvam), f)
+            json.dump(metrics, f)
+    if _DEMO:
+        _write_demo_speech_leaderboard(output_dir, providers, len(utterances), "stt_leaderboard.xlsx")
 
+
+
+def _demo_judge(
+    dataset: str, provider: str, evaluators: List[Dict[str, Any]], n: int
+) -> tuple[int, Dict[str, str], Dict[str, str], Dict[str, Any]]:
+    """Demo judge outcome for one STT/TTS provider: how many rows pass, the
+    evaluator cells for a passing and a failing row, and the metrics.json
+    entries. Entries carry the real CLI's ``mean`` (binary as a 0-1 fraction),
+    which the leaderboard's evaluator columns read."""
+    d = _DEMO.get(dataset) or {}
+    k = round((d.get("demo_judge_pass_rate") or {}).get(provider, 1.0) * n)
+    ok: Dict[str, str] = {}
+    bad: Dict[str, str] = {}
+    metrics: Dict[str, Any] = {}
+    for ev in evaluators:
+        name = ev.get("name")
+        if not name:
+            continue
+        rating = ev.get("type") == "rating"
+        ok[name] = str(_ev_scale_max(ev)) if rating else "1"
+        bad[name] = str(_ev_scale_min(ev) + 1) if rating else "0"
+        ok[f"{name}_reasoning"] = d.get("demo_judge_reasoning_pass", FAKE_REASONING)
+        bad[f"{name}_reasoning"] = d.get("demo_judge_reasoning_fail", FAKE_REASONING)
+        agg = _metrics_aggregate(ev, n, 100.0 * k / n if n else 100.0)
+        agg.setdefault("mean", k / n if n else 1.0)
+        metrics[name] = agg
+    return k, ok, bad, metrics
+
+
+def _write_demo_speech_leaderboard(
+    output_dir: Path, providers: List[str], count: int, filename: str
+) -> None:
+    """The ``summary`` sheet the real CLI's ``{stt,tts}/leaderboard.py`` writes
+    (one row per provider: ``run``, ``count``, then the metrics.json numbers
+    flattened as ``read_leaderboard_metrics`` does), read by
+    ``read_leaderboard_xlsx``. The real CLI names provider folders by the bare
+    provider, so ``run`` is the provider."""
+    import openpyxl  # in the backend env; only demo mode needs it
+
+    rows = []
+    for provider in providers:
+        metrics = json.loads(
+            (output_dir / f"{provider}_results" / "metrics.json").read_text(encoding="utf-8")
+        )
+        row: Dict[str, Any] = {"run": provider, "count": count}
+        for key, value in metrics.items():
+            if isinstance(value, dict) and "mean" in value:
+                row[key] = value["mean"]
+            elif isinstance(value, (int, float)) and not isinstance(value, bool):
+                row[key] = float(value)
+        rows.append(row)
+    headers = list(dict.fromkeys(k for r in rows for k in r))
+    (output_dir / "leaderboard").mkdir(exist_ok=True)
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.title = "summary"
+    ws.append(headers)
+    for r in rows:
+        ws.append([r.get(h) for h in headers])
+    wb.save(output_dir / "leaderboard" / filename)
 
 
 # --- Subcommand: tts --------------------------------------------------------
-def _tts_metrics(evaluators: List[Dict[str, Any]]) -> Dict[str, Any]:
-    metrics: Dict[str, Any] = {"ttfb": FAKE_TTFB}
+def _tts_metrics(evaluators: List[Dict[str, Any]], ttfb: float = FAKE_TTFB) -> Dict[str, Any]:
+    metrics: Dict[str, Any] = {"ttfb": ttfb}
     for ev in evaluators:
         name = ev.get("name")
         if name:
@@ -427,6 +600,9 @@ def _cmd_tts(opts: Dict[str, List[str]]) -> None:
 
     ev_cols, ev_values = _evaluator_row_cols(evaluators)
     for provider in providers:
+        k, ok, bad, judge = len(rows), ev_values, ev_values, {}
+        if _DEMO:
+            k, ok, bad, judge = _demo_judge("tts_dataset", provider, evaluators, len(rows))
         sub = output_dir / f"{provider}_results"
         audios = sub / "audios"
         audios.mkdir(parents=True, exist_ok=True)
@@ -434,17 +610,22 @@ def _cmd_tts(opts: Dict[str, List[str]]) -> None:
             writer = csv.writer(f)
             writer.writerow(["id", "text", "audio_path"] + ev_cols)
             for idx, row in enumerate(rows):
-                # Write a real (empty) .wav and reference its ABSOLUTE path — the
+                # Write a real .wav and reference its ABSOLUTE path — the
                 # TTS worker keys audio files by exact local path and marks a
                 # provider failed if no row's audio_path matches a walked file.
                 wav = audios / f"row_{idx + 1}.wav"
-                wav.write_bytes(b"")
+                _write_silent_wav(wav)
                 writer.writerow(
                     [row.get("id"), row.get("text", ""), str(wav)]
-                    + [ev_values[c] for c in ev_cols]
+                    + [(ok if idx < k else bad)[c] for c in ev_cols]
                 )
+        ttfb = ((_DEMO or {}).get("tts_dataset") or {}).get("demo_ttfb_seconds", {}).get(provider, FAKE_TTFB)
+        metrics = _tts_metrics(evaluators, ttfb)
+        metrics.update(judge)
         with open(sub / "metrics.json", "w", encoding="utf-8") as f:
-            json.dump(_tts_metrics(evaluators), f)
+            json.dump(metrics, f)
+    if _DEMO:
+        _write_demo_speech_leaderboard(output_dir, providers, len(rows), "tts_leaderboard.xlsx")
 
 
 
@@ -455,28 +636,91 @@ def _sim_eval_row(ev: Dict[str, Any]) -> List[Any]:
     return [_ev_uuid(ev), ev.get("name"), "binary", "Pass", FAKE_REASONING]
 
 
+# Per-case timings (seconds) the real voice CLI appends to
+# evaluation_results.csv; the voice results page averages them per run.
+_DEMO_VOICE_LATENCY = {
+    "stt/ttft": 0.31,
+    "llm/ttft": 0.58,
+    "tts/ttft": 0.27,
+    "stt/processing_time": 0.35,
+    "llm/processing_time": 0.92,
+    "tts/processing_time": 0.41,
+}
+
+
+def _demo_sim_eval_row(ev: Dict[str, Any], verdicts: Dict[str, Any]) -> List[Any]:
+    """Real-CLI value shape: binary 1.0/0.0, rating the score as a float."""
+    sim = _DEMO["simulation"]
+    name = ev.get("name")
+    fail = name in verdicts and verdicts[name] is not True
+    reasoning = sim["demo_reasoning_fail"] if fail else sim["demo_reasoning_pass"]
+    if ev.get("type") == "rating":
+        value = float(verdicts[name] if fail else _ev_scale_max(ev))
+        return [_ev_uuid(ev), name, "rating", value, reasoning]
+    return [_ev_uuid(ev), name, "binary", 0.0 if fail else 1.0, reasoning]
+
+
 def _write_sim_case(
     case_dir: Path,
     persona: Any,
     scenario: Any,
     evaluators: List[Dict[str, Any]],
-) -> None:
+    voice: bool = False,
+) -> List[List[Any]]:
+    """Writes one case and returns its evaluation rows."""
     case_dir.mkdir(parents=True, exist_ok=True)
+    transcript = [
+        {"role": "user", "content": "Simulated user turn."},
+        {"role": "assistant", "content": FAKE_RESPONSE},
+    ]
+    rows = [_sim_eval_row(ev) for ev in evaluators]
+    if _DEMO and isinstance(persona, dict) and isinstance(scenario, dict):
+        sim = _DEMO["simulation"]
+        key = f"{persona.get('label')}|{scenario.get('name')}"
+        transcript = sim["demo_transcripts"].get(key, transcript)
+        verdicts = sim.get("demo_verdicts", {}).get(key, {})
+        rows = [_demo_sim_eval_row(ev, verdicts) for ev in evaluators]
+        if voice:
+            rows += [["", k, "", v, ""] for k, v in _DEMO_VOICE_LATENCY.items()]
+            # Turn audio is named <exchange>_<bot|user>.wav, exchange N
+            # holding spoken turns 2N-2 and 2N-1 (the order the reader sorts by).
+            audios = case_dir / "audios"
+            audios.mkdir(exist_ok=True)
+            for i, turn in enumerate(transcript):
+                role = "bot" if turn["role"] == "assistant" else "user"
+                _write_silent_wav(audios / f"{i // 2 + 1}_{role}.wav")
+            _write_silent_wav(case_dir / "conversation.wav", 1.5 * len(transcript))
     with open(case_dir / "transcript.json", "w", encoding="utf-8") as f:
-        json.dump(
-            [
-                {"role": "user", "content": "Simulated user turn."},
-                {"role": "assistant", "content": FAKE_RESPONSE},
-            ],
-            f,
-        )
+        json.dump(transcript, f)
     with open(case_dir / "evaluation_results.csv", "w", newline="", encoding="utf-8") as f:
         writer = csv.writer(f)
         writer.writerow(["evaluator_id", "name", "type", "value", "reasoning"])
-        for ev in evaluators:
-            writer.writerow(_sim_eval_row(ev))
+        writer.writerows(rows)
     with open(case_dir / "config.json", "w", encoding="utf-8") as f:
         json.dump({"persona": persona, "scenario": scenario}, f)
+    return rows
+
+
+def _demo_sim_metrics(
+    evaluators: List[Dict[str, Any]], rows: List[List[Any]]
+) -> Dict[str, Any]:
+    """Real-CLI metrics.json shape (``summarize_metric_distribution``)."""
+    metrics: Dict[str, Any] = {}
+    for ev in evaluators:
+        values = [r[3] for r in rows if r[1] == ev.get("name")]
+        if not values:
+            continue
+        entry: Dict[str, Any] = {
+            "type": ev.get("type") or "binary",
+            "mean": statistics.fmean(values),
+            "std": statistics.pstdev(values),
+            "values": values,
+        }
+        if ev.get("type") == "rating":
+            entry["scale_min"], entry["scale_max"] = _ev_scale_min(ev), _ev_scale_max(ev)
+        entry["evaluator_id"] = _ev_uuid(ev)
+        metrics[ev["name"]] = entry
+    return metrics
 
 
 def _cmd_simulations(opts: Dict[str, List[str]]) -> None:
@@ -486,14 +730,19 @@ def _cmd_simulations(opts: Dict[str, List[str]]) -> None:
     personas = config.get("personas") or []
     scenarios = config.get("scenarios") or []
     evaluators = _evaluators_from_config(config)
+    voice = _first(opts, "--type") == "voice"
 
+    all_rows: List[List[Any]] = []
     for i, persona in enumerate(personas, start=1):
         for j, scenario in enumerate(scenarios, start=1):
             case_dir = output_dir / f"simulation_persona_{i}_scenario_{j}"
-            _write_sim_case(case_dir, persona, scenario, evaluators)
+            all_rows += _write_sim_case(case_dir, persona, scenario, evaluators, voice)
 
     with open(output_dir / "metrics.json", "w", encoding="utf-8") as f:
-        json.dump({"total": len(personas) * len(scenarios)}, f)
+        if _DEMO:
+            json.dump(_demo_sim_metrics(evaluators, all_rows), f)
+        else:
+            json.dump({"total": len(personas) * len(scenarios)}, f)
 
 
 # --- Annotation eval-only flows ---------------------------------------------
@@ -580,15 +829,20 @@ def _cmd_annotation_llm(opts: Dict[str, List[str]]) -> None:
             continue
         test_case = row.get("test_case") or {}
         criteria = (test_case.get("evaluation") or {}).get("criteria") or []
-        judge_results = _llm_judge_results(criteria, ev_by_name)
+        demo = _demo_test(test_case)
+        judge_results = _llm_judge_results(criteria, ev_by_name, demo)
         results.append(
             {
                 "test_case_id": test_case.get("id"),
                 "test_case": test_case,
-                "output": {"response": FAKE_RESPONSE, "tool_calls": [], "cost": FAKE_COST},
+                "output": {
+                    "response": demo["reply"] if demo else FAKE_RESPONSE,
+                    "tool_calls": [],
+                    "cost": FAKE_COST,
+                },
                 "metrics": {
-                    "passed": True,
-                    "reasoning": FAKE_REASONING,
+                    "passed": demo["passed"] if demo else True,
+                    "reasoning": demo["reasoning"] if demo else FAKE_REASONING,
                     "judge_results": judge_results,
                 },
                 "latency_ms": FAKE_LATENCY_MS,
@@ -598,7 +852,16 @@ def _cmd_annotation_llm(opts: Dict[str, List[str]]) -> None:
     with open(output_dir / "results.json", "w", encoding="utf-8") as f:
         json.dump(results, f)
     with open(output_dir / "metrics.json", "w", encoding="utf-8") as f:
-        json.dump({"total": len(results), "passed": len(results)}, f)
+        passed = sum(1 for r in results if r["metrics"]["passed"])
+        json.dump({"total": len(results), "passed": passed}, f)
+
+
+def _demo_case_eval_row(ev: Dict[str, Any], demo: Dict[str, Any]) -> List[Any]:
+    passed = demo["passed"]
+    if ev.get("type") == "rating":
+        value = float(_ev_scale_max(ev) if passed else _ev_scale_min(ev) + 1)
+        return [_ev_uuid(ev), ev.get("name"), "rating", value, demo["reasoning"]]
+    return [_ev_uuid(ev), ev.get("name"), "binary", 1.0 if passed else 0.0, demo["reasoning"]]
 
 
 def _cmd_annotation_simulation(opts: Dict[str, List[str]]) -> None:
@@ -620,11 +883,13 @@ def _cmd_annotation_simulation(opts: Dict[str, List[str]]) -> None:
         dataset_map[row_id] = {"index": idx, "name": name}
         case_dir = output_dir / row_id
         case_dir.mkdir(parents=True, exist_ok=True)
+        # A demo item is one test exchange; its student message picks the verdict.
+        demo = _demo_test({"history": row.get("conversation_history")}) if isinstance(row, dict) else None
         with open(case_dir / "evaluation_results.csv", "w", newline="", encoding="utf-8") as f:
             writer = csv.writer(f)
             writer.writerow(["evaluator_id", "name", "type", "value", "reasoning"])
             for ev in evaluators:
-                writer.writerow(_sim_eval_row(ev))
+                writer.writerow(_demo_case_eval_row(ev, demo) if demo else _sim_eval_row(ev))
 
     with open(output_dir / "dataset_map.json", "w", encoding="utf-8") as f:
         json.dump(dataset_map, f)
@@ -650,6 +915,11 @@ SUPPORTED_SUBCOMMANDS = frozenset(
 
 
 def main(argv: List[str]) -> int:
+    global _DEMO
+    _DEMO = None
+    if os.environ.get("FAKE_AI_DEMO") == "1":
+        with open(Path(__file__).with_name("demo_replies.json"), encoding="utf-8") as f:
+            _DEMO = json.load(f)
     sub, opts = _parse_args(argv)
     eval_only = "--eval-only" in opts
 

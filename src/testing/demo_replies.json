@@ -1,0 +1,195 @@
+{
+  "_about": "One AI tutor example used on every docs page. The frontend screenshot script creates these objects; the backend fake (FAKE_AI_DEMO=1) returns the replies below, matched by the exact input text.",
+  "agent": {
+    "name": "Maths homework tutor",
+    "system_prompt": "You are a friendly maths tutor for class 6 students in India. Explain one step at a time in simple words. Reply in the language the student uses (English or Hindi). Never give the final answer straight away: ask the student to try the next step first. If the student is upset, encourage them before continuing.",
+    "llm_model": "openai/gpt-4.1-mini",
+    "stt_provider": "sarvam",
+    "tts_provider": "sarvam",
+    "language": "hindi"
+  },
+  "tools": [
+    {
+      "kind": "structured_output",
+      "name": "save_progress",
+      "description": "Save which topic the student practised and whether they solved the question.",
+      "parameters": [
+        {"name": "topic", "type": "string", "description": "The maths topic, for example fractions"},
+        {"name": "solved", "type": "boolean", "description": "True if the student reached the right answer"}
+      ]
+    },
+    {
+      "kind": "webhook",
+      "name": "get_practice_question",
+      "description": "Fetch one practice question for a topic.",
+      "url": "https://example.org/tutor/practice-question",
+      "method": "GET",
+      "parameters": [
+        {"name": "topic", "type": "string", "description": "The maths topic"}
+      ]
+    }
+  ],
+  "evaluators": [
+    {
+      "name": "Explains step by step",
+      "type": "binary",
+      "prompt": "Does the tutor explain the next step instead of giving the final answer straight away?"
+    },
+    {
+      "name": "Encouraging tone",
+      "type": "rating",
+      "scale_min": 1,
+      "scale_max": 5,
+      "prompt": "How encouraging and patient is the tutor's reply? 1 is dismissive, 5 is warm and patient."
+    }
+  ],
+  "tests": [
+    {
+      "name": "Fractions: asks for the next step",
+      "kind": "response",
+      "user_message": "What is 1/2 + 1/4? Just tell me the answer.",
+      "criteria": "The tutor does not give 3/4 straight away. It asks the student to make the bottoms of both fractions the same first.",
+      "demo": {
+        "reply": "Let's do it together! First, can you turn 1/2 into quarters? How many quarters make one half?",
+        "passed": true,
+        "reasoning": "The tutor does not reveal 3/4. It asks the student to convert 1/2 into quarters, which is the correct next step."
+      }
+    },
+    {
+      "name": "Hindi: replies in Hindi",
+      "kind": "response",
+      "user_message": "मुझे भिन्न समझ नहीं आते",
+      "criteria": "The tutor replies in Hindi and starts with a simple example.",
+      "demo": {
+        "reply": "कोई बात नहीं! सोचो एक रोटी के 4 बराबर टुकड़े किए। अगर तुमने 1 टुकड़ा खाया, तो तुमने रोटी का 1/4 खाया। अब बताओ, 2 टुकड़े खाए तो कितना हुआ?",
+        "passed": true,
+        "reasoning": "The reply is in Hindi and uses a simple roti example to explain quarters."
+      }
+    },
+    {
+      "name": "Upset student: encourages first",
+      "kind": "response",
+      "user_message": "I am bad at maths. I got every question wrong.",
+      "criteria": "The tutor encourages the student before going back to the question.",
+      "demo": {
+        "reply": "Let's look at question 1 again. Write 2/3 as sixths.",
+        "passed": false,
+        "reasoning": "The tutor goes straight back to the question and does not acknowledge that the student feels upset.",
+        "pass_reply": "I am sorry you feel that way. Getting questions wrong is how we learn, and you are brave to keep trying! Let's look at question 1 together. Can you write 2/3 as sixths?",
+        "pass_reasoning": "The tutor first comforts the student and praises their effort, then gently goes back to the question."
+      }
+    },
+    {
+      "name": "Saves progress after a solved question",
+      "kind": "tool_call",
+      "user_message": "I got it! 1/2 + 1/4 is 3/4.",
+      "expected_tool_call": {"name": "save_progress", "arguments": {"topic": "fractions", "solved": true}},
+      "demo": {
+        "reply": "Well done, that is right! 1/2 is 2/4, and 2/4 + 1/4 = 3/4.",
+        "passed": true,
+        "reasoning": "The tutor called save_progress with topic fractions and solved true."
+      }
+    }
+  ],
+  "benchmark_models": [
+    {"model": "openai/gpt-4.1-mini", "pass_rate": 75.0, "latency_ms": 820, "cost": 0.0011},
+    {"model": "google/gemini-2.5-flash", "pass_rate": 100.0, "latency_ms": 640, "cost": 0.0007},
+    {"model": "anthropic/claude-haiku-4.5", "pass_rate": 100.0, "latency_ms": 910, "cost": 0.0016}
+  ],
+  "personas": [
+    {
+      "name": "Riya, stuck on fractions",
+      "characteristics": "A class 6 student who is stuck on fractions homework. Gets frustrated quickly and gives short answers.",
+      "gender": "female",
+      "language": "hindi",
+      "interruption_level": "low"
+    },
+    {
+      "name": "Arjun, wants the answer fast",
+      "characteristics": "A class 6 student in a hurry who keeps asking for the final answer.",
+      "gender": "male",
+      "language": "english",
+      "interruption_level": "medium"
+    }
+  ],
+  "scenarios": [
+    {
+      "name": "Fractions homework",
+      "description": "The student needs help adding 1/2 and 1/4 for homework."
+    },
+    {
+      "name": "Asks for the answer only",
+      "description": "The student asks the tutor to just give the answer to 3/5 + 1/5."
+    }
+  ],
+  "simulation": {
+    "name": "Tutor practice sessions",
+    "demo_transcripts": {
+      "Riya, stuck on fractions|Fractions homework": [
+        {"role": "assistant", "content": "नमस्ते! आज हम क्या पढ़ें?"},
+        {"role": "user", "content": "1/2 और 1/4 जोड़ना है, समझ नहीं आ रहा।"},
+        {"role": "assistant", "content": "चलो साथ में करते हैं। 1/2 में कितने 1/4 होते हैं?"},
+        {"role": "user", "content": "दो?"},
+        {"role": "assistant", "content": "बिल्कुल सही! तो 2/4 + 1/4 कितना हुआ?"},
+        {"role": "user", "content": "3/4!"}
+      ],
+      "Riya, stuck on fractions|Asks for the answer only": [
+        {"role": "assistant", "content": "नमस्ते! आज हम क्या पढ़ें?"},
+        {"role": "user", "content": "बस 3/5 + 1/5 का जवाब बता दो।"},
+        {"role": "assistant", "content": "नीचे वाले अंक एक जैसे हैं। ऊपर वाले 3 और 1 जोड़ो तो कितना हुआ?"},
+        {"role": "user", "content": "4, तो 4/5।"}
+      ],
+      "Arjun, wants the answer fast|Fractions homework": [
+        {"role": "assistant", "content": "Hi! What are we working on today?"},
+        {"role": "user", "content": "1/2 plus 1/4. Quick please."},
+        {"role": "assistant", "content": "Sure. How many quarters are in one half?"},
+        {"role": "user", "content": "Two. So 3/4."},
+        {"role": "assistant", "content": "Exactly right, well done!"}
+      ],
+      "Arjun, wants the answer fast|Asks for the answer only": [
+        {"role": "assistant", "content": "Hi! What are we working on today?"},
+        {"role": "user", "content": "Just tell me 3/5 + 1/5."},
+        {"role": "assistant", "content": "It is 4/5."}
+      ]
+    },
+    "demo_verdicts": {
+      "Arjun, wants the answer fast|Asks for the answer only": {"Explains step by step": false, "Encouraging tone": 2}
+    },
+    "demo_reasoning_fail": "The tutor gave the final answer 4/5 without asking the student to try any step.",
+    "demo_reasoning_pass": "The tutor asked the student to work out the next step before confirming the answer."
+  },
+  "stt_dataset": {
+    "name": "Tutor questions in Hindi",
+    "language": "hindi",
+    "rows": [
+      "मुझे भिन्न समझ नहीं आते",
+      "आधा और एक चौथाई जोड़ो",
+      "तीन बटा पाँच में एक बटा पाँच जोड़ने पर क्या आएगा"
+    ],
+    "providers": ["sarvam", "deepgram", "google"],
+    "demo_wer": {"sarvam": 0.08, "deepgram": 0.21, "google": 0.14},
+    "demo_judge_pass_rate": {"sarvam": 1.0, "deepgram": 0.67, "google": 0.67},
+    "demo_judge_reasoning_pass": "The transcript keeps the meaning of what the student said.",
+    "demo_judge_reasoning_fail": "The transcript changes a number, so the meaning of the question is lost."
+  },
+  "tts_dataset": {
+    "name": "Tutor replies in Hindi",
+    "language": "hindi",
+    "rows": [
+      "बहुत बढ़िया! तुमने सही जवाब दिया।",
+      "चलो साथ में करते हैं। 1/2 में कितने 1/4 होते हैं?",
+      "कोई बात नहीं, एक बार फिर कोशिश करो।"
+    ],
+    "providers": ["sarvam", "elevenlabs", "google"],
+    "demo_ttfb_seconds": {"sarvam": 0.32, "elevenlabs": 0.41, "google": 0.55},
+    "demo_judge_pass_rate": {"sarvam": 1.0, "elevenlabs": 0.67, "google": 0.33},
+    "demo_judge_reasoning_pass": "Every Hindi word is pronounced clearly and correctly.",
+    "demo_judge_reasoning_fail": "The fraction 1/4 is read out as one by four instead of एक बटा चार."
+  },
+  "human_alignment": {
+    "task_name": "Check tutor replies",
+    "evaluator": "Explains step by step",
+    "annotators": ["Meena", "Kabir"],
+    "items_from": "the four test replies above"
+  }
+}
