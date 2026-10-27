@@ -872,7 +872,7 @@ def test_over_time_agreement_equals_agreement_on_rows_up_to_each_bucket_end():
     now = datetime(2024, 6, 30, 12, tzinfo=timezone.utc)
 
     # These 16 agreements, added one at a time, total 11.499999999999998, so the
-    # mean rounds to 0.7187; a correctly rounded sum gives 11.5 and 0.7188.
+    # mean would round to 0.7187; the exactly rounded sum gives 11.5 and 0.7188.
     # Each item is a judge rating of 1 against one annotator's 1 + gap, on the
     # scale of the version the judge score came from.
     rating_gap_and_version_per_item = [
@@ -895,7 +895,7 @@ def test_over_time_agreement_equals_agreement_on_rows_up_to_each_bucket_end():
         order_sensitive_annotations, order_sensitive_runs, {"v5": (1, 5), "v4": (1, 4)}, "e5",
         [], [], "week", 35, now,
     )
-    assert order_sensitive_series[-1]["agreement"] == 0.7187
+    assert order_sensitive_series[-1]["agreement"] == 0.7188
 
     mixed_answer_choices = [
         True, False, {"value": True}, {"value": False}, 1, 2, 3, 5, 2.5,
@@ -1362,3 +1362,54 @@ def test_agreement_on_item_never_works_out_kappa(monkeypatch):
     result = agreement_on_item(annotations, runs, ["ev"])
     assert result["human_human"] == {"agreement": 0.0, "pair_count": 1}
     assert result["evaluators"] == [{"evaluator_id": "ev", "agreement": 0.5, "pair_count": 2}]
+
+
+def test_shown_agreement_each_kinds_agreement_and_kappas_agreement_are_identical(monkeypatch):
+    import annotation_metrics
+
+    # Unrounded, so a difference in the last bit between two sums shows.
+    monkeypatch.setattr(annotation_metrics, "_round_agreement", lambda agreement: agreement)
+    randomizer = random.Random(277)
+    kappa_count = 0
+    for _case in range(1500):
+        answer_choices = randomizer.choice([[True, False], [1, 2, 3, 4, 5]])
+        rating_scales = randomizer.choice([{}, {"e": _ONE_TO_FIVE}])
+        annotator_ids = [f"a{index}" for index in range(randomizer.randint(2, 4))]
+        annotations = []
+        evaluator_runs = []
+        for item_index in range(randomizer.randint(1, 8)):
+            for annotator_id in randomizer.sample(annotator_ids, randomizer.randint(1, len(annotator_ids))):
+                annotations.append({
+                    "item_id": f"i{item_index}", "evaluator_id": "e", "annotator_id": annotator_id,
+                    "value": {"value": randomizer.choice(answer_choices)},
+                })
+            if randomizer.random() < 0.8:
+                evaluator_runs.append({
+                    "item_id": f"i{item_index}", "evaluator_id": "e",
+                    "value": {"value": randomizer.choice(answer_choices)}, "completed_at": "2024-01-01 00:00:00",
+                })
+        response = agreement_response(annotations, evaluator_runs, [{"uuid": "e", "name": "e"}], rating_scales)
+        results = [
+            agreement_and_kappa_between_annotators(annotations, rating_scales),
+            agreement_and_kappa_between_judge_and_annotators(annotations, evaluator_runs, "e", rating_scales),
+            *(
+                agreement_and_kappa_of_annotator_with_others(annotations, annotator_id, rating_scales)
+                for annotator_id in annotator_ids
+            ),
+        ]
+        assert response["human_human"]["current"] == results[0][0]
+        assert response["evaluators"][0]["inter_annotator"]["current"] == results[0][0]
+        assert response["evaluators_with_humans"]["current"] == response["evaluators"][0]["current"] == results[1][0]
+        for agreement, pair_count, kappa_by_kind in results:
+            if pair_count == 0:
+                assert kappa_by_kind == []
+                continue
+            [kind_kappa] = kappa_by_kind
+            # One evaluator and one kind: its pairs are every pair compared.
+            assert (kind_kappa["agreement"], kind_kappa["pair_count"]) == (agreement, pair_count)
+            if kind_kappa["kappa"] is None:
+                continue
+            kappa_count += 1
+            chance_agreement = kind_kappa["chance_agreement"]
+            assert kind_kappa["kappa"] == (agreement - chance_agreement) / (1 - chance_agreement)
+    assert kappa_count > 1000

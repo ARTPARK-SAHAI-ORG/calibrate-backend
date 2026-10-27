@@ -198,22 +198,22 @@ def _answer_pairs_compared(
     ]
 
 
-def _agreement_total_and_pair_count(
-    answer_pairs_compared: List[Tuple[Any, Any, float]],
-) -> Tuple[float, int]:
-    agreement_total = 0.0
-    for _first_answer, _second_answer, agreement in answer_pairs_compared:
-        agreement_total += agreement
-    return (agreement_total, len(answer_pairs_compared))
+def _agreements(answer_pairs_compared: Iterable[Tuple[Any, Any, float]]) -> List[float]:
+    return [agreement for _first_answer, _second_answer, agreement in answer_pairs_compared]
 
 
-def _mean_agreement_of_pairs(
-    answer_pairs_compared: List[Tuple[Any, Any, float]],
-) -> Tuple[float, int]:
-    agreement_total, pair_count = _agreement_total_and_pair_count(answer_pairs_compared)
-    if pair_count == 0:
-        return (0.0, 0)
-    return (agreement_total / pair_count, pair_count)
+def _mean_agreement(
+    agreements: Iterable[float], rounded: bool = True
+) -> Tuple[Optional[float], int]:
+    """Mean agreement over every compared pair, given each pair's agreement,
+    and how many pairs that is, or (None, 0) when there are none. Every
+    agreement average goes through here, summed with `math.fsum` so the order
+    the pairs arrive in never changes the result."""
+    agreement_list = list(agreements)
+    if not agreement_list:
+        return (None, 0)
+    mean = math.fsum(agreement_list) / len(agreement_list)
+    return (_round_agreement(mean) if rounded else mean, len(agreement_list))
 
 
 def _answer_pairs_compared_between_annotators(
@@ -242,9 +242,11 @@ def _mean_agreement_between_answers(
     evaluator, and how many pairs that mean covers. `rating_scale` is that
     evaluator's rating scale. Returns (0.0, 0) when no two answers can be
     compared."""
-    return _mean_agreement_of_pairs(
-        _answer_pairs_compared_between_annotators(answers, rating_scale)[1]
+    mean, pair_count = _mean_agreement(
+        _agreements(_answer_pairs_compared_between_annotators(answers, rating_scale)[1]),
+        rounded=False,
     )
+    return (mean if pair_count else 0.0, pair_count)
 
 
 def _record_annotator_answers(
@@ -624,11 +626,12 @@ def judge_and_annotators_agreement_on_item(
     wanting one item's mean divides the two itself, treating a count of 0 as
     None.
     """
-    return _agreement_total_and_pair_count(
+    agreements = _agreements(
         _answer_pairs_compared_between_one_answer_and_others(
             judge_answer, annotator_answers, rating_scale
         )[1]
     )
+    return (math.fsum(agreements), len(agreements))
 
 
 def has_answers_to_compare(
@@ -750,8 +753,8 @@ def _add_to_count(counts: Counter, key: Any, change: int) -> None:
 
 class _AnswerKindTally:
     """One evaluator's compared pairs of one `_answer_kind`: the answers on each
-    side, the pairs at each largest possible rating gap, and each item's
-    agreement total."""
+    side, the pairs at each largest possible rating gap, and each item's pair
+    agreements."""
 
     def __init__(self, kappa_family: KappaFamily) -> None:
         self.first_answer_counts: Counter = Counter()
@@ -760,7 +763,7 @@ class _AnswerKindTally:
             self.first_answer_counts if kappa_family == "fleiss" else Counter()
         )
         self.rating_gap_to_pair_count: Counter = Counter()
-        self.item_id_to_agreement_total: Dict[str, float] = {}
+        self.item_id_to_agreements: Dict[str, List[float]] = {}
 
     def count(
         self,
@@ -770,11 +773,9 @@ class _AnswerKindTally:
         change: int,
     ) -> None:
         if change > 0:
-            self.item_id_to_agreement_total[item_id] = math.fsum(
-                agreement for _first, _second, agreement in answer_pairs_compared
-            )
+            self.item_id_to_agreements[item_id] = _agreements(answer_pairs_compared)
         else:
-            del self.item_id_to_agreement_total[item_id]
+            del self.item_id_to_agreements[item_id]
         _add_to_count(
             self.rating_gap_to_pair_count,
             largest_possible_rating_gap,
@@ -848,7 +849,7 @@ class _KappaTally:
             str, Dict[Optional[str], List[_AnswerKindTally]]
         ] = defaultdict(lambda: defaultdict(list))
         for (answer_kind, evaluator_id), tally in self.answer_kind_and_evaluator_to_tally.items():
-            if tally.item_id_to_agreement_total:
+            if tally.item_id_to_agreements:
                 reported_kind_to_evaluator_to_tallies[_reported_answer_kind(answer_kind)][
                     evaluator_id
                 ].append(tally)
@@ -857,27 +858,28 @@ class _KappaTally:
             evaluator_to_tallies = reported_kind_to_evaluator_to_tallies.get(reported_kind)
             if not evaluator_to_tallies:
                 continue
-            evaluator_ids_counted = {
-                evaluator_id
-                for evaluator_id, tallies in evaluator_to_tallies.items()
+            tallies_counted = [
+                tally
+                for tallies in evaluator_to_tallies.values()
                 if _compared_on_two_items_or_more(tallies)
-            }
-            # Added pair by pair in the order the pairs were first counted, the
-            # order the agreement over every kind adds them, so one kind on its
-            # own matches that agreement exactly.
-            kind_agreement_shown, kind_pair_count_shown = _mean_agreement(
-                (agreement, 1)
-                for (_item_id, evaluator_id), (_gap, pairs) in (
-                    self.item_and_evaluator_to_answer_pairs_compared.items()
-                )
-                if not evaluator_ids_counted or evaluator_id in evaluator_ids_counted
-                for first_answer, _second_answer, agreement in pairs
-                if _reported_answer_kind(_answer_kind(first_answer)) == reported_kind
+                for tally in tallies
+            ]
+            tallies_shown = tallies_counted or [
+                tally for tallies in evaluator_to_tallies.values() for tally in tallies
+            ]
+            kind_agreement, kind_pair_count = _mean_agreement(
+                (
+                    agreement
+                    for tally in tallies_shown
+                    for agreements in tally.item_id_to_agreements.values()
+                    for agreement in agreements
+                ),
+                rounded=False,
             )
             kind_kappa: Dict[str, Any] = {
                 "answer_kind": reported_kind,
-                "agreement": kind_agreement_shown,
-                "pair_count": kind_pair_count_shown,
+                "agreement": _round_agreement(kind_agreement),
+                "pair_count": kind_pair_count,
                 "kappa": None,
                 "kappa_type": (
                     f"linear_weighted_{self.kappa_family}"
@@ -888,17 +890,9 @@ class _KappaTally:
                 "chance_agreement": None,
             }
             kappa_by_kind.append(kind_kappa)
-            tallies_counted = [
-                tally
-                for evaluator_id in evaluator_ids_counted
-                for tally in evaluator_to_tallies[evaluator_id]
-            ]
             if not tallies_counted:
                 kind_kappa["kappa_blank_reason"] = "too_few_items"
                 continue
-            pair_count = sum(
-                sum(tally.rating_gap_to_pair_count.values()) for tally in tallies_counted
-            )
             chance_agreement = (
                 math.fsum(
                     _chance_agreement(
@@ -912,22 +906,12 @@ class _KappaTally:
                         tally.rating_gap_to_pair_count.items()
                     )
                 )
-                / pair_count
+                / kind_pair_count
             )
             kind_kappa["chance_agreement"] = _round_agreement(chance_agreement)
             if 1 - chance_agreement < 1e-12:
                 kind_kappa["kappa_blank_reason"] = "everyone_agreed"
                 continue
-            # An order-free sum, so a trend built bucket by bucket gets the same
-            # kappa as a fresh count.
-            kind_agreement = (
-                math.fsum(
-                    agreement_total
-                    for tally in tallies_counted
-                    for agreement_total in tally.item_id_to_agreement_total.values()
-                )
-                / pair_count
-            )
             kind_kappa["kappa"] = _round_agreement(
                 (kind_agreement - chance_agreement) / (1 - chance_agreement)
             )
@@ -941,7 +925,7 @@ def _reported_answer_kind(answer_kind: Optional[str]) -> str:
 def _compared_on_two_items_or_more(tallies: List[_AnswerKindTally]) -> bool:
     item_ids: set = set()
     for tally in tallies:
-        item_ids.update(tally.item_id_to_agreement_total)
+        item_ids.update(tally.item_id_to_agreements)
         if len(item_ids) >= 2:
             return True
     return False
@@ -958,23 +942,6 @@ def kappa_of_one_kind(kappa_by_kind: List[Dict[str, Any]]) -> Dict[str, Any]:
     if len(kappa_by_kind) != 1:
         return dict(_NO_KAPPA)
     return {key: kappa_by_kind[0][key] for key in _NO_KAPPA}
-
-
-def _mean_agreement(
-    agreement_totals_and_pair_counts: Iterable[Tuple[float, int]],
-) -> Tuple[Optional[float], int]:
-    """Rounded mean agreement from `(agreement_total, pair_count)` parts and
-    the pair count it covers, or (None, 0) when no pair counts."""
-    # Added one at a time, in the order the items were first answered: another
-    # order, or subtracting from a running total, can change the rounded result.
-    agreement_total = 0.0
-    pair_count_total = 0
-    for part_agreement_total, part_pair_count in agreement_totals_and_pair_counts:
-        agreement_total += part_agreement_total
-        pair_count_total += part_pair_count
-    if pair_count_total == 0:
-        return (None, 0)
-    return (_round_agreement(agreement_total / pair_count_total), pair_count_total)
 
 
 def _trend_point(
@@ -1003,24 +970,17 @@ def agreement_and_kappa_between_annotators(
     rating scale from `rating_scales` (see `rating_scales_for`). Returns
     (None, 0, []) when nothing can be compared."""
     kappa_tally = _KappaTally("fleiss")
-    agreement_totals_and_pair_counts = []
+    agreements: List[float] = []
     for item_and_evaluator, annotator_id_to_answer in _annotator_answers_per_item_and_evaluator(
         annotations
     ).items():
         answer_pairs_compared = _answer_pairs_compared_between_annotators(
             list(annotator_id_to_answer.values()), rating_scales.get(item_and_evaluator[1])
         )
-        agreement_on_this_item, pair_count_on_this_item = _mean_agreement_of_pairs(
-            answer_pairs_compared[1]
-        )
-        # The item's mean times its pair count, not the plain sum: the two can
-        # differ in the last bit, which changes the rounded agreement.
-        agreement_totals_and_pair_counts.append(
-            (agreement_on_this_item * pair_count_on_this_item, pair_count_on_this_item)
-        )
+        agreements.extend(_agreements(answer_pairs_compared[1]))
         if with_kappa:
             kappa_tally.replace(item_and_evaluator, answer_pairs_compared)
-    return (*_mean_agreement(agreement_totals_and_pair_counts), kappa_tally.kappa_by_kind())
+    return (*_mean_agreement(agreements), kappa_tally.kappa_by_kind())
 
 
 def agreement_and_kappa_of_annotator_with_others(
@@ -1048,12 +1008,10 @@ def agreement_and_kappa_of_annotator_with_others(
             ],
             rating_scales.get(item_and_evaluator[1]),
         )
-        agreements_with_others.extend(
-            agreement for _this_answer, _other_answer, agreement in answer_pairs_compared[1]
-        )
+        agreements_with_others.extend(_agreements(answer_pairs_compared[1]))
         kappa_tally.replace(item_and_evaluator, answer_pairs_compared)
     return (
-        *_mean_agreement((agreement, 1) for agreement in agreements_with_others),
+        *_mean_agreement(agreements_with_others),
         kappa_tally.kappa_by_kind(),
     )
 
@@ -1075,9 +1033,7 @@ class _AgreementBetweenJudgeAndAnnotatorsSoFar:
         self.item_and_evaluator_to_judge_answer: Dict[
             Tuple[str, str], Tuple[Any, str, Optional[str]]
         ] = {}
-        self.item_and_evaluator_to_agreement_total_and_pair_count: Dict[
-            Tuple[str, str], Tuple[float, int]
-        ] = {}
+        self.item_and_evaluator_to_agreements: Dict[Tuple[str, str], List[float]] = {}
         self.kappa_tally = _KappaTally("cohen")
 
     def add_rows(
@@ -1116,21 +1072,18 @@ class _AgreementBetweenJudgeAndAnnotatorsSoFar:
                     judge_version_id, self.rating_scales.get(self.evaluator_id)
                 ),
             )
-            self.item_and_evaluator_to_agreement_total_and_pair_count[item_and_evaluator] = (
-                _agreement_total_and_pair_count(answer_pairs_compared[1])
+            self.item_and_evaluator_to_agreements[item_and_evaluator] = _agreements(
+                answer_pairs_compared[1]
             )
             if self.with_kappa:
                 self.kappa_tally.replace(item_and_evaluator, answer_pairs_compared)
 
+    def agreements(self) -> Iterator[float]:
+        for agreements in self.item_and_evaluator_to_agreements.values():
+            yield from agreements
+
     def agreement_and_kappa(self) -> AgreementAndKappa:
-        return (
-            *_mean_agreement(
-                self.item_and_evaluator_to_agreement_total_and_pair_count[item_and_evaluator]
-                for item_and_evaluator in self.item_and_evaluator_to_judge_answer
-                if item_and_evaluator in self.item_and_evaluator_to_agreement_total_and_pair_count
-            ),
-            self.kappa_tally.kappa_by_kind(),
-        )
+        return (*_mean_agreement(self.agreements()), self.kappa_tally.kappa_by_kind())
 
 
 def agreement_and_kappa_between_judge_and_annotators(
@@ -1316,13 +1269,9 @@ def agreement_response(
             }
         )
     judges_agreement, judges_pair_count = _mean_agreement(
-        judge_agreement_so_far.item_and_evaluator_to_agreement_total_and_pair_count[
-            item_and_evaluator
-        ]
+        agreement
         for judge_agreement_so_far in judge_agreement_so_far_per_evaluator
-        for item_and_evaluator in judge_agreement_so_far.item_and_evaluator_to_judge_answer
-        if item_and_evaluator
-        in judge_agreement_so_far.item_and_evaluator_to_agreement_total_and_pair_count
+        for agreement in judge_agreement_so_far.agreements()
     )
     return {
         "human_human": {"current": human_agreement, "pair_count": human_pair_count},
