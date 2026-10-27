@@ -1329,35 +1329,6 @@ def _answer_pairs_compared_between_annotator_and_others(
     )
 
 
-def agreement_of_annotator_with_others_over_time(
-    annotations: List[Dict[str, Any]],
-    annotator_id: str,
-    bucket: str,
-    days: int,
-    now: Optional[datetime] = None,
-    rating_scales: RatingScales = _NO_RATING_SCALES,
-) -> List[Dict[str, Any]]:
-    """`agreement_and_kappa_of_annotator_with_others` at the end of each time
-    bucket, counting every annotation updated by then: `{bucket_start,
-    bucket_end, agreement, pair_count, kappa_by_kind}`."""
-    agreement_so_far = _AgreementOfAnnotatorWithOthersSoFar(annotator_id, rating_scales)
-    agreement_over_time: List[Dict[str, Any]] = []
-    for bucket_start_and_end, (annotations_new_in_bucket,) in _rows_new_in_each_time_bucket(
-        bucket, days, now, [(annotations, _ANNOTATION_TIMESTAMP_FIELDS)]
-    ):
-        agreement_so_far.add_annotations(annotations_new_in_bucket)
-        agreement, pair_count, kappa_by_kind = agreement_so_far.agreement_and_kappa()
-        agreement_over_time.append(
-            {
-                **bucket_start_and_end,
-                "agreement": agreement,
-                "pair_count": pair_count,
-                "kappa_by_kind": kappa_by_kind,
-            }
-        )
-    return agreement_over_time
-
-
 def _rows_per_evaluator(rows: Iterable[Dict[str, Any]]) -> Dict[Optional[str], List[Dict[str, Any]]]:
     evaluator_id_to_rows: Dict[Optional[str], List[Dict[str, Any]]] = defaultdict(list)
     for row in rows:

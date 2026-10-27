@@ -22,7 +22,6 @@ from annotation_metrics import (
     agreement_on_item,
     keep_runs_from_live_versions_of,
     agreement_between_judge_and_annotators_over_time_by_version_and_task,
-    agreement_of_annotator_with_others_over_time,
     agreement_and_kappa_between_annotators,
     agreement_and_kappa_between_judge_and_annotators,
     agreement_and_kappa_of_annotator_with_others,
@@ -353,38 +352,6 @@ def test_aggregate_agreement_for_annotator():
     assert pairs >= 2
 
 
-def test_trend_series_for_annotator():
-    now = datetime(2024, 1, 31, tzinfo=timezone.utc)
-    annotations = [
-        {
-            "item_id": "i1",
-            "evaluator_id": "e1",
-            "annotator_id": "a",
-            "value": {"value": True},
-            "updated_at": "2024-01-26 12:00:00",
-        },
-        {
-            "item_id": "i1",
-            "evaluator_id": "e1",
-            "annotator_id": "b",
-            "value": {"value": False},
-            "updated_at": "2024-01-26 12:01:00",
-        },
-        {
-            "item_id": "i2",
-            "annotator_id": "a",
-            "value": "garbage-ts",
-            "updated_at": "not a date",
-        },
-    ]
-    series = agreement_of_annotator_with_others_over_time(annotations, "a", "week", 14, now=now)
-    assert len(series) == 2
-
-    # Empty inputs go through the empty-series branch
-    empty = agreement_of_annotator_with_others_over_time([], "a", "week", 14, now=now)
-    assert all(b["agreement"] is None for b in empty)
-
-
 def test_agreement_of_each_evaluator_with_no_evaluators_or_no_data():
     assert agreement_of_each_evaluator_with_annotators([], [], []) == (
         {}, {"current": None, "pair_count": 0}
@@ -654,12 +621,6 @@ def test_trend_series_carry_the_map_down():
     ]
     rating_scales = {"e1": _ONE_TO_FIVE}
     assert (
-        agreement_of_annotator_with_others_over_time(
-            annotations, "a", "week", 7, now=now, rating_scales=rating_scales
-        )[-1]["agreement"]
-        == 0.75
-    )
-    assert (
         agreement_of_each_evaluator_with_annotators(
             annotations, runs, ["e1"], rating_scales=rating_scales
         )[0]["e1"]["current"]
@@ -776,11 +737,10 @@ def _rows_timestamped_up_to(rows, timestamp_fields, bucket_end):
 
 
 def _assert_over_time_agreement_equals_agreement_on_rows_up_to_each_bucket_end(
-    annotations, evaluator_runs, rating_scales, annotator_id, evaluator_id,
+    annotations, evaluator_runs, rating_scales, evaluator_id,
     requested_version_ids, requested_task_ids, bucket, days, now,
 ):
     expected_points = []
-    expected_annotator_with_others_series = []
     expected_breakdown = {
         "overall": [],
         "by_version": {identifier: [] for identifier in requested_version_ids},
@@ -800,19 +760,8 @@ def _assert_over_time_agreement_equals_agreement_on_rows_up_to_each_bucket_end(
             })
             return expected_points[-1]
 
-        def point_by_kind(agreement_and_kappa):
-            agreement, pair_count, kappa_by_kind = agreement_and_kappa
-            expected_points.append({
-                **bucket_start_and_end, "agreement": agreement, "pair_count": pair_count,
-                "kappa_by_kind": kappa_by_kind,
-            })
-            return expected_points[-1]
-
         annotations_so_far = _rows_timestamped_up_to(annotations, ("updated_at", "created_at"), bucket_end)
         evaluator_runs_so_far = _rows_timestamped_up_to(evaluator_runs, ("completed_at", "created_at"), bucket_end)
-        expected_annotator_with_others_series.append(
-            point_by_kind(agreement_and_kappa_of_annotator_with_others(annotations_so_far, annotator_id, rating_scales))
-        )
         expected_breakdown["overall"].append(point(
             agreement_and_kappa_between_judge_and_annotators(annotations_so_far, evaluator_runs_so_far, evaluator_id, rating_scales)
         ))
@@ -835,14 +784,11 @@ def _assert_over_time_agreement_equals_agreement_on_rows_up_to_each_bucket_end(
                 )
             ))
 
-    assert agreement_of_annotator_with_others_over_time(
-        annotations, annotator_id, bucket, days, now=now, rating_scales=rating_scales
-    ) == expected_annotator_with_others_series
     assert agreement_between_judge_and_annotators_over_time_by_version_and_task(
         annotations, evaluator_runs, evaluator_id, requested_version_ids, requested_task_ids,
         bucket, days, now=now, rating_scales=rating_scales,
     ) == expected_breakdown
-    return expected_annotator_with_others_series, expected_points
+    return expected_breakdown["overall"], expected_points
 
 
 def _check_a_random_trend_case(randomizer, answer_choices, now):
@@ -910,11 +856,10 @@ def _check_a_random_trend_case(randomizer, answer_choices, now):
             if randomizer.random() < 0.7
         },
     ])
-    _annotator_with_others_series, expected_points = _assert_over_time_agreement_equals_agreement_on_rows_up_to_each_bucket_end(
+    _overall_series, expected_points = _assert_over_time_agreement_equals_agreement_on_rows_up_to_each_bucket_end(
         annotations,
         evaluator_runs,
         rating_scales,
-        annotator_id=randomizer.choice([*annotator_ids, "never-annotated"]),
         evaluator_id=randomizer.choice(evaluator_ids),
         requested_version_ids=randomizer.choices([*version_ids, "unknown"], k=randomizer.randint(0, 3)),
         requested_task_ids=randomizer.choices([*task_ids, "unknown"], k=randomizer.randint(0, 3)),
@@ -930,20 +875,26 @@ def test_over_time_agreement_equals_agreement_on_rows_up_to_each_bucket_end():
 
     # These 16 agreements, added one at a time, total 11.499999999999998, so the
     # mean rounds to 0.7187; a correctly rounded sum gives 11.5 and 0.7188.
-    rating_gap_and_scale_per_item = [
-        (1, "e5"), (0, "e5"), (0, "e5"), (0, "e5"), (3, "e5"), (2, "e5"), (0, "e5"), (0, "e5"),
-        (2, "e4"), (0, "e5"), (0, "e5"), (0, "e5"), (1, "e4"), (2, "e5"), (2, "e5"), (4, "e5"),
+    # Each item is a judge rating of 1 against one annotator's 1 + gap, on the
+    # scale of the version the judge score came from.
+    rating_gap_and_version_per_item = [
+        (1, "v5"), (0, "v5"), (0, "v5"), (0, "v5"), (3, "v5"), (2, "v5"), (0, "v5"), (0, "v5"),
+        (2, "v4"), (0, "v5"), (0, "v5"), (0, "v5"), (1, "v4"), (2, "v5"), (2, "v5"), (4, "v5"),
     ]
     order_sensitive_annotations = []
-    for item_index, (rating_gap, evaluator_id) in enumerate(rating_gap_and_scale_per_item):
-        updated_at = (now - timedelta(days=30 - item_index)).strftime("%Y-%m-%d %H:%M:%S")
-        for annotator_id, rating in (("a", 1), ("b", 1 + rating_gap)):
-            order_sensitive_annotations.append({
-                "item_id": f"i{item_index}", "evaluator_id": evaluator_id, "annotator_id": annotator_id,
-                "value": {"value": rating}, "updated_at": updated_at,
-            })
+    order_sensitive_runs = []
+    for item_index, (rating_gap, version_id) in enumerate(rating_gap_and_version_per_item):
+        timestamp = (now - timedelta(days=30 - item_index)).strftime("%Y-%m-%d %H:%M:%S")
+        order_sensitive_annotations.append({
+            "item_id": f"i{item_index}", "evaluator_id": "e5", "annotator_id": "a",
+            "value": {"value": 1 + rating_gap}, "updated_at": timestamp,
+        })
+        order_sensitive_runs.append({
+            "item_id": f"i{item_index}", "evaluator_id": "e5", "evaluator_version_id": version_id,
+            "value": {"value": 1}, "completed_at": timestamp,
+        })
     order_sensitive_series, _order_sensitive_points = _assert_over_time_agreement_equals_agreement_on_rows_up_to_each_bucket_end(
-        order_sensitive_annotations, [], {"e5": (1, 5), "e4": (1, 4)}, "a", "e5",
+        order_sensitive_annotations, order_sensitive_runs, {"v5": (1, 5), "v4": (1, 4)}, "e5",
         [], [], "week", 35, now,
     )
     assert order_sensitive_series[-1]["agreement"] == 0.7187

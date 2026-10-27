@@ -3864,12 +3864,7 @@ def test_kappa_sits_beside_every_agreement_over_many_items(client):
         {"answer_kind": "binary", **kappa(0.5, "cohen", 0.5)},
         {"answer_kind": "rating", **kappa(0.6, "linear_weighted_cohen", 0.6875)},
     ]
-    one_annotator_earlier = [
-        {"answer_kind": "binary", **kappa(1.0, "cohen", 0.5)},
-        {"answer_kind": "rating", **kappa(0.5, "linear_weighted_cohen", 0.75)},
-    ]
     kappa_keys = ("kappa", "kappa_type", "kappa_blank_reason", "chance_agreement")
-    point_keys_on_main = {"bucket_start", "bucket_end", "agreement", "pair_count"}
 
     def kappa_of(block):
         return {key: block[key] for key in kappa_keys}
@@ -3958,11 +3953,7 @@ def test_kappa_sits_beside_every_agreement_over_many_items(client):
     assert detail["stats"]["current_agreement"] == 0.8125
     assert detail["stats"]["kappa_by_kind"] == one_annotator_now
     assert all(key not in detail["stats"] for key in kappa_keys)
-    series = detail["trend"]["series"]
-    assert series[-1]["kappa_by_kind"] == one_annotator_now
-    assert earliest_point_with_pairs(series)["kappa_by_kind"] == one_annotator_earlier
-    assert all(point["kappa_by_kind"] == [] for point in series if not point["pair_count"])
-    assert all(set(point) == point_keys_on_main | {"kappa_by_kind"} for point in series)
+    assert set(detail) == {"annotator", "stats", "jobs"}
 
     # One item cannot show chance, so per-item numbers carry no kappa.
     task_items = client.get(f"/annotation-tasks/{task_uuid}", headers=h).json()["items"]
@@ -4021,9 +4012,8 @@ def test_kappa_blank_reason_follows_the_answers_compared(client):
         kappa_by_kind_entries = [
             *(entry for annotator in listed for entry in annotator["kappa_by_kind"]),
             *detail["stats"]["kappa_by_kind"],
-            *detail["trend"]["series"][-1]["kappa_by_kind"],
         ]
-        assert inter_annotator_blocks and len(kappa_by_kind_entries) == 4
+        assert inter_annotator_blocks and len(kappa_by_kind_entries) == 3
         return {
             (block["kappa_blank_reason"], block["chance_agreement"])
             for block in flat_blocks + kappa_by_kind_entries

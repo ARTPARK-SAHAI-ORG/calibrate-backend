@@ -1,5 +1,5 @@
 from typing import Any, Dict, List, Optional
-from fastapi import APIRouter, HTTPException, Depends, Path, Query
+from fastapi import APIRouter, HTTPException, Depends, Path
 from pydantic import BaseModel, Field
 
 from db import (
@@ -27,7 +27,6 @@ from annotation_metrics import (
     KappaBlankReason,
     agreement_and_kappa_of_annotator_with_others,
     rating_scales_for,
-    agreement_of_annotator_with_others_over_time,
 )
 
 
@@ -152,17 +151,9 @@ def get_annotator_endpoint(
         description="Annotator to retrieve",
         examples=["f47ac10b-58cc-4372-a567-0e02b2c3d479"],
     ),
-    bucket: str = Query(
-        "month",
-        pattern="^(week|month|year)$",
-        description="Time bucket for the agreement trend series (`week`, `month`, or `year`)",
-    ),
-    days: int = Query(
-        365, ge=1, le=3650, description="Trailing window in days for the trend series"
-    ),
     ctx: OrgContext = Depends(get_current_org),
 ):
-    """Get one annotator with assigned jobs and an agreement trend series"""
+    """Get one annotator with assigned jobs and agreement stats"""
     annotator = _ensure_owned_annotator(annotator_uuid, ctx.org_uuid)
 
     jobs = get_jobs_for_annotator_detailed(annotator_uuid)
@@ -173,13 +164,6 @@ def get_annotator_endpoint(
     rating_scales = rating_scales_for(annotations)
     current_agreement, pair_count, kappa_by_kind = agreement_and_kappa_of_annotator_with_others(
         annotations, annotator_uuid, rating_scales
-    )
-    agreement_over_time = agreement_of_annotator_with_others_over_time(
-        annotations,
-        annotator_uuid,
-        bucket=bucket,
-        days=days,
-        rating_scales=rating_scales,
     )
 
     return {
@@ -194,11 +178,6 @@ def get_annotator_endpoint(
             "pair_count": pair_count,
             "kappa_by_kind": kappa_by_kind,
             "jobs_count": len(jobs),
-        },
-        "trend": {
-            "bucket": bucket,
-            "days": days,
-            "series": agreement_over_time,
         },
         "jobs": jobs,
     }
