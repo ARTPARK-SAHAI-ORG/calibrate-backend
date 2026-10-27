@@ -16,36 +16,26 @@ from db import (
 from auth_utils import get_current_org, OrgContext
 from org_scope import ensure_owned_evaluator
 from annotation_metrics import (
-    agreement_between_annotators,
-    agreement_between_judge_and_annotators,
+    KAPPA_FIELDS,
+    agreement_response,
     keep_runs_from_live_versions_of,
     rating_scales_for,
-    agreement_between_annotators_over_time,
     agreement_between_judge_and_annotators_over_time_by_version_and_task,
-    agreement_between_judge_and_annotators_over_time,
 )
 
 
 router = APIRouter(prefix="/annotation-agreement", tags=["annotation-agreement"])
 
 
-@router.get("/trend", summary="Get workspace agreement trend")
-def agreement_trend(
-    bucket: str = Query(
-        "week",
-        pattern="^(week|month|year)$",
-        description="Time bucket for the trend series (`week`, `month`, or `year`)",
-    ),
-    days: int = Query(
-        90, ge=1, le=3650, description="Trailing window in days for the trend series"
-    ),
+@router.get("", summary="Get workspace agreement")
+def workspace_agreement(
     task_id: Optional[str] = Query(
         None,
-        description="Annotation task to scope metrics to. Omit for workspace-wide trends",
+        description="Annotation task to scope metrics to. Omit for the whole workspace",
     ),
     ctx: OrgContext = Depends(get_current_org),
 ):
-    """Get human-vs-human agreement trends and human alignment for each evaluator"""
+    """Get human-vs-human agreement and human alignment for each evaluator"""
     if task_id:
         task = get_annotation_task(task_id)
         if not task or task.get("org_uuid") != ctx.org_uuid:
@@ -56,19 +46,11 @@ def agreement_trend(
         annotations = get_annotations_for_org(ctx.org_uuid)
         all_evaluator_version_runs = get_evaluator_runs_for_org(ctx.org_uuid)
 
-    rating_scales = rating_scales_for(annotations, all_evaluator_version_runs)
-    annotator_agreement, annotator_pair_count = agreement_between_annotators(
-        annotations, rating_scales
-    )
-    annotator_agreement_over_time = agreement_between_annotators_over_time(
-        annotations, bucket=bucket, days=days, rating_scales=rating_scales
-    )
-
     evaluator_ids = list(
         dict.fromkeys(
-            run["evaluator_id"]
-            for run in all_evaluator_version_runs
-            if run.get("evaluator_id")
+            row["evaluator_id"]
+            for row in [*all_evaluator_version_runs, *annotations]
+            if row.get("evaluator_id")
         )
     )
 
@@ -81,45 +63,14 @@ def agreement_trend(
     live_evaluator_version_runs = keep_runs_from_live_versions_of(
         all_evaluator_version_runs, evaluator_id_to_evaluator.values()
     )
-
-    evaluator_id_to_agreement_over_time = (
-        agreement_between_judge_and_annotators_over_time(
+    return {
+        "task_id": task_id,
+        **agreement_response(
             annotations,
             live_evaluator_version_runs,
-            evaluator_ids,
-            bucket=bucket,
-            days=days,
-            rating_scales=rating_scales,
-        )
-    )
-    agreement_per_evaluator = []
-    for evaluator_id in evaluator_ids:
-        evaluator = evaluator_id_to_evaluator[evaluator_id]
-        evaluator_agreement, evaluator_pair_count = (
-            agreement_between_judge_and_annotators(
-                annotations, live_evaluator_version_runs, evaluator_id, rating_scales
-            )
-        )
-        agreement_per_evaluator.append(
-            {
-                "evaluator_id": evaluator_id,
-                "name": evaluator.get("name"),
-                "current": evaluator_agreement,
-                "pair_count": evaluator_pair_count,
-                "series": evaluator_id_to_agreement_over_time.get(evaluator_id, []),
-            }
-        )
-
-    return {
-        "bucket": bucket,
-        "days": days,
-        "task_id": task_id,
-        "human_human": {
-            "current": annotator_agreement,
-            "pair_count": annotator_pair_count,
-            "series": annotator_agreement_over_time,
-        },
-        "evaluators": agreement_per_evaluator,
+            [evaluator_id_to_evaluator[evaluator_id] for evaluator_id in evaluator_ids],
+            rating_scales_for(annotations, all_evaluator_version_runs),
+        ),
     }
 
 
@@ -197,13 +148,15 @@ def evaluator_agreement_trend(
         )
     )
 
-    def _latest_agreement_and_pair_count(
+    def _latest_agreement_and_kappa(
         agreement_per_bucket: List[Dict[str, Any]],
-    ) -> tuple:
-        if not agreement_per_bucket:
-            return None, 0
+    ) -> Dict[str, Any]:
         latest_bucket = agreement_per_bucket[-1]
-        return latest_bucket["agreement"], latest_bucket["pair_count"]
+        return {
+            "current": latest_bucket["agreement"],
+            "pair_count": latest_bucket["pair_count"],
+            **{key: latest_bucket[key] for key in KAPPA_FIELDS},
+        }
 
     task_id_to_task = get_annotation_tasks_by_uuids(task_ids_with_scores)
 
@@ -212,16 +165,12 @@ def evaluator_agreement_trend(
         version_agreement_per_bucket = agreement_over_time["by_version"][
             scored_version_id
         ]
-        agreement, pair_count = _latest_agreement_and_pair_count(
-            version_agreement_per_bucket
-        )
         agreement_per_version.append(
             {
                 "version_id": scored_version_id,
                 "version_number": version_id_to_version_number.get(scored_version_id),
                 "is_live": scored_version_id == live_version_id,
-                "current": agreement,
-                "pair_count": pair_count,
+                **_latest_agreement_and_kappa(version_agreement_per_bucket),
                 "series": version_agreement_per_bucket,
             }
         )
@@ -229,24 +178,17 @@ def evaluator_agreement_trend(
     agreement_per_task: List[Dict[str, Any]] = []
     for scored_task_id in task_ids_with_scores:
         task_agreement_per_bucket = agreement_over_time["by_task"][scored_task_id]
-        agreement, pair_count = _latest_agreement_and_pair_count(
-            task_agreement_per_bucket
-        )
         scored_task = task_id_to_task.get(scored_task_id) or {}
         agreement_per_task.append(
             {
                 "task_id": scored_task_id,
                 "task_name": scored_task.get("name"),
-                "current": agreement,
-                "pair_count": pair_count,
+                **_latest_agreement_and_kappa(task_agreement_per_bucket),
                 "series": task_agreement_per_bucket,
             }
         )
 
     overall_agreement_per_bucket = agreement_over_time["overall"]
-    overall_agreement, overall_pair_count = _latest_agreement_and_pair_count(
-        overall_agreement_per_bucket
-    )
 
     return {
         "evaluator_id": evaluator_uuid,
@@ -255,8 +197,7 @@ def evaluator_agreement_trend(
         "days": days,
         "filters": {"task_id": task_id, "version_id": version_id},
         "overall": {
-            "current": overall_agreement,
-            "pair_count": overall_pair_count,
+            **_latest_agreement_and_kappa(overall_agreement_per_bucket),
             "series": overall_agreement_per_bucket,
         },
         "versions": agreement_per_version,

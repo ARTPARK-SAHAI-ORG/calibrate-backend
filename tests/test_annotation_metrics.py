@@ -13,9 +13,6 @@ from annotation_metrics import (
     rating_scales_for,
     _mean_agreement_between_answers,
     _extract_answer,
-    agreement_between_annotators,
-    agreement_of_annotator_with_others,
-    agreement_between_judge_and_annotators,
     build_time_buckets,
     judge_and_annotators_agreement_on_item,
     judge_answer_summary,
@@ -24,10 +21,12 @@ from annotation_metrics import (
     annotator_answer_summary,
     agreement_on_item,
     keep_runs_from_live_versions_of,
-    agreement_between_annotators_over_time,
     agreement_between_judge_and_annotators_over_time_by_version_and_task,
-    agreement_of_annotator_with_others_over_time,
-    agreement_between_judge_and_annotators_over_time,
+    agreement_and_kappa_between_annotators,
+    agreement_and_kappa_between_judge_and_annotators,
+    agreement_and_kappa_of_annotator_with_others,
+    agreement_response,
+    kappa_of_one_kind,
 )
 
 
@@ -117,18 +116,18 @@ def test_runs_at_live_versions():
 
 
 def test_aggregate_agreement_empty_and_full():
-    assert agreement_between_annotators([]) == (None, 0)
+    assert agreement_and_kappa_between_annotators([])[:2] == (None, 0)
     # Two annotators agreeing on one slot
     annotations = [
         {"item_id": "i1", "evaluator_id": "e1", "annotator_id": "a", "value": {"value": True}},
         {"item_id": "i1", "evaluator_id": "e1", "annotator_id": "b", "value": {"value": True}},
     ]
-    agree, pairs = agreement_between_annotators(annotations)
+    agree, pairs = agreement_and_kappa_between_annotators(annotations)[:2]
     assert agree == 1.0 and pairs == 1
     # Skip rows missing scalar / annotator
     annotations.append({"item_id": "i2", "evaluator_id": "e1", "annotator_id": None, "value": {"value": True}})
     annotations.append({"item_id": "i3", "evaluator_id": "e1", "annotator_id": "a", "value": {"other": 1}})
-    agree, pairs = agreement_between_annotators(annotations)
+    agree, pairs = agreement_and_kappa_between_annotators(annotations)[:2]
     assert pairs == 1
 
 
@@ -191,7 +190,7 @@ def test_evaluator_result_summary():
 
 
 def test_aggregate_human_evaluator_agreement_empty():
-    agree, pairs = agreement_between_judge_and_annotators([], [], "e1")
+    agree, pairs = agreement_and_kappa_between_judge_and_annotators([], [], "e1")[:2]
     assert agree is None and pairs == 0
 
     annotations = [
@@ -206,7 +205,7 @@ def test_aggregate_human_evaluator_agreement_empty():
         # Missing fields — filtered
         {"evaluator_id": "e1", "value": {"value": True}},
     ]
-    agree, pairs = agreement_between_judge_and_annotators(annotations, runs, "e1")
+    agree, pairs = agreement_and_kappa_between_judge_and_annotators(annotations, runs, "e1")[:2]
     # Latest evaluator value is False; human said True → disagreement
     assert agree == 0.0 and pairs == 1
 
@@ -284,8 +283,8 @@ def test_has_answers_to_compare_matches_scoring_every_pair():
         }
 
     def compare_by_scoring_every_pair(annotations, evaluator_runs, evaluator_ids):
-        return agreement_between_annotators(annotations)[1] > 0 or any(
-            agreement_between_judge_and_annotators(
+        return agreement_and_kappa_between_annotators(annotations)[1] > 0 or any(
+            agreement_and_kappa_between_judge_and_annotators(
                 annotations, evaluator_runs, evaluator_id
             )[1] > 0
             for evaluator_id in evaluator_ids
@@ -331,7 +330,7 @@ def test_per_item_agreement_shape():
 
 def test_aggregate_agreement_for_annotator():
     # No data
-    assert agreement_of_annotator_with_others([], "a") == (None, 0)
+    assert agreement_and_kappa_of_annotator_with_others([], "a")[:2] == (None, 0)
     annotations = [
         # Slot with annotator a + b
         {"item_id": "i1", "evaluator_id": "e1", "annotator_id": "a", "value": {"value": True}},
@@ -347,125 +346,19 @@ def test_aggregate_agreement_for_annotator():
         # No scalar — skipped
         {"item_id": "i5", "evaluator_id": "e1", "annotator_id": None, "value": None},
     ]
-    agree, pairs = agreement_of_annotator_with_others(annotations, "a")
+    agree, pairs = agreement_and_kappa_of_annotator_with_others(annotations, "a")[:2]
     assert pairs >= 2
 
 
-def test_trend_series_empty_returns_buckets():
-    now = datetime(2024, 1, 31, tzinfo=timezone.utc)
-    series = agreement_between_annotators_over_time([], "week", 14, now=now)
-    assert all(b["agreement"] is None for b in series)
-    assert all(b["pair_count"] == 0 for b in series)
-
-
-def test_trend_series_populated():
-    now = datetime(2024, 1, 31, tzinfo=timezone.utc)
-    annotations = [
-        {
-            "item_id": "i1",
-            "evaluator_id": "e1",
-            "annotator_id": "a",
-            "value": {"value": True},
-            "updated_at": "2024-01-25 12:00:00",
-        },
-        {
-            "item_id": "i1",
-            "evaluator_id": "e1",
-            "annotator_id": "b",
-            "value": {"value": True},
-            "updated_at": "2024-01-26 12:00:00",
-        },
-        # Malformed timestamp → skipped
-        {
-            "item_id": "i2",
-            "annotator_id": "a",
-            "value": {"value": True},
-            "updated_at": "garbage",
-        },
-        # No timestamp → skipped
-        {"item_id": "i3", "annotator_id": "a", "value": {"value": True}},
-    ]
-    series = agreement_between_annotators_over_time(annotations, "week", 14, now=now)
-    assert any(b["pair_count"] > 0 for b in series)
-
-
-def test_trend_series_for_annotator():
-    now = datetime(2024, 1, 31, tzinfo=timezone.utc)
-    annotations = [
-        {
-            "item_id": "i1",
-            "evaluator_id": "e1",
-            "annotator_id": "a",
-            "value": {"value": True},
-            "updated_at": "2024-01-26 12:00:00",
-        },
-        {
-            "item_id": "i1",
-            "evaluator_id": "e1",
-            "annotator_id": "b",
-            "value": {"value": False},
-            "updated_at": "2024-01-26 12:01:00",
-        },
-        {
-            "item_id": "i2",
-            "annotator_id": "a",
-            "value": "garbage-ts",
-            "updated_at": "not a date",
-        },
-    ]
-    series = agreement_of_annotator_with_others_over_time(annotations, "a", "week", 14, now=now)
-    assert len(series) == 2
-
-    # Empty inputs go through the empty-series branch
-    empty = agreement_of_annotator_with_others_over_time([], "a", "week", 14, now=now)
-    assert all(b["agreement"] is None for b in empty)
-
-
-def test_trend_series_human_evaluator_branches():
-    now = datetime(2024, 1, 31, tzinfo=timezone.utc)
-    # Empty evaluator list
-    assert agreement_between_judge_and_annotators_over_time([], [], [], "week", 14, now=now) == {}
-
-    # No data path
-    empty = agreement_between_judge_and_annotators_over_time([], [], ["e1"], "week", 14, now=now)
-    assert all(b["agreement"] is None for b in empty["e1"])
-
-    annotations = [
-        {
-            "item_id": "i1",
-            "evaluator_id": "e1",
-            "annotator_id": "a",
-            "value": {"value": True},
-            "updated_at": "2024-01-26 12:00:00",
-        }
-    ]
-    runs = [
-        {
-            "item_id": "i1",
-            "evaluator_id": "e1",
-            "evaluator_version_id": "v1",
-            "value": {"value": True},
-            "completed_at": "2024-01-26 13:00:00",
-        },
-        # malformed ts → skipped
-        {
-            "item_id": "i2",
-            "evaluator_id": "e1",
-            "evaluator_version_id": "v1",
-            "value": {"value": True},
-            "completed_at": "garbage",
-        },
-        # no ts → skipped
-        {
-            "item_id": "i3",
-            "evaluator_id": "e1",
-            "value": {"value": True},
-        },
-    ]
-    series = agreement_between_judge_and_annotators_over_time(
-        annotations, runs, ["e1"], "week", 14, now=now
-    )
-    assert "e1" in series
+def test_agreement_response_with_no_evaluators_or_no_data():
+    nothing_compared = {"current": None, "pair_count": 0}
+    assert agreement_response([], [], []) == {
+        "human_human": nothing_compared, "evaluators_with_humans": nothing_compared, "evaluators": [],
+    }
+    [evaluator_agreement] = agreement_response([], [], [{"uuid": "e1", "name": "E1"}])["evaluators"]
+    assert (evaluator_agreement["evaluator_id"], evaluator_agreement["name"]) == ("e1", "E1")
+    assert evaluator_agreement["current"] is None
+    assert evaluator_agreement["inter_annotator"]["current"] is None
 
 
 def test_trend_series_evaluator_breakdown():
@@ -571,6 +464,10 @@ def test_trend_series_evaluator_breakdown_ignores_other_versions_and_tasks():
         "bucket_end": out["overall"][-1]["bucket_end"],
         "agreement": 1.0,
         "pair_count": 1,
+        "kappa": None,
+        "kappa_type": "cohen",
+        "kappa_blank_reason": "too_few_items",
+        "chance_agreement": None,
     }
     assert out["by_task"]["t1"][-1]["pair_count"] == 1
     assert out["by_task"]["t1"][-1]["agreement"] == 1.0
@@ -657,9 +554,9 @@ def test_rating_scales_map_is_looked_up_per_slot():
     ]
     rating_scales = {"e1": _ONE_TO_FIVE}
     # e1's slot scores 0.75, the evaluator-less slot falls back to 0.0.
-    assert agreement_between_annotators(annotations, rating_scales) == (0.375, 2)
+    assert agreement_and_kappa_between_annotators(annotations, rating_scales)[:2] == (0.375, 2)
     # An evaluator missing from the map falls back for its own slot only.
-    assert agreement_between_annotators(annotations, {"other": _ONE_TO_FIVE}) == (0.0, 2)
+    assert agreement_and_kappa_between_annotators(annotations, {"other": _ONE_TO_FIVE})[:2] == (0.0, 2)
 
 
 def test_rating_agreement_unchanged_without_a_map():
@@ -672,10 +569,10 @@ def test_rating_agreement_unchanged_without_a_map():
             "created_at": "2024-01-01 00:00:00",
         }
     ]
-    assert agreement_between_annotators(annotations) == (0.0, 1)
-    assert agreement_of_annotator_with_others(annotations, "a") == (0.0, 1)
+    assert agreement_and_kappa_between_annotators(annotations)[:2] == (0.0, 1)
+    assert agreement_and_kappa_of_annotator_with_others(annotations, "a")[:2] == (0.0, 1)
     # Observed range over the evaluator's 5 and the humans' 3 and 4 is 2.
-    assert agreement_between_judge_and_annotators(annotations, runs, "e1") == (0.25, 2)
+    assert agreement_and_kappa_between_judge_and_annotators(annotations, runs, "e1")[:2] == (0.25, 2)
     assert judge_and_annotators_agreement_on_item(5, [3, 4]) == (0.5, 2)
     item = agreement_on_item(annotations, runs, ["e1"])
     assert item["human_human"]["agreement"] == 0.0
@@ -693,10 +590,10 @@ def test_rating_agreement_with_a_map():
         }
     ]
     rating_scales = {"e1": _ONE_TO_FIVE}
-    assert agreement_between_annotators(annotations, rating_scales) == (0.75, 1)
-    assert agreement_of_annotator_with_others(annotations, "a", rating_scales) == (0.75, 1)
+    assert agreement_and_kappa_between_annotators(annotations, rating_scales)[:2] == (0.75, 1)
+    assert agreement_and_kappa_of_annotator_with_others(annotations, "a", rating_scales)[:2] == (0.75, 1)
     # Evaluator said 5: 1 - 2/4 against the 3, 1 - 1/4 against the 4.
-    assert agreement_between_judge_and_annotators(annotations, runs, "e1", rating_scales) == (
+    assert agreement_and_kappa_between_judge_and_annotators(annotations, runs, "e1", rating_scales)[:2] == (
         0.625,
         2,
     )
@@ -723,21 +620,8 @@ def test_trend_series_carry_the_map_down():
         }
     ]
     rating_scales = {"e1": _ONE_TO_FIVE}
-    assert agreement_between_annotators_over_time(annotations, "week", 7, now=now)[-1]["agreement"] == 0.0
     assert (
-        agreement_between_annotators_over_time(annotations, "week", 7, now=now, rating_scales=rating_scales)[-1]["agreement"]
-        == 0.75
-    )
-    assert (
-        agreement_of_annotator_with_others_over_time(
-            annotations, "a", "week", 7, now=now, rating_scales=rating_scales
-        )[-1]["agreement"]
-        == 0.75
-    )
-    assert (
-        agreement_between_judge_and_annotators_over_time(
-            annotations, runs, ["e1"], "week", 7, now=now, rating_scales=rating_scales
-        )["e1"][-1]["agreement"]
+        agreement_response(annotations, runs, [{"uuid": "e1"}], rating_scales)["evaluators"][0]["current"]
         == 0.625
     )
     breakdown = agreement_between_judge_and_annotators_over_time_by_version_and_task(
@@ -817,7 +701,7 @@ def test_judge_score_is_divided_by_its_own_versions_width():
             "completed_at": "2024-01-01 00:00:00",
         }
     ]
-    assert agreement_between_judge_and_annotators(annotations, runs, "e1", rating_scales) == (
+    assert agreement_and_kappa_between_judge_and_annotators(annotations, runs, "e1", rating_scales)[:2] == (
         round(1 - 1 / 3, 4),
         1,
     )
@@ -829,7 +713,7 @@ def test_agreement_never_goes_below_zero():
         {"item_id": "i1", "evaluator_id": "e1", "annotator_id": a, "value": {"value": v}}
         for a, v in (("a", 1), ("b", 4))
     ]
-    assert agreement_between_annotators(annotations, {"e1": (1, 2)}) == (0.0, 1)
+    assert agreement_and_kappa_between_annotators(annotations, {"e1": (1, 2)})[:2] == (0.0, 1)
 
 
 def _rows_timestamped_up_to(rows, timestamp_fields, bucket_end):
@@ -851,12 +735,10 @@ def _rows_timestamped_up_to(rows, timestamp_fields, bucket_end):
 
 
 def _assert_over_time_agreement_equals_agreement_on_rows_up_to_each_bucket_end(
-    annotations, evaluator_runs, rating_scales, annotator_id, evaluator_id,
-    requested_evaluator_ids, requested_version_ids, requested_task_ids, bucket, days, now,
+    annotations, evaluator_runs, rating_scales, evaluator_id,
+    requested_version_ids, requested_task_ids, bucket, days, now,
 ):
-    expected_annotator_series = []
-    expected_annotator_with_others_series = []
-    expected_evaluator_id_to_series = {identifier: [] for identifier in requested_evaluator_ids}
+    expected_points = []
     expected_breakdown = {
         "overall": [],
         "by_version": {identifier: [] for identifier in requested_version_ids},
@@ -868,28 +750,22 @@ def _assert_over_time_agreement_equals_agreement_on_rows_up_to_each_bucket_end(
             "bucket_end": bucket_end.strftime("%Y-%m-%d %H:%M:%S"),
         }
 
-        def point(agreement_and_pair_count):
-            agreement, pair_count = agreement_and_pair_count
-            return {**bucket_start_and_end, "agreement": agreement, "pair_count": pair_count}
+        def point(agreement_and_kappa):
+            agreement, pair_count, kappa_by_kind = agreement_and_kappa
+            expected_points.append({
+                **bucket_start_and_end, "agreement": agreement, "pair_count": pair_count,
+                **kappa_of_one_kind(kappa_by_kind),
+            })
+            return expected_points[-1]
 
         annotations_so_far = _rows_timestamped_up_to(annotations, ("updated_at", "created_at"), bucket_end)
         evaluator_runs_so_far = _rows_timestamped_up_to(evaluator_runs, ("completed_at", "created_at"), bucket_end)
-        expected_annotator_series.append(
-            point(agreement_between_annotators(annotations_so_far, rating_scales))
-        )
-        expected_annotator_with_others_series.append(
-            point(agreement_of_annotator_with_others(annotations_so_far, annotator_id, rating_scales))
-        )
-        for identifier in requested_evaluator_ids:
-            expected_evaluator_id_to_series[identifier].append(point(
-                agreement_between_judge_and_annotators(annotations_so_far, evaluator_runs_so_far, identifier, rating_scales)
-            ))
         expected_breakdown["overall"].append(point(
-            agreement_between_judge_and_annotators(annotations_so_far, evaluator_runs_so_far, evaluator_id, rating_scales)
+            agreement_and_kappa_between_judge_and_annotators(annotations_so_far, evaluator_runs_so_far, evaluator_id, rating_scales)
         ))
         for version_id in requested_version_ids:
             expected_breakdown["by_version"][version_id].append(point(
-                agreement_between_judge_and_annotators(
+                agreement_and_kappa_between_judge_and_annotators(
                     annotations_so_far,
                     [run for run in evaluator_runs_so_far if run.get("evaluator_version_id") == version_id],
                     evaluator_id,
@@ -898,7 +774,7 @@ def _assert_over_time_agreement_equals_agreement_on_rows_up_to_each_bucket_end(
             ))
         for task_id in requested_task_ids:
             expected_breakdown["by_task"][task_id].append(point(
-                agreement_between_judge_and_annotators(
+                agreement_and_kappa_between_judge_and_annotators(
                     [annotation for annotation in annotations_so_far if annotation.get("task_id") == task_id],
                     [run for run in evaluator_runs_so_far if run.get("task_id") == task_id],
                     evaluator_id,
@@ -906,124 +782,702 @@ def _assert_over_time_agreement_equals_agreement_on_rows_up_to_each_bucket_end(
                 )
             ))
 
-    assert agreement_between_annotators_over_time(
-        annotations, bucket, days, now=now, rating_scales=rating_scales
-    ) == expected_annotator_series
-    assert agreement_of_annotator_with_others_over_time(
-        annotations, annotator_id, bucket, days, now=now, rating_scales=rating_scales
-    ) == expected_annotator_with_others_series
-    assert agreement_between_judge_and_annotators_over_time(
-        annotations, evaluator_runs, requested_evaluator_ids, bucket, days, now=now, rating_scales=rating_scales
-    ) == expected_evaluator_id_to_series
     assert agreement_between_judge_and_annotators_over_time_by_version_and_task(
         annotations, evaluator_runs, evaluator_id, requested_version_ids, requested_task_ids,
         bucket, days, now=now, rating_scales=rating_scales,
     ) == expected_breakdown
-    return expected_annotator_series
+    return expected_breakdown["overall"], expected_points
+
+
+def _check_a_random_trend_case(randomizer, answer_choices, now):
+    """Build one random set of rows and check every trend against fresh
+    results at each bucket end. Returns every expected point."""
+    bucket_and_days_choices = [("week", 35), ("month", 120), ("year", 800)]
+    bucket, days = randomizer.choice(bucket_and_days_choices)
+    item_ids = [f"i{index}" for index in range(randomizer.randint(1, 6))]
+    evaluator_ids = [f"e{index}" for index in range(randomizer.randint(1, 3))]
+    annotator_ids = [f"a{index}" for index in range(randomizer.randint(1, 4))]
+    version_ids = [f"v{index}" for index in range(randomizer.randint(1, 3))]
+    task_ids = [f"t{index}" for index in range(randomizer.randint(1, 3))]
+    # A small pool of moments makes ties; some fall before the window or after now.
+    moments = [
+        (now - timedelta(days=randomizer.uniform(-3, days + 40))).replace(microsecond=0)
+        for _ in range(randomizer.randint(1, 8))
+    ]
+
+    def random_timestamp():
+        roll = randomizer.random()
+        if roll < 0.05:
+            return None
+        if roll < 0.08:
+            return "not a timestamp"
+        moment = randomizer.choice(moments)
+        if roll < 0.11:
+            # Parses, but sorts differently as text.
+            return f"{moment.year}-{moment.month}-{moment.day} {moment.hour}:{moment.minute}:{moment.second}"
+        return moment.strftime("%Y-%m-%d %H:%M:%S")
+
+    def mostly(choices, rare_choice):
+        return rare_choice if randomizer.random() < 0.1 else randomizer.choice(choices)
+
+    annotations = []
+    for _ in range(randomizer.randint(0, 25)):
+        annotation = {
+            "item_id": randomizer.choice(item_ids),
+            "evaluator_id": randomizer.choice([*evaluator_ids, None]),
+            "annotator_id": mostly(annotator_ids, None),
+            "task_id": randomizer.choice(task_ids),
+            "value": randomizer.choice(answer_choices),
+            "created_at": random_timestamp(),
+        }
+        if randomizer.random() < 0.8:
+            annotation["updated_at"] = random_timestamp()
+        annotations.append(annotation)
+    evaluator_runs = []
+    for _ in range(randomizer.randint(0, 15)):
+        run = {
+            "item_id": mostly(item_ids, None),
+            "evaluator_id": mostly(evaluator_ids, None),
+            "evaluator_version_id": randomizer.choice([*version_ids, None]),
+            "task_id": randomizer.choice(task_ids),
+            "value": randomizer.choice(answer_choices),
+            "created_at": random_timestamp(),
+        }
+        if randomizer.random() < 0.8:
+            run["completed_at"] = random_timestamp()
+        evaluator_runs.append(run)
+    rating_scales = randomizer.choice([
+        {},
+        {
+            identifier: randomizer.choice([(1, 5), (1, 3), (0, 10), (3, 3), (None, None)])
+            for identifier in [*evaluator_ids, *version_ids]
+            if randomizer.random() < 0.7
+        },
+    ])
+    _overall_series, expected_points = _assert_over_time_agreement_equals_agreement_on_rows_up_to_each_bucket_end(
+        annotations,
+        evaluator_runs,
+        rating_scales,
+        evaluator_id=randomizer.choice(evaluator_ids),
+        requested_version_ids=randomizer.choices([*version_ids, "unknown"], k=randomizer.randint(0, 3)),
+        requested_task_ids=randomizer.choices([*task_ids, "unknown"], k=randomizer.randint(0, 3)),
+        bucket=bucket,
+        days=days,
+        now=now,
+    )
+    return expected_points
 
 
 def test_over_time_agreement_equals_agreement_on_rows_up_to_each_bucket_end():
     now = datetime(2024, 6, 30, 12, tzinfo=timezone.utc)
 
     # These 16 agreements, added one at a time, total 11.499999999999998, so the
-    # mean rounds to 0.7187; a correctly rounded sum gives 11.5 and 0.7188.
-    rating_gap_and_scale_per_item = [
-        (1, "e5"), (0, "e5"), (0, "e5"), (0, "e5"), (3, "e5"), (2, "e5"), (0, "e5"), (0, "e5"),
-        (2, "e4"), (0, "e5"), (0, "e5"), (0, "e5"), (1, "e4"), (2, "e5"), (2, "e5"), (4, "e5"),
+    # mean would round to 0.7187; the exactly rounded sum gives 11.5 and 0.7188.
+    # Each item is a judge rating of 1 against one annotator's 1 + gap, on the
+    # scale of the version the judge score came from.
+    rating_gap_and_version_per_item = [
+        (1, "v5"), (0, "v5"), (0, "v5"), (0, "v5"), (3, "v5"), (2, "v5"), (0, "v5"), (0, "v5"),
+        (2, "v4"), (0, "v5"), (0, "v5"), (0, "v5"), (1, "v4"), (2, "v5"), (2, "v5"), (4, "v5"),
     ]
     order_sensitive_annotations = []
-    for item_index, (rating_gap, evaluator_id) in enumerate(rating_gap_and_scale_per_item):
-        updated_at = (now - timedelta(days=30 - item_index)).strftime("%Y-%m-%d %H:%M:%S")
-        for annotator_id, rating in (("a", 1), ("b", 1 + rating_gap)):
-            order_sensitive_annotations.append({
-                "item_id": f"i{item_index}", "evaluator_id": evaluator_id, "annotator_id": annotator_id,
-                "value": {"value": rating}, "updated_at": updated_at,
-            })
-    order_sensitive_series = _assert_over_time_agreement_equals_agreement_on_rows_up_to_each_bucket_end(
-        order_sensitive_annotations, [], {"e5": (1, 5), "e4": (1, 4)}, "a", "e5",
-        ["e5"], [], [], "week", 35, now,
+    order_sensitive_runs = []
+    for item_index, (rating_gap, version_id) in enumerate(rating_gap_and_version_per_item):
+        timestamp = (now - timedelta(days=30 - item_index)).strftime("%Y-%m-%d %H:%M:%S")
+        order_sensitive_annotations.append({
+            "item_id": f"i{item_index}", "evaluator_id": "e5", "annotator_id": "a",
+            "value": {"value": 1 + rating_gap}, "updated_at": timestamp,
+        })
+        order_sensitive_runs.append({
+            "item_id": f"i{item_index}", "evaluator_id": "e5", "evaluator_version_id": version_id,
+            "value": {"value": 1}, "completed_at": timestamp,
+        })
+    order_sensitive_series, _order_sensitive_points = _assert_over_time_agreement_equals_agreement_on_rows_up_to_each_bucket_end(
+        order_sensitive_annotations, order_sensitive_runs, {"v5": (1, 5), "v4": (1, 4)}, "e5",
+        [], [], "week", 35, now,
     )
-    assert order_sensitive_series[-1]["agreement"] == 0.7187
+    assert order_sensitive_series[-1]["agreement"] == 0.7188
 
-    randomizer = random.Random(20261022)
-    bucket_and_days_choices = [("week", 35), ("month", 120), ("year", 800)]
-    answer_choices = [
+    mixed_answer_choices = [
         True, False, {"value": True}, {"value": False}, 1, 2, 3, 5, 2.5,
         {"value": 4}, {"score": 1}, "good", "bad", None, {"value": None},
         {"comment": "no answer"},
     ]
+    randomizer = random.Random(20261022)
     for _case in range(400):
-        bucket, days = randomizer.choice(bucket_and_days_choices)
-        item_ids = [f"i{index}" for index in range(randomizer.randint(1, 6))]
-        evaluator_ids = [f"e{index}" for index in range(randomizer.randint(1, 3))]
-        annotator_ids = [f"a{index}" for index in range(randomizer.randint(1, 4))]
-        version_ids = [f"v{index}" for index in range(randomizer.randint(1, 3))]
-        task_ids = [f"t{index}" for index in range(randomizer.randint(1, 3))]
-        # A small pool of moments makes ties; some fall before the window or after now.
-        moments = [
-            (now - timedelta(days=randomizer.uniform(-3, days + 40))).replace(microsecond=0)
-            for _ in range(randomizer.randint(1, 8))
-        ]
+        _check_a_random_trend_case(randomizer, mixed_answer_choices, now)
 
-        def random_timestamp():
-            roll = randomizer.random()
-            if roll < 0.05:
-                return None
-            if roll < 0.08:
-                return "not a timestamp"
-            moment = randomizer.choice(moments)
-            if roll < 0.11:
-                # Parses, but sorts differently as text.
-                return f"{moment.year}-{moment.month}-{moment.day} {moment.hour}:{moment.minute}:{moment.second}"
-            return moment.strftime("%Y-%m-%d %H:%M:%S")
-
-        def mostly(choices, rare_choice):
-            return rare_choice if randomizer.random() < 0.1 else randomizer.choice(choices)
-
-        annotations = []
-        for _ in range(randomizer.randint(0, 25)):
-            annotation = {
-                "item_id": randomizer.choice(item_ids),
-                "evaluator_id": randomizer.choice([*evaluator_ids, None]),
-                "annotator_id": mostly(annotator_ids, None),
-                "task_id": randomizer.choice(task_ids),
-                "value": randomizer.choice(answer_choices),
-                "created_at": random_timestamp(),
-            }
-            if randomizer.random() < 0.8:
-                annotation["updated_at"] = random_timestamp()
-            annotations.append(annotation)
-        evaluator_runs = []
-        for _ in range(randomizer.randint(0, 15)):
-            run = {
-                "item_id": mostly(item_ids, None),
-                "evaluator_id": mostly(evaluator_ids, None),
-                "evaluator_version_id": randomizer.choice([*version_ids, None]),
-                "task_id": randomizer.choice(task_ids),
-                "value": randomizer.choice(answer_choices),
-                "created_at": random_timestamp(),
-            }
-            if randomizer.random() < 0.8:
-                run["completed_at"] = random_timestamp()
-            evaluator_runs.append(run)
-        rating_scales = randomizer.choice([
-            {},
-            {
-                identifier: randomizer.choice([(1, 5), (1, 3), (0, 10), (3, 3), (None, None)])
-                for identifier in [*evaluator_ids, *version_ids]
-                if randomizer.random() < 0.7
-            },
-        ])
-        _assert_over_time_agreement_equals_agreement_on_rows_up_to_each_bucket_end(
-            annotations,
-            evaluator_runs,
-            rating_scales,
-            annotator_id=randomizer.choice([*annotator_ids, "never-annotated"]),
-            evaluator_id=randomizer.choice(evaluator_ids),
-            requested_evaluator_ids=randomizer.choices([*evaluator_ids, "unknown"], k=randomizer.randint(1, 3)),
-            requested_version_ids=randomizer.choices([*version_ids, "unknown"], k=randomizer.randint(0, 3)),
-            requested_task_ids=randomizer.choices([*task_ids, "unknown"], k=randomizer.randint(0, 3)),
-            bucket=bucket,
-            days=days,
-            now=now,
+    # One kind of answer per case, plus an answer of no known kind that is
+    # never compared, so most points have a kappa to check.
+    single_kind_answer_choices = [
+        [True, False, {"value": True}, {"value": False}, None, {"value": [1]}],
+        [1, 2, 3, 5, 2.5, {"value": 4}, {"score": 1}, {"value": None}, {"value": [1]}],
+    ]
+    single_kind_randomizer = random.Random(20261023)
+    kappa_point_count = 0
+    for _case in range(400):
+        expected_points = _check_a_random_trend_case(
+            single_kind_randomizer,
+            single_kind_randomizer.choice(single_kind_answer_choices),
+            now,
         )
+        kappa_point_count += sum(
+            1
+            for point in expected_points
+            if point.get("kappa") is not None
+            or any(entry["kappa"] is not None for entry in point.get("kappa_by_kind", []))
+        )
+    assert kappa_point_count > 200
+
+
+def _annotations_from_answers(answers_per_item, evaluator_id="e1", item_prefix="i"):
+    return [
+        {
+            "item_id": f"{item_prefix}{item_index}",
+            "evaluator_id": evaluator_id,
+            "annotator_id": f"a{annotator_index}",
+            "value": {"value": answer},
+        }
+        for item_index, answers in enumerate(answers_per_item)
+        for annotator_index, answer in enumerate(answers)
+    ]
+
+
+def _judge_runs_from_answers(answers, evaluator_id="e1"):
+    return [
+        {
+            "item_id": f"i{item_index}",
+            "evaluator_id": evaluator_id,
+            "value": {"value": answer},
+            "created_at": "2024-01-01 00:00:00",
+        }
+        for item_index, answer in enumerate(answers)
+    ]
+
+
+def _kappa(
+    answer_kind, agreement, pair_count, kappa_type, kappa, kappa_blank_reason=None, chance_agreement=None
+):
+    return {
+        "answer_kind": answer_kind,
+        "agreement": agreement,
+        "pair_count": pair_count,
+        "kappa": kappa,
+        "kappa_type": kappa_type,
+        "kappa_blank_reason": kappa_blank_reason,
+        "chance_agreement": chance_agreement,
+    }
+
+
+def _annotations_by_annotator(annotator_id_to_answers, evaluator_id="e1"):
+    return [
+        {
+            "item_id": f"i{item_index}",
+            "evaluator_id": evaluator_id,
+            "annotator_id": annotator_id,
+            "value": {"value": answer},
+        }
+        for annotator_id, answers in annotator_id_to_answers.items()
+        for item_index, answer in enumerate(answers)
+    ]
+
+
+def test_cohen_kappa_between_exactly_two_annotators_on_pass_fail_answers():
+    annotations = _annotations_by_annotator(
+        {"asha": (True, True, False, True), "ben": (True, False, False, True)}
+    )
+    # Asha said pass 3 of 4 times and Ben 2 of 4: chance 0.75 * 0.5 + 0.25 * 0.5.
+    assert agreement_and_kappa_between_annotators(annotations) == (
+        0.75, 4, [_kappa("binary", 0.75, 4, "cohen", 0.5, chance_agreement=0.5)]
+    )
+
+
+def test_linear_weighted_cohen_kappa_between_exactly_two_annotators_on_ratings():
+    asha, ben = (4, 3, 5, 2), (4, 2, 5, 3)
+    annotations = _annotations_by_annotator({"asha": asha, "ben": ben})
+    assert agreement_and_kappa_between_annotators(annotations, {"e1": _ONE_TO_FIVE}) == (
+        0.875, 4, [_kappa("rating", 0.875, 4, "linear_weighted_cohen", 0.6, chance_agreement=0.6875)]
+    )
+    agreement = sum(1 - abs(first - second) / 4 for first, second in zip(asha, ben)) / 4
+    chance_agreement = sum(1 - abs(first - second) / 4 for first in asha for second in ben) / 16
+    assert (agreement, chance_agreement) == (0.875, 11 / 16)
+    assert (agreement - chance_agreement) / (1 - chance_agreement) == 0.6
+
+
+def test_an_annotator_compared_with_nobody_leaves_two_annotators_and_cohen():
+    # Asha true, true, false, true and Ben false, false, false, true: chance
+    # 0.75 * 0.25 + 0.25 * 0.75 = 0.375. Ben is stored first on the second
+    # item, and Asha still sits on the first side there.
+    asha_and_ben = _annotations_by_annotator(
+        {"asha": (True, True, False, True), "ben": (False, False, False, True)}
+    )
+    asha_and_ben[1], asha_and_ben[5] = asha_and_ben[5], asha_and_ben[1]
+    chen_alone = {"item_id": "i9", "evaluator_id": "e1", "annotator_id": "chen", "value": {"value": False}}
+    assert agreement_and_kappa_between_annotators([*asha_and_ben, chen_alone]) == (
+        0.5, 4, [_kappa("binary", 0.5, 4, "cohen", 0.2, chance_agreement=0.375)]
+    )
+
+
+def test_evaluators_with_cohen_and_with_fleiss_kappa_never_share_an_entry():
+    two_annotators = _annotations_by_annotator(
+        {"asha": (True, True, False, True), "ben": (True, False, False, True)}, evaluator_id="e"
+    )
+    three_annotators = _annotations_from_answers(
+        [(True, True, False), (True, True, True)], evaluator_id="f", item_prefix="j"
+    )
+    # f: 4 of 6 pairs agree. Pool: 10 true and 2 false, so chance
+    # (10/12)^2 + (2/12)^2 = 104/144.
+    assert agreement_and_kappa_between_annotators(two_annotators + three_annotators) == (
+        0.7,
+        10,
+        [
+            _kappa("binary", 0.75, 4, "cohen", 0.5, chance_agreement=0.5),
+            _kappa("binary", 0.6667, 6, "fleiss", -0.2, chance_agreement=round(104 / 144, 4)),
+        ],
+    )
+
+
+def test_cohen_kappa_between_judge_and_annotator():
+    annotations = _annotations_from_answers([(True,), (False,), (False,), (False,)])
+    runs = _judge_runs_from_answers([True, True, False, False])
+    # Chance: 0.5 * 0.25 + 0.5 * 0.75 = 0.5.
+    assert agreement_and_kappa_between_judge_and_annotators(annotations, runs, "e1") == (
+        0.75, 4, [_kappa("binary", 0.75, 4, "cohen", 0.5, chance_agreement=0.5)]
+    )
+
+
+def test_cohen_kappa_of_one_annotator_with_the_others():
+    annotations = _annotations_from_answers(
+        [(True, True), (True, True), (True, False), (False, False)]
+    )
+    # a0 said true 3 of 4 times and a1 2 of 4: chance 0.75 * 0.5 + 0.25 * 0.5.
+    assert agreement_and_kappa_of_annotator_with_others(annotations, "a0") == (
+        0.75, 4, [_kappa("binary", 0.75, 4, "cohen", 0.5, chance_agreement=0.5)]
+    )
+
+
+def test_linear_weighted_cohen_kappa_on_a_one_to_five_scale():
+    annotations = _annotations_from_answers([(4,), (4,), (1,), (1,)])
+    runs = _judge_runs_from_answers([5, 4, 2, 1])
+    # Agreement: 1 - 1/4, 1, 1 - 1/4, 1, so 0.875.
+    # Chance: each judge answer 1/4 of the time, each annotator answer 1/2,
+    # and the weights of the 8 combinations add up to 4.5, so 4.5 / 8 = 0.5625.
+    assert agreement_and_kappa_between_judge_and_annotators(
+        annotations, runs, "e1", {"e1": _ONE_TO_FIVE}
+    ) == (0.875, 4, [_kappa("rating", 0.875, 4, "linear_weighted_cohen", 0.7143, chance_agreement=0.5625)])
+    assert round((0.875 - 0.5625) / (1 - 0.5625), 4) == 0.7143
+
+
+def test_chance_agreement_uses_the_gap_each_pair_was_compared_over():
+    # No scale: each item divides by its own gap of 1, so both disagree fully.
+    # Chance over that same gap of 1 credits only two equal ratings: a0's 1, 2
+    # against a1's 2, 3 match once in 4, so kappa -0.25 / 0.75.
+    annotations = _annotations_from_answers([(1, 2), (2, 3)])
+    assert agreement_and_kappa_between_annotators(annotations) == (
+        0.0,
+        2,
+        [_kappa("rating", 0.0, 2, "linear_weighted_cohen", -0.3333, chance_agreement=0.25)],
+    )
+    # Four such items: a0's 1 to 4 against a1's 2 to 5 match 3 times in 16,
+    # so kappa -0.1875 / 0.8125.
+    four_items = _annotations_from_answers([(1, 2), (2, 3), (3, 4), (4, 5)])
+    agreement, _pair_count, [rating_kappa] = agreement_and_kappa_between_annotators(four_items)
+    assert agreement == 0.0
+    assert (rating_kappa["kappa"], rating_kappa["chance_agreement"]) == (-0.2308, 0.1875)
+    assert -1 <= rating_kappa["kappa"] <= 1
+
+
+def test_two_kinds_of_evaluator_each_get_their_own_kappa():
+    annotations = _annotations_from_answers([(True, True), (False, False)]) + (
+        _annotations_from_answers([(1, 5), (5, 5)], evaluator_id="e2", item_prefix="r")
+    )
+    # Binary: both pairs agree, chance 0.5. Rating: agreement 0 and 1, so 0.5,
+    # and a0's 1, 5 against a1's 5, 5 gives chance 0.5, so kappa 0. The
+    # agreement covers all four pairs.
+    assert agreement_and_kappa_between_annotators(annotations, {"e2": _ONE_TO_FIVE}) == (
+        0.75,
+        4,
+        [
+            _kappa("binary", 1.0, 2, "cohen", 1.0, chance_agreement=0.5),
+            _kappa("rating", 0.5, 2, "linear_weighted_cohen", 0.0, chance_agreement=0.5),
+        ],
+    )
+
+
+def test_kappa_is_empty_when_nothing_was_compared():
+    assert agreement_and_kappa_between_annotators([]) == (None, 0, [])
+    assert agreement_and_kappa_between_judge_and_annotators([], [], "e1") == (None, 0, [])
+    assert agreement_and_kappa_of_annotator_with_others([], "a0") == (None, 0, [])
+    assert kappa_of_one_kind([]) == {
+        "kappa": None, "kappa_type": None, "kappa_blank_reason": None, "chance_agreement": None
+    }
+
+
+def test_kappa_is_blank_because_everyone_agreed_when_every_answer_is_the_same():
+    every_answer_the_same = _annotations_from_answers([(True, True), (True, True)])
+    assert agreement_and_kappa_between_annotators(every_answer_the_same) == (
+        1.0, 2, [_kappa("binary", 1.0, 2, "cohen", None, "everyone_agreed", 1.0)]
+    )
+    assert agreement_and_kappa_between_judge_and_annotators(
+        _annotations_from_answers([(True,), (True,)]), _judge_runs_from_answers([True, True]), "e1"
+    ) == (1.0, 2, [_kappa("binary", 1.0, 2, "cohen", None, "everyone_agreed", 1.0)])
+
+
+def test_one_evaluator_answered_with_both_kinds_has_no_single_kappa():
+    one_evaluator_with_two_kinds = _annotations_from_answers([(True, True), (3, 4)])
+    agreement, pair_count, kappa_by_kind = agreement_and_kappa_between_annotators(
+        one_evaluator_with_two_kinds, {"e1": _ONE_TO_FIVE}
+    )
+    assert (agreement, pair_count) == (0.875, 2)
+    assert kappa_by_kind == [
+        _kappa("binary", 1.0, 1, "cohen", None, "too_few_items"),
+        _kappa("rating", 0.75, 1, "linear_weighted_cohen", None, "too_few_items"),
+    ]
+    assert kappa_of_one_kind(kappa_by_kind) == kappa_of_one_kind([])
+
+
+def test_fleiss_pool_counts_each_answer_once_per_pair_it_is_in():
+    # Item A: 4 annotators say true, 6 pairs, each answer in 3 of them.
+    # Items B and C: true against false, 1 pair each.
+    # Agreement: 6 of 8 pairs agree. Pool: 12 + 1 + 1 = 14 true, 2 false, so
+    # chance is (14/16)^2 + (2/16)^2 = 0.78125.
+    annotations = _annotations_from_answers(
+        [(True, True, True, True), (True, False), (True, False)]
+    )
+    assert agreement_and_kappa_between_annotators(annotations) == (
+        0.75, 8, [_kappa("binary", 0.75, 8, "fleiss", -0.1429, chance_agreement=0.7812)]
+    )
+    assert round((0.75 - 0.78125) / (1 - 0.78125), 4) == -0.1429
+
+
+def test_chance_agreement_pools_the_whole_evaluator_at_each_gap():
+    # a0 rated 3, 3, 1 and a1 3, 3, 5. Agreement: 1, 1 and 0, so 2/3.
+    annotations = _annotations_from_answers([(3, 3), (3, 3), (1, 5)])
+    # On the 1-to-5 scale every pair is over a gap of 4: chance 4/9 + 2/9 *
+    # 0.5 + 2/9 * 0.5 = 6/9, so kappa 0.
+    assert agreement_and_kappa_between_annotators(annotations, {"e1": _ONE_TO_FIVE}) == (
+        0.6667, 3, [_kappa("rating", 0.6667, 3, "linear_weighted_cohen", 0.0, chance_agreement=0.6667)]
+    )
+    # With no scale the two (3, 3) pairs are over a gap of 1, where chance is
+    # 4/9, and the (1, 5) pair over a gap of 4, where it is 6/9. Weighted by
+    # pairs: (2 * 4/9 + 6/9) / 3 = 14/27, so kappa (18/27 - 14/27) / (13/27).
+    assert agreement_and_kappa_between_annotators(annotations) == (
+        0.6667, 3,
+        [_kappa("rating", 0.6667, 3, "linear_weighted_cohen", round(4 / 13, 4), chance_agreement=round(14 / 27, 4))],
+    )
+
+
+def test_kappa_uses_only_the_answers_compared():
+    # The rating 3 on the first item and the list on the second are never
+    # compared, so they neither add a rating kappa nor raise.
+    annotations = _annotations_from_answers(
+        [(True, True, 3), (True, False, [1]), (False, False)]
+    )
+    # a2 is in no compared pair, so a0 and a1 use Cohen: true, true, false
+    # against true, false, false, chance 4/9. Agreement 2/3.
+    assert agreement_and_kappa_between_annotators(annotations) == (
+        0.6667, 3, [_kappa("binary", 0.6667, 3, "cohen", 0.4, chance_agreement=0.4444)]
+    )
+    # a0 said true, true, false and the others true, false, false: chance
+    # 2/3 * 1/3 + 1/3 * 2/3 = 4/9, so (2/3 - 4/9) / (5/9) = 0.4.
+    assert agreement_and_kappa_of_annotator_with_others(annotations, "a0") == (
+        0.6667, 3, [_kappa("binary", 0.6667, 3, "cohen", 0.4, chance_agreement=0.4444)]
+    )
+    # The judge's list on the second item compares with nothing. On the other
+    # two it matches all four answers, half of them true.
+    runs = _judge_runs_from_answers([True, [1], False])
+    assert agreement_and_kappa_between_judge_and_annotators(annotations, runs, "e1") == (
+        1.0, 4, [_kappa("binary", 1.0, 4, "cohen", 1.0, chance_agreement=0.5)]
+    )
+
+
+def _correctness_and_conciseness_annotations():
+    """Correctness: both annotators say true on two items. Conciseness, 1 to
+    5: (1, 1) and (1, 2)."""
+    return _annotations_from_answers([(True, True), (True, True)], evaluator_id="correctness") + (
+        _annotations_from_answers([(1, 1), (1, 2)], evaluator_id="conciseness", item_prefix="r")
+    )
+
+
+_CONCISENESS_SCALE = {"conciseness": _ONE_TO_FIVE}
+
+
+def test_kinds_are_never_combined_into_one_kappa():
+    annotations = _correctness_and_conciseness_annotations()
+    # Pairs agree 1, 1, 1 and 1 - 1/4, so 0.9375 over both kinds.
+    assert agreement_and_kappa_between_annotators(annotations, _CONCISENESS_SCALE)[:2] == (0.9375, 4)
+    # a0 gave 1, 1 and the other 1, 2: agreement 0.875 and chance
+    # 1/2 * 1 + 1/2 * 0.75 = 0.875, so kappa 0.
+    assert agreement_and_kappa_of_annotator_with_others(annotations, "a0", _CONCISENESS_SCALE) == (
+        0.9375,
+        4,
+        [
+            _kappa("binary", 1.0, 2, "cohen", None, "everyone_agreed", 1.0),
+            _kappa("rating", 0.875, 2, "linear_weighted_cohen", 0.0, chance_agreement=0.875),
+        ],
+    )
+
+
+def test_each_evaluator_reports_its_inter_annotator_kappa_and_the_overall_is_weighted_by_pairs():
+    annotations = _correctness_and_conciseness_annotations()
+    conciseness_judge = [
+        {**run, "item_id": "r0", "evaluator_id": "conciseness"} for run in _judge_runs_from_answers([4])
+    ]
+    correctness_and_conciseness = [{"uuid": "correctness"}, {"uuid": "conciseness"}]
+    agreement = agreement_response(
+        annotations, conciseness_judge, correctness_and_conciseness, _CONCISENESS_SCALE
+    )
+    evaluator_id_to_agreement = {entry["evaluator_id"]: entry for entry in agreement["evaluators"]}
+    conciseness = evaluator_id_to_agreement["conciseness"]
+    # a0 gave 1, 1 and a1 1, 2: chance 0.5 * 1 + 0.5 * 0.75 = 0.875, so kappa 0.
+    assert conciseness["inter_annotator"] == {
+        "current": 0.875, "pair_count": 2, "kappa": 0.0,
+        "kappa_type": "linear_weighted_cohen", "kappa_blank_reason": None,
+        "chance_agreement": 0.875,
+    }
+    assert evaluator_id_to_agreement["correctness"]["inter_annotator"] == {
+        "current": 1.0, "pair_count": 2, "kappa": None, "kappa_type": "cohen",
+        "kappa_blank_reason": "everyone_agreed", "chance_agreement": 1.0,
+    }
+    # The judge's 4 against the two 1s: 1 - 3/4 each, on one item.
+    assert {key: value for key, value in conciseness.items() if key not in ("inter_annotator", "evaluator_id", "name")} == {
+        "current": 0.25, "pair_count": 2, "kappa": None, "kappa_type": "linear_weighted_cohen",
+        "kappa_blank_reason": "too_few_items", "chance_agreement": None,
+    }
+    assert evaluator_id_to_agreement["correctness"]["current"] is None
+    assert agreement["evaluators_with_humans"] == {"current": 0.25, "pair_count": 2}
+
+    # A Correctness judge that agrees on both items adds 4 pairs at 1: the
+    # overall is (2 * 0.25 + 4 * 1) / 6, not the mean of 0.25 and 1.
+    correctness_judge = [
+        {**run, "evaluator_id": "correctness"} for run in _judge_runs_from_answers([True, True])
+    ]
+    assert agreement_response(
+        annotations, conciseness_judge + correctness_judge, correctness_and_conciseness,
+        _CONCISENESS_SCALE,
+    )["evaluators_with_humans"] == {"current": 0.75, "pair_count": 6}
+
+
+def _textbook_fleiss_kappa(answers_per_item, categories, weight):
+    """Fleiss' kappa for items that all have the same number of raters, with
+    an agreement weight between two categories (1 for an exact match)."""
+    rater_count = len(answers_per_item[0])
+    item_count = len(answers_per_item)
+    category_counts_per_item = [
+        {category: list(answers).count(category) for category in categories}
+        for answers in answers_per_item
+    ]
+    observed_agreement = sum(
+        (
+            sum(
+                weight(first, second) * counts[first] * counts[second]
+                for first in categories
+                for second in categories
+            )
+            - rater_count
+        )
+        / (rater_count * (rater_count - 1))
+        for counts in category_counts_per_item
+    ) / item_count
+    category_shares = {
+        category: sum(counts[category] for counts in category_counts_per_item)
+        / (item_count * rater_count)
+        for category in categories
+    }
+    expected_agreement = sum(
+        weight(first, second) * category_shares[first] * category_shares[second]
+        for first in categories
+        for second in categories
+    )
+    if 1 - expected_agreement < 1e-12:
+        return None
+    return (observed_agreement - expected_agreement) / (1 - expected_agreement)
+
+
+def test_kappa_is_blank_for_too_few_items_unless_an_evaluator_has_two():
+    # One judge answer against one annotator answer: chance equals the
+    # agreement itself, so a Cohen's kappa would always read 0.
+    assert agreement_and_kappa_between_judge_and_annotators(
+        _annotations_from_answers([(1,)]),
+        _judge_runs_from_answers([0]),
+        "e1",
+        {"e1": (0, 2)},
+    ) == (0.5, 1, [_kappa("rating", 0.5, 1, "linear_weighted_cohen", None, "too_few_items")])
+    assert agreement_and_kappa_between_annotators(
+        _annotations_from_answers([[True, False, False]])
+    )[2] == [_kappa("binary", 0.3333, 3, "fleiss", None, "too_few_items")]
+    # One item where everyone agreed is still too few items.
+    assert agreement_and_kappa_between_annotators(
+        _annotations_from_answers([[True, True, True]])
+    ) == (1.0, 3, [_kappa("binary", 1.0, 3, "fleiss", None, "too_few_items")])
+    assert agreement_and_kappa_of_annotator_with_others(
+        _annotations_from_answers([[True, True]]), "a0"
+    ) == (1.0, 1, [_kappa("binary", 1.0, 1, "cohen", None, "too_few_items")])
+    # Two items, but one per evaluator: neither evaluator can show chance.
+    one_item_on_each_evaluator = _annotations_from_answers([(True, False)], evaluator_id="e") + (
+        _annotations_from_answers([(True, False)], evaluator_id="f", item_prefix="j")
+    )
+    assert agreement_and_kappa_of_annotator_with_others(one_item_on_each_evaluator, "a0") == (
+        0.0, 2, [_kappa("binary", 0.0, 2, "cohen", None, "too_few_items")]
+    )
+    two_items = _annotations_from_answers([[True, False], [True, True]])
+    assert agreement_and_kappa_between_annotators(two_items)[2] == [
+        _kappa("binary", 0.5, 2, "cohen", 0.0, chance_agreement=0.5)
+    ]
+
+
+def test_a_kinds_agreement_covers_the_same_pairs_as_its_kappa():
+    # Evaluator e: a0 says true on two items, the other true then false.
+    # Evaluator f: one item, true against false. The agreement over all kinds
+    # covers all three pairs, 1, 0 and 0. The binary entry leaves out f, which
+    # has one item, the way its kappa does: e's pairs agree 0.5, chance
+    # 1 * 0.5, so kappa 0.
+    annotations = _annotations_from_answers([(True, True), (True, False)], evaluator_id="e") + (
+        _annotations_from_answers([(True, False)], evaluator_id="f", item_prefix="j")
+    )
+    assert agreement_and_kappa_of_annotator_with_others(annotations, "a0") == (
+        0.3333, 3, [_kappa("binary", 0.5, 2, "cohen", 0.0, chance_agreement=0.5)]
+    )
+
+
+def test_pass_fail_and_text_answers_are_pooled_apart():
+    # True against False on one item and "yes" against "no" on another, all on
+    # one evaluator. The agreement compares both; chance is worked out for the
+    # true/false answers and the text answers apart. a0 always said True or
+    # "yes", the other False or "no": chance 0.
+    annotations = _annotations_from_answers([(True, False), ("yes", "no")])
+    assert agreement_and_kappa_between_annotators(annotations) == (
+        0.0, 2, [_kappa("binary", 0.0, 2, "cohen", 0.0, chance_agreement=0.0)]
+    )
+    assert agreement_and_kappa_of_annotator_with_others(annotations, "a0") == (
+        0.0, 2, [_kappa("binary", 0.0, 2, "cohen", 0.0, chance_agreement=0.0)]
+    )
+
+
+@pytest.mark.parametrize(
+    "categories, weight, rating_scales, answer_kind, kappa_type",
+    [
+        ([True, False], lambda first, second: float(first == second), {}, "binary", "fleiss"),
+        (
+            [1, 2, 3, 4, 5],
+            lambda first, second: 1 - abs(first - second) / 4,
+            {"e1": _ONE_TO_FIVE},
+            "rating",
+            "linear_weighted_fleiss",
+        ),
+    ],
+)
+def test_fleiss_kappa_matches_the_textbook_formula_when_every_item_has_the_same_raters(
+    categories, weight, rating_scales, answer_kind, kappa_type
+):
+    randomizer = random.Random(3141)
+    kappa_count = 0
+    for _case in range(300):
+        rater_count = randomizer.randint(3, 5)
+        answers_per_item = [
+            [randomizer.choice(categories) for _rater in range(rater_count)]
+            for _item in range(randomizer.randint(1, 8))
+        ]
+        agreement, pair_count, [kind_kappa] = agreement_and_kappa_between_annotators(
+            _annotations_from_answers(answers_per_item), rating_scales
+        )
+        assert (kind_kappa["answer_kind"], kind_kappa["kappa_type"]) == (answer_kind, kappa_type)
+        # One kind on its own: its agreement is the agreement over every kind.
+        assert (kind_kappa["agreement"], kind_kappa["pair_count"]) == (agreement, pair_count)
+        expected_kappa = _textbook_fleiss_kappa(answers_per_item, categories, weight)
+        if len(answers_per_item) == 1:
+            assert kind_kappa == _kappa(answer_kind, agreement, pair_count, kappa_type, None, "too_few_items")
+            continue
+        if expected_kappa is None:
+            assert kind_kappa == _kappa(
+                answer_kind, agreement, pair_count, kappa_type, None, "everyone_agreed", 1.0
+            )
+            continue
+        kappa_count += 1
+        assert kind_kappa["kappa"] == pytest.approx(expected_kappa, abs=5.1e-5)
+        assert kind_kappa["kappa_blank_reason"] is None
+        chance_agreement = kind_kappa["chance_agreement"]
+        assert kind_kappa["kappa"] == pytest.approx(
+            (agreement - chance_agreement) / (1 - chance_agreement), abs=1e-3
+        )
+    assert kappa_count > 250
+
+
+def test_agreement_on_item_never_works_out_kappa(monkeypatch):
+    import annotation_metrics
+
+    def no_kappa(*_args, **_kwargs):
+        raise AssertionError("one item never shows kappa, so none is worked out")
+
+    monkeypatch.setattr(annotation_metrics._KappaTally, "replace", no_kappa)
+    annotations = [
+        {"item_id": "i1", "evaluator_id": "ev", "annotator_id": who, "value": {"value": answer}}
+        for who, answer in (("asha", True), ("ben", False))
+    ]
+    runs = [{"item_id": "i1", "evaluator_id": "ev", "value": {"value": True}, "completed_at": "x"}]
+    result = agreement_on_item(annotations, runs, ["ev"])
+    assert result["human_human"] == {"agreement": 0.0, "pair_count": 1}
+    assert result["evaluators"] == [{"evaluator_id": "ev", "agreement": 0.5, "pair_count": 2}]
+
+
+def test_agreement_response_works_out_no_kappa_for_human_human(monkeypatch):
+    import annotation_metrics
+
+    def no_kappa(*_args, **_kwargs):
+        raise AssertionError("human_human shows no kappa, so none is worked out")
+
+    monkeypatch.setattr(annotation_metrics._KappaTally, "replace", no_kappa)
+    annotations = _annotations_by_annotator(
+        {"asha": (True, True, False, True), "ben": (True, False, False, True)}
+    )
+    assert agreement_response(annotations, [], [])["human_human"] == {"current": 0.75, "pair_count": 4}
+
+
+def test_shown_agreement_each_kinds_agreement_and_kappas_agreement_are_identical(monkeypatch):
+    import annotation_metrics
+
+    # Unrounded, so a difference in the last bit between two sums shows.
+    monkeypatch.setattr(annotation_metrics, "_round_agreement", lambda agreement: agreement)
+    randomizer = random.Random(277)
+    kappa_count = 0
+    for _case in range(1500):
+        answer_choices = randomizer.choice([[True, False], [1, 2, 3, 4, 5]])
+        rating_scales = randomizer.choice([{}, {"e": _ONE_TO_FIVE}])
+        annotator_ids = [f"a{index}" for index in range(randomizer.randint(2, 4))]
+        annotations = []
+        evaluator_runs = []
+        for item_index in range(randomizer.randint(1, 8)):
+            for annotator_id in randomizer.sample(annotator_ids, randomizer.randint(1, len(annotator_ids))):
+                annotations.append({
+                    "item_id": f"i{item_index}", "evaluator_id": "e", "annotator_id": annotator_id,
+                    "value": {"value": randomizer.choice(answer_choices)},
+                })
+            if randomizer.random() < 0.8:
+                evaluator_runs.append({
+                    "item_id": f"i{item_index}", "evaluator_id": "e",
+                    "value": {"value": randomizer.choice(answer_choices)}, "completed_at": "2024-01-01 00:00:00",
+                })
+        response = agreement_response(annotations, evaluator_runs, [{"uuid": "e", "name": "e"}], rating_scales)
+        results = [
+            agreement_and_kappa_between_annotators(annotations, rating_scales),
+            agreement_and_kappa_between_judge_and_annotators(annotations, evaluator_runs, "e", rating_scales),
+            *(
+                agreement_and_kappa_of_annotator_with_others(annotations, annotator_id, rating_scales)
+                for annotator_id in annotator_ids
+            ),
+        ]
+        assert response["human_human"]["current"] == results[0][0]
+        assert response["evaluators"][0]["inter_annotator"]["current"] == results[0][0]
+        assert response["evaluators_with_humans"]["current"] == response["evaluators"][0]["current"] == results[1][0]
+        for agreement, pair_count, kappa_by_kind in results:
+            if pair_count == 0:
+                assert kappa_by_kind == []
+                continue
+            [kind_kappa] = kappa_by_kind
+            # One evaluator and one kind: its pairs are every pair compared.
+            assert (kind_kappa["agreement"], kind_kappa["pair_count"]) == (agreement, pair_count)
+            if kind_kappa["kappa"] is None:
+                continue
+            kappa_count += 1
+            chance_agreement = kind_kappa["chance_agreement"]
+            assert kind_kappa["kappa"] == (agreement - chance_agreement) / (1 - chance_agreement)
+    assert kappa_count > 1000
