@@ -1284,16 +1284,17 @@ def test_kappa_is_blank_for_too_few_items_unless_an_evaluator_has_two():
     ]
 
 
-def test_a_kinds_agreement_covers_every_pair_while_its_kappa_needs_two_items():
+def test_a_kinds_agreement_covers_the_same_pairs_as_its_kappa():
     # Evaluator e: a0 says true on two items, the other true then false.
-    # Evaluator f: one item, true against false. The binary agreement covers
-    # all three pairs, 1, 0 and 0. The kappa leaves out f, which has one
-    # item: e's pairs agree 0.5, chance 1 * 0.5, so kappa 0.
+    # Evaluator f: one item, true against false. The agreement over all kinds
+    # covers all three pairs, 1, 0 and 0. The binary entry leaves out f, which
+    # has one item, the way its kappa does: e's pairs agree 0.5, chance
+    # 1 * 0.5, so kappa 0.
     annotations = _annotations_from_answers([(True, True), (True, False)], evaluator_id="e") + (
         _annotations_from_answers([(True, False)], evaluator_id="f", item_prefix="j")
     )
     assert agreement_and_kappa_of_annotator_with_others(annotations, "a0") == (
-        0.3333, 3, [_annotator_kappa("binary", 0.3333, 3, "cohen", 0.0, chance_agreement=0.5)]
+        0.3333, 3, [_annotator_kappa("binary", 0.5, 2, "cohen", 0.0, chance_agreement=0.5)]
     )
 
 

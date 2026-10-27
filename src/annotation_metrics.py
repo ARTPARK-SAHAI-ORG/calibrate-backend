@@ -814,6 +814,31 @@ class _KappaTally:
                 self.answer_kind_and_evaluator_to_tally[(answer_kind, evaluator_id)] = tally
             tally.count(item_id, largest_possible_rating_gap, pairs_of_kind, change)
 
+    def _rating_kind_to_evaluator_to_tallies(
+        self,
+    ) -> Dict[bool, Dict[Optional[str], List[_AnswerKindTally]]]:
+        rating_kind_to_evaluator_to_tallies: Dict[
+            bool, Dict[Optional[str], List[_AnswerKindTally]]
+        ] = defaultdict(lambda: defaultdict(list))
+        for (answer_kind, evaluator_id), tally in self.answer_kind_and_evaluator_to_tally.items():
+            if tally.item_id_to_agreement_total:
+                rating_kind_to_evaluator_to_tallies[answer_kind == "numeric"][evaluator_id].append(
+                    tally
+                )
+        return rating_kind_to_evaluator_to_tallies
+
+    def evaluator_ids_counted_by_kind(self) -> Dict[bool, set]:
+        """For ratings (True) and binary answers (False), the evaluators whose
+        pairs `kappa_by_kind` counts."""
+        return {
+            is_rating: {
+                evaluator_id
+                for evaluator_id, tallies in evaluator_to_tallies.items()
+                if _compared_on_two_items_or_more(tallies)
+            }
+            for is_rating, evaluator_to_tallies in self._rating_kind_to_evaluator_to_tallies().items()
+        }
+
     def kappa_by_kind(self) -> List[Dict[str, Any]]:
         """Kappa once for binary answers (any answer that either matches or does
         not) and once for ratings, each kind only when it was compared, binary
@@ -827,14 +852,7 @@ class _KappaTally:
         Cohen's kappa on it would always read 0. With no evaluator left the
         kappa is blank with `too_few_items` and no chance agreement, and it is
         blank with `everyone_agreed` when chance agreement is 1."""
-        rating_kind_to_evaluator_to_tallies: Dict[
-            bool, Dict[Optional[str], List[_AnswerKindTally]]
-        ] = defaultdict(lambda: defaultdict(list))
-        for (answer_kind, evaluator_id), tally in self.answer_kind_and_evaluator_to_tally.items():
-            if tally.item_id_to_agreement_total:
-                rating_kind_to_evaluator_to_tallies[answer_kind == "numeric"][evaluator_id].append(
-                    tally
-                )
+        rating_kind_to_evaluator_to_tallies = self._rating_kind_to_evaluator_to_tallies()
         kappa_by_kind: List[Dict[str, Any]] = []
         for is_rating in (False, True):
             evaluator_to_tallies = rating_kind_to_evaluator_to_tallies.get(is_rating)
@@ -1001,9 +1019,9 @@ class _AgreementOfAnnotatorWithOthersSoFar:
     """`agreement_and_kappa_of_annotator_with_others` over every annotation
     added so far, rescoring only the (item, evaluator) pairs that new
     annotations answer. Each `kappa_by_kind` entry also carries the agreement
-    and pair count over every compared pair of its kind, added up in the same
-    order as the agreement over all kinds, so one kind on its own matches it
-    exactly. Its kappa may use fewer pairs (see `_KappaTally.kappa_by_kind`)."""
+    and pair count over the same pairs its kappa uses, or over every pair of
+    its kind when no evaluator has them on two items, added up in the same
+    order as the agreement over all kinds."""
 
     def __init__(self, annotator_id: str, rating_scales: RatingScales) -> None:
         self.annotator_id = annotator_id
@@ -1034,22 +1052,25 @@ class _AgreementOfAnnotatorWithOthersSoFar:
             self.kappa_tally.replace(item_and_evaluator, answer_pairs_compared)
 
     def agreement_and_kappa(self) -> AgreementAndKappa:
-        rating_kind_and_agreements = [
-            rating_kind_and_agreement
+        evaluator_rating_kind_and_agreements = [
+            (item_and_evaluator[1], pair_is_rating, agreement)
             for item_and_evaluator in self.item_and_evaluator_to_annotator_answers
-            for rating_kind_and_agreement in (
+            for pair_is_rating, agreement in (
                 self.item_and_evaluator_to_rating_kind_and_agreements_with_others[
                     item_and_evaluator
                 ]
             )
         ]
+        evaluator_ids_counted_by_kind = self.kappa_tally.evaluator_ids_counted_by_kind()
         kappa_by_kind = []
         for kind_kappa in self.kappa_tally.kappa_by_kind():
             is_rating = kind_kappa["answer_kind"] == "rating"
+            evaluator_ids_counted = evaluator_ids_counted_by_kind.get(is_rating)
             kind_agreement, kind_pair_count = _mean_agreement(
                 (agreement, 1)
-                for pair_is_rating, agreement in rating_kind_and_agreements
+                for evaluator_id, pair_is_rating, agreement in evaluator_rating_kind_and_agreements
                 if pair_is_rating == is_rating
+                and (not evaluator_ids_counted or evaluator_id in evaluator_ids_counted)
             )
             kappa_by_kind.append(
                 {
@@ -1060,7 +1081,9 @@ class _AgreementOfAnnotatorWithOthersSoFar:
                 }
             )
         return (
-            *_mean_agreement((agreement, 1) for _, agreement in rating_kind_and_agreements),
+            *_mean_agreement(
+                (agreement, 1) for _, _, agreement in evaluator_rating_kind_and_agreements
+            ),
             kappa_by_kind,
         )
 
