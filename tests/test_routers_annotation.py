@@ -2070,11 +2070,11 @@ def test_workspace_trend_lists_evaluators_that_were_only_labelled(client):
             "current": None, "pair_count": 0, "kappa": None, "kappa_type": None,
             "kappa_blank_reason": None, "chance_agreement": None,
         }
-        # Annotators agree on the first item only. Answers true 3 of 4 times:
-        # chance 0.625, so kappa (0.5 - 0.625) / 0.375.
+        # Annotators agree on the first item only. One said true twice and the
+        # other true then false: chance 1 * 0.5, so kappa 0.
         assert labelled_only_row["inter_annotator"] == {
-            "current": 0.5, "pair_count": 2, "kappa": -0.3333, "kappa_type": "fleiss",
-            "kappa_blank_reason": None, "chance_agreement": 0.625,
+            "current": 0.5, "pair_count": 2, "kappa": 0.0, "kappa_type": "cohen",
+            "kappa_blank_reason": None, "chance_agreement": 0.5,
         }
         # Only the judged evaluator adds pairs: true against true, true on the
         # first item, and true against true, false on the second.
@@ -3754,11 +3754,11 @@ def test_kappa_sits_beside_every_agreement_over_many_items(client):
     # 7/8, chance 10/16.
     rating_judge_now = kappa(0.6667, "linear_weighted_cohen", 0.625)
     rating_judge_earlier = kappa(0.75, "linear_weighted_cohen", 0.75)
-    # Annotators on the binary evaluator: true 5 of 8 answers, chance 0.53125.
-    binary_annotators_now = kappa(0.4667, "fleiss", 0.5312)
+    # Annotators on the binary evaluator: true 3 of 4 and 2 of 4, chance 0.5.
+    binary_annotators_now = kappa(0.5, "cohen", 0.5)
     # Annotators on the rating evaluator: 2, 3, 4, 5 a quarter each, chance
     # 11/16.
-    rating_annotators_now = kappa(0.6, "linear_weighted_fleiss", 0.6875)
+    rating_annotators_now = kappa(0.6, "linear_weighted_cohen", 0.6875)
     # One annotator against the other: 4 binary pairs agreeing on 3, and 4
     # rating pairs agreeing 1, 0.75, 1 and 0.75.
     one_annotator_now = [

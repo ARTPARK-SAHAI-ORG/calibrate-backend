@@ -21,11 +21,13 @@ that agreement number compared. Chance agreement is how much two answers drawn
 at random would agree, weighed the same way as a real pair. For each evaluator
 the answers are drawn from its compared pairs on every item:
 
-- Annotators with each other use Fleiss' kappa. Both answers come from one pool
-  in which an annotator's answer counts once for every other annotator it was
-  compared with on that item, so an item counts as much as its pairs, as in the
-  agreement number. When every item has the same number of annotators this is
-  exactly Fleiss' kappa.
+- Annotators with each other use Cohen's kappa for an evaluator whose compared
+  pairs are between exactly two annotators, each side being one of them.
+- With three or more such annotators they use Fleiss' kappa. Both answers come
+  from one pool in which an annotator's answer counts once for every other
+  annotator it was compared with on that item, so an item counts as much as its
+  pairs, as in the agreement number. When every item has the same number of
+  annotators this is exactly Fleiss' kappa.
 - A judge against annotators, and one annotator against the others, use Cohen's
   kappa. Each answer of a pair is drawn from its own side.
 
@@ -93,10 +95,10 @@ class KappaFields(BaseModel):
     kappa_type: Optional[KappaType] = Field(
         description=(
             "The kind of kappa reported in `kappa`:\n\n"
-            "- `fleiss`: Fleiss' kappa between annotators\n"
-            "- `linear_weighted_fleiss`: Fleiss' kappa between annotators, giving partial credit to close ratings\n"
-            "- `cohen`: Cohen's kappa between a judge and the annotators, or between one annotator and the others\n"
-            "- `linear_weighted_cohen`: Cohen's kappa between a judge and the annotators, or between one annotator and the others, giving partial credit to close ratings\n"
+            "- `fleiss`: Fleiss' kappa between three or more annotators\n"
+            "- `linear_weighted_fleiss`: Fleiss' kappa between three or more annotators, giving partial credit to close ratings\n"
+            "- `cohen`: Cohen's kappa between exactly two annotators, between a judge and the annotators, or between one annotator and the others\n"
+            "- `linear_weighted_cohen`: Cohen's kappa between exactly two annotators, between a judge and the annotators, or between one annotator and the others, giving partial credit to close ratings\n"
         )
     )
     kappa_blank_reason: Optional[KappaBlankReason] = Field(
@@ -757,6 +759,7 @@ class _AnswerKindTally:
     agreements."""
 
     def __init__(self, kappa_family: KappaFamily) -> None:
+        self.kappa_family = kappa_family
         self.first_answer_counts: Counter = Counter()
         # Fleiss draws both answers from one pool.
         self.second_answer_counts: Counter = (
@@ -791,8 +794,13 @@ class _KappaTally:
     evaluator)'s compared pairs are replaced, so a trend does not recount every
     pair at every bucket."""
 
-    def __init__(self, kappa_family: KappaFamily) -> None:
+    def __init__(
+        self,
+        kappa_family: KappaFamily,
+        evaluator_id_to_kappa_family: Optional[Dict[Optional[str], KappaFamily]] = None,
+    ) -> None:
         self.kappa_family = kappa_family
+        self.evaluator_id_to_kappa_family = evaluator_id_to_kappa_family or {}
         self.item_and_evaluator_to_answer_pairs_compared: Dict[
             Tuple[str, Optional[str]], AnswerPairsCompared
         ] = {}
@@ -827,7 +835,9 @@ class _KappaTally:
         for answer_kind, pairs_of_kind in answer_kind_to_pairs.items():
             tally = self.answer_kind_and_evaluator_to_tally.get((answer_kind, evaluator_id))
             if tally is None:
-                tally = _AnswerKindTally(self.kappa_family)
+                tally = _AnswerKindTally(
+                    self.evaluator_id_to_kappa_family.get(evaluator_id, self.kappa_family)
+                )
                 self.answer_kind_and_evaluator_to_tally[(answer_kind, evaluator_id)] = tally
             tally.count(item_id, largest_possible_rating_gap, pairs_of_kind, change)
 
@@ -844,18 +854,24 @@ class _KappaTally:
         `agreement` and `pair_count` cover the pairs its kappa uses, or every
         pair of the kind when no evaluator counts, in which case the kappa is
         blank with `too_few_items` and no chance agreement. It is blank with
-        `everyone_agreed` when chance agreement is 1."""
-        reported_kind_to_evaluator_to_tallies: Dict[
-            str, Dict[Optional[str], List[_AnswerKindTally]]
+        `everyone_agreed` when chance agreement is 1. Evaluators whose kappa is
+        Cohen's and evaluators whose kappa is Fleiss' never share an entry: a
+        kind compared by both gets one entry for each, Cohen's first."""
+        reported_kind_and_family_to_evaluator_to_tallies: Dict[
+            Tuple[str, str], Dict[Optional[str], List[_AnswerKindTally]]
         ] = defaultdict(lambda: defaultdict(list))
         for (answer_kind, evaluator_id), tally in self.answer_kind_and_evaluator_to_tally.items():
             if tally.item_id_to_agreements:
-                reported_kind_to_evaluator_to_tallies[_reported_answer_kind(answer_kind)][
-                    evaluator_id
-                ].append(tally)
+                reported_kind_and_family_to_evaluator_to_tallies[
+                    (_reported_answer_kind(answer_kind), tally.kappa_family)
+                ][evaluator_id].append(tally)
         kappa_by_kind: List[Dict[str, Any]] = []
-        for reported_kind in ("binary", "rating"):
-            evaluator_to_tallies = reported_kind_to_evaluator_to_tallies.get(reported_kind)
+        for reported_kind, kappa_family in (
+            ("binary", "cohen"), ("binary", "fleiss"), ("rating", "cohen"), ("rating", "fleiss")
+        ):
+            evaluator_to_tallies = reported_kind_and_family_to_evaluator_to_tallies.get(
+                (reported_kind, kappa_family)
+            )
             if not evaluator_to_tallies:
                 continue
             tallies_counted = [
@@ -882,9 +898,9 @@ class _KappaTally:
                 "pair_count": kind_pair_count,
                 "kappa": None,
                 "kappa_type": (
-                    f"linear_weighted_{self.kappa_family}"
+                    f"linear_weighted_{kappa_family}"
                     if reported_kind == "rating"
-                    else self.kappa_family
+                    else kappa_family
                 ),
                 "kappa_blank_reason": None,
                 "chance_agreement": None,
@@ -966,20 +982,48 @@ def agreement_and_kappa_between_annotators(
 ) -> AgreementAndKappa:
     """Mean agreement between annotators, over every item and evaluator that
     two or more of them answered, how many pairs of answers that covers, and
-    the Fleiss' kappa of each kind of answer. Ratings use each evaluator's live
-    rating scale from `rating_scales` (see `rating_scales_for`). Returns
-    (None, 0, []) when nothing can be compared."""
-    kappa_tally = _KappaTally("fleiss")
+    the kappa of each kind of answer. An evaluator whose compared pairs are
+    between exactly two annotators uses Cohen's kappa, the annotator id that
+    sorts first always on the first side. One with three or more uses Fleiss'.
+    Ratings use each evaluator's live rating scale from `rating_scales` (see
+    `rating_scales_for`). Returns (None, 0, []) when nothing can be compared."""
     agreements: List[float] = []
+    item_and_evaluator_to_answer_pairs_compared: Dict[
+        Tuple[str, Optional[str]], AnswerPairsCompared
+    ] = {}
+    evaluator_id_to_annotator_ids_compared: Dict[Optional[str], set] = defaultdict(set)
     for item_and_evaluator, annotator_id_to_answer in _annotator_answers_per_item_and_evaluator(
         annotations
     ).items():
+        annotator_ids = sorted(annotator_id_to_answer)
         answer_pairs_compared = _answer_pairs_compared_between_annotators(
-            list(annotator_id_to_answer.values()), rating_scales.get(item_and_evaluator[1])
+            [annotator_id_to_answer[annotator_id] for annotator_id in annotator_ids],
+            rating_scales.get(item_and_evaluator[1]),
         )
         agreements.extend(_agreements(answer_pairs_compared[1]))
         if with_kappa:
-            kappa_tally.replace(item_and_evaluator, answer_pairs_compared)
+            item_and_evaluator_to_answer_pairs_compared[item_and_evaluator] = answer_pairs_compared
+            evaluator_id_to_annotator_ids_compared[item_and_evaluator[1]].update(
+                annotator_id
+                for first_annotator_id, second_annotator_id in combinations(annotator_ids, 2)
+                if _agreement_between_two_answers(
+                    annotator_id_to_answer[first_annotator_id],
+                    annotator_id_to_answer[second_annotator_id],
+                    1.0,
+                )
+                is not None
+                for annotator_id in (first_annotator_id, second_annotator_id)
+            )
+    kappa_tally = _KappaTally(
+        "fleiss",
+        {
+            evaluator_id: "cohen"
+            for evaluator_id, annotator_ids_compared in evaluator_id_to_annotator_ids_compared.items()
+            if len(annotator_ids_compared) == 2
+        },
+    )
+    for item_and_evaluator, answer_pairs_compared in item_and_evaluator_to_answer_pairs_compared.items():
+        kappa_tally.replace(item_and_evaluator, answer_pairs_compared)
     return (*_mean_agreement(agreements), kappa_tally.kappa_by_kind())
 
 
@@ -1230,7 +1274,7 @@ def agreement_response(
     judge against the annotators and the annotators with each other on it
     (`inter_annotator`), each with its kappa."""
     human_agreement, human_pair_count = agreement_and_kappa_between_annotators(
-        annotations, rating_scales
+        annotations, rating_scales, with_kappa=False
     )[:2]
     evaluator_id_to_annotations = _rows_per_evaluator(annotations)
     evaluator_id_to_evaluator_runs = _rows_per_evaluator(evaluator_runs)
