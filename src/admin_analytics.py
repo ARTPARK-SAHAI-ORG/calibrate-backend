@@ -157,8 +157,13 @@ def get_analytics(start: Optional[date], end: date, tz_offset_minutes: int) -> d
             f"""WITH {_VALID_ORGS}
                 SELECT v.uuid, v.name, v.is_personal,
                        (SELECT COUNT(*) FROM organization_members m JOIN users u ON u.uuid = m.user_id
-                         WHERE m.org_uuid = v.uuid AND m.deleted_at IS NULL AND NOT {_STUB_USER}) AS members
-                  FROM valid_orgs v"""
+                         WHERE m.org_uuid = v.uuid AND m.deleted_at IS NULL AND NOT {_STUB_USER}) AS members,
+                       ou.email AS owner_email, COALESCE(ou.first_name, '') AS owner_first_name,
+                       COALESCE(ou.last_name, '') AS owner_last_name
+                  FROM valid_orgs v
+                  LEFT JOIN organization_members om
+                    ON om.org_uuid = v.uuid AND om.role = 'owner' AND om.deleted_at IS NULL
+                  LEFT JOIN users ou ON ou.uuid = om.user_id"""
         )
         running = q(
             f"""WITH {_VALID_ORGS}, {_EVALS}
@@ -286,6 +291,11 @@ def get_analytics(start: Optional[date], end: date, tz_offset_minutes: int) -> d
                 "name": o["name"],
                 "is_personal": bool(o["is_personal"]),
                 "members": o["members"],
+                "owner": (
+                    {"email": o["owner_email"], "first_name": o["owner_first_name"],
+                     "last_name": o["owner_last_name"]}
+                    if o["owner_email"] else None
+                ),
                 "last_active_at": last_active.get(o["uuid"]),
                 **{m: a[m] for m in RANGE_METRICS},
                 "evaluations": sum(a[k] for k in EVAL_KINDS),

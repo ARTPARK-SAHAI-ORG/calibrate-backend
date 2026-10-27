@@ -89,11 +89,18 @@ class DayCounts(BaseModel):
     labelling_jobs_finished: int = Field(description="Labelling jobs finished that day")
 
 
+class WorkspaceOwner(BaseModel):
+    email: str = Field(description="Owner's email address")
+    first_name: str = Field(description="Owner's given name")
+    last_name: str = Field(description="Owner's family name")
+
+
 class WorkspaceRow(PeriodCounts):
     org_uuid: str = Field(description="Workspace ID")
     name: str = Field(description="Workspace name")
     is_personal: bool = Field(description="Whether this is someone's personal workspace")
     members: int = Field(description="Members of the workspace now")
+    owner: Optional[WorkspaceOwner] = Field(description="Who owns the workspace now")
     last_active_at: Optional[str] = Field(
         description="When the workspace last started an evaluation, received a trace, or collected a label, all time (ISO 8601 UTC)"
     )
