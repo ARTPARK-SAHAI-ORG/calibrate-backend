@@ -32,11 +32,13 @@
   "evaluators": [
     {
       "name": "Explains step by step",
+      "reply_name": "Step-by-step reply",
       "type": "binary",
       "prompt": "Does the tutor explain the next step instead of giving the final answer straight away?"
     },
     {
       "name": "Encouraging tone",
+      "reply_name": "Warm tone",
       "type": "rating",
       "scale_min": 1,
       "scale_max": 5,
