@@ -46,6 +46,9 @@ def _seed(conn):
     for org, user, role in [(A, ALICE, "owner"), (A, BOB, "admin"), (A, STUB, "admin"),
                             (B, ALICE, "owner"), (C, BOB, "owner")]:
         _ins(conn, "organization_members", org_uuid=org, user_id=user, role=role)
+    # Bob has left his personal workspace, so it has no owner now.
+    conn.execute("UPDATE organization_members SET deleted_at = '2026-10-09 00:00:00' "
+                 "WHERE org_uuid = ? AND user_id = ?", (C, BOB))
 
     agents = {org: str(uuid.uuid4()) for org in (A, B, GONE, STUB_ORG)}
     for org, ag in agents.items():
@@ -196,6 +199,7 @@ def test_end_before_start_is_422(env):
     assert r.status_code == 422
 
 
+ALICE_OWNER = {"email": "alice@example.com", "first_name": "Alice", "last_name": ""}
 ZERO_DAY = dict(new_users=0, active_workspaces=0, test_runs=0, model_comparisons=0,
                 simulations=0, stt=0, tts=0, labelling_evaluator_runs=0, failed_evaluations=0,
                 traces_received=0, traces_scored=0, labels_collected=0, labelling_jobs_finished=0)
@@ -233,15 +237,16 @@ def test_numbers_for_a_period(env):
     ]
     assert body["workspaces"] == [
         {**ZERO_RANGE, "org_uuid": B, "name": "Alice personal", "is_personal": True, "members": 1,
-         "last_active_at": "2026-10-12T23:00:00Z", "evaluations": 3, "failed_evaluations": 1,
+         "owner": ALICE_OWNER, "last_active_at": "2026-10-12T23:00:00Z", "evaluations": 3, "failed_evaluations": 1,
          "model_comparisons": 1, "stt": 1, "tts": 1, "cost": 1.25},
         {**ZERO_RANGE, "org_uuid": A, "name": "Acme", "is_personal": False, "members": 2,
+         "owner": ALICE_OWNER,
          "last_active_at": "2026-10-12T09:30:00Z", "evaluations": 4, "failed_evaluations": 2,
          "test_runs": 2, "simulations": 2, "cost": 0.5, "traces_received": 2,
          "traces_scored": 1, "labelling_jobs_finished": 1, "labels_collected": 3,
          "items_labelled": 2, "limit_hits": 2},
-        {**ZERO_RANGE, "org_uuid": C, "name": "Bob personal", "is_personal": True, "members": 1,
-         "last_active_at": None},
+        {**ZERO_RANGE, "org_uuid": C, "name": "Bob personal", "is_personal": True, "members": 0,
+         "owner": None, "last_active_at": None},
     ]
     # A failed trace scoring is not an evaluation, so it is not listed.
     assert body["failures_total"] == 3
