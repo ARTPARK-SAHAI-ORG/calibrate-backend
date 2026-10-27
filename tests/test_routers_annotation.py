@@ -1415,12 +1415,12 @@ def test_annotation_agreement_endpoints(client):
     h = auth["headers"]
 
     # Account-wide trend (no tasks)
-    trend = client.get("/annotation-agreement/trend", headers=h)
+    trend = client.get("/annotation-agreement", headers=h)
     assert trend.status_code == 200
 
     # With task_id filter (missing task)
     missing_task = client.get(
-        "/annotation-agreement/trend", params={"task_id": "missing"}, headers=h
+        "/annotation-agreement", params={"task_id": "missing"}, headers=h
     )
     assert missing_task.status_code == 404
 
@@ -1978,7 +1978,7 @@ def test_deleted_annotator_stops_counting_in_agreement(client):
 
     task_agreement = client.get(f"/annotation-tasks/{task_uuid}/agreement", headers=h).json()
     assert task_agreement["human_human"]["current"] == 0.5
-    workspace_trend = client.get("/annotation-agreement/trend", headers=h).json()
+    workspace_trend = client.get("/annotation-agreement", headers=h).json()
     assert workspace_trend["human_human"]["current"] == 0.5
     assert task_list_row()["has_agreement"] is True
     assert client.get(f"/annotation-tasks/{task_uuid}", headers=h).json()["has_agreement"] is True
@@ -1988,7 +1988,7 @@ def test_deleted_annotator_stops_counting_in_agreement(client):
 
     task_agreement = client.get(f"/annotation-tasks/{task_uuid}/agreement", headers=h).json()
     assert task_agreement["human_human"]["current"] is None
-    workspace_trend = client.get("/annotation-agreement/trend", headers=h).json()
+    workspace_trend = client.get("/annotation-agreement", headers=h).json()
     assert workspace_trend["human_human"]["current"] is None
     assert task_list_row()["has_agreement"] is False
     assert client.get(f"/annotation-tasks/{task_uuid}", headers=h).json()["has_agreement"] is False
@@ -2058,7 +2058,7 @@ def test_workspace_trend_lists_evaluators_that_were_only_labelled(client):
     assert client.delete(f"/evaluators/{deleted['uuid']}", headers=h).status_code == 200
 
     for params in ({}, {"task_id": task_uuid}):
-        trend = client.get("/annotation-agreement/trend", params=params, headers=h).json()
+        trend = client.get("/annotation-agreement", params=params, headers=h).json()
         assert [row["evaluator_id"] for row in trend["evaluators"]] == [
             judged["uuid"], labelled_only["uuid"]
         ]
@@ -3637,11 +3637,11 @@ def test_rating_agreement_divides_by_the_rubric_width(client):
     assert detail["stats"]["current_agreement"] == 0.75
 
     # Workspace trend and the per-evaluator trend read it too.
-    trend = client.get("/annotation-agreement/trend", headers=h).json()
+    trend = client.get("/annotation-agreement", headers=h).json()
     assert trend["human_human"]["current"] == 0.75
     assert trend["evaluators"][0]["current"] == 0.625
     task_trend = client.get(
-        "/annotation-agreement/trend", params={"task_id": task_uuid}, headers=h
+        "/annotation-agreement", params={"task_id": task_uuid}, headers=h
     ).json()
     assert task_trend["human_human"]["current"] == 0.75
     assert task_trend["evaluators"][0]["current"] == 0.625
@@ -3813,7 +3813,7 @@ def test_kappa_sits_beside_every_agreement_over_many_items(client):
     assert_agreement_blocks(agreement)
     for params in ({}, {"task_id": task_uuid}):
         assert_agreement_blocks(
-            client.get("/annotation-agreement/trend", params=params, headers=h).json()
+            client.get("/annotation-agreement", params=params, headers=h).json()
         )
 
     evaluator_trend = client.get(
@@ -3901,7 +3901,7 @@ def test_kappa_blank_reason_follows_the_answers_compared(client):
 
     def blank_reasons_and_chance_agreements():
         task_agreement = client.get(f"/annotation-tasks/{task_uuid}/agreement", headers=h).json()
-        workspace_trend = client.get("/annotation-agreement/trend", headers=h).json()
+        workspace_trend = client.get("/annotation-agreement", headers=h).json()
         listed = client.get("/annotators", headers=h).json()
         detail = client.get(f"/annotators/{annotator_ids[0]}", headers=h).json()
         inter_annotator_blocks = [

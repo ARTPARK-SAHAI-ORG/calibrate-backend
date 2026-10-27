@@ -670,7 +670,7 @@ def get_annotation_task_endpoint(
     # an N+1 query pattern on the per-item agreement computation. Per-item
     # agreement uses whichever evaluator version actually ran on each slot —
     # the live-version filter is reserved for AGGREGATED agreement (task-level
-    # `/agreement` and account-level `/annotation-agreement/trend`).
+    # `/agreement` and account-level `/annotation-agreement`).
     all_annotations = get_annotations_for_task(task_uuid)
     all_evaluator_runs = get_evaluator_runs_for_task(task_uuid)
     item_id_to_annotations: Dict[str, List[Dict[str, Any]]] = {}
@@ -3088,7 +3088,7 @@ def task_summary(
     # `evaluator_agreement` compares annotators against THAT run. Aggregated
     # agreement (task-level / account-level) is the only place we restrict to
     # live-version runs — see `/annotation-tasks/{uuid}/agreement` and
-    # `/annotation-agreement/trend`.
+    # `/annotation-agreement`.
     runs = get_evaluator_runs_for_task(task_uuid)
     annotations = get_annotations_for_task(task_uuid)
 

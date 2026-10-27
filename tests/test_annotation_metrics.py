@@ -1345,3 +1345,20 @@ def test_fleiss_kappa_matches_the_textbook_formula_when_every_item_has_the_same_
             (agreement - chance_agreement) / (1 - chance_agreement), abs=1e-3
         )
     assert kappa_count > 250
+
+
+def test_agreement_on_item_never_works_out_kappa(monkeypatch):
+    import annotation_metrics
+
+    def no_kappa(*_args, **_kwargs):
+        raise AssertionError("one item never shows kappa, so none is worked out")
+
+    monkeypatch.setattr(annotation_metrics._KappaTally, "replace", no_kappa)
+    annotations = [
+        {"item_id": "i1", "evaluator_id": "ev", "annotator_id": who, "value": {"value": answer}}
+        for who, answer in (("asha", True), ("ben", False))
+    ]
+    runs = [{"item_id": "i1", "evaluator_id": "ev", "value": {"value": True}, "completed_at": "x"}]
+    result = agreement_on_item(annotations, runs, ["ev"])
+    assert result["human_human"] == {"agreement": 0.0, "pair_count": 1}
+    assert result["evaluators"] == [{"evaluator_id": "ev", "agreement": 0.5, "pair_count": 2}]

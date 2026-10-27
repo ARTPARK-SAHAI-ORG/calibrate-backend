@@ -27,8 +27,8 @@ from annotation_metrics import (
 router = APIRouter(prefix="/annotation-agreement", tags=["annotation-agreement"])
 
 
-@router.get("/trend", summary="Get workspace agreement")
-def agreement_trend(
+@router.get("", summary="Get workspace agreement")
+def workspace_agreement(
     task_id: Optional[str] = Query(
         None,
         description="Annotation task to scope metrics to. Omit for the whole workspace",
