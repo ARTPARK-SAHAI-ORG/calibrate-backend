@@ -613,3 +613,32 @@ def test_evaluator_run_with_specific_item_ids(client):
             headers=h,
         )
     assert resp.status_code == 200
+
+
+def test_build_evaluators_block_shows_the_version_the_scores_used_once():
+    """A run whose snapshot pins a version none of its scores use (a default
+    evaluator moved onto the workspace's own copy) lists that evaluator once,
+    under the version its scores used."""
+    from routers.annotation_tasks import _build_evaluators_block_for_eval_job
+    from unittest.mock import patch
+
+    job_details = {
+        "evaluators": [
+            {"evaluator_id": "ev-fork", "evaluator_version_id": "v-template", "name": "Safety"},
+            {"evaluator_id": "ev-own", "evaluator_version_id": "v-own", "name": "Helpfulness"},
+        ]
+    }
+    raw_runs = [
+        {"evaluator_id": "ev-fork", "evaluator_version_id": "v-fork"},
+        {"evaluator_id": "ev-fork", "evaluator_version_id": "v-fork"},
+        {"evaluator_id": "ev-own", "evaluator_version_id": "v-own"},
+    ]
+    with patch(
+        "routers.annotation_tasks.get_evaluator",
+        side_effect=lambda uuid: {"uuid": uuid, "name": uuid, "output_type": "binary"},
+    ):
+        block = _build_evaluators_block_for_eval_job(job_details, raw_runs)
+    assert [(e["uuid"], e["evaluator_version_id"]) for e in block] == [
+        ("ev-fork", "v-fork"),
+        ("ev-own", "v-own"),
+    ]

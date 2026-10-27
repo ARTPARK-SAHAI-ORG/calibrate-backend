@@ -2477,10 +2477,20 @@ def _build_evaluators_block_for_eval_job(
     # version actually used.
     slots: List[tuple] = []
     seen: set = set()
+    run_versions_by_evaluator: Dict[str, List[Optional[str]]] = {}
+    for r in evaluator_runs_in_this_job or []:
+        versions = run_versions_by_evaluator.setdefault(r.get("evaluator_id"), [])
+        if r.get("evaluator_version_id") not in versions:
+            versions.append(r.get("evaluator_version_id"))
     for entry in snapshot:
         if not isinstance(entry, dict):
             continue
         slot = (entry.get("evaluator_id"), entry.get("evaluator_version_id"))
+        # Runs moved onto a workspace's own copy of a default evaluator kept
+        # the template's version in their snapshot; show the version scored.
+        run_versions = run_versions_by_evaluator.get(slot[0])
+        if run_versions and slot[1] not in run_versions:
+            slot = (slot[0], run_versions[0])
         if slot[0] and slot not in seen:
             seen.add(slot)
             slots.append(slot)
