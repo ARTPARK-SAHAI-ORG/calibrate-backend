@@ -1,4 +1,4 @@
-from typing import Optional, List, Dict, Any, Tuple, Union
+from typing import Optional, List, Dict, Any, Union
 from fastapi import APIRouter, HTTPException, Depends, Path, Query
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 from typing import Literal
@@ -77,6 +77,7 @@ from annotation_eval_runner import (
     start_annotation_eval_job,
     TOOL_CALL_EVALUATOR_TYPE,
 )
+from annotation_metrics import KappaFields
 from utils import (
     utc_now,
     job_slot,
@@ -273,12 +274,45 @@ class HumanAgreementBlock(BaseModel):
     )
 
 
-class EvaluatorsWithHumansBlock(HumanAgreementBlock):
+class EvaluatorsWithHumansBlock(BaseModel):
     current: Optional[float] = Field(
         description="Current mean agreement between the evaluators and the annotators, weighted by how many pairs each evaluator compared"
     )
     pair_count: int = Field(
         description="How many evaluator and annotator pairs the current value averages over"
+    )
+
+
+class InterAnnotatorAgreement(KappaFields):
+    current: Optional[float] = Field(
+        description="Current mean pairwise agreement among annotators on this evaluator"
+    )
+    pair_count: int = Field(
+        description="How many annotator pairs the current value averages over"
+    )
+
+
+class AnswerSummary(BaseModel):
+    count: int = Field(description="How many answers there are")
+    true_count: Optional[int] = Field(description="How many pass/fail answers are a pass")
+    mean: Optional[float] = Field(description="Mean of the rating answers")
+
+
+class EvaluatorAgreement(KappaFields):
+    evaluator_id: str = Field(description="ID of the evaluator", examples=[_EXAMPLE_ID])
+    name: Optional[str] = Field(description="Name of the evaluator")
+    current: Optional[float] = Field(
+        description="Current mean agreement between this evaluator's judge and the annotators"
+    )
+    pair_count: int = Field(
+        description="How many judge and annotator pairs the current value averages over"
+    )
+    inter_annotator: InterAnnotatorAgreement = Field(
+        description="Agreement between annotators on this evaluator"
+    )
+    result: AnswerSummary = Field(description="The evaluator's own scores on the task")
+    human_result: Optional[AnswerSummary] = Field(
+        description="The annotators' answers for this evaluator"
     )
 
 
@@ -291,7 +325,7 @@ class TaskAgreementResponse(BaseModel):
     evaluators_with_humans: EvaluatorsWithHumansBlock = Field(
         description="Agreement between the evaluators and the annotators, across every evaluator in `evaluators`"
     )
-    evaluators: List[Dict[str, Any]] = Field(
+    evaluators: List[EvaluatorAgreement] = Field(
         description="Agreement between each evaluator and the annotators, plus that evaluator's own results and the human results, one entry per linked evaluator"
     )
 
@@ -388,14 +422,13 @@ _SummaryProjection = make_projection_params(
     ]
 )
 from annotation_metrics import (
-    agreement_between_annotators,
     agreement_and_kappa_between_judge_and_annotators,
+    agreement_response,
     judge_and_annotators_agreement_on_item,
     judge_answer_summary,
     annotator_answer_summary,
     agreement_on_item,
     has_answers_to_compare,
-    agreement_of_each_evaluator_with_annotators,
     kappa_of_one_kind,
     keep_runs_from_live_versions_of,
     rating_scales_for,
@@ -2994,37 +3027,6 @@ def list_item_evaluator_runs(
 # ============ Agreement (human-vs-human) ============
 
 
-def _agreement_per_linked_evaluator(
-    annotations: List[Dict[str, Any]],
-    evaluator_runs: List[Dict[str, Any]],
-    linked_evaluators: List[Dict[str, Any]],
-    rating_scales: Dict[str, Any],
-) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
-    """For each evaluator linked to the task, its judge's agreement with the
-    annotators. Always returns one entry per linked
-    evaluator (with `current=None, pair_count=0` when there's no overlap yet).
-    Also returns the agreement over all of them."""
-    evaluator_id_to_agreement, agreement_of_all_evaluators = (
-        agreement_of_each_evaluator_with_annotators(
-            annotations,
-            evaluator_runs,
-            [evaluator["uuid"] for evaluator in linked_evaluators],
-            rating_scales=rating_scales,
-        )
-    )
-    agreement_per_evaluator = [
-        {
-            "evaluator_id": evaluator["uuid"],
-            "name": evaluator.get("name"),
-            **evaluator_id_to_agreement[evaluator["uuid"]],
-            "result": judge_answer_summary(evaluator_runs, evaluator["uuid"]),
-            "human_result": annotator_answer_summary(annotations, evaluator["uuid"]),
-        }
-        for evaluator in linked_evaluators
-    ]
-    return agreement_per_evaluator, agreement_of_all_evaluators
-
-
 @router.get("/{task_uuid}/agreement", response_model=TaskAgreementResponse, summary="Get task agreement", tags=["Public API"])
 def task_agreement(
     task_uuid: str = Path(
@@ -3041,26 +3043,17 @@ def task_agreement(
         get_evaluator_runs_for_task(task_uuid), linked_evaluators
     )
 
-    rating_scales = rating_scales_for(annotations, live_evaluator_version_runs)
-    annotator_agreement, annotator_pair_count = agreement_between_annotators(
-        annotations, rating_scales
-    )
-    agreement_per_evaluator, agreement_of_all_evaluators = _agreement_per_linked_evaluator(
+    agreement = agreement_response(
         annotations,
         live_evaluator_version_runs,
         linked_evaluators,
-        rating_scales,
+        rating_scales_for(annotations, live_evaluator_version_runs),
     )
-
-    return {
-        "task_id": task_uuid,
-        "human_human": {
-            "current": annotator_agreement,
-            "pair_count": annotator_pair_count,
-        },
-        "evaluators_with_humans": agreement_of_all_evaluators,
-        "evaluators": agreement_per_evaluator,
-    }
+    for evaluator_agreement in agreement["evaluators"]:
+        evaluator_id = evaluator_agreement["evaluator_id"]
+        evaluator_agreement["result"] = judge_answer_summary(live_evaluator_version_runs, evaluator_id)
+        evaluator_agreement["human_result"] = annotator_answer_summary(annotations, evaluator_id)
+    return {"task_id": task_uuid, **agreement}
 
 
 @router.get("/{task_uuid}/summary", response_model=TaskSummaryResponse, summary="Get task summary", tags=["Public API"])

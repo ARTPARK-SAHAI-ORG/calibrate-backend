@@ -1891,6 +1891,55 @@ def _post_answers(client, job, evaluator_uuid, item_to_value):
         )
 
 
+def _evaluator_with_scale(client, h, output_type, scale):
+    return client.post(
+        "/evaluators",
+        json={
+            "name": f"{output_type}-{uuid.uuid4().hex[:6]}",
+            "evaluator_type": "llm",
+            "output_type": output_type,
+            "version": {
+                "judge_model": "openai/gpt-4",
+                "system_prompt": "Judge it",
+                "output_config": {"scale": scale},
+            },
+        },
+        headers=h,
+    ).json()
+
+
+_PASS_FAIL_SCALE = [{"value": True, "name": "Pass"}, {"value": False, "name": "Fail"}]
+_ONE_TO_FIVE_SCALE = [{"value": value, "name": str(value)} for value in range(1, 6)]
+
+
+def _store_judge_scores(user_uuid, task_uuid, scores):
+    """Store a finished evaluator-run job on `task_uuid` with one completed
+    judge score per `(item_id, evaluator_id, evaluator_version_id, value)`,
+    without running calibrate. Returns the job's ID."""
+    import db as db_mod
+    from annotation_eval_runner import ANNOTATION_EVAL_JOB_TYPE
+
+    job_id = db_mod.create_job(
+        job_type=ANNOTATION_EVAL_JOB_TYPE,
+        org_uuid=db_mod.get_personal_org_for_user(user_uuid)["uuid"],
+        user_id=user_uuid,
+        status="done",
+        details={"task_id": task_uuid},
+    )
+    db_mod.create_evaluator_runs([
+        {
+            "job_id": job_id,
+            "item_id": item_id,
+            "evaluator_id": evaluator_id,
+            "evaluator_version_id": evaluator_version_id,
+            "status": "completed",
+            "value": value,
+        }
+        for item_id, evaluator_id, evaluator_version_id, value in scores
+    ])
+    return job_id
+
+
 def test_deleted_annotator_stops_counting_in_agreement(client):
     import db as db_mod
 
@@ -1955,58 +2004,10 @@ def test_deleted_annotator_stops_counting_in_agreement(client):
     assert client.get(f"/annotators/{doomed['uuid']}", headers=h).status_code == 404
 
 
-def test_workspace_trend_leaves_out_deleted_evaluators(client):
-    import db as db_mod
-    from annotation_eval_runner import ANNOTATION_EVAL_JOB_TYPE
-
-    auth = _signup(client)
-    h = auth["headers"]
-    llm_ev = _llm_evaluator(client, h)
-    task_uuid = client.post(
-        "/annotation-tasks",
-        json={"name": f"t-{uuid.uuid4().hex[:6]}", "type": "llm", "evaluator_ids": [llm_ev["uuid"]]},
-        headers=h,
-    ).json()["uuid"]
-    item_uuid = client.post(
-        f"/annotation-tasks/{task_uuid}/items",
-        json={"items": [{"payload": llm_item_payload("one")}]},
-        headers=h,
-    ).json()["item_ids"][0]
-    eval_job = db_mod.create_job(
-        job_type=ANNOTATION_EVAL_JOB_TYPE,
-        org_uuid=db_mod.get_personal_org_for_user(auth["user_uuid"])["uuid"],
-        user_id=auth["user_uuid"],
-        status="done",
-        details={"task_id": task_uuid},
-    )
-    db_mod.create_evaluator_runs(
-        [
-            {
-                "job_id": eval_job,
-                "item_id": item_uuid,
-                "evaluator_id": llm_ev["uuid"],
-                "evaluator_version_id": llm_ev["live_version_id"],
-                "status": "completed",
-                "value": {"value": True},
-            }
-        ]
-    )
-
-    def trend_evaluator_ids():
-        trend = client.get("/annotation-agreement/trend", headers=h).json()
-        return [row["evaluator_id"] for row in trend["evaluators"]]
-
-    assert trend_evaluator_ids() == [llm_ev["uuid"]]
-    assert client.delete(f"/evaluators/{llm_ev['uuid']}", headers=h).status_code == 200
-    assert trend_evaluator_ids() == []
-
-
 def test_workspace_trend_lists_evaluators_that_were_only_labelled(client):
     """Evaluator A has judge scores and labels, B and C only labels. B is
     listed after A with no judge numbers but its annotators' agreement. C is
     left out once deleted."""
-    import db as db_mod
-    from annotation_eval_runner import ANNOTATION_EVAL_JOB_TYPE
 
     auth = _signup(client)
     h = auth["headers"]
@@ -2049,24 +2050,11 @@ def test_workspace_trend_lists_evaluators_that_were_only_labelled(client):
                     ],
                 },
             ).status_code == 200
-    eval_job = db_mod.create_job(
-        job_type=ANNOTATION_EVAL_JOB_TYPE,
-        org_uuid=db_mod.get_personal_org_for_user(auth["user_uuid"])["uuid"],
-        user_id=auth["user_uuid"],
-        status="done",
-        details={"task_id": task_uuid},
+    _store_judge_scores(
+        auth["user_uuid"],
+        task_uuid,
+        [(item_id, judged["uuid"], judged["version_uuid"], {"value": True}) for item_id in item_ids],
     )
-    db_mod.create_evaluator_runs([
-        {
-            "job_id": eval_job,
-            "item_id": item_id,
-            "evaluator_id": judged["uuid"],
-            "evaluator_version_id": judged["version_uuid"],
-            "status": "completed",
-            "value": {"value": True},
-        }
-        for item_id in item_ids
-    ])
     assert client.delete(f"/evaluators/{deleted['uuid']}", headers=h).status_code == 200
 
     for params in ({}, {"task_id": task_uuid}):
@@ -2653,8 +2641,6 @@ def _seed_summary_with_agreement(client, h, user_uuid, n_extra_agree=0):
     DISAGREES (agreement 0.0). `n_extra_agree` adds that many further AGREEING
     items (used to push the disagreeing item onto a later page). Returns
     (task_uuid, item_agree, item_disagree, extra_agree_ids)."""
-    import db as db_mod
-    from annotation_eval_runner import ANNOTATION_EVAL_JOB_TYPE
 
     llm_ev = _llm_evaluator(client, h)
     live_version_id = llm_ev["live_version_id"]
@@ -2722,35 +2708,16 @@ def _seed_summary_with_agreement(client, h, user_uuid, n_extra_agree=0):
     # Evaluator runs: match the human (True==True → 1.0) on every agreeing item,
     # disagree (False!=True → 0.0) on item_disagree. Seeded directly to avoid
     # spawning calibrate.
-    eval_job = db_mod.create_job(
-        job_type=ANNOTATION_EVAL_JOB_TYPE,
-        org_uuid=db_mod.get_personal_org_for_user(user_uuid)["uuid"],
-        user_id=user_uuid,
-        status="done",
-        details={"task_id": task_uuid},
-    )
-    db_mod.create_evaluator_runs(
+    _store_judge_scores(
+        user_uuid,
+        task_uuid,
         [
             *[
-                {
-                    "job_id": eval_job,
-                    "item_id": it,
-                    "evaluator_id": llm_ev["uuid"],
-                    "evaluator_version_id": live_version_id,
-                    "status": "completed",
-                    "value": {"value": True, "reasoning": "eval agree"},
-                }
-                for it in agree_ids
+                (item_id, llm_ev["uuid"], live_version_id, {"value": True, "reasoning": "eval agree"})
+                for item_id in agree_ids
             ],
-            {
-                "job_id": eval_job,
-                "item_id": item_disagree,
-                "evaluator_id": llm_ev["uuid"],
-                "evaluator_version_id": live_version_id,
-                "status": "completed",
-                "value": {"value": False, "reasoning": "eval disagree"},
-            },
-        ]
+            (item_disagree, llm_ev["uuid"], live_version_id, {"value": False, "reasoning": "eval disagree"}),
+        ],
     )
     return task_uuid, item_agree, item_disagree, extra_agree_ids
 
@@ -3598,26 +3565,10 @@ def test_rating_agreement_divides_by_the_rubric_width(client):
     evaluator that said 5 agrees 0.625 with them. On the observed range of the
     values alone both numbers would be 0."""
     import db as db_mod
-    from annotation_eval_runner import ANNOTATION_EVAL_JOB_TYPE
 
     auth = _signup(client)
     h = auth["headers"]
-    ev = client.post(
-        "/evaluators",
-        json={
-            "name": f"rating-{uuid.uuid4().hex[:6]}",
-            "evaluator_type": "llm",
-            "output_type": "rating",
-            "version": {
-                "judge_model": "openai/gpt-4",
-                "system_prompt": "Score it",
-                "output_config": {
-                    "scale": [{"value": v, "name": str(v)} for v in range(1, 6)]
-                },
-            },
-        },
-        headers=h,
-    ).json()
+    ev = _evaluator_with_scale(client, h, "rating", _ONE_TO_FIVE_SCALE)
     task_uuid = client.post(
         "/annotation-tasks",
         json={
@@ -3657,25 +3608,8 @@ def test_rating_agreement_divides_by_the_rubric_width(client):
             == 200
         )
 
-    org_uuid = db_mod.get_personal_org_for_user(auth["user_uuid"])["uuid"]
-    eval_job = db_mod.create_job(
-        job_type=ANNOTATION_EVAL_JOB_TYPE,
-        org_uuid=org_uuid,
-        user_id=auth["user_uuid"],
-        status="done",
-        details={"task_id": task_uuid},
-    )
-    db_mod.create_evaluator_runs(
-        [
-            {
-                "job_id": eval_job,
-                "item_id": item_id,
-                "evaluator_id": ev["uuid"],
-                "evaluator_version_id": ev["version_uuid"],
-                "status": "completed",
-                "value": {"value": 5},
-            }
-        ]
+    eval_job = _store_judge_scores(
+        auth["user_uuid"], task_uuid, [(item_id, ev["uuid"], ev["version_uuid"], {"value": 5})]
     )
 
     # Summary rows: humans 3 vs 4 → 1 - 1/4; evaluator 5 vs 3 and 4 → mean of
@@ -3727,33 +3661,11 @@ def test_rating_agreement_divides_by_the_rubric_width(client):
     assert public["human_agreement"]["evaluators"][0]["agreement"] == 0.625
 
 
-def _evaluator_with_scale(client, h, output_type, scale):
-    return client.post(
-        "/evaluators",
-        json={
-            "name": f"{output_type}-{uuid.uuid4().hex[:6]}",
-            "evaluator_type": "llm",
-            "output_type": output_type,
-            "version": {
-                "judge_model": "openai/gpt-4",
-                "system_prompt": "Judge it",
-                "output_config": {"scale": scale},
-            },
-        },
-        headers=h,
-    ).json()
-
-
-_PASS_FAIL_SCALE = [{"value": True, "name": "Pass"}, {"value": False, "name": "Fail"}]
-_ONE_TO_FIVE_SCALE = [{"value": value, "name": str(value)} for value in range(1, 6)]
-
-
 def test_kappa_sits_beside_every_agreement_over_many_items(client):
     """Two annotators and a judge answer four items on a pass/fail evaluator
     and on a 1-to-5 rating evaluator. Items 0 and 3 were answered 40 days ago,
-    so earlier trend points carry their own kappa."""
+    so the evaluator trend's earlier points carry their own kappa."""
     import db as db_mod
-    from annotation_eval_runner import ANNOTATION_EVAL_JOB_TYPE
 
     auth = _signup(client)
     h = auth["headers"]
@@ -3804,27 +3716,14 @@ def test_kappa_sits_beside_every_agreement_over_many_items(client):
                 },
             ).status_code == 200
 
-    org_uuid = db_mod.get_personal_org_for_user(auth["user_uuid"])["uuid"]
-    eval_job = db_mod.create_job(
-        job_type=ANNOTATION_EVAL_JOB_TYPE,
-        org_uuid=org_uuid,
-        user_id=auth["user_uuid"],
-        status="done",
-        details={"task_id": task_uuid},
-    )
-    db_mod.create_evaluator_runs(
+    eval_job = _store_judge_scores(
+        auth["user_uuid"],
+        task_uuid,
         [
-            {
-                "job_id": eval_job,
-                "item_id": item_id,
-                "evaluator_id": evaluator["uuid"],
-                "evaluator_version_id": evaluator["version_uuid"],
-                "status": "completed",
-                "value": {"value": judge_answers[evaluator["uuid"]][item_index]},
-            }
+            (item_id, evaluator["uuid"], evaluator["version_uuid"], {"value": judge_answers[evaluator["uuid"]][item_index]})
             for evaluator in (binary_evaluator, rating_evaluator)
             for item_index, item_id in enumerate(item_ids)
-        ]
+        ],
     )
     earlier_item_ids = (item_ids[0], item_ids[3])
     with db_mod.get_db_connection() as conn:
@@ -3840,11 +3739,11 @@ def test_kappa_sits_beside_every_agreement_over_many_items(client):
         )
         conn.commit()
 
-    def kappa(kappa_value, kappa_type, chance_agreement, kappa_blank_reason=None):
+    def kappa(kappa_value, kappa_type, chance_agreement):
         return {
             "kappa": kappa_value,
             "kappa_type": kappa_type,
-            "kappa_blank_reason": kappa_blank_reason,
+            "kappa_blank_reason": None,
             "chance_agreement": chance_agreement,
         }
 
@@ -4006,19 +3905,16 @@ def test_kappa_blank_reason_follows_the_answers_compared(client):
         listed = client.get("/annotators", headers=h).json()
         detail = client.get(f"/annotators/{annotator_ids[0]}", headers=h).json()
         inter_annotator_blocks = [
-            response["evaluators"][0]["inter_annotator"]
-            for response in (task_agreement, workspace_trend)
-            if response["evaluators"]
+            response["evaluators"][0]["inter_annotator"] for response in (task_agreement, workspace_trend)
         ]
-        flat_blocks = inter_annotator_blocks
         kappa_by_kind_entries = [
             *(entry for annotator in listed for entry in annotator["kappa_by_kind"]),
             *detail["stats"]["kappa_by_kind"],
         ]
-        assert inter_annotator_blocks and len(kappa_by_kind_entries) == 3
+        assert len(kappa_by_kind_entries) == 3
         return {
             (block["kappa_blank_reason"], block["chance_agreement"])
-            for block in flat_blocks + kappa_by_kind_entries
+            for block in inter_annotator_blocks + kappa_by_kind_entries
         }
 
     for job in jobs:

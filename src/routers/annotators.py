@@ -16,15 +16,10 @@ from db import (
 )
 from auth_utils import get_current_org, get_org_jwt_or_api_key, OrgContext
 from annotation_metrics import (
-    ANNOTATOR_VS_OTHERS_KAPPA_TYPE_DESCRIPTION,
     ANSWER_KIND_DESCRIPTION,
-    CHANCE_AGREEMENT_DESCRIPTION,
-    KAPPA_BLANK_REASON_DESCRIPTION,
     KAPPA_BY_KIND_DESCRIPTION,
-    KAPPA_DESCRIPTION,
-    AnnotatorVsOthersKappaType,
     AnswerKind,
-    KappaBlankReason,
+    KappaFields,
     agreement_and_kappa_of_annotator_with_others,
     rating_scales_for,
 )
@@ -45,7 +40,7 @@ class AnnotatorUpdate(BaseModel):
     )
 
 
-class KappaOfAnswerKind(BaseModel):
+class KappaOfAnswerKind(KappaFields):
     answer_kind: AnswerKind = Field(description=ANSWER_KIND_DESCRIPTION)
     agreement: Optional[float] = Field(
         description="Mean agreement with the other annotators over the pairs `kappa` is worked out from, from 0 to 1. When `kappa_blank_reason` is `too_few_items`, over every compared pair of this kind"
@@ -53,14 +48,6 @@ class KappaOfAnswerKind(BaseModel):
     pair_count: int = Field(
         description="How many compared pairs `agreement` averages over"
     )
-    kappa: Optional[float] = Field(description=KAPPA_DESCRIPTION)
-    kappa_type: AnnotatorVsOthersKappaType = Field(
-        description=ANNOTATOR_VS_OTHERS_KAPPA_TYPE_DESCRIPTION
-    )
-    kappa_blank_reason: Optional[KappaBlankReason] = Field(
-        description=KAPPA_BLANK_REASON_DESCRIPTION
-    )
-    chance_agreement: Optional[float] = Field(description=CHANCE_AGREEMENT_DESCRIPTION)
 
 
 class AnnotatorResponse(BaseModel):

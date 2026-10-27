@@ -16,11 +16,11 @@ from db import (
 from auth_utils import get_current_org, OrgContext
 from org_scope import ensure_owned_evaluator
 from annotation_metrics import (
-    agreement_between_annotators,
+    KAPPA_FIELDS,
+    agreement_response,
     keep_runs_from_live_versions_of,
     rating_scales_for,
     agreement_between_judge_and_annotators_over_time_by_version_and_task,
-    agreement_of_each_evaluator_with_annotators,
 )
 
 
@@ -46,11 +46,6 @@ def agreement_trend(
         annotations = get_annotations_for_org(ctx.org_uuid)
         all_evaluator_version_runs = get_evaluator_runs_for_org(ctx.org_uuid)
 
-    rating_scales = rating_scales_for(annotations, all_evaluator_version_runs)
-    annotator_agreement, annotator_pair_count = agreement_between_annotators(
-        annotations, rating_scales
-    )
-
     evaluator_ids = list(
         dict.fromkeys(
             row["evaluator_id"]
@@ -68,32 +63,14 @@ def agreement_trend(
     live_evaluator_version_runs = keep_runs_from_live_versions_of(
         all_evaluator_version_runs, evaluator_id_to_evaluator.values()
     )
-
-    evaluator_id_to_agreement, agreement_of_all_evaluators = (
-        agreement_of_each_evaluator_with_annotators(
-            annotations,
-            live_evaluator_version_runs,
-            evaluator_ids,
-            rating_scales=rating_scales,
-        )
-    )
-    agreement_per_evaluator = [
-        {
-            "evaluator_id": evaluator_id,
-            "name": evaluator_id_to_evaluator[evaluator_id].get("name"),
-            **evaluator_id_to_agreement[evaluator_id],
-        }
-        for evaluator_id in evaluator_ids
-    ]
-
     return {
         "task_id": task_id,
-        "human_human": {
-            "current": annotator_agreement,
-            "pair_count": annotator_pair_count,
-        },
-        "evaluators_with_humans": agreement_of_all_evaluators,
-        "evaluators": agreement_per_evaluator,
+        **agreement_response(
+            annotations,
+            live_evaluator_version_runs,
+            [evaluator_id_to_evaluator[evaluator_id] for evaluator_id in evaluator_ids],
+            rating_scales_for(annotations, all_evaluator_version_runs),
+        ),
     }
 
 
@@ -178,10 +155,7 @@ def evaluator_agreement_trend(
         return {
             "current": latest_bucket["agreement"],
             "pair_count": latest_bucket["pair_count"],
-            "kappa": latest_bucket["kappa"],
-            "kappa_type": latest_bucket["kappa_type"],
-            "kappa_blank_reason": latest_bucket["kappa_blank_reason"],
-            "chance_agreement": latest_bucket["chance_agreement"],
+            **{key: latest_bucket[key] for key in KAPPA_FIELDS},
         }
 
     task_id_to_task = get_annotation_tasks_by_uuids(task_ids_with_scores)

@@ -543,7 +543,7 @@ actions:
         readOnlyHint: true
         openWorldHint: true
         description: |
-          Get human-vs-human and human-vs-evaluator agreement metrics for a task, with a trend series.
+          Get human-vs-human and human-vs-evaluator agreement metrics for a task, with a chance-corrected kappa for each evaluator.
   - target: $.paths['/annotation-tasks/{task_uuid}/summary'].get
     update:
       x-speakeasy-group: annotation_tasks
