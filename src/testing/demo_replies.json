@@ -153,10 +153,20 @@
       ]
     },
     "demo_verdicts": {
-      "Arjun, wants the answer fast|Asks for the answer only": {"Explains step by step": false, "Encouraging tone": 2}
+      "Arjun, wants the answer fast|Asks for the answer only": {
+        "Explains step by step": {"pass": false, "reasoning": "The tutor gave the final answer 4/5 without asking the student to try any step."},
+        "Encouraging tone": {"score": 2, "reasoning": "The tutor answers in one short line with no praise or encouragement."}
+      }
     },
-    "demo_reasoning_fail": "The tutor gave the final answer 4/5 without asking the student to try any step.",
-    "demo_reasoning_pass": "The tutor asked the student to work out the next step before confirming the answer."
+    "demo_reasoning_pass": "The tutor asked the student to work out the next step before confirming the answer.",
+    "demo_voice_latency_seconds": {
+      "stt/ttft": 0.31,
+      "llm/ttft": 0.58,
+      "tts/ttft": 0.27,
+      "stt/processing_time": 0.35,
+      "llm/processing_time": 0.92,
+      "tts/processing_time": 0.41
+    }
   },
   "stt_dataset": {
     "name": "Tutor questions in Hindi",
@@ -168,6 +178,9 @@
     ],
     "providers": ["sarvam", "deepgram", "google"],
     "demo_wer": {"sarvam": 0.08, "deepgram": 0.21, "google": 0.14},
+    "demo_cer": {"sarvam": 0.048, "deepgram": 0.126, "google": 0.084},
+    "demo_sarvam_llm_wer": {"sarvam": 0.056, "deepgram": 0.147, "google": 0.098},
+    "demo_sarvam_llm_cer": {"sarvam": 0.036, "deepgram": 0.0945, "google": 0.063},
     "demo_judge_pass_rate": {"sarvam": 1.0, "deepgram": 0.67, "google": 0.67},
     "demo_judge_reasoning_pass": "The transcript keeps the meaning of what the student said.",
     "demo_judge_reasoning_fail": "The transcript changes a number, so the meaning of the question is lost."
@@ -189,7 +202,6 @@
   "human_alignment": {
     "task_name": "Check tutor replies",
     "evaluator": "Explains step by step",
-    "annotators": ["Meena", "Kabir"],
-    "items_from": "the four test replies above"
+    "annotators": ["Meena", "Kabir"]
   }
 }

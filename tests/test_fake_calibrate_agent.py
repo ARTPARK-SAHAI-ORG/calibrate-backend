@@ -719,9 +719,10 @@ def test_demo_benchmark_uses_demo_replies_verdicts_and_model_numbers():
     assert model_result["cost"]["mean"] == bm["cost"]
     (row,) = job["results"]["leaderboard_summary"]
     assert row["model"] == bm["model"]
-    # 3 cases at the model's pass rate, rounded to whole cases.
-    assert model_result["passed"] == round(3 * bm["pass_rate"] / 100)
-    assert float(row["pass_rate"]) == pytest.approx(100 * model_result["passed"] / 3)
+    # The summary counts the case verdicts above, so the two always agree.
+    passed_rows = sum(r["passed"] for r in model_result["test_results"])
+    assert model_result["passed"] == passed_rows == 2
+    assert float(row["pass_rate"]) == pytest.approx(100 * 2 / 3)
 
 
 def test_without_demo_flag_the_reply_stays_canned(tmp_path, monkeypatch):
@@ -798,14 +799,35 @@ def test_demo_simulation_failing_verdict_from_demo_verdicts(tmp_path, monkeypatc
     config.write_text(json.dumps({
         "personas": [{"label": persona_name}],
         "scenarios": [{"name": scenario_name}],
-        "evaluators": [{"id": "e1", "name": "Explains step by step", "type": "binary"}],
+        "evaluators": [
+            {"id": "e1", "name": "Explains step by step", "type": "binary"},
+            {"id": "e2", "name": "Encouraging tone", "type": "rating", "scale_min": 1, "scale_max": 5},
+        ],
     }))
     _load_fake().main(["x", "simulations", "--type", "text", "-c", str(config), "-o", str(tmp_path / "o")])
     with open(tmp_path / "o" / "simulation_persona_1_scenario_1" / "evaluation_results.csv") as f:
-        (row,) = csv.DictReader(f)
-    assert verdicts["Explains step by step"] is False
-    assert float(row["value"]) == 0.0
-    assert row["reasoning"] == demo["simulation"]["demo_reasoning_fail"]
+        binary, rating = csv.DictReader(f)
+    assert float(binary["value"]) == 0.0
+    assert binary["reasoning"] == verdicts["Explains step by step"]["reasoning"]
+    assert float(rating["value"]) == verdicts["Encouraging tone"]["score"]
+    assert rating["reasoning"] == verdicts["Encouraging tone"]["reasoning"]
+
+
+def test_demo_tool_call_test_shows_the_expected_call(tmp_path, monkeypatch):
+    import json
+
+    monkeypatch.setenv("FAKE_AI_DEMO", "1")
+    tool_test = next(t for t in _demo()["tests"] if t.get("expected_tool_call"))
+    config = tmp_path / "c.json"
+    config.write_text(json.dumps({"test_cases": [{
+        "id": "t1",
+        "history": [{"role": "user", "content": tool_test["user_message"]}],
+        "evaluation": {"type": "tool_call", "tool_calls": [{"tool": "x", "arguments": {"a": {"match_type": "exact", "value": 1}}}]},
+    }]}))
+    _load_fake().main(["x", "llm", "-c", str(config), "-o", str(tmp_path / "o")])
+    (result,) = json.loads((tmp_path / "o" / "default" / "results.json").read_text())
+    call = tool_test["expected_tool_call"]
+    assert result["output"]["tool_calls"] == [{"tool": call["name"], "arguments": call["arguments"]}]
 
 
 @pytest.mark.parametrize("demo_flag", ["0", "1"])
@@ -951,3 +973,25 @@ def test_demo_stt_reports_cer_and_sarvam_scores_from_wer(tmp_path, monkeypatch):
     assert metrics["cer"] == pytest.approx(wer * 0.6)
     assert metrics["sarvam_llm_wer"] > 0
     assert metrics["sarvam_llm_cer"] > 0
+
+
+def test_demo_metrics_count_passes_from_the_case_verdicts(tmp_path, monkeypatch):
+    """A listed model's pass_rate does not override the case verdicts: one
+    pass and one fail at 75% is 1 of 2, not round(1.5)."""
+    import json
+
+    monkeypatch.setenv("FAKE_AI_DEMO", "1")
+    demo = _demo()
+    passing = next(t for t in demo["tests"] if t["demo"]["passed"])
+    failing = next(t for t in demo["tests"] if not t["demo"]["passed"])
+    bm = next(b for b in demo["benchmark_models"] if b["pass_rate"] < 100)
+    config = tmp_path / "c.json"
+    config.write_text(json.dumps({"test_cases": [
+        {"id": f"t{i}", "history": [{"role": "user", "content": t["user_message"]}]}
+        for i, t in enumerate([passing, failing])
+    ]}))
+    _load_fake().main(["x", "llm", "-c", str(config), "-m", bm["model"], "-o", str(tmp_path / "o")])
+    folder = tmp_path / "o" / bm["model"].replace("/", "__").replace(":", "_")
+    metrics = json.loads((folder / "metrics.json").read_text())
+    assert metrics["passed"] == 1
+    assert metrics["latency_ms"]["p50"] == bm["latency_ms"]
