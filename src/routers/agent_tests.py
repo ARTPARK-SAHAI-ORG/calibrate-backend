@@ -82,6 +82,7 @@ from shared_enums import (
     required_agent_interaction_type,
 )
 from auth_utils import get_current_org, get_org_jwt_or_api_key, OrgContext
+from calibrate_agent.llm.summary import aggregate_criteria, pass_rate_summary
 from read_calibrate_run_output import (
     CliRunFailed,
     no_output_failure,
@@ -221,6 +222,26 @@ _ABORTED_DESCRIPTION = (
     "up to that point are kept, and test cases that never ran are counted "
     "neither as passed nor as failed"
 )
+
+PASS_RATE_DESCRIPTION = (
+    "Percentage of the test cases that passed, counting only the ones that "
+    "produced an answer"
+)
+PASS_RATE_CI_DESCRIPTION = (
+    "Range the pass rate would likely fall in if the run were repeated, with "
+    "95% confidence"
+)
+EVALUATOR_SUMMARY_DESCRIPTION = (
+    "Totals for each evaluator. Each includes `ci`, the range its pass rate or "
+    "mean score would likely fall in if the run were repeated, with 95% "
+    "confidence"
+)
+
+
+class ConfidenceInterval(BaseModel):
+    low: float = Field(description="Lowest likely value")
+    high: float = Field(description="Highest likely value")
+
 
 # Shared so the benchmark leaderboard reads the same wherever it appears.
 LEADERBOARD_SUMMARY_DESCRIPTION = (
@@ -538,6 +559,10 @@ class TestRunStatusResponse(BaseModel):
             "that produced no answer"
         ),
     )
+    pass_rate: Optional[float] = Field(None, description=PASS_RATE_DESCRIPTION)
+    pass_rate_ci: Optional[ConfidenceInterval] = Field(
+        None, description=PASS_RATE_CI_DESCRIPTION
+    )
     latency_ms: Optional[Dict[str, Any]] = Field(
         None,
         description="Aggregated response latency in milliseconds, as `{p50, p95, p99, count}`",
@@ -555,8 +580,7 @@ class TestRunStatusResponse(BaseModel):
         description="The evaluators used in this run. Each verdict in `judge_results` links to one of these by `evaluator_uuid`",
     )
     evaluator_summary: Optional[List[Dict[str, Any]]] = Field(
-        None,
-        description="Totals for each evaluator over the whole run, matching the shape a benchmark reports for each model. Only evaluators that returned a verdict appear",
+        None, description=EVALUATOR_SUMMARY_DESCRIPTION
     )
     results: Optional[List[TestCaseResult]] = Field(
         None, description="Results for each test case"
@@ -1235,9 +1259,8 @@ def _run_item_answers(item: AgentTestRunListItem) -> tuple[int, int]:
     """
     unanswered = item.unanswered_tests or 0
     if item.results:
-        answered = sum(1 for r in item.results if r.passed is not None)
-        failed = sum(1 for r in item.results if r.passed is False)
-        return max(answered - unanswered, 0), max(failed - unanswered, 0)
+        passed, failed = _verdict_counts(r.passed for r in item.results)
+        return max(passed + failed - unanswered, 0), max(failed - unanswered, 0)
     if item.model_results:
         answered = 0
         failed = 0
@@ -1916,35 +1939,17 @@ def _calibrate_config_from_agent_test_job(
     return calibrate_config
 
 
-def _read_agent_test_results_json(output_dir: Path) -> Optional[List[dict]]:
-    """Read results.json from agent test output directory if it exists."""
+def _read_agent_test_json(output_dir: Path, filename: str) -> Any:
+    """Read the first `filename` found under an agent test output directory, or None."""
     if not output_dir or not output_dir.exists():
         return None
     for root, dirs, files in os.walk(output_dir):
-        for file in files:
-            if file == "results.json":
-                file_path = Path(root) / file
-                try:
-                    with open(file_path, "r", encoding="utf-8") as f:
-                        return json.load(f)
-                except Exception:
-                    return None
-    return None
-
-
-def _read_agent_test_metrics_json(output_dir: Path) -> Optional[dict]:
-    """Read metrics.json from agent test output directory if it exists."""
-    if not output_dir or not output_dir.exists():
-        return None
-    for root, dirs, files in os.walk(output_dir):
-        for file in files:
-            if file == "metrics.json":
-                file_path = Path(root) / file
-                try:
-                    with open(file_path, "r", encoding="utf-8") as f:
-                        return json.load(f)
-                except Exception:
-                    return None
+        if filename in files:
+            try:
+                with open(Path(root) / filename, "r", encoding="utf-8") as f:
+                    return json.load(f)
+            except Exception:
+                return None
     return None
 
 
@@ -2035,6 +2040,75 @@ def _merge_test_results_by_test_names(
         else:
             out.append(_pending_test_case_result_placeholder(name))
     return out
+
+
+def _verdict_counts(passed_values) -> tuple[int, int]:
+    """How many cases passed and how many failed. A case with no verdict yet
+    (None) is neither."""
+    values = list(passed_values)
+    return sum(v is True for v in values), sum(v is False for v in values)
+
+
+def _run_totals(
+    metrics_data: Optional[dict], test_results: List[Dict[str, Any]]
+) -> tuple[int, int]:
+    """`(total, passed)` from calibrate's metrics.json, or counted from the
+    rows when it wrote none."""
+    if metrics_data:
+        # A merged re-judge writes `turns` where a first-pass run writes `total`.
+        total = metrics_data.get("total")
+        if total is None:
+            total = metrics_data.get("turns")
+        if total is None:
+            total = len(test_results)
+        return total, metrics_data.get("passed", 0)
+    passed, _ = _verdict_counts(r.get("passed") for r in test_results)
+    return len(test_results), passed
+
+
+def _run_result(
+    test_results: List[Dict[str, Any]], metrics_data: Optional[dict]
+) -> Dict[str, Any]:
+    """The stored fields a single run and each benchmark model share.
+
+    Rows stay plain dicts: calibrate emits `judge_results` as a dict keyed by
+    evaluator name and the read path reshapes it, so building a `ModelResult`
+    here would fail validation.
+    """
+    total, passed = _run_totals(metrics_data, test_results)
+    metrics = metrics_data or {}
+    return {
+        "total_tests": total,
+        "passed": passed,
+        "failed": total - passed,
+        **_summary_fields(metrics_data),
+        "latency_ms": metrics.get("latency_ms"),
+        "cost": metrics.get("cost"),
+        "total_tokens": metrics.get("total_tokens"),
+        **run_counts(metrics_data, test_results),
+        "test_results": test_results,
+    }
+
+
+def _model_result(
+    model: str,
+    test_results: List[Dict[str, Any]],
+    metrics_data: Optional[dict],
+    success: Optional[bool],
+    message: Optional[str] = None,
+) -> Dict[str, Any]:
+    if message is None:
+        message = (
+            f"Benchmark completed successfully for {model}"
+            if metrics_data
+            else f"Benchmark completed for {model}"
+        )
+    return {
+        "model": model,
+        "success": success,
+        "message": message,
+        **_run_result(test_results, metrics_data),
+    }
 
 
 def _benchmark_queued_model_results(
@@ -2336,16 +2410,13 @@ def _enrich_model_results_with_evaluators(
                 tool_call_evaluator,
                 test_uuid_by_name,
             )
-            _enrich_evaluator_summary(mr.get("evaluator_summary"), cache)
 
 
 def _build_evaluator_summary(
-    metrics_data: Optional[dict],
+    criteria: Optional[dict],
 ) -> Optional[List[Dict[str, Any]]]:
-    """Extract per-evaluator benchmark aggregates from calibrate metrics.json."""
-    if not isinstance(metrics_data, dict):
-        return None
-    criteria = metrics_data.get("criteria")
+    """One entry for each evaluator from a calibrate `criteria` block, the one
+    in metrics.json or the one `aggregate_criteria` works out from stored rows."""
     if not isinstance(criteria, dict):
         return None
 
@@ -2362,6 +2433,7 @@ def _build_evaluator_summary(
             "name": metric_key,
             "type": evaluator_type,
             "evaluator_uuid": aggregate.get("evaluator_id"),
+            "ci": aggregate.get("ci"),
         }
 
         if evaluator_type == "binary":
@@ -2389,89 +2461,74 @@ def _build_evaluator_summary(
     return summary or None
 
 
-def evaluator_totals_from_rows(
-    test_results: Optional[List[Dict[str, Any]]],
-    evaluators_block: Optional[List[Dict[str, Any]]],
-    evaluators_by_test_id: Optional[Dict[str, List[Dict[str, Any]]]] = None,
-) -> Optional[List[Dict[str, Any]]]:
-    """Per-evaluator totals over a single run's cases, in the shape a benchmark
-    reports for each model.
+def _summary_fields(metrics_data: Optional[dict]) -> Dict[str, Any]:
+    """The evaluator totals from calibrate's metrics.json, plus its pass rate
+    and likely range when it wrote them. Leaving `pass_rate_ci` out is what
+    tells `fill_run_summaries` to work all three out from the rows instead."""
+    metrics_data = metrics_data or {}
+    fields: Dict[str, Any] = {
+        "evaluator_summary": _build_evaluator_summary(metrics_data.get("criteria"))
+    }
+    if "pass_rate_ci" in metrics_data:
+        fields["pass_rate"] = metrics_data.get("pass_rate")
+        fields["pass_rate_ci"] = metrics_data["pass_rate_ci"]
+    return fields
 
-    Counted from the rows rather than read from calibrate's `metrics.json`,
-    which a single run has never stored, so a run that finished long ago
-    reports its totals too. Only evaluators that returned at least one verdict
-    appear, so a run still going reports what has landed.
+
+def _as_calibrate_row(row: Dict[str, Any]) -> Dict[str, Any]:
+    """A stored case row in the shape calibrate's own summary functions read."""
+    judge_results = row.get("judge_results")
+    return {
+        "test_case": row.get("test_case") or {},
+        "metrics": {
+            "passed": row.get("passed"),
+            "judge_results": judge_results if isinstance(judge_results, dict) else None,
+        },
+        "error": bool(row.get("unanswered")),
+    }
+
+
+def fill_run_summaries(
+    results: Dict[str, Any],
+    details: Dict[str, Any],
+    evaluator_cache: Dict[str, Optional[Dict[str, Any]]],
+) -> None:
+    """Give a run, or each model of a benchmark, its pass rate, likely range
+    and totals for each evaluator.
+
+    A run whose metrics.json did not carry them (it finished before calibrate
+    wrote them, or it is still going) has them worked out from its stored rows
+    by the same calibrate functions. Stored evaluator totals are kept and only
+    gain a range, since the recount matches evaluators by the names in
+    `calibrate_config`, which older runs never stored. Call this before
+    `_enrich_*`, which turns each row's `judge_results` from calibrate's dict
+    into a list.
     """
-    if not test_results or not evaluators_block:
-        return None
-
-    # A benchmark reports calibrate's own key, which carries a suffix when two
-    # evaluators share a display name. That key is the name frozen into the
-    # snapshot, so read it there rather than using the current name, which two
-    # evaluators can share.
-    calibrate_key: Dict[str, str] = {}
-    for snapshot in (evaluators_by_test_id or {}).values():
-        for e in snapshot if isinstance(snapshot, list) else []:
-            if isinstance(e, dict) and e.get("uuid") and e.get("name"):
-                calibrate_key.setdefault(e["uuid"], e["name"])
-
-    verdicts: Dict[str, List[Any]] = {}
-    for row in test_results:
-        if not isinstance(row, dict):
+    evaluators = {
+        e["name"]: e
+        for e in (details.get("calibrate_config") or {}).get("evaluators") or []
+        if isinstance(e, dict) and e.get("name")
+    }
+    for container in results.get("model_results") or [results]:
+        if not isinstance(container, dict):
             continue
-        for entry in row.get("judge_results") or []:
-            if not isinstance(entry, dict):
-                continue
-            uid = entry.get("evaluator_uuid")
-            if not uid:
-                continue
-            value = entry.get("match")
-            if value is None:
-                value = entry.get("score")
-            if value is not None:
-                verdicts.setdefault(uid, []).append(value)
-
-    summary: List[Dict[str, Any]] = []
-    for evaluator in evaluators_block:
-        values = verdicts.get(evaluator.get("uuid"))
-        if not values:
-            continue
-        uid = evaluator.get("uuid")
-        entry = {
-            "metric_key": calibrate_key.get(uid) or evaluator.get("name"),
-            "name": evaluator.get("name"),
-            "type": evaluator.get("output_type"),
-            "evaluator_uuid": uid,
-            "description": evaluator.get("description"),
-        }
-        if evaluator.get("output_type") == "rating":
-            numbers = [v for v in values if isinstance(v, (int, float))]
-            if not numbers:
-                continue
-            entry.update(
-                {
-                    "mean": sum(numbers) / len(numbers),
-                    "min": min(numbers),
-                    "max": max(numbers),
-                    "count": len(numbers),
-                    "scale_min": evaluator.get("scale_min"),
-                    "scale_max": evaluator.get("scale_max"),
-                }
-            )
-        else:
-            passed = sum(1 for v in values if v is True)
-            entry.update(
-                {
-                    "passed": passed,
-                    "total": len(values),
-                    # Out of 100, the scale calibrate itself writes into
-                    # metrics.json, so a run and a benchmark read alike.
-                    "pass_rate": passed / len(values) * 100,
-                }
-            )
-        summary.append(entry)
-
-    return summary or None
+        if "pass_rate_ci" not in container:
+            rows = [
+                _as_calibrate_row(r)
+                for r in container.get("test_results") or []
+                if isinstance(r, dict) and r.get("passed") is not None
+            ]
+            container.update(pass_rate_summary(rows))
+            recount = _build_evaluator_summary(aggregate_criteria(rows, evaluators))
+            stored = container.get("evaluator_summary")
+            if stored:
+                ci_by_key = {e["metric_key"]: e["ci"] for e in recount or []}
+                for entry in stored:
+                    if isinstance(entry, dict) and entry.get("ci") is None:
+                        entry["ci"] = ci_by_key.get(entry.get("metric_key"))
+            else:
+                container["evaluator_summary"] = recount
+        _enrich_evaluator_summary(container.get("evaluator_summary"), evaluator_cache)
 
 
 def _enrich_evaluator_summary(
@@ -2623,7 +2680,7 @@ def _update_agent_test_intermediate_results(
     Update intermediate results for an agent test job.
     Returns the number of completed tests.
     """
-    results_data = _read_agent_test_results_json(output_dir)
+    results_data = _read_agent_test_json(output_dir, "results.json")
     if results_data is None:
         return 0
 
@@ -2637,25 +2694,24 @@ def _update_agent_test_intermediate_results(
     intermediate_results = _merge_test_results_by_test_names(test_names, test_results)
 
     # Check if metrics.json exists (all tests complete)
-    metrics_data = _read_agent_test_metrics_json(output_dir)
+    metrics_data = _read_agent_test_json(output_dir, "metrics.json")
 
+    if metrics_data:
+        total, passed = _run_totals(metrics_data, test_results)
+        failed = total - passed
+    else:
+        total, passed, failed = len(test_names), None, None
+    metrics = metrics_data or {}
     update_agent_test_job(
         task_id,
         results={
-            "total_tests": (
-                metrics_data.get("total") if metrics_data else len(test_names)
-            ),
-            "passed": metrics_data.get("passed") if metrics_data else None,
-            "failed": (
-                (metrics_data.get("total", 0) - metrics_data.get("passed", 0))
-                if metrics_data
-                else None
-            ),
-            "latency_ms": metrics_data.get("latency_ms") if metrics_data else None,
-            "cost": metrics_data.get("cost") if metrics_data else None,
-            "total_tokens": (
-                metrics_data.get("total_tokens") if metrics_data else None
-            ),
+            "total_tests": total,
+            "passed": passed,
+            "failed": failed,
+            **_summary_fields(metrics_data),
+            "latency_ms": metrics.get("latency_ms"),
+            "cost": metrics.get("cost"),
+            "total_tokens": metrics.get("total_tokens"),
             **run_counts(metrics_data, test_results),
             "test_results": intermediate_results,
         },
@@ -2886,30 +2942,7 @@ def run_llm_test_task(
                         test_case = results_data[i].get("test_case", {})
                         r["name"] = test_case.get("name")
 
-                # Parse metrics
-                total_tests = 0
-                passed = 0
-                failed = 0
-                latency_ms = None
-                cost = None
-                total_tokens = None
-
-                if metrics_data and isinstance(metrics_data, dict):
-                    total_tests = metrics_data.get("total", 0)
-                    passed = metrics_data.get("passed", 0)
-                    failed = total_tests - passed
-                    latency_ms = metrics_data.get("latency_ms")
-                    cost = metrics_data.get("cost")
-                    total_tokens = metrics_data.get("total_tokens")
-                elif results_data:
-                    # Compute from results if metrics.json not found
-                    total_tests = len(results_data)
-                    passed = sum(
-                        1
-                        for r in results_data
-                        if r.get("metrics", {}).get("passed", False)
-                    )
-                    failed = total_tests - passed
+                run_result = _run_result(test_results, metrics_data)
 
                 # Upload results to S3 (calibrate ``logs``/``results.log`` per model, run-level ``logs``, etc.)
                 results_prefix = f"agent-tests/runs/{task_id}"
@@ -2925,21 +2958,15 @@ def run_llm_test_task(
                     task_id,
                     status=TaskStatus.DONE.value,
                     results={
-                        "total_tests": total_tests,
-                        "passed": passed,
-                        "failed": failed,
-                        "latency_ms": latency_ms,
-                        "cost": cost,
-                        "total_tokens": total_tokens,
-                        **run_counts(metrics_data, test_results),
-                        "test_results": test_results,
+                        **run_result,
                         "results_s3_prefix": results_prefix,
                         "error": None,
                     },
                 )
 
                 logger.info(
-                    f"LLM test task {task_id} completed: {passed}/{total_tests} passed"
+                    f"LLM test task {task_id} completed: "
+                    f"{run_result['passed']}/{run_result['total_tests']} passed"
                 )
 
             except subprocess.CalledProcessError as e:
@@ -3463,17 +3490,11 @@ def _settle_stopped_rows(rows: List[Any]) -> tuple[int, int]:
     (`passed` is None for both). Only once the run has ended does the first
     reading become the true one.
     """
-    passed = failed = 0
+    rows = [row for row in rows if isinstance(row, dict)]
     for row in rows:
-        if not isinstance(row, dict):
-            continue
-        if row.get("passed") is True:
-            passed += 1
-        elif row.get("passed") is False:
-            failed += 1
-        else:
+        if row.get("passed") is None:
             row["not_run"] = True
-    return passed, failed
+    return _verdict_counts(row.get("passed") for row in rows)
 
 
 def _finish_stopped_run(task_id: str) -> None:
@@ -3654,6 +3675,7 @@ def get_agent_test_run_status(
 
     evaluators_snapshot = details.get("evaluators_by_test_id") or {}
     evaluator_cache: Dict[str, Optional[Dict[str, Any]]] = {}
+    fill_run_summaries(results, details, evaluator_cache)
     tool_call_evaluator = _tool_call_evaluator_for_run(details)
     _enrich_test_results_with_evaluators(
         results.get("test_results"),
@@ -3681,9 +3703,9 @@ def get_agent_test_run_status(
         cost=results.get("cost"),
         total_tokens=results.get("total_tokens"),
         evaluators=evaluators_block or None,
-        evaluator_summary=evaluator_totals_from_rows(
-            results.get("test_results"), evaluators_block, evaluators_snapshot
-        ),
+        pass_rate=results.get("pass_rate"),
+        pass_rate_ci=results.get("pass_rate_ci"),
+        evaluator_summary=results.get("evaluator_summary"),
         results=results.get("test_results"),
         unanswered_tests=results.get("unanswered_tests"),
         stopped_early=bool(results.get("stopped_early")),
@@ -3842,9 +3864,12 @@ class ModelResult(BaseModel):
             "that produced no answer"
         ),
     )
+    pass_rate: Optional[float] = Field(None, description=PASS_RATE_DESCRIPTION)
+    pass_rate_ci: Optional[ConfidenceInterval] = Field(
+        None, description=PASS_RATE_CI_DESCRIPTION
+    )
     evaluator_summary: Optional[List[Dict[str, Any]]] = Field(
-        None,
-        description="Aggregate summary for each evaluator for this model",
+        None, description=EVALUATOR_SUMMARY_DESCRIPTION
     )
     test_results: Optional[List[TestCaseResult]] = Field(
         None,
@@ -3966,41 +3991,19 @@ def _update_benchmark_intermediate_results(
             )
 
             if metrics_data:
-                total = metrics_data.get("total", 0)
-                passed = metrics_data.get("passed", 0)
-                evaluator_summary = _build_evaluator_summary(metrics_data)
                 model_results.append(
-                    {
-                        "model": model,
-                        "success": True,
-                        "message": f"Completed",
-                        "total_tests": total,
-                        "passed": passed,
-                        "failed": total - passed,
-                        "evaluator_summary": evaluator_summary,
-                        "latency_ms": metrics_data.get("latency_ms"),
-                        "cost": metrics_data.get("cost"),
-                        "total_tokens": metrics_data.get("total_tokens"),
-                        **run_counts(metrics_data, test_results),
-                        "test_results": merged,
-                    }
+                    _model_result(model, merged, metrics_data, True, "Completed")
                 )
                 completed_count += 1
             elif test_results:
-                # Has partial results but no metrics yet
-                total = len(merged) if test_names else len(test_results)
-                passed = sum(1 for r in merged if r.get("passed", False))
                 model_results.append(
-                    {
-                        "model": model,
-                        "success": None,
-                        "message": f"Running... ({len(test_results)} tests done)",
-                        "total_tests": total,
-                        "passed": passed,
-                        "failed": total - passed,
-                        "evaluator_summary": None,
-                        "test_results": merged,
-                    }
+                    _model_result(
+                        model,
+                        merged,
+                        None,
+                        None,
+                        f"Running... ({len(test_results)} tests done)",
+                    )
                 )
             else:
                 # No results yet for this model
@@ -4268,50 +4271,14 @@ def run_benchmark_task(
                                 test_names, test_results
                             )
 
-                        if metrics_data:
-                            total = metrics_data.get("total", 0)
-                            passed = metrics_data.get("passed", 0)
-                            evaluator_summary = _build_evaluator_summary(metrics_data)
-                            # Store raw parsed dicts (not a validated ``ModelResult``):
-                            # calibrate emits ``judge_results`` as a dict keyed by
-                            # evaluator name, but ``TestCaseResult.judge_results`` is
-                            # typed ``List[JudgeResult]``. Validating at write time
-                            # would raise; the dict→list conversion happens at read
-                            # time in ``_enrich_model_results_with_evaluators``.
-                            model_results.append(
-                                {
-                                    "model": model,
-                                    "success": True,
-                                    "message": f"Benchmark completed successfully for {model}",
-                                    "total_tests": total,
-                                    "passed": passed,
-                                    "failed": total - passed,
-                                    "evaluator_summary": evaluator_summary,
-                                    "latency_ms": metrics_data.get("latency_ms"),
-                                    "cost": metrics_data.get("cost"),
-                                    "total_tokens": metrics_data.get("total_tokens"),
-                                    **run_counts(metrics_data, test_results),
-                                    "test_results": test_results,
-                                }
+                        model_results.append(
+                            _model_result(
+                                model,
+                                test_results,
+                                metrics_data,
+                                True,
                             )
-                        else:
-                            # No metrics but has results - compute from results
-                            total = len(test_results) if test_results else 0
-                            passed = sum(
-                                1 for r in test_results if r.get("passed", False)
-                            )
-                            model_results.append(
-                                {
-                                    "model": model,
-                                    "success": True,
-                                    "message": f"Benchmark completed for {model}",
-                                    "total_tests": total,
-                                    "passed": passed,
-                                    "failed": total - passed,
-                                    "evaluator_summary": None,
-                                    "test_results": test_results,
-                                }
-                            )
+                        )
                     else:
                         logger.warning(f"No output found for model {model}")
                         model_results.append(
@@ -4691,12 +4658,7 @@ def _benchmark_model_result(
     test_names: List[str],
     uuid_by_case_id: Dict[str, str],
 ) -> Dict[str, Any]:
-    """Build one model's stored result, matching what `run_benchmark_task` writes.
-
-    Rows are stored as plain dicts on purpose. Calibrate emits `judge_results`
-    as a dict keyed by evaluator name and the read path reshapes it, so building
-    a `ModelResult` here would fail validation.
-    """
+    """Build one model's stored result, matching what `run_benchmark_task` writes."""
     test_results = _parse_agent_test_results(rows)
     for parsed in test_results:
         # Calibrate leaves `test_case.name` unset, so the row arrives nameless and
@@ -4710,47 +4672,12 @@ def _benchmark_model_result(
         # matched, which is the whole reason the rubric resolves at all.
         parsed["test_case_id"] = uuid_by_case_id.get(case_id, case_id)
     test_results = _merge_test_results_by_test_names(test_names, test_results)
-
-    if metrics_data:
-        # A merged re-judge writes `turns` where a first-pass run writes `total`.
-        total = metrics_data.get("total")
-        if total is None:
-            total = metrics_data.get("turns")
-        if total is None:
-            total = len(rows)
-        passed = metrics_data.get("passed", 0)
-        return {
-            "model": model,
-            "success": True,
-            "message": f"Benchmark completed successfully for {model}",
-            "total_tests": total,
-            "passed": passed,
-            "failed": total - passed,
-            "evaluator_summary": _build_evaluator_summary(metrics_data),
-            "latency_ms": metrics_data.get("latency_ms"),
-            "cost": metrics_data.get("cost"),
-            "total_tokens": metrics_data.get("total_tokens"),
-            # `failed` is `total - passed`, so it holds the cases that produced
-            # no answer too; without this count a reader cannot take them back
-            # out, and an imported run would read worse than the same run
-            # carried out here.
-            **run_counts(metrics_data, test_results),
-            "test_results": test_results,
-        }
-
-    total = len(rows)
-    passed = sum(1 for r in test_results if r.get("passed"))
-    return {
-        "model": model,
-        "success": True,
-        "message": f"Benchmark completed for {model}",
-        "total_tests": total,
-        "passed": passed,
-        "failed": total - passed,
-        "evaluator_summary": None,
-        **run_counts(None, test_results),
-        "test_results": test_results,
-    }
+    return _model_result(
+        model,
+        test_results,
+        metrics_data,
+        True,
+    )
 
 
 @router.post(
@@ -4815,7 +4742,7 @@ def import_agent_benchmark(
         rows_by_model: Dict[str, List[dict]] = {}
         metrics_by_model: Dict[str, Optional[dict]] = {}
         for folder, model in zip(folders, models):
-            rows = _read_agent_test_results_json(run_root / folder)
+            rows = _read_agent_test_json(run_root / folder, "results.json")
             if not rows:
                 raise HTTPException(
                     status_code=400,
@@ -4962,6 +4889,7 @@ def get_benchmark_status(
 
     evaluators_snapshot = details.get("evaluators_by_test_id") or {}
     evaluator_cache: Dict[str, Optional[Dict[str, Any]]] = {}
+    fill_run_summaries(results, details, evaluator_cache)
     tool_call_evaluator = _tool_call_evaluator_for_run(details)
     _enrich_model_results_with_evaluators(
         results.get("model_results"),
