@@ -388,11 +388,11 @@ def test_same_message_id_on_two_agents_is_two_traces(client):
 
 
 # ---------------------------------------------------------------------------
-# List / detail / bulk delete (curation surface, JWT-only)
+# List / detail / bulk delete
 # ---------------------------------------------------------------------------
 
 
-def test_list_accepts_an_api_key_and_returns_scores_with_reasoning(client):
+def test_list_accepts_an_api_key_and_stays_in_its_workspace(client):
     h, agent_id = _signup_with_agent(client)
     key_headers = _api_key_headers(client, h)
     trace = _post_trace(client, h, _payload(agent_id, _mid(), labels=["prod"]))
@@ -444,13 +444,6 @@ def test_list_filters_by_creation_time(client):
     # The value a row reports for itself works as the next cursor.
     edge_row = client.get(f"/traces/{edge['uuid']}", headers=h).json()
     assert listed(created_after=edge_row["created_at"]) == {edge["uuid"], new["uuid"]}
-
-    averages = client.get(
-        "/traces",
-        params={"created_after": "2026-01-02T00:00:00Z", "include_score_averages": True},
-        headers=h,
-    )
-    assert averages.status_code == 200 and averages.json()["total"] == 1
 
     assert (
         client.get("/traces", params={"created_after": "yesterday"}, headers=h).status_code
@@ -2907,6 +2900,22 @@ def test_score_averages_mean_each_evaluator_over_the_matching_traces(client):
     assert got[_EVAL_A]["output_type"] == "binary"
     assert got[_EVAL_B]["average"] == 4
     assert got[_EVAL_B]["traces_scored"] == 3
+
+
+def test_score_averages_honour_the_creation_time(client):
+    h, agent_id = _signup_with_agent(client)
+    _disable_auto_score(client, h, agent_id)
+    for value, created in ((0, "2026-01-01 00:00:00"), (1, "2026-02-01 00:00:00")):
+        trace = _post_trace(client, h, _payload(agent_id, _mid()))
+        _set_created_at(trace["uuid"], created)
+        run = _insert_run(_org_of(agent_id), trace["uuid"], status="completed",
+                          completed_at=_at(9), agent_id=agent_id)
+        _insert_score(run, evaluator_uuid=_EVAL_A, evaluator_version_id=_VER_A, value=value)
+
+    got = _averages(client, h, created_after="2026-01-15T00:00:00Z")
+
+    assert got[_EVAL_A]["traces_scored"] == 1
+    assert got[_EVAL_A]["average"] == 1
 
 
 def test_score_averages_count_a_trace_once_through_its_latest_run(client):

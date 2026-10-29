@@ -608,10 +608,10 @@ actions:
         openWorldHint: true
         description: |
           List the traces in the caller's org, newest first, one page at a
-          time. Each trace carries its input, output, labels and metadata,
-          and the scores from its latest scoring run with each evaluator's
-          reasoning and evaluator version. Filter by agent, label, creation
-          time, text, or score.
+          time. Each trace carries a short preview of its last user message
+          and reply, its tool calls and labels, and the scores from its
+          latest scoring run with each evaluator's reasoning and evaluator
+          version. Filter by agent, label, creation time, text, or score.
   - target: $.paths['/traces'].post
     update:
       x-speakeasy-group: traces

@@ -71,7 +71,7 @@ calibrate-backend/
 │       ├── annotators.py    # Annotator CRUD (human labelers)
 │       ├── annotation_tasks.py  # Annotation tasks, items, jobs, evaluator links, agreement runs
 │       ├── annotation_agreement.py  # Inter-annotator / human-vs-evaluator agreement metrics
-│       ├── traces.py        # Production trace ingestion (API key) + curation (JWT)
+│       ├── traces.py        # Production trace ingestion and listing (API key) + curation (JWT)
 │       └── user_limits.py   # Per-user limits CRUD and limit queries
 ├── tests/                   # Pytest suite (repo root); imports match runtime (`from llm_judge import …`) via configured pythonpath
 ├── .githooks/               # Git hooks (opt-in): `pre-commit` runs pytest on `main` only — enable with `git config core.hooksPath .githooks`
@@ -293,8 +293,8 @@ The JWT token contains the user's UUID and is validated on every protected endpo
 
 #### Traces
 
-- `POST /traces` - Ingest one production agent turn (`agent_id`, `input` history, `output`, optional `message_id`, `conversation_id`, `metadata`). Auth: `get_org_jwt_or_api_key` — machine-to-machine, deliberately **not** tagged `Public API` until that exposure is explicitly decided. Always stores a new trace: neither ID is a dedupe key, so a wrong or reused one can never drop a turn. 429 past the cap.
-- `GET /traces?limit=&offset=&agent_id=&conversation_id=` - Paginated slim `TraceSummary` list in the shared `PaginatedResponse` envelope. `conversation_id` is an exact match. JWT only. Filter and count run in SQL — never route this through `pagination.py`'s post-fetch `.apply()` helpers.
+- `POST /traces` - Ingest one production agent turn (`agent_id`, `input` history, `output`, optional `message_id`, `conversation_id`, `metadata`). Auth: `get_org_jwt_or_api_key`, tagged `Public API`. Always stores a new trace: neither ID is a dedupe key, so a wrong or reused one can never drop a turn. 429 past the cap.
+- `GET /traces?limit=&offset=&agent_id=&conversation_id=&created_after=&created_before=` - Paginated slim `TraceSummary` list in the shared `PaginatedResponse` envelope. `conversation_id` is an exact match. `created_after` is inclusive, `created_before` exclusive. Auth: `get_org_jwt_or_api_key`, tagged `Public API`. Filter and count run in SQL — never route this through `pagination.py`'s post-fetch `.apply()` helpers.
 - `GET /traces/conversations` - One row per conversation (live traces sharing `agent_id` and `conversation_id`): `conversation_id`, `agent_id`, `first_turn_at`, `last_turn_at`, `first_message_preview` (user message of the oldest trace), `last_turn` (the newest trace as a `TraceSummary`, scores included). Newest `last_turn_at` first, `PaginatedResponse`, max `limit` 200. Same filters as `GET /traces`; a conversation is listed when any turn matches, but the times and `last_turn` cover the whole conversation. Null `conversation_id` traces are left out. `db.list_trace_conversations`. JWT only, not `Public API`. Declared before `GET /traces/{trace_uuid}`.
 - `GET /traces/conversation-ids?agent_id=` - Every distinct `conversation_id` on the live traces, newest activity first, for the trace filter's conversation list (`db.list_trace_conversation_ids`). JWT only, not `Public API`. Declared before `GET /traces/{trace_uuid}`.
 - `GET /traces/{trace_uuid}` - Full `input`/`output`/`metadata`. JWT only.
