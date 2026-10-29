@@ -678,7 +678,7 @@ actions:
           caller's org.
   - target: $.paths['/organizations/current'].get
     update:
-      x-speakeasy-group: workspace
+      x-speakeasy-group: organizations
       x-speakeasy-name-override: current
       x-speakeasy-mcp:
         name: get-current-workspace
