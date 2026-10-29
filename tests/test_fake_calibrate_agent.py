@@ -638,3 +638,35 @@ def test_collect_intermediate_results_reports_partial_and_missing_providers(tmp_
     # Never started, so nothing to keep.
     assert results["sarvam"].success is False
     assert results["sarvam"].results is None
+
+
+def test_run_benchmark_task_with_a_colon_in_the_model_name():
+    """A model name holding a colon round-trips through the real fake CLI: the
+    folder it writes is the one the backend looks for, so the run finishes with
+    the model's results instead of failing with nothing."""
+    from routers.agent_tests import run_benchmark_task
+
+    agent, test, _ = _make_agent_with_response_test()
+    job_uuid = db.create_agent_test_job(
+        agent_id=agent["uuid"], job_type="llm-benchmark", status="in_progress"
+    )
+    models = ["qwen/qwen3:free"]
+
+    with patch.dict(os.environ, {"FAKE_AI_PROVIDERS": "1"}), patch(
+        "routers.agent_tests.get_s3_client", return_value=MagicMock()
+    ), patch("routers.agent_tests.upload_directory_tree_to_s3"), patch(
+        "routers.agent_tests.upload_file_to_s3"
+    ), patch("routers.agent_tests.try_start_queued_agent_test_job"), patch(
+        "routers.agent_tests.time.sleep"
+    ):
+        run_benchmark_task(job_uuid, agent, [test], models, "bucket")
+
+    job = db.get_agent_test_job(job_uuid)
+    assert job["status"] == "done", job.get("results")
+    row = job["results"]["model_results"][0]
+    assert row["model"] == "qwen/qwen3:free"
+    assert row["success"] is True
+    assert row["passed"] == row["total_tests"] == 1
+    assert [r["model"] for r in job["results"]["leaderboard_summary"]] == [
+        "qwen/qwen3:free"
+    ]
