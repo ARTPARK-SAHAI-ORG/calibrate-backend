@@ -1218,6 +1218,40 @@ def init_db():
         except sqlite3.OperationalError:
             pass
 
+        try:
+            cursor.execute(
+                "ALTER TABLE users ADD COLUMN role TEXT NOT NULL DEFAULT 'user' "
+                "CHECK (role IN ('user', 'superadmin'))"
+            )
+        except sqlite3.OperationalError:
+            pass
+
+        try:
+            cursor.execute(
+                "ALTER TABLE users ADD COLUMN email_verified_at TIMESTAMP DEFAULT NULL"
+            )
+            # Runs once, when the column is first added: every password and
+            # Google account that already exists counts as confirmed. Invite
+            # stubs (no password, no name) stay unconfirmed.
+            cursor.execute(
+                "UPDATE users SET email_verified_at = CURRENT_TIMESTAMP "
+                "WHERE password_hash IS NOT NULL OR first_name != '' OR last_name != ''"
+            )
+        except sqlite3.OperationalError:
+            pass
+
+        for column in (
+            "verify_token_hash TEXT",
+            "verify_password_hash TEXT",
+            "verify_sent_at TIMESTAMP",
+            "reset_token_hash TEXT",
+            "reset_sent_at TIMESTAMP",
+        ):
+            try:
+                cursor.execute(f"ALTER TABLE users ADD COLUMN {column} DEFAULT NULL")
+            except sqlite3.OperationalError:
+                pass
+
         # Add user_id column to all relevant tables if not present (migration)
         tables_with_user_id = [
             "agents",
@@ -1258,6 +1292,44 @@ def init_db():
             cursor.execute("ALTER TABLE agent_test_jobs ADD COLUMN name TEXT")
         except sqlite3.OperationalError:
             pass
+
+        # What the run cost in USD, copied out of `results` whenever they are
+        # written so analytics can add it up without parsing every blob.
+        try:
+            cursor.execute("ALTER TABLE agent_test_jobs ADD COLUMN cost REAL")
+        except sqlite3.OperationalError:
+            pass
+
+        # Every verify or reset link ever sent, so a used or replaced link
+        # still says whose account it was for.
+        cursor.execute(
+            """
+            CREATE TABLE IF NOT EXISTS auth_links (
+                token_hash TEXT PRIMARY KEY,
+                user_uuid TEXT NOT NULL,
+                kind TEXT NOT NULL,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+            """
+        )
+
+        # One row each time a workspace is refused for going over a limit.
+        cursor.execute(
+            """
+            CREATE TABLE IF NOT EXISTS limit_hits (
+                uuid TEXT PRIMARY KEY,
+                org_uuid TEXT NOT NULL,
+                limit_name TEXT NOT NULL,
+                kind TEXT,
+                requested INTEGER,
+                cap INTEGER,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+            """
+        )
+        cursor.execute(
+            "CREATE INDEX IF NOT EXISTS idx_limit_hits_created ON limit_hits(created_at)"
+        )
 
         # Workspace invite link. One live token per workspace: creating a new
         # one overwrites the old, revoking sets both back to NULL.
@@ -1381,17 +1453,20 @@ def init_db():
             default_user_uuid = default_user_row["uuid"]
             logger.info(f"Default user already exists with UUID: {default_user_uuid}")
         else:
-            # Create the default user
+            # Create the default user. A real address is an account someone
+            # owns, so it is verified and cannot be claimed by a signup; with no
+            # address the row is only a placeholder and is not counted as a user.
             default_user_uuid = str(uuid.uuid4())
             cursor.execute(
                 """
-                INSERT INTO users (uuid, first_name, last_name, email)
-                VALUES (?, ?, ?, ?)
+                INSERT INTO users (uuid, first_name, last_name, email, email_verified_at)
+                VALUES (?, ?, ?, ?, CASE WHEN ? != '' THEN CURRENT_TIMESTAMP END)
                 """,
                 (
                     default_user_uuid,
                     DEFAULT_USER_FIRST_NAME,
                     DEFAULT_USER_LAST_NAME,
+                    default_user_email_normalized,
                     default_user_email_normalized,
                 ),
             )
@@ -1801,6 +1876,13 @@ def init_db():
             conn.commit()
             if filled:
                 logger.info(f"Backfilled jobs-list header columns on {filled} row(s)")
+
+        if not _schema_migration_applied(cursor, AGENT_TEST_JOB_COST_BACKFILL_MIGRATION):
+            filled = _backfill_agent_test_job_cost(cursor)
+            _mark_schema_migration_applied(cursor, AGENT_TEST_JOB_COST_BACKFILL_MIGRATION)
+            conn.commit()
+            if filled:
+                logger.info(f"Backfilled cost on {filled} agent test job(s)")
 
         conn.commit()
 
@@ -3034,6 +3116,46 @@ def _backfill_jobs_summary_columns(cursor: sqlite3.Cursor) -> int:
     return int(row[0]) if row else 0
 
 
+AGENT_TEST_JOB_COST_BACKFILL_MIGRATION = "backfill_agent_test_job_cost_v1"
+
+
+def agent_test_job_cost(results: Any) -> Optional[float]:
+    """USD cost of a test run or model comparison from its `results`.
+
+    A comparison is the sum of every model's cost; None when nothing has one.
+    """
+    if not isinstance(results, dict):
+        return None
+    if "model_results" in results:
+        costs = [m.get("cost") for m in results.get("model_results") or [] if isinstance(m, dict)]
+    else:
+        costs = [results.get("cost")]
+    costs = [c for c in costs if isinstance(c, (int, float)) and not isinstance(c, bool)]
+    return float(sum(costs)) if costs else None
+
+
+def _backfill_agent_test_job_cost(cursor: sqlite3.Cursor) -> int:
+    """One-time migration: fill `agent_test_jobs.cost` for rows written before it."""
+    # A run's results can be several MB, so read them one at a time on a
+    # cursor of their own rather than all at once.
+    reader = cursor.connection.cursor()
+    reader.execute(
+        "SELECT uuid, results FROM agent_test_jobs WHERE cost IS NULL AND results IS NOT NULL"
+    )
+    filled = 0
+    for job_uuid, results_json in reader:
+        try:
+            cost = agent_test_job_cost(json.loads(results_json))
+        except (TypeError, ValueError):
+            continue
+        if cost is not None:
+            cursor.execute(
+                "UPDATE agent_test_jobs SET cost = ? WHERE uuid = ?", (cost, job_uuid)
+            )
+            filled += 1
+    return filled
+
+
 FORK_DEFAULT_EVALUATORS_MIGRATION = "fork_default_evaluators_per_org_v1"
 REPOINT_DEFAULT_LINKS_MIGRATION = "repoint_default_evaluator_links_to_forks_v1"
 REPOINT_DEFAULT_JOB_SNAPSHOTS_MIGRATION = "repoint_default_evaluator_job_snapshots_v1"
@@ -3786,6 +3908,26 @@ def get_user_by_email(email: str) -> Optional[Dict[str, Any]]:
         return None
 
 
+def list_superadmins(server_email: str) -> List[Dict[str, Any]]:
+    """Users whose role is superadmin, plus the user with `server_email`."""
+    with get_db_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            "SELECT * FROM users WHERE role = 'superadmin' OR email = ? ORDER BY created_at, id",
+            (normalize_email(server_email) or None,),
+        )
+        return [dict(row) for row in cursor.fetchall()]
+
+
+def set_user_role(user_uuid: str, role: str) -> None:
+    with get_db_connection() as conn:
+        conn.execute(
+            "UPDATE users SET role = ?, updated_at = CURRENT_TIMESTAMP WHERE uuid = ?",
+            (role, user_uuid),
+        )
+        conn.commit()
+
+
 def get_all_users() -> List[Dict[str, Any]]:
     """Get all users."""
     with get_db_connection() as conn:
@@ -3883,9 +4025,9 @@ def create_user_with_password(
     If a stub user (created by an org invite before signup — no
     `password_hash`, no name) already exists for this email, we hydrate that
     row instead of inserting a new one. This is what lets an invited person
-    sign up later and immediately see any orgs they were pre-added to. We
-    refuse to overwrite an existing password_hash to avoid an account-takeover
-    vector via /signup with someone else's email.
+    sign up later and immediately see any orgs they were pre-added to. Any
+    other existing row, including a Google account with no password, raises
+    ValueError so /signup cannot take over someone else's account.
 
     Email is normalized to lowercase before lookup/insert so it matches the
     same normalization done by `add_organization_member` — otherwise an
@@ -3895,11 +4037,15 @@ def create_user_with_password(
     with get_db_connection() as conn:
         cursor = conn.cursor()
         cursor.execute(
-            "SELECT uuid, password_hash FROM users WHERE email = ?", (email,)
+            "SELECT uuid, email_verified_at FROM users WHERE email = ?", (email,)
         )
         existing = cursor.fetchone()
         if existing is not None:
-            if existing["password_hash"] is not None:
+            # Only a row nobody has confirmed may be claimed: an invite stub, or
+            # a signup left waiting on its link when email was later turned off.
+            # A Google account has no password either, so checking the password
+            # alone let anyone set one on it and log in as its owner.
+            if existing["email_verified_at"] is not None:
                 raise ValueError("email already registered")
             # Hydrate the stub user row in place; preserve its uuid so any
             # existing organization_members rows keep working.
@@ -3908,6 +4054,8 @@ def create_user_with_password(
                 """
                 UPDATE users
                    SET first_name = ?, last_name = ?, password_hash = ?,
+                       email_verified_at = CURRENT_TIMESTAMP,
+                       """ + _CLEAR_LINKS + """,
                        updated_at = CURRENT_TIMESTAMP
                  WHERE uuid = ?
                 """,
@@ -3917,8 +4065,9 @@ def create_user_with_password(
             user_uuid = str(uuid.uuid4())
             cursor.execute(
                 """
-                INSERT INTO users (uuid, first_name, last_name, email, password_hash)
-                VALUES (?, ?, ?, ?, ?)
+                INSERT INTO users
+                    (uuid, first_name, last_name, email, password_hash, email_verified_at)
+                VALUES (?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
                 """,
                 (user_uuid, first_name, last_name, email, password_hash),
             )
@@ -3938,6 +4087,116 @@ def create_user_with_password(
         conn.commit()
         logger.info(f"Created user (email/password auth) with UUID: {user_uuid}")
         return user_uuid
+
+
+# Voids every pending verify and reset link; shared by both ways an address gets verified.
+_CLEAR_LINKS = (
+    "verify_token_hash = NULL, verify_password_hash = NULL, verify_sent_at = NULL, "
+    "reset_token_hash = NULL, reset_sent_at = NULL"
+)
+
+
+def _check_link_kind(kind: str) -> None:
+    # The kind is put into column names, so only these two may ever reach SQL.
+    if kind not in ("verify", "reset"):
+        raise ValueError("kind must be verify or reset")
+
+
+def set_user_token(
+    user_uuid: str,
+    kind: str,
+    token_hash: str,
+    cooldown_seconds: int,
+    first_name: Optional[str] = None,
+    last_name: Optional[str] = None,
+    verify_password_hash: Optional[str] = None,
+) -> bool:
+    """Store a new `verify` or `reset` token hash, plus any given signup fields.
+
+    Changes nothing and returns False when the previous token of that kind was
+    sent less than `cooldown_seconds` ago. Leaving the password alone too means
+    the link already in the inbox can never be redirected to a password typed
+    by someone else.
+    """
+    _check_link_kind(kind)
+    with get_db_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            f"""
+            UPDATE users
+               SET {kind}_token_hash = ?, {kind}_sent_at = CURRENT_TIMESTAMP,
+                   first_name = COALESCE(?, first_name),
+                   last_name = COALESCE(?, last_name),
+                   verify_password_hash = COALESCE(?, verify_password_hash),
+                   updated_at = CURRENT_TIMESTAMP
+             WHERE uuid = ?
+               AND ({kind}_sent_at IS NULL OR {kind}_sent_at <= datetime('now', ?))
+            """,
+            (
+                token_hash,
+                first_name,
+                last_name,
+                verify_password_hash,
+                user_uuid,
+                f"-{cooldown_seconds} seconds",
+            ),
+        )
+        stored = cursor.rowcount > 0
+        if stored:
+            cursor.execute(
+                "INSERT INTO auth_links (token_hash, user_uuid, kind) VALUES (?, ?, ?)",
+                (token_hash, user_uuid, kind),
+            )
+        conn.commit()
+        return stored
+
+
+def get_user_by_token(
+    kind: str, token_hash: str, max_age_seconds: int
+) -> Optional[Dict[str, Any]]:
+    """The user holding this `verify` or `reset` token, if it is younger than `max_age_seconds`."""
+    _check_link_kind(kind)
+    with get_db_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            f"""
+            SELECT * FROM users
+             WHERE {kind}_token_hash = ? AND {kind}_sent_at > datetime('now', ?)
+            """,
+            (token_hash, f"-{max_age_seconds} seconds"),
+        )
+        row = cursor.fetchone()
+        return dict(row) if row else None
+
+
+def get_link_owner(kind: str, token_hash: str) -> Optional[Dict[str, Any]]:
+    """The user a `verify` or `reset` link was issued to, even once it is used, replaced or too old."""
+    with get_db_connection() as conn:
+        row = conn.execute(
+            """
+            SELECT u.* FROM auth_links l JOIN users u ON u.uuid = l.user_uuid
+             WHERE l.kind = ? AND l.token_hash = ?
+            """,
+            (kind, token_hash),
+        ).fetchone()
+        return dict(row) if row else None
+
+
+def mark_email_verified(user_uuid: str, password_hash: Optional[str] = None) -> None:
+    """Confirm the address, optionally set the password, and void every pending link."""
+    with get_db_connection() as conn:
+        conn.execute(
+            """
+            UPDATE users
+               SET password_hash = COALESCE(?, password_hash),
+                   email_verified_at = COALESCE(email_verified_at, CURRENT_TIMESTAMP),
+                   """ + _CLEAR_LINKS + """,
+                   updated_at = CURRENT_TIMESTAMP
+             WHERE uuid = ?
+            """,
+            (password_hash, user_uuid),
+        )
+        conn.commit()
 
 
 # ============ Organizations (multi-tenant) ============
@@ -7589,10 +7848,18 @@ def create_agent_test_job(
         results_json = json.dumps(results) if results is not None else None
         cursor.execute(
             """
-            INSERT INTO agent_test_jobs (uuid, agent_id, type, status, details, results)
-            VALUES (?, ?, ?, ?, ?, ?)
+            INSERT INTO agent_test_jobs (uuid, agent_id, type, status, details, results, cost)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
             """,
-            (job_uuid, agent_id, job_type, status, details_json, results_json),
+            (
+                job_uuid,
+                agent_id,
+                job_type,
+                status,
+                details_json,
+                results_json,
+                agent_test_job_cost(results),
+            ),
         )
         conn.commit()
         logger.info(
@@ -7898,6 +8165,8 @@ def update_agent_test_job(
     if results is not None:
         updates.append("results = ?")
         params.append(json.dumps(results))
+        updates.append("cost = ?")
+        params.append(agent_test_job_cost(results))
 
     if details is not None:
         with get_db_connection() as conn:
@@ -8636,6 +8905,37 @@ def create_org_limits(org_uuid: str, limits: "OrgLimits") -> str:
         conn.commit()
         logger.info(f"Created org_limits for org {org_uuid} with UUID: {row_uuid}")
         return row_uuid
+
+
+def create_limit_hit(
+    org_uuid: str,
+    limit_name: str,
+    kind: Optional[str],
+    requested: Optional[int],
+    cap: Optional[int],
+) -> None:
+    """Record that a workspace was refused for going over a limit.
+
+    A client keeps sending traces after the trace cap, so that limit is
+    recorded at most once per workspace per hour.
+    """
+    with get_db_connection() as conn:
+        conn.execute(
+            """
+            INSERT INTO limit_hits (uuid, org_uuid, limit_name, kind, requested, cap)
+            SELECT ?, ?, ?, ?, ?, ?
+            WHERE ? != 'max_traces' OR NOT EXISTS (
+                SELECT 1 FROM limit_hits
+                WHERE org_uuid = ? AND limit_name = 'max_traces'
+                  AND created_at > datetime('now', '-1 hour')
+            )
+            """,
+            (
+                str(uuid.uuid4()), org_uuid, limit_name, kind, requested, cap,
+                limit_name, org_uuid,
+            ),
+        )
+        conn.commit()
 
 
 def get_org_limits(org_uuid: str) -> Optional[Dict[str, Any]]:
@@ -10044,6 +10344,7 @@ def get_annotations_for_annotator_overlap_slots(
              WHERE t.org_uuid = ?
                AND t.deleted_at IS NULL
                AND j.deleted_at IS NULL
+               AND j.annotator_id NOT IN (SELECT uuid FROM annotators WHERE deleted_at IS NOT NULL)
                AND a.deleted_at IS NULL
                AND ai.deleted_at IS NULL
                AND (a.item_id, COALESCE(a.evaluator_id, '')) IN (
@@ -10280,6 +10581,7 @@ def get_annotations_for_item(item_id: str) -> List[Dict[str, Any]]:
              WHERE a.item_id = ?
                AND a.deleted_at IS NULL
                AND j.deleted_at IS NULL
+               AND j.annotator_id NOT IN (SELECT uuid FROM annotators WHERE deleted_at IS NOT NULL)
              ORDER BY a.created_at ASC
             """,
             (item_id,),
@@ -10316,6 +10618,7 @@ def get_annotations_for_slots(
         " WHERE j.task_id = ? "
         "   AND a.deleted_at IS NULL "
         "   AND j.deleted_at IS NULL "
+        "   AND j.annotator_id NOT IN (SELECT uuid FROM annotators WHERE deleted_at IS NOT NULL) "
         f"  AND a.item_id IN ({item_placeholders}) "
         f"  AND a.evaluator_id IN ({evaluator_placeholders}) "
     )
@@ -10355,6 +10658,7 @@ def get_annotations_for_task(
         " WHERE j.task_id = ? "
         "   AND a.deleted_at IS NULL "
         "   AND j.deleted_at IS NULL "
+        "   AND j.annotator_id NOT IN (SELECT uuid FROM annotators WHERE deleted_at IS NOT NULL) "
     )
     if not include_deleted_items:
         query += "   AND ai.deleted_at IS NULL "
@@ -10388,6 +10692,7 @@ def get_annotations_for_org(
         " WHERE t.org_uuid = ? "
         "   AND t.deleted_at IS NULL "
         "   AND j.deleted_at IS NULL "
+        "   AND j.annotator_id NOT IN (SELECT uuid FROM annotators WHERE deleted_at IS NOT NULL) "
         "   AND a.deleted_at IS NULL "
         "   AND ai.deleted_at IS NULL "
     )
@@ -10425,6 +10730,7 @@ def get_annotations_for_tasks(task_ids: List[str]) -> List[Dict[str, Any]]:
              WHERE j.task_id IN ({placeholders})
                AND a.deleted_at IS NULL
                AND j.deleted_at IS NULL
+               AND j.annotator_id NOT IN (SELECT uuid FROM annotators WHERE deleted_at IS NOT NULL)
                AND ai.deleted_at IS NULL
              ORDER BY a.updated_at ASC
             """,
@@ -10643,10 +10949,18 @@ def _trace_filters(
     labels: Optional[List[str]] = None,
     scores: Optional[List[TraceScoreFilter]] = None,
     conversation_id: Optional[str] = None,
+    created_after: Optional[str] = None,
+    created_before: Optional[str] = None,
 ) -> Tuple[str, List[Any]]:
     """Build the shared WHERE clause for every live-trace query."""
     where = ["org_uuid = ?", "deleted_at IS NULL"]
     params: List[Any] = [org_uuid]
+    if created_after:
+        where.append("created_at >= ?")
+        params.append(created_after)
+    if created_before:
+        where.append("created_at < ?")
+        params.append(created_before)
     if agent_id:
         where.append("agent_id = ?")
         params.append(agent_id)
@@ -11044,6 +11358,8 @@ def list_traces(
     labels: Optional[List[str]] = None,
     scores: Optional[List[TraceScoreFilter]] = None,
     conversation_id: Optional[str] = None,
+    created_after: Optional[str] = None,
+    created_before: Optional[str] = None,
     sort_evaluator: Optional[str] = None,
     sort_order: str = "desc",
 ) -> Tuple[List[Dict[str, Any]], int]:
@@ -11054,7 +11370,8 @@ def list_traces(
     unscored trace is unknown, not a low score, so it must not lead the page.
     """
     where, params = _trace_filters(
-        org_uuid, agent_id, q, output_type, labels, scores, conversation_id
+        org_uuid, agent_id, q, output_type, labels, scores, conversation_id,
+        created_after, created_before,
     )
     order = "ORDER BY created_at DESC, id DESC"
     order_params: List[Any] = []
@@ -11185,12 +11502,15 @@ def soft_delete_traces_matching(
     labels: Optional[List[str]] = None,
     scores: Optional[List[TraceScoreFilter]] = None,
     conversation_id: Optional[str] = None,
+    created_after: Optional[str] = None,
+    created_before: Optional[str] = None,
 ) -> int:
     """Soft-delete every live trace matching the list filters, returning the
     number of rows flipped. No UUID list, so a workspace-wide delete stays one
     statement however many traces it covers."""
     where, params = _trace_filters(
-        org_uuid, agent_id, q, output_type, labels, scores, conversation_id
+        org_uuid, agent_id, q, output_type, labels, scores, conversation_id,
+        created_after, created_before,
     )
     with get_db_connection() as conn:
         cursor = conn.execute(
@@ -11349,6 +11669,8 @@ def average_trace_scores(
     labels: Optional[List[str]] = None,
     scores: Optional[List[TraceScoreFilter]] = None,
     conversation_id: Optional[str] = None,
+    created_after: Optional[str] = None,
+    created_before: Optional[str] = None,
 ) -> List[Dict[str, Any]]:
     """Mean score per evaluator over the live traces matching the list filters.
 
@@ -11363,7 +11685,8 @@ def average_trace_scores(
     scored nothing in the filtered set is absent rather than zero.
     """
     where, params = _trace_filters(
-        org_uuid, agent_id, q, output_type, labels, scores, conversation_id
+        org_uuid, agent_id, q, output_type, labels, scores, conversation_id,
+        created_after, created_before,
     )
     sql = f"""
         WITH matched AS (

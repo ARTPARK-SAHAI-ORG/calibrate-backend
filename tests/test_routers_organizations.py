@@ -947,3 +947,58 @@ def test_accepting_the_link_again_sends_nothing(client, sent_emails):
     assert client.post(f"/invites/{token}/accept", headers=joiner["headers"]).status_code == 200
     assert client.post(f"/invites/{token}/accept", headers=owner["headers"]).status_code == 200
     assert sent_emails == []
+
+
+def test_current_workspace_matches_the_key_not_the_last_one_opened(client):
+    """An API key names exactly one workspace, and /organizations/current says which.
+
+    This is what lets a programmatic client build a web address that opens the
+    right workspace instead of whichever one the reader happened to open last.
+    """
+    owner = _signup(client, "cur")
+    h = owner["headers"]
+
+    personal = client.get("/organizations", headers=h).json()[0]
+    other = client.post(
+        "/organizations", json={"name": "Second workspace"}, headers=h
+    ).json()
+    assert other["uuid"] != personal["uuid"]
+
+    # A key made while the personal workspace is current belongs to it.
+    raw = client.post("/api-keys", json={"name": "ci"}, headers=h).json()["key"]
+
+    r = client.get("/organizations/current", headers={"X-API-Key": raw})
+    assert r.status_code == 200, r.text
+    assert r.json() == {"uuid": personal["uuid"], "name": personal["name"]}
+
+    # Asking as the signed-in user with no workspace named gives the same one,
+    # and naming the other workspace gives that one.
+    assert (
+        client.get("/organizations/current", headers=h).json()["uuid"]
+        == personal["uuid"]
+    )
+    assert (
+        client.get(
+            "/organizations/current",
+            headers={**h, "X-Org-UUID": other["uuid"]},
+        ).json()["uuid"]
+        == other["uuid"]
+    )
+
+
+def test_current_workspace_needs_authentication(client):
+    # 403, not 401: with no Authorization header at all the bearer scheme
+    # rejects the request before the dependency runs. Same as every other
+    # endpoint behind get_org_jwt_or_api_key.
+    assert client.get("/organizations/current").status_code == 403
+    assert (
+        client.get(
+            "/organizations/current", headers={"X-API-Key": "sk_not_a_real_key"}
+        ).status_code
+        == 401
+    )
+
+
+def test_current_workspace_is_in_the_public_api(client):
+    spec = client.get("/public-api/openapi.json").json()
+    assert "/organizations/current" in spec["paths"], sorted(spec["paths"])

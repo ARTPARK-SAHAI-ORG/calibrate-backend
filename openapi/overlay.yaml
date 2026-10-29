@@ -543,7 +543,7 @@ actions:
         readOnlyHint: true
         openWorldHint: true
         description: |
-          Get human-vs-human and human-vs-evaluator agreement metrics for a task, with a trend series.
+          Get human-vs-human and human-vs-evaluator agreement metrics for a task, with a chance-corrected kappa for each evaluator.
   - target: $.paths['/annotation-tasks/{task_uuid}/summary'].get
     update:
       x-speakeasy-group: annotation_tasks
@@ -596,6 +596,24 @@ actions:
         idempotentHint: true
         description: |
           Rename an annotator in your workspace.
+  - target: $.paths['/traces'].get
+    update:
+      x-speakeasy-group: traces
+      x-speakeasy-name-override: list
+      x-speakeasy-mcp:
+        name: list-traces
+        title: List traces
+        scopes: [read]
+        readOnlyHint: true
+        openWorldHint: true
+        description: |
+          List the traces in the caller's org, newest first, one page at a
+          time. Each trace carries a short preview of its last user message
+          and reply, its tool calls and labels, and the scores from its
+          latest scoring run with each evaluator's reasoning and evaluator
+          version. Filter by agent, label, creation time, text, or score.
+          Set include_content to also get each trace's full input, output
+          and metadata.
   - target: $.paths['/traces'].post
     update:
       x-speakeasy-group: traces
@@ -614,3 +632,66 @@ actions:
           and optional metadata. Use this to capture live traffic for later
           review and conversion into tests. Fails with 429 once the workspace
           hits its trace limit.
+  - target: $.paths['/datasets'].post
+    update:
+      x-speakeasy-group: datasets
+      x-speakeasy-name-override: create
+      x-speakeasy-mcp:
+        name: create-dataset
+        title: Create dataset
+        scopes: [write]
+        readOnlyHint: false
+        destructiveHint: false
+        idempotentHint: false
+        openWorldHint: true
+        description: |
+          Create an empty STT or TTS dataset in the caller's org. The name must
+          be unique in the workspace (409 otherwise). Add items separately.
+  - target: $.paths['/datasets/{dataset_id}'].get
+    update:
+      x-speakeasy-group: datasets
+      x-speakeasy-name-override: get
+      x-speakeasy-mcp:
+        name: get-dataset
+        title: Get dataset
+        scopes: [read]
+        readOnlyHint: true
+        openWorldHint: true
+        description: |
+          Get one dataset in the caller's org with all of its items, each with
+          a download link for its audio (STT) and its text.
+  - target: $.paths['/datasets/{dataset_id}/items/upload'].post
+    update:
+      x-speakeasy-group: datasets
+      x-speakeasy-name-override: upload_item
+      x-speakeasy-mcp:
+        name: upload-dataset-item
+        title: Upload STT dataset item
+        scopes: [write]
+        readOnlyHint: false
+        destructiveHint: false
+        idempotentHint: false
+        openWorldHint: true
+        description: |
+          Upload one WAV clip (at most 25 MB and 10 minutes) with its
+          ground-truth transcript and append it to an STT dataset in the
+          caller's org.
+  - target: $.paths['/organizations/current'].get
+    update:
+      x-speakeasy-group: organizations
+      x-speakeasy-name-override: current
+      x-speakeasy-mcp:
+        name: get-current-workspace
+        title: Get the current workspace
+        scopes: [read]
+        readOnlyHint: true
+        destructiveHint: false
+        idempotentHint: true
+        openWorldHint: true
+        description: |
+          Get the workspace the caller's API key belongs to, as its ID and
+          name. Put the ID at the front of a Calibrate web address to link
+          straight to something in that workspace, as in `/<uuid>/tests`.
+          Without it, a link opens whichever workspace the reader looked at
+          last. Requires a Calibrate API key (CALIBRATE_API_KEY).
+

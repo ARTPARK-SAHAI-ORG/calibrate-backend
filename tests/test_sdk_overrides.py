@@ -82,6 +82,32 @@ def test_every_speakeasy_overlay_has_group_and_method_names():
         )
 
 
+def _group_key(name: str) -> str:
+    """The docs build pairs groups ignoring case, hyphens and underscores."""
+    return re.sub(r"[^a-z0-9]", "", name.lower())
+
+
+def test_cli_and_sdk_groups_match_the_api_group():
+    """The docs site (ARTPARK-SAHAI-ORG/calibrate) pairs each API group with a
+    CLI page by name and refuses to publish when one has no match."""
+    spec = _build_public_openapi()
+    fern = _fern_override_ops()
+    speakeasy = _speakeasy_overlay_ops()
+    mismatched = []
+    for path, ops in spec["paths"].items():
+        for method, op in ops.items():
+            key = (path, method.lower())
+            api = (op.get("tags") or [""])[0]
+            cli = speakeasy[key]["x-speakeasy-group"]
+            sdk = fern[key]["x-fern-sdk-group-name"]
+            if not _group_key(api) == _group_key(cli) == _group_key(sdk):
+                mismatched.append(
+                    f"{method.upper()} {path}: API group {api!r}, "
+                    f"CLI group {cli!r}, Python SDK group {sdk!r}"
+                )
+    assert not mismatched, "\n".join(mismatched)
+
+
 def test_every_speakeasy_overlay_has_mcp_metadata():
     for (path, method), op in _speakeasy_overlay_ops().items():
         mcp = op.get("x-speakeasy-mcp")

@@ -6,10 +6,10 @@ a separate token for read-write access.
 """
 
 import logging
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Union
 
 from fastapi import APIRouter, HTTPException, Query, Path
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field, StrictBool, StrictFloat, StrictInt
 
 from db import (
     DEFAULT_EVALUATORS_SEED,
@@ -864,7 +864,7 @@ def get_public_annotation_eval(
         # The parent task was deleted out from under the share link.
         raise HTTPException(status_code=404, detail="Not found")
 
-    raw_runs = get_evaluator_runs_for_job(job["uuid"])
+    evaluator_runs_in_this_job = get_evaluator_runs_for_job(job["uuid"])
     details = job.get("details") or {}
 
     # Forward only the safe-to-share keys from the raw `details` blob. Strip
@@ -889,7 +889,7 @@ def get_public_annotation_eval(
     # public responses shaped the same way.
     public_details.pop("evaluators", None)
 
-    evaluators_block = _build_evaluators_block_for_eval_job(details, raw_runs)
+    evaluators_block = _build_evaluators_block_for_eval_job(details, evaluator_runs_in_this_job)
 
     return PublicAnnotationEvalResponse(
         task_id=task_uuid,
@@ -911,8 +911,8 @@ def get_public_annotation_eval(
         # Per-run `evaluator` / `evaluator_version` blobs are intentionally
         # not surfaced — `(evaluator_id, evaluator_version_id)` on each run
         # keys back into the top-level evaluators[] block.
-        runs=_strip_run_evaluator_blocks(raw_runs),
-        human_agreement=_human_agreement_for_run(task_uuid, raw_runs),
+        runs=_strip_run_evaluator_blocks(evaluator_runs_in_this_job),
+        human_agreement=_human_agreement_for_run(task_uuid, evaluator_runs_in_this_job),
         error=shaped.get("error"),
     )
 
@@ -1021,6 +1021,24 @@ def get_public_annotation_job(
     return _build_annotation_job_payload(job, read_only=False)
 
 
+class PublicAnnotationValue(BaseModel):
+    """One judgement, and whatever the annotator wrote alongside it."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    value: Optional[Union[StrictBool, StrictInt, StrictFloat]] = Field(
+        None,
+        description="Judgement itself: a bool for a binary evaluator, a number on the rubric's scale for a rating one",
+        examples=[True],
+    )
+    reasoning: Optional[str] = Field(
+        None, description="Why the annotator chose that judgement"
+    )
+    comment: Optional[str] = Field(
+        None, description="A note on the row, carried by the row-level entry"
+    )
+
+
 class PublicAnnotationEntry(BaseModel):
     evaluator_id: Optional[str] = Field(
         None,
@@ -1029,8 +1047,8 @@ class PublicAnnotationEntry(BaseModel):
         description="Evaluator ID this judgement is for. `null` marks a row-level overall annotation",
         examples=[_EXAMPLE_EVALUATOR_UUID],
     )
-    value: Optional[Dict[str, Any]] = Field(
-        None, description="Judgement payload. Its shape depends on the evaluator's output type. `null` removes the stored judgement"
+    value: Optional[PublicAnnotationValue] = Field(
+        None, description="Judgement to record. `null` removes the stored judgement"
     )
 
 
@@ -1093,7 +1111,11 @@ def upsert_public_annotations(
             job_id=job["uuid"],
             item_id=payload.item_id,
             evaluator_id=entry.evaluator_id,
-            value=entry.value,
+            value=(
+                entry.value.model_dump(exclude_unset=True)
+                if entry.value is not None
+                else None
+            ),
         )
         if annotation_uuid:
             saved_uuids.append(annotation_uuid)

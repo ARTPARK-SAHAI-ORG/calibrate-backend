@@ -32,7 +32,7 @@ The backend wraps the `calibrate` CLI tool and orchestrates evaluation jobs whil
 | **Containerization** | Docker                              | Deployment                                                                                                                                                                   |
 | **CLI Tool**         | calibrate-agent                     | Core evaluation/simulation engine (PyPI `calibrate-agent`)                                                                                                                   |
 | **Unit tests**       | pytest + pytest-cov                 | Small regression suite under `tests/`; dev-only deps in `pyproject.toml` `[dependency-groups] dev`                                                                           |
-| **CI**               | GitHub Actions                      | Lint-free pipeline: install via `uv`, run pytest with coverage, upload to Codecov; **skipped** on push/PR when **only** docs/config/notebook paths change (`paths-ignore` in `tests.yml`: `*.md`, `*.yml`/`*.yaml`, `*.ipynb` and `**/*` variants). **Production** release deploy (`deploy.yml`) diffs the current release tag against the previous published release and calls the reusable test workflow only when that release diff contains code-impacting files; deploy still gates on passing tests when they run. Staging (`deploy-staging.yml`) is **`workflow_dispatch`** only and does **not** gate on tests. |
+| **CI**               | GitHub Actions                      | Lint-free pipeline: install via `uv`, run pytest with coverage, upload to Codecov; **skipped** on push/PR when **only** docs/config/notebook paths change (`paths-ignore` in `tests.yml`: `*.md`, `*.yml`/`*.yaml`, `*.ipynb` and `**/*` variants). Neither production (`deploy.yml`) nor staging (`deploy-staging.yml`) deploy gates on tests. |
 
 ---
 
@@ -71,7 +71,7 @@ calibrate-backend/
 │       ├── annotators.py    # Annotator CRUD (human labelers)
 │       ├── annotation_tasks.py  # Annotation tasks, items, jobs, evaluator links, agreement runs
 │       ├── annotation_agreement.py  # Inter-annotator / human-vs-evaluator agreement metrics
-│       ├── traces.py        # Production trace ingestion (API key) + curation (JWT)
+│       ├── traces.py        # Production trace ingestion and listing (API key) + curation (JWT)
 │       └── user_limits.py   # Per-user limits CRUD and limit queries
 ├── tests/                   # Pytest suite (repo root); imports match runtime (`from llm_judge import …`) via configured pythonpath
 ├── .githooks/               # Git hooks (opt-in): `pre-commit` runs pytest on `main` only — enable with `git config core.hooksPath .githooks`
@@ -101,12 +101,12 @@ calibrate-backend/
 
 **GitHub Actions**
 
-- **`tests.yml`** runs on **pushes to `main`**, **pull requests targeting `main`**, and as a **`workflow_call`** reusable workflow. **Push/PR triggers** use **`paths-ignore`** for `*.md`, `*.yml`/`*.yaml`, and `*.ipynb` (each with a root and `**/*` glob) — if **every** changed file in the event matches one of those patterns, the workflow is not scheduled (Codecov upload is skipped too). **Mixed** PRs (e.g. `src/foo.py` + `docker-compose.yml`) still run tests. Before **`uv sync`**, it installs **`libasound2-dev`** on the Ubuntu runner (**`alsa/asoundlib.h`**) so **`simpleaudio`** (a transitive dependency of **`calibrate-agent`**) can compile — same class of fix as the Calibrate CLI **agentloop** CI. Then **`uv sync --frozen --group dev`**, **`uv run pytest`** (pytest **`addopts`** include **`--cov=src`**; CI adds **`--cov-report=xml`**). **Codecov** uses **`codecov/codecov-action@v5`** with **`token: ${{ secrets.CODECOV_TOKEN }}`** and **`./coverage.xml`**; **`fail_ci_if_error: false`** avoids blocking merges when the token is missing or Codecov is unavailable.
-- **`deploy.yml`** (production, on **release published**) runs the reusable **`test`** job (**`uses: ./.github/workflows/tests.yml`**) before **`build-and-deploy`**; a failing test suite prevents the production image build/push and EC2 deploy from running. **`deploy-staging.yml`** does **not** invoke the test workflow; it only runs when manually triggered and goes straight to **`build-and-deploy`**.
+- **`tests.yml`** runs on **pushes to `main`**, and **pull requests targeting `main`**. **Push/PR triggers** use **`paths-ignore`** for `*.md`, `*.yml`/`*.yaml`, and `*.ipynb` (each with a root and `**/*` glob) — if **every** changed file in the event matches one of those patterns, the workflow is not scheduled (Codecov upload is skipped too). **Mixed** PRs (e.g. `src/foo.py` + `docker-compose.yml`) still run tests. Before **`uv sync`**, it installs **`libasound2-dev`** on the Ubuntu runner (**`alsa/asoundlib.h`**) so **`simpleaudio`** (a transitive dependency of **`calibrate-agent`**) can compile — same class of fix as the Calibrate CLI **agentloop** CI. Then **`uv sync --frozen --group dev`**, **`uv run pytest`** (pytest **`addopts`** include **`--cov=src`**; CI adds **`--cov-report=xml`**). **Codecov** uses **`codecov/codecov-action@v5`** with **`token: ${{ secrets.CODECOV_TOKEN }}`** and **`./coverage.xml`**; **`fail_ci_if_error: false`** avoids blocking merges when the token is missing or Codecov is unavailable.
+- **`deploy.yml`** (production, on **release published**) and **`deploy-staging.yml`** (manual) both go straight to **`build-and-deploy`** without running tests.
 
 **Gotchas**
 
-- **Production vs staging**: **`deploy.yml`** only runs **`tests.yml`** when the release diff from the previous published release contains code-impacting paths, then gates deployment on that result. **`deploy-staging.yml`** goes straight to build/push/deploy so operators can validate infra or hot-fix paths without waiting on the unit suite — accept the trade-off that a broken test run on `main` does not stop a manual staging deploy.
+- **Deploys do not run tests**: neither **`deploy.yml`** nor **`deploy-staging.yml`** runs **`tests.yml`**, so a broken test run on `main` does not stop a deploy. Tests run only on push/PR to `main`.
 - **Different CWD**: Developers run the API from **`src/`**; they run tests from the **repo root** (`uv run pytest`). Do not assume `Path.cwd()` matches between tests and runtime unless a test explicitly `chdir`s or uses paths relative to the project root.
 - **Hooks are opt-in**: Local **`pre-commit`** only runs for clones that set **`core.hooksPath`**. Do not assume every contributor has hooks installed.
 - **Non-code paths skip CI tests**: GitHub **`paths-ignore`** skips the workflow when the push/PR changes **only** markdown, YAML (workflows/compose), or notebooks. The local hook still runs only when staged files include **`.py` or `.json`** — e.g. a **`main`** commit that only edits `tests.yml` skips CI but also skips the hook. Do not rely on CI to catch breakage hidden in a config-only PR; if a workflow/compose change implies runtime behaviour changed, include a `.py` change or run **`uv run --group dev pytest`** locally.
@@ -211,7 +211,7 @@ The `users` table supports two authentication methods. Columns:
 | `created_at`    | TIMESTAMP | Default CURRENT_TIMESTAMP                                          |
 | `updated_at`    | TIMESTAMP | Default CURRENT_TIMESTAMP                                          |
 
-**Two auth paths for the same table**: The `email` column is the shared identifier. Google OAuth users have `password_hash` as NULL (authenticated via Google tokens). Email/password users have `password_hash` set (authenticated via bcrypt). Both use the same `email` column — there is no separate `username` column.
+**Two auth paths for the same table**: The `email` column is the shared identifier. Google OAuth users have `password_hash` as NULL (authenticated via Google tokens). Email/password users have `password_hash` set (authenticated via bcrypt). When email sending is on (`RESEND_API_KEY`), a new email/password signup keeps `password_hash` NULL until its emailed link is opened: the password waits in `verify_password_hash`, and `email_verified_at` is NULL until then. `verify_token_hash` / `reset_token_hash` hold the sha256 of the one-time links, with `verify_sent_at` / `reset_sent_at` for their age. Both use the same `email` column — there is no separate `username` column.
 
 ### Design Patterns
 
@@ -255,10 +255,16 @@ Each router follows a consistent pattern:
 #### Authentication
 
 - `POST /auth/google` - Google OAuth login (returns JWT access token)
-- `POST /auth/signup` - Register with first name, last name, email, and password (returns JWT access token)
-- `POST /auth/login` - Login with email and password (returns JWT access token)
+- `POST /auth/signup` - Register with first name, last name, email, and password (returns JWT access token; with email on, returns 202 and emails a verification link instead)
+- `POST /auth/login` - Login with email and password (returns JWT access token; with email on, 403 `email_not_verified`, with a new link sent, for a signup not verified yet)
+- `POST /auth/verify-email` - Open the verification link's token (returns JWT access token; 400 `already_verified` or `expired_token` when the link no longer works)
+- `POST /auth/resend-verification` - Email a new verification link to the account an earlier verification link (even a used or replaced one) was for (202; 400 `invalid_or_expired_token` for an unknown link, `already_verified` when that account is verified)
+- `POST /auth/forgot-password` - Email a password reset link (always 202)
+- `POST /auth/check-reset-link` - Say whether a reset link still works without using it (400 `invalid_or_expired_token` when not)
+- `POST /auth/resend-reset` - Email a new reset link to the account an earlier reset link was for (202; 400 `invalid_or_expired_token` for an unknown link)
+- `POST /auth/reset-password` - Set a new password with the reset link's token (returns JWT access token)
 
-All three auth endpoints return the same `LoginResponse` format (`access_token`, `token_type`, `user`, `message`).
+`/auth/google`, `/auth/signup` (with email off), `/auth/login`, `/auth/verify-email` and `/auth/reset-password` return the same `LoginResponse` format (`access_token`, `token_type`, `user`, `message`).
 
 **JWT Token Usage**: After login/signup, all API requests must include the JWT token in the Authorization header:
 
@@ -287,8 +293,8 @@ The JWT token contains the user's UUID and is validated on every protected endpo
 
 #### Traces
 
-- `POST /traces` - Ingest one production agent turn (`agent_id`, `input` history, `output`, optional `message_id`, `conversation_id`, `metadata`). Auth: `get_org_jwt_or_api_key` — machine-to-machine, deliberately **not** tagged `Public API` until that exposure is explicitly decided. Always stores a new trace: neither ID is a dedupe key, so a wrong or reused one can never drop a turn. 429 past the cap.
-- `GET /traces?limit=&offset=&agent_id=&conversation_id=` - Paginated slim `TraceSummary` list in the shared `PaginatedResponse` envelope. `conversation_id` is an exact match. JWT only. Filter and count run in SQL — never route this through `pagination.py`'s post-fetch `.apply()` helpers.
+- `POST /traces` - Ingest one production agent turn (`agent_id`, `input` history, `output`, optional `message_id`, `conversation_id`, `metadata`). Auth: `get_org_jwt_or_api_key`, tagged `Public API`. Always stores a new trace: neither ID is a dedupe key, so a wrong or reused one can never drop a turn. 429 past the cap.
+- `GET /traces?limit=&offset=&agent_id=&conversation_id=&created_after=&created_before=` - Paginated slim `TraceSummary` list in the shared `PaginatedResponse` envelope. `conversation_id` is an exact match. `created_after` is inclusive, `created_before` exclusive. `include_content=true` adds each row's full `input`, `output` and `metadata`. Auth: `get_org_jwt_or_api_key`, tagged `Public API`. Filter and count run in SQL — never route this through `pagination.py`'s post-fetch `.apply()` helpers.
 - `GET /traces/conversations` - One row per conversation (live traces sharing `agent_id` and `conversation_id`): `conversation_id`, `agent_id`, `first_turn_at`, `last_turn_at`, `first_message_preview` (user message of the oldest trace), `last_turn` (the newest trace as a `TraceSummary`, scores included). Newest `last_turn_at` first, `PaginatedResponse`, max `limit` 200. Same filters as `GET /traces`; a conversation is listed when any turn matches, but the times and `last_turn` cover the whole conversation. Null `conversation_id` traces are left out. `db.list_trace_conversations`. JWT only, not `Public API`. Declared before `GET /traces/{trace_uuid}`.
 - `GET /traces/conversation-ids?agent_id=` - Every distinct `conversation_id` on the live traces, newest activity first, for the trace filter's conversation list (`db.list_trace_conversation_ids`). JWT only, not `Public API`. Declared before `GET /traces/{trace_uuid}`.
 - `GET /traces/{trace_uuid}` - Full `input`/`output`/`metadata`. JWT only.
@@ -1487,9 +1493,9 @@ The container:
 
 ### GitHub Actions Deployments
 
-- **Unit tests / coverage**: `.github/workflows/tests.yml` runs on **pushes to `main`**, **PRs targeting `main`**, and when **reused** by production deploy (below). Details: **Automated testing and CI** (earlier in this doc).
+- **Unit tests / coverage**: `.github/workflows/tests.yml` runs on **pushes to `main`**, and **PRs targeting `main`**. Details: **Automated testing and CI** (earlier in this doc).
 - `.github/workflows/deploy-staging.yml` is manually triggered via **`workflow_dispatch`** only. It does **not** call `tests.yml`; it runs **`build-and-deploy`** immediately (see **Gotchas** → production vs staging).
-- `.github/workflows/deploy.yml` deploys production only on the GitHub Release **`published`** event. The workflow’s first job **`test`** invokes **`./.github/workflows/tests.yml`**; **`build-and-deploy`** has **`needs: test`**, so a failing suite blocks the image build and EC2 steps. It does not expose a manual **`workflow_dispatch`** trigger.
+- `.github/workflows/deploy.yml` deploys production only on the GitHub Release **`published`** event. It does not run tests. It does not expose a manual **`workflow_dispatch`** trigger.
 - Production deploys are tied to publishing a GitHub Release, not to a raw `git push` of a `v*` tag. Pushing a tag alone will not deploy — a Release must be published (the Release can target an existing pushed tag or create a new one). Re-publishing the same Release retriggers the deploy.
 
 ### Development

@@ -204,6 +204,81 @@ def test_create_user_with_password_then_delete():
     assert db.delete_user(pw_uuid) is False  # already gone
 
 
+def test_email_verified_backfill_runs_once(tmp_path, monkeypatch):
+    """Existing password and Google rows count as confirmed; invite stubs do not,
+    and a later restart never confirms anyone."""
+    path = tmp_path / "old.db"
+    conn = sqlite3.connect(path)
+    conn.execute(
+        """CREATE TABLE users (
+            id INTEGER PRIMARY KEY AUTOINCREMENT, uuid TEXT NOT NULL UNIQUE,
+            first_name TEXT NOT NULL, last_name TEXT NOT NULL,
+            email TEXT NOT NULL UNIQUE, password_hash TEXT DEFAULT NULL,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)"""
+    )
+    conn.executemany(
+        "INSERT INTO users (uuid, first_name, last_name, email, password_hash) VALUES (?, ?, ?, ?, ?)",
+        [
+            ("u-pw", "", "", "pw@example.com", "hash$x"),
+            ("u-google", "G", "", "g@example.com", None),
+            ("u-stub", "", "", "stub@example.com", None),
+        ],
+    )
+    conn.commit()
+    conn.close()
+    monkeypatch.setattr(db, "DB_PATH", path)
+    monkeypatch.setattr(db, "DEFAULT_USER_EMAIL", "default@example.com")
+
+    db.init_db()
+    verified = lambda email: db.get_user_by_email(email)["email_verified_at"]  # noqa: E731
+    assert verified("pw@example.com")
+    assert verified("g@example.com")
+    assert verified("stub@example.com") is None
+    # Inserted after the backfill, so it must be verified on insert.
+    assert verified("default@example.com")
+
+    pending = db.create_user("Pending", "Signup", "pending@example.com")
+    db.init_db()
+    assert db.get_user(pending)["email_verified_at"] is None
+    assert verified("stub@example.com") is None
+
+
+def test_user_tokens_cooldown_expiry_and_clearing():
+    email = f"{_u('tok')}@example.com"
+    user_uuid = db.create_user("To", "Ken", email)
+
+    assert db.set_user_token(user_uuid, "verify", "h1", 60, verify_password_hash="pw1")
+    assert not db.set_user_token(user_uuid, "verify", "h2", 60, verify_password_hash="pw2")
+    row = db.get_user_by_token("verify", "h1", 3600)
+    assert row["uuid"] == user_uuid and row["verify_password_hash"] == "pw1"
+    assert db.get_user_by_token("verify", "h2", 3600) is None
+    assert db.get_user_by_token("reset", "h1", 3600) is None
+
+    with db.get_db_connection() as conn:
+        conn.execute(
+            "UPDATE users SET verify_sent_at = datetime('now', '-2 hours') WHERE uuid = ?",
+            (user_uuid,),
+        )
+        conn.commit()
+    assert db.get_user_by_token("verify", "h1", 3600) is None
+
+    db.mark_email_verified(user_uuid, "final-hash")
+    # The link record outlives the token on the users row.
+    assert db.get_link_owner("verify", "h1")["uuid"] == user_uuid
+    assert db.get_link_owner("verify", "h2") is None  # never stored: the minute had not passed
+    assert db.get_link_owner("reset", "h1") is None
+    row = db.get_user(user_uuid)
+    assert row["password_hash"] == "final-hash"
+    assert row["email_verified_at"]
+    assert row["verify_token_hash"] is None and row["verify_password_hash"] is None
+
+    with pytest.raises(ValueError):
+        db.set_user_token(user_uuid, "bogus", "h", 60)
+    with pytest.raises(ValueError):
+        db.get_user_by_token("bogus", "h", 60)
+
+
 # ---------------------------------------------------------------------------
 # Agents + Tools + agent_tools pivot
 # ---------------------------------------------------------------------------

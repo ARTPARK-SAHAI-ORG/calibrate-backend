@@ -2505,7 +2505,9 @@ def run_simulation_endpoint(
             detail="Simulation has no scenarios. Add at least one scenario.",
         )
 
-    enforce_max_rows_per_eval(ctx.org_uuid, len(personas) * len(scenarios))
+    enforce_max_rows_per_eval(
+        ctx.org_uuid, len(personas) * len(scenarios), "simulation"
+    )
 
     # Get S3 configuration
     try:

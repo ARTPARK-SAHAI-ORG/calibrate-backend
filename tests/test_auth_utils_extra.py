@@ -54,6 +54,9 @@ def test_get_current_user_id_missing_sub(monkeypatch):
 def test_require_superadmin_allows(monkeypatch):
     monkeypatch.setattr(auth_utils, "JWT_SECRET_KEY", "test-secret-key-for-unit-tests")
     monkeypatch.setattr(auth_utils, "SUPERADMIN_EMAIL", "admin@example.com")
+    import db
+
+    monkeypatch.setattr(db, "get_user", lambda uid: {"email": "admin@example.com"})
     token = create_access_token("admin-uid", "admin@example.com")
     out = asyncio.run(require_superadmin(_creds(token)))
     assert out == "admin-uid"
@@ -102,8 +105,9 @@ def test_is_superadmin_user_match_and_mismatch(monkeypatch):
 
     def fake_get_user(uid):
         return {
-            "admin-uid": {"email": "admin@example.com"},
-            "regular-uid": {"email": "user@example.com"},
+            "admin-uid": {"email": "admin@example.com", "role": "user"},
+            "regular-uid": {"email": "user@example.com", "role": "user"},
+            "added-uid": {"email": "added@example.com", "role": "superadmin"},
         }.get(uid)
 
     import db
@@ -112,6 +116,7 @@ def test_is_superadmin_user_match_and_mismatch(monkeypatch):
     assert auth_utils.is_superadmin_user("admin-uid") is True
     assert auth_utils.is_superadmin_user("regular-uid") is False
     assert auth_utils.is_superadmin_user("unknown-uid") is False
+    assert auth_utils.is_superadmin_user("added-uid") is True
 
 
 def test_get_current_org_superadmin_bypasses_membership(monkeypatch):
@@ -125,6 +130,7 @@ def test_get_current_org_superadmin_bypasses_membership(monkeypatch):
 
     monkeypatch.setattr(db, "get_member_role", lambda org, uid: None)
     monkeypatch.setattr(db, "get_organization", lambda org: {"uuid": org})
+    monkeypatch.setattr(db, "get_user", lambda uid: {"email": "admin@example.com"})
 
     ctx = asyncio.run(get_current_org(_creds(token), x_org_uuid="some-org"))
     assert ctx.org_uuid == "some-org"

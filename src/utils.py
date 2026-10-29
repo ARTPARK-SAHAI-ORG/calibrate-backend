@@ -1,4 +1,6 @@
+import ipaddress
 import mimetypes
+import socket
 import os
 import signal
 import shutil
@@ -23,12 +25,13 @@ from typing import (
     Tuple,
     Union,
 )
-from urllib.parse import quote
+from urllib.parse import quote, urlparse
 
 import boto3
 from botocore.config import Config
 import openpyxl
 import sentry_sdk
+from fastapi import HTTPException
 from pydantic import BaseModel, Field, StringConstraints
 
 from shared_enums import TestType
@@ -121,6 +124,54 @@ def with_calibrate_eval_header(
     return {**(agent_headers or {}), CALIBRATE_EVAL_HEADER: "1"}
 
 
+def _is_private_ip(addr: str) -> bool:
+    """Return True if addr is loopback, private, link-local, or otherwise non-public."""
+    try:
+        ip = ipaddress.ip_address(addr)
+    except ValueError:
+        return False
+    return (
+        ip.is_loopback
+        or ip.is_private
+        or ip.is_reserved
+        or ip.is_link_local
+        or ip.is_multicast
+        or ip.is_unspecified
+    )
+
+
+def public_url_error(url: str) -> Optional[str]:
+    """Why url is not a public HTTP(S) address, or None if it is.
+
+    The backend calls agent and webhook addresses from its own server, so an
+    address inside that server's network (localhost, 169.254.169.254, a private
+    range) would let a user read what only the server can reach. Checks both the
+    hostname and every address it resolves to.
+    """
+    parsed = urlparse(url) if isinstance(url, str) else None
+    if parsed is None or parsed.scheme not in ("http", "https"):
+        return "must use http or https"
+    if not parsed.hostname:
+        return "must include a hostname"
+    hostname = parsed.hostname.lower()
+    if hostname in ("localhost", "127.0.0.1", "0.0.0.0", "::1", "[::1]"):
+        return "must not point to localhost"
+    if hostname.endswith(".local"):
+        return "must not point to a private network address"
+    try:
+        addr_infos = socket.getaddrinfo(hostname, None, proto=socket.IPPROTO_TCP)
+    except socket.gaierror:
+        return "hostname could not be resolved"
+    if not addr_infos:
+        return "hostname could not be resolved"
+    # ponytail: checked here, then resolved again when the call is made, so a
+    # hostname that changes its address in between gets through. Closing that
+    # means pinning the call to the checked address inside calibrate-agent.
+    if any(_is_private_ip(info[4][0]) for info in addr_infos):
+        return "must not resolve to a private or reserved network address"
+    return None
+
+
 def build_tool_configs(agent_tools: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     """
     Build tool configurations for calibrate CLI from agent tools.
@@ -146,7 +197,14 @@ def build_tool_configs(agent_tools: List[Dict[str, Any]]) -> List[Dict[str, Any]
         }
 
         if tool_type == "webhook":
-            # For webhook tools, include the full webhook configuration
+            # Checked again here, not only on save, so a tool saved before the
+            # check existed cannot reach the server's own network.
+            error = public_url_error((tool_config.get("webhook") or {}).get("url"))
+            if error:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Tool {tool['name']}: webhook url {error}",
+                )
             tool_entry["type"] = "webhook"
             tool_entry["parameters"] = tool_config.get("parameters", [])
             tool_entry["webhook"] = tool_config.get("webhook", {})

@@ -165,6 +165,25 @@ paths:
       x-fern-sdk-group-name: annotators
       x-fern-sdk-method-name: update
   /traces:
+    get:
+      x-fern-sdk-group-name: traces
+      x-fern-sdk-method-name: list
     post:
       x-fern-sdk-group-name: traces
       x-fern-sdk-method-name: create
+  /datasets:
+    post:
+      x-fern-sdk-group-name: datasets
+      x-fern-sdk-method-name: create
+  /datasets/{dataset_id}:
+    get:
+      x-fern-sdk-group-name: datasets
+      x-fern-sdk-method-name: get
+  /datasets/{dataset_id}/items/upload:
+    post:
+      x-fern-sdk-group-name: datasets
+      x-fern-sdk-method-name: upload_item
+  /organizations/current:
+    get:
+      x-fern-sdk-group-name: organizations
+      x-fern-sdk-method-name: current

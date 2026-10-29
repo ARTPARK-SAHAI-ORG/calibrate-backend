@@ -50,6 +50,19 @@ def _signup(client):
     }
 
 
+def _hits(auth):
+    """Every limit hit recorded for this user's workspace."""
+    import db as db_mod
+
+    org_uuid = db_mod.get_personal_org_for_user(auth["user_uuid"])["uuid"]
+    with db_mod.get_db_connection() as conn:
+        rows = conn.execute(
+            "SELECT limit_name, kind, requested, cap FROM limit_hits WHERE org_uuid = ?",
+            (org_uuid,),
+        ).fetchall()
+    return [tuple(r) for r in rows]
+
+
 def _llm_ev(client, h):
     evs = client.get("/evaluators", headers=h).json()["items"]
     return next(e for e in evs if e.get("evaluator_type") == "llm")
@@ -92,9 +105,9 @@ def test_helper_allows_up_to_the_cap_and_rejects_above_it(monkeypatch):
     import routers.org_limits as org_limits
 
     monkeypatch.setattr(org_limits, "DEFAULT_MAX_ROWS_PER_EVAL", 3)
-    org_limits.enforce_max_rows_per_eval("org-uuid", 3)
+    org_limits.enforce_max_rows_per_eval("org-uuid", 3, "test_run")
     with pytest.raises(HTTPException) as exc:
-        org_limits.enforce_max_rows_per_eval("org-uuid", 4)
+        org_limits.enforce_max_rows_per_eval("org-uuid", 4, "test_run")
     assert exc.value.status_code == 400
     assert "4 rows" in exc.value.detail and "limit of 3" in exc.value.detail
 
@@ -108,7 +121,7 @@ def test_helper_prefers_the_workspace_limit_over_the_default(client, monkeypatch
     org_uuid = db_mod.get_personal_org_for_user(auth["user_uuid"])["uuid"]
     db_mod.create_org_limits(org_uuid=org_uuid, limits=OrgLimits(max_rows_per_eval=5))
     assert org_limits.effective_max_rows_per_eval(org_uuid) == 5
-    org_limits.enforce_max_rows_per_eval(org_uuid, 5)
+    org_limits.enforce_max_rows_per_eval(org_uuid, 5, "test_run")
 
 
 def test_run_counts_linked_tests(client, monkeypatch):
@@ -120,6 +133,7 @@ def test_run_counts_linked_tests(client, monkeypatch):
     resp = client.post(f"/agent-tests/agent/{agent['uuid']}/run", json={}, headers=h)
     assert resp.status_code == 400
     assert "limit of 1" in resp.json()["detail"]
+    assert _hits(auth) == [("max_rows_per_eval", "test_run", 2, 1)]
 
     # One explicit test is within the cap. Started rather than queued, so this
     # leaves no queued job behind for the shared job-queue tests to pick up.
@@ -147,6 +161,7 @@ def test_benchmark_counts_tests_times_models(client, monkeypatch):
     )
     assert resp.status_code == 400
     assert "would process 2 rows" in resp.json()["detail"]
+    assert _hits(auth) == [("max_rows_per_eval", "model_comparison", 2, 1)]
 
 
 def test_stt_evaluate_counts_texts(client, monkeypatch):
@@ -164,6 +179,7 @@ def test_stt_evaluate_counts_texts(client, monkeypatch):
     )
     assert resp.status_code == 400
     assert "limit of 1" in resp.json()["detail"]
+    assert _hits(auth) == [("max_rows_per_eval", "stt", 2, 1)]
 
 
 def test_tts_evaluate_counts_texts(client, monkeypatch):
@@ -176,6 +192,7 @@ def test_tts_evaluate_counts_texts(client, monkeypatch):
     )
     assert resp.status_code == 400
     assert "limit of 1" in resp.json()["detail"]
+    assert _hits(auth) == [("max_rows_per_eval", "tts", 2, 1)]
 
 
 def test_simulation_run_counts_personas_times_scenarios(client, monkeypatch):
@@ -212,6 +229,7 @@ def test_simulation_run_counts_personas_times_scenarios(client, monkeypatch):
     )
     assert resp.status_code == 400
     assert "would process 2 rows" in resp.json()["detail"]
+    assert _hits(auth) == [("max_rows_per_eval", "simulation", 2, 1)]
 
 
 def test_evaluator_run_counts_items_times_evaluators(client):
@@ -251,6 +269,7 @@ def test_evaluator_run_counts_items_times_evaluators(client):
     )
     assert resp.status_code == 400
     assert "would process 2 rows" in resp.json()["detail"]
+    assert _hits(auth) == [("max_rows_per_eval", "labelling_evaluator_run", 2, 1)]
 
 
 def _failed_eval_job(auth, *, job_type, details):
@@ -301,6 +320,7 @@ def test_retry_counts_the_rows_it_would_rerun(
     )
     assert resp.status_code == 400
     assert "limit of 1" in resp.json()["detail"]
+    assert _hits(auth) == [("max_rows_per_eval", prefix, 2, 1)]
 
     # The refused retry leaves the original run as it was.
     job = db_mod.get_job(task_id)
@@ -334,6 +354,7 @@ def test_batch_run_skips_an_agent_over_the_limit(client, monkeypatch):
             "reason": "over_row_limit",
         }
     ]
+    assert _hits(auth) == [("max_rows_per_eval", "test_run", 2, 1)]
 
 
 def test_run_counts_a_repeated_test_once(client, monkeypatch):
