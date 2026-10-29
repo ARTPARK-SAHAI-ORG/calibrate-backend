@@ -746,7 +746,7 @@ def _ensure_input_matches_agent(stored_input: Any, agent: Dict[str, Any]) -> Non
     summary="Create trace",
     tags=["Public API"],
 )
-async def ingest_trace(
+def ingest_trace(
     payload: TraceIngest, ctx: OrgContext = Depends(get_org_jwt_or_api_key)
 ):
     """Store a production agent turn and its conversation history for later review"""
@@ -836,7 +836,7 @@ class TraceListResponse(PaginatedResponse[TraceSummary]):
     summary="List traces",
     tags=["Public API"],
 )
-async def list_traces_endpoint(
+def list_traces_endpoint(
     ctx: OrgContext = Depends(get_org_jwt_or_api_key),
     pagination: PaginationParams = Depends(),
     agent_id: Optional[str] = Query(
@@ -960,7 +960,7 @@ class TraceConversationSummary(BaseModel):
     response_model=PaginatedResponse[TraceConversationSummary],
     summary="List trace conversations",
 )
-async def list_trace_conversations_endpoint(
+def list_trace_conversations_endpoint(
     ctx: OrgContext = Depends(get_current_org),
     pagination: PaginationParams = Depends(),
     agent_id: Optional[str] = Query(
@@ -1037,7 +1037,7 @@ class TraceUsageResponse(BaseModel):
     response_model=TraceUsageResponse,
     summary="Get your trace usage against your limits",
 )
-async def get_trace_usage_endpoint(ctx: OrgContext = Depends(get_current_org)):
+def get_trace_usage_endpoint(ctx: OrgContext = Depends(get_current_org)):
     """Report how much of each trace limit you have used"""
     usage_limits = effective_limits(ctx.org_uuid)
     return {
@@ -1053,7 +1053,7 @@ async def get_trace_usage_endpoint(ctx: OrgContext = Depends(get_current_org)):
     response_model=TraceLabelsResponse,
     summary="List trace labels",
 )
-async def list_trace_labels_endpoint(
+def list_trace_labels_endpoint(
     ctx: OrgContext = Depends(get_current_org),
     agent_id: Optional[str] = Query(
         None, description="Return only labels used by this agent's traces"
@@ -1068,7 +1068,7 @@ async def list_trace_labels_endpoint(
     response_model=TraceConversationIdsResponse,
     summary="List trace conversation IDs",
 )
-async def list_trace_conversation_ids_endpoint(
+def list_trace_conversation_ids_endpoint(
     ctx: OrgContext = Depends(get_current_org),
     agent_id: Optional[str] = Query(
         None, description="Return only conversation IDs from this agent's traces"
@@ -1087,7 +1087,7 @@ async def list_trace_conversation_ids_endpoint(
     response_model=BulkDeleteTracesResponse,
     summary="Bulk delete traces",
 )
-async def bulk_delete_traces(
+def bulk_delete_traces(
     payload: BulkDeleteTracesRequest, ctx: OrgContext = Depends(get_current_org)
 ):
     """Soft-delete traces, freeing their capacity"""
@@ -1461,7 +1461,7 @@ def convert_traces_to_tests(
     response_model=TraceScoresResponse,
     summary="Get trace scores",
 )
-async def get_trace_scores_endpoint(
+def get_trace_scores_endpoint(
     trace_uuid: str = Path(
         description="The trace whose scoring runs to return",
         examples=[_EXAMPLE_TRACE_UUID],
@@ -1488,7 +1488,7 @@ async def get_trace_scores_endpoint(
 
 
 @router.get("/{trace_uuid}", response_model=TraceResponse, summary="Get trace")
-async def get_trace_endpoint(
+def get_trace_endpoint(
     trace_uuid: str = Path(
         description="The trace to retrieve",
         examples=[_EXAMPLE_TRACE_UUID],
