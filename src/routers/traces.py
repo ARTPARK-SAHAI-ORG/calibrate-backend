@@ -17,6 +17,7 @@ OTel-gateway migration.
 
 import logging
 import math
+from datetime import datetime, timezone
 from typing import Annotated, Any, ClassVar, Dict, List, Literal, Optional, Union
 
 from fastapi import APIRouter, Depends, HTTPException, Path, Query
@@ -546,6 +547,25 @@ def _require_agent_for_conversation(
         raise HTTPException(status_code=422, detail=_CONVERSATION_NEEDS_AGENT)
 
 
+_CREATED_AFTER_DESCRIPTION = (
+    "Return only traces created at or after this time (ISO 8601). "
+    "A time with no timezone is read as UTC"
+)
+_CREATED_BEFORE_DESCRIPTION = (
+    "Return only traces created before this time (ISO 8601). "
+    "A time with no timezone is read as UTC"
+)
+
+
+def _stored_time(value: Optional[datetime]) -> Optional[str]:
+    """Write a time the way `traces.created_at` stores it, so the two compare as text."""
+    if value is None:
+        return None
+    if value.tzinfo is not None:
+        value = value.astimezone(timezone.utc)
+    return value.strftime("%Y-%m-%d %H:%M:%S")
+
+
 class _TraceSelection(BaseModel):
     """Either a list of IDs or `select_all` plus the same filters `GET /traces`
     takes, so a caller acting on a whole filtered set never has to name its rows."""
@@ -583,6 +603,14 @@ class _TraceSelection(BaseModel):
         default_factory=list,
         max_length=MAX_SCORE_FILTERS,
         description=_FILTER_SCORE_DESCRIPTION,
+    )
+    created_after: Optional[datetime] = Field(
+        None,
+        description="With `select_all` on, act only on traces created at or after this time (ISO 8601). A time with no timezone is read as UTC",
+    )
+    created_before: Optional[datetime] = Field(
+        None,
+        description="With `select_all` on, act only on traces created before this time (ISO 8601). A time with no timezone is read as UTC",
     )
 
     @model_validator(mode="after")
@@ -797,9 +825,14 @@ class TraceListResponse(PaginatedResponse[TraceSummary]):
     )
 
 
-@router.get("", response_model=TraceListResponse, summary="List traces")
+@router.get(
+    "",
+    response_model=TraceListResponse,
+    summary="List traces",
+    tags=["Public API"],
+)
 async def list_traces_endpoint(
-    ctx: OrgContext = Depends(get_current_org),
+    ctx: OrgContext = Depends(get_org_jwt_or_api_key),
     pagination: PaginationParams = Depends(),
     agent_id: Optional[str] = Query(
         None, description="Return only traces from this agent"
@@ -824,6 +857,12 @@ async def list_traces_endpoint(
     ),
     score: Optional[List[str]] = Query(
         None, description=_SCORE_FILTER_DESCRIPTION
+    ),
+    created_after: Optional[datetime] = Query(
+        None, description=_CREATED_AFTER_DESCRIPTION
+    ),
+    created_before: Optional[datetime] = Query(
+        None, description=_CREATED_BEFORE_DESCRIPTION
     ),
     sort_by_evaluator: Optional[str] = Query(
         None, description=_SORT_BY_EVALUATOR_DESCRIPTION
@@ -861,6 +900,8 @@ async def list_traces_endpoint(
         labels=labels,
         scores=scores,
         conversation_id=conversation_id,
+        created_after=_stored_time(created_after),
+        created_before=_stored_time(created_before),
         sort_evaluator=sort_by_evaluator,
         sort_order=sort_order,
     )
@@ -881,6 +922,8 @@ async def list_traces_endpoint(
             labels=labels,
             scores=scores,
             conversation_id=conversation_id,
+            created_after=_stored_time(created_after),
+            created_before=_stored_time(created_before),
         )
     return body
 
@@ -1042,6 +1085,8 @@ async def bulk_delete_traces(
             labels=payload.labels,
             scores=_parse_score_filters(payload.score),
             conversation_id=payload.conversation_id,
+            created_after=_stored_time(payload.created_after),
+            created_before=_stored_time(payload.created_before),
         )
     else:
         deleted = soft_delete_traces(ctx.org_uuid, trace_ids=payload.trace_ids)
@@ -1220,6 +1265,8 @@ def convert_traces_to_tests(
             labels=payload.labels,
             scores=_parse_score_filters(payload.score),
             conversation_id=payload.conversation_id,
+            created_after=_stored_time(payload.created_after),
+            created_before=_stored_time(payload.created_before),
         )
         if total > MAX_CONVERT_TRACES:
             raise HTTPException(

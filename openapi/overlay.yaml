@@ -596,6 +596,22 @@ actions:
         idempotentHint: true
         description: |
           Rename an annotator in your workspace.
+  - target: $.paths['/traces'].get
+    update:
+      x-speakeasy-group: traces
+      x-speakeasy-name-override: list
+      x-speakeasy-mcp:
+        name: list-traces
+        title: List traces
+        scopes: [read]
+        readOnlyHint: true
+        openWorldHint: true
+        description: |
+          List the traces in the caller's org, newest first, one page at a
+          time. Each trace carries its input, output, labels and metadata,
+          and the scores from its latest scoring run with each evaluator's
+          reasoning and evaluator version. Filter by agent, label, creation
+          time, text, or score.
   - target: $.paths['/traces'].post
     update:
       x-speakeasy-group: traces

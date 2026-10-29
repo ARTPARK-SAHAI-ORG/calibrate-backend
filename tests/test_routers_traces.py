@@ -392,13 +392,105 @@ def test_same_message_id_on_two_agents_is_two_traces(client):
 # ---------------------------------------------------------------------------
 
 
+def test_list_accepts_an_api_key_and_returns_scores_with_reasoning(client):
+    h, agent_id = _signup_with_agent(client)
+    key_headers = _api_key_headers(client, h)
+    trace = _post_trace(client, h, _payload(agent_id, _mid(), labels=["prod"]))
+
+    res = client.get("/traces", params={"labels": "prod"}, headers=key_headers)
+    assert res.status_code == 200, res.text
+    assert [t["uuid"] for t in res.json()["items"]] == [trace["uuid"]]
+
+    other_h, other_agent = _signup_with_agent(client)
+    _post_trace(client, other_h, _payload(other_agent, _mid()))
+    assert client.get("/traces", headers=key_headers).json()["total"] == 1
+    assert (
+        client.get("/traces", headers={"X-API-Key": "sk_bogus"}).status_code == 401
+    )
+
+
+def _set_created_at(trace_uuid, stored):
+    with db.get_db_connection() as conn:
+        conn.execute(
+            "UPDATE traces SET created_at = ? WHERE uuid = ?", (stored, trace_uuid)
+        )
+        conn.commit()
+
+
+def test_list_filters_by_creation_time(client):
+    h, agent_id = _signup_with_agent(client)
+    old = _post_trace(client, h, _payload(agent_id, _mid()))
+    edge = _post_trace(client, h, _payload(agent_id, _mid()))
+    new = _post_trace(client, h, _payload(agent_id, _mid()))
+    _set_created_at(old["uuid"], "2026-01-01 09:59:59")
+    _set_created_at(edge["uuid"], "2026-01-01 10:00:00")
+    _set_created_at(new["uuid"], "2026-01-02 00:00:00")
+
+    def listed(**params):
+        res = client.get("/traces", params=params, headers=h)
+        assert res.status_code == 200, res.text
+        return {t["uuid"] for t in res.json()["items"]}
+
+    assert listed(created_after="2026-01-01T10:00:00Z") == {edge["uuid"], new["uuid"]}
+    assert listed(created_before="2026-01-01T10:00:00Z") == {old["uuid"]}
+    assert listed(
+        created_after="2026-01-01T10:00:00", created_before="2026-01-02T00:00:00"
+    ) == {edge["uuid"]}
+    # 15:30 in India is 10:00 UTC.
+    assert listed(created_after="2026-01-01T15:30:00+05:30") == {
+        edge["uuid"],
+        new["uuid"],
+    }
+    # The value a row reports for itself works as the next cursor.
+    edge_row = client.get(f"/traces/{edge['uuid']}", headers=h).json()
+    assert listed(created_after=edge_row["created_at"]) == {edge["uuid"], new["uuid"]}
+
+    averages = client.get(
+        "/traces",
+        params={"created_after": "2026-01-02T00:00:00Z", "include_score_averages": True},
+        headers=h,
+    )
+    assert averages.status_code == 200 and averages.json()["total"] == 1
+
+    assert (
+        client.get("/traces", params={"created_after": "yesterday"}, headers=h).status_code
+        == 422
+    )
+
+
+def test_bulk_endpoints_select_all_honour_the_creation_time(client):
+    h, agent_id = _signup_with_agent(client)
+    old = _post_trace(client, h, _payload(agent_id, _mid()))
+    new = _post_trace(client, h, _payload(agent_id, _mid()))
+    _set_created_at(old["uuid"], "2026-01-01 00:00:00")
+    _set_created_at(new["uuid"], "2026-02-01 00:00:00")
+
+    converted = _convert(
+        client,
+        h,
+        select_all=True,
+        created_after="2026-01-15T00:00:00Z",
+        type="tool_call",
+    )
+    assert converted.status_code == 200, converted.text
+    assert converted.json()["created"] == 1
+
+    res = client.post(
+        "/traces/bulk-delete",
+        json={"select_all": True, "created_before": "2026-01-15T00:00:00Z"},
+        headers=h,
+    )
+    assert res.status_code == 200 and res.json() == {"deleted": 1}
+    assert client.get(f"/traces/{old['uuid']}", headers=h).status_code == 404
+    assert client.get(f"/traces/{new['uuid']}", headers=h).status_code == 200
+
+
 def test_curation_endpoints_are_jwt_only(client):
     h = _signup(client)
     key_headers = _api_key_headers(client, h)
 
     trace_uuid = "00000000-0000-4000-8000-000000000001"
     assert client.get("/traces").status_code in (401, 403)
-    assert client.get("/traces", headers=key_headers).status_code in (401, 403)
     assert (
         client.get(f"/traces/{trace_uuid}", headers=key_headers).status_code
         in (401, 403)
