@@ -388,8 +388,142 @@ def test_same_message_id_on_two_agents_is_two_traces(client):
 
 
 # ---------------------------------------------------------------------------
-# List / detail / bulk delete (curation surface, JWT-only)
+# List / detail / bulk delete
 # ---------------------------------------------------------------------------
+
+
+def test_list_accepts_an_api_key_and_stays_in_its_workspace(client):
+    h, agent_id = _signup_with_agent(client)
+    key_headers = _api_key_headers(client, h)
+    trace = _post_trace(client, h, _payload(agent_id, _mid(), labels=["prod"]))
+
+    res = client.get("/traces", params={"labels": "prod"}, headers=key_headers)
+    assert res.status_code == 200, res.text
+    assert [t["uuid"] for t in res.json()["items"]] == [trace["uuid"]]
+
+    other_h, other_agent = _signup_with_agent(client)
+    _post_trace(client, other_h, _payload(other_agent, _mid()))
+    assert client.get("/traces", headers=key_headers).json()["total"] == 1
+    assert (
+        client.get("/traces", headers={"X-API-Key": "sk_bogus"}).status_code == 401
+    )
+
+
+def test_list_returns_full_content_only_when_asked_and_pages_through_it(client):
+    h, agent_id = _signup_with_agent(client)
+    key_headers = _api_key_headers(client, h)
+    long_reply = "x" * 2000
+    sent = [
+        _post_trace(
+            client,
+            h,
+            _payload(
+                agent_id,
+                _mid(),
+                output={"response": f"{i}{long_reply}"},
+                metadata=[{"key": "n", "value": str(i)}],
+            ),
+        )
+        for i in range(3)
+    ]
+
+    plain = client.get("/traces", headers=key_headers).json()["items"][0]
+    assert plain["input"] is None and plain["output"] is None and plain["metadata"] is None
+    assert len(plain["response_preview"]) < len(long_reply)
+
+    pages = [
+        client.get(
+            "/traces",
+            params={"include_content": True, "limit": 2, "offset": offset},
+            headers=key_headers,
+        ).json()
+        for offset in (0, 2)
+    ]
+    assert [len(p["items"]) for p in pages] == [2, 1]
+    assert all(p["total"] == 3 for p in pages)
+    rows = [row for p in pages for row in p["items"]]
+    assert {row["uuid"] for row in rows} == {t["uuid"] for t in sent}
+    for row in rows:
+        detail = client.get(f"/traces/{row['uuid']}", headers=h).json()
+        assert row["input"] == detail["input"]
+        assert row["output"] == detail["output"]
+        assert row["metadata"] == detail["metadata"]
+    assert sorted(row["output"]["response"][0] for row in rows) == ["0", "1", "2"]
+
+
+def _set_created_at(trace_uuid, stored):
+    with db.get_db_connection() as conn:
+        conn.execute(
+            "UPDATE traces SET created_at = ? WHERE uuid = ?", (stored, trace_uuid)
+        )
+        conn.commit()
+
+
+def test_list_filters_by_creation_time(client):
+    h, agent_id = _signup_with_agent(client)
+    old = _post_trace(client, h, _payload(agent_id, _mid()))
+    edge = _post_trace(client, h, _payload(agent_id, _mid()))
+    new = _post_trace(client, h, _payload(agent_id, _mid()))
+    _set_created_at(old["uuid"], "2026-01-01 09:59:59")
+    _set_created_at(edge["uuid"], "2026-01-01 10:00:00")
+    _set_created_at(new["uuid"], "2026-01-02 00:00:00")
+
+    def listed(**params):
+        res = client.get("/traces", params=params, headers=h)
+        assert res.status_code == 200, res.text
+        return {t["uuid"] for t in res.json()["items"]}
+
+    assert listed(created_after="2026-01-01T10:00:00Z") == {edge["uuid"], new["uuid"]}
+    assert listed(created_before="2026-01-01T10:00:00Z") == {old["uuid"]}
+    assert listed(
+        created_after="2026-01-01T10:00:00", created_before="2026-01-02T00:00:00"
+    ) == {edge["uuid"]}
+    # 15:30 in India is 10:00 UTC.
+    assert listed(created_after="2026-01-01T15:30:00+05:30") == {
+        edge["uuid"],
+        new["uuid"],
+    }
+    # The value a row reports for itself works as the next cursor.
+    edge_row = client.get(f"/traces/{edge['uuid']}", headers=h).json()
+    assert listed(created_after=edge_row["created_at"]) == {edge["uuid"], new["uuid"]}
+
+    assert (
+        client.get("/traces", params={"created_after": "yesterday"}, headers=h).status_code
+        == 422
+    )
+    assert (
+        client.get(
+            "/traces", params={"created_after": "0001-01-01T00:00:00+01:00"}, headers=h
+        ).status_code
+        == 422
+    )
+
+
+def test_bulk_endpoints_select_all_honour_the_creation_time(client):
+    h, agent_id = _signup_with_agent(client)
+    old = _post_trace(client, h, _payload(agent_id, _mid()))
+    new = _post_trace(client, h, _payload(agent_id, _mid()))
+    _set_created_at(old["uuid"], "2026-01-01 00:00:00")
+    _set_created_at(new["uuid"], "2026-02-01 00:00:00")
+
+    converted = _convert(
+        client,
+        h,
+        select_all=True,
+        created_after="2026-01-15T00:00:00Z",
+        type="tool_call",
+    )
+    assert converted.status_code == 200, converted.text
+    assert converted.json()["created"] == 1
+
+    res = client.post(
+        "/traces/bulk-delete",
+        json={"select_all": True, "created_before": "2026-01-15T00:00:00Z"},
+        headers=h,
+    )
+    assert res.status_code == 200 and res.json() == {"deleted": 1}
+    assert client.get(f"/traces/{old['uuid']}", headers=h).status_code == 404
+    assert client.get(f"/traces/{new['uuid']}", headers=h).status_code == 200
 
 
 def test_curation_endpoints_are_jwt_only(client):
@@ -398,7 +532,6 @@ def test_curation_endpoints_are_jwt_only(client):
 
     trace_uuid = "00000000-0000-4000-8000-000000000001"
     assert client.get("/traces").status_code in (401, 403)
-    assert client.get("/traces", headers=key_headers).status_code in (401, 403)
     assert (
         client.get(f"/traces/{trace_uuid}", headers=key_headers).status_code
         in (401, 403)
@@ -2809,6 +2942,22 @@ def test_score_averages_mean_each_evaluator_over_the_matching_traces(client):
     assert got[_EVAL_A]["output_type"] == "binary"
     assert got[_EVAL_B]["average"] == 4
     assert got[_EVAL_B]["traces_scored"] == 3
+
+
+def test_score_averages_honour_the_creation_time(client):
+    h, agent_id = _signup_with_agent(client)
+    _disable_auto_score(client, h, agent_id)
+    for value, created in ((0, "2026-01-01 00:00:00"), (1, "2026-02-01 00:00:00")):
+        trace = _post_trace(client, h, _payload(agent_id, _mid()))
+        _set_created_at(trace["uuid"], created)
+        run = _insert_run(_org_of(agent_id), trace["uuid"], status="completed",
+                          completed_at=_at(9), agent_id=agent_id)
+        _insert_score(run, evaluator_uuid=_EVAL_A, evaluator_version_id=_VER_A, value=value)
+
+    got = _averages(client, h, created_after="2026-01-15T00:00:00Z")
+
+    assert got[_EVAL_A]["traces_scored"] == 1
+    assert got[_EVAL_A]["average"] == 1
 
 
 def test_score_averages_count_a_trace_once_through_its_latest_run(client):
