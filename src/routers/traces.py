@@ -559,16 +559,6 @@ def _require_agent_for_conversation(
         raise HTTPException(status_code=422, detail=_CONVERSATION_NEEDS_AGENT)
 
 
-_CREATED_AFTER_DESCRIPTION = (
-    "Return only traces created at or after this time (ISO 8601). "
-    "A time with no timezone is read as UTC"
-)
-_CREATED_BEFORE_DESCRIPTION = (
-    "Return only traces created before this time (ISO 8601). "
-    "A time with no timezone is read as UTC"
-)
-
-
 def _stored_time(value: Optional[datetime]) -> Optional[str]:
     """Write a time the way `traces.created_at` stores it, so the two compare as text."""
     if value is None:
@@ -874,10 +864,12 @@ async def list_traces_endpoint(
         None, description=_SCORE_FILTER_DESCRIPTION
     ),
     created_after: Optional[datetime] = Query(
-        None, description=_CREATED_AFTER_DESCRIPTION
+        None,
+        description="Return only traces created at or after this time (ISO 8601). A time with no timezone is read as UTC",
     ),
     created_before: Optional[datetime] = Query(
-        None, description=_CREATED_BEFORE_DESCRIPTION
+        None,
+        description="Return only traces created before this time (ISO 8601). A time with no timezone is read as UTC",
     ),
     sort_by_evaluator: Optional[str] = Query(
         None, description=_SORT_BY_EVALUATOR_DESCRIPTION
@@ -887,7 +879,7 @@ async def list_traces_endpoint(
     ),
     include_content: bool = Query(
         False,
-        description="Also return each trace's full input, output and metadata, as `GET /traces/{trace_uuid}` does. Use `limit` and `offset` to page through them",
+        description="Also return each trace's full input, output and metadata. Use `limit` and `offset` to page through them",
     ),
     include_score_averages: bool = Query(
         False,

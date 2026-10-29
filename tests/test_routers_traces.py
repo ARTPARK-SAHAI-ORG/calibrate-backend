@@ -414,8 +414,17 @@ def test_list_returns_full_content_only_when_asked_and_pages_through_it(client):
     key_headers = _api_key_headers(client, h)
     long_reply = "x" * 2000
     sent = [
-        _post_trace(client, h, _payload(agent_id, _mid(), output={"response": long_reply}))
-        for _ in range(3)
+        _post_trace(
+            client,
+            h,
+            _payload(
+                agent_id,
+                _mid(),
+                output={"response": f"{i}{long_reply}"},
+                metadata=[{"key": "n", "value": str(i)}],
+            ),
+        )
+        for i in range(3)
     ]
 
     plain = client.get("/traces", headers=key_headers).json()["items"][0]
@@ -434,11 +443,12 @@ def test_list_returns_full_content_only_when_asked_and_pages_through_it(client):
     assert all(p["total"] == 3 for p in pages)
     rows = [row for p in pages for row in p["items"]]
     assert {row["uuid"] for row in rows} == {t["uuid"] for t in sent}
-    detail = client.get(f"/traces/{rows[0]['uuid']}", headers=h).json()
     for row in rows:
-        assert row["output"]["response"] == long_reply
+        detail = client.get(f"/traces/{row['uuid']}", headers=h).json()
         assert row["input"] == detail["input"]
+        assert row["output"] == detail["output"]
         assert row["metadata"] == detail["metadata"]
+    assert sorted(row["output"]["response"][0] for row in rows) == ["0", "1", "2"]
 
 
 def _set_created_at(trace_uuid, stored):
