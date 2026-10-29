@@ -638,3 +638,360 @@ def test_collect_intermediate_results_reports_partial_and_missing_providers(tmp_
     # Never started, so nothing to keep.
     assert results["sarvam"].success is False
     assert results["sarvam"].results is None
+
+
+# --- FAKE_AI_DEMO=1: replies and numbers come from demo_replies.json --------
+_DEMO_PATH = Path(__file__).resolve().parents[1] / "src" / "testing" / "demo_replies.json"
+
+
+def _load_fake():
+    import importlib.util
+
+    path = _DEMO_PATH.with_name("fake_calibrate_agent.py")
+    spec = importlib.util.spec_from_file_location("_fake_demo", path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def _demo():
+    import json
+
+    return json.loads(_DEMO_PATH.read_text(encoding="utf-8"))
+
+
+def _make_agent_with_tests(messages):
+    agent, _, _ = _make_agent_with_response_test()
+    user_uuid = agent["user_id"]
+    org_uuid = agent["org_uuid"]
+    tests = []
+    for msg in messages:
+        test_uuid = db.create_test(
+            name=f"t-{os.urandom(4).hex()}",
+            type="response",
+            config={
+                "history": [{"role": "user", "content": msg}],
+                "evaluation": {"type": "response"},
+            },
+            org_uuid=org_uuid,
+            user_id=user_uuid,
+        )
+        tests.append(db.get_test(test_uuid))
+    return agent, tests
+
+
+def test_demo_benchmark_uses_demo_replies_verdicts_and_model_numbers():
+    from routers.agent_tests import run_benchmark_task
+
+    demo = _demo()
+    passing = next(t for t in demo["tests"] if t["kind"] == "response" and t["demo"]["passed"])
+    failing = next(t for t in demo["tests"] if not t["demo"]["passed"])
+    agent, tests = _make_agent_with_tests(
+        [passing["user_message"], failing["user_message"], "not in the demo"]
+    )
+    job_uuid = db.create_agent_test_job(
+        agent_id=agent["uuid"], job_type="llm-benchmark", status="in_progress"
+    )
+    bm = demo["benchmark_models"][0]
+
+    with patch.dict(os.environ, {"FAKE_AI_PROVIDERS": "1", "FAKE_AI_DEMO": "1"}), patch(
+        "routers.agent_tests.get_s3_client", return_value=MagicMock()
+    ), patch("routers.agent_tests.upload_directory_tree_to_s3"), patch(
+        "routers.agent_tests.upload_file_to_s3"
+    ), patch("routers.agent_tests.try_start_queued_agent_test_job"), patch(
+        "routers.agent_tests.time.sleep"
+    ):
+        run_benchmark_task(job_uuid, agent, tests, [bm["model"]], "bucket")
+
+    job = db.get_agent_test_job(job_uuid)
+    assert job["status"] == "done", job.get("results")
+    (model_result,) = job["results"]["model_results"]
+    by_msg = {
+        r["test_case"]["history"][-1]["content"]: r for r in model_result["test_results"]
+    }
+    assert by_msg[passing["user_message"]]["output"]["response"] == passing["demo"]["reply"]
+    assert by_msg[passing["user_message"]]["passed"] is True
+    assert by_msg[failing["user_message"]]["output"]["response"] == failing["demo"]["reply"]
+    assert by_msg[failing["user_message"]]["passed"] is False
+    assert by_msg[failing["user_message"]]["reasoning"] == failing["demo"]["reasoning"]
+    assert by_msg["not in the demo"]["output"]["response"] == "Simulated agent reply."
+    assert model_result["latency_ms"]["p50"] == bm["latency_ms"]
+    assert model_result["cost"]["mean"] == bm["cost"]
+    (row,) = job["results"]["leaderboard_summary"]
+    assert row["model"] == bm["model"]
+    # The summary counts the case verdicts above, so the two always agree.
+    passed_rows = sum(r["passed"] for r in model_result["test_results"])
+    assert model_result["passed"] == passed_rows == 2
+    assert float(row["pass_rate"]) == pytest.approx(100 * 2 / 3)
+
+
+def test_without_demo_flag_the_reply_stays_canned(tmp_path, monkeypatch):
+    import json
+
+    monkeypatch.delenv("FAKE_AI_DEMO", raising=False)
+    msg = _demo()["tests"][0]["user_message"]
+    config = tmp_path / "c.json"
+    config.write_text(
+        json.dumps({"test_cases": [{"id": "t1", "history": [{"role": "user", "content": msg}]}]})
+    )
+    _load_fake().main(["x", "llm", "-c", str(config), "-o", str(tmp_path / "o")])
+    (result,) = json.loads((tmp_path / "o" / "default" / "results.json").read_text())
+    assert result["output"]["response"] == "Simulated agent reply."
+    assert result["metrics"]["passed"] is True
+
+
+def test_demo_voice_simulation_uses_demo_transcript_and_writes_audio():
+    from routers.simulations import run_simulation_task
+
+    demo = _demo()
+    persona, scenario = demo["personas"][1], demo["scenarios"][1]
+    key = f"{persona['name']}|{scenario['name']}"
+    user_uuid = db.create_user("F", "V", f"fv-{os.urandom(4).hex()}@x.com")
+    org_uuid = db.get_personal_org_for_user(user_uuid)["uuid"]
+    sim_uuid = db.create_simulation(
+        name=f"sim-{os.urandom(4).hex()}", org_uuid=org_uuid, user_id=user_uuid
+    )
+    job_uuid = db.create_simulation_job(
+        simulation_id=sim_uuid, job_type="voice", status="in_progress"
+    )
+    evaluators = [
+        {"uuid": "e1", "name": "Explains step by step", "output_type": "binary",
+         "live_version": {"system_prompt": "p", "judge_model": "m"}},
+    ]
+    uploaded = []
+
+    with patch.dict(os.environ, {"FAKE_AI_PROVIDERS": "1", "FAKE_AI_DEMO": "1"}), patch(
+        "routers.simulations.get_s3_client", return_value=MagicMock()
+    ), patch(
+        "routers.simulations.upload_file_to_s3",
+        side_effect=lambda s3, path, bucket, key: uploaded.append(Path(path)),
+    ), patch("routers.simulations.try_start_queued_simulation_job"), patch(
+        "routers.simulations.time.sleep"
+    ):
+        run_simulation_task(
+            job_uuid,
+            {"uuid": "a", "name": "Agent", "config": {}},
+            [{"uuid": "p1", "name": persona["name"], "description": "d", "config": {}}],
+            [{"uuid": "s1", "name": scenario["name"], "description": "d"}],
+            evaluators,
+            "bucket",
+            "voice",
+        )
+
+    job = db.get_simulation_job(job_uuid)
+    assert job["status"] == "done", job.get("results")
+    (sim,) = job["results"]["simulation_results"]
+    assert sim["transcript"] == demo["simulation"]["demo_transcripts"][key]
+    wavs = [p for p in uploaded if p.suffix == ".wav"]
+    assert {p.name for p in wavs} >= {"1_bot.wav", "1_user.wav", "conversation.wav"}
+    assert sim["audios_s3_path"]
+
+
+def test_demo_simulation_failing_verdict_from_demo_verdicts(tmp_path, monkeypatch):
+    import csv
+    import json
+
+    monkeypatch.setenv("FAKE_AI_DEMO", "1")
+    demo = _demo()
+    key, verdicts = next(iter(demo["simulation"]["demo_verdicts"].items()))
+    persona_name, scenario_name = key.split("|")
+    config = tmp_path / "c.json"
+    config.write_text(json.dumps({
+        "personas": [{"label": persona_name}],
+        "scenarios": [{"name": scenario_name}],
+        "evaluators": [
+            {"id": "e1", "name": "Explains step by step", "type": "binary"},
+            {"id": "e2", "name": "Encouraging tone", "type": "rating", "scale_min": 1, "scale_max": 5},
+        ],
+    }))
+    _load_fake().main(["x", "simulations", "--type", "text", "-c", str(config), "-o", str(tmp_path / "o")])
+    with open(tmp_path / "o" / "simulation_persona_1_scenario_1" / "evaluation_results.csv") as f:
+        binary, rating = csv.DictReader(f)
+    assert float(binary["value"]) == 0.0
+    assert binary["reasoning"] == verdicts["Explains step by step"]["reasoning"]
+    assert float(rating["value"]) == verdicts["Encouraging tone"]["score"]
+    assert rating["reasoning"] == verdicts["Encouraging tone"]["reasoning"]
+
+
+def test_demo_tool_call_test_shows_the_expected_call(tmp_path, monkeypatch):
+    import json
+
+    monkeypatch.setenv("FAKE_AI_DEMO", "1")
+    tool_test = next(t for t in _demo()["tests"] if t.get("expected_tool_call"))
+    config = tmp_path / "c.json"
+    config.write_text(json.dumps({"test_cases": [{
+        "id": "t1",
+        "history": [{"role": "user", "content": tool_test["user_message"]}],
+        "evaluation": {"type": "tool_call", "tool_calls": [{"tool": "x", "arguments": {"a": {"match_type": "exact", "value": 1}}}]},
+    }]}))
+    _load_fake().main(["x", "llm", "-c", str(config), "-o", str(tmp_path / "o")])
+    (result,) = json.loads((tmp_path / "o" / "default" / "results.json").read_text())
+    call = tool_test["expected_tool_call"]
+    assert result["output"]["tool_calls"] == [{"tool": call["name"], "arguments": call["arguments"]}]
+
+
+@pytest.mark.parametrize("demo_flag", ["0", "1"])
+def test_tts_writes_a_valid_non_empty_wav(tmp_path, monkeypatch, demo_flag):
+    import csv
+    import json
+    import wave
+
+    monkeypatch.setenv("FAKE_AI_DEMO", demo_flag)
+    _load_fake().main(["x", "tts", "-o", str(tmp_path), "-p", "sarvam"])
+    with open(tmp_path / "sarvam_results" / "results.csv") as f:
+        (row,) = csv.DictReader(f)
+    with wave.open(row["audio_path"]) as w:
+        assert w.getnframes() > 0
+        assert w.getframerate() == 16000
+    ttfb = json.loads((tmp_path / "sarvam_results" / "metrics.json").read_text())["ttfb"]
+    expected = _demo()["tts_dataset"]["demo_ttfb_seconds"]["sarvam"] if demo_flag == "1" else 0.5
+    assert ttfb == expected
+
+
+def test_demo_benchmark_full_pass_model_uses_the_pass_reply():
+    from routers.agent_tests import run_benchmark_task
+
+    demo = _demo()
+    failing = next(t for t in demo["tests"] if not t["demo"]["passed"])
+    bm = next(b for b in demo["benchmark_models"] if b["pass_rate"] == 100)
+    agent, tests = _make_agent_with_tests([failing["user_message"]])
+    job_uuid = db.create_agent_test_job(
+        agent_id=agent["uuid"], job_type="llm-benchmark", status="in_progress"
+    )
+
+    with patch.dict(os.environ, {"FAKE_AI_PROVIDERS": "1", "FAKE_AI_DEMO": "1"}), patch(
+        "routers.agent_tests.get_s3_client", return_value=MagicMock()
+    ), patch("routers.agent_tests.upload_directory_tree_to_s3"), patch(
+        "routers.agent_tests.upload_file_to_s3"
+    ), patch("routers.agent_tests.try_start_queued_agent_test_job"), patch(
+        "routers.agent_tests.time.sleep"
+    ):
+        run_benchmark_task(job_uuid, agent, tests, [bm["model"]], "bucket")
+
+    (model_result,) = db.get_agent_test_job(job_uuid)["results"]["model_results"]
+    (result,) = model_result["test_results"]
+    assert result["passed"] is True
+    assert result["output"]["response"] == failing["demo"]["pass_reply"]
+    assert result["reasoning"] == failing["demo"]["pass_reasoning"]
+
+
+def test_demo_stt_leaderboard_shows_demo_wer_per_provider():
+    from routers.stt import run_evaluation_task, STTEvaluationRequest
+
+    demo_wer = _demo()["stt_dataset"]["demo_wer"]
+    providers = list(demo_wer)[:2]
+    job_uuid = _make_eval_job(
+        "stt-eval",
+        {
+            "audio_paths": ["s3://bucket/key.wav"],
+            "texts": ["hi"],
+            "providers": providers,
+            "language": "en",
+            "s3_bucket": "bucket",
+            "evaluators": [],
+        },
+    )
+
+    with patch.dict(os.environ, {"FAKE_AI_PROVIDERS": "1", "FAKE_AI_DEMO": "1"}), patch(
+        "routers.stt.get_s3_client", return_value=MagicMock()
+    ), patch("routers.stt.download_file_from_s3"), patch(
+        "routers.stt.upload_file_to_s3"
+    ), patch("routers.stt.upload_top_level_files_to_s3"), patch(
+        "routers.stt.upload_directory_tree_to_s3"
+    ), patch("routers.stt.try_start_queued_job"), patch("routers.stt.time.sleep"):
+        request = STTEvaluationRequest(
+            audio_paths=["s3://bucket/key.wav"], texts=["hi"], providers=providers, language="en"
+        )
+        run_evaluation_task(job_uuid, request, "bucket")
+
+    job = db.get_job(job_uuid)
+    assert job["status"] == "done", job.get("results")
+    rows = {r["run"]: r for r in job["results"]["leaderboard_summary"]}
+    assert set(rows) == set(providers)
+    for p in providers:
+        assert rows[p]["wer"] == demo_wer[p]
+        assert rows[p]["count"] == 1
+
+
+def test_demo_conversation_eval_only_uses_the_demo_verdict(tmp_path, monkeypatch):
+    import csv
+    import json
+
+    monkeypatch.setenv("FAKE_AI_DEMO", "1")
+    failing = next(t for t in _demo()["tests"] if not t["demo"]["passed"])
+    (tmp_path / "c.json").write_text(json.dumps(
+        {"evaluators": [{"id": "e1", "name": "Explains step by step", "type": "binary"}]}
+    ))
+    (tmp_path / "d.json").write_text(json.dumps([{
+        "name": "item-1",
+        "conversation_history": [
+            {"role": "user", "content": failing["user_message"]},
+            {"role": "assistant", "content": failing["demo"]["reply"]},
+        ],
+    }]))
+    _load_fake().main([
+        "x", "simulations", "-t", "text", "-c", str(tmp_path / "c.json"), "--eval-only",
+        "--dataset", str(tmp_path / "d.json"), "-o", str(tmp_path / "o"),
+    ])
+    with open(tmp_path / "o" / "row_1" / "evaluation_results.csv") as f:
+        (row,) = csv.DictReader(f)
+    assert float(row["value"]) == 0.0
+    assert row["reasoning"] == failing["demo"]["reasoning"]
+
+
+def test_demo_tts_fills_the_evaluator_scores_and_leaderboard(tmp_path, monkeypatch):
+    import csv
+    import json
+
+    from utils import read_leaderboard_xlsx
+
+    monkeypatch.setenv("FAKE_AI_DEMO", "1")
+    rates = _demo()["tts_dataset"]["demo_judge_pass_rate"]
+    provider = next(p for p, r in rates.items() if 0 < r < 1)
+    (tmp_path / "c.json").write_text(json.dumps(
+        {"evaluators": [{"id": "e1", "name": "Pronunciation", "type": "binary"}]}
+    ))
+    (tmp_path / "in.csv").write_text("id,text\nr1,a\nr2,b\nr3,c\n")
+    _load_fake().main([
+        "x", "tts", "-p", provider, "-i", str(tmp_path / "in.csv"),
+        "-o", str(tmp_path / "o"), "--config", str(tmp_path / "c.json"),
+    ])
+    expected = round(rates[provider] * 3)
+    with open(tmp_path / "o" / f"{provider}_results" / "results.csv") as f:
+        assert sum(r["Pronunciation"] == "1" for r in csv.DictReader(f)) == expected
+    (row,) = read_leaderboard_xlsx(tmp_path / "o" / "leaderboard")
+    assert row["Pronunciation"] == pytest.approx(expected / 3)
+
+
+def test_demo_stt_reports_cer_and_sarvam_scores_from_wer(tmp_path, monkeypatch):
+    import json
+
+    monkeypatch.setenv("FAKE_AI_DEMO", "1")
+    provider, wer = next(iter(_demo()["stt_dataset"]["demo_wer"].items()))
+    _load_fake().main(["x", "stt", "-p", provider, "-o", str(tmp_path)])
+    metrics = json.loads((tmp_path / f"{provider}_results" / "metrics.json").read_text())
+    assert metrics["cer"] == pytest.approx(wer * 0.6)
+    assert metrics["sarvam_llm_wer"] > 0
+    assert metrics["sarvam_llm_cer"] > 0
+
+
+def test_demo_metrics_count_passes_from_the_case_verdicts(tmp_path, monkeypatch):
+    """A listed model's pass_rate does not override the case verdicts: one
+    pass and one fail at 75% is 1 of 2, not round(1.5)."""
+    import json
+
+    monkeypatch.setenv("FAKE_AI_DEMO", "1")
+    demo = _demo()
+    passing = next(t for t in demo["tests"] if t["demo"]["passed"])
+    failing = next(t for t in demo["tests"] if not t["demo"]["passed"])
+    bm = next(b for b in demo["benchmark_models"] if b["pass_rate"] < 100)
+    config = tmp_path / "c.json"
+    config.write_text(json.dumps({"test_cases": [
+        {"id": f"t{i}", "history": [{"role": "user", "content": t["user_message"]}]}
+        for i, t in enumerate([passing, failing])
+    ]}))
+    _load_fake().main(["x", "llm", "-c", str(config), "-m", bm["model"], "-o", str(tmp_path / "o")])
+    folder = tmp_path / "o" / bm["model"].replace("/", "__").replace(":", "_")
+    metrics = json.loads((folder / "metrics.json").read_text())
+    assert metrics["passed"] == 1
+    assert metrics["latency_ms"]["p50"] == bm["latency_ms"]
