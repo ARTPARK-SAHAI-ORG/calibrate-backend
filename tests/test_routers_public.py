@@ -646,6 +646,38 @@ def _save(client, token, item_uuid, evaluator_uuid):
     return resp.json()["status"]
 
 
+def test_saving_a_judgement_rejects_anything_but_a_bool_or_a_number(client):
+    token, item_uuids, evaluator_uuids = _labelling_job(
+        client, [_TEXT_PAYLOAD], ["llm"]
+    )
+
+    def post(value):
+        return client.post(
+            f"/public/annotation-jobs/{token}/annotations",
+            json={
+                "item_id": item_uuids[0],
+                "annotations": [
+                    {"evaluator_id": evaluator_uuids[0], "value": value}
+                ],
+            },
+        )
+
+    for rejected in (
+        {"value": [1, 2]},
+        {"value": {"nested": 1}},
+        {"value": "true"},
+        {"value": True, "unexpected": 1},
+    ):
+        assert post(rejected).status_code == 422, rejected
+
+    assert post({"value": True}).status_code == 200
+    assert post({"value": 4, "reasoning": "close enough"}).status_code == 200
+
+    # Stored verbatim: a key the annotator did not send is not invented.
+    saved = client.get(f"/public/annotation-jobs/{token}").json()["annotations"]
+    assert [a["value"] for a in saved] == [{"value": 4, "reasoning": "close enough"}]
+
+
 def test_public_annotation_job_marks_tool_call_items(client):
     token, item_uuids, evaluator_uuids = _labelling_job(
         client, [_TOOL_CALL_PAYLOAD, _TEXT_PAYLOAD], ["tool-call", "llm"]

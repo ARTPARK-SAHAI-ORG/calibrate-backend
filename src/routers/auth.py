@@ -1,6 +1,12 @@
+import hashlib
 import os
 import logging
+import secrets
+from typing import Literal, Optional
+from urllib.parse import quote
+
 from fastapi import APIRouter, HTTPException
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 import httpx
 import bcrypt
@@ -8,11 +14,24 @@ import bcrypt
 from db import (
     get_or_create_user,
     get_user_by_email,
+    create_user,
     create_user_with_password,
     get_user,
+    get_user_by_token,
+    get_link_owner,
+    list_organizations_for_user,
+    mark_email_verified,
+    set_user_token,
 )
 from auth_utils import create_access_token
-from mailer import send_email, frontend_url, WELCOME_TEMPLATE
+from mailer import (
+    send_email,
+    email_enabled,
+    frontend_url,
+    WELCOME_TEMPLATE,
+    VERIFY_EMAIL_TEMPLATE,
+    RESET_PASSWORD_TEMPLATE,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -47,6 +66,75 @@ class LoginResponse(BaseModel):
     message: str = Field(description="Status message")
 
 
+RESEND_COOLDOWN_SECONDS = 60
+VERIFY_LINK_SECONDS = 24 * 3600
+RESET_LINK_SECONDS = 3600
+
+
+def _login_response(user: dict, message: str) -> LoginResponse:
+    return LoginResponse(
+        access_token=create_access_token(user["uuid"], user["email"]),
+        user=UserResponse(
+            uuid=user["uuid"],
+            first_name=user["first_name"],
+            last_name=user["last_name"],
+            email=user["email"],
+            created_at=user["created_at"],
+            updated_at=user["updated_at"],
+        ),
+        message=message,
+    )
+
+
+def _hash_token(token: str) -> str:
+    return hashlib.sha256(token.encode("utf-8")).hexdigest()
+
+
+# bcrypt refuses anything longer, which was a server error instead of a message.
+MAX_PASSWORD_BYTES = 72
+
+
+def _hash_password(password: str) -> str:
+    if len(password.encode("utf-8")) > MAX_PASSWORD_BYTES:
+        raise HTTPException(status_code=422, detail="Password is too long")
+    return bcrypt.hashpw(password.encode("utf-8"), bcrypt.gensalt()).decode("utf-8")
+
+
+def _password_matches(password: str, password_hash: Optional[str]) -> bool:
+    # No stored password can be that long, so a longer one simply does not match.
+    if not password_hash or len(password.encode("utf-8")) > MAX_PASSWORD_BYTES:
+        return False
+    return bcrypt.checkpw(password.encode("utf-8"), password_hash.encode("utf-8"))
+
+
+def _send_welcome_unless_invited(user: dict) -> None:
+    """Welcome a newly verified account, unless an invite to someone else's workspace already emailed them."""
+    orgs = list_organizations_for_user(user["uuid"])
+    if all(org["created_by_user_id"] == user["uuid"] for org in orgs):
+        _send_welcome_email(user["email"], user["first_name"])
+
+
+def _send_token_email(
+    user: dict, kind: str, next_path: Optional[str], **signup_fields
+) -> None:
+    """Rotate the user's verify or reset token and email its link, unless one went out under a minute ago."""
+    token = secrets.token_urlsafe(32)
+    if not set_user_token(
+        user["uuid"], kind, _hash_token(token), RESEND_COOLDOWN_SECONDS, **signup_fields
+    ):
+        return
+    page, template = (
+        ("verify-email", VERIFY_EMAIL_TEMPLATE)
+        if kind == "verify"
+        else ("reset-password", RESET_PASSWORD_TEMPLATE)
+    )
+    url = f"{frontend_url()}/{page}?token={token}"
+    # Only a path on the frontend itself; `//host` and `/\host` leave the site.
+    if next_path and next_path.startswith("/") and not next_path.startswith(("//", "/\\")):
+        url += "&callbackUrl=" + quote(next_path, safe="")
+    send_email(to=user["email"], template=template, variables={"URL": url})
+
+
 def _send_welcome_email(email: str, first_name: str) -> None:
     send_email(
         to=email,
@@ -72,8 +160,6 @@ async def verify_google_token(id_token: str) -> dict:
         HTTPException: If token verification fails
     """
     google_client_id = os.getenv("GOOGLE_CLIENT_ID")
-    if not google_client_id:
-        logger.warning("GOOGLE_CLIENT_ID not set, skipping client_id validation")
 
     # Use Google's tokeninfo endpoint to verify the token
     async with httpx.AsyncClient() as client:
@@ -87,6 +173,14 @@ async def verify_google_token(id_token: str) -> dict:
                 raise HTTPException(status_code=401, detail="Invalid Google token")
 
             token_info = response.json()
+            # Any app's Google token passes tokeninfo, so the audience must be ours.
+            if (
+                not google_client_id
+                or token_info.get("aud") != google_client_id
+                or token_info.get("email_verified") not in ("true", True)
+            ):
+                logger.error("Google token has the wrong audience or an unverified email")
+                raise HTTPException(status_code=401, detail="Invalid Google token")
 
             return token_info
 
@@ -111,7 +205,10 @@ async def google_login(request: GoogleLoginRequest):
             status_code=400, detail="Email not provided in Google token"
         )
 
-    is_new = get_user_by_email(email) is None
+    existing = get_user_by_email(email)
+    # A row nobody confirmed (an invite stub, or a signup someone else started
+    # with this address) still means this is the person's first real sign in.
+    first_sign_in = existing is None or not existing["email_verified_at"]
 
     user = get_or_create_user(
         email=email,
@@ -119,89 +216,135 @@ async def google_login(request: GoogleLoginRequest):
         last_name=family_name,
     )
 
-    if is_new:
-        _send_welcome_email(user["email"], user["first_name"])
+    # Google has confirmed the address, so any signup still waiting on its link
+    # (possibly started by someone else) must stop being usable.
+    mark_email_verified(user["uuid"])
 
-    # Generate JWT access token
-    access_token = create_access_token(user["uuid"], user["email"])
+    if first_sign_in:
+        _send_welcome_unless_invited(user)
 
     logger.info(f"User logged in: {email} (UUID: {user['uuid']})")
+    return _login_response(user, "Login successful")
 
-    return LoginResponse(
-        access_token=access_token,
-        token_type="bearer",
-        user=UserResponse(
-            uuid=user["uuid"],
-            first_name=user["first_name"],
-            last_name=user["last_name"],
-            email=user["email"],
-            created_at=user["created_at"],
-            updated_at=user["updated_at"],
-        ),
-        message="Login successful",
+
+class NextPathRequest(BaseModel):
+    next: Optional[str] = Field(
+        None,
+        description="Page to return to after following the emailed link. Only a path starting with `/` is kept",
     )
 
 
-class SignupRequest(BaseModel):
+class SignupRequest(NextPathRequest):
     first_name: str = Field(..., min_length=1, description="Your given name")
     last_name: str = Field(..., min_length=1, description="Your family name")
     email: str = Field(..., min_length=3, description="Email address for your new account")
     password: str = Field(..., min_length=6, description="Account password")
 
 
-class CredentialLoginRequest(BaseModel):
+class CredentialLoginRequest(NextPathRequest):
     email: str = Field(description="Email address for your account")
     password: str = Field(description="Your account password")
 
 
-@router.post("/signup", response_model=LoginResponse, summary="Sign up with email and password")
+class VerificationSentResponse(BaseModel):
+    status: Literal["verification_sent"] = Field(
+        description="Always `verification_sent`: open the emailed link to finish signing up"
+    )
+    email: str = Field(description="Address the verification link was sent to")
+    already_pending: bool = Field(
+        description="Whether an earlier signup for this address was still waiting to be verified"
+    )
+
+
+class VerifyEmailRequest(BaseModel):
+    token: str = Field(min_length=1, description="Token from the verification link")
+
+
+class ResendLinkRequest(NextPathRequest):
+    token: str = Field(min_length=1, description="Token from an earlier link, even one that no longer works")
+
+
+class ResendLinkResponse(BaseModel):
+    status: Literal["sent"] = Field(description="Always `sent`")
+    email: str = Field(description="Address of the account the earlier link was for")
+
+
+class ForgotPasswordRequest(NextPathRequest):
+    email: str = Field(description="Email address for your account")
+
+
+class ForgotPasswordResponse(BaseModel):
+    status: Literal["sent"] = Field(
+        description="Always `sent`, whether or not an account exists for the address"
+    )
+
+
+class CheckResetLinkRequest(BaseModel):
+    token: str = Field(min_length=1, description="Token from the reset link")
+
+
+class CheckResetLinkResponse(BaseModel):
+    valid: Literal[True] = Field(description="Always `true`: the link can still set a new password")
+
+
+class ResetPasswordRequest(BaseModel):
+    token: str = Field(min_length=1, description="Token from the reset link")
+    password: str = Field(..., min_length=6, description="New account password")
+
+
+@router.post(
+    "/signup",
+    response_model=LoginResponse,
+    responses={202: {"model": VerificationSentResponse}},
+    summary="Sign up with email and password",
+)
 def signup(request: SignupRequest):
-    """Create an account with email and password and receive a JWT plus your profile"""
-    # 409 if email already has a password; invite stub rows (no password yet) are hydrated in place.
-    # A row may already exist as a stub created by an org invite (no
-    # password_hash set). `create_user_with_password` hydrates that stub in
-    # place; it raises ValueError("email already registered") if the row
-    # already has a password set.
-    existing = get_user_by_email(request.email)
-    if existing and existing.get("password_hash"):
+    """Create an account with email and password, verified through an emailed link when email is on"""
+    if not email_enabled():
+        # An unverified row is claimed in place; a verified one makes
+        # `create_user_with_password` raise, which is a 409.
+        try:
+            user_uuid = create_user_with_password(
+                first_name=request.first_name,
+                last_name=request.last_name,
+                email=request.email,
+                password_hash=_hash_password(request.password),
+            )
+        except ValueError:
+            raise HTTPException(status_code=409, detail="Email already taken")
+
+        user = get_user(user_uuid)
+        logger.info(f"User signed up: {request.email} (UUID: {user['uuid']})")
+        _send_welcome_unless_invited(user)
+        return _login_response(user, "Signup successful")
+
+    user = get_user_by_email(request.email)
+    if user is not None and user["email_verified_at"]:
         raise HTTPException(status_code=409, detail="Email already taken")
-
-    password_hash = bcrypt.hashpw(
-        request.password.encode("utf-8"), bcrypt.gensalt()
-    ).decode("utf-8")
-
-    try:
-        user_uuid = create_user_with_password(
-            first_name=request.first_name,
-            last_name=request.last_name,
-            email=request.email,
-            password_hash=password_hash,
+    # Hash first: a password bcrypt refuses must not leave a new account behind.
+    password_hash = _hash_password(request.password)
+    if user is None:
+        user = get_user(
+            create_user(request.first_name, request.last_name, request.email)
         )
-    except ValueError:
-        raise HTTPException(status_code=409, detail="Email already taken")
 
-    user = get_user(user_uuid)
-
-    access_token = create_access_token(user["uuid"], user["email"])
-    logger.info(f"User signed up: {request.email} (UUID: {user['uuid']})")
-
-    # A stub row means an invite already emailed them; only a brand-new account
-    # gets the welcome, matching the Google path.
-    if existing is None:
-        _send_welcome_email(user["email"], user["first_name"])
-
-    return LoginResponse(
-        access_token=access_token,
-        token_type="bearer",
-        user=UserResponse(
-            uuid=user["uuid"],
-            first_name=user["first_name"],
-            last_name=user["last_name"],
+    # password_hash stays empty until the link is opened, so nobody can log in
+    # with a password the address owner never confirmed.
+    _send_token_email(
+        user,
+        "verify",
+        request.next,
+        first_name=request.first_name,
+        last_name=request.last_name,
+        verify_password_hash=password_hash,
+    )
+    return JSONResponse(
+        status_code=202,
+        content=VerificationSentResponse(
+            status="verification_sent",
             email=user["email"],
-            created_at=user["created_at"],
-            updated_at=user["updated_at"],
-        ),
-        message="Signup successful",
+            already_pending=bool(user["verify_token_hash"]),
+        ).model_dump(),
     )
 
 
@@ -209,28 +352,113 @@ def signup(request: SignupRequest):
 def login(request: CredentialLoginRequest):
     """Log in with email and password and receive a JWT plus your profile"""
     user = get_user_by_email(request.email)
-    if not user or not user.get("password_hash"):
-        raise HTTPException(status_code=401, detail="Invalid email or password")
+    if user and _password_matches(request.password, user["password_hash"]):
+        logger.info(f"User logged in: {request.email} (UUID: {user['uuid']})")
+        return _login_response(user, "Login successful")
 
-    if not bcrypt.checkpw(
-        request.password.encode("utf-8"),
-        user["password_hash"].encode("utf-8"),
+    if (
+        email_enabled()
+        and user
+        and not user["email_verified_at"]
+        and _password_matches(request.password, user["verify_password_hash"])
     ):
-        raise HTTPException(status_code=401, detail="Invalid email or password")
+        _send_token_email(user, "verify", request.next)
+        raise HTTPException(status_code=403, detail="email_not_verified")
 
-    access_token = create_access_token(user["uuid"], user["email"])
-    logger.info(f"User logged in: {request.email} (UUID: {user['uuid']})")
+    raise HTTPException(status_code=401, detail="Invalid email or password")
 
-    return LoginResponse(
-        access_token=access_token,
-        token_type="bearer",
-        user=UserResponse(
-            uuid=user["uuid"],
-            first_name=user["first_name"],
-            last_name=user["last_name"],
-            email=user["email"],
-            created_at=user["created_at"],
-            updated_at=user["updated_at"],
-        ),
-        message="Login successful",
-    )
+
+@router.post("/verify-email", response_model=LoginResponse, summary="Verify email address")
+def verify_email(request: VerifyEmailRequest):
+    """Finish signing up with the token from the verification email and receive a JWT plus your profile"""
+    user = get_user_by_token("verify", _hash_token(request.token), VERIFY_LINK_SECONDS)
+    if user is None:
+        owner = get_link_owner("verify", _hash_token(request.token))
+        if owner and owner["email_verified_at"]:
+            raise HTTPException(status_code=400, detail="already_verified")
+        # Too old, used, or replaced by a newer link: the page offers a new one.
+        raise HTTPException(status_code=400, detail="expired_token")
+
+    mark_email_verified(user["uuid"], user["verify_password_hash"])
+    user = get_user(user["uuid"])
+
+    _send_welcome_unless_invited(user)
+
+    logger.info(f"User verified email: {user['email']} (UUID: {user['uuid']})")
+    return _login_response(user, "Email verified")
+
+
+@router.post(
+    "/resend-verification",
+    response_model=ResendLinkResponse,
+    status_code=202,
+    summary="Resend verification email",
+)
+def resend_verification(request: ResendLinkRequest):
+    """Email a new verification link to the account an earlier verification link was for"""
+    owner = get_link_owner("verify", _hash_token(request.token))
+    if owner is None:
+        raise HTTPException(status_code=400, detail="invalid_or_expired_token")
+    if owner["email_verified_at"]:
+        raise HTTPException(status_code=400, detail="already_verified")
+    # Only a signup still waiting has a password for the new link to set.
+    if email_enabled() and owner["verify_password_hash"]:
+        _send_token_email(owner, "verify", request.next)
+    return ResendLinkResponse(status="sent", email=owner["email"])
+
+
+@router.post(
+    "/resend-reset",
+    response_model=ResendLinkResponse,
+    status_code=202,
+    summary="Resend password reset email",
+)
+def resend_reset(request: ResendLinkRequest):
+    """Email a new reset link to the account an earlier reset link was for"""
+    owner = get_link_owner("reset", _hash_token(request.token))
+    if owner is None:
+        raise HTTPException(status_code=400, detail="invalid_or_expired_token")
+    if email_enabled():
+        _send_token_email(owner, "reset", request.next)
+    return ResendLinkResponse(status="sent", email=owner["email"])
+
+
+@router.post(
+    "/forgot-password",
+    response_model=ForgotPasswordResponse,
+    status_code=202,
+    summary="Request password reset",
+)
+def forgot_password(request: ForgotPasswordRequest):
+    """Email a link to choose a new password, without revealing whether an account exists"""
+    user = get_user_by_email(request.email)
+    # A bare invite stub has nobody behind it yet, so it gets no reset link.
+    if email_enabled() and user and (user["email_verified_at"] or user["verify_token_hash"]):
+        _send_token_email(user, "reset", request.next)
+    return ForgotPasswordResponse(status="sent")
+
+
+@router.post(
+    "/check-reset-link",
+    response_model=CheckResetLinkResponse,
+    summary="Check reset link",
+)
+def check_reset_link(request: CheckResetLinkRequest):
+    """Check that a reset link still works, without using it, so the page can say so before asking for a password"""
+    if get_user_by_token("reset", _hash_token(request.token), RESET_LINK_SECONDS) is None:
+        raise HTTPException(status_code=400, detail="invalid_or_expired_token")
+    return CheckResetLinkResponse(valid=True)
+
+
+@router.post("/reset-password", response_model=LoginResponse, summary="Reset password")
+def reset_password(request: ResetPasswordRequest):
+    """Set a new password with the token from the reset email and receive a JWT plus your profile"""
+    user = get_user_by_token("reset", _hash_token(request.token), RESET_LINK_SECONDS)
+    if user is None:
+        raise HTTPException(status_code=400, detail="invalid_or_expired_token")
+
+    # ponytail: JWTs issued before the reset stay valid until they expire; add a
+    # per-user token version checked in auth_utils if a reset must log others out.
+    mark_email_verified(user["uuid"], _hash_password(request.password))
+    logger.info(f"User reset password: {user['email']} (UUID: {user['uuid']})")
+    return _login_response(get_user(user["uuid"]), "Password reset")

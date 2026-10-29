@@ -1,12 +1,9 @@
 import copy
-import ipaddress
 import json
 import logging
-import socket
 from dataclasses import asdict
 from datetime import datetime, timezone
 from typing import Optional, List, Dict, Any, Literal
-from urllib.parse import urlparse
 from fastapi import APIRouter, HTTPException, Depends, Path, Body
 from pagination import (
     OptionalPaginationParams,
@@ -22,6 +19,7 @@ from pydantic import BaseModel, Field
 from calibrate_agent.connections import TextAgentConnection
 
 from utils import (
+    public_url_error,
     env_bool,
     with_calibrate_eval_header,
     env_int,
@@ -90,64 +88,11 @@ BLOCKED_HEADERS = frozenset(
 )
 
 
-def _is_private_ip(addr: str) -> bool:
-    """Return True if addr is loopback, private, link-local, or otherwise non-public."""
-    try:
-        ip = ipaddress.ip_address(addr)
-    except ValueError:
-        return False
-    return (
-        ip.is_loopback
-        or ip.is_private
-        or ip.is_reserved
-        or ip.is_link_local
-        or ip.is_multicast
-        or ip.is_unspecified
-    )
-
-
 def _validate_agent_url(url: str) -> None:
-    """Raise HTTPException if url is not a valid public HTTP(S) endpoint.
-
-    Checks both the hostname string and the resolved IP addresses to
-    prevent SSRF via DNS rebinding or numeric IP encoding tricks.
-    """
-    parsed = urlparse(url)
-    if parsed.scheme not in ("http", "https"):
-        raise HTTPException(status_code=400, detail="agent_url must use http or https")
-    if not parsed.hostname:
-        raise HTTPException(status_code=400, detail="agent_url must include a hostname")
-    hostname = parsed.hostname.lower()
-
-    if hostname in ("localhost", "127.0.0.1", "0.0.0.0", "::1", "[::1]"):
-        raise HTTPException(
-            status_code=400, detail="agent_url must not point to localhost"
-        )
-    if hostname.endswith(".local"):
-        raise HTTPException(
-            status_code=400,
-            detail="agent_url must not point to a private network address",
-        )
-
-    try:
-        addr_infos = socket.getaddrinfo(hostname, None, proto=socket.IPPROTO_TCP)
-    except socket.gaierror:
-        raise HTTPException(
-            status_code=400, detail="agent_url hostname could not be resolved"
-        )
-
-    if not addr_infos:
-        raise HTTPException(
-            status_code=400, detail="agent_url hostname could not be resolved"
-        )
-
-    for family, _type, _proto, _canonname, sockaddr in addr_infos:
-        ip_str = sockaddr[0]
-        if _is_private_ip(ip_str):
-            raise HTTPException(
-                status_code=400,
-                detail="agent_url must not resolve to a private or reserved network address",
-            )
+    """Raise HTTPException if url is not a valid public HTTP(S) endpoint."""
+    error = public_url_error(url)
+    if error:
+        raise HTTPException(status_code=400, detail=f"agent_url {error}")
 
 
 def _sanitize_headers(headers: Optional[Dict[str, str]]) -> Optional[Dict[str, str]]:

@@ -200,7 +200,7 @@ def test_own_provider_keys_lift_only_the_spend_limits(client, monkeypatch):
         "max_scored_traces": None
     }
     assert org_limits.effective_max_traces(org) == 5
-    org_limits.enforce_max_rows_per_eval(org, 10_000)
+    org_limits.enforce_max_rows_per_eval(org, 10_000, "test_run")
     # The stored values survive, so deleting the keys brings them back.
     assert client.get(f"/org-limits/{org}", headers=h).json()["limits"]["max_rows_per_eval"] == 3
 

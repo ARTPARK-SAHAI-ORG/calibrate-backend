@@ -71,7 +71,7 @@ calibrate-backend/
 │       ├── annotators.py    # Annotator CRUD (human labelers)
 │       ├── annotation_tasks.py  # Annotation tasks, items, jobs, evaluator links, agreement runs
 │       ├── annotation_agreement.py  # Inter-annotator / human-vs-evaluator agreement metrics
-│       ├── traces.py        # Production trace ingestion (API key) + curation (JWT)
+│       ├── traces.py        # Production trace ingestion and listing (API key) + curation (JWT)
 │       └── user_limits.py   # Per-user limits CRUD and limit queries
 ├── tests/                   # Pytest suite (repo root); imports match runtime (`from llm_judge import …`) via configured pythonpath
 ├── .githooks/               # Git hooks (opt-in): `pre-commit` runs pytest on `main` only — enable with `git config core.hooksPath .githooks`
@@ -211,7 +211,7 @@ The `users` table supports two authentication methods. Columns:
 | `created_at`    | TIMESTAMP | Default CURRENT_TIMESTAMP                                          |
 | `updated_at`    | TIMESTAMP | Default CURRENT_TIMESTAMP                                          |
 
-**Two auth paths for the same table**: The `email` column is the shared identifier. Google OAuth users have `password_hash` as NULL (authenticated via Google tokens). Email/password users have `password_hash` set (authenticated via bcrypt). Both use the same `email` column — there is no separate `username` column.
+**Two auth paths for the same table**: The `email` column is the shared identifier. Google OAuth users have `password_hash` as NULL (authenticated via Google tokens). Email/password users have `password_hash` set (authenticated via bcrypt). When email sending is on (`RESEND_API_KEY`), a new email/password signup keeps `password_hash` NULL until its emailed link is opened: the password waits in `verify_password_hash`, and `email_verified_at` is NULL until then. `verify_token_hash` / `reset_token_hash` hold the sha256 of the one-time links, with `verify_sent_at` / `reset_sent_at` for their age. Both use the same `email` column — there is no separate `username` column.
 
 ### Design Patterns
 
@@ -255,10 +255,16 @@ Each router follows a consistent pattern:
 #### Authentication
 
 - `POST /auth/google` - Google OAuth login (returns JWT access token)
-- `POST /auth/signup` - Register with first name, last name, email, and password (returns JWT access token)
-- `POST /auth/login` - Login with email and password (returns JWT access token)
+- `POST /auth/signup` - Register with first name, last name, email, and password (returns JWT access token; with email on, returns 202 and emails a verification link instead)
+- `POST /auth/login` - Login with email and password (returns JWT access token; with email on, 403 `email_not_verified`, with a new link sent, for a signup not verified yet)
+- `POST /auth/verify-email` - Open the verification link's token (returns JWT access token; 400 `already_verified` or `expired_token` when the link no longer works)
+- `POST /auth/resend-verification` - Email a new verification link to the account an earlier verification link (even a used or replaced one) was for (202; 400 `invalid_or_expired_token` for an unknown link, `already_verified` when that account is verified)
+- `POST /auth/forgot-password` - Email a password reset link (always 202)
+- `POST /auth/check-reset-link` - Say whether a reset link still works without using it (400 `invalid_or_expired_token` when not)
+- `POST /auth/resend-reset` - Email a new reset link to the account an earlier reset link was for (202; 400 `invalid_or_expired_token` for an unknown link)
+- `POST /auth/reset-password` - Set a new password with the reset link's token (returns JWT access token)
 
-All three auth endpoints return the same `LoginResponse` format (`access_token`, `token_type`, `user`, `message`).
+`/auth/google`, `/auth/signup` (with email off), `/auth/login`, `/auth/verify-email` and `/auth/reset-password` return the same `LoginResponse` format (`access_token`, `token_type`, `user`, `message`).
 
 **JWT Token Usage**: After login/signup, all API requests must include the JWT token in the Authorization header:
 
@@ -287,8 +293,8 @@ The JWT token contains the user's UUID and is validated on every protected endpo
 
 #### Traces
 
-- `POST /traces` - Ingest one production agent turn (`agent_id`, `input` history, `output`, optional `message_id`, `conversation_id`, `metadata`). Auth: `get_org_jwt_or_api_key` — machine-to-machine, deliberately **not** tagged `Public API` until that exposure is explicitly decided. Always stores a new trace: neither ID is a dedupe key, so a wrong or reused one can never drop a turn. 429 past the cap.
-- `GET /traces?limit=&offset=&agent_id=&conversation_id=` - Paginated slim `TraceSummary` list in the shared `PaginatedResponse` envelope. `conversation_id` is an exact match. JWT only. Filter and count run in SQL — never route this through `pagination.py`'s post-fetch `.apply()` helpers.
+- `POST /traces` - Ingest one production agent turn (`agent_id`, `input` history, `output`, optional `message_id`, `conversation_id`, `metadata`). Auth: `get_org_jwt_or_api_key`, tagged `Public API`. Always stores a new trace: neither ID is a dedupe key, so a wrong or reused one can never drop a turn. 429 past the cap.
+- `GET /traces?limit=&offset=&agent_id=&conversation_id=&created_after=&created_before=` - Paginated slim `TraceSummary` list in the shared `PaginatedResponse` envelope. `conversation_id` is an exact match. `created_after` is inclusive, `created_before` exclusive. `include_content=true` adds each row's full `input`, `output` and `metadata`. Auth: `get_org_jwt_or_api_key`, tagged `Public API`. Filter and count run in SQL — never route this through `pagination.py`'s post-fetch `.apply()` helpers.
 - `GET /traces/conversations` - One row per conversation (live traces sharing `agent_id` and `conversation_id`): `conversation_id`, `agent_id`, `first_turn_at`, `last_turn_at`, `first_message_preview` (user message of the oldest trace), `last_turn` (the newest trace as a `TraceSummary`, scores included). Newest `last_turn_at` first, `PaginatedResponse`, max `limit` 200. Same filters as `GET /traces`; a conversation is listed when any turn matches, but the times and `last_turn` cover the whole conversation. Null `conversation_id` traces are left out. `db.list_trace_conversations`. JWT only, not `Public API`. Declared before `GET /traces/{trace_uuid}`.
 - `GET /traces/conversation-ids?agent_id=` - Every distinct `conversation_id` on the live traces, newest activity first, for the trace filter's conversation list (`db.list_trace_conversation_ids`). JWT only, not `Public API`. Declared before `GET /traces/{trace_uuid}`.
 - `GET /traces/{trace_uuid}` - Full `input`/`output`/`metadata`. JWT only.

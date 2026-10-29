@@ -5,15 +5,17 @@ scored automatically, and trace scoring batch size and concurrency. Members read
 the effective values via `/me`.
 """
 
+import logging
 import os
 import sqlite3
 
-from fastapi import APIRouter, HTTPException, Depends, Path
-from typing import Dict, Optional
+from fastapi import APIRouter, HTTPException, Depends, Path, Response
+from typing import Dict, Literal, Optional
 
 from pydantic import BaseModel, Field
 
 from db import (
+    create_limit_hit,
     create_org_limits,
     get_member_role,
     get_organization,
@@ -23,8 +25,14 @@ from db import (
 )
 from auth_utils import get_current_org, OrgContext, require_superadmin, is_superadmin_user
 import provider_keys
+from admin_analytics import EVAL_FIELDS
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/org-limits", tags=["org-limits"])
+
+# The kinds of run a limit hit can name: the same list the analytics count.
+EvalKind = Literal[tuple(EVAL_FIELDS)]
 
 DEFAULT_MAX_ROWS_PER_EVAL = int(os.getenv("DEFAULT_MAX_ROWS_PER_EVAL", "20"))
 DEFAULT_MAX_SCORED_TRACES = int(os.getenv("DEFAULT_MAX_SCORED_TRACES", "100"))
@@ -40,30 +48,35 @@ class OrgLimits(BaseModel):
         gt=0,
         le=10000,
         description="Maximum dataset rows a single eval run may process",
+        examples=[DEFAULT_MAX_ROWS_PER_EVAL],
     )
     max_scored_traces: Optional[int] = Field(
         None,
         gt=0,
         le=1_000_000,
         description="Maximum traces a workspace may score automatically, counted over its lifetime",
+        examples=[DEFAULT_MAX_SCORED_TRACES],
     )
     max_traces: Optional[int] = Field(
         None,
         gt=0,
         le=1_000_000,
         description="Maximum traces a workspace may store",
+        examples=[DEFAULT_MAX_TRACES],
     )
     trace_scoring_batch_size: Optional[int] = Field(
         None,
         gt=0,
         le=1000,
         description="Maximum traces one scoring batch takes",
+        examples=[DEFAULT_TRACE_SCORING_BATCH_SIZE],
     )
     max_concurrent_trace_scoring_batches: Optional[int] = Field(
         None,
         gt=0,
         le=100,
         description="Maximum scoring batches a workspace may run at once",
+        examples=[DEFAULT_MAX_CONCURRENT_TRACE_SCORING_BATCHES],
     )
 
 
@@ -109,17 +122,24 @@ class OrgLimitsCreateResponse(BaseModel):
 
 class OwnLimitsResponse(BaseModel):
     max_rows_per_eval: Optional[int] = Field(
-        description="Maximum dataset rows a single eval run may process. No limit (`null`) while your workspace uses its own AI provider keys"
+        description="Maximum dataset rows a single eval run may process. No limit (`null`) while your workspace uses its own AI provider keys",
+        examples=[DEFAULT_MAX_ROWS_PER_EVAL],
     )
     max_scored_traces: Optional[int] = Field(
-        description="Maximum traces your workspace may score automatically, counted over its lifetime. No limit (`null`) while your workspace uses its own AI provider keys"
+        description="Maximum traces your workspace may score automatically, counted over its lifetime. No limit (`null`) while your workspace uses its own AI provider keys",
+        examples=[DEFAULT_MAX_SCORED_TRACES],
     )
-    max_traces: int = Field(description="Maximum traces your workspace may store")
+    max_traces: int = Field(
+        description="Maximum traces your workspace may store",
+        examples=[DEFAULT_MAX_TRACES],
+    )
     trace_scoring_batch_size: int = Field(
-        description="Maximum traces one scoring batch takes"
+        description="Maximum traces one scoring batch takes",
+        examples=[DEFAULT_TRACE_SCORING_BATCH_SIZE],
     )
     max_concurrent_trace_scoring_batches: int = Field(
-        description="Maximum scoring batches your workspace may run at once"
+        description="Maximum scoring batches your workspace may run at once",
+        examples=[DEFAULT_MAX_CONCURRENT_TRACE_SCORING_BATCHES],
     )
     uses_own_provider_keys: bool = Field(
         description="Whether your workspace's runs use only its own AI provider keys instead of Calibrate's"
@@ -128,13 +148,15 @@ class OwnLimitsResponse(BaseModel):
 
 class MaxRowsPerEvalResponse(BaseModel):
     max_rows_per_eval: Optional[int] = Field(
-        description="Maximum dataset rows a single eval run may process. No limit (`null`) while your workspace uses its own AI provider keys"
+        description="Maximum dataset rows a single eval run may process. No limit (`null`) while your workspace uses its own AI provider keys",
+        examples=[DEFAULT_MAX_ROWS_PER_EVAL],
     )
 
 
 class MaxScoredTracesResponse(BaseModel):
     max_scored_traces: Optional[int] = Field(
-        description="Maximum traces your workspace may score automatically, counted over its lifetime. No limit (`null`) while your workspace uses its own AI provider keys"
+        description="Maximum traces your workspace may score automatically, counted over its lifetime. No limit (`null`) while your workspace uses its own AI provider keys",
+        examples=[DEFAULT_MAX_SCORED_TRACES],
     )
 
 
@@ -198,10 +220,25 @@ def effective_max_concurrent_trace_scoring_batches(org_uuid: str) -> int:
     return _effective_limit(org_uuid, "max_concurrent_trace_scoring_batches")
 
 
-def enforce_max_rows_per_eval(org_uuid: str, rows: int) -> None:
+def record_limit_hit(
+    org_uuid: str,
+    limit_name: str,
+    kind: Optional[str],
+    requested: Optional[int],
+    cap: Optional[int],
+) -> None:
+    """Record a refusal for analytics. Never raises: the caller's own answer wins."""
+    try:
+        create_limit_hit(org_uuid, limit_name, kind, requested, cap)
+    except Exception:
+        logger.exception(f"Could not record a {limit_name} limit hit for {org_uuid}")
+
+
+def enforce_max_rows_per_eval(org_uuid: str, rows: int, kind: EvalKind) -> None:
     """Reject a run that would process more rows than the workspace allows."""
     cap = effective_max_rows_per_eval(org_uuid)
     if cap is not None and rows > cap:
+        record_limit_hit(org_uuid, "max_rows_per_eval", kind, rows, cap)
         raise HTTPException(
             status_code=400,
             detail=(
@@ -238,6 +275,35 @@ def get_max_rows_per_eval(ctx: OrgContext = Depends(get_current_org)):
 def get_max_scored_traces(ctx: OrgContext = Depends(get_current_org)):
     """Get how many traces your workspace may have scored automatically"""
     return {"max_scored_traces": effective_max_scored_traces(ctx.org_uuid)}
+
+
+class LimitHitCreate(BaseModel):
+    limit_name: Literal["max_rows_per_eval"] = Field(
+        description="The limit the run went over",
+        examples=["max_rows_per_eval"],
+    )
+    kind: Optional[EvalKind] = Field(
+        None,
+        description="What kind of evaluation was refused, or `null` when unknown",
+        examples=["test_run"],
+    )
+    requested: int = Field(
+        ge=0,
+        description="How many rows the refused run would have processed",
+        examples=[600],
+    )
+
+
+@router.post("/hits", status_code=204, summary="Record a limit hit")
+def record_limit_hit_endpoint(
+    data: LimitHitCreate, ctx: OrgContext = Depends(get_current_org)
+):
+    """Record that a run in your workspace was stopped before it started for going over a limit"""
+    cap = effective_limits(ctx.org_uuid)[data.limit_name]
+    # Only a run that really was over the limit is a hit.
+    if cap is not None and data.requested > cap:
+        record_limit_hit(ctx.org_uuid, data.limit_name, data.kind, data.requested, cap)
+    return Response(status_code=204)
 
 
 @router.post("", response_model=OrgLimitsCreateResponse, summary="Create workspace limits")

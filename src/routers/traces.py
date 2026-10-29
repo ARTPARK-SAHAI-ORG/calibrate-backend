@@ -17,6 +17,7 @@ OTel-gateway migration.
 
 import logging
 import math
+from datetime import datetime, timezone
 from typing import Annotated, Any, ClassVar, Dict, List, Literal, Optional, Union
 
 from fastapi import APIRouter, Depends, HTTPException, Path, Query
@@ -50,7 +51,7 @@ from db import (
 )
 from org_scope import ensure_owned_agent
 from pagination import PaginatedResponse, PaginationParams, page_envelope
-from routers.org_limits import effective_limits
+from routers.org_limits import effective_limits, record_limit_hit
 
 # Reuse the tests router's validation so a converted test accepts exactly what
 # POST /tests does (evaluator visible to the workspace, evaluator_type matches).
@@ -379,6 +380,18 @@ class TraceSummary(BaseModel):
         description="Number of metadata entries stored with the trace"
     )
     labels: List[str] = Field(description=_LABELS_DESCRIPTION)
+    input: Optional[TraceInput] = Field(
+        None,
+        description=_TRACE_INPUT_DESCRIPTION + ". Sent only with `include_content`",
+    )
+    output: Optional[TraceOutput] = Field(
+        None,
+        description="What the agent produced for this turn. Sent only with `include_content`",
+    )
+    metadata: Optional[List[TraceMetadataEntry]] = Field(
+        None,
+        description="Key-value pairs stored with the trace. Sent only with `include_content`",
+    )
     created_at: str = Field(description="When the trace was created (ISO 8601 UTC)")
     latest_run_status: Optional[TraceEvalRunStatus] = Field(
         None,
@@ -546,6 +559,18 @@ def _require_agent_for_conversation(
         raise HTTPException(status_code=422, detail=_CONVERSATION_NEEDS_AGENT)
 
 
+def _stored_time(value: Optional[datetime]) -> Optional[str]:
+    """Write a time the way `traces.created_at` stores it, so the two compare as text."""
+    if value is None:
+        return None
+    if value.tzinfo is not None:
+        try:
+            value = value.astimezone(timezone.utc)
+        except OverflowError:
+            raise HTTPException(status_code=422, detail="time is out of range")
+    return value.strftime("%Y-%m-%d %H:%M:%S")
+
+
 class _TraceSelection(BaseModel):
     """Either a list of IDs or `select_all` plus the same filters `GET /traces`
     takes, so a caller acting on a whole filtered set never has to name its rows."""
@@ -583,6 +608,14 @@ class _TraceSelection(BaseModel):
         default_factory=list,
         max_length=MAX_SCORE_FILTERS,
         description=_FILTER_SCORE_DESCRIPTION,
+    )
+    created_after: Optional[datetime] = Field(
+        None,
+        description="With `select_all` on, act only on traces created at or after this time (ISO 8601). A time with no timezone is read as UTC",
+    )
+    created_before: Optional[datetime] = Field(
+        None,
+        description="With `select_all` on, act only on traces created before this time (ISO 8601). A time with no timezone is read as UTC",
     )
 
     @model_validator(mode="after")
@@ -724,6 +757,7 @@ def ingest_trace(
     cap = limits["max_traces"]
     current = count_live_traces(ctx.org_uuid)
     if current >= cap:
+        record_limit_hit(ctx.org_uuid, "max_traces", "trace", current + 1, cap)
         raise HTTPException(
             status_code=429,
             detail={
@@ -796,9 +830,14 @@ class TraceListResponse(PaginatedResponse[TraceSummary]):
     )
 
 
-@router.get("", response_model=TraceListResponse, summary="List traces")
+@router.get(
+    "",
+    response_model=TraceListResponse,
+    summary="List traces",
+    tags=["Public API"],
+)
 def list_traces_endpoint(
-    ctx: OrgContext = Depends(get_current_org),
+    ctx: OrgContext = Depends(get_org_jwt_or_api_key),
     pagination: PaginationParams = Depends(),
     agent_id: Optional[str] = Query(
         None, description="Return only traces from this agent"
@@ -824,11 +863,23 @@ def list_traces_endpoint(
     score: Optional[List[str]] = Query(
         None, description=_SCORE_FILTER_DESCRIPTION
     ),
+    created_after: Optional[datetime] = Query(
+        None,
+        description="Return only traces created at or after this time (ISO 8601). A time with no timezone is read as UTC",
+    ),
+    created_before: Optional[datetime] = Query(
+        None,
+        description="Return only traces created before this time (ISO 8601). A time with no timezone is read as UTC",
+    ),
     sort_by_evaluator: Optional[str] = Query(
         None, description=_SORT_BY_EVALUATOR_DESCRIPTION
     ),
     sort_order: Literal["asc", "desc"] = Query(
         "desc", description=_SORT_ORDER_DESCRIPTION
+    ),
+    include_content: bool = Query(
+        False,
+        description="Also return each trace's full input, output and metadata. Use `limit` and `offset` to page through them",
     ),
     include_score_averages: bool = Query(
         False,
@@ -860,14 +911,20 @@ def list_traces_endpoint(
         labels=labels,
         scores=scores,
         conversation_id=conversation_id,
+        created_after=_stored_time(created_after),
+        created_before=_stored_time(created_before),
         sort_evaluator=sort_by_evaluator,
         sort_order=sort_order,
     )
     scoring = get_latest_trace_run_summaries(
         ctx.org_uuid, [row["uuid"] for row in rows]
     )
+    items = [_to_summary(row, scoring.get(row["uuid"])) for row in rows]
+    if include_content:
+        for item, row in zip(items, rows):
+            item.update(input=row["input"], output=row["output"], metadata=row["metadata"])
     body = page_envelope(
-        [_to_summary(row, scoring.get(row["uuid"])) for row in rows],
+        items,
         total,
         pagination,
     )
@@ -880,6 +937,8 @@ def list_traces_endpoint(
             labels=labels,
             scores=scores,
             conversation_id=conversation_id,
+            created_after=_stored_time(created_after),
+            created_before=_stored_time(created_before),
         )
     return body
 
@@ -1041,6 +1100,8 @@ def bulk_delete_traces(
             labels=payload.labels,
             scores=_parse_score_filters(payload.score),
             conversation_id=payload.conversation_id,
+            created_after=_stored_time(payload.created_after),
+            created_before=_stored_time(payload.created_before),
         )
     else:
         deleted = soft_delete_traces(ctx.org_uuid, trace_ids=payload.trace_ids)
@@ -1219,6 +1280,8 @@ def convert_traces_to_tests(
             labels=payload.labels,
             scores=_parse_score_filters(payload.score),
             conversation_id=payload.conversation_id,
+            created_after=_stored_time(payload.created_after),
+            created_before=_stored_time(payload.created_before),
         )
         if total > MAX_CONVERT_TRACES:
             raise HTTPException(

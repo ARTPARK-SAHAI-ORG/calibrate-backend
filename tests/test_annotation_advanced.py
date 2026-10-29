@@ -306,7 +306,7 @@ def test_public_annotation_job_upsert_flow(client):
             "item_id": items[0],
             "annotations": [
                 {"evaluator_id": llm_ev["uuid"], "value": {"value": True}},
-                {"evaluator_id": None, "value": {"value": "overall"}},
+                {"evaluator_id": None, "value": {"comment": "overall"}},
             ],
         },
     )

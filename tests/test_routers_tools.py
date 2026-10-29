@@ -30,6 +30,27 @@ def client(app):
             yield c
 
 
+PUBLIC_ADDR = [(2, 1, 6, "", ("93.184.215.14", 0))]
+
+
+def _fake_getaddrinfo(host, *args, **kwargs):
+    """An IP address resolves to itself; any name resolves to a public address."""
+    import ipaddress
+
+    try:
+        ipaddress.ip_address(host)
+        return [(2, 1, 6, "", (host, 0))]
+    except ValueError:
+        return PUBLIC_ADDR
+
+
+@pytest.fixture(autouse=True)
+def _public_dns():
+    """So the tests need no network."""
+    with patch("utils.socket.getaddrinfo", side_effect=_fake_getaddrinfo):
+        yield
+
+
 def _signup(client):
     suffix = uuid.uuid4().hex[:8]
     body = client.post(
@@ -84,7 +105,7 @@ def test_create_tool_rejects_duplicate_webhook_query_parameter_ids(client):
         h,
         {
             "type": "webhook",
-            "webhook": {"queryParameters": [{"id": "q"}, {"id": "q"}]},
+            "webhook": {"url": "https://example.com/hook", "queryParameters": [{"id": "q"}, {"id": "q"}]},
         },
     )
     assert resp.status_code == 422, resp.text
@@ -97,7 +118,7 @@ def test_create_tool_rejects_duplicate_webhook_body_parameter_ids(client):
         h,
         {
             "type": "webhook",
-            "webhook": {"body": {"parameters": [{"id": "b"}, {"id": "b"}]}},
+            "webhook": {"url": "https://example.com/hook", "body": {"parameters": [{"id": "b"}, {"id": "b"}]}},
         },
     )
     assert resp.status_code == 422, resp.text
@@ -128,6 +149,52 @@ def test_update_tool_rejects_duplicate_parameter_ids(client):
     resp = client.put(
         f"/tools/{created['uuid']}",
         json={"config": {"parameters": [{"id": "x"}, {"id": "x"}]}},
+        headers=h,
+    )
+    assert resp.status_code == 422, resp.text
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "http://169.254.169.254/latest/meta-data/",
+        "http://localhost:8000/admin",
+        "http://10.0.0.5/",
+        "file:///etc/passwd",
+        None,
+    ],
+)
+def test_create_tool_rejects_webhook_url_inside_the_server_network(client, url):
+    """The backend calls a webhook from its own server, so an address only that
+    server can reach (such as the AWS address that hands out its credentials)
+    must be refused."""
+    h = _signup(client)
+    resp = _create(client, h, {"type": "webhook", "webhook": {"url": url}})
+    assert resp.status_code == 422, resp.text
+    assert "webhook url" in resp.text
+
+
+def test_create_tool_rejects_hostname_resolving_to_a_private_address(client):
+    h = _signup(client)
+    private = [(2, 1, 6, "", ("169.254.169.254", 0))]
+    with patch("utils.socket.getaddrinfo", return_value=private):
+        resp = _create(
+            client,
+            h,
+            {"type": "webhook", "webhook": {"url": "https://looks-public.example"}},
+        )
+    assert resp.status_code == 422, resp.text
+
+
+def test_update_tool_rejects_internal_webhook_url(client):
+    h = _signup(client)
+    created = _create(
+        client, h, {"type": "webhook", "webhook": {"url": "https://example.com/hook"}}
+    )
+    assert created.status_code == 200, created.text
+    resp = client.put(
+        f"/tools/{created.json()['uuid']}",
+        json={"config": {"type": "webhook", "webhook": {"url": "http://127.0.0.1/"}}},
         headers=h,
     )
     assert resp.status_code == 422, resp.text

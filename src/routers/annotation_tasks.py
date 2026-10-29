@@ -77,6 +77,7 @@ from annotation_eval_runner import (
     start_annotation_eval_job,
     TOOL_CALL_EVALUATOR_TYPE,
 )
+from annotation_metrics import KappaFields
 from utils import (
     utc_now,
     job_slot,
@@ -271,20 +272,60 @@ class HumanAgreementBlock(BaseModel):
     pair_count: int = Field(
         description="How many annotator pairs the current value averages over"
     )
-    series: List[Dict[str, Any]] = Field(
-        description="Agreement over time, one point per time bucket"
+
+
+class EvaluatorsWithHumansBlock(BaseModel):
+    current: Optional[float] = Field(
+        description="Current mean agreement between the evaluators and the annotators, weighted by how many pairs each evaluator compared"
+    )
+    pair_count: int = Field(
+        description="How many evaluator and annotator pairs the current value averages over"
+    )
+
+
+class InterAnnotatorAgreement(KappaFields):
+    current: Optional[float] = Field(
+        description="Current mean pairwise agreement among annotators on this evaluator"
+    )
+    pair_count: int = Field(
+        description="How many annotator pairs the current value averages over"
+    )
+
+
+class AnswerSummary(BaseModel):
+    count: int = Field(description="How many answers there are")
+    true_count: Optional[int] = Field(description="How many pass/fail answers are a pass")
+    mean: Optional[float] = Field(description="Mean of the rating answers")
+
+
+class EvaluatorAgreement(KappaFields):
+    evaluator_id: str = Field(description="ID of the evaluator", examples=[_EXAMPLE_ID])
+    name: Optional[str] = Field(description="Name of the evaluator")
+    current: Optional[float] = Field(
+        description="Current mean agreement between this evaluator's judge and the annotators"
+    )
+    pair_count: int = Field(
+        description="How many judge and annotator pairs the current value averages over"
+    )
+    inter_annotator: InterAnnotatorAgreement = Field(
+        description="Agreement between annotators on this evaluator"
+    )
+    result: AnswerSummary = Field(description="The evaluator's own scores on the task")
+    human_result: Optional[AnswerSummary] = Field(
+        description="The annotators' answers for this evaluator"
     )
 
 
 class TaskAgreementResponse(BaseModel):
     model_config = ConfigDict(extra="allow")
     task_id: str = Field(description="ID of the task", examples=[_EXAMPLE_ID])
-    bucket: str = Field(description="Time bucket used for the trend series")
-    days: int = Field(description="Length of the trailing window in days")
     human_human: HumanAgreementBlock = Field(
         description="Agreement between annotators who labelled the same items"
     )
-    evaluators: List[Dict[str, Any]] = Field(
+    evaluators_with_humans: EvaluatorsWithHumansBlock = Field(
+        description="Agreement between the evaluators and the annotators, across every evaluator in `evaluators`"
+    )
+    evaluators: List[EvaluatorAgreement] = Field(
         description="Agreement between each evaluator and the annotators, plus that evaluator's own results and the human results, one entry per linked evaluator"
     )
 
@@ -381,36 +422,20 @@ _SummaryProjection = make_projection_params(
     ]
 )
 from annotation_metrics import (
-    aggregate_agreement,
-    aggregate_human_evaluator_agreement,
-    evaluator_human_pair_agreement,
-    evaluator_result_summary,
-    human_result_summary,
-    per_item_agreement,
-    has_any_comparable_pair,
-    trend_series,
-    trend_series_human_evaluator,
-    filter_runs_to_live_versions,
-    _pairwise_agreement,
-    _scalar,
+    agreement_and_kappa_between_judge_and_annotators,
+    agreement_response,
+    judge_and_annotators_agreement_on_item,
+    judge_answer_summary,
+    annotator_answer_summary,
+    agreement_on_item,
+    has_answers_to_compare,
+    kappa_of_one_kind,
+    keep_runs_from_live_versions_of,
+    rating_scales_for,
+    _mean_agreement_between_answers,
+    _extract_answer,
     _round_agreement,
 )
-
-
-def _live_version_map(evaluators: List[Dict[str, Any]]) -> Dict[str, Optional[str]]:
-    return {e["uuid"]: e.get("live_version_id") for e in evaluators}
-
-
-def _runs_at_live_versions(
-    runs: List[Dict[str, Any]], evaluators: List[Dict[str, Any]]
-) -> List[Dict[str, Any]]:
-    """Keep only runs at each linked evaluator's live version.
-
-    Single definition of the live-version filter shared by the `/agreement`
-    endpoint and the list endpoint's `has_agreement` flag, so the two can't
-    drift on what counts as agreement.
-    """
-    return filter_runs_to_live_versions(runs, _live_version_map(evaluators))
 
 
 # Re-exported for tests; canonical home is llm_judge so agent-tests/STT/TTS can
@@ -615,8 +640,8 @@ def list_annotation_tasks(
     for task in page:
         linked = evaluators_by_task.get(task["uuid"], [])
         task["evaluators"] = linked
-        runs = _runs_at_live_versions(runs_by_task.get(task["uuid"], []), linked)
-        task["has_agreement"] = has_any_comparable_pair(
+        runs = keep_runs_from_live_versions_of(runs_by_task.get(task["uuid"], []), linked)
+        task["has_agreement"] = has_answers_to_compare(
             annotations_by_task.get(task["uuid"], []),
             runs,
             [e["uuid"] for e in linked],
@@ -645,27 +670,29 @@ def get_annotation_task_endpoint(
     # an N+1 query pattern on the per-item agreement computation. Per-item
     # agreement uses whichever evaluator version actually ran on each slot —
     # the live-version filter is reserved for AGGREGATED agreement (task-level
-    # `/agreement` and account-level `/annotation-agreement/trend`).
+    # `/agreement` and account-level `/annotation-agreement`).
     all_annotations = get_annotations_for_task(task_uuid)
-    all_runs = get_evaluator_runs_for_task(task_uuid)
-    annotations_by_item: Dict[str, List[Dict[str, Any]]] = {}
-    for a in all_annotations:
-        annotations_by_item.setdefault(a["item_id"], []).append(a)
-    runs_by_item: Dict[str, List[Dict[str, Any]]] = {}
-    for r in all_runs:
-        runs_by_item.setdefault(r["item_id"], []).append(r)
-    evaluator_ids = [e["uuid"] for e in evaluators]
+    all_evaluator_runs = get_evaluator_runs_for_task(task_uuid)
+    item_id_to_annotations: Dict[str, List[Dict[str, Any]]] = {}
+    for annotation in all_annotations:
+        item_id_to_annotations.setdefault(annotation["item_id"], []).append(annotation)
+    item_id_to_evaluator_runs: Dict[str, List[Dict[str, Any]]] = {}
+    for run in all_evaluator_runs:
+        item_id_to_evaluator_runs.setdefault(run["item_id"], []).append(run)
+    evaluator_ids = [evaluator["uuid"] for evaluator in evaluators]
+    rating_scales = rating_scales_for(all_annotations, all_evaluator_runs)
     for item in items:
-        item["agreement"] = per_item_agreement(
-            annotations_by_item.get(item["uuid"], []),
-            runs_by_item.get(item["uuid"], []),
+        item["agreement"] = agreement_on_item(
+            item_id_to_annotations.get(item["uuid"], []),
+            item_id_to_evaluator_runs.get(item["uuid"], []),
             evaluator_ids,
+            rating_scales,
         )
     # Same all-time flag the list endpoint sets, so the detail view agrees.
     # Aggregated agreement filters runs to each evaluator's live version.
-    task["has_agreement"] = has_any_comparable_pair(
+    task["has_agreement"] = has_answers_to_compare(
         all_annotations,
-        _runs_at_live_versions(all_runs, evaluators),
+        keep_runs_from_live_versions_of(all_evaluator_runs, evaluators),
         evaluator_ids,
     )
     # TTS items store audio as an S3 key; sign it so the Items tab can play it.
@@ -1451,7 +1478,7 @@ def bulk_create_items(
                 )
             # Validate the value shape on every entry so a malformed dict
             # can't slip through and silently zero out of the agreement
-            # aggregates (`annotation_metrics._scalar` only recognises
+            # aggregates (`annotation_metrics._extract_answer` only recognises
             # the keys `value`, `score`, `rating`, `label`, `binary`).
             # Bulk uploads are the only ingress path that doesn't go
             # through the public form's typed widget, so the canonical
@@ -2312,7 +2339,9 @@ def start_evaluator_run(
     except EvaluatorResolutionError as e:
         raise HTTPException(status_code=400, detail=str(e))
 
-    enforce_max_rows_per_eval(ctx.org_uuid, len(items) * len(resolved))
+    enforce_max_rows_per_eval(
+        ctx.org_uuid, len(items) * len(resolved), "labelling_evaluator_run"
+    )
 
     # Validate item payload shape early so we 400 instead of failing async.
     try:
@@ -2425,7 +2454,7 @@ def _enrich_runs_with_live_evaluator(
 
 def _build_evaluators_block_for_eval_job(
     job_details: Optional[Dict[str, Any]],
-    raw_runs: List[Dict[str, Any]],
+    evaluator_runs_in_this_job: List[Dict[str, Any]],
 ) -> List[Dict[str, Any]]:
     """Build the top-level `evaluators[]` block returned alongside an
     evaluator-run job detail response. Mirrors the shape used by the
@@ -2448,14 +2477,24 @@ def _build_evaluators_block_for_eval_job(
     # version actually used.
     slots: List[tuple] = []
     seen: set = set()
+    run_versions_by_evaluator: Dict[str, List[Optional[str]]] = {}
+    for r in evaluator_runs_in_this_job or []:
+        versions = run_versions_by_evaluator.setdefault(r.get("evaluator_id"), [])
+        if r.get("evaluator_version_id") not in versions:
+            versions.append(r.get("evaluator_version_id"))
     for entry in snapshot:
         if not isinstance(entry, dict):
             continue
         slot = (entry.get("evaluator_id"), entry.get("evaluator_version_id"))
+        # Runs moved onto a workspace's own copy of a default evaluator kept
+        # the template's version in their snapshot; show the version scored.
+        run_versions = run_versions_by_evaluator.get(slot[0])
+        if run_versions and slot[1] not in run_versions:
+            slot = (slot[0], run_versions[0])
         if slot[0] and slot not in seen:
             seen.add(slot)
             slots.append(slot)
-    for r in raw_runs or []:
+    for r in evaluator_runs_in_this_job or []:
         slot = (r.get("evaluator_id"), r.get("evaluator_version_id"))
         if slot[0] and slot not in seen:
             seen.add(slot)
@@ -2616,10 +2655,10 @@ def list_evaluator_run_jobs(
 
 
 def _human_agreement_for_run(
-    task_uuid: str, job_runs: List[Dict[str, Any]]
+    task_uuid: str, evaluator_runs_in_this_job: List[Dict[str, Any]]
 ) -> Dict[str, Any]:
     """Build the `human_agreement` block returned alongside an evaluator-run
-    job. Restricted to slots (item_id, evaluator_id) actually exercised by
+    job. Restricted to the (item_id, evaluator_id) pairs actually scored by
     THIS job's runs — annotations on items/evaluators not in the run are
     ignored even if present elsewhere on the task.
 
@@ -2627,7 +2666,10 @@ def _human_agreement_for_run(
         {
           "evaluators": [
             { "evaluator_id": str, "evaluator_version_id": str|None,
-              "agreement": float|None, "pair_count": int, "item_count": int }
+              "agreement": float|None, "pair_count": int,
+              "kappa": float|None, "kappa_type": str|None,
+              "kappa_blank_reason": str|None, "chance_agreement": float|None,
+              "item_count": int }
           ],
           "items": [
             { "item_id": str, "annotator_count": int,
@@ -2635,21 +2677,21 @@ def _human_agreement_for_run(
           ]
         }
 
-    `evaluators[].agreement` reuses `aggregate_human_evaluator_agreement` —
+    `evaluators[].agreement` reuses `agreement_and_kappa_between_judge_and_annotators` —
     so it agrees with the task-level alignment block by construction.
     `items[]` only includes items where at least one human annotation exists
     on an evaluator that this job ran (no humans → no row, by design)."""
-    if not job_runs:
+    if not evaluator_runs_in_this_job:
         return {"evaluators": [], "items": []}
 
-    item_ids_in_run = {r["item_id"] for r in job_runs if r.get("item_id")}
-    evaluator_ids_in_run = list(
-        {r["evaluator_id"] for r in job_runs if r.get("evaluator_id")}
+    item_ids_in_this_job = {run["item_id"] for run in evaluator_runs_in_this_job if run.get("item_id")}
+    evaluator_ids_in_this_job = list(
+        {run["evaluator_id"] for run in evaluator_runs_in_this_job if run.get("evaluator_id")}
     )
-    if not item_ids_in_run or not evaluator_ids_in_run:
+    if not item_ids_in_this_job or not evaluator_ids_in_this_job:
         return {"evaluators": [], "items": []}
 
-    # Constrain the read to this run's slots at the DB layer rather than
+    # Constrain the read to this run's items and evaluators at the DB layer rather than
     # pulling the task's entire annotation history and filtering in
     # Python — on a large task, the run is a tiny window and the filter
     # would dominate request latency. `include_deleted_items=True`
@@ -2657,41 +2699,43 @@ def _human_agreement_for_run(
     # completed (the run's `evaluator_runs` rows survive item delete; the
     # human side has to survive too or the agreement number on the
     # run-detail view silently shrinks).
-    relevant_annotations = get_annotations_for_slots(
+    annotations_on_this_jobs_items = get_annotations_for_slots(
         task_uuid,
-        item_ids=list(item_ids_in_run),
-        evaluator_ids=evaluator_ids_in_run,
+        item_ids=list(item_ids_in_this_job),
+        evaluator_ids=evaluator_ids_in_this_job,
         include_deleted_items=True,
     )
 
     # Per-evaluator aggregate (across every item this job touched).
-    evaluator_blocks: List[Dict[str, Any]] = []
+    agreement_per_evaluator: List[Dict[str, Any]] = []
     # Pre-compute version pin per evaluator from the run rows so the FE can
     # show "agreement on evaluator X version Y vs humans" without an extra
     # lookup. A job runs one version per evaluator by construction.
-    version_by_evaluator: Dict[str, Optional[str]] = {}
-    for r in job_runs:
-        ev_id = r.get("evaluator_id")
-        if ev_id and ev_id not in version_by_evaluator:
-            version_by_evaluator[ev_id] = r.get("evaluator_version_id")
-    for ev_id in evaluator_ids_in_run:
-        agreement, pair_count = aggregate_human_evaluator_agreement(
-            relevant_annotations, job_runs, ev_id
+    evaluator_id_to_version_id: Dict[str, Optional[str]] = {}
+    for run in evaluator_runs_in_this_job:
+        evaluator_id = run.get("evaluator_id")
+        if evaluator_id and evaluator_id not in evaluator_id_to_version_id:
+            evaluator_id_to_version_id[evaluator_id] = run.get("evaluator_version_id")
+    rating_scales = rating_scales_for(annotations_on_this_jobs_items, evaluator_runs_in_this_job)
+    for evaluator_id in evaluator_ids_in_this_job:
+        agreement, pair_count, kappa_by_kind = agreement_and_kappa_between_judge_and_annotators(
+            annotations_on_this_jobs_items, evaluator_runs_in_this_job, evaluator_id, rating_scales
         )
         # Items with at least one human annotation on this evaluator.
         item_count = len(
             {
-                a["item_id"]
-                for a in relevant_annotations
-                if a.get("evaluator_id") == ev_id
+                annotation["item_id"]
+                for annotation in annotations_on_this_jobs_items
+                if annotation.get("evaluator_id") == evaluator_id
             }
         )
-        evaluator_blocks.append(
+        agreement_per_evaluator.append(
             {
-                "evaluator_id": ev_id,
-                "evaluator_version_id": version_by_evaluator.get(ev_id),
+                "evaluator_id": evaluator_id,
+                "evaluator_version_id": evaluator_id_to_version_id.get(evaluator_id),
                 "agreement": agreement,
                 "pair_count": pair_count,
+                **kappa_of_one_kind(kappa_by_kind),
                 "item_count": item_count,
             }
         )
@@ -2700,118 +2744,131 @@ def _human_agreement_for_run(
     # annotation on an evaluator this job ran. The whole point of this view
     # is "where do machines and humans disagree on this run" — items with
     # zero human signal contribute nothing.
-    annotations_by_item: Dict[str, List[Dict[str, Any]]] = {}
-    for a in relevant_annotations:
-        annotations_by_item.setdefault(a["item_id"], []).append(a)
-    runs_by_item: Dict[str, List[Dict[str, Any]]] = {}
-    for r in job_runs:
-        if r.get("item_id"):
-            runs_by_item.setdefault(r["item_id"], []).append(r)
+    item_id_to_annotations: Dict[str, List[Dict[str, Any]]] = {}
+    for annotation in annotations_on_this_jobs_items:
+        item_id_to_annotations.setdefault(annotation["item_id"], []).append(annotation)
+    item_id_to_evaluator_runs: Dict[str, List[Dict[str, Any]]] = {}
+    for run in evaluator_runs_in_this_job:
+        if run.get("item_id"):
+            item_id_to_evaluator_runs.setdefault(run["item_id"], []).append(run)
 
     # Resolve annotator names once for every annotator that contributed to
     # any of the relevant items, so per-item entries can label each value.
-    annotator_uuids = sorted(
+    annotator_ids = sorted(
         {
-            a.get("annotator_id")
-            for a in relevant_annotations
-            if a.get("annotator_id")
+            annotation.get("annotator_id")
+            for annotation in annotations_on_this_jobs_items
+            if annotation.get("annotator_id")
         }
     )
-    annotators_by_uuid = (
-        get_annotators_by_uuids(annotator_uuids) if annotator_uuids else {}
+    annotator_id_to_annotator = (
+        get_annotators_by_uuids(annotator_ids) if annotator_ids else {}
     )
 
-    item_blocks: List[Dict[str, Any]] = []
-    for item_id, item_annotations in annotations_by_item.items():
-        per_item = per_item_agreement(
-            item_annotations,
-            runs_by_item.get(item_id, []),
-            evaluator_ids_in_run,
+    agreement_per_item: List[Dict[str, Any]] = []
+    for item_id, annotations_on_this_item in item_id_to_annotations.items():
+        agreement_on_this_item = agreement_on_item(
+            annotations_on_this_item,
+            item_id_to_evaluator_runs.get(item_id, []),
+            evaluator_ids_in_this_job,
+            rating_scales,
         )
-        # Drop evaluator slots with zero human pair count so the FE only
+        # Drop evaluators no annotator answered on this item, so the FE only
         # renders cells that actually compare to a human.
-        ev_entries = [
-            e for e in per_item.get("evaluators", []) if e.get("pair_count")
+        evaluators_compared_with_annotators = [
+            evaluator_agreement
+            for evaluator_agreement in agreement_on_this_item.get("evaluators", [])
+            if evaluator_agreement.get("pair_count")
         ]
-        if not ev_entries:
+        if not evaluators_compared_with_annotators:
             continue
         # Bucket the raw human annotations on this item by evaluator so the
         # FE can show every annotator's exact value alongside the agreement
-        # number. Annotations are already filtered to the run's slot set.
+        # number. Annotations are already filtered to the run's items and
+        # evaluators.
         #
         # **Latest-wins per (evaluator, annotator)** — matches the summary
         # endpoint's semantics ([`task_summary`](annotation_tasks.py)). If
-        # the same annotator labeled the same slot across multiple
+        # the same annotator labeled the same item and evaluator across multiple
         # annotation jobs, only the most recent submission surfaces in
         # `human_annotations[]`. Input is sorted by `updated_at ASC`
         # (`get_annotations_for_slots`), so dict-overwrite per
-        # `(ev_id, annotator_id)` gives latest-wins.
-        latest_by_slot: Dict[tuple, Dict[str, Any]] = {}
-        for a in item_annotations:
-            ev_id = a.get("evaluator_id")
-            annotator_id = a.get("annotator_id")
-            if not ev_id or not annotator_id:
+        # `(evaluator_id, annotator_id)` gives latest-wins.
+        evaluator_and_annotator_to_latest_annotation: Dict[tuple, Dict[str, Any]] = {}
+        for annotation in annotations_on_this_item:
+            evaluator_id = annotation.get("evaluator_id")
+            annotator_id = annotation.get("annotator_id")
+            if not evaluator_id or not annotator_id:
                 continue
-            latest_by_slot[(ev_id, annotator_id)] = a
+            evaluator_and_annotator_to_latest_annotation[(evaluator_id, annotator_id)] = annotation
 
-        annotations_by_evaluator: Dict[str, List[Dict[str, Any]]] = {}
-        for (ev_id, annotator_id), a in latest_by_slot.items():
-            annotator = annotators_by_uuid.get(annotator_id) if annotator_id else None
-            raw_value = a.get("value")
+        evaluator_id_to_annotations: Dict[str, List[Dict[str, Any]]] = {}
+        for (evaluator_id, annotator_id), annotation in evaluator_and_annotator_to_latest_annotation.items():
+            annotator = annotator_id_to_annotator.get(annotator_id) if annotator_id else None
+            stored_value = annotation.get("value")
             reasoning = (
-                raw_value.get("reasoning")
-                if isinstance(raw_value, dict)
+                stored_value.get("reasoning")
+                if isinstance(stored_value, dict)
                 else None
             )
-            annotations_by_evaluator.setdefault(ev_id, []).append(
+            evaluator_id_to_annotations.setdefault(evaluator_id, []).append(
                 {
-                    "annotation_id": a.get("uuid"),
+                    "annotation_id": annotation.get("uuid"),
                     "annotator_id": annotator_id,
                     "annotator_name": (
                         annotator.get("name") if annotator else None
                     ),
-                    "job_id": a.get("job_id"),
-                    "value": raw_value,
+                    "job_id": annotation.get("job_id"),
+                    "value": stored_value,
                     "reasoning": reasoning,
-                    "updated_at": a.get("updated_at"),
+                    "updated_at": annotation.get("updated_at"),
                 }
             )
         # Sort each evaluator's annotations deterministically (oldest first)
         # so the FE can render them in a stable order.
-        for entries in annotations_by_evaluator.values():
-            entries.sort(key=lambda e: (e.get("updated_at") or "", e.get("annotation_id") or ""))
+        for annotations_for_evaluator in evaluator_id_to_annotations.values():
+            annotations_for_evaluator.sort(
+                key=lambda annotation_entry: (
+                    annotation_entry.get("updated_at") or "",
+                    annotation_entry.get("annotation_id") or "",
+                )
+            )
         # Inline the raw annotations onto each evaluator block keyed by
         # evaluator_id, so the agreement cell and the underlying values
         # render together without an extra join on the FE.
-        for entry in ev_entries:
-            entry["human_annotations"] = annotations_by_evaluator.get(
-                entry["evaluator_id"], []
+        for evaluator_agreement in evaluators_compared_with_annotators:
+            evaluator_agreement["human_annotations"] = evaluator_id_to_annotations.get(
+                evaluator_agreement["evaluator_id"], []
             )
-        item_blocks.append(
+        agreement_per_item.append(
             {
                 "item_id": item_id,
                 "annotator_count": len(
                     {
-                        a.get("annotator_id")
-                        for a in item_annotations
-                        if a.get("annotator_id")
+                        annotation.get("annotator_id")
+                        for annotation in annotations_on_this_item
+                        if annotation.get("annotator_id")
                     }
                 ),
-                "evaluators": ev_entries,
+                "evaluators": evaluators_compared_with_annotators,
             }
         )
     # Stable order: items in run-row order so the FE can scroll predictably.
-    item_order = [r["item_id"] for r in job_runs if r.get("item_id")]
-    seen: set = set()
-    ordered_item_ids: List[str] = []
-    for i in item_order:
-        if i not in seen:
-            seen.add(i)
-            ordered_item_ids.append(i)
-    pos = {i: idx for idx, i in enumerate(ordered_item_ids)}
-    item_blocks.sort(key=lambda b: pos.get(b["item_id"], len(pos)))
+    item_ids_in_run_order = list(
+        dict.fromkeys(
+            run["item_id"] for run in evaluator_runs_in_this_job if run.get("item_id")
+        )
+    )
+    item_id_to_position = {
+        item_id: position for position, item_id in enumerate(item_ids_in_run_order)
+    }
+    agreement_per_item.sort(
+        key=lambda item_agreement: item_id_to_position.get(
+            item_agreement["item_id"], len(item_id_to_position)
+        )
+    )
 
-    return {"evaluators": evaluator_blocks, "items": item_blocks}
+    return {"evaluators": agreement_per_evaluator, "items": agreement_per_item}
 
 
 @router.get("/{task_uuid}/evaluator-runs/{job_uuid}", response_model=EvaluatorRunResponse, summary="Get evaluator run", tags=["Public API"])
@@ -2836,19 +2893,19 @@ def get_evaluator_run_job(
     ):
         raise HTTPException(status_code=404, detail="Job not found")
     shaped = _shape_eval_job_for_response(job)
-    raw_runs = get_evaluator_runs_for_job(job_uuid)
+    evaluator_runs_in_this_job = get_evaluator_runs_for_job(job_uuid)
     # Top-level evaluators[] mirrors the labelling-job viewer shape so the
     # FE reads `output_config.scale` from one consistent place across the
     # two surfaces. Each entry pins the version the job ran against.
     shaped["evaluators"] = _build_evaluators_block_for_eval_job(
-        job.get("details"), raw_runs
+        job.get("details"), evaluator_runs_in_this_job
     )
     _strip_details_evaluators(shaped)
     # Per-run `evaluator` / `evaluator_version` are intentionally NOT
     # surfaced here — `(evaluator_id, evaluator_version_id)` on each run
     # row keys back into the top-level evaluators[] block.
-    shaped["runs"] = _strip_run_evaluator_blocks(raw_runs)
-    shaped["human_agreement"] = _human_agreement_for_run(task_uuid, raw_runs)
+    shaped["runs"] = _strip_run_evaluator_blocks(evaluator_runs_in_this_job)
+    shaped["human_agreement"] = _human_agreement_for_run(task_uuid, evaluator_runs_in_this_job)
     # Frozen item snapshot — what calibrate actually saw, regardless of
     # any post-submit edits / soft-deletes on the source annotation_items.
     # Empty for legacy jobs created before snapshotting (those will be
@@ -2980,79 +3037,33 @@ def list_item_evaluator_runs(
 # ============ Agreement (human-vs-human) ============
 
 
-def _evaluator_alignment_block(
-    annotations: List[Dict[str, Any]],
-    evaluator_runs: List[Dict[str, Any]],
-    linked_evaluators: List[Dict[str, Any]],
-    bucket: str,
-    days: int,
-) -> List[Dict[str, Any]]:
-    """For each evaluator linked to the task, compute current agreement vs
-    humans + a cumulative trend series. Always returns one entry per linked
-    evaluator (with `current=None, pair_count=0` when there's no overlap yet)."""
-    evaluator_ids = [e["uuid"] for e in linked_evaluators]
-    series_by_id = trend_series_human_evaluator(
-        annotations, evaluator_runs, evaluator_ids, bucket=bucket, days=days
-    )
-    out: List[Dict[str, Any]] = []
-    for ev in linked_evaluators:
-        ev_id = ev["uuid"]
-        cur, pairs = aggregate_human_evaluator_agreement(
-            annotations, evaluator_runs, ev_id
-        )
-        out.append(
-            {
-                "evaluator_id": ev_id,
-                "name": ev.get("name"),
-                "current": cur,
-                "pair_count": pairs,
-                "series": series_by_id.get(ev_id, []),
-                "result": evaluator_result_summary(evaluator_runs, ev_id),
-                "human_result": human_result_summary(annotations, ev_id),
-            }
-        )
-    return out
-
-
 @router.get("/{task_uuid}/agreement", response_model=TaskAgreementResponse, summary="Get task agreement", tags=["Public API"])
 def task_agreement(
     task_uuid: str = Path(
         description="Annotation task to act on",
         examples=["f47ac10b-58cc-4372-a567-0e02b2c3d479"],
     ),
-    bucket: Literal["week", "month", "year"] = Query(
-        "week",
-        description="How to bucket points in the trend series",
-    ),
-    days: int = Query(
-        90, ge=1, le=3650, description="Trailing window in days for the trend series"
-    ),
     ctx: OrgContext = Depends(get_org_jwt_or_api_key),
 ):
     """Get human-vs-human and human-vs-evaluator agreement metrics for a task"""
     _ensure_owned_task(task_uuid, ctx.org_uuid)
     annotations = get_annotations_for_task(task_uuid)
-    linked = get_evaluators_for_annotation_task(task_uuid)
-    runs = _runs_at_live_versions(get_evaluator_runs_for_task(task_uuid), linked)
-
-    hh_current, hh_pairs = aggregate_agreement(annotations)
-    hh_series = trend_series(annotations, bucket=bucket, days=days)
-
-    evaluators_block = _evaluator_alignment_block(
-        annotations, runs, linked, bucket, days
+    linked_evaluators = get_evaluators_for_annotation_task(task_uuid)
+    live_evaluator_version_runs = keep_runs_from_live_versions_of(
+        get_evaluator_runs_for_task(task_uuid), linked_evaluators
     )
 
-    return {
-        "task_id": task_uuid,
-        "bucket": bucket,
-        "days": days,
-        "human_human": {
-            "current": hh_current,
-            "pair_count": hh_pairs,
-            "series": hh_series,
-        },
-        "evaluators": evaluators_block,
-    }
+    agreement = agreement_response(
+        annotations,
+        live_evaluator_version_runs,
+        linked_evaluators,
+        rating_scales_for(annotations, live_evaluator_version_runs),
+    )
+    for evaluator_agreement in agreement["evaluators"]:
+        evaluator_id = evaluator_agreement["evaluator_id"]
+        evaluator_agreement["result"] = judge_answer_summary(live_evaluator_version_runs, evaluator_id)
+        evaluator_agreement["human_result"] = annotator_answer_summary(annotations, evaluator_id)
+    return {"task_id": task_uuid, **agreement}
 
 
 @router.get("/{task_uuid}/summary", response_model=TaskSummaryResponse, summary="Get task summary", tags=["Public API"])
@@ -3087,7 +3098,7 @@ def task_summary(
     # `evaluator_agreement` compares annotators against THAT run. Aggregated
     # agreement (task-level / account-level) is the only place we restrict to
     # live-version runs — see `/annotation-tasks/{uuid}/agreement` and
-    # `/annotation-agreement/trend`.
+    # `/annotation-agreement`.
     runs = get_evaluator_runs_for_task(task_uuid)
     annotations = get_annotations_for_task(task_uuid)
 
@@ -3163,9 +3174,9 @@ def task_summary(
     # hasn't run yet — that keeps a baseline "current version" row in the
     # table.
     for ev in evaluators:
-        live_v = ev.get("live_version_id")
-        if live_v:
-            versions_by_evaluator.setdefault(ev["uuid"], set()).add(live_v)
+        live_version_id = ev.get("live_version_id")
+        if live_version_id:
+            versions_by_evaluator.setdefault(ev["uuid"], set()).add(live_version_id)
         else:
             versions_by_evaluator.setdefault(ev["uuid"], set())
 
@@ -3252,19 +3263,22 @@ def task_summary(
         version_cache[version_id] = meta
         return meta
 
+    def _rating_scale_of_version(version_id: Optional[str]) -> tuple:
+        version = _version_meta(version_id) or {}
+        return (version.get("scale_min"), version.get("scale_max"))
 
     def _scalar_and_reasoning(value: Any) -> tuple:
         if isinstance(value, dict):
             return value.get("value"), value.get("reasoning")
         return value, None
 
-    def _version_row_keys(ev_id: str, live_v: Optional[str]) -> List[Optional[str]]:
+    def _version_row_keys(ev_id: str, live_version_id: Optional[str]) -> List[Optional[str]]:
         if live_only:
             # Single row per (item, evaluator) using the live version. If the
             # evaluator has no live version, emit a null-version placeholder
             # row so the evaluator stays visible (consistent with the
             # non-filtered behavior below).
-            return [live_v] if live_v else [None]
+            return [live_version_id] if live_version_id else [None]
         versions = list(versions_by_evaluator.get(ev_id, set()))
         if not versions:
             # Evaluator linked but has no live version and no runs anywhere.
@@ -3275,56 +3289,68 @@ def task_summary(
         def _sort_key(v_id: str) -> tuple:
             meta = _version_meta(v_id) or {}
             num = meta.get("version_number")
-            return (0 if v_id == live_v else 1, num if num is not None else 1 << 30)
+            return (0 if v_id == live_version_id else 1, num if num is not None else 1 << 30)
         return sorted(versions, key=_sort_key)
 
     # Shared agreement math for the row builder and the `disagreement_only`
     # pre-filter, so the paging count and the visible rows can't diverge.
 
-    def _slot_human_scalars(item_uuid: str, ev_id: str) -> List[Any]:
-        """Non-null human annotation scalars for one (item, evaluator) slot."""
-        out: List[Any] = []
+    def _annotator_answers_on(item_uuid: str, evaluator_id: str) -> List[Any]:
+        """Every annotator's latest answer to one item for one evaluator,
+        skipping annotators who gave none."""
+        annotator_answers: List[Any] = []
         for annotator in annotators:
-            a = latest_ann.get((item_uuid, ev_id, annotator["uuid"]))
-            if a is None:
+            latest_annotation = latest_ann.get(
+                (item_uuid, evaluator_id, annotator["uuid"])
+            )
+            if latest_annotation is None:
                 continue
-            scalar = _scalar(a.get("value"))
-            if scalar is not None:
-                out.append(scalar)
-        return out
+            answer = _extract_answer(latest_annotation.get("value"))
+            if answer is not None:
+                annotator_answers.append(answer)
+        return annotator_answers
 
-    def _evaluator_agreement(
-        run_value: Any, slot_human_scalars: List[Any]
+    def _judge_and_annotators_agreement(
+        judge_stored_value: Any,
+        annotator_answers: List[Any],
+        version_id: Optional[str],
     ) -> Optional[float]:
-        """Evaluator-vs-human agreement for one (item, evaluator, version) slot,
-        or None when the evaluator produced no value or there are no human
-        labels. Shares `evaluator_human_pair_agreement` with the task-level
-        rollup so the two endpoints stay consistent."""
-        eval_scalar = _scalar(run_value) if run_value is not None else None
-        if eval_scalar is None or not slot_human_scalars:
+        """Agreement between the judge and the annotators on one row of the
+        table (one item, evaluator and version), or None when the judge gave
+        no answer or no annotator did. Uses
+        `judge_and_annotators_agreement_on_item`, the same as the task-level
+        number, so the two endpoints stay consistent."""
+        judge_answer = (
+            _extract_answer(judge_stored_value)
+            if judge_stored_value is not None
+            else None
+        )
+        if judge_answer is None or not annotator_answers:
             return None
-        total, pairs = evaluator_human_pair_agreement(eval_scalar, slot_human_scalars)
-        return _round_agreement(total / pairs) if pairs > 0 else None
+        agreement_total, pair_count = judge_and_annotators_agreement_on_item(
+            judge_answer, annotator_answers, _rating_scale_of_version(version_id)
+        )
+        return _round_agreement(agreement_total / pair_count) if pair_count > 0 else None
 
     def _is_disagreement(agreement: Optional[float]) -> bool:
-        """A slot disagrees when the evaluator scored below perfect agreement.
-        None (no evaluator value / no human labels) is NOT a disagreement."""
+        """A row disagrees when the judge scored below perfect agreement.
+        None (no judge answer / no annotator answers) is NOT a disagreement."""
         return agreement is not None and agreement < 1.0
 
     def _item_disagrees(item: Dict[str, Any]) -> bool:
-        """True if any (evaluator, version) slot on this item disagrees."""
+        """True if any (evaluator, version) row on this item disagrees."""
         item_uuid = item["uuid"]
         for ev in evaluators:
             ev_id = ev["uuid"]
-            live_v = ev.get("live_version_id")
-            slot_human_scalars = _slot_human_scalars(item_uuid, ev_id)
-            if not slot_human_scalars:
+            live_version_id = ev.get("live_version_id")
+            annotator_answers = _annotator_answers_on(item_uuid, ev_id)
+            if not annotator_answers:
                 continue
-            for version_id in _version_row_keys(ev_id, live_v):
+            for version_id in _version_row_keys(ev_id, live_version_id):
                 run = latest_run.get((item_uuid, ev_id, version_id))
-                run_value = run.get("value") if run else None
+                judge_stored_value = run.get("value") if run else None
                 if _is_disagreement(
-                    _evaluator_agreement(run_value, slot_human_scalars)
+                    _judge_and_annotators_agreement(judge_stored_value, annotator_answers, version_id)
                 ):
                     return True
         return False
@@ -3346,7 +3372,7 @@ def task_summary(
         # are reused across every version row for that (item, evaluator).
         for ev in evaluators:
             ev_id = ev["uuid"]
-            live_v = ev.get("live_version_id")
+            live_version_id = ev.get("live_version_id")
 
             ann_cells: Dict[str, Optional[Dict[str, Any]]] = {}
             for annotator in annotators:
@@ -3359,21 +3385,25 @@ def task_summary(
                     "value": val,
                     "reasoning": reasoning,
                 }
-            slot_human_scalars = _slot_human_scalars(item["uuid"], ev_id)
+            annotator_answers = _annotator_answers_on(item["uuid"], ev_id)
 
-            hh_mean, hh_pairs = _pairwise_agreement(slot_human_scalars)
+            annotator_agreement_on_row, annotator_pair_count_on_row = _mean_agreement_between_answers(
+                annotator_answers, _rating_scale_of_version(live_version_id)
+            )
             human_agreement = (
-                _round_agreement(hh_mean) if hh_pairs > 0 else None
+                _round_agreement(annotator_agreement_on_row)
+                if annotator_pair_count_on_row > 0
+                else None
             )
 
-            for version_id in _version_row_keys(ev_id, live_v):
+            for version_id in _version_row_keys(ev_id, live_version_id):
                 run = latest_run.get((item["uuid"], ev_id, version_id))
-                run_value = run.get("value") if run else None
-                ev_value, ev_reasoning = _scalar_and_reasoning(run_value)
+                judge_stored_value = run.get("value") if run else None
+                ev_value, ev_reasoning = _scalar_and_reasoning(judge_stored_value)
                 version_meta = _version_meta(version_id)
 
-                evaluator_agreement = _evaluator_agreement(
-                    run_value, slot_human_scalars
+                evaluator_agreement = _judge_and_annotators_agreement(
+                    judge_stored_value, annotator_answers, version_id
                 )
 
                 rows.append(
@@ -3413,8 +3443,8 @@ def task_summary(
     evaluators_block: List[Dict[str, Any]] = []
     for ev in evaluators:
         ev_id = ev["uuid"]
-        live_v = ev.get("live_version_id")
-        version_ids = _version_row_keys(ev_id, live_v)
+        live_version_id = ev.get("live_version_id")
+        version_ids = _version_row_keys(ev_id, live_version_id)
         versions_payload: List[Dict[str, Any]] = []
         live_version_index: Optional[int] = None
         for v_id in version_ids:
@@ -3439,7 +3469,7 @@ def task_summary(
             output_config = meta.get("output_config")
             if output_config is None:
                 output_config = default_output_config(ev.get("output_type"))
-            is_live = v_id == live_v
+            is_live = v_id == live_version_id
             if is_live:
                 live_version_index = len(versions_payload)
             versions_payload.append(
@@ -3460,7 +3490,7 @@ def task_summary(
                 "output_type": ev.get("output_type"),
                 "evaluator_type": ev.get("evaluator_type"),
                 "data_type": ev.get("data_type"),
-                "live_version_id": live_v,
+                "live_version_id": live_version_id,
                 "live_version_index": live_version_index,
                 "versions": versions_payload,
                 "run_count": run_count_by_evaluator.get(ev_id, 0),

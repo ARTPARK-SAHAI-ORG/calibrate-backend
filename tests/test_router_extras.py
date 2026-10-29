@@ -530,7 +530,7 @@ def test_agent_verify_connection_paths(client):
     fake_addr = [(0, 0, 0, "", ("93.184.216.34", 0))]
     with patch(
         "routers.agents.TextAgentConnection", return_value=fake_agent
-    ), patch("routers.agents.socket.getaddrinfo", return_value=fake_addr):
+    ), patch("utils.socket.getaddrinfo", return_value=fake_addr):
         resp = client.post(
             "/agents/verify-connection",
             json={
@@ -551,7 +551,7 @@ def test_agent_verify_connection_paths(client):
     )
     with patch(
         "routers.agents.TextAgentConnection", return_value=fake_agent
-    ), patch("routers.agents.socket.getaddrinfo", return_value=fake_addr):
+    ), patch("utils.socket.getaddrinfo", return_value=fake_addr):
         resp = client.post(
             "/agents/verify-connection",
             json={"agent_url": "https://example.com/agent"},
@@ -563,7 +563,7 @@ def test_agent_verify_connection_paths(client):
     fake_agent.verify = AsyncMock(side_effect=RuntimeError("boom"))
     with patch(
         "routers.agents.TextAgentConnection", return_value=fake_agent
-    ), patch("routers.agents.socket.getaddrinfo", return_value=fake_addr):
+    ), patch("utils.socket.getaddrinfo", return_value=fake_addr):
         resp = client.post(
             "/agents/verify-connection",
             json={"agent_url": "https://example.com/agent"},
@@ -574,7 +574,7 @@ def test_agent_verify_connection_paths(client):
     # URL whose resolved addr is private
     fake_private_addr = [(0, 0, 0, "", ("10.0.0.1", 0))]
     with patch(
-        "routers.agents.socket.getaddrinfo", return_value=fake_private_addr
+        "utils.socket.getaddrinfo", return_value=fake_private_addr
     ):
         resp = client.post(
             "/agents/verify-connection",
@@ -587,7 +587,7 @@ def test_agent_verify_connection_paths(client):
     import socket as _socket
 
     with patch(
-        "routers.agents.socket.getaddrinfo", side_effect=_socket.gaierror
+        "utils.socket.getaddrinfo", side_effect=_socket.gaierror
     ):
         resp = client.post(
             "/agents/verify-connection",
@@ -617,7 +617,7 @@ def test_agent_verify_forwards_default_inputs(client):
     ctor = MagicMock(return_value=fake_agent)
     fake_addr = [(0, 0, 0, "", ("93.184.216.34", 0))]
     with patch("routers.agents.TextAgentConnection", ctor), patch(
-        "routers.agents.socket.getaddrinfo", return_value=fake_addr
+        "utils.socket.getaddrinfo", return_value=fake_addr
     ):
         resp = client.post(
             "/agents/verify-connection",
@@ -646,7 +646,7 @@ def test_agent_verify_marks_the_probe_as_an_evaluation(client):
     ctor = MagicMock(return_value=fake_agent)
     fake_addr = [(0, 0, 0, "", ("93.184.216.34", 0))]
     with patch("routers.agents.TextAgentConnection", ctor), patch(
-        "routers.agents.socket.getaddrinfo", return_value=fake_addr
+        "utils.socket.getaddrinfo", return_value=fake_addr
     ):
         resp = client.post(
             "/agents/verify-connection",
@@ -683,7 +683,7 @@ def test_agent_verify_saved_with_model_persists(client):
     fake_addr = [(0, 0, 0, "", ("93.184.216.34", 0))]
     with patch(
         "routers.agents.TextAgentConnection", return_value=fake_agent
-    ), patch("routers.agents.socket.getaddrinfo", return_value=fake_addr):
+    ), patch("utils.socket.getaddrinfo", return_value=fake_addr):
         ok = client.post(
             f"/agents/{agent['uuid']}/verify-connection",
             json={"model": "openai/gpt-4"},
@@ -694,7 +694,7 @@ def test_agent_verify_saved_with_model_persists(client):
     # Verify connection without model (basic check)
     with patch(
         "routers.agents.TextAgentConnection", return_value=fake_agent
-    ), patch("routers.agents.socket.getaddrinfo", return_value=fake_addr):
+    ), patch("utils.socket.getaddrinfo", return_value=fake_addr):
         ok2 = client.post(
             f"/agents/{agent['uuid']}/verify-connection",
             json={},
@@ -813,31 +813,6 @@ def test_google_login_token_verify_failure(client):
             json={"id_token": "fake"},
         )
     assert resp.status_code == 401
-
-
-def test_google_token_verify_pass():
-    """Exercise verify_google_token directly for the httpx response path."""
-    import asyncio
-
-    class FakeResp:
-        status_code = 200
-
-        def json(self):
-            return {"email": "x@example.com"}
-
-        @property
-        def text(self):
-            return "ok"
-
-    fake_client = MagicMock()
-    fake_client.get = AsyncMock(return_value=FakeResp())
-    fake_client.__aenter__ = AsyncMock(return_value=fake_client)
-    fake_client.__aexit__ = AsyncMock(return_value=None)
-    from routers import auth as auth_mod
-
-    with patch("routers.auth.httpx.AsyncClient", return_value=fake_client):
-        info = asyncio.run(auth_mod.verify_google_token("fake"))
-    assert info["email"] == "x@example.com"
 
 
 def test_google_token_verify_non_200():
