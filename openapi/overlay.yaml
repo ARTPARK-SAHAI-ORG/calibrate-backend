@@ -612,6 +612,8 @@ actions:
           and reply, its tool calls and labels, and the scores from its
           latest scoring run with each evaluator's reasoning and evaluator
           version. Filter by agent, label, creation time, text, or score.
+          Set include_content to also get each trace's full input, output
+          and metadata.
   - target: $.paths['/traces'].post
     update:
       x-speakeasy-group: traces

@@ -409,6 +409,38 @@ def test_list_accepts_an_api_key_and_stays_in_its_workspace(client):
     )
 
 
+def test_list_returns_full_content_only_when_asked_and_pages_through_it(client):
+    h, agent_id = _signup_with_agent(client)
+    key_headers = _api_key_headers(client, h)
+    long_reply = "x" * 2000
+    sent = [
+        _post_trace(client, h, _payload(agent_id, _mid(), output={"response": long_reply}))
+        for _ in range(3)
+    ]
+
+    plain = client.get("/traces", headers=key_headers).json()["items"][0]
+    assert plain["input"] is None and plain["output"] is None and plain["metadata"] is None
+    assert len(plain["response_preview"]) < len(long_reply)
+
+    pages = [
+        client.get(
+            "/traces",
+            params={"include_content": True, "limit": 2, "offset": offset},
+            headers=key_headers,
+        ).json()
+        for offset in (0, 2)
+    ]
+    assert [len(p["items"]) for p in pages] == [2, 1]
+    assert all(p["total"] == 3 for p in pages)
+    rows = [row for p in pages for row in p["items"]]
+    assert {row["uuid"] for row in rows} == {t["uuid"] for t in sent}
+    detail = client.get(f"/traces/{rows[0]['uuid']}", headers=h).json()
+    for row in rows:
+        assert row["output"]["response"] == long_reply
+        assert row["input"] == detail["input"]
+        assert row["metadata"] == detail["metadata"]
+
+
 def _set_created_at(trace_uuid, stored):
     with db.get_db_connection() as conn:
         conn.execute(

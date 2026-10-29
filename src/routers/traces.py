@@ -380,6 +380,18 @@ class TraceSummary(BaseModel):
         description="Number of metadata entries stored with the trace"
     )
     labels: List[str] = Field(description=_LABELS_DESCRIPTION)
+    input: Optional[TraceInput] = Field(
+        None,
+        description=_TRACE_INPUT_DESCRIPTION + ". Sent only with `include_content`",
+    )
+    output: Optional[TraceOutput] = Field(
+        None,
+        description="What the agent produced for this turn. Sent only with `include_content`",
+    )
+    metadata: Optional[List[TraceMetadataEntry]] = Field(
+        None,
+        description="Key-value pairs stored with the trace. Sent only with `include_content`",
+    )
     created_at: str = Field(description="When the trace was created (ISO 8601 UTC)")
     latest_run_status: Optional[TraceEvalRunStatus] = Field(
         None,
@@ -873,6 +885,10 @@ async def list_traces_endpoint(
     sort_order: Literal["asc", "desc"] = Query(
         "desc", description=_SORT_ORDER_DESCRIPTION
     ),
+    include_content: bool = Query(
+        False,
+        description="Also return each trace's full input, output and metadata, as `GET /traces/{trace_uuid}` does. Use `limit` and `offset` to page through them",
+    ),
     include_score_averages: bool = Query(
         False,
         description="Also return each evaluator's mean score over every matching trace, not just this page. Costs a pass over those traces, so ask for it when the filters change rather than on every page",
@@ -911,8 +927,12 @@ async def list_traces_endpoint(
     scoring = get_latest_trace_run_summaries(
         ctx.org_uuid, [row["uuid"] for row in rows]
     )
+    items = [_to_summary(row, scoring.get(row["uuid"])) for row in rows]
+    if include_content:
+        for item, row in zip(items, rows):
+            item.update(input=row["input"], output=row["output"], metadata=row["metadata"])
     body = page_envelope(
-        [_to_summary(row, scoring.get(row["uuid"])) for row in rows],
+        items,
         total,
         pagination,
     )
