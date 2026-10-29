@@ -562,7 +562,10 @@ def _stored_time(value: Optional[datetime]) -> Optional[str]:
     if value is None:
         return None
     if value.tzinfo is not None:
-        value = value.astimezone(timezone.utc)
+        try:
+            value = value.astimezone(timezone.utc)
+        except OverflowError:
+            raise HTTPException(status_code=422, detail="time is out of range")
     return value.strftime("%Y-%m-%d %H:%M:%S")
 
 

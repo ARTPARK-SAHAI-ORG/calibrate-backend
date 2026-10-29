@@ -456,6 +456,12 @@ def test_list_filters_by_creation_time(client):
         client.get("/traces", params={"created_after": "yesterday"}, headers=h).status_code
         == 422
     )
+    assert (
+        client.get(
+            "/traces", params={"created_after": "0001-01-01T00:00:00+01:00"}, headers=h
+        ).status_code
+        == 422
+    )
 
 
 def test_bulk_endpoints_select_all_honour_the_creation_time(client):
