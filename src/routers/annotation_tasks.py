@@ -1,4 +1,5 @@
-from typing import Optional, List, Dict, Any, Union
+from datetime import datetime
+from typing import Optional, List, Dict, Any, Set, Tuple, Union
 from fastapi import APIRouter, HTTPException, Depends, Path, Query
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 from typing import Literal
@@ -341,7 +342,7 @@ class TaskSummaryResponse(BaseModel):
         description="The annotators who labelled or commented on items in the task, stable across pages"
     )
     rows: List[Dict[str, Any]] = Field(
-        description="One row per item, evaluator, and version on this page, with the evaluator's value and each annotator's label"
+        description="One row per item, evaluator, and version on this page, with the evaluator's value and each annotator's label. `item_added_at` is when the row was added and each label's `answered_at` is when the annotator first gave it"
     )
     item_comments: Optional[Dict[str, Any]] = Field(
         default=None,
@@ -379,12 +380,14 @@ class EvaluatorRunResponse(BaseModel):
     )
 from auth_utils import get_current_org, get_org_jwt_or_api_key, OrgContext
 from org_scope import ensure_owned_evaluator
+from routers.api_keys import _to_utc_iso
 from routers.org_limits import enforce_max_rows_per_eval
 from routers.traces import (
     MAX_METADATA_ENTRIES,
     TraceMetadataEntry,
     TraceToolCall,
     TraceTurn,
+    _stored_time,
 )
 from pagination import (
     OptionalPaginationParams,
@@ -436,6 +439,65 @@ from annotation_metrics import (
     _extract_answer,
     _round_agreement,
 )
+
+
+class _DateWindow:
+    """The `date_field`/`start`/`end` filter shared by the task exports."""
+
+    def __init__(
+        self,
+        date_field: Literal["row_added", "annotator_answered"] = Query(
+            "row_added",
+            description="Which date `start` and `end` apply to: when the row was added to the task, or when an annotator first gave the answer",
+        ),
+        start: Optional[datetime] = Query(
+            None,
+            description="Return only rows or answers dated at or after this time (ISO 8601). A time with no timezone is read as UTC",
+        ),
+        end: Optional[datetime] = Query(
+            None,
+            description="Return only rows or answers dated before this time (ISO 8601). A time with no timezone is read as UTC",
+        ),
+    ):
+        self.date_field = date_field
+        self.start = _stored_time(start)
+        self.end = _stored_time(end)
+        if self.start and self.end and self.end <= self.start:
+            raise HTTPException(status_code=422, detail="end must be after start")
+        self.active = bool(self.start or self.end)
+
+    def _contains(self, stored_time: str) -> bool:
+        return (not self.start or stored_time >= self.start) and (
+            not self.end or stored_time < self.end
+        )
+
+    def scope(
+        self, items: List[Dict[str, Any]], annotations: List[Dict[str, Any]]
+    ) -> Tuple[Set[str], List[Dict[str, Any]]]:
+        """The item ids in the window and the answers to report for them.
+        `annotator_answered` takes each annotator's latest answer before testing
+        its date, so an answer replaced in a newer job counts in no earlier
+        week and weekly answer counts add up to the all-time count."""
+        if self.date_field == "row_added":
+            item_ids = {
+                item["uuid"] for item in items if self._contains(item["created_at"])
+            }
+            return item_ids, [a for a in annotations if a["item_id"] in item_ids]
+        latest_answers: Dict[tuple, Dict[str, Any]] = {}
+        for annotation in annotations:
+            if (
+                annotation.get("evaluator_id") is not None
+                and _extract_answer(annotation.get("value")) is not None
+            ):
+                latest_answers[
+                    (
+                        annotation["item_id"],
+                        annotation["evaluator_id"],
+                        annotation["annotator_id"],
+                    )
+                ] = annotation
+        answers = [a for a in latest_answers.values() if self._contains(a["created_at"])]
+        return {a["item_id"] for a in answers}, answers
 
 
 # Re-exported for tests; canonical home is llm_judge so agent-tests/STT/TTS can
@@ -3043,6 +3105,7 @@ def task_agreement(
         description="Annotation task to act on",
         examples=["f47ac10b-58cc-4372-a567-0e02b2c3d479"],
     ),
+    window: _DateWindow = Depends(),
     ctx: OrgContext = Depends(get_org_jwt_or_api_key),
 ):
     """Get human-vs-human and human-vs-evaluator agreement metrics for a task"""
@@ -3052,6 +3115,14 @@ def task_agreement(
     live_evaluator_version_runs = keep_runs_from_live_versions_of(
         get_evaluator_runs_for_task(task_uuid), linked_evaluators
     )
+    if window.active:
+        item_ids, annotations = window.scope(
+            get_annotation_items_for_task(task_uuid) if window.date_field == "row_added" else [],
+            annotations,
+        )
+        live_evaluator_version_runs = [
+            run for run in live_evaluator_version_runs if run.get("item_id") in item_ids
+        ]
 
     agreement = agreement_response(
         annotations,
@@ -3084,6 +3155,7 @@ def task_summary(
         False,
         description="When true, keep only rows where the evaluator disagreed with at least one annotator",
     ),
+    window: _DateWindow = Depends(),
     ctx: OrgContext = Depends(get_org_jwt_or_api_key),
     search: _SummarySearch = Depends(),
     sort: _SummarySort = Depends(),
@@ -3110,6 +3182,10 @@ def task_summary(
                 status_code=404, detail="Item not found in this task"
             )
         items = [it for it in items if it["uuid"] == item_id]
+
+    if window.active:
+        window_item_ids, window_answers = window.scope(items, annotations)
+        items = [it for it in items if it["uuid"] in window_item_ids]
 
     # Substring search on `payload.name` (the only required string field on
     # items — enforced by the items POST validator). Applied AFTER `item_id`
@@ -3164,6 +3240,9 @@ def task_summary(
             run_count_by_evaluator[ev_id] = (
                 run_count_by_evaluator.get(ev_id, 0) + 1
             )
+        # A failed re-run must not blank the score, matching /agreement.
+        if _extract_answer(r.get("value")) is None:
+            continue
         ts = r.get("completed_at") or r.get("created_at") or ""
         slot = (r_item_id, ev_id, v_id)
         if slot not in latest_run_ts or ts > latest_run_ts[slot]:
@@ -3238,6 +3317,11 @@ def task_summary(
         for a in annotator_rows.values()
     ]
     annotators.sort(key=lambda x: ((x.get("name") or "").lower(), x["uuid"]))
+
+    if window.active:
+        latest_ann = {
+            (a["item_id"], a["evaluator_id"], a["annotator_id"]): a for a in window_answers
+        }
 
     version_cache: Dict[str, Optional[Dict[str, Any]]] = {}
 
@@ -3384,6 +3468,7 @@ def task_summary(
                 ann_cells[annotator["uuid"]] = {
                     "value": val,
                     "reasoning": reasoning,
+                    "answered_at": _to_utc_iso(a.get("created_at")),
                 }
             annotator_answers = _annotator_answers_on(item["uuid"], ev_id)
 
@@ -3409,6 +3494,7 @@ def task_summary(
                 rows.append(
                     {
                         "item_id": item["uuid"],
+                        "item_added_at": _to_utc_iso(item.get("created_at")),
                         "payload": item.get("payload"),
                         "metadata": item["metadata"],
                         # Reference into the top-level `evaluators[]` block

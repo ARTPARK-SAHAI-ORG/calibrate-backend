@@ -1839,6 +1839,8 @@ def init_db():
             "ON annotation_items(task_id, deleted_at)",
             "CREATE INDEX IF NOT EXISTS idx_evaluator_runs_job "
             "ON evaluator_runs(job_id, deleted_at)",
+            "CREATE INDEX IF NOT EXISTS idx_evaluator_runs_item "
+            "ON evaluator_runs(item_id, deleted_at)",
             "CREATE INDEX IF NOT EXISTS idx_dataset_items_dataset "
             "ON dataset_items(dataset_id, deleted_at)",
             # Queue poller: WHERE status = ? [AND type IN (...)] ORDER BY created_at.
