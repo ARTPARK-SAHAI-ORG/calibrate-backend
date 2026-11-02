@@ -342,7 +342,7 @@ class TaskSummaryResponse(BaseModel):
         description="The annotators who labelled or commented on items in the task, stable across pages"
     )
     rows: List[Dict[str, Any]] = Field(
-        description="One row per item, evaluator, and version on this page, with the evaluator's value and each annotator's label. `item_added_at` is when the row was added and each label's `answered_at` is when the annotator first gave it"
+        description="One row per item, evaluator, and version on this page, with the evaluator's value and each annotator's label. `item_added_at` is when the row was added and each label's `answered_at` is when the annotator first gave their current answer, both in ISO 8601 UTC"
     )
     item_comments: Optional[Dict[str, Any]] = Field(
         default=None,
@@ -448,15 +448,15 @@ class _DateWindow:
         self,
         date_field: Literal["row_added", "annotator_answered"] = Query(
             "row_added",
-            description="Which date `start` and `end` apply to: when the row was added to the task, or when an annotator first gave the answer",
+            description="Which date `start` and `end` apply to:\n\n- `row_added`: when the row was added to the task\n- `annotator_answered`: when the annotator first gave their current answer\n\nOmit to use `row_added`",
         ),
         start: Optional[datetime] = Query(
             None,
-            description="Return only rows or answers dated at or after this time (ISO 8601). A time with no timezone is read as UTC",
+            description="Return only rows or answers dated at or after this time (ISO 8601). A time with no timezone is read as UTC. Omit for no earliest date",
         ),
         end: Optional[datetime] = Query(
             None,
-            description="Return only rows or answers dated before this time (ISO 8601). A time with no timezone is read as UTC",
+            description="Return only rows or answers dated before this time (ISO 8601). A time with no timezone is read as UTC. Omit for no latest date",
         ),
     ):
         self.date_field = date_field
