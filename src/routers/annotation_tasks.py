@@ -342,7 +342,7 @@ class TaskSummaryResponse(BaseModel):
         description="The annotators who labelled or commented on items in the task, stable across pages"
     )
     rows: List[Dict[str, Any]] = Field(
-        description="One row per item, evaluator, and version on this page, with the evaluator's value and each annotator's label. `item_added_at` is when the row was added and each label's `answered_at` is when the annotator first gave their current answer, both in ISO 8601 UTC"
+        description="One row per item, evaluator, and version on this page, with the evaluator's value and each annotator's label. `item_added_at` is when the row was added (ISO 8601 UTC) and each label's `answered_at` is when the annotator first gave it (ISO 8601 UTC), which editing it does not change"
     )
     item_comments: Optional[Dict[str, Any]] = Field(
         default=None,
@@ -448,7 +448,7 @@ class _DateWindow:
         self,
         date_field: Literal["row_added", "annotator_answered"] = Query(
             "row_added",
-            description="Which date `start` and `end` apply to:\n\n- `row_added`: when the row was added to the task\n- `annotator_answered`: when the annotator first gave their current answer\n\nOmit to use `row_added`",
+            description="Which date `start` and `end` apply to:\n\n- `row_added`: when the row was added to the task\n- `annotator_answered`: when the annotator first gave the answer, which editing it does not change\n\nOmit to use `row_added`",
         ),
         start: Optional[datetime] = Query(
             None,
