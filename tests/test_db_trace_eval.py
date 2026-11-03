@@ -75,6 +75,15 @@ def _insert_run(org: str, trace_uuid: str, *, run_uuid: str | None = None, **ove
     return row["uuid"]
 
 
+def _link_default_evaluator():
+    with db.get_db_connection() as conn:
+        conn.execute(
+            "INSERT OR IGNORE INTO agent_evaluators (agent_id, evaluator_id) "
+            "VALUES ('agent-1', 'eval-1')"
+        )
+        conn.commit()
+
+
 def _insert_score(run_uuid: str, **overrides):
     row = {
         "run_uuid": run_uuid,
@@ -274,6 +283,7 @@ def test_latest_run_summary_tie_breaks_on_id():
     second = _insert_run(
         org, trace["uuid"], status="completed", created_at=_ts(50), completed_at=_ts(50)
     )
+    _link_default_evaluator()
     _insert_score(first, value=1)
     _insert_score(second, value=0)
     with db.get_db_connection() as conn:
@@ -294,6 +304,7 @@ def test_score_read_helpers_are_org_scoped():
     org_a, org_b = _org(), _org()
     trace = _ingest_trace(org_a)
     run = _insert_run(org_a, trace["uuid"], status="completed", completed_at=_ts(3))
+    _link_default_evaluator()
     _insert_score(run, value=1)
     assert db.get_latest_trace_run_summaries(org_b, [trace["uuid"]]) == {}
     assert db.list_trace_scoring_runs(org_b, trace["uuid"]) == []

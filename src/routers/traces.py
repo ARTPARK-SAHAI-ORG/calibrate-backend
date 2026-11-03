@@ -148,7 +148,8 @@ _SCORE_FILTER_DESCRIPTION = (
 
 _SORT_BY_EVALUATOR_DESCRIPTION = (
     "Order traces by this evaluator's score on each trace's latest scoring "
-    "run. Traces it has not scored come last whichever direction you pick"
+    "run. Traces this evaluator has not scored come last whichever direction you pick, and "
+    "an evaluator not linked to the agent counts as having scored none"
 )
 
 _SORT_ORDER_DESCRIPTION = (
@@ -402,7 +403,7 @@ class TraceSummary(BaseModel):
     )
     results: List["TraceScoreResult"] = Field(
         default_factory=list,
-        description="Results for each evaluator on the latest scoring run",
+        description="Results on the latest scoring run from the evaluators linked to the agent",
     )
 
 
@@ -471,7 +472,7 @@ class TraceScoringRun(BaseModel):
         None, description="Why this run was skipped or failed"
     )
     results: List[TraceScoreResult] = Field(
-        description="Results for each evaluator that scored this run"
+        description="Results on this run from the evaluators linked to the agent"
     )
 
 
@@ -826,7 +827,7 @@ class TraceListResponse(PaginatedResponse[TraceSummary]):
 
     score_averages: Optional[List[TraceScoreAverage]] = Field(
         None,
-        description="One entry per evaluator that scored at least one matching trace, averaged over every matching trace rather than this page. Ask for it with `include_score_averages`",
+        description="One average for each evaluator linked to the agent that scored at least one trace matching the filters, covering all the matching traces it scored rather than this page. Ask for it with `include_score_averages`",
     )
 
 

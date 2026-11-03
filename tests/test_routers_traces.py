@@ -2530,6 +2530,11 @@ def _insert_score(run_uuid: str, **overrides) -> None:
     row.update(overrides)
     with db.get_db_connection() as conn:
         conn.execute(
+            "INSERT OR IGNORE INTO agent_evaluators (agent_id, evaluator_id) "
+            "SELECT agent_id, ? FROM trace_eval_runs WHERE uuid = ?",
+            (row["evaluator_uuid"], run_uuid),
+        )
+        conn.execute(
             "INSERT INTO trace_eval_scores "
             "(run_uuid, evaluator_uuid, evaluator_version_id, "
             "value, output_type, reasoning, completed_at) "
@@ -3612,3 +3617,121 @@ def test_a_conversation_filter_needs_its_agent(client):
         )
         assert res.status_code == 422, path
     assert client.get("/traces", params={"agent_id": agent_id}, headers=h).json()["total"] == 1
+
+
+def test_unlinked_evaluator_scores_are_hidden_until_relinked(client):
+    h, agent_id = _signup_with_agent(client)
+    _disable_auto_score(client, h, agent_id)
+    kept, kept_ver = _create_clean_evaluator(client, h)
+    removed, removed_ver = _create_clean_evaluator(client, h)
+    client.post(
+        f"/agents/{agent_id}/evaluators",
+        json={"evaluator_ids": [kept, removed]},
+        headers=h,
+    )
+    trace = _post_trace(client, h, _payload(agent_id, _mid()))
+    run = _insert_run(
+        _org_of(agent_id),
+        trace["uuid"],
+        status="completed",
+        created_at=_at(20),
+        completed_at=_at(21),
+        agent_id=agent_id,
+    )
+    _insert_score(run, evaluator_uuid=kept, evaluator_version_id=kept_ver, value=1)
+    _insert_score(run, evaluator_uuid=removed, evaluator_version_id=removed_ver, value=0)
+
+    def listed(**params):
+        return client.get(
+            "/traces",
+            headers=h,
+            params={"agent_id": agent_id, "include_score_averages": True, **params},
+        ).json()
+
+    def shown():
+        body = listed()
+        return (
+            {a["evaluator_uuid"] for a in body["score_averages"]},
+            {
+                r["evaluator_uuid"]
+                for r in next(i for i in body["items"] if i["uuid"] == trace["uuid"])[
+                    "results"
+                ]
+            },
+            {
+                r["evaluator_uuid"]
+                for r in client.get(f"/traces/{trace['uuid']}/scores", headers=h).json()[
+                    "runs"
+                ][0]["results"]
+            },
+        )
+
+    assert shown() == ({kept, removed},) * 3
+    assert listed(score=f"{removed}:failed")["total"] == 1
+
+    other = _post_trace(client, h, _payload(agent_id, _mid()))
+    other_run = _insert_run(
+        _org_of(agent_id),
+        other["uuid"],
+        status="completed",
+        created_at=_at(20),
+        completed_at=_at(21),
+        agent_id=agent_id,
+    )
+    _insert_score(other_run, evaluator_uuid=removed, evaluator_version_id=removed_ver, value=1)
+    sorted_ids = [
+        i["uuid"]
+        for i in listed(sort_by_evaluator=removed, sort_order="asc")["items"]
+    ]
+    assert sorted_ids == [trace["uuid"], other["uuid"]]
+
+    r = client.delete(f"/agents/{agent_id}/evaluators/{removed}", headers=h)
+    assert r.status_code == 200, r.text
+
+    assert shown() == ({kept},) * 3
+    assert listed(score=f"{removed}:failed")["total"] == 0
+    bulk = client.post(
+        "/traces/bulk-delete",
+        json={"select_all": True, "agent_id": agent_id, "score": [f"{removed}:failed"]},
+        headers=h,
+    )
+    assert bulk.status_code == 200, bulk.text
+    assert listed()["total"] == 2
+    conversation_row = client.get(
+        "/traces/conversations", headers=h, params={"agent_id": agent_id}
+    ).json()["items"]
+    for row in conversation_row:
+        assert removed not in {
+            r["evaluator_uuid"] for r in row["last_turn"]["results"]
+        }
+    # With the removed evaluator unknown on every trace, sorting falls back to newest first.
+    assert [
+        i["uuid"]
+        for i in listed(sort_by_evaluator=removed, sort_order="asc")["items"]
+    ] == [other["uuid"], trace["uuid"]]
+
+    r = client.post(
+        f"/agents/{agent_id}/evaluators",
+        json={"evaluator_ids": [removed]},
+        headers=h,
+    )
+    assert r.status_code == 200, r.text
+    assert shown() == ({kept, removed},) * 3
+
+
+def test_deleting_an_agent_keeps_the_scores_on_its_traces(client):
+    h, agent_id = _signup_with_agent(client)
+    _disable_auto_score(client, h, agent_id)
+    ev, ver = _create_clean_evaluator(client, h)
+    trace = _scored_trace(
+        client, h, agent_id, evaluator=ev, version=ver, value=1, output_type="binary"
+    )
+
+    assert client.delete(f"/agents/{agent_id}", headers=h).status_code == 200
+
+    body = client.get(
+        "/traces", headers=h, params={"include_score_averages": True}
+    ).json()
+    row = next(i for i in body["items"] if i["uuid"] == trace)
+    assert [r["evaluator_uuid"] for r in row["results"]] == [ev]
+    assert ev in {a["evaluator_uuid"] for a in body["score_averages"]}

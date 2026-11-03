@@ -10889,6 +10889,20 @@ _LATEST_TRACE_RUN_SQL = (
     "ORDER BY r.created_at DESC, r.id DESC LIMIT 1)"
 )
 
+
+def _evaluator_still_linked_sql(agent_column: str) -> str:
+    """Scores stay stored when an evaluator is unlinked, and are hidden from
+    every read until it is linked again. Deleting an agent also soft-deletes its
+    links but leaves its traces live, so that alone must not hide their scores."""
+    return (
+        "(EXISTS (SELECT 1 FROM agent_evaluators ae "
+        f"WHERE ae.agent_id = {agent_column} "
+        "AND ae.evaluator_id = ts.evaluator_uuid AND ae.deleted_at IS NULL) "
+        "OR EXISTS (SELECT 1 FROM agents a "
+        f"WHERE a.uuid = {agent_column} AND a.deleted_at IS NOT NULL))"
+    )
+
+
 # Highest value in the rubric the score was written under, not the evaluator's
 # current one, so a later edit cannot change what a stored score means.
 _TRACE_SCORE_SCALE_MAX_SQL = (
@@ -10915,7 +10929,8 @@ TRACE_SCORE_COMPARISONS = ("=", "!=", "<", "<=", ">", ">=")
 _TRACE_SCORE_VALUE_SQL = (
     "(SELECT ts.value FROM trace_eval_scores ts "
     f"WHERE ts.run_uuid = {_LATEST_TRACE_RUN_SQL} "
-    "AND ts.evaluator_uuid = ?)"
+    "AND ts.evaluator_uuid = ? "
+    f"AND {_evaluator_still_linked_sql('traces.agent_id')})"
 )
 
 # One score condition: the evaluator, the operator, and the number to compare
@@ -10937,7 +10952,8 @@ def _trace_score_clause(condition: TraceScoreFilter) -> Tuple[str, List[Any]]:
     return (
         "EXISTS (SELECT 1 FROM trace_eval_scores ts "
         f"WHERE ts.run_uuid = {_LATEST_TRACE_RUN_SQL} "
-        f"AND ts.evaluator_uuid = ? AND ({test}))",
+        f"AND ts.evaluator_uuid = ? AND ({test}) "
+        f"AND {_evaluator_still_linked_sql('traces.agent_id')})",
         [evaluator_uuid] + params,
     )
 
@@ -11633,9 +11649,10 @@ def _hydrate_trace_score_row(row: sqlite3.Row) -> Dict[str, Any]:
 # Scores join through the pinned version for the rating scale, and through the
 # evaluator row for name/type -- soft-deleted evaluators and historical versions
 # still resolve, so a finished run renders after later edits or deletes.
-_TRACE_SCORE_JOIN_SQL = """
+_TRACE_SCORE_JOIN_SQL = f"""
 LEFT JOIN trace_eval_scores ts
   ON ts.run_uuid = runs.uuid
+ AND {_evaluator_still_linked_sql('runs.agent_id')}
 LEFT JOIN evaluators e
   ON e.uuid = ts.evaluator_uuid
 LEFT JOIN evaluator_versions ev
@@ -11694,7 +11711,7 @@ def average_trace_scores(
             SELECT uuid FROM traces WHERE {where}
         ),
         latest AS (
-            SELECT r.uuid, ROW_NUMBER() OVER (
+            SELECT r.uuid, r.agent_id, ROW_NUMBER() OVER (
                        PARTITION BY r.trace_uuid
                         ORDER BY r.created_at DESC, r.id DESC
                    ) AS rn
@@ -11714,6 +11731,7 @@ def average_trace_scores(
           LEFT JOIN evaluator_versions live ON live.uuid = e.live_version_id
          WHERE latest.rn = 1
            AND ts.output_type = COALESCE(e.output_type, ts.output_type)
+           AND {_evaluator_still_linked_sql('latest.agent_id')}
          GROUP BY ts.evaluator_uuid
          ORDER BY MAX(e.name), ts.evaluator_uuid
     """
@@ -11755,7 +11773,7 @@ def get_latest_trace_run_summaries(
     placeholders = ",".join("?" * len(unique))
     sql = f"""
         WITH ranked AS (
-            SELECT uuid, trace_uuid, org_uuid, status, error,
+            SELECT uuid, trace_uuid, org_uuid, agent_id, status, error,
                    created_at, completed_at, id,
                    ROW_NUMBER() OVER (
                        PARTITION BY trace_uuid
@@ -11789,7 +11807,7 @@ def list_trace_scoring_runs(org_uuid: str, trace_uuid: str) -> List[Dict[str, An
     """Every run for a trace, newest first, each with hydrated per-evaluator results."""
     sql = f"""
         WITH runs AS (
-            SELECT uuid, trace_uuid, org_uuid, status, error,
+            SELECT uuid, trace_uuid, org_uuid, agent_id, status, error,
                    created_at, completed_at, id
             FROM trace_eval_runs
             WHERE org_uuid = ? AND trace_uuid = ?
