@@ -4268,3 +4268,261 @@ def test_item_payload_allows_empty_text_without_versions(client):
         [{"payload": llm_item_payload("e1", agent_response={"content": "", "label": "AI draft"}, tool_calls=[{"tool": "lookup", "arguments": {}}])}],
     )
     assert resp.status_code == 200, resp.text
+
+
+WEEK_1 = {"start": "2026-09-07T00:00:00Z", "end": "2026-09-14T00:00:00Z"}
+WEEK_2 = {"start": "2026-09-14T00:00:00Z", "end": "2026-09-21T00:00:00Z"}
+
+
+def _run_sql(sql, *params):
+    import db as db_mod
+
+    with db_mod.get_db_connection() as conn:
+        conn.execute(sql, params)
+        conn.commit()
+
+
+def _seed_two_week_task(client, h, user_uuid):
+    """Rows 1 and 2 are added in week 1, row 3 in week 2. Annotator A answers
+    row 1 in week 1. Annotator B answers rows 1 and 2 in week 2. The judge
+    scored rows 1, 2 and 3."""
+    evaluator = _llm_evaluator(client, h)
+    task_uuid = client.post(
+        "/annotation-tasks",
+        json={
+            "name": f"t-{uuid.uuid4().hex[:6]}",
+            "type": "llm",
+            "evaluator_ids": [evaluator["uuid"]],
+        },
+        headers=h,
+    ).json()["uuid"]
+    item_ids = client.post(
+        f"/annotation-tasks/{task_uuid}/items",
+        json={"items": [{"payload": llm_item_payload(f"row-{i}")} for i in (1, 2, 3)]},
+        headers=h,
+    ).json()["item_ids"]
+    for item_id, stamp in zip(item_ids, ("2026-09-08 10:00:00", "2026-09-08 10:00:00", "2026-09-15 10:00:00")):
+        _run_sql("UPDATE annotation_items SET created_at = ? WHERE uuid = ?", stamp, item_id)
+
+    annotator_a = client.post("/annotators", json={"name": "A"}, headers=h).json()["uuid"]
+    annotator_b = client.post("/annotators", json={"name": "B"}, headers=h).json()["uuid"]
+    job_a, job_b = client.post(
+        f"/annotation-tasks/{task_uuid}/jobs",
+        json={"annotator_ids": [annotator_a, annotator_b], "select_all": True},
+        headers=h,
+    ).json()["jobs"]
+
+    def answer(job, item_id, value, stamp):
+        assert (
+            client.post(
+                f"/public/annotation-jobs/{job['public_token']}/annotations",
+                json={
+                    "item_id": item_id,
+                    "annotations": [{"evaluator_id": evaluator["uuid"], "value": {"value": value}}],
+                },
+            ).status_code
+            == 200
+        )
+        _run_sql(
+            "UPDATE annotations SET created_at = ?, updated_at = ? WHERE job_id = ? AND item_id = ?",
+            stamp, stamp, job["uuid"], item_id,
+        )
+
+    answer(job_a, item_ids[0], True, "2026-09-09 10:00:00")
+    answer(job_b, item_ids[0], True, "2026-09-16 10:00:00")
+    answer(job_b, item_ids[1], True, "2026-09-16 11:00:00")
+    _store_judge_scores(
+        user_uuid,
+        task_uuid,
+        [(item_id, evaluator["uuid"], evaluator["live_version_id"], {"value": True}) for item_id in item_ids],
+    )
+    return task_uuid, item_ids, annotator_a, annotator_b, evaluator, answer
+
+
+def _summary(client, h, task_uuid, **params):
+    response = client.get(f"/annotation-tasks/{task_uuid}/summary", params=params, headers=h)
+    assert response.status_code == 200, response.text
+    return response.json()
+
+
+def _agreement(client, h, task_uuid, **params):
+    response = client.get(f"/annotation-tasks/{task_uuid}/agreement", params=params, headers=h)
+    assert response.status_code == 200, response.text
+    return response.json()
+
+
+def test_date_filter_by_row_added(client):
+    auth = _signup(client)
+    h = auth["headers"]
+    task_uuid, item_ids, annotator_a, annotator_b, _, _ = _seed_two_week_task(client, h, auth["user_uuid"])
+
+    week_1 = _summary(client, h, task_uuid, **WEEK_1)
+    assert {r["item_id"] for r in week_1["rows"]} == {item_ids[0], item_ids[1]}
+    assert week_1["pagination"]["total"] == 2
+    row_1 = next(r for r in week_1["rows"] if r["item_id"] == item_ids[0])
+    # B answered a week later, and the answer still counts in the row's week.
+    assert row_1["annotations"][annotator_a]["answered_at"] == "2026-09-09T10:00:00Z"
+    assert row_1["annotations"][annotator_b]["answered_at"] == "2026-09-16T10:00:00Z"
+    assert row_1["item_added_at"] == "2026-09-08T10:00:00Z"
+    agreement = _agreement(client, h, task_uuid, **WEEK_1)
+    assert agreement["human_human"]["pair_count"] == 1
+    assert agreement["evaluators"][0]["result"]["count"] == 2
+
+    # A row nobody answered is still listed, so pending work is visible.
+    week_2 = _summary(client, h, task_uuid, **WEEK_2)
+    assert [r["item_id"] for r in week_2["rows"]] == [item_ids[2]]
+    assert all(cell is None for cell in week_2["rows"][0]["annotations"].values())
+    assert _agreement(client, h, task_uuid, **WEEK_2)["human_human"]["pair_count"] == 0
+
+
+def test_date_filter_by_annotator_answered(client):
+    auth = _signup(client)
+    h = auth["headers"]
+    task_uuid, item_ids, annotator_a, annotator_b, _, _ = _seed_two_week_task(client, h, auth["user_uuid"])
+    params = {"date_field": "annotator_answered"}
+
+    # A comment on row 3 is not an answer, so it does not place the row in a week.
+    job = client.post(
+        f"/annotation-tasks/{task_uuid}/jobs",
+        json={"annotator_ids": [annotator_a], "item_ids": [item_ids[2]]},
+        headers=h,
+    ).json()["jobs"][0]
+    client.post(
+        f"/public/annotation-jobs/{job['public_token']}/annotations",
+        json={"item_id": item_ids[2], "annotations": [{"evaluator_id": None, "value": {"comment": "note"}}]},
+    )
+    _run_sql(
+        "UPDATE annotations SET created_at = '2026-09-09 12:00:00', updated_at = '2026-09-09 12:00:00' WHERE item_id = ?",
+        item_ids[2],
+    )
+
+    week_1 = _summary(client, h, task_uuid, **params, **WEEK_1)
+    assert [r["item_id"] for r in week_1["rows"]] == [item_ids[0]]
+    assert week_1["rows"][0]["annotations"][annotator_a]["value"] is True
+    assert week_1["rows"][0]["annotations"][annotator_b] is None
+    assert {a["uuid"] for a in week_1["annotators"]} == {annotator_a, annotator_b}
+
+    week_2 = _summary(client, h, task_uuid, **params, **WEEK_2)
+    assert {r["item_id"] for r in week_2["rows"]} == {item_ids[0], item_ids[1]}
+    # Annotators who answered in different weeks are not compared.
+    assert all(r["annotations"][annotator_a] is None for r in week_2["rows"])
+    for week in (WEEK_1, WEEK_2):
+        assert _agreement(client, h, task_uuid, **params, **week)["human_human"]["pair_count"] == 0
+    # Row 3 has a judge score but no answer, so it is in neither week.
+    assert _agreement(client, h, task_uuid, **params, **WEEK_1)["evaluators"][0]["result"]["count"] == 1
+    assert _agreement(client, h, task_uuid, **params, **WEEK_2)["evaluators"][0]["result"]["count"] == 2
+
+
+def test_date_filter_answer_replaced_or_edited(client):
+    auth = _signup(client)
+    h = auth["headers"]
+    task_uuid, item_ids, annotator_a, _, evaluator, answer = _seed_two_week_task(client, h, auth["user_uuid"])
+    params = {"date_field": "annotator_answered"}
+
+    # An edit in a later week leaves the answer in the week it was first given.
+    _run_sql(
+        "UPDATE annotations SET updated_at = '2026-09-16 12:00:00' WHERE item_id = ? AND created_at = '2026-09-09 10:00:00'",
+        item_ids[0],
+    )
+    assert [r["item_id"] for r in _summary(client, h, task_uuid, **params, **WEEK_1)["rows"]] == [item_ids[0]]
+
+    # A newer job saving only reasoning replaces nothing and places no row.
+    reasoning_job = client.post(
+        f"/annotation-tasks/{task_uuid}/jobs",
+        json={"annotator_ids": [annotator_a], "item_ids": [item_ids[2]]},
+        headers=h,
+    ).json()["jobs"][0]
+    second_job = client.post(
+        f"/annotation-tasks/{task_uuid}/jobs",
+        json={"annotator_ids": [annotator_a], "item_ids": [item_ids[0]]},
+        headers=h,
+    ).json()["jobs"][0]
+    for job, item_id in ((reasoning_job, item_ids[2]), (second_job, item_ids[0])):
+        assert (
+            client.post(
+                f"/public/annotation-jobs/{job['public_token']}/annotations",
+                json={
+                    "item_id": item_id,
+                    "annotations": [{"evaluator_id": evaluator["uuid"], "value": {"reasoning": "unsure"}}],
+                },
+            ).status_code
+            == 200
+        )
+    week_1 = _summary(client, h, task_uuid, **params, **WEEK_1)
+    assert [r["item_id"] for r in week_1["rows"]] == [item_ids[0]]
+    assert week_1["rows"][0]["annotations"][annotator_a]["value"] is True
+    assert _agreement(client, h, task_uuid, **params, **WEEK_1)["evaluators"][0]["result"]["count"] == 1
+
+    # A newer job replacing the answer moves it to the newer job's week.
+    new_job = client.post(
+        f"/annotation-tasks/{task_uuid}/jobs",
+        json={"annotator_ids": [annotator_a], "item_ids": [item_ids[0]]},
+        headers=h,
+    ).json()["jobs"][0]
+    answer(new_job, item_ids[0], False, "2026-09-17 10:00:00")
+    assert _summary(client, h, task_uuid, **params, **WEEK_1)["rows"] == []
+    week_2_row = next(
+        r for r in _summary(client, h, task_uuid, **params, **WEEK_2)["rows"] if r["item_id"] == item_ids[0]
+    )
+    assert week_2_row["annotations"][annotator_a]["value"] is False
+
+
+def test_date_filter_bounds_and_errors(client):
+    auth = _signup(client)
+    h = auth["headers"]
+    task_uuid, item_ids, *_ = _seed_two_week_task(client, h, auth["user_uuid"])
+
+    def row_ids(**params):
+        return {r["item_id"] for r in _summary(client, h, task_uuid, **params)["rows"]}
+
+    assert row_ids() == set(item_ids)
+    assert row_ids(date_field="annotator_answered") == set(item_ids)
+    # `start` is included and `end` is not.
+    assert row_ids(start="2026-09-08T10:00:00Z") == set(item_ids)
+    assert row_ids(start="2026-09-08T10:00:01Z") == {item_ids[2]}
+    assert row_ids(end="2026-09-08T10:00:00Z") == set()
+    assert row_ids(end="2026-09-08T10:00:01Z") == {item_ids[0], item_ids[1]}
+    # 15:30 in India is 10:00 UTC, and a time with no timezone is UTC.
+    assert row_ids(start="2026-09-08T15:30:01+05:30") == {item_ids[2]}
+    assert row_ids(start="2026-09-08T10:00:01") == {item_ids[2]}
+
+    for path in ("summary", "agreement"):
+        url = f"/annotation-tasks/{task_uuid}/{path}"
+        assert client.get(url, params={"start": "2026-09-14", "end": "2026-09-14"}, headers=h).status_code == 422
+        assert client.get(url, params={"start": "2026-09-14T00:00:00Z", "end": "2026-09-13"}, headers=h).status_code == 422
+        assert client.get(url, params={"start": "last week"}, headers=h).status_code == 422
+        assert client.get(url, params={"date_field": "scored"}, headers=h).status_code == 422
+
+
+def test_summary_failed_rerun_keeps_previous_score(client):
+    auth = _signup(client)
+    h = auth["headers"]
+    task_uuid, item_ids, _, _, evaluator, _ = _seed_two_week_task(client, h, auth["user_uuid"])
+    _run_sql(
+        "UPDATE evaluator_runs SET created_at = '2026-09-10 10:00:00', completed_at = '2026-09-10 10:00:00' WHERE item_id = ?",
+        item_ids[0],
+    )
+    _store_judge_scores(
+        auth["user_uuid"],
+        task_uuid,
+        [(item_ids[0], evaluator["uuid"], evaluator["live_version_id"], None)],
+    )
+
+    row = next(
+        r for r in _summary(client, h, task_uuid, live_only=True)["rows"] if r["item_id"] == item_ids[0]
+    )
+    assert row["evaluator_value"] is True
+    assert _agreement(client, h, task_uuid)["evaluators"][0]["result"]["true_count"] == 3
+
+
+def test_evaluator_runs_lookup_by_item_uses_index():
+    import db as db_mod
+
+    with db_mod.get_db_connection() as conn:
+        plan = conn.execute(
+            "EXPLAIN QUERY PLAN SELECT er.* FROM evaluator_runs er "
+            "JOIN annotation_items ai ON ai.uuid = er.item_id "
+            "WHERE ai.task_id = 'x' AND er.deleted_at IS NULL AND ai.deleted_at IS NULL "
+            "ORDER BY er.id ASC"
+        ).fetchall()
+    assert "idx_evaluator_runs_item" in " ".join(row[3] for row in plan)

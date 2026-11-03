@@ -611,11 +611,11 @@ class _TraceSelection(BaseModel):
     )
     created_after: Optional[datetime] = Field(
         None,
-        description="With `select_all` on, act only on traces created at or after this time (ISO 8601). A time with no timezone is read as UTC",
+        description="With `select_all` on, act only on traces created at or after this time (ISO 8601). A time with no timezone is read as UTC. Omit for no earliest date",
     )
     created_before: Optional[datetime] = Field(
         None,
-        description="With `select_all` on, act only on traces created before this time (ISO 8601). A time with no timezone is read as UTC",
+        description="With `select_all` on, act only on traces created before this time (ISO 8601). A time with no timezone is read as UTC. Omit for no latest date",
     )
 
     @model_validator(mode="after")
@@ -865,11 +865,11 @@ async def list_traces_endpoint(
     ),
     created_after: Optional[datetime] = Query(
         None,
-        description="Return only traces created at or after this time (ISO 8601). A time with no timezone is read as UTC",
+        description="Return only traces created at or after this time (ISO 8601). A time with no timezone is read as UTC. Omit for no earliest date",
     ),
     created_before: Optional[datetime] = Query(
         None,
-        description="Return only traces created before this time (ISO 8601). A time with no timezone is read as UTC",
+        description="Return only traces created before this time (ISO 8601). A time with no timezone is read as UTC. Omit for no latest date",
     ),
     sort_by_evaluator: Optional[str] = Query(
         None, description=_SORT_BY_EVALUATOR_DESCRIPTION
