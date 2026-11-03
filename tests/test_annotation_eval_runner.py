@@ -1012,32 +1012,6 @@ def test_parse_results_for_task_type_dispatch_conversation(tmp_path):
 
 
 # ---------------------------------------------------------------------------
-# _extract_calibrate_error
-# ---------------------------------------------------------------------------
-
-
-def test_extract_calibrate_error_structured():
-    stdout = '{"status":"error","error":"bad config"}'
-    assert runner._extract_calibrate_error(stdout, "") == "bad config"
-
-
-def test_extract_calibrate_error_stderr_fallback():
-    assert runner._extract_calibrate_error("", "boom\nspecific failure") == (
-        "specific failure"
-    )
-
-
-def test_extract_calibrate_error_stdout_fallback():
-    assert runner._extract_calibrate_error("blah\nfinal", "") == "final"
-
-
-def test_extract_calibrate_error_empty():
-    assert runner._extract_calibrate_error("", "") == (
-        "calibrate exited non-zero with no diagnostic output"
-    )
-
-
-# ---------------------------------------------------------------------------
 # _persist_pgid
 # ---------------------------------------------------------------------------
 

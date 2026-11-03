@@ -38,6 +38,7 @@ from db import (
     update_job,
 )
 from provider_keys import provider_env
+from read_calibrate_run_output import cli_error_line
 from llm_judge import (
     build_evaluator_cli_payload,
     build_evaluator_cli_payload_unrendered,
@@ -1219,36 +1220,6 @@ def _run_calibrate_eval_only(
     return proc.returncode, stdout, stderr
 
 
-def _extract_calibrate_error(stdout: str, stderr: str) -> str:
-    """Pick the most useful error string out of calibrate's outputs.
-
-    calibrate eval-only emits `{"status": "error", "error": "..."}` to stdout
-    on validation failures (per the CLI contract). Fall back to the last
-    non-empty line of stderr, then stdout, then a generic message.
-    """
-    for blob in (stdout, stderr):
-        for line in reversed(blob.splitlines()):
-            line = line.strip()
-            if not line:
-                continue
-            try:
-                parsed = json.loads(line)
-            except (TypeError, ValueError):
-                continue
-            if (
-                isinstance(parsed, dict)
-                and parsed.get("status") == "error"
-                and parsed.get("error")
-            ):
-                return str(parsed["error"])
-            break  # only check the last line for JSON
-    if stderr.strip():
-        return stderr.strip().splitlines()[-1]
-    if stdout.strip():
-        return stdout.strip().splitlines()[-1]
-    return "calibrate exited non-zero with no diagnostic output"
-
-
 def _persist_pgid(job_uuid: str, pid: int) -> None:
     """Write pid/pgid into the job's details so recovery can kill the
     orphaned subprocess if the backend dies mid-run. Uses update_job's merge
@@ -1494,14 +1465,9 @@ def _run_job(
                 )
                 raise
     except subprocess.CalledProcessError as e:
-        # The calibrate CLI exited non-zero. Surface the actual stderr (or the
-        # structured `{"status":"error","error":"..."}` blob if present) so the
-        # API caller sees what went wrong, mirroring stt/tts/etc.
         traceback.print_exc()
         capture_exception_to_sentry(e)
-        cli_err = _extract_calibrate_error(
-            getattr(e, "stdout", "") or "", getattr(e, "stderr", "") or ""
-        )
+        cli_err = cli_error_line(e.stdout, e.stderr, e.returncode)
         _discard_partial_runs(job_uuid)
         details_patch = {"completed_at": utc_now()}
         if partial_prefix:

@@ -31,6 +31,7 @@ import boto3
 from botocore.config import Config
 import openpyxl
 import sentry_sdk
+from sentry_sdk.utils import event_from_exception
 from fastapi import HTTPException
 from pydantic import BaseModel, Field, StringConstraints
 
@@ -101,10 +102,12 @@ def capture_exception_to_sentry(exception: Exception) -> None:
     This ensures job failures appear as unresolved issues in Sentry
     rather than handled/resolved exceptions.
     """
-    sentry_sdk.capture_exception(
+    event, hint = event_from_exception(
         exception,
-        hint={"mechanism": {"type": "generic", "handled": False}},
+        client_options=sentry_sdk.get_client().options,
+        mechanism={"type": "generic", "handled": False},
     )
+    sentry_sdk.capture_event(event, hint=hint)
     # Flush to ensure the event is sent immediately (important for background tasks)
     sentry_sdk.flush(timeout=2)
 
