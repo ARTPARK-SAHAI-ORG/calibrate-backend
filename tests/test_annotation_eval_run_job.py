@@ -460,6 +460,50 @@ def test_run_job_discards_in_flight_rows_when_calibrate_fails():
     create.assert_not_called()
 
 
+def _stored_error_when_calibrate_fails(rc, stdout, stderr):
+    from annotation_eval_runner import _run_job
+
+    items = [{"uuid": "i1", "payload": {
+        "predicted_transcript": "p", "reference_transcript": "r"}}]
+    with patch(
+        "annotation_eval_runner.get_annotation_task", return_value={"type": "stt"}
+    ), patch(
+        "annotation_eval_runner.get_eval_job_items", return_value=items
+    ), patch(
+        "annotation_eval_runner._run_calibrate_eval_only",
+        return_value=(rc, stdout, stderr),
+    ), patch(
+        "annotation_eval_runner.update_job"
+    ) as update_job, patch(
+        "annotation_eval_runner.try_start_queued_job"
+    ), patch(
+        "annotation_eval_runner.clear_evaluator_runs_for_job"
+    ), patch(
+        "annotation_eval_runner.capture_exception_to_sentry"
+    ) as sentry, patch(
+        "annotation_eval_runner._try_upload_partial_outputs", return_value=None
+    ):
+        _run_job("j-1", "task", "u-1", [_resolved()], item_ids=None)
+    sentry.assert_called_once()
+    return update_job.call_args.kwargs["results"]["error"]
+
+
+PROGRESS_BAR = "Running general evaluators:   0%|     | 0/18 [00:23<?, ?it/s]\n"
+
+
+def test_failed_run_stores_calibrates_error_rather_than_its_progress_bar():
+    assert _stored_error_when_calibrate_fails(
+        1, "  \x1b[31mError - judge model not found\x1b[0m\n", PROGRESS_BAR
+    ) == "calibrate --eval-only failed: Error - judge model not found"
+
+
+def test_failed_run_killed_with_only_a_progress_bar_stores_how_it_ended():
+    assert _stored_error_when_calibrate_fails(-9, "", PROGRESS_BAR) == (
+        "calibrate --eval-only failed: calibrate-agent process killed by signal 9 "
+        "(SIGKILL: Killed)"
+    )
+
+
 def test_run_job_no_rows_skips_create():
     """A successful run that parses zero rows still clears the job's prior
     runs, but has nothing to insert."""
