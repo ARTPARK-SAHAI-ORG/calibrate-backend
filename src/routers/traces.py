@@ -17,6 +17,7 @@ OTel-gateway migration.
 
 import logging
 import math
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Annotated, Any, ClassVar, Dict, List, Literal, Optional, Union
 
@@ -47,6 +48,7 @@ from db import (
     set_test_evaluators,
     soft_delete_traces,
     soft_delete_traces_matching,
+    TraceFilters,
     TraceScoreFilter,
 )
 from org_scope import ensure_owned_agent
@@ -553,13 +555,6 @@ _FILTER_SCORE_DESCRIPTION = (
 _CONVERSATION_NEEDS_AGENT = "conversation_id needs agent_id"
 
 
-def _require_agent_for_conversation(
-    agent_id: Optional[str], conversation_id: Optional[str]
-) -> None:
-    if conversation_id and not agent_id:
-        raise HTTPException(status_code=422, detail=_CONVERSATION_NEEDS_AGENT)
-
-
 def _stored_time(value: Optional[datetime]) -> Optional[str]:
     """Write a time the way `traces.created_at` stores it, so the two compare as text."""
     if value is None:
@@ -570,6 +565,37 @@ def _stored_time(value: Optional[datetime]) -> Optional[str]:
         except OverflowError:
             raise HTTPException(status_code=422, detail="time is out of range")
     return value.strftime("%Y-%m-%d %H:%M:%S")
+
+
+def _to_trace_filters(source: Any) -> TraceFilters:
+    """Read a request's filters, parsing the score conditions before the times."""
+    scores = _parse_score_filters(source.score)
+    return TraceFilters(
+        agent_id=source.agent_id,
+        conversation_id=source.conversation_id,
+        q=source.q,
+        output_type=source.output_type,
+        labels=source.labels,
+        scores=scores,
+        # GET /traces/conversations has no date filters.
+        created_after=_stored_time(getattr(source, "created_after", None)),
+        created_before=_stored_time(getattr(source, "created_before", None)),
+    )
+
+
+def _checked_query_filters(params: Any, pagination: PaginationParams) -> TraceFilters:
+    """Run the checks both GET list routes share, in the order they report errors."""
+    if params.conversation_id and not params.agent_id:
+        raise HTTPException(status_code=422, detail=_CONVERSATION_NEEDS_AGENT)
+    if pagination.limit > MAX_LIST_LIMIT:
+        raise HTTPException(
+            status_code=422, detail=f"limit must be {MAX_LIST_LIMIT} or less"
+        )
+    if params.labels and len(params.labels) > MAX_LABELS:
+        raise HTTPException(
+            status_code=422, detail=f"labels accepts at most {MAX_LABELS} labels"
+        )
+    return _to_trace_filters(params)
 
 
 class _TraceSelection(BaseModel):
@@ -833,6 +859,61 @@ class TraceListResponse(PaginatedResponse[TraceSummary]):
     )
 
 
+# Plain dataclasses: a pydantic query model would change the published parameters.
+@dataclass
+class _TraceListFilters:
+    agent_id: Optional[str] = Query(
+        None, description="Return only traces from this agent"
+    )
+    conversation_id: Optional[str] = Query(
+        None,
+        min_length=1,
+        max_length=255,
+        description="Return only the turns of this conversation. Requires `agent_id`",
+    )
+    q: Optional[str] = Query(
+        None,
+        description="Return only traces containing this text in their message ID, conversation ID, conversation history, output, or metadata",
+    )
+    output_type: Optional[Literal["response", "tool_call"]] = Query(
+        None,
+        description="Return only traces whose output is of this kind. `response` covers every trace carrying a reply, including one that also issued tool calls. `tool_call` covers traces that only issued tool calls",
+    )
+    labels: Optional[List[TraceLabel]] = Query(
+        None,
+        description="Return only traces carrying at least one of these labels. Repeat the parameter for each label",
+    )
+    score: Optional[List[str]] = Query(
+        None, description=_SCORE_FILTER_DESCRIPTION
+    )
+    created_after: Optional[datetime] = Query(
+        None,
+        description="Return only traces created at or after this time (ISO 8601). A time with no timezone is read as UTC. Omit for no earliest date",
+    )
+    created_before: Optional[datetime] = Query(
+        None,
+        description="Return only traces created before this time (ISO 8601). A time with no timezone is read as UTC. Omit for no latest date",
+    )
+
+
+@dataclass
+class _TraceListOptions:
+    sort_by_evaluator: Optional[str] = Query(
+        None, description=_SORT_BY_EVALUATOR_DESCRIPTION
+    )
+    sort_order: Literal["asc", "desc"] = Query(
+        "desc", description=_SORT_ORDER_DESCRIPTION
+    )
+    include_content: bool = Query(
+        False,
+        description="Also return each trace's full input, output and metadata. Use `limit` and `offset` to page through them",
+    )
+    include_score_averages: bool = Query(
+        False,
+        description="Also return each evaluator's mean score over every matching trace, not just this page. Costs a pass over those traces, so ask for it when the filters change rather than on every page",
+    )
+
+
 @router.get(
     "",
     response_model=TraceListResponse,
@@ -841,65 +922,12 @@ class TraceListResponse(PaginatedResponse[TraceSummary]):
 )
 def list_traces_endpoint(
     ctx: OrgContext = Depends(get_org_jwt_or_api_key),
+    filters: _TraceListFilters = Depends(),
+    options: _TraceListOptions = Depends(),
     pagination: PaginationParams = Depends(),
-    agent_id: Optional[str] = Query(
-        None, description="Return only traces from this agent"
-    ),
-    conversation_id: Optional[str] = Query(
-        None,
-        min_length=1,
-        max_length=255,
-        description="Return only the turns of this conversation. Requires `agent_id`",
-    ),
-    q: Optional[str] = Query(
-        None,
-        description="Return only traces containing this text in their message ID, conversation ID, conversation history, output, or metadata",
-    ),
-    output_type: Optional[Literal["response", "tool_call"]] = Query(
-        None,
-        description="Return only traces whose output is of this kind. `response` covers every trace carrying a reply, including one that also issued tool calls. `tool_call` covers traces that only issued tool calls",
-    ),
-    labels: Optional[List[TraceLabel]] = Query(
-        None,
-        description="Return only traces carrying at least one of these labels. Repeat the parameter for each label",
-    ),
-    score: Optional[List[str]] = Query(
-        None, description=_SCORE_FILTER_DESCRIPTION
-    ),
-    created_after: Optional[datetime] = Query(
-        None,
-        description="Return only traces created at or after this time (ISO 8601). A time with no timezone is read as UTC. Omit for no earliest date",
-    ),
-    created_before: Optional[datetime] = Query(
-        None,
-        description="Return only traces created before this time (ISO 8601). A time with no timezone is read as UTC. Omit for no latest date",
-    ),
-    sort_by_evaluator: Optional[str] = Query(
-        None, description=_SORT_BY_EVALUATOR_DESCRIPTION
-    ),
-    sort_order: Literal["asc", "desc"] = Query(
-        "desc", description=_SORT_ORDER_DESCRIPTION
-    ),
-    include_content: bool = Query(
-        False,
-        description="Also return each trace's full input, output and metadata. Use `limit` and `offset` to page through them",
-    ),
-    include_score_averages: bool = Query(
-        False,
-        description="Also return each evaluator's mean score over every matching trace, not just this page. Costs a pass over those traces, so ask for it when the filters change rather than on every page",
-    ),
 ):
     """List ingested traces, newest first"""
-    _require_agent_for_conversation(agent_id, conversation_id)
-    if pagination.limit > MAX_LIST_LIMIT:
-        raise HTTPException(
-            status_code=422, detail=f"limit must be {MAX_LIST_LIMIT} or less"
-        )
-    if labels and len(labels) > MAX_LABELS:
-        raise HTTPException(
-            status_code=422, detail=f"labels accepts at most {MAX_LABELS} labels"
-        )
-    scores = _parse_score_filters(score)
+    trace_filters = _checked_query_filters(filters, pagination)
     # Search/filter/count run in SQL (db.list_traces), not the post-fetch
     # pagination helpers, and paging uses the bounded PaginationParams rather
     # than the unbounded OptionalPaginationParams: traces are machine-written
@@ -908,22 +936,15 @@ def list_traces_endpoint(
         ctx.org_uuid,
         limit=pagination.limit,
         offset=pagination.offset,
-        agent_id=agent_id,
-        q=q,
-        output_type=output_type,
-        labels=labels,
-        scores=scores,
-        conversation_id=conversation_id,
-        created_after=_stored_time(created_after),
-        created_before=_stored_time(created_before),
-        sort_evaluator=sort_by_evaluator,
-        sort_order=sort_order,
+        filters=trace_filters,
+        sort_evaluator=options.sort_by_evaluator,
+        sort_order=options.sort_order,
     )
     scoring = get_latest_trace_run_summaries(
         ctx.org_uuid, [row["uuid"] for row in rows]
     )
     items = [_to_summary(row, scoring.get(row["uuid"])) for row in rows]
-    if include_content:
+    if options.include_content:
         for item, row in zip(items, rows):
             item.update(input=row["input"], output=row["output"], metadata=row["metadata"])
     body = page_envelope(
@@ -931,17 +952,9 @@ def list_traces_endpoint(
         total,
         pagination,
     )
-    if include_score_averages:
+    if options.include_score_averages:
         body["score_averages"] = average_trace_scores(
-            ctx.org_uuid,
-            agent_id=agent_id,
-            q=q,
-            output_type=output_type,
-            labels=labels,
-            scores=scores,
-            conversation_id=conversation_id,
-            created_after=_stored_time(created_after),
-            created_before=_stored_time(created_before),
+            ctx.org_uuid, filters=trace_filters
         )
     return body
 
@@ -958,6 +971,35 @@ class TraceConversationSummary(BaseModel):
     last_turn: TraceSummary = Field(description="The newest trace in this conversation")
 
 
+@dataclass
+class _ConversationFilters:
+    agent_id: Optional[str] = Query(
+        None, description="Return only conversations with this agent"
+    )
+    conversation_id: Optional[str] = Query(
+        None,
+        min_length=1,
+        max_length=255,
+        description="Return only the conversation with this ID. Requires `agent_id`",
+    )
+    q: Optional[str] = Query(
+        None,
+        description="Return only conversations with a turn containing this text in its message ID, conversation ID, conversation history, output, or metadata",
+    )
+    output_type: Optional[Literal["response", "tool_call"]] = Query(
+        None,
+        description="Return only conversations with a turn whose output is of this kind",
+    )
+    labels: Optional[List[TraceLabel]] = Query(
+        None,
+        description="Return only conversations with a turn carrying at least one of these labels. Repeat the parameter for each label",
+    )
+    score: Optional[List[str]] = Query(
+        None,
+        description="Return only conversations with a turn whose latest scoring run matches every one of these conditions. " + _SCORE_CONDITION_SYNTAX,
+    )
+
+
 @router.get(
     "/conversations",
     response_model=PaginatedResponse[TraceConversationSummary],
@@ -965,53 +1007,16 @@ class TraceConversationSummary(BaseModel):
 )
 def list_trace_conversations_endpoint(
     ctx: OrgContext = Depends(get_current_org),
+    filters: _ConversationFilters = Depends(),
     pagination: PaginationParams = Depends(),
-    agent_id: Optional[str] = Query(
-        None, description="Return only conversations with this agent"
-    ),
-    conversation_id: Optional[str] = Query(
-        None,
-        min_length=1,
-        max_length=255,
-        description="Return only the conversation with this ID. Requires `agent_id`",
-    ),
-    q: Optional[str] = Query(
-        None,
-        description="Return only conversations with a turn containing this text in its message ID, conversation ID, conversation history, output, or metadata",
-    ),
-    output_type: Optional[Literal["response", "tool_call"]] = Query(
-        None,
-        description="Return only conversations with a turn whose output is of this kind",
-    ),
-    labels: Optional[List[TraceLabel]] = Query(
-        None,
-        description="Return only conversations with a turn carrying at least one of these labels. Repeat the parameter for each label",
-    ),
-    score: Optional[List[str]] = Query(
-        None,
-        description="Return only conversations with a turn whose latest scoring run matches every one of these conditions. " + _SCORE_CONDITION_SYNTAX,
-    ),
 ):
     """List conversations, newest turn first. Traces sent without a conversation ID are left out"""
-    _require_agent_for_conversation(agent_id, conversation_id)
-    if pagination.limit > MAX_LIST_LIMIT:
-        raise HTTPException(
-            status_code=422, detail=f"limit must be {MAX_LIST_LIMIT} or less"
-        )
-    if labels and len(labels) > MAX_LABELS:
-        raise HTTPException(
-            status_code=422, detail=f"labels accepts at most {MAX_LABELS} labels"
-        )
+    trace_filters = _checked_query_filters(filters, pagination)
     conversations, total = list_trace_conversations(
         ctx.org_uuid,
         limit=pagination.limit,
         offset=pagination.offset,
-        agent_id=agent_id,
-        q=q,
-        output_type=output_type,
-        labels=labels,
-        scores=_parse_score_filters(score),
-        conversation_id=conversation_id,
+        filters=trace_filters,
     )
     scoring = get_latest_trace_run_summaries(
         ctx.org_uuid, [c["last_turn"]["uuid"] for c in conversations]
@@ -1096,15 +1101,7 @@ def bulk_delete_traces(
     """Soft-delete traces, freeing their capacity"""
     if payload.select_all:
         deleted = soft_delete_traces_matching(
-            ctx.org_uuid,
-            agent_id=payload.agent_id,
-            q=payload.q,
-            output_type=payload.output_type,
-            labels=payload.labels,
-            scores=_parse_score_filters(payload.score),
-            conversation_id=payload.conversation_id,
-            created_after=_stored_time(payload.created_after),
-            created_before=_stored_time(payload.created_before),
+            ctx.org_uuid, filters=_to_trace_filters(payload)
         )
     else:
         deleted = soft_delete_traces(ctx.org_uuid, trace_ids=payload.trace_ids)
@@ -1277,14 +1274,7 @@ def convert_traces_to_tests(
             ctx.org_uuid,
             limit=MAX_CONVERT_TRACES,
             offset=0,
-            agent_id=payload.agent_id,
-            q=payload.q,
-            output_type=payload.output_type,
-            labels=payload.labels,
-            scores=_parse_score_filters(payload.score),
-            conversation_id=payload.conversation_id,
-            created_after=_stored_time(payload.created_after),
-            created_before=_stored_time(payload.created_before),
+            filters=_to_trace_filters(payload),
         )
         if total > MAX_CONVERT_TRACES:
             raise HTTPException(

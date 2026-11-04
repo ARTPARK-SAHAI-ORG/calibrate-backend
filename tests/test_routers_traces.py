@@ -3769,3 +3769,192 @@ def test_select_all_refuses_an_empty_agent_id(client, path, extra):
 
     assert res.status_code == 422
     assert client.get(f"/traces/{trace['uuid']}", headers=h).status_code == 200
+
+
+def test_the_published_list_parameters_keep_their_order():
+    from main import _build_public_openapi
+
+    parameters = _build_public_openapi()["paths"]["/traces"]["get"]["parameters"]
+    assert [p["name"] for p in parameters if p["in"] == "query"] == [
+        "agent_id",
+        "conversation_id",
+        "q",
+        "output_type",
+        "labels",
+        "score",
+        "created_after",
+        "created_before",
+        "sort_by_evaluator",
+        "sort_order",
+        "include_content",
+        "include_score_averages",
+        "limit",
+        "offset",
+    ]
+
+
+# For each filter: what the matching trace carries, what the other one carries,
+# and the filter that tells them apart.
+_ONE_FILTER_CASES = {
+    "q": ({"metadata": [{"key": "tag", "value": "needle"}]}, {}, {"q": "needle"}),
+    "output_type": (
+        {"output": {"tool_calls": [{"tool": "get_schedule", "arguments": {}}]}},
+        {},
+        {"output_type": "tool_call"},
+    ),
+    "labels": ({"labels": ["vip"]}, {"labels": ["other"]}, {"labels": ["vip"]}),
+    "conversation_id": (
+        {"conversation_id": "conv-a"},
+        {"conversation_id": "conv-b"},
+        {"conversation_id": "conv-a"},
+    ),
+    "created_after": (
+        {"created_at": "2026-02-01 00:00:00"},
+        {"created_at": "2026-01-01 00:00:00"},
+        {"created_after": "2026-01-15T00:00:00Z"},
+    ),
+    "created_before": (
+        {"created_at": "2026-01-01 00:00:00"},
+        {"created_at": "2026-02-01 00:00:00"},
+        {"created_before": "2026-01-15T00:00:00Z"},
+    ),
+}
+
+
+def _matching_and_other_trace(client, h, agent_id, filter_name):
+    """Post a trace the filter keeps and one it leaves out."""
+    matching, other, query = _ONE_FILTER_CASES[filter_name]
+    traces = []
+    for fields in (matching, other):
+        fields = dict(fields)
+        created_at = fields.pop("created_at", None)
+        message_id = _mid()
+        trace = _post_trace(client, h, _payload(agent_id, message_id, **fields))
+        if created_at:
+            _set_created_at(trace["uuid"], created_at)
+        traces.append({**trace, "message_id": message_id})
+    return traces[0], traces[1], query
+
+
+@pytest.mark.parametrize("filter_name", _ONE_FILTER_CASES)
+def test_bulk_delete_select_all_spares_a_trace_outside_one_filter(client, filter_name):
+    h, agent_id = _signup_with_agent(client)
+    matching, other, query = _matching_and_other_trace(client, h, agent_id, filter_name)
+
+    res = client.post(
+        "/traces/bulk-delete",
+        json={"select_all": True, "agent_id": agent_id, **query},
+        headers=h,
+    )
+
+    assert res.status_code == 200, res.text
+    assert res.json() == {"deleted": 1}
+    assert client.get(f"/traces/{matching['uuid']}", headers=h).status_code == 404
+    assert client.get(f"/traces/{other['uuid']}", headers=h).status_code == 200
+
+
+@pytest.mark.parametrize("filter_name", _ONE_FILTER_CASES)
+def test_convert_select_all_skips_a_trace_outside_one_filter(client, filter_name):
+    h, agent_id = _signup_with_agent(client)
+    matching, _other, query = _matching_and_other_trace(
+        client, h, agent_id, filter_name
+    )
+
+    res = _convert(
+        client, h, select_all=True, agent_id=agent_id, type="tool_call", **query
+    )
+
+    assert res.status_code == 200, res.text
+    assert _test_names(client, h) == [matching["message_id"]]
+
+
+@pytest.mark.parametrize("filter_name", ["q", "output_type", "labels"])
+def test_score_averages_leave_out_a_trace_outside_one_filter(client, filter_name):
+    h, agent_id = _signup_with_agent(client)
+    _disable_auto_score(client, h, agent_id)
+    matching, other, query = _matching_and_other_trace(client, h, agent_id, filter_name)
+    for trace, value in ((matching, 1), (other, 0)):
+        run = _insert_run(_org_of(agent_id), trace["uuid"], status="completed",
+                          completed_at=_at(9), agent_id=agent_id)
+        _insert_score(run, evaluator_uuid=_EVAL_A, evaluator_version_id=_VER_A, value=value)
+
+    got = _averages(client, h, **query)[_EVAL_A]
+
+    assert got["traces_scored"] == 1
+    assert got["average"] == 1
+
+
+def _conversation_ids(client, h, **params):
+    res = client.get("/traces/conversations", params=params, headers=h)
+    assert res.status_code == 200, res.text
+    return [c["conversation_id"] for c in res.json()["items"]]
+
+
+@pytest.mark.parametrize("filter_name", ["q", "output_type"])
+def test_conversations_leave_out_one_outside_one_filter(client, filter_name):
+    h, agent_id = _signup_with_agent(client)
+    matching, other, query = _ONE_FILTER_CASES[filter_name]
+    _post_trace(client, h, _payload(agent_id, _mid(), "conv-a", **matching))
+    _post_trace(client, h, _payload(agent_id, _mid(), "conv-b", **other))
+
+    assert _conversation_ids(client, h, **query) == ["conv-a"]
+
+
+def test_conversations_leave_out_one_outside_the_score_filter(client):
+    h, agent_id = _signup_with_agent(client)
+    _disable_auto_score(client, h, agent_id)
+    for conversation_id, value in (("conv-a", 1), ("conv-b", 0)):
+        trace = _post_trace(client, h, _payload(agent_id, _mid(), conversation_id))
+        run = _insert_run(_org_of(agent_id), trace["uuid"], status="completed",
+                          completed_at=_at(9), agent_id=agent_id)
+        _insert_score(run, evaluator_uuid=_EVAL_A, evaluator_version_id=_VER_A, value=value)
+
+    assert _conversation_ids(client, h, score=f"{_EVAL_A}:passed") == ["conv-a"]
+
+
+_ALL_FILTERS = {
+    "agent_id": "agent-1",
+    "conversation_id": "conv-a",
+    "q": "needle",
+    "output_type": "tool_call",
+    "labels": ["vip", "prod"],
+    "score": ["ev-a:passed", "ev-b:>=4"],
+    "created_after": "2026-01-15T05:30:00+05:30",
+    "created_before": "2026-02-01T00:00:00Z",
+}
+
+
+@pytest.mark.parametrize(
+    "db_function, path, extra",
+    [
+        ("soft_delete_traces_matching", "/traces/bulk-delete", {}),
+        ("list_traces", "/traces/convert-to-tests", {"type": "tool_call"}),
+    ],
+)
+def test_a_body_with_every_filter_reaches_trace_filters_intact(
+    client, monkeypatch, db_function, path, extra
+):
+    from routers import traces as traces_mod
+
+    h = _signup(client)
+    seen = {}
+
+    def capture(org_uuid, **kwargs):
+        seen.update(kwargs)
+        return ([], 0) if db_function == "list_traces" else 0
+
+    monkeypatch.setattr(traces_mod, db_function, capture)
+    client.post(
+        path, json={"select_all": True, **_ALL_FILTERS, **extra}, headers=h
+    )
+
+    assert seen["filters"] == db.TraceFilters(
+        agent_id="agent-1",
+        conversation_id="conv-a",
+        q="needle",
+        output_type="tool_call",
+        labels=["vip", "prod"],
+        scores=[("ev-a", "passed", None), ("ev-b", ">=", 4.0)],
+        created_after="2026-01-15 00:00:00",
+        created_before="2026-02-01 00:00:00",
+    )
