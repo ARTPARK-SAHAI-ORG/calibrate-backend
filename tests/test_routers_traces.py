@@ -3735,3 +3735,17 @@ def test_deleting_an_agent_keeps_the_scores_on_its_traces(client):
     row = next(i for i in body["items"] if i["uuid"] == trace)
     assert [r["evaluator_uuid"] for r in row["results"]] == [ev]
     assert ev in {a["evaluator_uuid"] for a in body["score_averages"]}
+
+
+def test_trace_routes_do_not_hold_up_other_requests():
+    """A route written `async def` runs on the one worker that serves every
+    request, so its database calls make every other request wait."""
+    import inspect
+
+    from routers.traces import router
+
+    assert [
+        route.path
+        for route in router.routes
+        if inspect.iscoroutinefunction(route.endpoint)
+    ] == []

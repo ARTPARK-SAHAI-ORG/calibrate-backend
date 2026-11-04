@@ -12,6 +12,8 @@ from unittest.mock import patch
 import pytest
 from fastapi.testclient import TestClient
 
+import db
+
 
 @pytest.fixture(scope="module")
 def app():
@@ -443,12 +445,24 @@ def test_run_simulation_queued_path(client, monkeypatch):
         headers=h,
     )
     assert on.status_code == 200
+    share_token = on.json()["share_token"]
+    assert share_token
     off = client.patch(
         f"/simulations/run/{job_uuid}/visibility",
         json={"is_public": False},
         headers=h,
     )
     assert off.status_code == 200
+    assert off.json()["share_token"] is None
+    assert db.get_simulation_job_by_share_token(share_token) is None
+    # Turning sharing back on brings back the same link
+    on_again = client.patch(
+        f"/simulations/run/{job_uuid}/visibility",
+        json={"is_public": True},
+        headers=h,
+    )
+    assert on_again.json()["share_token"] == share_token
+    assert db.get_simulation_job_by_share_token(share_token) is not None
     assert (
         client.patch(
             "/simulations/run/missing/visibility",
