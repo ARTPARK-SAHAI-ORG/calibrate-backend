@@ -344,7 +344,7 @@ class EvaluatorResponse(EvaluatorResponseBase):
     )
     trace_variables: Optional[Dict[str, str]] = Field(
         None,
-        description="Which part of a trace fills each variable when this agent's traces are scored",
+        description="Which part of a trace fills each variable of the evaluator when it scores an agent's traces",
     )
 
 

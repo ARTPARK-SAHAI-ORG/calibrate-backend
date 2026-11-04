@@ -524,7 +524,7 @@ class TraceScoringIneligibleEvaluator(BaseModel):
             "Why this evaluator cannot score traces for this agent:\n\n"
             f"- `{IneligibleReason.WRONG_TYPE}`: its type does not match the agent's interaction type\n"
             f"- `{IneligibleReason.NO_LIVE_VERSION}`: it has no live version to run\n"
-            f"- `{IneligibleReason.DECLARES_VARIABLES}`: a variable in its live version has no trace value chosen"
+            f"- `{IneligibleReason.DECLARES_VARIABLES}`: it has a variable in its live version with no trace value chosen"
         )
     )
 
@@ -598,7 +598,17 @@ class EvaluatorLinkResponse(BaseModel):
 
 class TraceVariablesRequest(BaseModel):
     trace_variables: Dict[str, str] = Field(
-        description="Which part of a trace fills each variable. Replaces the stored choices, and an empty object clears them",
+        description=(
+            "Which part of a trace fills each variable, keyed by variable name. Each value is one of:\n\n"
+            "- `input`: the trace's input\n"
+            "- `output.response`: the agent's reply\n"
+            "- `output.tool_calls`: the tool calls the agent issued\n"
+            "- `labels`: the trace's labels\n"
+            "- `conversation_id`: the conversation ID sent with the trace\n"
+            "- `message_id`: the message ID sent with the trace\n"
+            "- `metadata.<key>`: the metadata entry with that key\n\n"
+            "Replaces the stored choices, and an empty object clears them"
+        ),
         examples=[{"nurse_reply": "metadata.expert_answer", "ai_reply": "output.response"}],
     )
 
@@ -1251,7 +1261,7 @@ def update_evaluator_trace_variables(
     payload: TraceVariablesRequest = ...,
     ctx: OrgContext = Depends(get_org_jwt_or_api_key),
 ):
-    """Choose which part of a trace fills each variable of an evaluator when this agent's traces are scored"""
+    """Choose which part of a trace fills each variable of an evaluator"""
     ensure_owned_agent(agent_uuid, ctx.org_uuid)
     live_version = next(
         (
