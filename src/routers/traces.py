@@ -577,9 +577,8 @@ def _to_trace_filters(source: Any) -> TraceFilters:
         output_type=source.output_type,
         labels=source.labels,
         scores=scores,
-        # GET /traces/conversations has no date filters.
-        created_after=_stored_time(getattr(source, "created_after", None)),
-        created_before=_stored_time(getattr(source, "created_before", None)),
+        created_after=_stored_time(source.created_after),
+        created_before=_stored_time(source.created_before),
     )
 
 
@@ -998,6 +997,9 @@ class _ConversationFilters:
         None,
         description="Return only conversations with a turn whose latest scoring run matches every one of these conditions. " + _SCORE_CONDITION_SYNTAX,
     )
+    # Not parameters: this route has no date filters.
+    created_after: ClassVar[None] = None
+    created_before: ClassVar[None] = None
 
 
 @router.get(
