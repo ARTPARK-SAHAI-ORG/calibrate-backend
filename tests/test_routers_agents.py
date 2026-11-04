@@ -1793,13 +1793,26 @@ def test_trace_variables_agent_in_another_workspace_is_not_writable(client):
     assert _listed_trace_variables(client, h, agent_uuid, ev) == {}
 
 
-def test_trace_variables_refuses_api_key(client):
+def test_trace_variables_accepts_api_key(client):
     h = _signup(client)
     agent_uuid, ev = _agent_with_variable_evaluator(client, h)
+    mapping = {"criteria": "metadata.expert_answer"}
     r = _put_trace_variables(
-        client, {"X-API-Key": _raw_key(client, h)}, agent_uuid, ev, {"criteria": "input"}
+        client, {"X-API-Key": _raw_key(client, h)}, agent_uuid, ev, mapping
+    )
+    assert r.status_code == 200, r.text
+    assert _listed_trace_variables(client, h, agent_uuid, ev) == mapping
+
+
+def test_trace_variables_refuses_another_workspace_api_key(client):
+    h = _signup(client)
+    agent_uuid, ev = _agent_with_variable_evaluator(client, h)
+    other_key = _raw_key(client, _signup(client))
+    r = _put_trace_variables(
+        client, {"X-API-Key": other_key}, agent_uuid, ev, {"criteria": "input"}
     )
     assert r.status_code == 403, r.text
+    assert "organization_uuid" not in r.json()
     assert _listed_trace_variables(client, h, agent_uuid, ev) == {}
 
 

@@ -1237,6 +1237,7 @@ def unlink_evaluator_from_agent(
     "/{agent_uuid}/evaluators/{evaluator_uuid}/trace-variables",
     response_model=TraceVariablesResponse,
     summary="Update evaluator trace variables",
+    tags=["Public API"],
 )
 def update_evaluator_trace_variables(
     agent_uuid: str = Path(
@@ -1248,7 +1249,7 @@ def update_evaluator_trace_variables(
         examples=["f47ac10b-58cc-4372-a567-0e02b2c3d479"],
     ),
     payload: TraceVariablesRequest = ...,
-    ctx: OrgContext = Depends(get_current_org),
+    ctx: OrgContext = Depends(get_org_jwt_or_api_key),
 ):
     """Choose which part of a trace fills each variable of an evaluator when this agent's traces are scored"""
     ensure_owned_agent(agent_uuid, ctx.org_uuid)
