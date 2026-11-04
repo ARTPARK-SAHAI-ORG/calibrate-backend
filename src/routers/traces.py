@@ -589,7 +589,9 @@ class _TraceSelection(BaseModel):
         default_factory=list, description="IDs of the traces to act on"
     )
     select_all: bool = Field(False, description=_SELECT_ALL_DESCRIPTION)
-    agent_id: Optional[str] = Field(None, description=_FILTER_AGENT_DESCRIPTION)
+    agent_id: Optional[str] = Field(
+        None, min_length=1, description=_FILTER_AGENT_DESCRIPTION
+    )
     conversation_id: Optional[str] = Field(
         None,
         min_length=1,

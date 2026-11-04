@@ -3749,3 +3749,23 @@ def test_trace_routes_do_not_hold_up_other_requests():
         for route in router.routes
         if inspect.iscoroutinefunction(route.endpoint)
     ] == []
+
+
+@pytest.mark.parametrize(
+    "path, extra",
+    [
+        ("/traces/bulk-delete", {}),
+        ("/traces/convert-to-tests", {"type": "tool_call"}),
+    ],
+)
+def test_select_all_refuses_an_empty_agent_id(client, path, extra):
+    """An empty id used to mean no agent filter, so it acted on the whole workspace."""
+    h, agent_id = _signup_with_agent(client)
+    trace = _post_trace(client, h, _payload(agent_id, _mid()))
+
+    res = client.post(
+        path, json={"select_all": True, "agent_id": "", **extra}, headers=h
+    )
+
+    assert res.status_code == 422
+    assert client.get(f"/traces/{trace['uuid']}", headers=h).status_code == 200
