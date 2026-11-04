@@ -370,6 +370,31 @@ def resolve_batch_evaluators(
     )
 
 
+def _trace_values_for_evaluator(
+    trace: dict[str, Any], ev: dict[str, Any]
+) -> dict[str, str | None]:
+    return {
+        name: trace_variable_value(trace, source)
+        for name, source in (ev.get("trace_variables") or {}).items()
+    }
+
+
+def missing_trace_values(
+    trace: dict[str, Any], hydrated: list[dict[str, Any]]
+) -> list[dict[str, str]]:
+    """One entry for each variable this trace has no value for."""
+    return [
+        {
+            "evaluator_uuid": ev["uuid"],
+            "variable": name,
+            "source": ev["trace_variables"][name],
+        }
+        for ev in hydrated
+        for name, value in _trace_values_for_evaluator(trace, ev).items()
+        if value is None
+    ]
+
+
 def evaluators_for_trace(
     trace: dict[str, Any], hydrated: list[dict[str, Any]]
 ) -> list[dict[str, Any]]:
@@ -377,10 +402,7 @@ def evaluators_for_trace(
     An evaluator is left out when the trace has no value for one of its variables."""
     included = []
     for ev in hydrated:
-        values = {
-            name: trace_variable_value(trace, source)
-            for name, source in (ev.get("trace_variables") or {}).items()
-        }
+        values = _trace_values_for_evaluator(trace, ev)
         if None in values.values():
             continue
         included.append({**ev, "variable_values": values} if values else ev)
@@ -831,7 +853,11 @@ def process_claimed_runs(
     time would write a backoff `available_at` that is already in the past.
     """
     import provider_keys
-    from db import settle_trace_eval_run_completed, settle_trace_eval_run_terminal
+    from db import (
+        set_trace_eval_run_missing_values,
+        settle_trace_eval_run_completed,
+        settle_trace_eval_run_terminal,
+    )
 
     prepare_now = now or utc_now()
     prepared: list[PreparedRun] = []
@@ -889,11 +915,20 @@ def process_claimed_runs(
         # The CLI records an automatic fail for an empty reply without calling the judge.
         if trace_variable_value(item.trace, "output.response") is None:
             skip_reason = TraceEvalSettleSkipReason.NO_REPLY
-        elif not evaluators_for_trace(item.trace, evaluators.hydrated):
-            skip_reason = TraceEvalSettleSkipReason.MISSING_TRACE_VALUES
         else:
-            scorable.append(item)
-            continue
+            missing = missing_trace_values(item.trace, evaluators.hydrated)
+            # A retry writes even with nothing missing, or an earlier attempt's entries would stay.
+            if missing or (item.run.get("attempts") or 0) > 1:
+                _swallow_settle(
+                    lambda run: set_trace_eval_run_missing_values(
+                        run["uuid"], missing, attempts=run.get("attempts")
+                    ),
+                    item.run,
+                )
+            if evaluators_for_trace(item.trace, evaluators.hydrated):
+                scorable.append(item)
+                continue
+            skip_reason = TraceEvalSettleSkipReason.MISSING_TRACE_VALUES
         _settle_or_defer_terminal(
             item.run, reason=skip_reason.value, now=prepare_now, rng=rng,
             max_attempts=max_attempts,
