@@ -15,7 +15,7 @@ from pagination import (
 
 _AgentSearch = make_search_params(searchable=["name"])
 _AgentEvaluatorSearch = make_search_params(searchable=["name"])
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 from calibrate_agent.connections import TextAgentConnection
 
 from utils import (
@@ -48,8 +48,13 @@ from db import (
     add_evaluator_to_agent,
     remove_evaluator_from_agent,
     resolve_live_evaluators,
+    set_agent_evaluator_trace_variables,
 )
-from trace_scoring import IneligibleReason, resolve_trace_scoring
+from trace_scoring import (
+    IneligibleReason,
+    is_trace_variable_source,
+    resolve_trace_scoring,
+)
 from auth_utils import get_current_org, get_org_jwt_or_api_key, OrgContext
 from org_scope import ensure_owned_agent, ensure_owned_evaluator
 
@@ -519,7 +524,7 @@ class TraceScoringIneligibleEvaluator(BaseModel):
             "Why this evaluator cannot score traces for this agent:\n\n"
             f"- `{IneligibleReason.WRONG_TYPE}`: its type does not match the agent's interaction type\n"
             f"- `{IneligibleReason.NO_LIVE_VERSION}`: it has no live version to run\n"
-            f"- `{IneligibleReason.DECLARES_VARIABLES}`: its live version defines prompt variables that cannot be filled"
+            f"- `{IneligibleReason.DECLARES_VARIABLES}`: a variable in its live version has no trace value chosen"
         )
     )
 
@@ -588,6 +593,27 @@ class EvaluatorLinkResponse(BaseModel):
     )
     already_linked: List[str] = Field(
         description="Evaluator IDs skipped because they were already linked"
+    )
+
+
+class TraceVariablesRequest(BaseModel):
+    trace_variables: Dict[str, str] = Field(
+        description="Which part of a trace fills each variable. Replaces the stored choices, and an empty object clears them",
+        examples=[{"nurse_reply": "metadata.expert_answer", "ai_reply": "output.response"}],
+    )
+
+    @field_validator("trace_variables")
+    @classmethod
+    def _sources_are_trace_parts(cls, value: Dict[str, str]) -> Dict[str, str]:
+        bad = [source for source in value.values() if not is_trace_variable_source(source)]
+        if bad:
+            raise ValueError(f"Not a part of a trace: {', '.join(bad)}")
+        return value
+
+
+class TraceVariablesResponse(BaseModel):
+    trace_variables: Dict[str, str] = Field(
+        description="Which part of a trace fills each variable"
     )
 
 
@@ -1101,6 +1127,10 @@ def duplicate_agent_endpoint(
             continue
         try:
             add_evaluator_to_agent(new_agent_uuid, evaluator["uuid"])
+            if evaluator["trace_variables"]:
+                set_agent_evaluator_trace_variables(
+                    new_agent_uuid, evaluator["uuid"], evaluator["trace_variables"]
+                )
         except Exception as e:
             # Log but continue - don't fail the entire duplication
             logger.warning(
@@ -1201,3 +1231,47 @@ def unlink_evaluator_from_agent(
             status_code=404, detail="Evaluator is not linked to this agent"
         )
     return {"message": "Evaluator unlinked from agent"}
+
+
+@router.put(
+    "/{agent_uuid}/evaluators/{evaluator_uuid}/trace-variables",
+    response_model=TraceVariablesResponse,
+    summary="Update evaluator trace variables",
+)
+def update_evaluator_trace_variables(
+    agent_uuid: str = Path(
+        description="The agent the evaluator is linked to",
+        examples=["f47ac10b-58cc-4372-a567-0e02b2c3d479"],
+    ),
+    evaluator_uuid: str = Path(
+        description="The evaluator whose variables to fill",
+        examples=["f47ac10b-58cc-4372-a567-0e02b2c3d479"],
+    ),
+    payload: TraceVariablesRequest = ...,
+    ctx: OrgContext = Depends(get_current_org),
+):
+    """Choose which part of a trace fills each variable of an evaluator when this agent's traces are scored"""
+    ensure_owned_agent(agent_uuid, ctx.org_uuid)
+    live_version = next(
+        (
+            version or {}
+            for evaluator, version in resolve_live_evaluators(agent_uuid)
+            if evaluator["uuid"] == evaluator_uuid
+        ),
+        None,
+    )
+    if live_version is None:
+        raise HTTPException(
+            status_code=404, detail="Evaluator is not linked to this agent"
+        )
+    declared = {variable.get("name") for variable in live_version.get("variables") or []}
+    undeclared = sorted(set(payload.trace_variables) - declared)
+    if undeclared:
+        raise HTTPException(
+            status_code=400,
+            detail=f"The evaluator's live version has no variable named: {', '.join(undeclared)}",
+        )
+    set_agent_evaluator_trace_variables(
+        agent_uuid, evaluator_uuid, payload.trace_variables
+    )
+    return TraceVariablesResponse(trace_variables=payload.trace_variables)

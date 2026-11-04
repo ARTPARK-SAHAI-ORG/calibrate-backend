@@ -1695,3 +1695,150 @@ def test_scoring_written_as_a_plain_false_turns_it_off(client):
     assert r.status_code == 200, r.text
     assert _scoring_on(r.json()) is False
     assert _scoring_on(client.get(f"/agents/{agent['uuid']}", headers=h).json()) is False
+
+
+def _agent_with_variable_evaluator(client, h):
+    """A `conversation` agent linked to one evaluator declaring `criteria` only."""
+    agent = client.post(
+        "/agents",
+        json={"name": f"tv-{uuid.uuid4().hex[:6]}", "type": "agent"},
+        headers=h,
+    ).json()
+    for linked in client.get(f"/agents/{agent['uuid']}/evaluators", headers=h).json()["items"]:
+        client.delete(f"/agents/{agent['uuid']}/evaluators/{linked['uuid']}", headers=h)
+    ev = _create_evaluator(client, h, variables=[{"name": "criteria"}])
+    client.post(f"/agents/{agent['uuid']}/evaluators", json={"evaluator_ids": [ev]}, headers=h)
+    return agent["uuid"], ev
+
+
+def _put_trace_variables(client, h, agent_uuid, ev, mapping):
+    return client.put(
+        f"/agents/{agent_uuid}/evaluators/{ev}/trace-variables",
+        json={"trace_variables": mapping},
+        headers=h,
+    )
+
+
+def _listed_trace_variables(client, h, agent_uuid, ev):
+    items = client.get(f"/agents/{agent_uuid}/evaluators", headers=h).json()["items"]
+    return next(e for e in items if e["uuid"] == ev)["trace_variables"]
+
+
+def test_trace_variables_saved_read_back_and_cleared(client):
+    h = _signup(client)
+    agent_uuid, ev = _agent_with_variable_evaluator(client, h)
+    assert _listed_trace_variables(client, h, agent_uuid, ev) == {}
+
+    mapping = {"criteria": "metadata.expert_answer"}
+    r = _put_trace_variables(client, h, agent_uuid, ev, mapping)
+    assert r.status_code == 200, r.text
+    assert r.json() == {"trace_variables": mapping}
+    assert _listed_trace_variables(client, h, agent_uuid, ev) == mapping
+
+    listed = client.get("/evaluators", headers=h).json()["items"]
+    assert next(e for e in listed if e["uuid"] == ev)["trace_variables"] is None
+
+    r = _put_trace_variables(client, h, agent_uuid, ev, {})
+    assert r.status_code == 200, r.text
+    assert _listed_trace_variables(client, h, agent_uuid, ev) == {}
+
+
+def test_trace_variables_rejects_unknown_source(client):
+    h = _signup(client)
+    agent_uuid, ev = _agent_with_variable_evaluator(client, h)
+    r = _put_trace_variables(client, h, agent_uuid, ev, {"criteria": "metadata."})
+    assert r.status_code == 422, r.text
+    assert "metadata." in r.text
+    assert _listed_trace_variables(client, h, agent_uuid, ev) == {}
+
+
+def test_trace_variables_rejects_undeclared_variable(client):
+    h = _signup(client)
+    agent_uuid, ev = _agent_with_variable_evaluator(client, h)
+    r = _put_trace_variables(
+        client, h, agent_uuid, ev, {"criteria": "input", "ghost": "input"}
+    )
+    assert r.status_code == 400, r.text
+    assert "ghost" in r.json()["detail"]
+    assert "criteria" not in r.json()["detail"]
+    assert _listed_trace_variables(client, h, agent_uuid, ev) == {}
+
+
+def test_trace_variables_no_live_version_declares_nothing(client):
+    h = _signup(client)
+    agent_uuid, _ = _agent_with_variable_evaluator(client, h)
+    no_live = db.create_evaluator(
+        name=f"tv-nolive-{uuid.uuid4().hex[:6]}",
+        org_uuid=db.get_agent(agent_uuid)["org_uuid"],
+    )
+    db.add_evaluator_to_agent(agent_uuid, no_live)
+    r = _put_trace_variables(client, h, agent_uuid, no_live, {"criteria": "input"})
+    assert r.status_code == 400, r.text
+
+
+def test_trace_variables_evaluator_not_linked_is_404(client):
+    h = _signup(client)
+    agent_uuid, _ = _agent_with_variable_evaluator(client, h)
+    unlinked = _create_evaluator(client, h, variables=[{"name": "criteria"}])
+    r = _put_trace_variables(client, h, agent_uuid, unlinked, {"criteria": "input"})
+    assert r.status_code == 404, r.text
+
+
+def test_trace_variables_agent_in_another_workspace_is_not_writable(client):
+    h = _signup(client)
+    agent_uuid, ev = _agent_with_variable_evaluator(client, h)
+    r = _put_trace_variables(client, _signup(client), agent_uuid, ev, {"criteria": "input"})
+    assert r.status_code == 403, r.text
+    assert "organization_uuid" not in r.json()
+    assert _listed_trace_variables(client, h, agent_uuid, ev) == {}
+
+
+def test_trace_variables_refuses_api_key(client):
+    h = _signup(client)
+    agent_uuid, ev = _agent_with_variable_evaluator(client, h)
+    r = _put_trace_variables(
+        client, {"X-API-Key": _raw_key(client, h)}, agent_uuid, ev, {"criteria": "input"}
+    )
+    assert r.status_code == 403, r.text
+    assert _listed_trace_variables(client, h, agent_uuid, ev) == {}
+
+
+def test_trace_variables_make_evaluator_eligible_and_allow_turning_scoring_on(client):
+    h = _signup(client)
+    agent_uuid, ev = _agent_with_variable_evaluator(client, h)
+    _disable_trace_scoring(client, h, agent_uuid)
+
+    def eligibility():
+        return client.get(
+            f"/agents/{agent_uuid}/trace-scoring-eligibility", headers=h
+        ).json()
+
+    assert [e["reason"] for e in eligibility()["ineligible"]] == [
+        IneligibleReason.DECLARES_VARIABLES
+    ]
+    assert _set_trace_scoring(client, h, agent_uuid, True).status_code == 422
+
+    assert _put_trace_variables(
+        client, h, agent_uuid, ev, {"criteria": "output.response"}
+    ).status_code == 200
+
+    body = eligibility()
+    assert [e["evaluator_uuid"] for e in body["eligible"]] == [ev]
+    assert body["ineligible"] == []
+    r = _set_trace_scoring(client, h, agent_uuid, True)
+    assert r.status_code == 200, r.text
+
+
+def test_duplicate_agent_copies_trace_variables(client):
+    h = _signup(client)
+    agent_uuid, ev = _agent_with_variable_evaluator(client, h)
+    mapping = {"criteria": "metadata.expert_answer"}
+    _put_trace_variables(client, h, agent_uuid, ev, mapping)
+
+    dup = client.post(
+        f"/agents/{agent_uuid}/duplicate",
+        json={"name": f"dup-{uuid.uuid4().hex[:6]}"},
+        headers=h,
+    )
+    assert dup.status_code == 200, dup.text
+    assert _listed_trace_variables(client, h, dup.json()["uuid"], ev) == mapping

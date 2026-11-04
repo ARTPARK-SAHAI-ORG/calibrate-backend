@@ -23,7 +23,7 @@ from enum import Enum
 from pathlib import Path
 from typing import Any, Literal
 
-from llm_judge import _scale_bounds, build_test_evaluators_payload
+from llm_judge import _VARIABLE_PATTERN, _scale_bounds, build_test_evaluators_payload
 from shared_enums import (
     REQUIRED_EVALUATOR_TYPE_BY_TEST_TYPE,
     AgentInteractionType,
@@ -45,6 +45,8 @@ class TraceEvalSettleSkipReason(str, Enum):
     TRACE_DELETED = "trace_deleted"
     AGENT_DELETED = "agent_deleted"
     SCORING_DISABLED = "scoring_disabled"
+    NO_REPLY = "no_reply"
+    MISSING_TRACE_VALUES = "missing_trace_values"
 
 
 # Subset of TestType that traces can score.
@@ -82,6 +84,58 @@ OPEN_TRACE_EVAL_RUN_STATUSES: tuple[TraceEvalRunStatus, ...] = (
     TraceEvalRunStatus.PENDING,
     TraceEvalRunStatus.PROCESSING,
 )
+
+
+TRACE_VARIABLE_SOURCES = (
+    "input",
+    "output.response",
+    "output.tool_calls",
+    "labels",
+    "conversation_id",
+    "message_id",
+)
+METADATA_SOURCE_PREFIX = "metadata."
+
+
+def is_trace_variable_source(source: str) -> bool:
+    return source in TRACE_VARIABLE_SOURCES or (
+        source.startswith(METADATA_SOURCE_PREFIX)
+        and len(source) > len(METADATA_SOURCE_PREFIX)
+    )
+
+
+def trace_variable_value(trace: dict[str, Any], source: str) -> str | None:
+    """The text a trace holds at `source`, or None when it holds none."""
+    output = trace.get("output") or {}
+    value: Any = None
+    if source == "input":
+        value = trace.get("input")
+        if isinstance(value, list):
+            value = "\n".join(
+                f"{turn.get('role')}: {turn['content']}"
+                for turn in value
+                if turn.get("content")
+            )
+    elif source == "output.response":
+        value = output.get("response")
+    elif source == "output.tool_calls":
+        calls = output.get("tool_calls")
+        value = json.dumps(calls, ensure_ascii=False) if calls else None
+    elif source == "labels":
+        value = ", ".join(trace.get("labels") or [])
+    elif source in ("conversation_id", "message_id"):
+        value = trace.get(source)
+    elif is_trace_variable_source(source):
+        key = source[len(METADATA_SOURCE_PREFIX) :]
+        value = next(
+            (
+                entry["value"]
+                for entry in trace.get("metadata") or []
+                if entry["key"] == key
+            ),
+            None,
+        )
+    return value if isinstance(value, str) and value.strip() else None
 
 
 def scale_bounds_from_output_config(raw: Any) -> tuple[float | None, float | None]:
@@ -180,30 +234,20 @@ def resolve_trace_scoring(
     ineligible: list[TraceScoringIneligible] = []
     for ev, version in live_evaluators:
         name = ev.get("name") or ev["uuid"]
+        mapping = ev.get("trace_variables") or {}
+        variables = (version or {}).get("variables") or []
         if ev.get("evaluator_type") != required_evaluator_type:
+            reason = IneligibleReason.WRONG_TYPE
+        elif not version:
+            reason = IneligibleReason.NO_LIVE_VERSION
+        elif any(v["name"] not in mapping for v in variables):
+            reason = IneligibleReason.DECLARES_VARIABLES
+        else:
+            reason = None
+        if reason is not None:
             ineligible.append(
                 TraceScoringIneligible(
-                    evaluator_uuid=ev["uuid"],
-                    name=name,
-                    reason=IneligibleReason.WRONG_TYPE,
-                )
-            )
-            continue
-        if not version:
-            ineligible.append(
-                TraceScoringIneligible(
-                    evaluator_uuid=ev["uuid"],
-                    name=name,
-                    reason=IneligibleReason.NO_LIVE_VERSION,
-                )
-            )
-            continue
-        if version.get("variables"):
-            ineligible.append(
-                TraceScoringIneligible(
-                    evaluator_uuid=ev["uuid"],
-                    name=name,
-                    reason=IneligibleReason.DECLARES_VARIABLES,
+                    evaluator_uuid=ev["uuid"], name=name, reason=reason
                 )
             )
             continue
@@ -217,9 +261,15 @@ def resolve_trace_scoring(
                     "name": name,
                     "output_type": ev.get("output_type") or "binary",
                     "judge_model": version.get("judge_model"),
-                    "system_prompt": version.get("system_prompt") or "",
+                    # The CLI replaces only the exact `{{name}}`.
+                    "system_prompt": _VARIABLE_PATTERN.sub(
+                        r"{{\1}}", version.get("system_prompt") or ""
+                    ),
                     "output_config": version.get("output_config"),
                     "evaluator_version_id": version["uuid"],
+                    "trace_variables": {
+                        v["name"]: mapping[v["name"]] for v in variables
+                    },
                 },
             )
         )
@@ -320,6 +370,23 @@ def resolve_batch_evaluators(
     )
 
 
+def evaluators_for_trace(
+    trace: dict[str, Any], hydrated: list[dict[str, Any]]
+) -> list[dict[str, Any]]:
+    """The evaluators this trace can be judged by, each carrying its values.
+    An evaluator is left out when the trace has no value for one of its variables."""
+    included = []
+    for ev in hydrated:
+        values = {
+            name: trace_variable_value(trace, source)
+            for name, source in (ev.get("trace_variables") or {}).items()
+        }
+        if None in values.values():
+            continue
+        included.append({**ev, "variable_values": values} if values else ev)
+    return included
+
+
 def build_dataset_item(
     run_uuid: str,
     evaluation_type: TraceScorableEvaluationType,
@@ -368,7 +435,10 @@ def build_eval_only_batch(
     """
     top_level, criteria_per_run = build_test_evaluators_payload(
         [
-            {"test_uuid": item.run["uuid"], "evaluators": evaluators.hydrated}
+            {
+                "test_uuid": item.run["uuid"],
+                "evaluators": evaluators_for_trace(item.trace, evaluators.hydrated),
+            }
             for item in prepared
         ]
     )
@@ -814,6 +884,24 @@ def process_claimed_runs(
             )
         return
 
+    scorable: list[PreparedRun] = []
+    for item in prepared:
+        # The CLI records an automatic fail for an empty reply without calling the judge.
+        if trace_variable_value(item.trace, "output.response") is None:
+            skip_reason = TraceEvalSettleSkipReason.NO_REPLY
+        elif not evaluators_for_trace(item.trace, evaluators.hydrated):
+            skip_reason = TraceEvalSettleSkipReason.MISSING_TRACE_VALUES
+        else:
+            scorable.append(item)
+            continue
+        _settle_or_defer_terminal(
+            item.run, reason=skip_reason.value, now=prepare_now, rng=rng,
+            max_attempts=max_attempts,
+        )
+    prepared = scorable
+    if not prepared:
+        return
+
     try:
         config, dataset, manifest = build_eval_only_batch(prepared, evaluators)
     except Exception as exc:
@@ -843,7 +931,6 @@ def process_claimed_runs(
         return
 
     indexed = index_cli_results(cli_result.results)
-    hydrated_by_uuid = {ev["uuid"]: ev for ev in evaluators.hydrated}
     scored: dict[str, list[dict[str, Any]]] = {}
     for item in prepared:
         entry = indexed.get(item.run["uuid"])
@@ -852,7 +939,10 @@ def process_claimed_runs(
         scores = map_item_scores(
             entry,
             name_to_uuid=manifest,
-            hydrated_by_uuid=hydrated_by_uuid,
+            hydrated_by_uuid={
+                ev["uuid"]: ev
+                for ev in evaluators_for_trace(item.trace, evaluators.hydrated)
+            },
         )
         if scores is not None:
             scored[item.run["uuid"]] = scores

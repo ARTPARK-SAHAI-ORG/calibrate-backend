@@ -459,7 +459,7 @@ def test_a_conversation_run_sends_history_and_tool_calls():
         org,
         agent,
         input=[{"role": "user", "content": "when?"}],
-        output={"response": "", "tool_calls": calls},
+        output={"response": "Week 14.", "tool_calls": calls},
     )
     evaluator_uuid, version_uuid = _evaluator(org, name="Correctness")
     run = _run(org, agent, trace, [(evaluator_uuid, version_uuid)])
@@ -470,7 +470,124 @@ def test_a_conversation_run_sends_history_and_tool_calls():
     item = invoke.captured["dataset"][0]
     assert item["test_case"]["history"] == [{"role": "user", "content": "when?"}]
     assert "input" not in item["test_case"]
-    assert item["output"] == {"response": "", "tool_calls": calls}
+    assert item["output"] == {"response": "Week 14.", "tool_calls": calls}
+
+
+def _nurse_evaluator(org: str, agent: dict) -> tuple[str, str]:
+    """An evaluator whose `{{nurse_reply}}` comes from the trace's `expert_answer`."""
+    ev = db.create_evaluator(
+        name="Matches nurse",
+        evaluator_type="llm",
+        org_uuid=org,
+        owner_user_id=str(uuid.uuid4()),
+        output_type="binary",
+    )
+    version = db.create_evaluator_version(
+        ev, "openai/gpt-4.1", "Compare {{nurse_reply}}.", variables=[{"name": "nurse_reply"}]
+    )
+    db.set_evaluator_live_version(ev, version["uuid"])
+    db.add_evaluator_to_agent(agent["uuid"], ev)
+    db.set_agent_evaluator_trace_variables(
+        agent["uuid"], ev, {"nurse_reply": "metadata.expert_answer"}
+    )
+    return ev, version["uuid"]
+
+
+_EXPERT_ANSWER = [{"key": "expert_answer", "value": "Give fluids."}]
+
+
+def _scored_evaluators(run_uuid: str) -> set[str]:
+    return {s["evaluator_uuid"] for s in db.get_trace_eval_scores(run_uuid)}
+
+
+def test_an_evaluator_left_out_of_one_trace_does_not_hold_that_run_open():
+    org = _org()
+    agent = _agent(org)
+    nurse, nurse_version = _nurse_evaluator(org, agent)
+    polite, polite_version = _evaluator(org, name="Polite")
+    pins = [(nurse, nurse_version), (polite, polite_version)]
+    full = _run(org, agent, _trace(org, agent, metadata=_EXPERT_ANSWER), pins, available_at=1)
+    partial = _run(org, agent, _trace(org, agent), pins, available_at=2)
+
+    def results(dataset):
+        return [
+            _judged(
+                row["test_case"]["id"],
+                {
+                    ref["name"]: {"match": True}
+                    for ref in row["test_case"]["evaluation"]["criteria"]
+                },
+            )
+            for row in dataset
+        ]
+
+    ts.claim_and_score_batch(now=_at(1000), invoke=_invoker(results))
+
+    assert _status(full) == RunStatus.COMPLETED.value
+    assert _scored_evaluators(full) == {nurse, polite}
+    assert _status(partial) == RunStatus.COMPLETED.value
+    assert _scored_evaluators(partial) == {polite}
+
+
+def test_a_run_with_every_evaluator_left_out_is_skipped_and_sends_no_row():
+    org = _org()
+    agent = _agent(org)
+    pins = [_nurse_evaluator(org, agent)]
+    filled = _run(org, agent, _trace(org, agent, metadata=_EXPERT_ANSWER), pins, available_at=1)
+    empty = _run(org, agent, _trace(org, agent), pins, available_at=2)
+
+    invoke = _invoker(lambda ds: [_judged(filled, {"Matches nurse": {"match": True}})])
+    ts.claim_and_score_batch(now=_at(1000), invoke=invoke)
+
+    assert [row["test_case"]["id"] for row in invoke.captured["dataset"]] == [filled]
+    assert _status(filled) == RunStatus.COMPLETED.value
+    settled = db.get_trace_eval_run(empty)
+    assert settled["status"] == RunStatus.SKIPPED.value
+    assert settled["error"] == "missing_trace_values"
+
+
+@pytest.mark.parametrize(
+    "output",
+    [
+        {"response": None, "tool_calls": [{"tool": "lookup", "arguments": {}}]},
+        {"response": "  \n", "tool_calls": [{"tool": "lookup", "arguments": {}}]},
+    ],
+)
+def test_a_trace_with_no_reply_is_skipped_and_sends_no_row(output):
+    org = _org()
+    agent = _agent(org)
+    pins = [_evaluator(org, name="Correctness")]
+    answered = _run(org, agent, _trace(org, agent), pins, available_at=1)
+    tool_only = _run(org, agent, _trace(org, agent, output=output), pins, available_at=2)
+
+    invoke = _invoker(lambda ds: [_judged(answered, {"Correctness": {"match": True}})])
+    ts.claim_and_score_batch(now=_at(1000), invoke=invoke)
+
+    assert [row["test_case"]["id"] for row in invoke.captured["dataset"]] == [answered]
+    settled = db.get_trace_eval_run(tool_only)
+    assert settled["status"] == RunStatus.SKIPPED.value
+    assert settled["error"] == "no_reply"
+
+
+def test_a_batch_with_every_run_skipped_never_calls_the_cli():
+    org = _org()
+    agent = _agent(org)
+    pins = [_nurse_evaluator(org, agent)]
+    no_reply = _run(
+        org,
+        agent,
+        _trace(org, agent, output={"tool_calls": [{"tool": "t"}]}, metadata=_EXPERT_ANSWER),
+        pins,
+        available_at=1,
+    )
+    no_value = _run(org, agent, _trace(org, agent), pins, available_at=2)
+
+    invoke = _invoker([])
+    ts.claim_and_score_batch(now=_at(1000), invoke=invoke)
+
+    assert invoke.captured == {}
+    assert db.get_trace_eval_run(no_reply)["error"] == "no_reply"
+    assert db.get_trace_eval_run(no_value)["error"] == "missing_trace_values"
 
 
 def test_results_map_by_id_so_a_reordered_file_still_lands():

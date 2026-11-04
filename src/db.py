@@ -530,6 +530,12 @@ def init_db():
             )
         """
         )
+        try:
+            cursor.execute(
+                "ALTER TABLE agent_evaluators ADD COLUMN trace_variables TEXT DEFAULT NULL"
+            )
+        except sqlite3.OperationalError:
+            pass
 
         cursor.execute(
             """
@@ -5312,14 +5318,32 @@ def get_evaluators_for_agent(agent_id: str) -> List[Dict[str, Any]]:
         cursor = conn.cursor()
         cursor.execute(
             """
-            SELECT e.* FROM evaluators e
+            SELECT e.*, ae.trace_variables FROM evaluators e
             INNER JOIN agent_evaluators ae ON e.uuid = ae.evaluator_id
             WHERE ae.agent_id = ? AND ae.deleted_at IS NULL AND e.deleted_at IS NULL
             ORDER BY ae.created_at DESC, ae.id DESC
             """,
             (agent_id,),
         )
-        return [_parse_evaluator_row(row) for row in cursor.fetchall()]
+        evaluators = [_parse_evaluator_row(row) for row in cursor.fetchall()]
+    for evaluator in evaluators:
+        evaluator["trace_variables"] = json.loads(evaluator["trace_variables"] or "{}")
+    return evaluators
+
+
+def set_agent_evaluator_trace_variables(
+    agent_id: str, evaluator_id: str, trace_variables: Dict[str, str]
+) -> bool:
+    """Replace the live link's variable-to-trace-field map. False when there is no live link."""
+    with get_db_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            "UPDATE agent_evaluators SET trace_variables = ? "
+            "WHERE agent_id = ? AND evaluator_id = ? AND deleted_at IS NULL",
+            (json.dumps(trace_variables), agent_id, evaluator_id),
+        )
+        conn.commit()
+        return cursor.rowcount > 0
 
 
 def resolve_live_evaluators(
