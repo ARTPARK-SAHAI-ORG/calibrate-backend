@@ -1029,7 +1029,7 @@ class ItemPayload(BaseModel):
     output: Optional[Union[str, TurnText]] = Field(None, description="The output to judge. For `llm-general` tasks")
     transcript: Optional[List[ChatTurn]] = Field(None, description="The full conversation to judge. For `conversation` tasks")
     tool_calls: Optional[List[ToolCall]] = Field(
-        None, description="Tool calls the agent made. With no text reply, sending at least one marks the item as a tool call, which only a tool-call evaluator scores. For `llm` and `llm-general` tasks"
+        None, description="Tool calls the agent made. With no text reply, sending at least one marks the item as a tool call, which only a tool-call evaluator scores. Omit when the agent made no tool calls. For `llm` and `llm-general` tasks"
     )
     expected_tool_calls: Optional[List[ToolCall]] = Field(
         None,
