@@ -97,6 +97,7 @@ from utils import (
 AnnotationEvalStatus = Literal["queued", "in_progress", "completed", "failed"]
 
 _EXAMPLE_ID = "f47ac10b-58cc-4372-a567-0e02b2c3d479"
+ReasoningMode = Literal["optional", "required", "hidden"]
 
 # Task type gloss, shared by the create and response models so both render identically.
 _TASK_TYPE_DESCRIPTION = (
@@ -1963,9 +1964,14 @@ class CreateJobsRequest(BaseModel):
         True,
         description="When `true`, the labelling form lets the annotator leave a comment on each item",
     )
-    reasoning_mode: Literal["optional", "required", "hidden"] = Field(
+    reasoning_mode: ReasoningMode = Field(
         "optional",
         description="How the labelling form treats the reasoning box on each judgement. `optional` shows it, `required` shows it and asks the annotator to fill it in, `hidden` leaves it out",
+    )
+    evaluator_reasoning_modes: Optional[Dict[str, ReasoningMode]] = Field(
+        None,
+        description="Map of evaluator ID to how the labelling form treats the reasoning box for that evaluator, with the same values as `reasoning_mode`. Every ID must be an evaluator on these jobs, otherwise you get a 400. An evaluator left out uses `reasoning_mode`",
+        examples=[{_EXAMPLE_ID: "required"}],
     )
 
 
@@ -2054,6 +2060,20 @@ def create_jobs(
                 status_code=400,
                 detail=f"evaluator_ids not linked to this task: {unknown}",
             )
+    if payload.evaluator_reasoning_modes:
+        on_job_ids = (
+            set(evaluator_ids)
+            if evaluator_ids is not None
+            else {e["uuid"] for e in get_evaluators_for_annotation_task(task_uuid)}
+        )
+        not_on_job = [
+            eid for eid in payload.evaluator_reasoning_modes if eid not in on_job_ids
+        ]
+        if not_on_job:
+            raise HTTPException(
+                status_code=400,
+                detail=f"evaluator_reasoning_modes ids not on these jobs: {not_on_job}",
+            )
     target_ids = _resolve_target_item_ids(
         task_uuid,
         select_all=payload.select_all,
@@ -2120,6 +2140,7 @@ def create_jobs(
             evaluator_ids=evaluator_ids,
             comments_enabled=payload.comments_enabled,
             reasoning_mode=payload.reasoning_mode,
+            evaluator_reasoning_modes=payload.evaluator_reasoning_modes,
         )
         jobs_created.append(
             {
