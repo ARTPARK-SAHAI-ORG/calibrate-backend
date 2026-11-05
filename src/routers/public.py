@@ -950,7 +950,9 @@ def _build_annotation_job_payload(
     # the labelling form without a second roundtrip.
     from llm_judge import _scale_bounds  # local to avoid module-load cycle
 
+    job_reasoning_mode = job.get("reasoning_mode") or "optional"
     for ev in evaluators:
+        ev["reasoning_mode"] = ev.get("reasoning_mode") or job_reasoning_mode
         version = (
             get_evaluator_version(ev["live_version_id"])
             if ev.get("live_version_id")
@@ -975,7 +977,7 @@ def _build_annotation_job_payload(
             "created_at": job["created_at"],
             "completed_at": job.get("completed_at"),
             "comments_enabled": bool(job.get("comments_enabled", 1)),
-            "reasoning_mode": job.get("reasoning_mode") or "optional",
+            "reasoning_mode": job_reasoning_mode,
         },
         "annotator": {
             "uuid": annotator["uuid"] if annotator else None,

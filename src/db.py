@@ -1061,6 +1061,8 @@ def init_db():
                 -- Snapshotted alongside `position`. Marking an evaluator
                 -- optional on the task later does NOT reach existing jobs.
                 is_optional INTEGER NOT NULL DEFAULT 0,
+                -- NULL means the evaluator uses `annotation_jobs.reasoning_mode`.
+                reasoning_mode TEXT DEFAULT NULL,
                 UNIQUE(job_id, evaluator_id),
                 FOREIGN KEY (job_id) REFERENCES annotation_jobs(uuid),
                 FOREIGN KEY (evaluator_id) REFERENCES evaluators(uuid)
@@ -1116,6 +1118,7 @@ def init_db():
             # rows land 0 (required), preserving the previous behavior.
             "ALTER TABLE annotation_task_evaluators ADD COLUMN is_optional INTEGER NOT NULL DEFAULT 0",
             "ALTER TABLE annotation_job_evaluators ADD COLUMN is_optional INTEGER NOT NULL DEFAULT 0",
+            "ALTER TABLE annotation_job_evaluators ADD COLUMN reasoning_mode TEXT DEFAULT NULL",
             # Denormalized STT/TTS list-header fields, promoted out of the heavy
             # `details` JSON blob so the jobs-list query never has to read or
             # parse it. Written at create time by `create_job`; legacy rows
@@ -9747,6 +9750,7 @@ def create_annotation_job(
     evaluator_ids: Optional[List[str]] = None,
     comments_enabled: bool = True,
     reasoning_mode: str = "optional",
+    evaluator_reasoning_modes: Optional[Dict[str, str]] = None,
 ) -> str:
     """Create one job (annotator × N rows). Items AND linked evaluators are
     SNAPSHOTTED at creation time — subsequent edits/soft-deletes on the
@@ -9764,7 +9768,9 @@ def create_annotation_job(
     dropped (callers validate up front for a clean error).
 
     `comments_enabled` and `reasoning_mode` are the labelling form's own
-    settings and are likewise frozen per job."""
+    settings and are likewise frozen per job. `evaluator_reasoning_modes` maps
+    an evaluator id to its own reasoning mode; an evaluator left out stores NULL
+    and uses `reasoning_mode`."""
     if not item_uuids:
         raise ValueError("item_uuids must be non-empty")
     if len(item_uuids) != len(set(item_uuids)):
@@ -9840,11 +9846,19 @@ def create_annotation_job(
             wanted = set(evaluator_ids)
             snapshot_rows = [r for r in snapshot_rows if r["evaluator_id"] in wanted]
         if snapshot_rows:
+            modes = evaluator_reasoning_modes or {}
             cursor.executemany(
                 "INSERT INTO annotation_job_evaluators "
-                "(job_id, evaluator_id, position, is_optional) VALUES (?, ?, ?, ?)",
+                "(job_id, evaluator_id, position, is_optional, reasoning_mode) "
+                "VALUES (?, ?, ?, ?, ?)",
                 [
-                    (job_uuid, r["evaluator_id"], idx, r["is_optional"])
+                    (
+                        job_uuid,
+                        r["evaluator_id"],
+                        idx,
+                        r["is_optional"],
+                        modes.get(r["evaluator_id"]),
+                    )
                     for idx, r in enumerate(snapshot_rows, start=1)
                 ],
             )
@@ -9897,7 +9911,8 @@ def get_evaluators_for_job(job_uuid: str) -> List[Dict[str, Any]]:
                 e.owner_user_id AS owner_user_id,
                 e.slug AS slug,
                 e.live_version_id AS live_version_id,
-                je.is_optional AS is_optional
+                je.is_optional AS is_optional,
+                je.reasoning_mode AS reasoning_mode
               FROM annotation_job_evaluators je
               JOIN evaluators e ON e.uuid = je.evaluator_id
              WHERE je.job_id = ?
