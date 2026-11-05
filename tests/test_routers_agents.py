@@ -1339,6 +1339,38 @@ def test_enable_rejected_when_only_default_correctness_evaluator_is_linked(clien
     )
 
 
+def test_eligibility_and_enable_with_tool_call_evaluators(client):
+    h = _signup(client)
+    agent = _create_agent(client, h, f"elig-tool-{uuid.uuid4().hex[:6]}")
+    org_uuid = db.get_agent(agent["uuid"])["org_uuid"]
+    blank = db.create_evaluator(
+        name=f"tool-blank-{uuid.uuid4().hex[:6]}",
+        evaluator_type="tool-call",
+        org_uuid=org_uuid,
+    )
+    version = db.create_evaluator_version(blank, "", "")
+    db.set_evaluator_live_version(blank, version["uuid"])
+    _unlink_all_evaluators(client, h, agent["uuid"])
+    db.add_evaluator_to_agent(agent["uuid"], blank)
+    _disable_trace_scoring(client, h, agent["uuid"])
+
+    url = f"/agents/{agent['uuid']}/trace-scoring-eligibility"
+    body = client.get(url, headers=h).json()
+    assert body["eligible"] == []
+    assert body["ineligible"][0]["reason"] == "no_judge_prompt"
+    blocked = _set_trace_scoring(client, h, agent["uuid"], True)
+    assert blocked.status_code == 422, blocked.text
+    assert blocked.json()["detail"]["ineligible"][0]["reason"] == "no_judge_prompt"
+
+    with_prompt = _create_evaluator(client, h, evaluator_type="tool-call")
+    _link_evaluators(client, h, agent["uuid"], with_prompt)
+    assert [e["evaluator_uuid"] for e in client.get(url, headers=h).json()["eligible"]] == [
+        with_prompt
+    ]
+    enabled = _set_trace_scoring(client, h, agent["uuid"], True)
+    assert enabled.status_code == 200, enabled.text
+
+
 def test_enable_rejected_for_general_agent_with_only_default_evaluator(client):
     h = _signup(client)
     created = client.post(
@@ -1695,3 +1727,11 @@ def test_scoring_written_as_a_plain_false_turns_it_off(client):
     assert r.status_code == 200, r.text
     assert _scoring_on(r.json()) is False
     assert _scoring_on(client.get(f"/agents/{agent['uuid']}", headers=h).json()) is False
+
+
+def test_ineligible_reason_docs_show_the_values_the_api_returns():
+    from routers.agents import TraceScoringIneligibleEvaluator
+
+    description = TraceScoringIneligibleEvaluator.model_fields["reason"].description
+    assert "`no_judge_prompt`" in description
+    assert "IneligibleReason" not in description

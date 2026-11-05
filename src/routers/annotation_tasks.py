@@ -72,6 +72,7 @@ from annotation_eval_runner import (
     EvaluatorResolutionError,
     DatasetBuildError,
     _resolve_evaluator_dicts,
+    evaluators_for_item,
     build_dataset_for_task_type,
     is_tool_call_row,
     required_evaluator_ids_for_item,
@@ -585,7 +586,7 @@ class AnnotationTaskResponse(BaseModel):
     # empty (use the dedicated /items and /jobs endpoints for those views).
     items: List[Dict[str, Any]] = Field(
         default=[],
-        description="The task's items, each with its agreement stats and an `is_tool_call` flag marking the rows a person labels on the tool call rather than a text reply. You get these when you fetch one task by ID, not when you list tasks",
+        description="The task's items, each with its agreement stats and an `is_tool_call` flag that says whether the item is judged on tool calls rather than a text reply. You get these when you fetch one task by ID, not when you list tasks",
     )
     jobs: List[Dict[str, Any]] = Field(
         default=[],
@@ -1028,15 +1029,15 @@ class ItemPayload(BaseModel):
     output: Optional[Union[str, TurnText]] = Field(None, description="The output to judge. For `llm-general` tasks")
     transcript: Optional[List[ChatTurn]] = Field(None, description="The full conversation to judge. For `conversation` tasks")
     tool_calls: Optional[List[ToolCall]] = Field(
-        None, description="Tool calls the agent made in place of a text reply. With no text reply, sending this marks the item as a tool call for a person to judge. For `llm` and `llm-general` tasks"
+        None, description="Tool calls the agent made. With no text reply, sending at least one marks the item as a tool call, which only a tool-call evaluator scores. For `llm` and `llm-general` tasks"
     )
     expected_tool_calls: Optional[List[ToolCall]] = Field(
         None,
-        description="Tool calls the agent should have made. Sending this marks the item as a tool call for a person to judge. For `llm` and `llm-general` tasks",
+        description="Tool calls the agent should have made, shown to the judge beside the calls the agent made. Omit to judge without them. Sending this marks the item as a tool call, which only a tool-call evaluator scores. For `llm` and `llm-general` tasks",
     )
     actual_tool_calls: Optional[List[ToolCall]] = Field(
         None,
-        description="Tool calls the agent made. Sending this marks the item as a tool call for a person to judge. For `llm` and `llm-general` tasks",
+        description="Tool calls the agent made. Sending this marks the item as a tool call, which only a tool-call evaluator scores. Omit for an item judged on its text reply. For `llm` and `llm-general` tasks",
     )
     evaluator_variables: Optional[Dict[str, Dict[str, Any]]] = Field(
         None,
@@ -1496,9 +1497,9 @@ def bulk_create_items(
             },
         )
 
-    # A tool-call row is answered by a person, never a judge, so the
-    # workspace's tool-call evaluator has to be on the task before anyone
-    # opens the labelling form. `add_evaluator_to_annotation_task` inserts
+    # A tool-call row is answered only through a tool-call evaluator, so the
+    # workspace's one has to be on the task before anyone opens the labelling
+    # form. `add_evaluator_to_annotation_task` inserts
     # unconditionally on an active link, so skip when it is already there:
     # later batches must not duplicate the link or move its display position.
     # A workspace that deleted its copy simply gets no link.
@@ -2395,35 +2396,38 @@ def start_evaluator_run(
         items = [items_by_id[i] for i in ordered_subset_ids]
         item_ids_persisted = ordered_subset_ids
 
-    # Tool-call rows (agent output is a tool call, no text) can't be scored by
-    # an LLM judge, so they never enter the run at all — not in `items`, not
-    # in `item_ids_persisted`, not in the item count. A caller that picks
-    # explicit rows already leaves these out; this catches `select_all` and
-    # any other path the frontend can't filter itself.
-    items = [it for it in items if not is_tool_call_row(it)]
-    item_ids_persisted = [it["uuid"] for it in items]
-    if not items:
-        raise HTTPException(
-            status_code=400,
-            detail=(
-                "The chosen items evaluate one or more tool calls, which "
-                "only supports human review today. Evaluators do not run "
-                "on them."
-            ),
-        )
-
     linked = {
         e["uuid"] for e in get_evaluators_for_annotation_task(task_uuid)
     }
     try:
         resolved = _resolve_evaluator_dicts(
-            [e.dict() for e in payload.evaluators], linked
+            [e.dict() for e in payload.evaluators], linked, task.get("type")
         )
     except EvaluatorResolutionError as e:
         raise HTTPException(status_code=400, detail=str(e))
 
+    # Rows no chosen evaluator pairs with never enter the run, and evaluators
+    # no chosen row pairs with are not recorded as having run.
+    items = [it for it in items if evaluators_for_item(it, resolved)]
+    item_ids_persisted = [it["uuid"] for it in items]
+    if not items:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "None of the selected evaluators fit the chosen items. "
+                "Tool-call items need a tool-call evaluator with a prompt, "
+                "and all other items need any other evaluator."
+            ),
+        )
+    paired = {
+        ev["uuid"] for it in items for ev in evaluators_for_item(it, resolved)
+    }
+    resolved = [ev for ev in resolved if ev["uuid"] in paired]
+
     enforce_max_rows_per_eval(
-        ctx.org_uuid, len(items) * len(resolved), "labelling_evaluator_run"
+        ctx.org_uuid,
+        sum(len(evaluators_for_item(it, resolved)) for it in items),
+        "labelling_evaluator_run",
     )
 
     # Validate item payload shape early so we 400 instead of failing async.
