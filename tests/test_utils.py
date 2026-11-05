@@ -1215,6 +1215,70 @@ def test_judge_turn_keeps_judge_keys_and_drops_the_rest():
     assert judge_turn(None) is None
 
 
+def test_tool_calls_as_text_writes_calls_for_the_judge():
+    from utils import tool_calls_as_text
+
+    assert tool_calls_as_text(
+        [{"tool": "book", "arguments": {"seats": 2}, "output": {"ok": True}}],
+        expected=[
+            {
+                "tool": "book",
+                "arguments": {
+                    "seats": {"match_type": "exact", "value": 2},
+                    "note": {"match_type": "any"},
+                    "guest": {"name": {"match_type": "any"}, "age": 30},
+                    "city": {"match_type": "llm_judge", "criteria": "a city"},
+                },
+            }
+        ],
+    ) == (
+        'Tool calls made by the agent:\nbook {"seats": 2} returned {"ok": true}'
+        '\n\nExpected tool calls:\nbook {"seats": 2, "guest": {"age": 30}, '
+        '"city": {"match_type": "llm_judge", "criteria": "a city"}} '
+        "(ignore these arguments, they may be missing or hold any value: "
+        "note, guest.name)"
+    )
+    assert tool_calls_as_text([]) == "The agent made no tool calls."
+    assert tool_calls_as_text(
+        [], expected=[{"tool": "book", "accept_any_arguments": True}], reply="Done"
+    ) == (
+        "Reply from the agent:\nDone\n\nThe agent made no tool calls."
+        "\n\nExpected tool calls:\nbook (any arguments accepted)"
+    )
+    assert tool_calls_as_text(
+        [{"function": {"name": "book", "arguments": '{"seats": 2}'}}, "odd"]
+    ) == 'Tool calls made by the agent:\nbook {"seats": 2}\nodd'
+    assert tool_calls_as_text([{"tool": "book"}]) == (
+        "Tool calls made by the agent:\nbook"
+    )
+
+
+def test_history_with_calls_as_text_moves_calls_into_content():
+    from utils import history_with_calls_as_text
+
+    assert history_with_calls_as_text(
+        [
+            {"role": "user", "content": "Book it"},
+            {
+                "role": "assistant",
+                "content": None,
+                "tool_calls": [
+                    {"id": "1", "function": {"name": "book", "arguments": "{}"}}
+                ],
+            },
+            {"role": "tool", "tool_call_id": "1", "content": "ok"},
+            {"role": "assistant", "content": None},
+            "odd",
+        ]
+    ) == [
+        {"role": "user", "content": "Book it"},
+        {"role": "assistant", "content": "[Tool Call] book {}"},
+        {"role": "tool", "content": "ok"},
+        {"role": "assistant"},
+        "odd",
+    ]
+
+
 def test_is_tool_call_row_reads_object_form_replies():
     calls = [{"tool": "search"}]
     assert not is_tool_call_row(

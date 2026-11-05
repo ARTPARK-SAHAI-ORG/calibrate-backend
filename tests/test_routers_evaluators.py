@@ -396,10 +396,9 @@ def test_delete_version_404s_on_unknown_repeat_and_other_org(client):
     assert client.delete(f"/evaluators/{ev_uuid}/versions/{v2}", headers=other).status_code == 403
 
 
-def test_tool_call_evaluator_has_no_judge_and_stays_editable(client):
-    """A tool-call evaluator is answered by a person, so its judge model and
-    system prompt are empty strings. Creating one from scratch, adding a version
-    to it, and filtering the list by its type must all still work."""
+def test_tool_call_evaluator_with_empty_judge_stays_allowed(client):
+    """A tool-call evaluator with an empty prompt and model is answered by people
+    only. Creating one from scratch and adding a version to it must still work."""
     h = _signup(client)
     name = f"ev-{uuid.uuid4().hex[:6]}"
     created = client.post(
@@ -434,6 +433,23 @@ def test_tool_call_evaluator_has_no_judge_and_stays_editable(client):
     assert detail["versions"][1]["output_config"]["scale"]
 
 
+def test_default_prompt_for_tool_call(client):
+    from db import DEFAULT_PROMPTS_BY_PURPOSE, DEFAULT_TEXT_JUDGE_MODEL
+
+    h = _signup(client)
+    r = client.get("/evaluators/default-prompt?purpose=tool-call", headers=h)
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["purpose"] == "tool-call"
+    assert body["name"] == "Tool call correctness"
+    assert body["system_prompt"] == DEFAULT_PROMPTS_BY_PURPOSE["tool-call"]["system_prompt"]
+    assert body["judge_model"] == DEFAULT_TEXT_JUDGE_MODEL
+    assert body["evaluator_type"] == "tool-call"
+    assert body["output_type"] == "binary"
+    assert [s["name"] for s in body["output_config"]["scale"]] == ["Correct", "Wrong"]
+    assert body["variables"] == []
+
+
 def test_list_evaluators_filtered_by_tool_call_type(client):
     """The type filter returns the workspace's tool-call evaluators, including
     its copy of the shipped `Tool call correctness` default."""
@@ -446,7 +462,9 @@ def test_list_evaluators_filtered_by_tool_call_type(client):
     forks = [e for e in items if e["source_default_slug"] == TOOL_CALL_EVALUATOR_SLUG]
     assert len(forks) == 1
     assert forks[0]["is_default"] is True
-    assert forks[0]["live_version"]["judge_model"] == ""
+    from db import DEFAULT_TEXT_JUDGE_MODEL
+
+    assert forks[0]["live_version"]["judge_model"] == DEFAULT_TEXT_JUDGE_MODEL
 
 
 def test_tool_call_default_fork_is_protected(client):

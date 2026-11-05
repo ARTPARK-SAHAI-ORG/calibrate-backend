@@ -2939,7 +2939,7 @@ def test_simulation_jobs_summary_returns_headers_only(user):
 # ---------------------------------------------------------------------------
 
 
-def test_tool_call_evaluator_is_seeded_with_no_judge():
+def test_tool_call_evaluator_is_seeded_with_a_judge():
     tmpl = db.get_evaluator_by_slug(db.TOOL_CALL_EVALUATOR_SLUG)
     assert tmpl is not None
     assert tmpl["name"] == "Tool call correctness"
@@ -2949,8 +2949,10 @@ def test_tool_call_evaluator_is_seeded_with_no_judge():
     assert tmpl["output_type"] == "binary"
 
     version = db.get_evaluator_version(tmpl["live_version_id"])
-    assert version["judge_model"] == ""
-    assert version["system_prompt"] == ""
+    purpose = db.DEFAULT_PROMPTS_BY_PURPOSE["tool-call"]
+    assert version["judge_model"] == db.DEFAULT_TEXT_JUDGE_MODEL
+    assert version["system_prompt"] == purpose["system_prompt"]
+    assert version["system_prompt"].startswith("Evaluate the tool calls")
     assert version["variables"] in (None, [])
     scale = version["output_config"]["scale"]
     assert [(s["value"], s["name"]) for s in scale] == [
@@ -2984,12 +2986,11 @@ def test_tool_call_backfills_are_idempotent():
     _user, org_uuid = _fresh_org()
     before = db.get_tool_call_evaluator_for_org(org_uuid)["uuid"]
     tmpl = db.get_evaluator_by_slug(db.TOOL_CALL_EVALUATOR_SLUG)["uuid"]
+    versions = len(db.get_evaluator_versions(tmpl))
     db.init_db()
     db.init_db()
     assert db.get_tool_call_evaluator_for_org(org_uuid)["uuid"] == before
-    # The empty judge_model / system_prompt still compare equal to the seed, so
-    # re-seeding does not churn out a new version every startup.
-    assert len(db.get_evaluator_versions(tmpl)) == 1
+    assert len(db.get_evaluator_versions(tmpl)) == versions
 
 
 def test_tool_call_description_backfill_rewrites_old_text_only():
@@ -3022,6 +3023,121 @@ def test_tool_call_description_backfill_rewrites_old_text_only():
         db.get_evaluator_by_slug(db.TOOL_CALL_EVALUATOR_SLUG)["description"]
         == new_text
     )
+
+
+def test_tool_call_seed_prompt_declares_no_variables():
+    """The JSON in the prompt uses single braces, which are not `{{variables}}`."""
+    from llm_judge import render_template
+
+    purpose = db.DEFAULT_PROMPTS_BY_PURPOSE["tool-call"]
+    assert purpose["variables"] == []
+    assert db._TOOL_CALL_SEED["version"]["variables"] == []
+    assert '{"match_type": "llm_judge"' in purpose["system_prompt"]
+    assert (
+        render_template(purpose["system_prompt"], {"criteria": "x"})
+        == purpose["system_prompt"]
+    )
+
+
+def test_seed_gives_template_a_new_live_version_when_prompt_was_empty():
+    """A template from before the prompt existed gets a new live version from
+    `_seed_default_evaluators`, and the old version stays for past answers."""
+    tmpl = db.get_evaluator_by_slug(db.TOOL_CALL_EVALUATOR_SLUG)
+    before = db.get_evaluator_version(tmpl["live_version_id"])
+    with db.get_db_connection() as conn:
+        conn.execute(
+            "UPDATE evaluator_versions SET system_prompt = '', judge_model = '' "
+            "WHERE uuid = ?",
+            (before["uuid"],),
+        )
+        conn.commit()
+
+    db.init_db()
+    db.init_db()
+
+    after = db.get_evaluator_by_slug(db.TOOL_CALL_EVALUATOR_SLUG)
+    assert after["live_version_id"] != before["uuid"]
+    live = db.get_evaluator_version(after["live_version_id"])
+    assert live["version_number"] == before["version_number"] + 1
+    assert live["system_prompt"] == db._TOOL_CALL_SEED["version"]["system_prompt"]
+    assert live["judge_model"] == db.DEFAULT_TEXT_JUDGE_MODEL
+    assert db.get_evaluator_version(before["uuid"])["system_prompt"] == ""
+
+
+def test_new_org_tool_call_fork_carries_prompt_and_model():
+    _user, org_uuid = _fresh_org()
+    fork = db.get_tool_call_evaluator_for_org(org_uuid)
+    version = db.get_evaluator_version(fork["live_version_id"])
+    assert version["system_prompt"] == db._TOOL_CALL_SEED["version"]["system_prompt"]
+    assert version["judge_model"] == db.DEFAULT_TEXT_JUDGE_MODEL
+
+
+def test_tool_call_judge_backfill_fills_blank_forks_in_place():
+    _u1, org_blank = _fresh_org()
+    _u2, org_edited = _fresh_org()
+    _u3, org_spaces = _fresh_org()
+    _u4, org_deleted = _fresh_org()
+    blank = db.get_tool_call_evaluator_for_org(org_blank)
+    edited = db.get_tool_call_evaluator_for_org(org_edited)
+    spaces = db.get_tool_call_evaluator_for_org(org_spaces)
+    deleted = db.get_tool_call_evaluator_for_org(org_deleted)
+    with db.get_db_connection() as conn:
+        for fork, prompt, model in (
+            (blank, "", ""),
+            (edited, "my own prompt", "my/model"),
+            (spaces, "   ", ""),
+            (deleted, "", ""),
+        ):
+            conn.execute(
+                "UPDATE evaluator_versions SET system_prompt = ?, judge_model = ? "
+                "WHERE uuid = ?",
+                (prompt, model, fork["live_version_id"]),
+            )
+        conn.execute(
+            "DELETE FROM _schema_migrations WHERE name = ?",
+            (db.FILL_TOOL_CALL_EVALUATOR_JUDGE_MIGRATION,),
+        )
+        conn.commit()
+    assert db.delete_evaluator(deleted["uuid"]) is True
+
+    db.init_db()
+
+    seed = db._TOOL_CALL_SEED["version"]
+    for fork in (blank, spaces):
+        after = db.get_evaluator(fork["uuid"])
+        assert after["live_version_id"] == fork["live_version_id"]
+        assert len(db.get_evaluator_versions(fork["uuid"])) == 1
+        version = db.get_evaluator_version(fork["live_version_id"])
+        assert version["system_prompt"] == seed["system_prompt"]
+        assert version["judge_model"] == seed["judge_model"]
+
+    kept = db.get_evaluator_version(edited["live_version_id"])
+    assert (kept["system_prompt"], kept["judge_model"]) == (
+        "my own prompt",
+        "my/model",
+    )
+    assert len(db.get_evaluator_versions(edited["uuid"])) == 1
+    assert db.get_evaluator_version(deleted["live_version_id"])["system_prompt"] == ""
+
+
+def test_tool_call_judge_backfill_runs_once():
+    """A person blanking the prompt later chooses people-only answers, so a
+    restart must not fill it back in."""
+    _user, org_uuid = _fresh_org()
+    fork = db.get_tool_call_evaluator_for_org(org_uuid)
+    with db.get_db_connection() as conn:
+        conn.execute(
+            "UPDATE evaluator_versions SET system_prompt = '', judge_model = '' "
+            "WHERE uuid = ?",
+            (fork["live_version_id"],),
+        )
+        conn.commit()
+
+    db.init_db()
+    db.init_db()
+
+    assert db.get_evaluator_version(fork["live_version_id"])["system_prompt"] == ""
+    assert len(db.get_evaluator_versions(fork["uuid"])) == 1
 
 
 def _rerun_tool_call_backfills():

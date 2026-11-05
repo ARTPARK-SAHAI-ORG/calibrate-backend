@@ -599,7 +599,7 @@ class DefaultPromptResponse(BaseModel):
  create-evaluator form. The `name` field is null for `purpose=conversation` because there's
  no built-in default conversation evaluator. The prompt is just a template."""
 
-    purpose: Literal["llm", "llm-general", "stt", "tts", "conversation"] = Field(
+    purpose: Literal["llm", "llm-general", "stt", "tts", "conversation", "tool-call"] = Field(
         description="Evaluation purpose this default prompt targets"
     )
     name: Optional[str] = Field(
@@ -617,7 +617,7 @@ class DefaultPromptResponse(BaseModel):
 
 @router.get("/default-prompt", response_model=DefaultPromptResponse, summary="Get default prompt")
 def get_default_prompt(
-    purpose: Literal["llm", "llm-general", "stt", "tts", "conversation"] = Query(
+    purpose: Literal["llm", "llm-general", "stt", "tts", "conversation", "tool-call"] = Query(
         description="Evaluation purpose whose canonical default prompt + config to return"
     ),
     _user_id: str = Depends(get_current_user_id),

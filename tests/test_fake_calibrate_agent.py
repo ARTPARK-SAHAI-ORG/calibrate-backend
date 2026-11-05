@@ -462,6 +462,98 @@ def test_annotation_eval_run_job_end_to_end_with_fake_cli(task_type):
     assert all(r["item_id"] == "item-1" for r in created)
 
 
+@pytest.mark.parametrize("task_type", ["llm", "llm-general"])
+def test_annotation_eval_tool_call_rows_pair_with_their_evaluators_with_fake_cli(
+    task_type,
+):
+    """A task with both kinds of row: each row keeps only its own evaluator's
+    score, and calibrate general's means, which cover every pairing, are dropped."""
+    from annotation_eval_runner import _run_job
+
+    def resolved(uuid, evaluator_type):
+        return {
+            "uuid": uuid,
+            "name": uuid,
+            "judge_model": "gpt",
+            "system_prompt": "judge",
+            "output_type": "binary",
+            "output_config": {},
+            "variables": [],
+            "variable_values": {},
+            "kind": "single",
+            "data_type": "text",
+            "evaluator_type": evaluator_type,
+            "_evaluator_version_id": f"ver-{uuid}",
+        }
+
+    calls = [{"tool": "book", "arguments": {"seats": 2}}]
+    tool_call_payload = (
+        {"chat_history": [{"role": "user", "content": "hi"}], "agent_response": ""}
+        if task_type == "llm"
+        else {"input": "q", "output": ""}
+    )
+    items = [
+        {"uuid": "reply", "payload": _ANNOTATION_CASES[task_type]},
+        {
+            "uuid": "tool",
+            "payload": {
+                **tool_call_payload,
+                "actual_tool_calls": calls,
+                "expected_tool_calls": calls,
+            },
+        },
+    ]
+    created = []
+    updates = []
+
+    with patch.dict(os.environ, {"FAKE_AI_PROVIDERS": "1"}), patch(
+        "annotation_eval_runner.get_annotation_task", return_value={"type": task_type}
+    ), patch(
+        "annotation_eval_runner.get_eval_job_items", return_value=items
+    ), patch(
+        "annotation_eval_runner.get_job",
+        return_value={"status": "in_progress", "details": {}},
+    ), patch("annotation_eval_runner._persist_pgid"), patch(
+        "annotation_eval_runner.snapshot_eval_job_items"
+    ), patch(
+        "annotation_eval_runner.create_evaluator_runs",
+        side_effect=lambda runs: created.extend(runs),
+    ), patch(
+        "annotation_eval_runner.update_job",
+        side_effect=lambda *a, **k: updates.append(k),
+    ), patch("annotation_eval_runner.try_start_queued_job"), patch(
+        "annotation_eval_runner.get_s3_client", return_value=MagicMock()
+    ), patch(
+        "annotation_eval_runner.get_s3_output_config", return_value="bucket"
+    ), patch(
+        "annotation_eval_runner.upload_file_to_s3"
+    ), patch(
+        "annotation_eval_runner.time.sleep"
+    ):
+        _run_job(
+            "j-1",
+            "task-1",
+            "u-1",
+            [resolved("ev-reply", task_type), resolved("ev-tool", "tool-call")],
+            item_ids=None,
+        )
+
+    done = next(u for u in updates if u.get("status") == "done")
+    assert ("metrics" in done["details"]) and (
+        (done["details"]["metrics"] is None) == (task_type == "llm-general")
+    )
+    assert {(r["item_id"], r["evaluator_id"]) for r in created} >= {
+        ("reply", "ev-reply"),
+        ("tool", "ev-tool"),
+    }
+    assert ("reply", "ev-tool") not in {
+        (r["item_id"], r["evaluator_id"]) for r in created
+    }
+    assert ("tool", "ev-reply") not in {
+        (r["item_id"], r["evaluator_id"]) for r in created
+    }
+
+
 @pytest.mark.parametrize(
     "interaction_type,evaluator_type,trace",
     [
@@ -474,6 +566,22 @@ def test_annotation_eval_run_job_end_to_end_with_fake_cli(task_type):
             },
         ),
         ("general", "llm-general", {"input": "summarize", "output": {"response": "done"}}),
+        (
+            "conversation",
+            "tool-call",
+            {
+                "input": [{"role": "user", "content": "hi"}],
+                "output": {"response": None, "tool_calls": [{"tool": "book"}]},
+            },
+        ),
+        (
+            "general",
+            "tool-call",
+            {
+                "input": "summarize",
+                "output": {"response": None, "tool_calls": [{"tool": "book"}]},
+            },
+        ),
     ],
 )
 def test_trace_scoring_claim_and_settle_end_to_end_with_fake_cli(
