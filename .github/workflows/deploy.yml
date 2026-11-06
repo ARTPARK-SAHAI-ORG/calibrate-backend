@@ -3,6 +3,12 @@ name: Deploy to Production
 on:
   release:
     types: [published]
+  workflow_dispatch:
+    inputs:
+      skip_build:
+        description: "Reuse the image already in the registry and only recreate the container (picks up changed secrets)"
+        type: boolean
+        default: true
 
 permissions:
   contents: read
@@ -27,9 +33,11 @@ jobs:
         run: echo "IMAGE_NAME=ghcr.io/$(echo '${{ github.repository }}' | tr '[:upper:]' '[:lower:]')" >> "$GITHUB_ENV"
 
       - name: Set up Docker Buildx
+        if: ${{ !inputs.skip_build }}
         uses: docker/setup-buildx-action@v3
 
       - name: Log in to GitHub Container Registry
+        if: ${{ !inputs.skip_build }}
         uses: docker/login-action@v3
         with:
           registry: ghcr.io
@@ -37,6 +45,7 @@ jobs:
           password: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Build and push Docker image
+        if: ${{ !inputs.skip_build }}
         uses: docker/build-push-action@v5
         with:
           context: .
