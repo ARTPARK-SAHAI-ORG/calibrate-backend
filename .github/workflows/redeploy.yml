@@ -1,9 +1,13 @@
 name: Redeploy to Production
 
-# Recreates the production container from the image already in the registry,
-# so changed secrets take effect without a release or a rebuild.
+# Recreates the production container from an image already in the registry:
+# the current one (to pick up changed secrets) or an earlier release's.
 on:
   workflow_dispatch:
+    inputs:
+      version:
+        description: "Release to run, e.g. v0.0.150. Leave empty to restart the current version."
+        required: false
 
 permissions:
   contents: read
@@ -16,10 +20,17 @@ jobs:
       contents: read
       packages: read
     env:
-      IMAGE_TAG: ${{ secrets.IMAGE_TAG }}
+      IMAGE_TAG: ${{ inputs.version || secrets.IMAGE_TAG }}
       CONTAINER_NAME: ${{ secrets.CONTAINER_NAME }}
 
     steps:
+      - name: Check the version is a plain tag name
+        if: ${{ inputs.version }}
+        env:
+          VERSION: ${{ inputs.version }}
+        run: |
+          [[ "$VERSION" =~ ^[A-Za-z0-9._-]+$ ]] || { echo "Not a valid tag: $VERSION"; exit 1; }
+
       - name: Checkout repository
         uses: actions/checkout@v4
 
