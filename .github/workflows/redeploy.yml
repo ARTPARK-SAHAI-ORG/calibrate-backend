@@ -1,0 +1,183 @@
+name: Redeploy to Production
+
+# Recreates the production container from the image already in the registry,
+# so changed secrets take effect without a release or a rebuild.
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build-and-deploy:
+    runs-on: ubuntu-latest
+    environment: Production
+    permissions:
+      contents: read
+      packages: read
+    env:
+      IMAGE_TAG: ${{ secrets.IMAGE_TAG }}
+      CONTAINER_NAME: ${{ secrets.CONTAINER_NAME }}
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      # ghcr.io image refs must be lowercase; org name may be mixed/upper case.
+      - name: Set image name
+        run: echo "IMAGE_NAME=ghcr.io/$(echo '${{ github.repository }}' | tr '[:upper:]' '[:lower:]')" >> "$GITHUB_ENV"
+
+      - name: Copy docker-compose.yml to VM
+        uses: appleboy/scp-action@v0.1.7
+        with:
+          host: ${{ secrets.VM_HOST }}
+          username: ${{ secrets.VM_USER }}
+          key: ${{ secrets.VM_SSH_KEY }}
+          source: "docker-compose.yml"
+          target: "/tmp/pense-production/"
+
+      - name: Deploy to Production VM
+        uses: appleboy/ssh-action@v1.0.3
+        env:
+          # Forwarded via the action's `envs:` mechanism so the value is exported
+          # on the remote host with proper quoting. Avoids the shell-injection /
+          # corruption risk of interpolating raw secret text into a script body
+          # — system prompts can contain $, backticks, quotes, markdown, etc.
+          DEFAULT_AGENT_SYSTEM_PROMPT: ${{ secrets.DEFAULT_AGENT_SYSTEM_PROMPT }}
+          # Short-lived registry credential so the VM can pull the private image
+          # without a stored personal PAT. GITHUB_TOKEN is minted per-run and
+          # expires when the job ends; the job's `packages: read` permission
+          # (set above) lets it pull this repo-linked GHCR image.
+          GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GHCR_ACTOR: ${{ github.actor }}
+        with:
+          host: ${{ secrets.VM_HOST }}
+          username: ${{ secrets.VM_USER }}
+          key: ${{ secrets.VM_SSH_KEY }}
+          envs: DEFAULT_AGENT_SYSTEM_PROMPT,GHCR_TOKEN,GHCR_ACTOR
+          script: |
+            set -eo pipefail  # Exit on any failure; fail a pipeline if any stage fails
+
+            # Set environment variables
+            export IMAGE_NAME="${{ env.IMAGE_NAME }}"
+            export IMAGE_TAG="${{ env.IMAGE_TAG }}"
+            export CONTAINER_NAME="${{ env.CONTAINER_NAME }}"
+            export PORT="${{ secrets.PORT }}"
+            export DOCS_USERNAME="${{ secrets.DOCS_USERNAME }}"
+            export DOCS_PASSWORD="${{ secrets.DOCS_PASSWORD }}"
+            export PUBLIC_API_BASE_URL="${{ secrets.PUBLIC_API_BASE_URL }}"
+            export CORS_ALLOWED_ORIGINS="${{ secrets.CORS_ALLOWED_ORIGINS }}"
+            export JWT_SECRET_KEY="${{ secrets.JWT_SECRET_KEY }}"
+            export JWT_EXPIRATION_HOURS="${{ secrets.JWT_EXPIRATION_HOURS }}"
+            export GOOGLE_CLIENT_ID="${{ secrets.GOOGLE_CLIENT_ID }}"
+            export RESEND_API_KEY="${{ secrets.RESEND_API_KEY }}"
+            export EMAIL_FROM="${{ secrets.EMAIL_FROM }}"
+            export FRONTEND_URL="${{ secrets.FRONTEND_URL }}"
+            export DEEPGRAM_API_KEY="${{ secrets.DEEPGRAM_API_KEY }}"
+            export OPENAI_API_KEY="${{ secrets.OPENAI_API_KEY }}"
+            export CARTESIA_API_KEY="${{ secrets.CARTESIA_API_KEY }}"
+            export SMALLEST_API_KEY="${{ secrets.SMALLEST_API_KEY }}"
+            export GROQ_API_KEY="${{ secrets.GROQ_API_KEY }}"
+            export GOOGLE_APPLICATION_CREDENTIALS="${{ secrets.GOOGLE_APPLICATION_CREDENTIALS }}"
+            export GOOGLE_CLOUD_PROJECT_ID="${{ secrets.GOOGLE_CLOUD_PROJECT_ID }}"
+            export GOOGLE_API_KEY="${{ secrets.GOOGLE_API_KEY }}"
+            export SARVAM_API_KEY="${{ secrets.SARVAM_API_KEY }}"
+            export ELEVENLABS_API_KEY="${{ secrets.ELEVENLABS_API_KEY }}"
+            export OPENROUTER_API_KEY="${{ secrets.OPENROUTER_API_KEY }}"
+            export OPENROUTER_ALLOWED_PROVIDERS="${{ secrets.OPENROUTER_ALLOWED_PROVIDERS }}"
+            export PROVIDER_KEYS_ENCRYPTION_KEY="${{ secrets.PROVIDER_KEYS_ENCRYPTION_KEY }}"
+            export PROVIDER_STATUS_REFRESH_INTERVAL_SECONDS="${{ secrets.PROVIDER_STATUS_REFRESH_INTERVAL_SECONDS }}"
+            export PROVIDER_STATUS_CACHE_MAX_AGE_SECONDS="${{ secrets.PROVIDER_STATUS_CACHE_MAX_AGE_SECONDS }}"
+            export PROVIDER_STATUS_CHECK_TIMEOUT_SECONDS="${{ secrets.PROVIDER_STATUS_CHECK_TIMEOUT_SECONDS }}"
+            export OBJECT_STORAGE_MODE="${{ secrets.OBJECT_STORAGE_MODE }}"
+            export S3_OUTPUT_BUCKET="${{ secrets.S3_OUTPUT_BUCKET }}"
+            export S3_ENDPOINT_URL="${{ secrets.S3_ENDPOINT_URL }}"
+            export AWS_ACCESS_KEY_ID="${{ secrets.AWS_ACCESS_KEY_ID }}"
+            export AWS_SECRET_ACCESS_KEY="${{ secrets.AWS_SECRET_ACCESS_KEY }}"
+            export AWS_REGION="${{ secrets.AWS_REGION }}"
+            export DB_ROOT_DIR="${{ secrets.DB_ROOT_DIR }}"
+            export APP_FOLDER_PATH="${{ secrets.APP_FOLDER_PATH }}"
+            export DEFAULT_USER_EMAIL="${{ secrets.DEFAULT_USER_EMAIL }}"
+            export DEFAULT_USER_FIRST_NAME="${{ secrets.DEFAULT_USER_FIRST_NAME }}"
+            export DEFAULT_USER_LAST_NAME="${{ secrets.DEFAULT_USER_LAST_NAME }}"
+            # DEFAULT_AGENT_SYSTEM_PROMPT is injected via the action's `envs:` —
+            # do not export it inline (shell-significant chars in the prompt).
+            export DEFAULT_AGENT_LLM_MODEL="${{ secrets.DEFAULT_AGENT_LLM_MODEL }}"
+            export DEFAULT_AGENT_STT_PROVIDER="${{ secrets.DEFAULT_AGENT_STT_PROVIDER }}"
+            export DEFAULT_AGENT_TTS_PROVIDER="${{ secrets.DEFAULT_AGENT_TTS_PROVIDER }}"
+            export DEFAULT_AGENT_SPEAKS_FIRST="${{ secrets.DEFAULT_AGENT_SPEAKS_FIRST }}"
+            export DEFAULT_AGENT_MAX_TURNS="${{ secrets.DEFAULT_AGENT_MAX_TURNS }}"
+            export DEFAULT_PERSONA_GENDER="${{ secrets.DEFAULT_PERSONA_GENDER }}"
+            export DEFAULT_PERSONA_LANGUAGE="${{ secrets.DEFAULT_PERSONA_LANGUAGE }}"
+            export DEFAULT_PERSONA_INTERRUPTION_SENSITIVITY="${{ secrets.DEFAULT_PERSONA_INTERRUPTION_SENSITIVITY }}"
+            export SENTRY_DSN="${{ secrets.SENTRY_DSN }}"
+            export SENTRY_ENVIRONMENT="${{ secrets.SENTRY_ENVIRONMENT }}"
+            export SENTRY_TRACES_SAMPLE_RATE="${{ secrets.SENTRY_TRACES_SAMPLE_RATE }}"
+            export SENTRY_PROFILES_SAMPLE_RATE="${{ secrets.SENTRY_PROFILES_SAMPLE_RATE }}"
+            export ENVIRONMENT="${{ secrets.ENVIRONMENT }}"
+            export ENABLE_TRACING="${{ secrets.ENABLE_TRACING }}"
+            export OTEL_EXPORTER_OTLP_ENDPOINT="${{ secrets.OTEL_EXPORTER_OTLP_ENDPOINT }}"
+            export OTEL_EXPORTER_OTLP_HEADERS="${{ secrets.OTEL_EXPORTER_OTLP_HEADERS }}"
+            export LANGFUSE_TRACING_ENVIRONMENT="${{ secrets.LANGFUSE_TRACING_ENVIRONMENT }}"
+            export LANGFUSE_HOST="${{ secrets.LANGFUSE_HOST }}"
+            export LANGFUSE_BASE_URL="${{ secrets.LANGFUSE_BASE_URL }}"
+            export LANGFUSE_PUBLIC_KEY="${{ secrets.LANGFUSE_PUBLIC_KEY }}"
+            export LANGFUSE_SECRET_KEY="${{ secrets.LANGFUSE_SECRET_KEY }}"
+            export MAX_CONCURRENT_JOBS="${{ secrets.MAX_CONCURRENT_JOBS }}"
+            export MAX_CONCURRENT_JOBS_PER_ORG="${{ secrets.MAX_CONCURRENT_JOBS_PER_ORG }}"
+            export DEFAULT_MAX_ROWS_PER_EVAL="${{ secrets.DEFAULT_MAX_ROWS_PER_EVAL }}"
+            export DEFAULT_MAX_TRACES="${{ secrets.DEFAULT_MAX_TRACES }}"
+            export DEFAULT_MAX_SCORED_TRACES="${{ secrets.DEFAULT_MAX_SCORED_TRACES }}"
+            export DEFAULT_TRACE_SCORING_BATCH_SIZE="${{ secrets.DEFAULT_TRACE_SCORING_BATCH_SIZE }}"
+            export MAX_CONCURRENT_TRACE_SCORING_BATCHES_PER_ORG="${{ secrets.MAX_CONCURRENT_TRACE_SCORING_BATCHES_PER_ORG }}"
+            export TRACE_SCORING_WORKERS="${{ secrets.TRACE_SCORING_WORKERS }}"
+            export TRACE_SCORING_WAIT_SECONDS="${{ secrets.TRACE_SCORING_WAIT_SECONDS }}"
+            export TRACE_SCORING_MAX_WAIT_SECONDS="${{ secrets.TRACE_SCORING_MAX_WAIT_SECONDS }}"
+            export CALIBRATE_TEST_PARALLEL="${{ secrets.CALIBRATE_TEST_PARALLEL }}"
+            export CALIBRATE_SIMULATION_PARALLEL="${{ secrets.CALIBRATE_SIMULATION_PARALLEL }}"
+            export SUPERADMIN_EMAIL="${{ secrets.SUPERADMIN_EMAIL }}"
+
+            # Authenticate to GHCR with the short-lived token injected by the
+            # Actions job (valid only for this run) — no personal PAT stored on
+            # the VM, and not subject to the org's classic-PAT policy.
+            echo "$GHCR_TOKEN" | docker login ghcr.io -u "$GHCR_ACTOR" --password-stdin
+
+            # Navigate to directory with docker-compose.yml
+            cd /tmp/pense-production
+
+            # Pull the new image explicitly and abort on failure. `docker pull`
+            # returns a non-zero exit code on registry/auth errors (e.g. 403
+            # Forbidden), whereas `docker compose pull` can exit 0 after logging
+            # the error and silently reuse a stale same-tag image already cached
+            # on the VM — which previously let a failed pull report success while
+            # the old container (old code + old env) kept running.
+            docker pull "${IMAGE_NAME}:${IMAGE_TAG}"
+
+            # --force-recreate so both code and env-var changes always take effect.
+            docker compose -p pense-production up -d --force-recreate
+
+            # Clean up old images
+            docker image prune -f
+
+            # Drop the ephemeral registry credential from the VM.
+            docker logout ghcr.io
+
+            echo "🎉 Production deployment completed successfully!"
+
+      - name: Verify deployment
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: ${{ secrets.VM_HOST }}
+          username: ${{ secrets.VM_USER }}
+          key: ${{ secrets.VM_SSH_KEY }}
+          script: |
+            export CONTAINER="${{ env.CONTAINER_NAME }}"
+            sleep 10
+            if docker ps | grep -q $CONTAINER; then
+              echo "✅ Deployment successful!"
+              docker logs --tail 20 $CONTAINER
+            else
+              echo "❌ Deployment failed!"
+              docker logs $CONTAINER
+              exit 1
+            fi
