@@ -89,6 +89,7 @@ from read_calibrate_run_output import (
     unanswered_case_count,
 )
 from utils import (
+    compute_share_token_toggle,
     job_slot,
     with_calibrate_eval_header,
     TaskStatus,
@@ -3401,15 +3402,9 @@ def update_test_run_visibility(
     """Toggle public sharing for a test run."""
     job = _load_owned_agent_test_job(task_id, ctx)
 
-    if body.is_public:
-        import uuid as _uuid
-
-        share_token = job.get("share_token") or str(_uuid.uuid4())
-    else:
-        share_token = None
-
-    update_agent_test_job_visibility(task_id, body.is_public, share_token)
-    return VisibilityResponse(is_public=body.is_public, share_token=share_token)
+    token_to_persist, token_to_return = compute_share_token_toggle(job, body.is_public)
+    update_agent_test_job_visibility(task_id, body.is_public, token_to_persist)
+    return VisibilityResponse(is_public=body.is_public, share_token=token_to_return)
 
 
 class RunNameRequest(BaseModel):
@@ -4896,15 +4891,9 @@ def update_benchmark_visibility(
     """Toggle public sharing for a benchmark run."""
     job = _load_owned_agent_test_job(task_id, ctx)
 
-    if body.is_public:
-        import uuid as _uuid
-
-        share_token = job.get("share_token") or str(_uuid.uuid4())
-    else:
-        share_token = None
-
-    update_agent_test_job_visibility(task_id, body.is_public, share_token)
-    return VisibilityResponse(is_public=body.is_public, share_token=share_token)
+    token_to_persist, token_to_return = compute_share_token_toggle(job, body.is_public)
+    update_agent_test_job_visibility(task_id, body.is_public, token_to_persist)
+    return VisibilityResponse(is_public=body.is_public, share_token=token_to_return)
 
 
 _BenchmarkProjection = make_projection_params(
