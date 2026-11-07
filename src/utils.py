@@ -275,8 +275,9 @@ EVALUATOR_TYPE_DESCRIPTION = (
     "- `llm`: a reply with its conversation history\n"
     "- `llm-general`: a standalone input and output pair\n"
     "- `conversation`: a full conversation\n"
-    "- `tool-call`: whether the agent called the right tool, labelled by a person\n"
+    "- `tool-call`: the tool calls an agent made\n"
 )
+TOOL_CALL_EVALUATOR_TYPE = "tool-call"
 DATA_TYPE_DESCRIPTION = (
     "The modality the judge reads:\n\n"
     "- `text`\n"
@@ -1063,6 +1064,108 @@ def judge_turn(turn: Any) -> Any:
     return {k: v for k, v in turn.items() if k in JUDGE_TURN_KEYS}
 
 
+def evaluators_fitting_row(
+    evaluators: List[Dict[str, Any]], row_is_tool_call: bool
+) -> List[Dict[str, Any]]:
+    """Tool-call evaluators judge only tool-call rows, every other evaluator only the rest."""
+    return [
+        ev
+        for ev in evaluators
+        if (ev.get("evaluator_type") == TOOL_CALL_EVALUATOR_TYPE) == row_is_tool_call
+    ]
+
+
+def _tool_call_line(call: Any) -> str:
+    """One call on one line. Reads both the `{tool, arguments}` shape and the
+    OpenAI `{function: {name, arguments}}` shape, whose arguments are a JSON string."""
+    if not isinstance(call, dict):
+        return str(call)
+    function = call.get("function") if isinstance(call.get("function"), dict) else {}
+    name = call.get("tool") or function.get("name") or "unknown"
+    arguments = call.get("arguments", function.get("arguments"))
+    line = str(name)
+    if call.get("accept_any_arguments"):
+        line += " (any arguments accepted)"
+    elif arguments is not None:
+        rendered = (
+            arguments
+            if isinstance(arguments, str)
+            else json.dumps(arguments, ensure_ascii=False)
+        )
+        line += f" {rendered}"
+    if call.get("output") is not None:
+        line += f" returned {json.dumps(call['output'], ensure_ascii=False)}"
+    return line
+
+
+def _without_any_arguments(value: Any, path: str, ignored: List[str]) -> Any:
+    """Expected arguments with each `{"match_type": "any"}` taken out and its path
+    collected, and each `{"match_type": "exact"}` reduced to its value. A judge
+    reads the `any` form as a required argument."""
+    if not isinstance(value, dict):
+        return value
+    if value.get("match_type") == "exact" and "value" in value:
+        return value["value"]
+    kept = {}
+    for key, inner in value.items():
+        inner_path = f"{path}.{key}" if path else key
+        if isinstance(inner, dict) and inner.get("match_type") == "any":
+            ignored.append(inner_path)
+        else:
+            kept[key] = _without_any_arguments(inner, inner_path, ignored)
+    return kept
+
+
+def _expected_tool_call_line(call: Any) -> str:
+    if not isinstance(call, dict) or call.get("accept_any_arguments"):
+        return _tool_call_line(call)
+    ignored: List[str] = []
+    arguments = _without_any_arguments(call.get("arguments"), "", ignored)
+    line = _tool_call_line({**call, "arguments": arguments})
+    if ignored:
+        line += f" (ignore these arguments, they may be missing or hold any value: {', '.join(ignored)})"
+    return line
+
+
+def tool_calls_as_text(
+    actual: Any, expected: Any = None, reply: Any = None
+) -> str:
+    """What a judge reads for a tool-call row. The CLI's reply judge fails an empty
+    reply without calling the model and never shows tool calls, so the calls go
+    in the reply field as text."""
+    sections = []
+    if reply:
+        sections.append(f"Reply from the agent:\n{reply}")
+    if actual:
+        lines = "\n".join(_tool_call_line(call) for call in actual)
+        sections.append(f"Tool calls made by the agent:\n{lines}")
+    else:
+        sections.append("The agent made no tool calls.")
+    if expected:
+        lines = "\n".join(_expected_tool_call_line(call) for call in expected)
+        sections.append(f"Expected tool calls:\n{lines}")
+    return "\n\n".join(sections)
+
+
+def history_with_calls_as_text(history: List[Any]) -> List[Any]:
+    """Earlier turns for a tool-call row's judge. The CLI's reply judge prints only
+    `role: content`, so calls on earlier turns are moved into `content`."""
+    out = []
+    for turn in history:
+        if not isinstance(turn, dict):
+            out.append(turn)
+            continue
+        text = message_text(turn.get("content"))
+        calls = turn.get("tool_calls") or []
+        lines = [f"[Tool Call] {_tool_call_line(call)}" for call in calls]
+        parts = ([str(text)] if text else []) + lines
+        flat = {"role": turn.get("role")}
+        if parts:
+            flat["content"] = "\n".join(parts)
+        out.append(flat)
+    return out
+
+
 def is_tool_call_row(item: Dict[str, Any]) -> bool:
     """True when an annotation item is judged on the tool call it made rather
     than on a text reply. Safe on any item — returns False for stt/tts/
@@ -1071,8 +1174,8 @@ def is_tool_call_row(item: Dict[str, Any]) -> bool:
     Two shapes qualify. An item built from a tool-call test or trace carries
     `expected_tool_calls` / `actual_tool_calls`, and the mere presence of
     either list settles it whatever the agent produced: an agent that answered
-    in words instead of calling the tool is the failure a person is there to
-    mark, and the empty list it leaves behind must not read as a text row.
+    in words instead of calling the tool is the failure being judged, and the
+    empty list it leaves behind must not read as a text row.
     Any other item qualifies only the original way — a tool call in place of a
     reply: no `agent_response` / `output` text and a non-empty `tool_calls`
     list.

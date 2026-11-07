@@ -73,13 +73,13 @@ def _version_record(**overrides):
 
 def test_resolve_evaluator_dicts_missing_id():
     with pytest.raises(runner.EvaluatorResolutionError):
-        runner._resolve_evaluator_dicts([{"evaluator_id": None}], {"ev-1"})
+        runner._resolve_evaluator_dicts([{"evaluator_id": None}], {"ev-1"}, "llm")
 
 
 def test_resolve_evaluator_dicts_not_linked():
     with pytest.raises(runner.EvaluatorResolutionError):
         runner._resolve_evaluator_dicts(
-            [{"evaluator_id": "ev-1"}], set()  # not linked
+            [{"evaluator_id": "ev-1"}], set(), "llm"  # not linked
         )
 
 
@@ -87,7 +87,7 @@ def test_resolve_evaluator_dicts_evaluator_missing():
     with patch("annotation_eval_runner.get_evaluator", return_value=None):
         with pytest.raises(runner.EvaluatorResolutionError):
             runner._resolve_evaluator_dicts(
-                [{"evaluator_id": "ev-1"}], {"ev-1"}
+                [{"evaluator_id": "ev-1"}], {"ev-1"}, "llm"
             )
 
 
@@ -98,7 +98,7 @@ def test_resolve_evaluator_dicts_no_live_version():
     ):
         with pytest.raises(runner.EvaluatorResolutionError):
             runner._resolve_evaluator_dicts(
-                [{"evaluator_id": "ev-1"}], {"ev-1"}
+                [{"evaluator_id": "ev-1"}], {"ev-1"}, "llm"
             )
 
 
@@ -111,7 +111,7 @@ def test_resolve_evaluator_dicts_version_mismatch():
     ):
         with pytest.raises(runner.EvaluatorResolutionError):
             runner._resolve_evaluator_dicts(
-                [{"evaluator_id": "ev-1"}], {"ev-1"}
+                [{"evaluator_id": "ev-1"}], {"ev-1"}, "llm"
             )
 
 
@@ -124,7 +124,7 @@ def test_resolve_evaluator_dicts_missing_identity_field():
     ):
         with pytest.raises(runner.EvaluatorResolutionError):
             runner._resolve_evaluator_dicts(
-                [{"evaluator_id": "ev-1"}], {"ev-1"}
+                [{"evaluator_id": "ev-1"}], {"ev-1"}, "llm"
             )
 
 
@@ -135,7 +135,7 @@ def test_resolve_evaluator_dicts_happy_path():
         "annotation_eval_runner.get_evaluator_version", return_value=_version_record()
     ):
         out = runner._resolve_evaluator_dicts(
-            [{"evaluator_id": "ev-1"}], {"ev-1"}
+            [{"evaluator_id": "ev-1"}], {"ev-1"}, "llm"
         )
     assert out[0]["uuid"] == "ev-1"
     assert out[0]["_evaluator_version_id"] == "ver-1"
@@ -328,7 +328,7 @@ def test_is_tool_call_row():
     assert not runner.is_tool_call_row({"payload": {"tool_calls": "search(x)"}})
 
 
-def test_build_llm_dataset_skips_tool_call_rows():
+def test_build_llm_dataset_skips_tool_call_rows_without_a_tool_call_evaluator():
     evs = [{"uuid": "e1", "name": "judge"}]
     out = runner._build_llm_dataset(
         [
@@ -343,12 +343,12 @@ def test_build_llm_dataset_skips_tool_call_rows():
         ],
         evs,
     )
-    # Only the response row makes it into the judge dataset.
+    # No evaluator pairs with the tool-call row, so only the response row runs.
     assert [row["test_case"]["id"] for row in out] == ["resp"]
 
 
 # ---------------------------------------------------------------------------
-# tool-call evaluator (human-answered only)
+# tool-call evaluator
 # ---------------------------------------------------------------------------
 
 TC_ROW = {"uuid": "tc", "payload": {"tool_calls": [{"tool": "t", "arguments": {}}]}}
@@ -373,21 +373,26 @@ def test_required_evaluator_ids_for_item_normal_row():
     )
 
 
-def _resolve_with_tool_call_evaluator(requested):
+def _resolve_with_tool_call_evaluator(requested, tc_prompt="", task_type="llm", **tc):
     """Resolve `requested` where ev-tc is a tool-call evaluator and ev-1 is a
     normal LLM judge."""
     evaluators = {
         "ev-1": _ev_record(evaluator_type="llm"),
         "ev-tc": _ev_record(
-            uuid="ev-tc",
-            name="Tool call",
-            live_version_id="ver-tc",
-            evaluator_type=runner.TOOL_CALL_EVALUATOR_TYPE,
+            **{
+                "uuid": "ev-tc",
+                "name": "Tool call",
+                "live_version_id": "ver-tc",
+                "evaluator_type": runner.TOOL_CALL_EVALUATOR_TYPE,
+                **tc,
+            }
         ),
     }
     versions = {
         "ver-1": _version_record(),
-        "ver-tc": _version_record(uuid="ver-tc", evaluator_id="ev-tc"),
+        "ver-tc": _version_record(
+            uuid="ver-tc", evaluator_id="ev-tc", system_prompt=tc_prompt
+        ),
     }
     with patch(
         "annotation_eval_runner.get_evaluator", side_effect=lambda u: evaluators[u]
@@ -396,20 +401,342 @@ def _resolve_with_tool_call_evaluator(requested):
         side_effect=lambda u: versions[u],
     ):
         return runner._resolve_evaluator_dicts(
-            [{"evaluator_id": e} for e in requested], set(evaluators)
+            [{"evaluator_id": e} for e in requested], set(evaluators), task_type
         )
 
 
-def test_tool_call_evaluator_never_reaches_calibrate_payload():
-    resolved = _resolve_with_tool_call_evaluator(["ev-1", "ev-tc"])
+NOTHING_TO_RUN = (
+    "None of the selected evaluators can run a judge on this task. A tool-call "
+    "evaluator needs a prompt, and runs only on llm and llm-general tasks."
+)
+
+
+@pytest.mark.parametrize("prompt", ["", "   "])
+def test_blank_prompt_tool_call_evaluator_never_reaches_calibrate_payload(prompt):
+    resolved = _resolve_with_tool_call_evaluator(["ev-1", "ev-tc"], tc_prompt=prompt)
     assert [ev["uuid"] for ev in resolved] == ["ev-1"]
     payload = runner.build_evaluator_cli_payload_unrendered(resolved)
     assert [p["name"] for p in payload] == ["Safety"]
 
 
-def test_resolve_rejects_only_tool_call_evaluators():
-    with pytest.raises(runner.EvaluatorResolutionError):
+def test_resolve_rejects_only_blank_prompt_tool_call_evaluators():
+    with pytest.raises(runner.EvaluatorResolutionError) as e:
         _resolve_with_tool_call_evaluator(["ev-tc"])
+    assert str(e.value) == NOTHING_TO_RUN
+
+
+def test_resolve_leaves_out_tool_call_evaluator_with_no_version():
+    with pytest.raises(runner.EvaluatorResolutionError) as e:
+        _resolve_with_tool_call_evaluator(["ev-tc"], live_version_id=None)
+    assert str(e.value) == NOTHING_TO_RUN
+
+
+@pytest.mark.parametrize("task_type", ["llm", "llm-general"])
+def test_resolve_keeps_tool_call_evaluator_with_a_prompt(task_type):
+    resolved = _resolve_with_tool_call_evaluator(
+        ["ev-1", "ev-tc"], tc_prompt="Judge the calls", task_type=task_type
+    )
+    assert [ev["uuid"] for ev in resolved] == ["ev-1", "ev-tc"]
+    assert [ev["evaluator_type"] for ev in resolved] == ["llm", "tool-call"]
+    for build in (
+        runner.build_evaluator_cli_payload,
+        runner.build_evaluator_cli_payload_unrendered,
+    ):
+        assert all("evaluator_type" not in p for p in build(resolved))
+
+
+@pytest.mark.parametrize("task_type", ["stt", "tts", "conversation"])
+def test_resolve_leaves_out_tool_call_evaluator_on_other_task_types(task_type):
+    resolved = _resolve_with_tool_call_evaluator(
+        ["ev-1", "ev-tc"], tc_prompt="Judge the calls", task_type=task_type
+    )
+    assert [ev["uuid"] for ev in resolved] == ["ev-1"]
+    with pytest.raises(runner.EvaluatorResolutionError) as e:
+        _resolve_with_tool_call_evaluator(
+            ["ev-tc"], tc_prompt="Judge the calls", task_type=task_type
+        )
+    assert str(e.value) == NOTHING_TO_RUN
+
+
+REPLY_EV = {"uuid": "ev-1", "name": "Reply judge", "evaluator_type": "llm"}
+TOOL_EV = {"uuid": "ev-tc", "name": "Tool judge", "evaluator_type": "tool-call"}
+CALL_X = {"tool": "search", "arguments": {"q": "x"}}
+CALL_Y = {"tool": "search", "arguments": {"q": "y"}}
+
+
+def test_evaluators_for_item_pairs_each_kind_of_row():
+    evs = [REPLY_EV, TOOL_EV]
+    assert runner.evaluators_for_item(TC_ROW, evs) == [TOOL_EV]
+    assert runner.evaluators_for_item(TEXT_ROW, evs) == [REPLY_EV]
+    assert runner.evaluators_for_item(TC_ROW, [REPLY_EV]) == []
+    assert runner.evaluators_for_item(TEXT_ROW, [TOOL_EV]) == []
+
+
+def _llm_tool_row(**payload):
+    row = runner._build_llm_dataset(
+        [{"uuid": "tc", "payload": {"chat_history": [], **payload}}], [TOOL_EV]
+    )
+    assert len(row) == 1
+    return row[0]
+
+
+def test_build_llm_tool_call_row_with_expected_calls():
+    assert runner._build_llm_dataset(
+        [
+            {
+                "uuid": "tc",
+                "payload": {
+                    "chat_history": [{"role": "user", "content": "find x", "label": "en"}],
+                    "agent_response": "",
+                    "actual_tool_calls": [CALL_X],
+                    "expected_tool_calls": [CALL_Y],
+                },
+            }
+        ],
+        [REPLY_EV, TOOL_EV],
+    ) == [
+        {
+            "test_case": {
+                "id": "tc",
+                "history": [{"role": "user", "content": "find x"}],
+                "evaluation": {"type": "response", "criteria": [{"name": "Tool judge"}]},
+            },
+            "output": {
+                "response": (
+                    'Tool calls made by the agent:\nsearch {"q": "x"}\n\n'
+                    'Expected tool calls:\nsearch {"q": "y"}'
+                ),
+                "tool_calls": [],
+            },
+        }
+    ]
+
+
+def test_build_llm_tool_call_row_without_expected_calls():
+    row = _llm_tool_row(agent_response="let me look", actual_tool_calls=[CALL_X])
+    assert row["output"] == {
+        "response": (
+            "Reply from the agent:\nlet me look\n\n"
+            'Tool calls made by the agent:\nsearch {"q": "x"}'
+        ),
+        "tool_calls": [],
+    }
+
+
+def test_build_llm_tool_call_row_with_tool_calls_only_and_no_reply():
+    row = _llm_tool_row(tool_calls=[CALL_X])
+    assert row["output"] == {
+        "response": 'Tool calls made by the agent:\nsearch {"q": "x"}',
+        "tool_calls": [],
+    }
+
+
+def test_build_llm_tool_call_row_where_the_agent_made_no_calls():
+    row = _llm_tool_row(
+        agent_response={"content": "I cannot"},
+        actual_tool_calls=[],
+        expected_tool_calls=[CALL_Y],
+        tool_calls=[CALL_X],
+    )
+    assert row["output"]["response"] == (
+        "Reply from the agent:\nI cannot\n\n"
+        "The agent made no tool calls.\n\n"
+        'Expected tool calls:\nsearch {"q": "y"}'
+    )
+
+
+def test_build_llm_tool_call_row_writes_earlier_calls_into_history():
+    row = _llm_tool_row(
+        chat_history=[
+            {"role": "user", "content": "find x"},
+            {"role": "assistant", "content": "", "tool_calls": [CALL_X]},
+            {"role": "tool", "content": "found", "tool_call_id": "1"},
+        ],
+        actual_tool_calls=[CALL_Y],
+    )
+    assert row["test_case"]["history"] == [
+        {"role": "user", "content": "find x"},
+        {"role": "assistant", "content": '[Tool Call] search {"q": "x"}'},
+        {"role": "tool", "content": "found"},
+    ]
+
+
+def test_build_llm_tool_call_row_needs_history():
+    with pytest.raises(runner.DatasetBuildError):
+        runner._build_llm_dataset(
+            [{"uuid": "tc", "payload": {"actual_tool_calls": [CALL_X]}}], [TOOL_EV]
+        )
+
+
+@pytest.mark.parametrize(
+    "calls",
+    [
+        {"expected_tool_calls": [], "tool_calls": "search(x)"},
+        {"actual_tool_calls": [], "expected_tool_calls": "search(x)"},
+    ],
+)
+def test_build_llm_tool_call_row_rejects_calls_that_are_not_a_list(calls):
+    with pytest.raises(runner.DatasetBuildError):
+        _llm_tool_row(**calls)
+
+
+def test_build_llm_reply_row_is_unchanged_beside_a_tool_call_evaluator():
+    tool_calls = [{"tool": "t"}]
+    assert runner._build_llm_dataset(
+        [
+            {
+                "uuid": "r",
+                "payload": {
+                    "chat_history": [
+                        {"role": "assistant", "content": "", "tool_calls": [CALL_X]}
+                    ],
+                    "agent_response": "hi",
+                    "tool_calls": tool_calls,
+                },
+            }
+        ],
+        [REPLY_EV, TOOL_EV],
+    ) == [
+        {
+            "test_case": {
+                "id": "r",
+                "history": [
+                    {"role": "assistant", "content": "", "tool_calls": [CALL_X]}
+                ],
+                "evaluation": {"type": "response", "criteria": [{"name": "Reply judge"}]},
+            },
+            "output": {"response": "hi", "tool_calls": tool_calls},
+        }
+    ]
+
+
+def test_build_llm_mixed_task_gives_each_row_only_its_evaluators():
+    variables = {"ev-1": {"a": 1}, "ev-tc": {"b": 2}}
+    out = runner._build_llm_dataset(
+        [
+            {
+                "uuid": "r",
+                "payload": {
+                    "chat_history": [],
+                    "agent_response": "hi",
+                    "evaluator_variables": variables,
+                },
+            },
+            {
+                "uuid": "tc",
+                "payload": {
+                    "chat_history": [],
+                    "actual_tool_calls": [CALL_X],
+                    "evaluator_variables": variables,
+                },
+            },
+        ],
+        [REPLY_EV, TOOL_EV],
+    )
+    assert {r["test_case"]["id"]: r["test_case"]["evaluation"]["criteria"] for r in out} == {
+        "r": [{"name": "Reply judge", "arguments": {"a": 1}}],
+        "tc": [{"name": "Tool judge", "arguments": {"b": 2}}],
+    }
+
+
+def test_build_llm_general_tool_call_row_output_text():
+    assert runner._build_llm_general_dataset(
+        [
+            {
+                "uuid": "tc",
+                "payload": {
+                    "input": "find x",
+                    "output": "let me look",
+                    "actual_tool_calls": [CALL_X],
+                    "expected_tool_calls": [CALL_Y],
+                },
+            }
+        ],
+        [TOOL_EV],
+    ) == [
+        {
+            "id": "tc",
+            "input": "find x",
+            "output": (
+                "Reply from the agent:\nlet me look\n\n"
+                'Tool calls made by the agent:\nsearch {"q": "x"}\n\n'
+                'Expected tool calls:\nsearch {"q": "y"}'
+            ),
+        }
+    ]
+
+
+def test_build_llm_general_tool_call_row_without_output_uses_tool_calls():
+    out = runner._build_llm_general_dataset(
+        [{"uuid": "tc", "payload": {"input": "i", "tool_calls": [CALL_X]}}], [TOOL_EV]
+    )
+    assert out[0]["output"] == 'Tool calls made by the agent:\nsearch {"q": "x"}'
+
+
+def test_build_llm_general_tool_call_row_still_needs_input():
+    with pytest.raises(runner.DatasetBuildError):
+        runner._build_llm_general_dataset(
+            [{"uuid": "tc", "payload": {"actual_tool_calls": [CALL_X]}}], [TOOL_EV]
+        )
+
+
+def test_build_llm_general_mixed_task_names_only_the_rows_evaluators():
+    variables = {"ev-1": {"a": 1}, "ev-tc": {"b": 2}}
+    out = runner._build_llm_general_dataset(
+        [
+            {
+                "uuid": "r",
+                "payload": {"input": "i", "output": "o", "evaluator_variables": variables},
+            },
+            {
+                "uuid": "tc",
+                "payload": {
+                    "input": "i",
+                    "tool_calls": [CALL_X],
+                    "evaluator_variables": variables,
+                },
+            },
+        ],
+        [REPLY_EV, TOOL_EV],
+    )
+    assert {r["id"]: r["arguments"] for r in out} == {
+        "r": {"Reply judge": {"a": 1}},
+        "tc": {"Tool judge": {"b": 2}},
+    }
+
+
+def test_build_llm_general_skips_rows_with_no_evaluator():
+    assert runner._build_llm_general_dataset([TC_ROW], [REPLY_EV]) == []
+
+
+def test_parse_llm_general_drops_scores_that_do_not_pair_with_their_row(tmp_path):
+    # calibrate general runs every evaluator on every row.
+    (tmp_path / "config.json").write_text(
+        json.dumps({"evaluators_map": {"ev-1": "Reply", "ev-tc": "Tool"}})
+    )
+    (tmp_path / "results.csv").write_text(
+        "id,input,output,Reply,Reply_reasoning,Tool,Tool_reasoning\n"
+        "r,i,o,1,ok,0,no\n"
+        "tc,i,o,0,no,1,ok\n"
+    )
+    evs = [
+        {**_ev_resolved("ev-1", "Reply"), "evaluator_type": "llm"},
+        {**_ev_resolved("ev-tc", "Tool"), "evaluator_type": "tool-call"},
+    ]
+    runs = runner.parse_results_for_task_type(
+        "llm-general",
+        tmp_path,
+        evs,
+        "job-1",
+        items=[
+            {"uuid": "r", "payload": {"input": "i", "output": "o"}},
+            {"uuid": "tc", "payload": {"input": "i", "actual_tool_calls": [CALL_X]}},
+        ],
+    )
+    assert sorted((r["item_id"], r["evaluator_id"], r["value"]["value"]) for r in runs) == [
+        ("r", "ev-1", True),
+        ("tc", "ev-tc", True),
+    ]
 
 
 def test_build_llm_general_dataset_no_evaluators():
@@ -989,7 +1316,11 @@ def test_parse_results_for_task_type_dispatch_llm_general(tmp_path):
         "id,input,output,Safety,Safety_reasoning\ni1,in1,out1,1,ok\n"
     )
     runs = runner.parse_results_for_task_type(
-        "llm-general", tmp_path, [_ev_resolved()], "job-1"
+        "llm-general",
+        tmp_path,
+        [_ev_resolved()],
+        "job-1",
+        items=[{"uuid": "i1", "payload": {"input": "in1", "output": "out1"}}],
     )
     assert len(runs) == 1
     assert runs[0]["value"]["value"] is True
@@ -1089,6 +1420,28 @@ def test_queue_starter_no_evaluators():
         runner._start_annotation_eval_job_from_queue(
             {"uuid": "j-1", "user_id": "u-1", "details": {"task_id": "t-1"}}
         )
+
+
+def test_queue_starter_resolves_with_the_tasks_type():
+    with patch(
+        "db.get_evaluators_for_annotation_task", return_value=[{"uuid": "ev-1"}]
+    ), patch(
+        "annotation_eval_runner.get_annotation_task",
+        return_value={"type": "llm-general"},
+    ), patch(
+        "annotation_eval_runner._resolve_evaluator_dicts",
+        return_value=[_ev_resolved()],
+    ) as resolve, patch(
+        "annotation_eval_runner.start_annotation_eval_job"
+    ):
+        runner._start_annotation_eval_job_from_queue(
+            {
+                "uuid": "j-1",
+                "user_id": "u-1",
+                "details": {"task_id": "t-1", "evaluators": [{"evaluator_id": "ev-1"}]},
+            }
+        )
+    assert resolve.call_args.args[2] == "llm-general"
 
 
 def test_queue_starter_happy_path():

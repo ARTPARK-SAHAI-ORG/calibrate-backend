@@ -6,7 +6,9 @@ Anything touching the claim transaction lives in `test_trace_eval_claim.py`.
 
 from __future__ import annotations
 
+import json
 import random
+import sqlite3
 import uuid
 
 import pytest
@@ -38,8 +40,8 @@ def _ev(evaluator_type, *, live=None, name="ev", ev_uuid=None):
     }
 
 
-def _version(version_uuid, *, variables=None):
-    return {"uuid": version_uuid, "variables": variables}
+def _version(version_uuid, *, variables=None, system_prompt="Judge it."):
+    return {"uuid": version_uuid, "variables": variables, "system_prompt": system_prompt}
 
 
 def test_conversation_agent_maps_to_response_llm():
@@ -114,6 +116,175 @@ def test_declares_variables_disqualifies():
     )
     assert result.eligible == []
     assert result.ineligible[0].reason == ts.IneligibleReason.DECLARES_VARIABLES
+
+
+@pytest.mark.parametrize("interaction_type", ["conversation", "general"])
+def test_a_tool_call_evaluator_with_a_prompt_is_eligible_on_both_agent_types(
+    interaction_type,
+):
+    live = str(uuid.uuid4())
+    ev = _ev("tool-call", live=live)
+    result = ts.resolve_trace_scoring(interaction_type, [(ev, _version(live))])
+    assert [p.evaluator_uuid for p in result.eligible] == [ev["uuid"]]
+    assert result.eligible[0].execution["evaluator_type"] == "tool-call"
+    assert result.ineligible == []
+
+
+@pytest.mark.parametrize("prompt", ["", "  \n", None])
+def test_a_tool_call_evaluator_with_a_blank_prompt_has_no_judge_prompt(prompt):
+    live = str(uuid.uuid4())
+    ev = _ev("tool-call", live=live)
+    result = ts.resolve_trace_scoring(
+        "conversation", [(ev, _version(live, system_prompt=prompt))]
+    )
+    assert result.eligible == []
+    assert result.ineligible[0].reason == ts.IneligibleReason.NO_JUDGE_PROMPT
+    assert result.skip_reason == "no_usable_evaluators"
+
+
+def test_tool_call_evaluator_checks_run_in_order():
+    live = str(uuid.uuid4())
+    no_live = _ev("tool-call", name="no-live")
+    blank_with_vars = _ev("tool-call", live=live, name="blank-vars")
+    with_vars = _ev("tool-call", live=live, name="vars")
+    result = ts.resolve_trace_scoring(
+        "conversation",
+        [
+            (no_live, None),
+            (blank_with_vars, _version(live, system_prompt="", variables=[{"name": "x"}])),
+            (with_vars, _version(live, variables=[{"name": "x"}])),
+        ],
+    )
+    assert {i.name: i.reason for i in result.ineligible} == {
+        "no-live": ts.IneligibleReason.NO_LIVE_VERSION,
+        "blank-vars": ts.IneligibleReason.NO_JUDGE_PROMPT,
+        "vars": ts.IneligibleReason.DECLARES_VARIABLES,
+    }
+
+
+def test_a_blank_prompt_only_disqualifies_a_tool_call_evaluator():
+    live = str(uuid.uuid4())
+    ev = _ev("llm", live=live)
+    result = ts.resolve_trace_scoring(
+        "conversation", [(ev, _version(live, system_prompt=""))]
+    )
+    assert len(result.eligible) == 1
+
+
+_NAMED_CALL = {"tool": "get_schedule", "arguments": {"weeks": 14}}
+
+
+@pytest.mark.parametrize(
+    ("output", "expected"),
+    [
+        ({"tool_calls": [_NAMED_CALL]}, True),
+        ({"response": None, "tool_calls": [_NAMED_CALL]}, True),
+        ({"response": "", "tool_calls": [_NAMED_CALL]}, True),
+        ({"response": "   ", "tool_calls": [_NAMED_CALL]}, True),
+        ({"response": "\n", "tool_calls": [_NAMED_CALL]}, False),
+        ({"response": "Week 14.", "tool_calls": [_NAMED_CALL]}, False),
+        ({"response": "", "tool_calls": [{"tool": ""}]}, False),
+        ({"response": "", "tool_calls": [{"arguments": {}}]}, False),
+        ({"response": "", "tool_calls": [{"tool": ""}, _NAMED_CALL]}, True),
+        ({"response": "", "tool_calls": []}, False),
+        ({"response": "", "tool_calls": None}, False),
+        ({"response": "Week 14."}, False),
+    ],
+)
+def test_is_tool_call_trace_agrees_with_the_output_type_filter(output, expected):
+    assert ts.is_tool_call_trace({"output": output}) is expected
+    with sqlite3.connect(":memory:") as conn:
+        in_sql = conn.execute(
+            f"SELECT {db.TRACE_OUTPUT_TYPE_SQL['tool_call']} FROM (SELECT ? AS output)",
+            (json.dumps(output),),
+        ).fetchone()[0]
+    assert bool(in_sql) is expected
+
+
+@pytest.mark.parametrize("trace", [{}, {"output": None}, {"output": "text"}])
+def test_is_tool_call_trace_reads_a_trace_with_no_output_object(trace):
+    assert ts.is_tool_call_trace(trace) is False
+
+
+def test_each_trace_gets_only_the_evaluators_for_its_kind():
+    tool_ev = {"uuid": "t", "evaluator_type": "tool-call"}
+    llm_ev = {"uuid": "l", "evaluator_type": "llm"}
+    tool_trace = {"output": {"tool_calls": [_NAMED_CALL]}}
+    reply_trace = {"output": {"response": "Week 14.", "tool_calls": [_NAMED_CALL]}}
+    assert ts.evaluators_for_trace(tool_trace, [tool_ev, llm_ev]) == [tool_ev]
+    assert ts.evaluators_for_trace(reply_trace, [tool_ev, llm_ev]) == [llm_ev]
+
+
+def test_a_conversation_tool_call_trace_sends_the_calls_as_the_reply():
+    history = [
+        {"role": "user", "content": "when?"},
+        {"role": "assistant", "tool_calls": [{"tool": "lookup", "arguments": {"a": 1}}]},
+        {"role": "user", "content": "and now?"},
+    ]
+    item = ts.build_dataset_item(
+        "run-1",
+        "response",
+        {"input": history, "output": {"response": " ", "tool_calls": [_NAMED_CALL]}},
+        [{"name": "Tools"}],
+    )
+    assert item["test_case"]["history"] == [
+        {"role": "user", "content": "when?"},
+        {"role": "assistant", "content": '[Tool Call] lookup {"a": 1}'},
+        {"role": "user", "content": "and now?"},
+    ]
+    assert item["output"] == {
+        "response": 'Tool calls made by the agent:\nget_schedule {"weeks": 14}',
+        "tool_calls": [],
+    }
+
+
+def test_a_general_tool_call_trace_sends_only_the_calls_as_the_reply():
+    item = ts.build_dataset_item(
+        "run-1",
+        "general",
+        {"input": "When?", "output": {"tool_calls": [_NAMED_CALL]}},
+        [{"name": "Tools"}],
+    )
+    assert item["test_case"]["input"] == "When?"
+    assert "history" not in item["test_case"]
+    assert item["output"] == {
+        "response": 'Tool calls made by the agent:\nget_schedule {"weeks": 14}',
+    }
+
+
+def test_a_reply_trace_with_tool_calls_is_sent_unchanged():
+    history = [
+        {"role": "assistant", "tool_calls": [{"tool": "lookup"}]},
+        {"role": "user", "content": "when?", "extra": 1},
+    ]
+    item = ts.build_dataset_item(
+        "run-1",
+        "response",
+        {"input": history, "output": {"response": "Week 14.", "tool_calls": [_NAMED_CALL]}},
+        [],
+    )
+    assert item["test_case"]["history"] == history
+    assert item["output"] == {"response": "Week 14.", "tool_calls": [_NAMED_CALL]}
+
+
+def test_the_evaluator_type_is_not_sent_to_the_cli():
+    live = str(uuid.uuid4())
+    ev = _ev("tool-call", live=live, name="Tools")
+    execution = ts.resolve_trace_scoring(
+        "conversation", [(ev, _version(live))]
+    ).eligible[0].execution
+    config, dataset, manifest = ts.build_eval_only_batch(
+        [
+            ts.PreparedRun(
+                {"uuid": "run-1"},
+                {"input": [], "output": {"tool_calls": [_NAMED_CALL]}},
+            )
+        ],
+        ts.BatchEvaluators(evaluation_type="response", hydrated=[execution]),
+    )
+    assert "evaluator_type" not in config["evaluators"][0]
+    assert dataset[0]["test_case"]["evaluation"]["criteria"] == [{"name": "Tools"}]
+    assert manifest == {"Tools": ev["uuid"]}
 
 
 def test_empty_variables_list_is_eligible():
@@ -610,7 +781,10 @@ def test_batch_invokes_the_cli_with_the_workspace_provider_env(monkeypatch, env)
     monkeypatch.setattr(ts, "_prepare_claimed_run", lambda r, now: ts.PreparedRun(r, {}))
     monkeypatch.setattr(
         ts, "resolve_batch_evaluators",
-        lambda agent_id: ts.BatchEvaluators(evaluation_type="response", hydrated=[]),
+        lambda agent_id: ts.BatchEvaluators(
+            evaluation_type="response",
+            hydrated=[{"uuid": "e1", "evaluator_type": "llm"}],
+        ),
     )
     monkeypatch.setattr(ts, "build_eval_only_batch", lambda prepared, ev: ({}, [], {}))
     monkeypatch.setattr(ts, "_swallow_settle", lambda *a, **k: None)

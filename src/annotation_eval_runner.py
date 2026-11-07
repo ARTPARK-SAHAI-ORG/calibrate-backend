@@ -45,13 +45,16 @@ from llm_judge import (
 )
 from utils import (
     utc_now,
+    TOOL_CALL_EVALUATOR_TYPE,
     TaskStatus,
     capture_exception_to_sentry,
     coerce_evaluator_score,
+    evaluators_fitting_row,
     download_file_from_s3,
     get_calibrate_agent_cli,
     get_s3_client,
     get_s3_output_config,
+    history_with_calls_as_text,
     is_job_timed_out,
     is_tool_call_row,
     judge_turn,
@@ -60,6 +63,7 @@ from utils import (
     normalize_stored_audio_path,
     register_job_starter,
     resolve_stored_audio_bucket_and_key,
+    tool_calls_as_text,
     try_start_queued_job,
     upload_file_to_s3,
     upload_top_level_files_to_s3,
@@ -111,17 +115,11 @@ ANNOTATION_EVAL_JOB_TYPE = "annotation-eval"
 # Task types whose annotation rows we know how to evaluate via the CLI's
 # --eval-only modes (or `calibrate general` for `llm-general`). Matches
 # db.ANNOTATION_TASK_TYPES — every creatable task type has a run path.
-# (Individual tool-call rows inside an llm/llm-general task are excluded from
-# a run entirely — see `is_tool_call_row` — but that is a per-row concern,
-# not a type.)
+# (A tool-call row inside an llm/llm-general task is a per-row concern, not a
+# type. See `evaluators_for_item`.)
 # `llm-general` (non-conversational input -> output) uses the dedicated
 # `calibrate general` command — see `_build_llm_general_dataset`.
 SUPPORTED_EVAL_TASK_TYPES = ("stt", "llm", "llm-general", "conversation", "tts")
-
-# `evaluators.evaluator_type` of the human-only "did the agent make the right
-# tool call" evaluator. No judge ever runs on it, so it is dropped before the
-# calibrate payload is built.
-TOOL_CALL_EVALUATOR_TYPE = "tool-call"
 
 
 def required_evaluator_ids_for_item(
@@ -137,6 +135,12 @@ def required_evaluator_ids_for_item(
     if is_tool_call_row(item):
         return {e for e in evaluator_ids if e in tool_call_evaluator_ids}
     return {e for e in evaluator_ids if e not in tool_call_evaluator_ids}
+
+
+def evaluators_for_item(
+    item: Dict[str, Any], evaluators_resolved: List[Dict[str, Any]]
+) -> List[Dict[str, Any]]:
+    return evaluators_fitting_row(evaluators_resolved, is_tool_call_row(item))
 
 
 logger = logging.getLogger(__name__)
@@ -195,15 +199,16 @@ class EvaluatorResolutionError(ValueError):
 def _resolve_evaluator_dicts(
     requested: List[Dict[str, Optional[str]]],
     linked_evaluator_uuids: set[str],
+    task_type: Optional[str],
 ) -> List[Dict[str, Any]]:
     """Combine each (evaluator_id, evaluator_version_id?) pair into a single dict
     that `build_evaluator_cli_payload` understands. Validates that every
     requested evaluator is linked to the task and the version belongs to it.
 
-    Tool-call evaluators are human-answered only, so they are dropped here,
-    the one choke point every launch path goes through. A request made up of
-    nothing else has nothing to judge and is rejected instead of starting an
-    empty CLI run."""
+    A tool-call evaluator is dropped here, the one choke point every launch
+    path goes through, when its version has a blank prompt (people answer it)
+    or the task type has no tool-call rows. A request left with nothing has
+    nothing to judge and is rejected instead of starting an empty CLI run."""
     resolved: List[Dict[str, Any]] = []
     for entry in requested:
         evaluator_id = entry.get("evaluator_id")
@@ -216,12 +221,15 @@ def _resolve_evaluator_dicts(
         evaluator = get_evaluator(evaluator_id)
         if not evaluator:
             raise EvaluatorResolutionError(f"Evaluator {evaluator_id} not found")
-        if evaluator.get("evaluator_type") == TOOL_CALL_EVALUATOR_TYPE:
+        is_tool_call = evaluator.get("evaluator_type") == TOOL_CALL_EVALUATOR_TYPE
+        if is_tool_call and task_type not in ("llm", "llm-general"):
             continue
         version_uuid = entry.get("evaluator_version_id") or evaluator.get(
             "live_version_id"
         )
         if not version_uuid:
+            if is_tool_call:
+                continue
             raise EvaluatorResolutionError(
                 f"Evaluator {evaluator_id} has no live version; pass evaluator_version_id"
             )
@@ -230,6 +238,8 @@ def _resolve_evaluator_dicts(
             raise EvaluatorResolutionError(
                 f"Version {version_uuid} does not belong to evaluator {evaluator_id}"
             )
+        if is_tool_call and not (version.get("system_prompt") or "").strip():
+            continue
         # `output_type`, `kind`, `data_type` are required identity columns on
         # the evaluator row (set at create time, backfilled by migration). A
         # missing value here means the row is malformed — surface it instead
@@ -258,14 +268,16 @@ def _resolve_evaluator_dicts(
                 "variable_values": {},
                 "kind": evaluator["kind"],
                 "data_type": evaluator["data_type"],
+                "evaluator_type": evaluator.get("evaluator_type"),
                 # extra fields for our own bookkeeping (not seen by CLI):
                 "_evaluator_version_id": version_uuid,
             }
         )
     if requested and not resolved:
         raise EvaluatorResolutionError(
-            "Every selected evaluator is a tool-call evaluator, which is "
-            "answered by a person; there is nothing for the judge to run on."
+            "None of the selected evaluators can run a judge on this task. "
+            "A tool-call evaluator needs a prompt, and runs only on llm and "
+            "llm-general tasks."
         )
     _dedupe_evaluator_names(resolved)
     return resolved
@@ -345,16 +357,33 @@ def _build_stt_dataset(items: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     return out
 
 
+def _tool_call_row_text(
+    it: Dict[str, Any], payload: Dict[str, Any], reply: Any
+) -> str:
+    actual = payload.get("actual_tool_calls")
+    if not isinstance(actual, list):
+        actual = payload.get("tool_calls")
+    expected = payload.get("expected_tool_calls")
+    if not isinstance(actual or [], list) or not isinstance(expected or [], list):
+        raise DatasetBuildError(
+            f"Item {it['uuid']}: tool calls must be a list if provided"
+        )
+    return tool_calls_as_text(actual, expected, reply)
+
+
 def _build_llm_dataset(
     items: List[Dict[str, Any]], evaluators_resolved: List[Dict[str, Any]]
 ) -> List[Dict[str, Any]]:
     """LLM --eval-only: [{test_case: {id, history, evaluation}, output: {response, tool_calls}}].
 
-    Annotation convention for payload (response-mode only — tool-call eval is
-    not exposed via this endpoint today):
+    Annotation convention for payload:
       { "chat_history": [...], "agent_response": "...", "tool_calls"?: [...],
         "evaluator_variables"?: { "<evaluator_uuid>": { "<var>": <value>, ... } } }
     `agent_response` may also be `{content, label?, versions?}`; the judge sees only `content`.
+
+    A tool-call row may also carry `expected_tool_calls` / `actual_tool_calls`,
+    and goes to the reply judge with its calls written out as text, in both the
+    response and the history. A row no resolved evaluator pairs with is left out.
 
     `evaluator_variables` lets each item supply per-evaluator `{{variable}}`
     values for evaluators whose prompts contain placeholders. Values are
@@ -366,29 +395,35 @@ def _build_llm_dataset(
     _require_evaluators(evaluators_resolved, "LLM --eval-only")
     out: List[Dict[str, Any]] = []
     for it in items:
-        # Tool-call rows have no text reply to judge — skip them; the runner
-        # records a skip message per row instead.
-        if is_tool_call_row(it):
+        row_evaluators = evaluators_for_item(it, evaluators_resolved)
+        if not row_evaluators:
             continue
         payload = _payload_dict(it)
         history = payload.get("chat_history")
         response = message_text(payload.get("agent_response"))
-        if not isinstance(history, list) or response is None:
+        row_is_tool_call = is_tool_call_row(it)
+        if not isinstance(history, list) or (response is None and not row_is_tool_call):
             raise DatasetBuildError(
                 f"Item {it['uuid']}: LLM items need `chat_history` (list) and "
                 "`agent_response` in payload"
             )
-        tool_calls = payload.get("tool_calls", [])
-        if not isinstance(tool_calls, list):
-            raise DatasetBuildError(
-                f"Item {it['uuid']}: `tool_calls` must be a list if provided"
-            )
-        criteria_refs = _criteria_refs_for_item(it, payload, evaluators_resolved)
+        turns = [judge_turn(t) for t in history]
+        if row_is_tool_call:
+            response = _tool_call_row_text(it, payload, response)
+            tool_calls = []
+            turns = history_with_calls_as_text(turns)
+        else:
+            tool_calls = payload.get("tool_calls", [])
+            if not isinstance(tool_calls, list):
+                raise DatasetBuildError(
+                    f"Item {it['uuid']}: `tool_calls` must be a list if provided"
+                )
+        criteria_refs = _criteria_refs_for_item(it, payload, row_evaluators)
         out.append(
             {
                 "test_case": {
                     "id": it["uuid"],
-                    "history": [judge_turn(t) for t in history],
+                    "history": turns,
                     "evaluation": {
                         "type": "response",
                         "criteria": criteria_refs,
@@ -471,21 +506,24 @@ def _build_llm_general_dataset(
     _require_evaluators(evaluators_resolved, "general eval")
     out: List[Dict[str, Any]] = []
     for it in items:
-        # Tool-call rows have no text output to judge — skip them; the runner
-        # records a skip message per row instead.
-        if is_tool_call_row(it):
+        row_evaluators = evaluators_for_item(it, evaluators_resolved)
+        if not row_evaluators:
             continue
         payload = _payload_dict(it)
         input_text = message_text(payload.get("input"))
         output_text = message_text(payload.get("output"))
-        if input_text is None or output_text is None:
+        row_is_tool_call = is_tool_call_row(it)
+        if input_text is None or (output_text is None and not row_is_tool_call):
             raise DatasetBuildError(
                 f"Item {it['uuid']}: llm-general items need `input` and "
                 "`output` in payload"
             )
+        if row_is_tool_call:
+            output_text = _tool_call_row_text(it, payload, output_text)
         # Identical per-evaluator resolution to the `llm` builder; just reshape
         # the criteria refs into general's name-keyed `arguments` map.
-        criteria_refs = _criteria_refs_for_item(it, payload, evaluators_resolved)
+        # ponytail: calibrate general runs every evaluator on every row, so a task with both kinds of row pays for judge calls parse_results_for_task_type discards. Split into two CLI runs if that cost matters.
+        criteria_refs = _criteria_refs_for_item(it, payload, row_evaluators)
         arguments = {
             ref["name"]: ref["arguments"]
             for ref in criteria_refs
@@ -832,9 +870,8 @@ def _parse_results_llm(
     """LLM outputs: <output_dir>/results.json — list of per-test-case results.
     Each entry is `{output, metrics, test_case, test_case_id?}`; per-row
     judgements live in `metrics.judge_results = {<name>: {reasoning, match|score}}`
-    (`match` for binary, `score` for rating). Tool-call evaluation is not
-    surfaced into evaluator_runs (this endpoint only runs response-mode
-    criteria evaluators)."""
+    (`match` for binary, `score` for rating). Tool-call rows arrive here like
+    any other row, since they are judged as replies."""
     p = output_dir / "results.json"
     if not p.exists():
         logger.warning(f"[annotation-eval] missing {p}")
@@ -1034,13 +1071,20 @@ def parse_results_for_task_type(
 ) -> List[Dict[str, Any]]:
     """Dispatch per task type. `items` (in dataset order) is required for
     simulation — calibrate uses internal `row_<i>` ids and we map back to
-    annotation_item.uuid via `dataset_map.json` + this list."""
+    annotation_item.uuid via `dataset_map.json` + this list. llm-general also
+    requires it, to decide which scores pair with their row."""
     if task_type == "stt":
         return _parse_results_stt(output_dir, evaluators_resolved, job_uuid)
     if task_type == "llm":
         return _parse_results_llm(output_dir, evaluators_resolved, job_uuid)
     if task_type == "llm-general":
-        return _parse_results_general(output_dir, evaluators_resolved, job_uuid)
+        runs = _parse_results_general(output_dir, evaluators_resolved, job_uuid)
+        paired = {
+            (it["uuid"], ev["uuid"])
+            for it in items or []
+            for ev in evaluators_for_item(it, evaluators_resolved)
+        }
+        return [r for r in runs if (r["item_id"], r["evaluator_id"]) in paired]
     if task_type == "conversation":
         return _parse_results_simulation(
             output_dir, evaluators_resolved, job_uuid, items=items
@@ -1421,6 +1465,13 @@ def _run_job(
                     task_type, output_dir, evaluators_resolved, job_uuid, items=items
                 )
                 metrics = _read_metrics_json(output_dir)
+                # calibrate general's means cover every evaluator on every row,
+                # including the pairings parsing just discarded.
+                if task_type == "llm-general" and {
+                    ev.get("evaluator_type") == TOOL_CALL_EVALUATOR_TYPE
+                    for ev in evaluators_resolved
+                } == {True, False}:
+                    metrics = None
                 # The finished files are the authority: anything stored in
                 # flight was read while calibrate was still appending, so its
                 # reasoning text may have been cut mid-write. Rewriting also
@@ -1545,7 +1596,8 @@ def _start_annotation_eval_job_from_queue(job_row: Dict[str, Any]) -> None:
         }
         for ref in evaluator_refs
     ]
-    resolved = _resolve_evaluator_dicts(requested, linked)
+    task = get_annotation_task(task_uuid) or {}
+    resolved = _resolve_evaluator_dicts(requested, linked, task.get("type"))
     start_annotation_eval_job(
         job_uuid=job_row["uuid"],
         task_uuid=task_uuid,
