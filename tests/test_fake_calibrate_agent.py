@@ -84,6 +84,12 @@ def test_run_llm_test_task_end_to_end_with_fake_cli():
     assert set(results["latency_ms"]) == {"p50", "p95", "p99", "count"}
     assert set(results["cost"]) == {"mean", "min", "max", "count"}
     assert set(results["total_tokens"]) == {"mean", "min", "max", "count"}
+    from calibrate_agent.llm.summary import wilson_interval
+
+    one_of_one = pytest.approx(wilson_interval(1, 1))
+    assert results["pass_rate"] == 100.0
+    assert results["pass_rate_ci"] == one_of_one
+    assert [e["ci"] for e in results["evaluator_summary"]] == [one_of_one]
     from routers.agent_tests import TestRunStatusResponse
 
     TestRunStatusResponse(
@@ -194,12 +200,53 @@ def test_run_benchmark_task_multi_model_end_to_end_with_fake_cli():
         assert set(by_model[m]["cost"]) == {"mean", "min", "max", "count"}
         assert set(by_model[m]["total_tokens"]) == {"mean", "min", "max", "count"}
     assert job["results"]["leaderboard_summary"], "leaderboard should be populated"
-    # The real CLI writes `(passed / total) * 100`, so an all-pass run is 100.0.
+    # The real CLI writes pass rates out of 100, so an all-pass run is 100.0.
     # A fake on a 0-1 scale would show a full pass rate as 1% in the UI.
+    from calibrate_agent.llm.summary import wilson_interval
+
+    one_of_one = pytest.approx(wilson_interval(1, 1))
     for m in models:
-        for aggregate in by_model[m]["evaluator_summary"] or []:
-            if aggregate.get("type") == "binary":
-                assert aggregate["pass_rate"] == 100.0
+        assert by_model[m]["pass_rate"] == 100.0
+        assert by_model[m]["pass_rate_ci"] == one_of_one
+        assert by_model[m]["evaluator_summary"]
+        for aggregate in by_model[m]["evaluator_summary"]:
+            assert aggregate["type"] == "binary"
+            assert aggregate["pass_rate"] == 100.0
+            assert aggregate["ci"] == one_of_one
+
+
+@pytest.mark.parametrize("cases", [1, 3])
+def test_fake_llm_ranges_match_what_calibrate_computes_over_its_rows(
+    tmp_path, cases
+):
+    """The fake writes its ranges without importing calibrate, so check them
+    against calibrate's own functions run over the rows the fake wrote."""
+    import json
+
+    from calibrate_agent.llm.summary import aggregate_criteria, pass_rate_summary
+
+    from testing.fake_calibrate_agent import _write_llm_model_dir
+
+    evaluators = [
+        {"name": "Right", "type": "binary", "id": "ev-b"},
+        {"name": "Tone", "type": "rating", "id": "ev-r", "scale_min": 1, "scale_max": 5},
+    ]
+    criteria = [{"name": "Right"}, {"name": "Tone"}]
+    test_cases = [
+        {"id": f"t{i}", "evaluation": {"type": "response", "criteria": criteria}}
+        for i in range(cases)
+    ]
+    _write_llm_model_dir(tmp_path, test_cases, evaluators)
+
+    rows = json.loads((tmp_path / "results.json").read_text())
+    metrics = json.loads((tmp_path / "metrics.json").read_text())
+    expected_run = pass_rate_summary(rows)
+    assert metrics["pass_rate"] == expected_run["pass_rate"]
+    assert metrics["pass_rate_ci"] == pytest.approx(expected_run["pass_rate_ci"])
+
+    expected = aggregate_criteria(rows, {ev["name"]: ev for ev in evaluators})
+    assert metrics["criteria"]["Right"]["ci"] == pytest.approx(expected["Right"]["ci"])
+    assert metrics["criteria"]["Tone"]["ci"] == expected["Tone"]["ci"] is None
 
 
 def _make_eval_job(job_type, details):
@@ -995,3 +1042,13 @@ def test_demo_metrics_count_passes_from_the_case_verdicts(tmp_path, monkeypatch)
     metrics = json.loads((folder / "metrics.json").read_text())
     assert metrics["passed"] == 1
     assert metrics["latency_ms"]["p50"] == bm["latency_ms"]
+
+
+@pytest.mark.parametrize("passed,total", [(0, 0), (0, 20), (15, 20), (19, 20), (5, 5)])
+def test_fake_ranges_match_calibrate_with_failures(passed, total):
+    from calibrate_agent.llm.summary import mean_interval, wilson_interval
+    from testing import fake_calibrate_agent as fake
+
+    assert fake._wilson_range(passed, total) == pytest.approx(wilson_interval(passed, total))
+    scores = [5] * passed + [2] * (total - passed)
+    assert fake._mean_range(scores, 1, 5) == pytest.approx(mean_interval(scores, 1, 5))

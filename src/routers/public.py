@@ -65,7 +65,11 @@ from routers.agent_tests import (
     _enrich_model_results_with_evaluators,
     _build_evaluators_block_for_test_run,
     _summarize_case_rows,
-    evaluator_totals_from_rows,
+    fill_run_summaries,
+    ConfidenceInterval,
+    PASS_RATE_DESCRIPTION,
+    PASS_RATE_CI_DESCRIPTION,
+    EVALUATOR_SUMMARY_DESCRIPTION,
     test_uuid_by_calibrate_id,
     _tool_call_evaluator_for_run,
     _RunDetailMode,
@@ -184,9 +188,12 @@ class PublicTestRunResponse(BaseModel):
         None,
         description="Shared evaluator definitions, each with its name, description, output type, and rubric. Rows reference these by evaluator ID",
     )
+    pass_rate: Optional[float] = Field(None, description=PASS_RATE_DESCRIPTION)
+    pass_rate_ci: Optional[ConfidenceInterval] = Field(
+        None, description=PASS_RATE_CI_DESCRIPTION
+    )
     evaluator_summary: Optional[List[Dict[str, Any]]] = Field(
-        None,
-        description="Totals for each evaluator over the whole run, matching the shape a benchmark reports for each model. Only evaluators that returned a verdict appear",
+        None, description=EVALUATOR_SUMMARY_DESCRIPTION
     )
     results: Optional[List[Dict[str, Any]]] = Field(
         None, description="Results for each test case"
@@ -652,6 +659,7 @@ def get_public_test_run(
 
     evaluators_snapshot = details.get("evaluators_by_test_id") or {}
     evaluator_cache: Dict[str, Optional[Dict[str, Any]]] = {}
+    fill_run_summaries(results, details, evaluator_cache)
     tool_call_evaluator = _tool_call_evaluator_for_run(details)
     _enrich_test_results_with_evaluators(
         results.get("test_results"),
@@ -667,10 +675,6 @@ def get_public_test_run(
         tool_call_evaluator=tool_call_evaluator,
     )
 
-    evaluator_summary = evaluator_totals_from_rows(
-        results.get("test_results"), evaluators_block, evaluators_snapshot
-    )
-
     if mode == "summary":
         _summarize_case_rows(results.get("test_results"))
 
@@ -682,7 +686,9 @@ def get_public_test_run(
         passed=results.get("passed"),
         failed=results.get("failed"),
         evaluators=evaluators_block or None,
-        evaluator_summary=evaluator_summary,
+        pass_rate=results.get("pass_rate"),
+        pass_rate_ci=results.get("pass_rate_ci"),
+        evaluator_summary=results.get("evaluator_summary"),
         results=results.get("test_results"),
         latency_ms=results.get("latency_ms"),
         cost=results.get("cost"),
@@ -711,6 +717,7 @@ def get_public_benchmark(
 
     evaluators_snapshot = details.get("evaluators_by_test_id") or {}
     evaluator_cache: Dict[str, Optional[Dict[str, Any]]] = {}
+    fill_run_summaries(results, details, evaluator_cache)
     tool_call_evaluator = _tool_call_evaluator_for_run(details)
     _enrich_model_results_with_evaluators(
         results.get("model_results"),
