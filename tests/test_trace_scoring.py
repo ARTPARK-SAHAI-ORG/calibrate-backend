@@ -607,10 +607,10 @@ def test_batch_invokes_the_cli_with_the_workspace_provider_env(monkeypatch, env)
         return ts.EvalOnlyCliResult(returncode=0, timed_out=False, results=[])
 
     monkeypatch.setattr(provider_keys, "provider_env", fake_env)
-    monkeypatch.setattr(ts, "_prepare_claimed_run", lambda r, now: ts.PreparedRun(r, {}))
+    monkeypatch.setattr(ts, "_prepare_claimed_run", lambda r, now: ts.PreparedRun(r, {"output": {"response": "hi"}}))
     monkeypatch.setattr(
         ts, "resolve_batch_evaluators",
-        lambda agent_id: ts.BatchEvaluators(evaluation_type="response", hydrated=[]),
+        lambda agent_id: ts.BatchEvaluators(evaluation_type="response", hydrated=[{"uuid": "e1"}]),
     )
     monkeypatch.setattr(ts, "build_eval_only_batch", lambda prepared, ev: ({}, [], {}))
     monkeypatch.setattr(ts, "_swallow_settle", lambda *a, **k: None)
@@ -641,3 +641,224 @@ def test_invoke_eval_only_cli_passes_env_to_the_subprocess(monkeypatch):
     ts.invoke_eval_only_cli({}, [], env={"OPENAI_API_KEY": "sk-org"})
 
     assert seen["env"] == {"OPENAI_API_KEY": "sk-org"}
+
+
+_FULL_TRACE = {
+    "input": [
+        {"role": "user", "content": "Is a fever normal?"},
+        {"role": "assistant", "tool_calls": [{"id": "1"}]},
+        {"role": "assistant", "content": "Sometimes."},
+    ],
+    "output": {
+        "response": "Yes, after a vaccine.",
+        "tool_calls": [{"tool": "lookup", "arguments": {"q": "बुखार"}}],
+    },
+    "labels": ["prod", "hindi"],
+    "conversation_id": "conv-1",
+    "message_id": "msg-1",
+    "metadata": [
+        {"key": "expert_answer", "value": "Give fluids."},
+        {"key": "expert_answer", "value": "A later entry."},
+        {"key": "a.b", "value": "dotted"},
+        {"key": "blank", "value": "   "},
+    ],
+}
+
+
+@pytest.mark.parametrize(
+    "source,expected",
+    [
+        ("input", "user: Is a fever normal?\nassistant: Sometimes."),
+        ("output.response", "Yes, after a vaccine."),
+        ("output.tool_calls", '[{"tool": "lookup", "arguments": {"q": "बुखार"}}]'),
+        ("labels", "prod, hindi"),
+        ("conversation_id", "conv-1"),
+        ("message_id", "msg-1"),
+        ("metadata.expert_answer", "Give fluids."),
+        ("metadata.a.b", "dotted"),
+        ("metadata.blank", None),
+        ("metadata.absent", None),
+        ("unknown", None),
+    ],
+)
+def test_trace_variable_value_reads_each_source(source, expected):
+    assert ts.trace_variable_value(_FULL_TRACE, source) == expected
+
+
+def test_trace_variable_value_keeps_a_string_input():
+    assert ts.trace_variable_value({"input": "Summarize"}, "input") == "Summarize"
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        "input",
+        "output.response",
+        "output.tool_calls",
+        "labels",
+        "conversation_id",
+        "message_id",
+        "metadata.expert_answer",
+    ],
+)
+@pytest.mark.parametrize(
+    "trace",
+    [
+        {},
+        {
+            "input": "  ",
+            "output": {"response": " \n", "tool_calls": []},
+            "labels": [],
+            "conversation_id": None,
+            "message_id": " ",
+            "metadata": None,
+        },
+        {"input": [{"role": "user"}], "output": None, "metadata": []},
+    ],
+)
+def test_trace_variable_value_reads_absent_and_blank_as_none(trace, source):
+    assert ts.trace_variable_value(trace, source) is None
+
+
+@pytest.mark.parametrize(
+    "source,valid",
+    [
+        ("input", True),
+        ("output.response", True),
+        ("output.tool_calls", True),
+        ("labels", True),
+        ("conversation_id", True),
+        ("message_id", True),
+        ("metadata.expert_answer", True),
+        ("metadata.a.b", True),
+        ("metadata.", False),
+        ("metadata", False),
+        ("output", False),
+        ("", False),
+    ],
+)
+def test_is_trace_variable_source(source, valid):
+    assert ts.is_trace_variable_source(source) is valid
+
+
+def _mapped_pair(variables, mapping, *, prompt="Compare {{nurse_reply}}.", name="ev"):
+    live = str(uuid.uuid4())
+    ev = {**_ev("llm", live=live, name=name), "trace_variables": mapping}
+    return ev, {
+        "uuid": live,
+        "variables": [{"name": v} for v in variables],
+        "system_prompt": prompt,
+        "judge_model": "m",
+    }
+
+
+@pytest.mark.parametrize(
+    "variables,mapping,eligible",
+    [
+        (["nurse_reply"], {}, False),
+        (["nurse_reply"], {"nurse_reply": "metadata.expert_answer"}, True),
+        (["nurse_reply", "ai_reply"], {"nurse_reply": "metadata.expert_answer"}, False),
+        ([], {}, True),
+    ],
+)
+def test_a_variable_with_no_mapping_is_what_disqualifies(variables, mapping, eligible):
+    result = ts.resolve_trace_scoring(
+        "conversation", [_mapped_pair(variables, mapping)]
+    )
+    assert bool(result.eligible) is eligible
+    assert [r.reason for r in result.ineligible] == (
+        [] if eligible else [ts.IneligibleReason.DECLARES_VARIABLES]
+    )
+
+
+def test_a_missing_mapping_key_reads_as_no_mapping():
+    live = str(uuid.uuid4())
+    result = ts.resolve_trace_scoring(
+        "conversation",
+        [(_ev("llm", live=live), _version(live, variables=[{"name": "x"}]))],
+    )
+    assert result.ineligible[0].reason == ts.IneligibleReason.DECLARES_VARIABLES
+
+
+def test_execution_keeps_only_declared_mappings_and_tidies_placeholders():
+    pair = _mapped_pair(
+        ["nurse_reply"],
+        {"nurse_reply": "metadata.expert_answer", "gone": "labels"},
+        prompt="Compare {{ nurse_reply }} and {{nurse_reply}}.",
+    )
+    execution = ts.resolve_trace_scoring("conversation", [pair]).eligible[0].execution
+    assert execution["trace_variables"] == {"nurse_reply": "metadata.expert_answer"}
+    assert execution["system_prompt"] == "Compare {{nurse_reply}} and {{nurse_reply}}."
+
+
+def test_execution_has_an_empty_mapping_without_variables():
+    execution = (
+        ts.resolve_trace_scoring("conversation", [_mapped_pair([], {"stale": "labels"})])
+        .eligible[0]
+        .execution
+    )
+    assert execution["trace_variables"] == {}
+
+
+def _two_run_batch():
+    """Two evaluators, one needing `expert_answer`, and two traces, one holding it."""
+    resolution = ts.resolve_trace_scoring(
+        "conversation",
+        [
+            _mapped_pair(
+                ["nurse_reply"],
+                {"nurse_reply": "metadata.expert_answer"},
+                name="Matches nurse",
+            ),
+            _mapped_pair([], {}, prompt="Is it polite?", name="Polite"),
+        ],
+    )
+    reply = {"response": "hello"}
+    turns = [{"role": "user", "content": "hi"}]
+    prepared = [
+        ts.PreparedRun(
+            run={"uuid": "with-answer"},
+            trace={
+                "input": turns,
+                "output": reply,
+                "metadata": [{"key": "expert_answer", "value": "Give fluids."}],
+            },
+        ),
+        ts.PreparedRun(
+            run={"uuid": "without-answer"},
+            trace={"input": turns, "output": reply, "metadata": None},
+        ),
+    ]
+    evaluators = ts.BatchEvaluators(
+        evaluation_type="response", hydrated=[e.execution for e in resolution.eligible]
+    )
+    return ts.build_eval_only_batch(prepared, evaluators)
+
+
+def test_each_dataset_row_carries_only_the_evaluators_its_trace_can_fill():
+    config, dataset, _ = _two_run_batch()
+    assert sorted(ev["name"] for ev in config["evaluators"]) == ["Matches nurse", "Polite"]
+    assert all("trace_variables" not in ev for ev in config["evaluators"])
+    with_answer, without_answer = (
+        row["test_case"]["evaluation"]["criteria"] for row in dataset
+    )
+    assert with_answer == [
+        {"name": "Matches nurse", "arguments": {"nurse_reply": "Give fluids."}},
+        {"name": "Polite"},
+    ]
+    assert without_answer == [{"name": "Polite"}]
+
+
+def test_the_real_cli_fills_the_prompt_from_the_row_arguments():
+    from calibrate_agent.llm.run_tests import (
+        _get_name_to_evaluator_dict,
+        _resolve_evaluators_for_test_case,
+    )
+
+    config, dataset, _ = _two_run_batch()
+    rendered = _resolve_evaluators_for_test_case(
+        dataset[0]["test_case"]["evaluation"], _get_name_to_evaluator_dict(config)
+    )
+    prompts = {ev["name"]: ev["system_prompt"] for ev in rendered}
+    assert "Give fluids." in prompts["Matches nurse"]
+    assert "{{" not in prompts["Matches nurse"]

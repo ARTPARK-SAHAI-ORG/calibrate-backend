@@ -502,6 +502,24 @@ def test_trace_scoring_claim_and_settle_end_to_end_with_fake_cli(
     )
     db.set_evaluator_live_version(ev_uuid, version["uuid"])
     db.add_evaluator_to_agent(agent_uuid, ev_uuid)
+    mapped_uuid = db.create_evaluator(
+        name=f"nurse-{os.urandom(4).hex()}",
+        evaluator_type=evaluator_type,
+        output_type="binary",
+        owner_user_id=user_uuid,
+        org_uuid=org_uuid,
+    )
+    mapped_version = db.create_evaluator_version(
+        mapped_uuid,
+        judge_model="m",
+        system_prompt="compare with {{nurse_reply}}",
+        variables=[{"name": "nurse_reply"}],
+    )
+    db.set_evaluator_live_version(mapped_uuid, mapped_version["uuid"])
+    db.add_evaluator_to_agent(agent_uuid, mapped_uuid)
+    db.set_agent_evaluator_trace_variables(
+        agent_uuid, mapped_uuid, {"nurse_reply": "metadata.expert_answer"}
+    )
 
     agent = db.get_agent(agent_uuid)
     row = db.create_trace_with_eval_run(
@@ -510,6 +528,7 @@ def test_trace_scoring_claim_and_settle_end_to_end_with_fake_cli(
         max_scored_traces=1_000_000,
         batch_size=20,
         wait_seconds=0,
+        metadata=[{"key": "expert_answer", "value": "Give fluids."}],
         **trace,
     )
 
@@ -528,10 +547,13 @@ def test_trace_scoring_claim_and_settle_end_to_end_with_fake_cli(
     settled = db.get_trace_eval_run(run["uuid"])
     assert settled["status"] == ts.TraceEvalRunStatus.COMPLETED.value, settled["error"]
     scores = db.get_trace_eval_scores(run["uuid"])
-    assert [(s["evaluator_uuid"], s["value"], s["output_type"]) for s in scores] == [
-        (ev_uuid, 1, "binary")
-    ]
-    assert scores[0]["evaluator_version_id"] == version["uuid"]
+    assert {
+        (s["evaluator_uuid"], s["evaluator_version_id"], s["value"], s["output_type"])
+        for s in scores
+    } == {
+        (ev_uuid, version["uuid"], 1, "binary"),
+        (mapped_uuid, mapped_version["uuid"], 1, "binary"),
+    }
 
 
 def test_provider_status_run_check_short_circuits_under_flag():

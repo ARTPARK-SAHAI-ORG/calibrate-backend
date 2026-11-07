@@ -3,7 +3,7 @@ import json
 import logging
 from dataclasses import asdict
 from datetime import datetime, timezone
-from typing import Optional, List, Dict, Any, Literal
+from typing import Annotated, Optional, List, Dict, Any, Literal
 from fastapi import APIRouter, HTTPException, Depends, Path, Body
 from pagination import (
     OptionalPaginationParams,
@@ -15,7 +15,7 @@ from pagination import (
 
 _AgentSearch = make_search_params(searchable=["name"])
 _AgentEvaluatorSearch = make_search_params(searchable=["name"])
-from pydantic import BaseModel, Field
+from pydantic import AfterValidator, BaseModel, Field
 from calibrate_agent.connections import TextAgentConnection
 
 from utils import (
@@ -48,8 +48,15 @@ from db import (
     add_evaluator_to_agent,
     remove_evaluator_from_agent,
     resolve_live_evaluators,
+    set_agent_evaluator_trace_variables,
+    get_trace,
 )
-from trace_scoring import IneligibleReason, resolve_trace_scoring
+from trace_scoring import (
+    IneligibleReason,
+    is_trace_variable_source,
+    resolve_trace_scoring,
+    trace_variable_value,
+)
 from auth_utils import get_current_org, get_org_jwt_or_api_key, OrgContext
 from org_scope import ensure_owned_agent, ensure_owned_evaluator
 
@@ -519,7 +526,7 @@ class TraceScoringIneligibleEvaluator(BaseModel):
             "Why this evaluator cannot score traces for this agent:\n\n"
             f"- `{IneligibleReason.WRONG_TYPE}`: its type does not match the agent's interaction type\n"
             f"- `{IneligibleReason.NO_LIVE_VERSION}`: it has no live version to run\n"
-            f"- `{IneligibleReason.DECLARES_VARIABLES}`: its live version defines prompt variables that cannot be filled"
+            f"- `{IneligibleReason.DECLARES_VARIABLES}`: it has a variable in its live version with no trace value chosen"
         )
     )
 
@@ -588,6 +595,69 @@ class EvaluatorLinkResponse(BaseModel):
     )
     already_linked: List[str] = Field(
         description="Evaluator IDs skipped because they were already linked"
+    )
+
+
+def _sources_are_trace_parts(value: Dict[str, str]) -> Dict[str, str]:
+    bad = [source for source in value.values() if not is_trace_variable_source(source)]
+    if bad:
+        raise ValueError(f"Not a part of a trace: {', '.join(bad)}")
+    return value
+
+
+TraceVariableMap = Annotated[Dict[str, str], AfterValidator(_sources_are_trace_parts)]
+
+_TRACE_VARIABLES_DESCRIPTION = (
+    "Which part of a trace fills each variable, keyed by variable name. Each value is one of:\n\n"
+    "- `input`: the trace's input\n"
+    "- `output.response`: the agent's reply\n"
+    "- `output.tool_calls`: the tool calls the agent issued\n"
+    "- `labels`: the trace's labels\n"
+    "- `conversation_id`: the conversation ID sent with the trace\n"
+    "- `message_id`: the message ID sent with the trace\n"
+    "- `metadata.<key>`: the metadata entry with that key"
+)
+_TRACE_VARIABLES_EXAMPLE = {"nurse_reply": "metadata.expert_answer", "ai_reply": "output.response"}
+
+
+class TraceVariablesRequest(BaseModel):
+    trace_variables: TraceVariableMap = Field(
+        description=(
+            f"{_TRACE_VARIABLES_DESCRIPTION}\n\n"
+            "Replaces the stored choices, and an empty object clears them"
+        ),
+        examples=[_TRACE_VARIABLES_EXAMPLE],
+    )
+
+
+class TraceVariablesResponse(BaseModel):
+    trace_variables: Dict[str, str] = Field(
+        description="Which part of a trace fills each variable"
+    )
+
+
+class TraceVariablesPreviewRequest(BaseModel):
+    trace_id: str = Field(
+        description="The trace to read the values from",
+        examples=["f47ac10b-58cc-4372-a567-0e02b2c3d479"],
+    )
+    trace_variables: TraceVariableMap = Field(
+        description=_TRACE_VARIABLES_DESCRIPTION,
+        examples=[_TRACE_VARIABLES_EXAMPLE],
+    )
+
+
+class TraceVariablePreview(BaseModel):
+    variable: str = Field(description="Name of the variable")
+    source: str = Field(description="The part of the trace chosen to fill the variable")
+    value: Optional[str] = Field(
+        None, description="The text the trace holds for this variable"
+    )
+
+
+class TraceVariablesPreviewResponse(BaseModel):
+    values: List[TraceVariablePreview] = Field(
+        description="What the trace holds for each variable, in the order you sent them"
     )
 
 
@@ -1101,6 +1171,10 @@ def duplicate_agent_endpoint(
             continue
         try:
             add_evaluator_to_agent(new_agent_uuid, evaluator["uuid"])
+            if evaluator["trace_variables"]:
+                set_agent_evaluator_trace_variables(
+                    new_agent_uuid, evaluator["uuid"], evaluator["trace_variables"]
+                )
         except Exception as e:
             # Log but continue - don't fail the entire duplication
             logger.warning(
@@ -1201,3 +1275,78 @@ def unlink_evaluator_from_agent(
             status_code=404, detail="Evaluator is not linked to this agent"
         )
     return {"message": "Evaluator unlinked from agent"}
+
+
+@router.put(
+    "/{agent_uuid}/evaluators/{evaluator_uuid}/trace-variables",
+    response_model=TraceVariablesResponse,
+    summary="Update evaluator trace variables",
+    tags=["Public API"],
+)
+def update_evaluator_trace_variables(
+    agent_uuid: str = Path(
+        description="The agent the evaluator is linked to",
+        examples=["f47ac10b-58cc-4372-a567-0e02b2c3d479"],
+    ),
+    evaluator_uuid: str = Path(
+        description="The evaluator whose variables to fill",
+        examples=["f47ac10b-58cc-4372-a567-0e02b2c3d479"],
+    ),
+    payload: TraceVariablesRequest = ...,
+    ctx: OrgContext = Depends(get_org_jwt_or_api_key),
+):
+    """Choose which part of a trace fills each variable of an evaluator"""
+    ensure_owned_agent(agent_uuid, ctx.org_uuid)
+    live_version = next(
+        (
+            version or {}
+            for evaluator, version in resolve_live_evaluators(agent_uuid)
+            if evaluator["uuid"] == evaluator_uuid
+        ),
+        None,
+    )
+    if live_version is None:
+        raise HTTPException(
+            status_code=404, detail="Evaluator is not linked to this agent"
+        )
+    declared = {variable.get("name") for variable in live_version.get("variables") or []}
+    undeclared = sorted(set(payload.trace_variables) - declared)
+    if undeclared:
+        raise HTTPException(
+            status_code=400,
+            detail=f"The evaluator's live version has no variable named: {', '.join(undeclared)}",
+        )
+    set_agent_evaluator_trace_variables(
+        agent_uuid, evaluator_uuid, payload.trace_variables
+    )
+    return TraceVariablesResponse(trace_variables=payload.trace_variables)
+
+
+@router.post(
+    "/{agent_uuid}/trace-variables/preview",
+    response_model=TraceVariablesPreviewResponse,
+    summary="Preview trace variables",
+)
+def preview_trace_variables(
+    agent_uuid: str = Path(
+        description="The agent the trace belongs to",
+        examples=["f47ac10b-58cc-4372-a567-0e02b2c3d479"],
+    ),
+    payload: TraceVariablesPreviewRequest = ...,
+    ctx: OrgContext = Depends(get_current_org),
+):
+    """Read what one trace holds for each variable, without scoring the trace or storing anything"""
+    ensure_owned_agent(agent_uuid, ctx.org_uuid)
+    trace = get_trace(ctx.org_uuid, payload.trace_id)
+    if trace is None or trace["agent_id"] != agent_uuid:
+        raise HTTPException(status_code=404, detail="Trace not found")
+    return TraceVariablesPreviewResponse(
+        values=[
+            TraceVariablePreview(
+                variable=variable,
+                source=source,
+                value=trace_variable_value(trace, source),
+            )
+            for variable, source in payload.trace_variables.items()
+        ]
+    )

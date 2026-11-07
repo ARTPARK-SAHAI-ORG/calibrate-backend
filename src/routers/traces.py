@@ -447,6 +447,20 @@ class TraceScoreResult(BaseModel):
     )
 
 
+class TraceMissingValue(BaseModel):
+    evaluator_uuid: str = Field(
+        min_length=36,
+        max_length=36,
+        description="ID of the evaluator that did not score this trace",
+        examples=[_EXAMPLE_TRACE_UUID],
+    )
+    name: str = Field(
+        description="Name of the evaluator. Uses the last stored name if it has been deleted"
+    )
+    variable: str = Field(description="The evaluator variable that had no value")
+    source: str = Field(description="The part of the trace chosen to fill the variable")
+
+
 class TraceScoringRun(BaseModel):
     run_uuid: str = Field(
         min_length=36,
@@ -473,6 +487,9 @@ class TraceScoringRun(BaseModel):
     )
     results: List[TraceScoreResult] = Field(
         description="Results on this run from the evaluators linked to the agent"
+    )
+    missing_values: List[TraceMissingValue] = Field(
+        description="Variables this trace had no value for, so their evaluators did not score it"
     )
 
 
@@ -1482,6 +1499,7 @@ async def get_trace_scores_endpoint(
                 "completed_at": _trace_iso(run["completed_at"]),
                 "error": run["error"],
                 "results": run["results"],
+                "missing_values": run["missing_values"],
             }
             for run in runs
         ]
