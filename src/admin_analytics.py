@@ -39,7 +39,7 @@ _STUB_USER = "(u.email_verified_at IS NULL)"
 # Workspaces that count: not deleted, and not the personal workspace of a stub user.
 _VALID_ORGS = f"""
 valid_orgs AS (
-    SELECT o.uuid, o.name, o.is_personal
+    SELECT o.uuid, o.name, o.is_personal, o.created_at
       FROM organizations o
       LEFT JOIN users u ON u.uuid = o.created_by_user_id
      WHERE o.deleted_at IS NULL
@@ -156,6 +156,7 @@ def get_analytics(start: Optional[date], end: date, tz_offset_minutes: int) -> d
         orgs = q(
             f"""WITH {_VALID_ORGS}
                 SELECT v.uuid, v.name, v.is_personal,
+                       {_ISO.format(col="v.created_at")} AS created_at,
                        (SELECT COUNT(*) FROM organization_members m JOIN users u ON u.uuid = m.user_id
                          WHERE m.org_uuid = v.uuid AND m.deleted_at IS NULL AND NOT {_STUB_USER}) AS members,
                        ou.email AS owner_email, COALESCE(ou.first_name, '') AS owner_first_name,
@@ -296,6 +297,7 @@ def get_analytics(start: Optional[date], end: date, tz_offset_minutes: int) -> d
                      "last_name": o["owner_last_name"]}
                     if o["owner_email"] else None
                 ),
+                "created_at": o["created_at"],
                 "last_active_at": last_active.get(o["uuid"]),
                 **{m: a[m] for m in RANGE_METRICS},
                 "evaluations": sum(a[k] for k in EVAL_KINDS),
