@@ -111,9 +111,11 @@ _JUDGE_MODEL_DESCRIPTION = (
 # The rubric is optional for binary (custom pass/fail labels) and required for
 # rating, so the same wording is reused on request and response output_config.
 _RUBRIC_DESCRIPTION = (
-    "The scale points and their labels. Required for a `rating` evaluator. A "
-    "`binary` evaluator uses the default Correct/Wrong labels unless you set "
-    "your own"
+    "The rows of the rating scale, each a number and its label. Required for a "
+    "`rating` evaluator. For a rating evaluator, give the label for the worst "
+    "result the lowest number and the label for the best result the highest "
+    "number. A `binary` evaluator uses the default Correct/Wrong labels unless "
+    "you set your own"
 )
 
 
@@ -125,20 +127,20 @@ class OutputScaleEntry(BaseModel):
  depending on output_type."""
 
     value: Any = Field(
-        description="The value for this scale point. Use a boolean for a `binary` evaluator, a number for a `rating` one"
+        description="The value for this row. Use a boolean for a `binary` evaluator, a number for a `rating` one. For a rating evaluator, give the label for the worst result the lowest number and the label for the best result the highest number"
     )
-    name: str = Field(description="Short label for this scale point")
+    name: str = Field(description="Short label for this row")
     description: Optional[str] = Field(
         None,
-        description="Rubric text for this level, added to the judge prompt. Omit to leave this level undescribed",
+        description="Rubric text for this row, added to the judge prompt. Omit to leave this row undescribed",
     )
-    color: Optional[str] = Field(None, description="Color to show for this level. Omit for the default")
+    color: Optional[str] = Field(None, description="Color to show for this row. Omit for the default")
 
 
 class OutputConfig(BaseModel):
     scale: Optional[List[OutputScaleEntry]] = Field(
         None,
-        description="The ordered scale points that make up the rubric, each with its label",
+        description="The rows of the rating scale, each a number and its label. For a rating evaluator, give the label for the worst result the lowest number and the label for the best result the highest number",
     )
 
 
