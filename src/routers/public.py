@@ -338,7 +338,7 @@ class PublicAnnotationEvalResponse(BaseModel):
 
 class PublicDefaultEvaluatorVersionResponse(BaseModel):
     output_config: Optional[Dict[str, Any]] = Field(
-        None, description="The rubric: the scale points and their labels"
+        None, description="The rubric: the rows of the rating scale, each a number and its label"
     )
 
 
