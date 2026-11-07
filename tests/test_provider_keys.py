@@ -261,6 +261,25 @@ def test_trim_pending_trace_runs_keeps_oldest_within_cap():
     assert _status(pending[3]) == ("skipped", "over_limit")
 
 
+def test_trim_pending_trace_runs_gives_no_slot_to_a_deleted_trace():
+    org = _org()
+    _trace_run(org, "completed", 0)
+    deleted = _trace_run(org, "pending", 10)
+    live = [_trace_run(org, "pending", 20 + i) for i in range(2)]
+    with db.get_db_connection() as conn:
+        conn.execute(
+            "UPDATE traces SET deleted_at = CURRENT_TIMESTAMP WHERE uuid = "
+            "(SELECT trace_uuid FROM trace_eval_runs WHERE uuid = ?)",
+            (deleted,),
+        )
+        conn.commit()
+
+    assert db.trim_pending_trace_runs_over_cap(org, 2) == 1
+
+    assert _status(live[0]) == ("pending", None)
+    assert _status(live[1]) == ("skipped", "over_limit")
+
+
 def test_trim_pending_trace_runs_cap_below_used_skips_all():
     org = _org()
     _trace_run(org, "completed", 0)
