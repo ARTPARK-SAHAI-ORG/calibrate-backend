@@ -162,6 +162,8 @@ async def _check_openrouter_key(value: str) -> Optional[str]:
         return f"No answer from OpenRouter within {CHECK_TIMEOUT_SECONDS} seconds."
     except httpx.HTTPError:
         return "Could not reach OpenRouter."
+    except UnicodeError:
+        return REFUSED_KEY_ERROR.format(name="OpenRouter")
     if response.status_code == 200:
         return None
     if response.status_code in (401, 403):

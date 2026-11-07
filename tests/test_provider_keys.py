@@ -334,3 +334,9 @@ def test_check_openrouter_key_network_failures(error, expected):
 
     with _openrouter(handler):
         assert asyncio.run(pk.check_provider_key("openrouter", "sk-or-1")) == expected
+
+
+def test_check_openrouter_key_with_non_ascii_character_is_refused():
+    assert asyncio.run(pk.check_provider_key("openrouter", "sk–or")) == (
+        "OpenRouter did not accept this key. Check that you copied the full API key."
+    )
