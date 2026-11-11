@@ -517,9 +517,10 @@ class TraceScoringIneligibleEvaluator(BaseModel):
     reason: IneligibleReason = Field(
         description=(
             "Why this evaluator cannot score traces for this agent:\n\n"
-            f"- `{IneligibleReason.WRONG_TYPE}`: its type does not match the agent's interaction type\n"
-            f"- `{IneligibleReason.NO_LIVE_VERSION}`: it has no live version to run\n"
-            f"- `{IneligibleReason.DECLARES_VARIABLES}`: its live version defines prompt variables that cannot be filled"
+            f"- `{IneligibleReason.WRONG_TYPE.value}`: its type does not match the agent's interaction type\n"
+            f"- `{IneligibleReason.NO_LIVE_VERSION.value}`: it has no live version to run\n"
+            f"- `{IneligibleReason.NO_JUDGE_PROMPT.value}`: its live version has no judge prompt, so only a person can answer it\n"
+            f"- `{IneligibleReason.DECLARES_VARIABLES.value}`: its live version defines prompt variables that cannot be filled"
         )
     )
 

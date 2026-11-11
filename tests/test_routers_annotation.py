@@ -2306,8 +2306,8 @@ def test_annotation_eval_llm_general_run_launches(client):
 
 def test_annotation_eval_supported_task_types_match_creatable():
     """Every creatable annotation task type has a wired evaluator-run path.
-    (Tool-call rows are filtered out of a run per-row — see the runner's
-    `is_tool_call_row` — but that is not a task type.)"""
+    (A tool-call row is paired with its evaluators per row — see the runner's
+    `evaluators_for_item` — but that is not a task type.)"""
     import db as db_mod
     from annotation_eval_runner import SUPPORTED_EVAL_TASK_TYPES
 

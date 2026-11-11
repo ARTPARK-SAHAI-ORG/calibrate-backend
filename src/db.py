@@ -1961,6 +1961,20 @@ def init_db():
                     "workspace fork(s)"
                 )
 
+        if not _schema_migration_applied(
+            cursor, FILL_TOOL_CALL_EVALUATOR_JUDGE_MIGRATION
+        ):
+            filled = _backfill_fill_tool_call_evaluator_judge(cursor)
+            _mark_schema_migration_applied(
+                cursor, FILL_TOOL_CALL_EVALUATOR_JUDGE_MIGRATION
+            )
+            conn.commit()
+            if filled:
+                logger.info(
+                    f"Filled the tool-call correctness judge on {filled} "
+                    "workspace fork(s)"
+                )
+
         # Re-point pre-existing evaluator links from the shared default templates
         # to each org's fork (one-time). Runs after the fork backfill so the
         # forks exist. Finished-run job snapshots stay frozen.
@@ -2096,6 +2110,42 @@ DEFAULT_PROMPTS_BY_PURPOSE: Dict[str, Dict[str, Any]] = {
         "kind": "single",
         "output_type": "binary",
         "output_config": _BINARY_CONFIG,
+        "variables": [],
+    },
+    "tool-call": {
+        "name": "Tool call correctness",
+        "system_prompt": (
+            "Evaluate the tool calls an AI agent made, given the conversation so far. "
+            "Decide whether they are right for what the user needs: the right tools, "
+            "the right arguments, nothing missing and nothing extra. The agent's tools "
+            "are its own and are not listed here, so never mark a call wrong because "
+            "you do not recognise the tool. If an "
+            "`Expected tool calls` section is present, compare against it. A call is "
+            "not wrong because of an argument that section says to ignore. There, "
+            '`{"match_type": "llm_judge", "criteria": ...}` means the value must meet '
+            "those criteria."
+        ),
+        "judge_model": DEFAULT_TEXT_JUDGE_MODEL,
+        "evaluator_type": "tool-call",
+        "data_type": "text",
+        "kind": "single",
+        "output_type": "binary",
+        "output_config": {
+            "scale": [
+                {
+                    "value": True,
+                    "name": "Correct",
+                    "description": "The agent made the right tool call.",
+                    "color": "#16a34a",
+                },
+                {
+                    "value": False,
+                    "name": "Wrong",
+                    "description": "The agent made the wrong tool call.",
+                    "color": "#dc2626",
+                },
+            ]
+        },
         "variables": [],
     },
     "stt": {
@@ -2332,42 +2382,13 @@ _LLM_GENERAL_SEED = {
 }
 
 
-# Seed for `default-tool-call-correctness`: the only default with no AI judge.
-# A tool-call row is labelled by a person, so `judge_model` and `system_prompt`
-# are deliberately empty strings (the columns are NOT NULL) and nothing ever
-# renders or sends them.
 TOOL_CALL_EVALUATOR_SLUG = "default-tool-call-correctness"
 
-_TOOL_CALL_SEED = {
-    "slug": TOOL_CALL_EVALUATOR_SLUG,
-    "name": "Tool call correctness",
-    "description": "Whether the agent made the right tool call",
-    "evaluator_type": "tool-call",
-    "data_type": "text",
-    "kind": "single",
-    "output_type": "binary",
-    "version": {
-        "judge_model": "",
-        "system_prompt": "",
-        "output_config": {
-            "scale": [
-                {
-                    "value": True,
-                    "name": "Correct",
-                    "description": "The agent made the right tool call.",
-                    "color": "#16a34a",
-                },
-                {
-                    "value": False,
-                    "name": "Wrong",
-                    "description": "The agent made the wrong tool call.",
-                    "color": "#dc2626",
-                },
-            ]
-        },
-        "variables": [],
-    },
-}
+_TOOL_CALL_SEED = _seed_from_purpose(
+    TOOL_CALL_EVALUATOR_SLUG,
+    "Whether the agent made the right tool call",
+    "tool-call",
+)
 
 
 DEFAULT_EVALUATORS_SEED = [
@@ -3458,6 +3479,7 @@ LINK_TOOL_CALL_EVALUATOR_TO_TASKS_MIGRATION = "link_tool_call_evaluator_to_tasks
 RENAME_TOOL_CALL_EVALUATOR_DESCRIPTION_MIGRATION = (
     "rename_tool_call_evaluator_description_v1"
 )
+FILL_TOOL_CALL_EVALUATOR_JUDGE_MIGRATION = "fill_tool_call_evaluator_judge_v1"
 _TOOL_CALL_EVALUATOR_OLD_DESCRIPTION = (
     "Records whether the agent made the right tool call, judged by a person"
 )
@@ -3521,6 +3543,26 @@ def _backfill_rename_tool_call_evaluator_description(cursor: sqlite3.Cursor) -> 
             TOOL_CALL_EVALUATOR_SLUG,
             _TOOL_CALL_EVALUATOR_OLD_DESCRIPTION,
         ),
+    )
+    return cursor.rowcount
+
+
+def _backfill_fill_tool_call_evaluator_judge(cursor: sqlite3.Cursor) -> int:
+    """One-time migration: give each org's fork of the tool-call correctness
+    evaluator the seed's prompt and model. Updates the live version in place
+    rather than adding one, so answers people already recorded stay on it. A
+    prompt a user wrote is kept. The template itself is reconciled by
+    `_seed_default_evaluators`."""
+    version = _TOOL_CALL_SEED["version"]
+    cursor.execute(
+        """
+        UPDATE evaluator_versions SET system_prompt = ?, judge_model = ?
+        WHERE TRIM(system_prompt) = '' AND uuid IN (
+            SELECT live_version_id FROM evaluators
+            WHERE source_default_slug = ? AND deleted_at IS NULL
+        )
+        """,
+        (version["system_prompt"], version["judge_model"], TOOL_CALL_EVALUATOR_SLUG),
     )
     return cursor.rowcount
 
