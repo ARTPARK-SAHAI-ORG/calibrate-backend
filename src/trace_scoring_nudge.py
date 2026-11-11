@@ -8,6 +8,9 @@ whichever loop first calls `.wait()` on it and raises `RuntimeError` if a later
 `.wait()` arrives from a different loop. Production starts the lifespan once,
 but the test suite starts many `TestClient`s — each with its own loop — over
 one process lifetime. `reset()` at each lifespan start binds a fresh Event.
+
+Ingest runs in FastAPI's threadpool and `asyncio.Event` is not thread-safe, so
+`set()` from another thread is handed to the loop that owns the Event.
 """
 
 from __future__ import annotations
@@ -15,12 +18,21 @@ from __future__ import annotations
 import asyncio
 
 _event: asyncio.Event | None = None
+_loop: asyncio.AbstractEventLoop | None = None
+
+
+def _running_loop() -> asyncio.AbstractEventLoop | None:
+    try:
+        return asyncio.get_running_loop()
+    except RuntimeError:
+        return None
 
 
 def reset() -> asyncio.Event:
     """Bind a fresh Event to the current context. Call once per lifespan start."""
-    global _event
+    global _event, _loop
     _event = asyncio.Event()
+    _loop = _running_loop()
     return _event
 
 
@@ -33,4 +45,13 @@ def get() -> asyncio.Event:
 
 
 def set() -> None:
-    get().set()
+    event = get()
+    loop = _loop
+    if loop is None or loop is _running_loop():
+        event.set()
+        return
+    try:
+        loop.call_soon_threadsafe(event.set)
+    except RuntimeError:
+        # The loop has closed, so nothing is waiting on the Event.
+        event.set()
