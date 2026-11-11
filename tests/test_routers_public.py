@@ -385,31 +385,37 @@ def test_public_test_run_reports_totals_and_test_type(client):
     job_uuid = db_mod.create_agent_test_job(
         agent_id=agent_uuid,
         job_type="llm-unit-test",
-        details={"evaluators_by_test_id": {"tc_a": snapshot, "tc_b": snapshot}},
+        details={
+            "evaluators_by_test_id": {"tc_a": snapshot, "tc_b": snapshot},
+            "calibrate_config": {
+                "evaluators": [
+                    {"name": "Correctness", "type": "binary", "id": evaluator_uuid}
+                ]
+            },
+        },
     )
+
+    def row(name, test_type, passed):
+        return {
+            "name": name,
+            "test_case_id": name,
+            "passed": passed,
+            "test_case": {
+                "evaluation": {
+                    "type": test_type,
+                    "criteria": [{"name": "Correctness"}],
+                }
+            },
+            "judge_results": {"Correctness": {"match": passed}},
+        }
+
     db_mod.update_agent_test_job(
         job_uuid,
         status="done",
         results={
             "test_results": [
-                {
-                    "name": "tc_a",
-                    "test_case_id": "tc_a",
-                    "passed": True,
-                    "test_case": {"evaluation": {"type": "response"}},
-                    "judge_results": [
-                        {"evaluator_uuid": evaluator_uuid, "match": True}
-                    ],
-                },
-                {
-                    "name": "tc_b",
-                    "test_case_id": "tc_b",
-                    "passed": False,
-                    "test_case": {"evaluation": {"type": "general"}},
-                    "judge_results": [
-                        {"evaluator_uuid": evaluator_uuid, "match": False}
-                    ],
-                },
+                row("tc_a", "response", True),
+                row("tc_b", "general", False),
             ]
         },
     )
@@ -422,6 +428,8 @@ def test_public_test_run_reports_totals_and_test_type(client):
     assert [c["test_type"] for c in body["results"]] == ["response", "general"]
     totals = body["evaluator_summary"][0]
     assert (totals["passed"], totals["total"], totals["pass_rate"]) == (1, 2, 50.0)
+    assert totals["ci"] == body["pass_rate_ci"]
+    assert body["pass_rate"] == 50.0
 
 
 def test_public_test_run_case_returns_one_case_in_full(client):
