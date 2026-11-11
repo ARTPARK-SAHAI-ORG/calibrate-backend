@@ -1695,3 +1695,288 @@ def test_scoring_written_as_a_plain_false_turns_it_off(client):
     assert r.status_code == 200, r.text
     assert _scoring_on(r.json()) is False
     assert _scoring_on(client.get(f"/agents/{agent['uuid']}", headers=h).json()) is False
+
+
+def _agent_with_variable_evaluator(client, h):
+    """A `conversation` agent linked to one evaluator declaring `criteria` only."""
+    agent = client.post(
+        "/agents",
+        json={"name": f"tv-{uuid.uuid4().hex[:6]}", "type": "agent"},
+        headers=h,
+    ).json()
+    for linked in client.get(f"/agents/{agent['uuid']}/evaluators", headers=h).json()["items"]:
+        client.delete(f"/agents/{agent['uuid']}/evaluators/{linked['uuid']}", headers=h)
+    ev = _create_evaluator(client, h, variables=[{"name": "criteria"}])
+    client.post(f"/agents/{agent['uuid']}/evaluators", json={"evaluator_ids": [ev]}, headers=h)
+    return agent["uuid"], ev
+
+
+def _put_trace_variables(client, h, agent_uuid, ev, mapping):
+    return client.put(
+        f"/agents/{agent_uuid}/evaluators/{ev}/trace-variables",
+        json={"trace_variables": mapping},
+        headers=h,
+    )
+
+
+def _listed_trace_variables(client, h, agent_uuid, ev):
+    items = client.get(f"/agents/{agent_uuid}/evaluators", headers=h).json()["items"]
+    return next(e for e in items if e["uuid"] == ev)["trace_variables"]
+
+
+def test_trace_variables_saved_read_back_and_cleared(client):
+    h = _signup(client)
+    agent_uuid, ev = _agent_with_variable_evaluator(client, h)
+    assert _listed_trace_variables(client, h, agent_uuid, ev) == {}
+
+    mapping = {"criteria": "metadata.expert_answer"}
+    r = _put_trace_variables(client, h, agent_uuid, ev, mapping)
+    assert r.status_code == 200, r.text
+    assert r.json() == {"trace_variables": mapping}
+    assert _listed_trace_variables(client, h, agent_uuid, ev) == mapping
+
+    listed = client.get("/evaluators", headers=h).json()["items"]
+    assert next(e for e in listed if e["uuid"] == ev)["trace_variables"] is None
+
+    r = _put_trace_variables(client, h, agent_uuid, ev, {})
+    assert r.status_code == 200, r.text
+    assert _listed_trace_variables(client, h, agent_uuid, ev) == {}
+
+
+def test_trace_variables_rejects_unknown_source(client):
+    h = _signup(client)
+    agent_uuid, ev = _agent_with_variable_evaluator(client, h)
+    r = _put_trace_variables(client, h, agent_uuid, ev, {"criteria": "metadata."})
+    assert r.status_code == 422, r.text
+    assert "metadata." in r.text
+    assert _listed_trace_variables(client, h, agent_uuid, ev) == {}
+
+
+def test_trace_variables_rejects_undeclared_variable(client):
+    h = _signup(client)
+    agent_uuid, ev = _agent_with_variable_evaluator(client, h)
+    r = _put_trace_variables(
+        client, h, agent_uuid, ev, {"criteria": "input", "ghost": "input"}
+    )
+    assert r.status_code == 400, r.text
+    assert "ghost" in r.json()["detail"]
+    assert "criteria" not in r.json()["detail"]
+    assert _listed_trace_variables(client, h, agent_uuid, ev) == {}
+
+
+def test_trace_variables_no_live_version_declares_nothing(client):
+    h = _signup(client)
+    agent_uuid, _ = _agent_with_variable_evaluator(client, h)
+    no_live = db.create_evaluator(
+        name=f"tv-nolive-{uuid.uuid4().hex[:6]}",
+        org_uuid=db.get_agent(agent_uuid)["org_uuid"],
+    )
+    db.add_evaluator_to_agent(agent_uuid, no_live)
+    r = _put_trace_variables(client, h, agent_uuid, no_live, {"criteria": "input"})
+    assert r.status_code == 400, r.text
+
+
+def test_trace_variables_evaluator_not_linked_is_404(client):
+    h = _signup(client)
+    agent_uuid, _ = _agent_with_variable_evaluator(client, h)
+    unlinked = _create_evaluator(client, h, variables=[{"name": "criteria"}])
+    r = _put_trace_variables(client, h, agent_uuid, unlinked, {"criteria": "input"})
+    assert r.status_code == 404, r.text
+
+
+def test_trace_variables_agent_in_another_workspace_is_not_writable(client):
+    h = _signup(client)
+    agent_uuid, ev = _agent_with_variable_evaluator(client, h)
+    r = _put_trace_variables(client, _signup(client), agent_uuid, ev, {"criteria": "input"})
+    assert r.status_code == 403, r.text
+    assert "organization_uuid" not in r.json()
+    assert _listed_trace_variables(client, h, agent_uuid, ev) == {}
+
+
+def test_trace_variables_accepts_api_key(client):
+    h = _signup(client)
+    agent_uuid, ev = _agent_with_variable_evaluator(client, h)
+    mapping = {"criteria": "metadata.expert_answer"}
+    r = _put_trace_variables(
+        client, {"X-API-Key": _raw_key(client, h)}, agent_uuid, ev, mapping
+    )
+    assert r.status_code == 200, r.text
+    assert _listed_trace_variables(client, h, agent_uuid, ev) == mapping
+
+
+def test_trace_variables_refuses_another_workspace_api_key(client):
+    h = _signup(client)
+    agent_uuid, ev = _agent_with_variable_evaluator(client, h)
+    other_key = _raw_key(client, _signup(client))
+    r = _put_trace_variables(
+        client, {"X-API-Key": other_key}, agent_uuid, ev, {"criteria": "input"}
+    )
+    assert r.status_code == 403, r.text
+    assert "organization_uuid" not in r.json()
+    assert _listed_trace_variables(client, h, agent_uuid, ev) == {}
+
+
+def test_trace_variables_make_evaluator_eligible_and_allow_turning_scoring_on(client):
+    h = _signup(client)
+    agent_uuid, ev = _agent_with_variable_evaluator(client, h)
+    _disable_trace_scoring(client, h, agent_uuid)
+
+    def eligibility():
+        return client.get(
+            f"/agents/{agent_uuid}/trace-scoring-eligibility", headers=h
+        ).json()
+
+    assert [e["reason"] for e in eligibility()["ineligible"]] == [
+        IneligibleReason.DECLARES_VARIABLES
+    ]
+    assert _set_trace_scoring(client, h, agent_uuid, True).status_code == 422
+
+    assert _put_trace_variables(
+        client, h, agent_uuid, ev, {"criteria": "output.response"}
+    ).status_code == 200
+
+    body = eligibility()
+    assert [e["evaluator_uuid"] for e in body["eligible"]] == [ev]
+    assert body["ineligible"] == []
+    r = _set_trace_scoring(client, h, agent_uuid, True)
+    assert r.status_code == 200, r.text
+
+
+def test_duplicate_agent_copies_trace_variables(client):
+    h = _signup(client)
+    agent_uuid, ev = _agent_with_variable_evaluator(client, h)
+    mapping = {"criteria": "metadata.expert_answer"}
+    _put_trace_variables(client, h, agent_uuid, ev, mapping)
+
+    dup = client.post(
+        f"/agents/{agent_uuid}/duplicate",
+        json={"name": f"dup-{uuid.uuid4().hex[:6]}"},
+        headers=h,
+    )
+    assert dup.status_code == 200, dup.text
+    assert _listed_trace_variables(client, h, dup.json()["uuid"], ev) == mapping
+
+
+def _post_trace(client, h, agent_uuid, **overrides):
+    payload = {
+        "agent_id": agent_uuid,
+        "input": [
+            {"role": "user", "content": "How much?"},
+            {"role": "assistant", "content": "For whom?"},
+            {"role": "user", "content": "A child"},
+        ],
+        "output": {"response": "Half a tablet."},
+        "metadata": [{"key": "expert_answer", "value": "Quarter of a tablet."}],
+    }
+    r = client.post("/traces", json={**payload, **overrides}, headers=h)
+    assert r.status_code == 200, r.text
+    return r.json()["uuid"]
+
+
+def _preview(client, h, agent_uuid, trace_id, mapping):
+    return client.post(
+        f"/agents/{agent_uuid}/trace-variables/preview",
+        json={"trace_id": trace_id, "trace_variables": mapping},
+        headers=h,
+    )
+
+
+def test_preview_returns_values_and_nulls_in_request_order(client):
+    h = _signup(client)
+    agent = _create_agent(client, h, f"pv-{uuid.uuid4().hex[:6]}")["uuid"]
+    trace = _post_trace(client, h, agent)
+
+    r = _preview(
+        client,
+        h,
+        agent,
+        trace,
+        {
+            "z_absent": "metadata.nope",
+            "nurse": "metadata.expert_answer",
+            "asked": "input",
+            "a_reply": "output.response",
+        },
+    )
+
+    assert r.status_code == 200, r.text
+    assert r.json() == {
+        "values": [
+            {"variable": "z_absent", "source": "metadata.nope", "value": None},
+            {
+                "variable": "nurse",
+                "source": "metadata.expert_answer",
+                "value": "Quarter of a tablet.",
+            },
+            {
+                "variable": "asked",
+                "source": "input",
+                "value": "user: How much?\nassistant: For whom?\nuser: A child",
+            },
+            {"variable": "a_reply", "source": "output.response", "value": "Half a tablet."},
+        ]
+    }
+
+
+@pytest.mark.parametrize("source", ["nonsense", "metadata.", ""])
+def test_preview_rejects_a_source_that_is_not_part_of_a_trace(client, source):
+    h = _signup(client)
+    agent = _create_agent(client, h, f"pv-{uuid.uuid4().hex[:6]}")["uuid"]
+    trace = _post_trace(client, h, agent)
+
+    assert _preview(client, h, agent, trace, {"v": source}).status_code == 422
+
+
+def test_preview_refuses_a_trace_or_agent_it_cannot_read(client):
+    h = _signup(client)
+    agent = _create_agent(client, h, f"pv-{uuid.uuid4().hex[:6]}")["uuid"]
+    sibling = _create_agent(client, h, f"pv-{uuid.uuid4().hex[:6]}")["uuid"]
+    sibling_trace = _post_trace(client, h, sibling)
+    other_h = _signup(client)
+    other_agent = _create_agent(client, other_h, f"pv-{uuid.uuid4().hex[:6]}")["uuid"]
+    other_trace = _post_trace(client, other_h, other_agent)
+    mapping = {"v": "input"}
+
+    assert _preview(client, h, agent, sibling_trace, mapping).status_code == 404
+    assert _preview(client, h, agent, str(uuid.uuid4()), mapping).status_code == 404
+    assert _preview(client, h, agent, other_trace, mapping).status_code == 404
+    # The handler in main.py answers 403 once a uuid in the path belongs to another workspace.
+    r = _preview(client, h, other_agent, other_trace, mapping)
+    assert r.status_code == 403, r.text
+    assert "organization_uuid" not in r.json()
+    assert _preview(client, h, str(uuid.uuid4()), other_trace, mapping).status_code == 404
+
+
+def test_preview_refuses_an_api_key(client):
+    h = _signup(client)
+    agent = _create_agent(client, h, f"pv-{uuid.uuid4().hex[:6]}")["uuid"]
+    trace = _post_trace(client, h, agent)
+
+    r = _preview(client, {"X-API-Key": _raw_key(client, h)}, agent, trace, {"v": "input"})
+    assert r.status_code == 403, r.text
+    assert r.json()["detail"] == "Not authenticated"
+
+
+def test_preview_writes_nothing(client):
+    h = _signup(client)
+    agent_uuid, ev = _agent_with_variable_evaluator(client, h)
+    mapping = {"criteria": "metadata.expert_answer"}
+    assert _put_trace_variables(client, h, agent_uuid, ev, mapping).status_code == 200
+    trace = _post_trace(client, h, agent_uuid)
+
+    def snapshot():
+        with db.get_db_connection() as conn:
+            return [
+                [dict(row) for row in conn.execute(sql, (key,)).fetchall()]
+                for sql, key in (
+                    ("SELECT * FROM traces WHERE uuid = ?", trace),
+                    ("SELECT * FROM trace_eval_runs WHERE trace_uuid = ?", trace),
+                    ("SELECT * FROM agent_evaluators WHERE agent_id = ?", agent_uuid),
+                )
+            ]
+
+    before = snapshot()
+    with patch("subprocess.Popen", side_effect=AssertionError("no AI call")):
+        r = _preview(client, h, agent_uuid, trace, {"criteria": "input"})
+    assert r.status_code == 200, r.text
+    assert snapshot() == before

@@ -3402,3 +3402,33 @@ def test_annotation_item_metadata_round_trips_and_freezes_in_snapshots(user):
     snap = {i["uuid"]: i["metadata"] for i in db.get_eval_job_items(eval_job_uuid)}
     assert snap == {with_meta: meta, without: []}
 
+
+
+def test_agent_evaluator_trace_variables_round_trip(user):
+    agent = db.create_agent(
+        name=_u("tv-agent"), user_id=user["uuid"], org_uuid=user["org_uuid"],
+        link_default_evaluator=False,
+    )
+    ev = db.create_evaluator(
+        name=_u("tv-ev"), owner_user_id=user["uuid"], org_uuid=user["org_uuid"]
+    )
+
+    assert db.set_agent_evaluator_trace_variables(agent, ev, {"a": "input"}) is False
+
+    db.add_evaluator_to_agent(agent, ev)
+    assert db.get_evaluators_for_agent(agent)[0]["trace_variables"] == {}
+
+    mapping = {"a": "metadata.expert", "b": "output.response"}
+    assert db.set_agent_evaluator_trace_variables(agent, ev, mapping) is True
+    assert db.get_evaluators_for_agent(agent)[0]["trace_variables"] == mapping
+
+    assert db.set_agent_evaluator_trace_variables(agent, ev, {}) is True
+    assert db.get_evaluators_for_agent(agent)[0]["trace_variables"] == {}
+
+    db.set_agent_evaluator_trace_variables(agent, ev, mapping)
+    db.remove_evaluator_from_agent(agent, ev)
+    assert db.get_evaluators_for_agent(agent) == []
+    assert db.set_agent_evaluator_trace_variables(agent, ev, {"a": "input"}) is False
+
+    db.add_evaluator_to_agent(agent, ev)
+    assert db.get_evaluators_for_agent(agent)[0]["trace_variables"] == mapping

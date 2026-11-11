@@ -344,6 +344,10 @@ class EvaluatorResponse(EvaluatorResponseBase):
     live_version: Optional[EvaluatorLiveVersionSummary] = Field(
         None, description="The version that is currently live"
     )
+    trace_variables: Optional[Dict[str, str]] = Field(
+        None,
+        description="Which part of a trace fills each variable of the evaluator when it scores an agent's traces",
+    )
 
 
 class EvaluatorDetailResponse(EvaluatorResponseBase):
@@ -530,6 +534,7 @@ def _evaluator_response(
         created_at=evaluator["created_at"],
         updated_at=evaluator["updated_at"],
         live_version=live_version,
+        trace_variables=evaluator.get("trace_variables"),
     )
 
 
