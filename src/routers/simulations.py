@@ -1230,9 +1230,11 @@ def _build_calibrate_simulation_config(
             "language": persona_config.get("language", default_language),
         }
         if simulation_type == "voice":
-            persona_obj["interruption_sensitivity"] = persona_config.get(
-                "interruption_sensitivity", default_interruption
-            )
+            persona_obj["interruption_config"] = {
+                "sensitivity": persona_config.get(
+                    "interruption_sensitivity", default_interruption
+                )
+            }
         if persona_obj["characteristics"]:
             persona_list.append(persona_obj)
 
