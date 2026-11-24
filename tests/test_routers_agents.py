@@ -1695,3 +1695,67 @@ def test_scoring_written_as_a_plain_false_turns_it_off(client):
     assert r.status_code == 200, r.text
     assert _scoring_on(r.json()) is False
     assert _scoring_on(client.get(f"/agents/{agent['uuid']}", headers=h).json()) is False
+
+
+def _chat_link(client, h, agent_uuid, is_public=None):
+    if is_public is None:
+        return client.get(f"/agents/{agent_uuid}/chat-link", headers=h)
+    return client.patch(
+        f"/agents/{agent_uuid}/chat-link/visibility", json={"is_public": is_public}, headers=h
+    )
+
+
+def test_chat_link_keeps_its_token_when_turned_off_and_on(client):
+    h = _signup(client)
+    agent = _create_agent(client, h, f"chat-{uuid.uuid4().hex[:6]}")
+
+    assert _chat_link(client, h, agent["uuid"]).json() == {
+        "is_public": False,
+        "share_token": None,
+        "text_chat_supported": True,
+        "connection_verified": True,
+    }
+    on = _chat_link(client, h, agent["uuid"], True).json()
+    assert on["is_public"] is True and on["share_token"]
+    assert _chat_link(client, h, agent["uuid"]).json()["share_token"] == on["share_token"]
+
+    off = _chat_link(client, h, agent["uuid"], False).json()
+    assert off == {"is_public": False, "share_token": None}
+    assert db.get_agent(agent["uuid"])["chat_token"] == on["share_token"]
+    assert _chat_link(client, h, agent["uuid"]).json()["share_token"] is None
+
+    again = _chat_link(client, h, agent["uuid"], True).json()
+    assert again["share_token"] == on["share_token"]
+
+
+def test_chat_link_refuses_an_unverified_connection_agent(client):
+    h = _signup(client)
+    agent = _create_agent(client, h, f"conn-{uuid.uuid4().hex[:6]}")
+    db.update_agent(agent["uuid"], config={"agent_url": "https://example.com/a"})
+
+    assert _chat_link(client, h, agent["uuid"]).json()["connection_verified"] is False
+    refused = _chat_link(client, h, agent["uuid"], True)
+    assert refused.status_code == 400
+    assert refused.json()["detail"] == {"error": "connection_unverified"}
+    assert db.get_agent(agent["uuid"])["chat_token"] is None
+    assert _chat_link(client, h, agent["uuid"], False).status_code == 200
+
+    db.update_agent(
+        agent["uuid"],
+        config={"agent_url": "https://example.com/a", "connection_verified": True},
+    )
+    assert _chat_link(client, h, agent["uuid"]).json()["connection_verified"] is True
+    assert _chat_link(client, h, agent["uuid"], True).json()["is_public"] is True
+
+
+def test_chat_link_of_another_workspaces_agent_is_refused(client):
+    owner = _signup(client)
+    agent = _create_agent(client, owner, f"own-{uuid.uuid4().hex[:6]}")
+    stranger = _signup(client)
+    for response in (
+        _chat_link(client, stranger, agent["uuid"]),
+        _chat_link(client, stranger, agent["uuid"], True),
+    ):
+        assert response.status_code == 403
+        assert "organization_uuid" not in response.json()
+    assert db.get_agent(agent["uuid"])["chat_link_public"] == 0

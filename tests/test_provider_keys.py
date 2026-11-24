@@ -288,3 +288,12 @@ def test_create_trace_with_eval_run_no_cap_never_skips():
         ]
     assert statuses == ["pending", "pending"]
     assert row["uuid"]
+
+
+def test_org_provider_key_is_none_without_keys_and_refuses_a_missing_provider():
+    org = _org()
+    assert pk.org_provider_key(org, "openrouter") is None
+    _save(org, "openai", "sk-openai")
+    assert pk.org_provider_key(org, "openai") == "sk-openai"
+    with pytest.raises(pk.MissingProviderKey):
+        pk.org_provider_key(org, "openrouter")

@@ -19,6 +19,7 @@ from pydantic import BaseModel, Field
 from calibrate_agent.connections import TextAgentConnection
 
 from utils import (
+    compute_share_token_toggle,
     public_url_error,
     env_bool,
     with_calibrate_eval_header,
@@ -48,6 +49,7 @@ from db import (
     add_evaluator_to_agent,
     remove_evaluator_from_agent,
     resolve_live_evaluators,
+    set_agent_chat_link,
 )
 from trace_scoring import IneligibleReason, resolve_trace_scoring
 from auth_utils import get_current_org, get_org_jwt_or_api_key, OrgContext
@@ -899,6 +901,81 @@ def get_trace_scoring_eligibility(
     if not agent or agent.get("org_uuid") != ctx.org_uuid:
         raise HTTPException(status_code=404, detail="Agent not found")
     return _eligibility_response(_resolve_agent_scoring(agent))
+
+
+class ChatLinkResponse(BaseModel):
+    is_public: bool = Field(description="Whether anyone with the link can chat with the agent")
+    share_token: Optional[str] = Field(
+        None, description="Token for building the chat link while it is on"
+    )
+
+
+class ChatLinkStatusResponse(ChatLinkResponse):
+    text_chat_supported: bool = Field(
+        description="Whether the agent can be reached by text chat"
+    )
+    connection_verified: bool = Field(
+        description="Whether the agent's connection has passed its check. Always true for an agent built in Calibrate"
+    )
+
+
+class ChatLinkVisibilityRequest(BaseModel):
+    is_public: bool = Field(
+        description="True to turn the chat link on. False to turn it off, keeping the same link for when it is turned back on"
+    )
+
+
+@router.get(
+    "/{agent_uuid}/chat-link",
+    response_model=ChatLinkStatusResponse,
+    summary="Get chat link",
+)
+def get_chat_link(
+    agent_uuid: str = Path(
+        description="The agent whose chat link to read",
+        examples=["f47ac10b-58cc-4372-a567-0e02b2c3d479"],
+    ),
+    ctx: OrgContext = Depends(get_current_org),
+):
+    """Get the link anyone can use to chat with an agent, and whether it can be turned on"""
+    from routers.agent_tests import _agent_connection_unverified
+
+    agent = ensure_owned_agent(agent_uuid, ctx.org_uuid)
+    is_public = bool(agent.get("chat_link_public"))
+    # ponytail: every connection agent is a plain HTTP(S) text endpoint today
+    # (public_url_error refuses any other scheme), so no voice check exists yet.
+    return ChatLinkStatusResponse(
+        is_public=is_public,
+        share_token=agent.get("chat_token") if is_public else None,
+        text_chat_supported=True,
+        connection_verified=not _agent_connection_unverified(agent),
+    )
+
+
+@router.patch(
+    "/{agent_uuid}/chat-link/visibility",
+    response_model=ChatLinkResponse,
+    summary="Update chat link visibility",
+)
+def update_chat_link_visibility(
+    agent_uuid: str = Path(
+        description="The agent whose chat link to turn on or off",
+        examples=["f47ac10b-58cc-4372-a567-0e02b2c3d479"],
+    ),
+    body: ChatLinkVisibilityRequest = ...,
+    ctx: OrgContext = Depends(get_current_org),
+):
+    """Turn on or off the link anyone can use to chat with an agent"""
+    from routers.agent_tests import _agent_connection_unverified
+
+    agent = ensure_owned_agent(agent_uuid, ctx.org_uuid)
+    if body.is_public and _agent_connection_unverified(agent):
+        raise HTTPException(status_code=400, detail={"error": "connection_unverified"})
+    token_to_persist, token_to_return = compute_share_token_toggle(
+        agent, body.is_public, token_field="chat_token"
+    )
+    set_agent_chat_link(agent_uuid, body.is_public, token_to_persist)
+    return ChatLinkResponse(is_public=body.is_public, share_token=token_to_return)
 
 
 @router.put(

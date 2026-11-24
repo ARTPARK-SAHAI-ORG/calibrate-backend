@@ -1287,6 +1287,18 @@ def init_db():
         except sqlite3.OperationalError:
             pass
 
+        # Public chat link. The token survives turning the link off, so a shared
+        # address works again when it is turned back on.
+        for col in ("chat_token TEXT DEFAULT NULL", "chat_link_public INTEGER DEFAULT 0"):
+            try:
+                cursor.execute(f"ALTER TABLE agents ADD COLUMN {col}")
+            except sqlite3.OperationalError:
+                pass
+        cursor.execute(
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_agents_chat_token "
+            "ON agents(chat_token) WHERE chat_token IS NOT NULL"
+        )
+
         # User-chosen run name. NULL means the run falls back to its position
         # ("Run 3"), which is what every run read as before this column existed.
         try:
@@ -4845,6 +4857,26 @@ def get_agent(agent_uuid: str) -> Optional[Dict[str, Any]]:
         if row:
             return _parse_agent_row(row)
         return None
+
+
+def get_agent_by_chat_token(token: str) -> Optional[Dict[str, Any]]:
+    """The live agent whose chat link is on and carries this token."""
+    with get_db_connection() as conn:
+        row = conn.execute(
+            "SELECT * FROM agents WHERE chat_token = ? AND chat_link_public = 1 "
+            "AND deleted_at IS NULL",
+            (token,),
+        ).fetchone()
+        return _parse_agent_row(row) if row else None
+
+
+def set_agent_chat_link(agent_uuid: str, is_public: bool, token: Optional[str]) -> None:
+    with get_db_connection() as conn:
+        conn.execute(
+            "UPDATE agents SET chat_link_public = ?, chat_token = ? WHERE uuid = ?",
+            (int(is_public), token, agent_uuid),
+        )
+        conn.commit()
 
 
 def get_all_agents(org_uuid: Optional[str] = None) -> List[Dict[str, Any]]:
