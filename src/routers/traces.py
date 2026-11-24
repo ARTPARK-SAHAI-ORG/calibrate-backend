@@ -32,6 +32,7 @@ from db import (
     bulk_delete_tests,
     average_trace_scores,
     count_live_traces,
+    count_chat_replies_today,
     count_scored_traces,
     create_trace_with_eval_run,
     get_agent,
@@ -153,6 +154,20 @@ _SORT_BY_EVALUATOR_DESCRIPTION = (
     "Order traces by this evaluator's score on each trace's latest scoring "
     "run. Traces this evaluator has not scored come last whichever direction you pick, and "
     "an evaluator not linked to the agent counts as having scored none"
+)
+
+TraceSource = Literal["api", "chat"]
+TraceFeedbackFilter = Literal["up", "down", "any", "none"]
+
+_SOURCE_VALUES = (
+    "\n\n- `api`: sent to `POST /traces`\n"
+    "- `chat`: a reply the agent gave on its chat link"
+)
+_FEEDBACK_VALUES = (
+    "\n\n- `up`: rated thumbs up\n"
+    "- `down`: rated thumbs down\n"
+    "- `any`: rated either way\n"
+    "- `none`: not rated"
 )
 
 _SORT_ORDER_DESCRIPTION = (
@@ -347,6 +362,22 @@ class TraceIngestResponse(BaseModel):
     created_at: str = Field(description="When the trace was created (ISO 8601 UTC)")
 
 
+class TraceFeedback(BaseModel):
+    rating: Literal["up", "down"] = Field(
+        description="Whether the person chatting liked the reply"
+    )
+    comment: Optional[str] = Field(
+        None, description="What the person chatting wrote about the reply"
+    )
+    at: str = Field(description="When the feedback was last given (ISO 8601 UTC)")
+
+
+_TRACE_SOURCE_DESCRIPTION = "Where the trace came from:" + _SOURCE_VALUES
+_TRACE_FEEDBACK_DESCRIPTION = (
+    "The rating and comment the person chatting gave this reply on the chat link"
+)
+
+
 class TraceSummary(BaseModel):
     uuid: str = Field(
         min_length=36,
@@ -384,6 +415,10 @@ class TraceSummary(BaseModel):
         description="Number of metadata entries stored with the trace"
     )
     labels: List[str] = Field(description=_LABELS_DESCRIPTION)
+    source: TraceSource = Field(description=_TRACE_SOURCE_DESCRIPTION)
+    feedback: Optional[TraceFeedback] = Field(
+        None, description=_TRACE_FEEDBACK_DESCRIPTION
+    )
     input: Optional[TraceInput] = Field(
         None,
         description=_TRACE_INPUT_DESCRIPTION + ". Sent only with `include_content`",
@@ -505,6 +540,10 @@ class TraceResponse(BaseModel):
         None, description="Key-value pairs stored with the trace"
     )
     labels: List[str] = Field(description=_LABELS_DESCRIPTION)
+    source: TraceSource = Field(description=_TRACE_SOURCE_DESCRIPTION)
+    feedback: Optional[TraceFeedback] = Field(
+        None, description=_TRACE_FEEDBACK_DESCRIPTION
+    )
     created_at: str = Field(description="When the trace was created (ISO 8601 UTC)")
     updated_at: str = Field(
         description="When the trace was last updated (ISO 8601 UTC)"
@@ -578,6 +617,8 @@ def _to_trace_filters(source: Any) -> TraceFilters:
         output_type=source.output_type,
         labels=source.labels,
         scores=scores,
+        source=source.source,
+        feedback=source.feedback,
         created_after=_stored_time(source.created_after),
         created_before=_stored_time(source.created_before),
     )
@@ -645,6 +686,14 @@ class _TraceSelection(BaseModel):
     created_before: Optional[datetime] = Field(
         None,
         description="With `select_all` on, act only on traces created before this time (ISO 8601). A time with no timezone is read as UTC. Omit for no latest date",
+    )
+    source: Optional[TraceSource] = Field(
+        None,
+        description="With `select_all` on, act only on traces from this source:" + _SOURCE_VALUES,
+    )
+    feedback: Optional[TraceFeedbackFilter] = Field(
+        None,
+        description="With `select_all` on, act only on traces with this chat feedback:" + _FEEDBACK_VALUES,
     )
 
     @model_validator(mode="after")
@@ -731,6 +780,8 @@ def _to_summary(
         "tool_call_count": len(calls),
         "metadata_count": len(row.get("metadata") or []),
         "labels": row.get("labels") or [],
+        "source": row["source"],
+        "feedback": row["feedback"],
         "created_at": row["created_at"],
         "latest_run_status": scoring.get("status"),
         "latest_run_error": scoring.get("error"),
@@ -894,6 +945,14 @@ class _TraceListFilters:
         None,
         description="Return only traces created before this time (ISO 8601). A time with no timezone is read as UTC. Omit for no latest date",
     )
+    source: Optional[TraceSource] = Query(
+        None,
+        description="Return only traces from this source:" + _SOURCE_VALUES,
+    )
+    feedback: Optional[TraceFeedbackFilter] = Query(
+        None,
+        description="Return only traces with this chat feedback:" + _FEEDBACK_VALUES,
+    )
 
 
 @dataclass
@@ -998,6 +1057,14 @@ class _ConversationFilters:
         None,
         description="Return only conversations with a turn whose latest scoring run matches every one of these conditions. " + _SCORE_CONDITION_SYNTAX,
     )
+    source: Optional[TraceSource] = Query(
+        None,
+        description="Return only conversations with a turn from this source:" + _SOURCE_VALUES,
+    )
+    feedback: Optional[TraceFeedbackFilter] = Query(
+        None,
+        description="Return only conversations with a turn with this chat feedback:" + _FEEDBACK_VALUES,
+    )
     # Not parameters: this route has no date filters.
     created_after: ClassVar[None] = None
     created_before: ClassVar[None] = None
@@ -1041,6 +1108,12 @@ class TraceUsageResponse(BaseModel):
     max_scored_traces: Optional[int] = Field(
         description="How many traces you may have scored. No limit (`null`) while your workspace uses its own AI provider keys"
     )
+    chat_replies_today: int = Field(
+        description="How many replies the agent's chat link has given since midnight UTC, deleted ones included. 0 without `agent_id`"
+    )
+    max_chat_replies_per_day: Optional[int] = Field(
+        description="How many replies one agent's chat link may give in a day. No limit (`null`) while your workspace uses its own AI provider keys and has turned off `chat_link.limit_with_own_keys`"
+    )
 
 
 @router.get(
@@ -1048,7 +1121,12 @@ class TraceUsageResponse(BaseModel):
     response_model=TraceUsageResponse,
     summary="Get your trace usage against your limits",
 )
-def get_trace_usage_endpoint(ctx: OrgContext = Depends(get_current_org)):
+def get_trace_usage_endpoint(
+    ctx: OrgContext = Depends(get_current_org),
+    agent_id: Optional[str] = Query(
+        None, description="Count the chat replies of this agent"
+    ),
+):
     """Report how much of each trace limit you have used"""
     usage_limits = effective_limits(ctx.org_uuid)
     return {
@@ -1056,6 +1134,10 @@ def get_trace_usage_endpoint(ctx: OrgContext = Depends(get_current_org)):
         "max_traces": usage_limits["max_traces"],
         "traces_scored": count_scored_traces(ctx.org_uuid),
         "max_scored_traces": usage_limits["max_scored_traces"],
+        "chat_replies_today": (
+            count_chat_replies_today(ctx.org_uuid, agent_id) if agent_id else 0
+        ),
+        "max_chat_replies_per_day": usage_limits["max_chat_replies_per_day"],
     }
 
 

@@ -56,6 +56,7 @@ def test_updating_only_rows_keeps_the_stored_scored_traces_cap(client, monkeypat
         "max_traces": None,
         "trace_scoring_batch_size": None,
         "max_concurrent_trace_scoring_batches": None,
+        "max_chat_replies_per_day": None,
     }
     assert org_limits.effective_max_scored_traces(org) == 5000
     assert client.get("/org-limits/me/max-scored-traces", headers=h).json() == {
@@ -82,6 +83,12 @@ NEW_LIMITS = [
         "DEFAULT_MAX_CONCURRENT_TRACE_SCORING_BATCHES",
         org_limits.effective_max_concurrent_trace_scoring_batches,
         4,
+    ),
+    (
+        "max_chat_replies_per_day",
+        "DEFAULT_MAX_CHAT_REPLIES_PER_DAY",
+        org_limits.effective_max_chat_replies_per_day,
+        9,
     ),
 ]
 
@@ -148,6 +155,7 @@ def test_me_returns_every_effective_limit(client, monkeypatch):
         "max_traces": org_limits.DEFAULT_MAX_TRACES,
         "trace_scoring_batch_size": org_limits.DEFAULT_TRACE_SCORING_BATCH_SIZE,
         "max_concurrent_trace_scoring_batches": org_limits.DEFAULT_MAX_CONCURRENT_TRACE_SCORING_BATCHES,
+        "max_chat_replies_per_day": org_limits.DEFAULT_MAX_CHAT_REPLIES_PER_DAY,
         "uses_own_provider_keys": False,
     }
 
@@ -161,6 +169,7 @@ def test_me_returns_every_effective_limit(client, monkeypatch):
                 "max_traces": 13,
                 "trace_scoring_batch_size": 14,
                 "max_concurrent_trace_scoring_batches": 15,
+                "max_chat_replies_per_day": 16,
             },
         },
         headers=h,
@@ -172,6 +181,7 @@ def test_me_returns_every_effective_limit(client, monkeypatch):
         "max_traces": 13,
         "trace_scoring_batch_size": 14,
         "max_concurrent_trace_scoring_batches": 15,
+        "max_chat_replies_per_day": 16,
         "uses_own_provider_keys": False,
     }
 
@@ -192,6 +202,7 @@ def test_own_provider_keys_lift_only_the_spend_limits(client, monkeypatch):
     assert me["max_scored_traces"] is None
     assert me["max_traces"] == 5
     assert me["trace_scoring_batch_size"] == org_limits.DEFAULT_TRACE_SCORING_BATCH_SIZE
+    assert me["max_chat_replies_per_day"] == org_limits.DEFAULT_MAX_CHAT_REPLIES_PER_DAY
     assert me["uses_own_provider_keys"] is True
     assert client.get("/org-limits/me/max-rows-per-eval", headers=h).json() == {
         "max_rows_per_eval": None
@@ -207,3 +218,35 @@ def test_own_provider_keys_lift_only_the_spend_limits(client, monkeypatch):
     monkeypatch.setattr(provider_keys, "org_uses_own_keys", lambda o: False)
     assert org_limits.effective_max_rows_per_eval(org) == 3
     assert org_limits.effective_max_scored_traces(org) == 4
+
+
+@pytest.mark.parametrize(
+    "own_keys,limit_with_own_keys,expected",
+    [
+        (False, True, 7),
+        (False, False, 7),
+        (True, True, 7),
+        (True, False, None),
+    ],
+)
+def test_chat_reply_limit_is_lifted_only_on_own_keys_with_the_setting_off(
+    client, monkeypatch, own_keys, limit_with_own_keys, expected
+):
+    import provider_keys
+
+    h, org = _signup_as_superadmin(client, monkeypatch)
+    client.post(
+        "/org-limits",
+        json={"org_uuid": org, "limits": {"max_rows_per_eval": 3, "max_chat_replies_per_day": 7}},
+        headers=h,
+    )
+    saved = client.patch(
+        f"/organizations/{org}",
+        json={"settings": {"chat_link": {"limit_with_own_keys": limit_with_own_keys}}},
+        headers=h,
+    )
+    assert saved.status_code == 200, saved.text
+    monkeypatch.setattr(provider_keys, "org_uses_own_keys", lambda o: own_keys)
+
+    assert org_limits.effective_max_chat_replies_per_day(org) == expected
+    assert client.get("/org-limits/me", headers=h).json()["max_chat_replies_per_day"] == expected

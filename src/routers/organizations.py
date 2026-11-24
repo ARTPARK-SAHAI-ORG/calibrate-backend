@@ -54,11 +54,24 @@ class ModelBenchmarkingSettings(BaseModel):
     )
 
 
+_LIMIT_WITH_OWN_KEYS_DESCRIPTION = (
+    "`true` keeps the daily chat reply limit while the workspace uses its own AI "
+    "provider keys, `false` lifts it"
+)
+
+
+class ChatLinkSettings(BaseModel):
+    limit_with_own_keys: bool = Field(description=_LIMIT_WITH_OWN_KEYS_DESCRIPTION)
+
+
 class OrganizationSettings(BaseModel):
     model_config = ConfigDict(protected_namespaces=())
 
     model_benchmarking: ModelBenchmarkingSettings = Field(
         description="How this workspace compares models"
+    )
+    chat_link: ChatLinkSettings = Field(
+        description="How this workspace's agent chat links are limited"
     )
 
 
@@ -71,12 +84,25 @@ class ModelBenchmarkingSettingsUpdate(BaseModel):
     )
 
 
+class ChatLinkSettingsUpdate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    limit_with_own_keys: Optional[bool] = Field(
+        None,
+        description=f"{_LIMIT_WITH_OWN_KEYS_DESCRIPTION}. Omit to leave it as it is",
+    )
+
+
 class OrganizationSettingsUpdate(BaseModel):
     model_config = ConfigDict(extra="forbid", protected_namespaces=())
 
     model_benchmarking: Optional[ModelBenchmarkingSettingsUpdate] = Field(
         None,
         description="How this workspace compares models. Omit to leave the whole section as it is",
+    )
+    chat_link: Optional[ChatLinkSettingsUpdate] = Field(
+        None,
+        description="How this workspace's agent chat links are limited. Omit to leave the whole section as it is",
     )
 
 
