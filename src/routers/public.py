@@ -1289,7 +1289,14 @@ async def _agent_reply(chat: Dict[str, Any]) -> Dict[str, Any]:
         default_inputs=config.get("default_inputs"),
         type=agent.get("interaction_type") or DEFAULT_AGENT_INTERACTION_TYPE,
     )
-    return await connection.call(chat["messages"])
+    # A connected agent takes plain turns, as in a simulation; its own tool
+    # calls stay on its side, so they are left out of what it is sent.
+    turns = [
+        {"role": m["role"], "content": m["content"]}
+        for m in chat["messages"]
+        if m["role"] in ("user", "assistant") and m.get("content")
+    ]
+    return await connection.call(turns)
 
 
 def _prepare_chat_reply(token: str, body: "ChatMessageRequest") -> Dict[str, Any]:

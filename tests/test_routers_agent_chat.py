@@ -317,6 +317,23 @@ def test_connection_agent_is_called_with_the_eval_header(client):
     }
 
 
+def test_connection_agent_is_sent_plain_turns_without_its_tool_calls(client):
+    _, agent, token = _chat_agent(client, config=CONNECTION)
+    first = {"response": "Looked it up", "tool_calls": [{"tool": "lookup", "arguments": {"q": 1}, "output": {"n": 2}}]}
+    connection = _connection_mock(AsyncMock(side_effect=[first, {"response": "Bye", "tool_calls": []}]))
+    with patch.object(public, "public_url_error", return_value=None), patch.object(
+        public, "TextAgentConnection", connection
+    ):
+        conversation_id = _send(client, token, "Find it").json()["conversation_id"]
+        _send(client, token, "Thanks", conversation_id)
+
+    assert connection.return_value.call.await_args_list[1].args[0] == [
+        {"role": "user", "content": "Find it"},
+        {"role": "assistant", "content": "Looked it up"},
+        {"role": "user", "content": "Thanks"},
+    ]
+
+
 def test_connection_agent_that_times_out_fails_and_stores_nothing(client, monkeypatch):
     _, agent, token = _chat_agent(client, config=CONNECTION)
     monkeypatch.setattr(public, "CHAT_REPLY_TIMEOUT_SECONDS", 0.05)
