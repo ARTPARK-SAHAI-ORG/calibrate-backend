@@ -130,13 +130,37 @@ def test_a_new_workspace_reads_every_setting_at_its_default(client):
     org = client.post(
         "/organizations", json={"name": "Parallel"}, headers=auth["headers"]
     ).json()
-    assert org["settings"] == {"model_benchmarking": {"run_models_in_parallel": True}}
+    defaults = {
+        "model_benchmarking": {"run_models_in_parallel": True},
+        "chat_link": {"limit_with_own_keys": True},
+    }
+    assert org["settings"] == defaults
 
     listed = client.get("/organizations", headers=auth["headers"]).json()
-    assert all(
-        o["settings"] == {"model_benchmarking": {"run_models_in_parallel": True}}
-        for o in listed
+    assert all(o["settings"] == defaults for o in listed)
+
+
+def test_the_chat_limit_setting_saves_without_touching_the_other_one(client):
+    auth = _signup(client)
+    h = auth["headers"]
+    org = client.post("/organizations", json={"name": "Chat"}, headers=h).json()
+
+    resp = client.patch(
+        f"/organizations/{org['uuid']}",
+        json={"settings": {"chat_link": {"limit_with_own_keys": False}}},
+        headers=h,
     )
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["settings"] == {
+        "model_benchmarking": {"run_models_in_parallel": True},
+        "chat_link": {"limit_with_own_keys": False},
+    }
+    refused = client.patch(
+        f"/organizations/{org['uuid']}",
+        json={"settings": {"chat_link": {"limit_with_own_key": True}}},
+        headers=h,
+    )
+    assert refused.status_code == 422
 
 
 def test_running_models_one_after_another_is_remembered(client):

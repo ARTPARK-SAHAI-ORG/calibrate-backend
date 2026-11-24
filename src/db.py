@@ -1697,10 +1697,23 @@ def init_db():
             "ON traces(org_uuid, agent_id, conversation_id, created_at) "
             "WHERE deleted_at IS NULL"
         )
-        try:
-            cursor.execute("ALTER TABLE traces ADD COLUMN labels TEXT DEFAULT NULL")
-        except sqlite3.OperationalError:
-            pass
+        for column in (
+            "labels TEXT DEFAULT NULL",
+            "source TEXT DEFAULT 'api'",
+            "feedback_rating TEXT DEFAULT NULL",
+            "feedback_comment TEXT DEFAULT NULL",
+            "feedback_at TIMESTAMP DEFAULT NULL",
+        ):
+            try:
+                cursor.execute(f"ALTER TABLE traces ADD COLUMN {column}")
+            except sqlite3.OperationalError:
+                pass
+        # Includes deleted rows: the daily chat reply count does not drop when
+        # traces are deleted.
+        cursor.execute(
+            "CREATE INDEX IF NOT EXISTS idx_traces_org_agent_source_created "
+            "ON traces(org_uuid, agent_id, source, created_at)"
+        )
         conn.commit()
 
         # Durable scoring runs. `status` is the source of truth for "scored?";
@@ -4208,9 +4221,11 @@ def mark_email_verified(user_uuid: str, password_hash: Optional[str] = None) -> 
 # Every workspace setting and the value it holds until someone changes it.
 # `run_models_in_parallel` True runs the models of a comparison at the same
 # time, False runs them one after another, which is what every comparison did
-# before a workspace could remember a choice.
+# before a workspace could remember a choice. `limit_with_own_keys` False lifts
+# the daily chat reply limit for a workspace on its own provider keys.
 ORG_SETTINGS_DEFAULTS: Dict[str, Dict[str, Any]] = {
     "model_benchmarking": {"run_models_in_parallel": True},
+    "chat_link": {"limit_with_own_keys": True},
 }
 
 
@@ -8918,23 +8933,24 @@ def create_limit_hit(
 ) -> None:
     """Record that a workspace was refused for going over a limit.
 
-    A client keeps sending traces after the trace cap, so that limit is
-    recorded at most once per workspace per hour.
+    A client keeps sending traces after the trace cap, and a chat keeps
+    sending messages after the daily reply cap, so those two limits are
+    recorded at most once per workspace per hour each.
     """
     with get_db_connection() as conn:
         conn.execute(
             """
             INSERT INTO limit_hits (uuid, org_uuid, limit_name, kind, requested, cap)
             SELECT ?, ?, ?, ?, ?, ?
-            WHERE ? != 'max_traces' OR NOT EXISTS (
+            WHERE ? NOT IN ('max_traces', 'max_chat_replies_per_day') OR NOT EXISTS (
                 SELECT 1 FROM limit_hits
-                WHERE org_uuid = ? AND limit_name = 'max_traces'
+                WHERE org_uuid = ? AND limit_name = ?
                   AND created_at > datetime('now', '-1 hour')
             )
             """,
             (
                 str(uuid.uuid4()), org_uuid, limit_name, kind, requested, cap,
-                limit_name, org_uuid,
+                limit_name, org_uuid, limit_name,
             ),
         )
         conn.commit()
@@ -10849,6 +10865,16 @@ def _trace_row(row: sqlite3.Row) -> Dict[str, Any]:
         "output": json.loads(row["output"]),
         "metadata": json.loads(row["metadata"]) if row["metadata"] else None,
         "labels": json.loads(row["labels"]) if row["labels"] else [],
+        "source": row["source"] or "api",
+        "feedback": (
+            {
+                "rating": row["feedback_rating"],
+                "comment": row["feedback_comment"],
+                "at": _trace_iso(row["feedback_at"]),
+            }
+            if row["feedback_rating"]
+            else None
+        ),
         "created_at": _trace_iso(row["created_at"]),
         "updated_at": _trace_iso(row["updated_at"]),
     }
@@ -10949,6 +10975,8 @@ class TraceFilters:
     output_type: Optional[str] = None
     labels: Optional[List[str]] = None
     scores: Optional[List[TraceScoreFilter]] = None
+    source: Optional[str] = None
+    feedback: Optional[str] = None
     created_after: Optional[str] = None
     created_before: Optional[str] = None
 
@@ -11000,6 +11028,16 @@ def _trace_filters(
         params.extend(filters.labels)
     if filters.output_type:
         where.append("(" + TRACE_OUTPUT_TYPE_SQL[filters.output_type] + ")")
+    if filters.source:
+        where.append("COALESCE(source, 'api') = ?")
+        params.append(filters.source)
+    if filters.feedback == "any":
+        where.append("feedback_rating IS NOT NULL")
+    elif filters.feedback == "none":
+        where.append("feedback_rating IS NULL")
+    elif filters.feedback:
+        where.append("feedback_rating = ?")
+        params.append(filters.feedback)
     if filters.q and filters.q.strip():
         lowered = filters.q.strip().lower()
         # json.dumps escapes non-ASCII, so a Hindi word sits in the JSON columns
@@ -11100,6 +11138,7 @@ def _insert_trace_row(
     conversation_id: Optional[str] = None,
     metadata: Optional[Any] = None,
     labels: Optional[List[str]] = None,
+    source: str = "api",
 ) -> Dict[str, Any]:
     """Insert one traces row on `cur` and return it. Does not commit."""
     trace_uuid = str(uuid.uuid4())
@@ -11107,8 +11146,8 @@ def _insert_trace_row(
         """
         INSERT INTO traces
             (uuid, org_uuid, agent_id, message_id, conversation_id,
-             input, output, metadata, labels)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+             input, output, metadata, labels, source)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             trace_uuid,
@@ -11120,6 +11159,7 @@ def _insert_trace_row(
             json.dumps(output),
             json.dumps(metadata) if metadata is not None else None,
             json.dumps(labels) if labels else None,
+            source,
         ),
     )
     row = cur.execute(
@@ -11278,6 +11318,7 @@ def create_trace_with_eval_run(
     conversation_id: Optional[str] = None,
     metadata: Optional[Any] = None,
     labels: Optional[List[str]] = None,
+    source: str = "api",
     max_scored_traces: Optional[int],
     batch_size: int,
     wait_seconds: Optional[int] = None,
@@ -11320,6 +11361,7 @@ def create_trace_with_eval_run(
             conversation_id,
             metadata,
             labels,
+            source,
         )
         if scoring_on:
             over_limit = (
@@ -11513,6 +11555,36 @@ def soft_delete_traces_matching(org_uuid: str, *, filters: TraceFilters) -> int:
         )
         conn.commit()
         return cursor.rowcount or 0
+
+
+def set_trace_feedback(
+    org_uuid: str, trace_uuid: str, rating: Optional[str], comment: Optional[str]
+) -> bool:
+    """Set or change the feedback on a live chat trace, or clear it when
+    `rating` is None. Returns whether such a trace was updated."""
+    if rating is None:
+        comment = None
+    with get_db_connection() as conn:
+        cursor = conn.execute(
+            "UPDATE traces SET feedback_rating = ?, feedback_comment = ?, "
+            "feedback_at = CASE WHEN ? IS NULL THEN NULL ELSE CURRENT_TIMESTAMP END, "
+            "updated_at = CURRENT_TIMESTAMP "
+            "WHERE org_uuid = ? AND uuid = ? AND deleted_at IS NULL AND source = 'chat'",
+            (rating, comment, rating, org_uuid, trace_uuid),
+        )
+        conn.commit()
+        return cursor.rowcount > 0
+
+
+def count_chat_replies_today(org_uuid: str, agent_id: str) -> int:
+    """Chat replies the agent has given since midnight UTC, deleted ones
+    included, so deleting traces does not free replies."""
+    with get_db_connection() as conn:
+        return conn.execute(
+            "SELECT COUNT(*) FROM traces WHERE org_uuid = ? AND agent_id = ? "
+            "AND source = 'chat' AND created_at >= date('now')",
+            (org_uuid, agent_id),
+        ).fetchone()[0]
 
 
 def soft_delete_traces(org_uuid: str, *, trace_ids: List[str]) -> int:

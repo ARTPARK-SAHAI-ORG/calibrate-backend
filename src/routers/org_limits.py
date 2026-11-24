@@ -1,7 +1,8 @@
 """Workspace limits (superadmin configuration).
 
 Set caps for each workspace: dataset rows per eval run, stored traces, traces
-scored automatically, and trace scoring batch size and concurrency. Members read
+scored automatically, trace scoring batch size and concurrency, and chat
+replies per day. Members read
 the effective values via `/me`.
 """
 
@@ -41,6 +42,9 @@ DEFAULT_TRACE_SCORING_BATCH_SIZE = int(os.getenv("DEFAULT_TRACE_SCORING_BATCH_SI
 DEFAULT_MAX_CONCURRENT_TRACE_SCORING_BATCHES = int(
     os.getenv("MAX_CONCURRENT_TRACE_SCORING_BATCHES_PER_ORG", "1")
 )
+DEFAULT_MAX_CHAT_REPLIES_PER_DAY = int(
+    os.getenv("DEFAULT_MAX_CHAT_REPLIES_PER_DAY", "200")
+)
 
 
 class OrgLimits(BaseModel):
@@ -77,6 +81,13 @@ class OrgLimits(BaseModel):
         le=100,
         description="Maximum scoring batches a workspace may run at once",
         examples=[DEFAULT_MAX_CONCURRENT_TRACE_SCORING_BATCHES],
+    )
+    max_chat_replies_per_day: Optional[int] = Field(
+        None,
+        gt=0,
+        le=1_000_000,
+        description="Maximum replies one agent's chat link may give in a day, counted from midnight UTC",
+        examples=[DEFAULT_MAX_CHAT_REPLIES_PER_DAY],
     )
 
 
@@ -141,6 +152,10 @@ class OwnLimitsResponse(BaseModel):
         description="Maximum scoring batches your workspace may run at once",
         examples=[DEFAULT_MAX_CONCURRENT_TRACE_SCORING_BATCHES],
     )
+    max_chat_replies_per_day: Optional[int] = Field(
+        description="Maximum replies one agent's chat link may give in a day, counted from midnight UTC. No limit (`null`) while your workspace uses its own AI provider keys and has turned off `chat_link.limit_with_own_keys`",
+        examples=[DEFAULT_MAX_CHAT_REPLIES_PER_DAY],
+    )
     uses_own_provider_keys: bool = Field(
         description="Whether your workspace's runs use only its own AI provider keys instead of Calibrate's"
     )
@@ -171,6 +186,7 @@ _DEFAULT_LIMITS = {
     "max_concurrent_trace_scoring_batches": (
         lambda: DEFAULT_MAX_CONCURRENT_TRACE_SCORING_BATCHES
     ),
+    "max_chat_replies_per_day": lambda: DEFAULT_MAX_CHAT_REPLIES_PER_DAY,
 }
 
 
@@ -188,6 +204,11 @@ def effective_limits(org_uuid: str) -> Dict[str, Optional[int]]:
     }
     if provider_keys.org_uses_own_keys(org_uuid):
         limits.update(dict.fromkeys(_SPEND_LIMITS))
+        # A public chat link spends on behalf of strangers, so it stays capped
+        # on the workspace's own keys unless the workspace turns that off.
+        org = get_organization(org_uuid)
+        if org and org["settings"]["chat_link"]["limit_with_own_keys"] is False:
+            limits["max_chat_replies_per_day"] = None
     return limits
 
 
@@ -218,6 +239,11 @@ def effective_trace_scoring_batch_size(org_uuid: str) -> int:
 def effective_max_concurrent_trace_scoring_batches(org_uuid: str) -> int:
     """Workspace cap on trace scoring batches running at once, falling back to the server default."""
     return _effective_limit(org_uuid, "max_concurrent_trace_scoring_batches")
+
+
+def effective_max_chat_replies_per_day(org_uuid: str) -> Optional[int]:
+    """Workspace cap on one chat link's replies per day, falling back to the server default."""
+    return _effective_limit(org_uuid, "max_chat_replies_per_day")
 
 
 def record_limit_hit(

@@ -3313,6 +3313,7 @@ def test_writing_one_setting_leaves_the_others_alone(user):
     assert written == {
         "model_benchmarking": {"run_models_in_parallel": True, "second_key": "kept"},
         "second_section": {"a_key": "kept"},
+        "chat_link": {"limit_with_own_keys": True},
     }
 
 

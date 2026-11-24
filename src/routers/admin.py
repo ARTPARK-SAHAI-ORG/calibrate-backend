@@ -122,10 +122,10 @@ class LimitHit(BaseModel):
     org_uuid: str = Field(description="Workspace ID")
     org_name: str = Field(description="Workspace name")
     limit_name: str = Field(
-        description="Which limit: `max_rows_per_eval`, `max_traces` or `max_scored_traces`"
+        description="Which limit: `max_rows_per_eval`, `max_traces`, `max_scored_traces` or `max_chat_replies_per_day`"
     )
     kind: Optional[str] = Field(description="What was being started when the limit was hit")
-    requested: Optional[int] = Field(description="How many rows or traces were asked for")
+    requested: Optional[int] = Field(description="How many rows, traces or chat replies were asked for")
     cap: Optional[int] = Field(description="The limit at the time")
 
 

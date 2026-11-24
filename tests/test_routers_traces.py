@@ -2833,6 +2833,7 @@ def test_scores_cross_org_is_403(client):
 
 
 def test_usage_reports_both_counts_and_both_limits(client, monkeypatch):
+    from routers import org_limits
     from routers import traces as traces_mod
 
     h, agent_id = _signup_with_agent(client)
@@ -2845,6 +2846,8 @@ def test_usage_reports_both_counts_and_both_limits(client, monkeypatch):
         "max_traces": 5,
         "traces_scored": 0,
         "max_scored_traces": 2,
+        "chat_replies_today": 0,
+        "max_chat_replies_per_day": org_limits.DEFAULT_MAX_CHAT_REPLIES_PER_DAY,
     }
 
     first = _post_trace(client, h, _payload(agent_id, _mid()))
@@ -2855,6 +2858,8 @@ def test_usage_reports_both_counts_and_both_limits(client, monkeypatch):
         "max_traces": 5,
         "traces_scored": 2,
         "max_scored_traces": 2,
+        "chat_replies_today": 0,
+        "max_chat_replies_per_day": org_limits.DEFAULT_MAX_CHAT_REPLIES_PER_DAY,
     }
 
     # Past the scoring limit the trace is still stored, so only one count moves.
@@ -2903,6 +2908,69 @@ def test_usage_is_scoped_to_the_callers_workspace(client):
 
     assert client.get("/traces/usage", headers=other_h).json()["traces_stored"] == 0
     assert client.get("/traces/usage", headers=h).json()["traces_stored"] == 1
+
+
+def _set_trace_columns(trace_uuid, **columns):
+    with db.get_db_connection() as conn:
+        for column, value in columns.items():
+            conn.execute(
+                f"UPDATE traces SET {column} = ? WHERE uuid = ?", (value, trace_uuid)
+            )
+        conn.commit()
+
+
+def test_usage_counts_one_agents_chat_replies_today(client):
+    h, agent_id = _signup_with_agent(client)
+    _, other_agent = _signup_with_agent(client)
+    chat = [_post_trace(client, h, _payload(agent_id, _mid())) for _ in range(3)]
+    _post_trace(client, h, _payload(agent_id, _mid()))
+    for trace in chat:
+        _set_trace_columns(trace["uuid"], source="chat")
+    _set_trace_columns(chat[0]["uuid"], created_at="2020-01-01 00:00:00")
+    _set_trace_columns(chat[1]["uuid"], deleted_at="2026-01-01 00:00:00")
+
+    usage = client.get("/traces/usage", params={"agent_id": agent_id}, headers=h)
+    assert usage.status_code == 200, usage.text
+    assert usage.json()["chat_replies_today"] == 2
+    assert client.get("/traces/usage", headers=h).json()["chat_replies_today"] == 0
+    assert (
+        client.get("/traces/usage", params={"agent_id": other_agent}, headers=h)
+        .json()["chat_replies_today"]
+        == 0
+    )
+
+
+def test_a_trace_sent_to_the_api_reads_as_api_with_no_feedback(client):
+    h, agent_id = _signup_with_agent(client)
+    trace = _post_trace(client, h, _payload(agent_id, _mid()))
+
+    row = client.get("/traces", headers=h).json()["items"][0]
+    detail = client.get(f"/traces/{trace['uuid']}", headers=h).json()
+    assert (row["source"], row["feedback"]) == ("api", None)
+    assert (detail["source"], detail["feedback"]) == ("api", None)
+
+
+def test_ingest_refuses_a_source(client):
+    h, agent_id = _signup_with_agent(client)
+    res = client.post(
+        "/traces", json=_payload(agent_id, _mid(), source="chat"), headers=h
+    )
+    assert res.status_code == 422
+
+
+def test_chat_feedback_shows_on_the_list_and_the_detail(client):
+    h, agent_id = _signup_with_agent(client)
+    trace = _post_trace(client, h, _payload(agent_id, _mid()))
+    _set_trace_columns(trace["uuid"], source="chat")
+    assert db.set_trace_feedback(_org_of(agent_id), trace["uuid"], "down", "Wrong date")
+
+    row = client.get("/traces", headers=h).json()["items"][0]
+    detail = client.get(f"/traces/{trace['uuid']}", headers=h).json()
+    for got in (row, detail):
+        assert got["source"] == "chat"
+        assert got["feedback"]["rating"] == "down"
+        assert got["feedback"]["comment"] == "Wrong date"
+        assert got["feedback"]["at"].endswith("Z")
 
 
 _EVAL_A = str(uuid.uuid4())
@@ -3784,6 +3852,8 @@ def test_the_published_list_parameters_keep_their_order():
         "score",
         "created_after",
         "created_before",
+        "source",
+        "feedback",
         "sort_by_evaluator",
         "sort_order",
         "include_content",
@@ -3818,20 +3888,33 @@ _ONE_FILTER_CASES = {
         {"created_at": "2026-02-01 00:00:00"},
         {"created_before": "2026-01-15T00:00:00Z"},
     ),
+    "source=chat": ({"source": "chat"}, {}, {"source": "chat"}),
+    "source=api": ({}, {"source": "chat"}, {"source": "api"}),
+    "source=api reads null as api": ({"source": None}, {"source": "chat"}, {"source": "api"}),
+    "feedback=up": ({"feedback_rating": "up"}, {"feedback_rating": "down"}, {"feedback": "up"}),
+    "feedback=down": ({"feedback_rating": "down"}, {"feedback_rating": "up"}, {"feedback": "down"}),
+    "feedback=any": ({"feedback_rating": "up"}, {}, {"feedback": "any"}),
+    "feedback=none": ({}, {"feedback_rating": "down"}, {"feedback": "none"}),
 }
+
+# Columns no request can set, written straight to the row.
+_ROW_ONLY_FIELDS = ("created_at", "source", "feedback_rating")
 
 
 def _matching_and_other_trace(client, h, agent_id, filter_name):
     """Post a trace the filter keeps and one it leaves out."""
     matching, other, query = _ONE_FILTER_CASES[filter_name]
     traces = []
-    for fields in (matching, other):
+    for conversation_id, fields in (("conv-a", matching), ("conv-b", other)):
         fields = dict(fields)
-        created_at = fields.pop("created_at", None)
+        columns = {k: fields.pop(k) for k in _ROW_ONLY_FIELDS if k in fields}
+        if "feedback_rating" in columns:
+            columns["feedback_at"] = "2026-01-01 00:00:00"
         message_id = _mid()
+        if filter_name != "conversation_id":
+            fields.setdefault("conversation_id", conversation_id)
         trace = _post_trace(client, h, _payload(agent_id, message_id, **fields))
-        if created_at:
-            _set_created_at(trace["uuid"], created_at)
+        _set_trace_columns(trace["uuid"], **columns)
         traces.append({**trace, "message_id": message_id})
     return traces[0], traces[1], query
 
@@ -3868,7 +3951,10 @@ def test_convert_select_all_skips_a_trace_outside_one_filter(client, filter_name
     assert _test_names(client, h) == [matching["message_id"]]
 
 
-@pytest.mark.parametrize("filter_name", ["q", "output_type", "labels"])
+@pytest.mark.parametrize(
+    "filter_name",
+    ["q", "output_type", "labels", "source=chat", "feedback=down", "feedback=none"],
+)
 def test_score_averages_leave_out_a_trace_outside_one_filter(client, filter_name):
     h, agent_id = _signup_with_agent(client)
     _disable_auto_score(client, h, agent_id)
@@ -3900,6 +3986,26 @@ def test_conversations_leave_out_one_outside_one_filter(client, filter_name):
     assert _conversation_ids(client, h, **query) == ["conv-a"]
 
 
+@pytest.mark.parametrize(
+    "filter_name", ["source=chat", "source=api", "feedback=down", "feedback=any", "feedback=none"]
+)
+def test_conversations_leave_out_one_outside_a_chat_filter(client, filter_name):
+    h, agent_id = _signup_with_agent(client)
+    _, _, query = _matching_and_other_trace(client, h, agent_id, filter_name)
+
+    assert _conversation_ids(client, h, **query) == ["conv-a"]
+
+
+@pytest.mark.parametrize("filter_name", ["source=chat", "feedback=up", "feedback=none"])
+def test_list_leaves_out_a_trace_outside_a_chat_filter(client, filter_name):
+    h, agent_id = _signup_with_agent(client)
+    matching, _, query = _matching_and_other_trace(client, h, agent_id, filter_name)
+
+    body = client.get("/traces", params=query, headers=h).json()
+    assert body["total"] == 1
+    assert [t["uuid"] for t in body["items"]] == [matching["uuid"]]
+
+
 def test_conversations_leave_out_one_outside_the_score_filter(client):
     h, agent_id = _signup_with_agent(client)
     _disable_auto_score(client, h, agent_id)
@@ -3921,6 +4027,8 @@ _ALL_FILTERS = {
     "score": ["ev-a:passed", "ev-b:>=4"],
     "created_after": "2026-01-15T05:30:00+05:30",
     "created_before": "2026-02-01T00:00:00Z",
+    "source": "chat",
+    "feedback": "any",
 }
 
 
@@ -3955,6 +4063,8 @@ def test_a_body_with_every_filter_reaches_trace_filters_intact(
         output_type="tool_call",
         labels=["vip", "prod"],
         scores=[("ev-a", "passed", None), ("ev-b", ">=", 4.0)],
+        source="chat",
+        feedback="any",
         created_after="2026-01-15 00:00:00",
         created_before="2026-02-01 00:00:00",
     )
