@@ -1278,7 +1278,6 @@ def _history_from_trace(trace: Dict[str, Any]) -> List[Dict[str, Any]]:
 
 
 async def _llm_reply(**kwargs: Any) -> Dict[str, Any]:
-    # calibrate_agent.chat ships in a calibrate-agent release newer than the pinned one.
     from calibrate_agent.chat import agent_reply
 
     return await agent_reply(**kwargs)
