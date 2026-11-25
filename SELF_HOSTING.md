@@ -6,8 +6,46 @@ Pick your target cloud (AWS/GCP) and follow that section. Before you start, make
 
 ## Contents
 
-1. [Deploy on AWS](#deploy-on-aws)
-2. [Deploy on GCP](#deploy-on-gcp)
+1. [What you need](#what-you-need)
+2. [How the backend and frontend connect](#how-the-backend-and-frontend-connect)
+3. [Release an update](#release-an-update)
+4. [Deploy on AWS](#deploy-on-aws)
+5. [Deploy on GCP](#deploy-on-gcp)
+
+## What you need
+
+A typical setup runs the backend on one GCP virtual machine and the frontend on Vercel. Have these ready before you start:
+
+- **Your own copies of both repos** on GitHub: `calibrate-backend` and `calibrate-frontend`, forked into your organisation.
+- **A GCP project** with billing on. The backend uses one Compute Engine machine, one persistent disk for the database, and one Cloud Storage bucket for audio and results.
+- **A Vercel account** connected to your copy of the frontend repo.
+- **Two web addresses**, for example `calibrate.yourdomain.com` for the frontend and `calibrate-api.yourdomain.com` for the backend, and access to their DNS settings. The backend address points at the machine's static IP. The frontend address is added in Vercel.
+- **A Google OAuth client** for sign-in with Google. One client is shared by both: the frontend uses its ID and secret, the backend uses its ID.
+- **A Resend account with a verified sending domain**, if you want email. Without it, signup works but no email is sent, so people cannot verify an address or reset a password. See [Set up the email templates](#set-up-the-email-templates).
+- **API keys for the AI providers** you will evaluate with, such as OpenRouter or OpenAI. Each workspace can also add its own keys in the app.
+- Optional: a Sentry project for error reports.
+
+## How the backend and frontend connect
+
+These values must agree, or sign-in, uploads, or email links break:
+
+| Where                         | Setting                            | Value                                             |
+| ----------------------------- | ---------------------------------- | ------------------------------------------------- |
+| Vercel (frontend)             | `NEXT_PUBLIC_BACKEND_URL`          | The backend address, e.g. `https://calibrate-api.yourdomain.com` |
+| Vercel (frontend)             | `AUTH_URL`, `NEXT_PUBLIC_APP_URL`  | The frontend address                              |
+| Backend `.env`                | `CORS_ALLOWED_ORIGINS`             | The frontend address                              |
+| Backend `.env`                | `FRONTEND_URL`                     | The frontend address, used for links in emails    |
+| Backend `.env` and Vercel     | `GOOGLE_CLIENT_ID`                 | The same OAuth client ID in both                  |
+| Google OAuth client           | Authorised origins and redirect URI | The frontend address, and `<frontend address>/api/auth/callback/google` |
+| Storage bucket CORS           | Allowed origin                     | The frontend address, since browsers upload audio straight to the bucket |
+
+## Release an update
+
+**Backend.** Pull the latest changes from the upstream repo into your copy on GitHub. Then publish a GitHub release (**Releases → Draft a new release**, new tag such as `v1.2.0`). Publishing the release runs **Deploy to Production**, which builds the image and restarts the backend on your machine. To restart without new code, for example after changing a secret, run **Actions → Redeploy to Production**. It can also roll back to an earlier release.
+
+**Frontend.** Pull the latest changes from upstream into your copy on GitHub. Vercel deploys it on its own.
+
+Update both together. A new frontend can call backend routes an older backend does not have.
 
 # Deploy on AWS
 
@@ -132,7 +170,7 @@ DOCS_USERNAME=admin
 DOCS_PASSWORD=CHANGE_ME
 
 # CORS — restrict to your frontend origin in production
-CORS_ALLOWED_ORIGINS=*
+CORS_ALLOWED_ORIGINS=https://<your frontend address>
 
 # Concurrency
 MAX_CONCURRENT_JOBS=1
@@ -155,6 +193,9 @@ GOOGLE_CLOUD_PROJECT_ID=
 
 # Auth
 GOOGLE_CLIENT_ID=
+
+# Encrypts the AI provider keys a workspace saves in the app. Generate once, never change.
+PROVIDER_KEYS_ENCRYPTION_KEY=
 
 # Email. Leave RESEND_API_KEY empty to send nothing.
 # FRONTEND_URL is the address of your frontend, used for links inside emails.
@@ -181,9 +222,12 @@ chmod 600 .env
 
 # Generate JWT secret and paste into .env
 openssl rand -base64 32
+
+# Generate PROVIDER_KEYS_ENCRYPTION_KEY and paste into .env
+docker run --rm calibrate-backend:local uv run python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"
 ```
 
-Update the default values given above as needed. For example, you might want to set the `SUPERADMIN_EMAIL` to an email address you own. Set the API keys for different providers (e.g. OpenRouter, OpenAI, etc.). Set the `GOOGLE_CLIENT_ID` to the same value as the one used for self-hosting the frontend. Set `FRONTEND_URL` to the address your frontend runs on, or the links in invite emails will point at localhost. If you want email at all, you also have to create the three Resend templates once: see [Set up the email templates](#set-up-the-email-templates).
+Update the default values given above as needed. For example, you might want to set the `SUPERADMIN_EMAIL` to an email address you own. Set the API keys for different providers (e.g. OpenRouter, OpenAI, etc.). Set the `GOOGLE_CLIENT_ID` to the same value as the one used for self-hosting the frontend. Set `FRONTEND_URL` to the address your frontend runs on, or the links in invite emails will point at localhost. If you want email at all, you also have to create the Resend templates once: see [Set up the email templates](#set-up-the-email-templates).
 
 If you used a different name other than `/appdata` in the `SSH and create the root directory for the database` step, update `APP_FOLDER_PATH` and `DB_ROOT_DIR` in the `.env` file accordingly.
 
@@ -200,7 +244,7 @@ Create them once, with a **full access** API key (the key you deploy with only n
 RESEND_API_KEY=<full access key> uv run python scripts/create_email_templates.py
 ```
 
-That creates and publishes three templates: the welcome email and the two workspace invites. Running it again changes nothing, so it will not overwrite wording you have since edited in the dashboard.
+That creates and publishes six templates: the welcome email, the workspace invite, the two emails telling a workspace owner someone joined, email verification, and password reset. Running it again changes nothing, so it will not overwrite wording you have since edited in the dashboard.
 
 To change any of the wording afterwards, edit the template in Resend and press Publish. A draft does not go out until you publish it.
 
@@ -219,7 +263,7 @@ Open `http://<INSTANCE_ELASTIC_IP>:8000/docs` on your browser. It should load th
 
 ## Move from HTTP to HTTPS
 
-Use nginx to route your custom domain (e.g. calibrate-backend.<yourdomain.com>) to the server. Use certbot to make the connection secure using HTTPS.
+Use nginx to route your custom domain (e.g. calibrate-backend.<yourdomain.com>) to the server. Use certbot to make the connection secure using HTTPS. Set `client_max_body_size 50m;` in the nginx server block. The nginx default of 1 MB refuses audio uploads and run imports sent through the API.
 
 ## Verify everything works
 
@@ -250,22 +294,9 @@ ssh -i <your-key>.pem ubuntu@<ELASTIC_IP> \
 
 Test from your laptop: `ssh -i ~/.ssh/calibrate-deploy ubuntu@<ELASTIC_IP>` should log you in.
 
-### 2. Let the VM pull from ghcr.io
+### 2. Set GitHub Actions environment secrets
 
-The workflow pushes to `ghcr.io/<your-org>/calibrate-backend`. Since your repo is private, the image is private too — the VM needs credentials to pull.
-
-1. Create a **Personal Access Token (classic)** at **GitHub → Settings → Developer settings → Personal access tokens → Tokens (classic) → Generate new token**. Only scope needed: `read:packages`. Copy the token (`ghp_...`).
-2. On the VM, log in once:
-
-   ```bash
-   echo "<ghp_xxx>" | docker login ghcr.io -u <your-github-username> --password-stdin
-   ```
-
-   Writes `~/.docker/config.json`; `docker compose pull` reads it on every subsequent deploy.
-
-### 3. Set GitHub Actions environment secrets
-
-Go to **GitHub → Repo settings → Environments → New environment** named `Production` (or `Staging`). Create new secrets for the environment variables you set in the `.env` file along with the following:
+Go to **GitHub → Repo settings → Environments → New environment** named `Production` (or `Staging`). Create new secrets for the environment variables you set in the `.env` file along with the following. On every deploy the workflow starts the backend with these secrets, not with the `.env` file on the machine, so every value in your `.env` needs a matching secret.
 
 | Secret                                        | Value                                                                       |
 | --------------------------------------------- | --------------------------------------------------------------------------- |
@@ -277,11 +308,11 @@ Go to **GitHub → Repo settings → Environments → New environment** named `P
 
 Leave `S3_ENDPOINT_URL`, `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY` empty (or unset) — the IAM instance role on the EC2 provides S3 credentials automatically.
 
-### 4. Trigger a deploy
+### 3. Trigger a deploy
 
-GitHub → **Actions** → **Deploy to Production** → **Run workflow** → choose the branch → Run.
+Publish a GitHub release (**Releases → Draft a new release**, new tag, Publish). That runs **Deploy to Production**. **Deploy to Staging** is started by hand from **Actions → Deploy to Staging → Run workflow**.
 
-Watch the run. If SSH connects and `docker compose up -d` succeeds, you're set — subsequent deploys are one click.
+Watch the run. If SSH connects and `docker compose up -d` succeeds, you're set. The workflow logs the machine in to ghcr.io with its own short-lived token, so the machine needs no GitHub token of its own.
 
 ### Common gotchas
 
@@ -306,7 +337,24 @@ Go to **Cloud Storage → Buckets → Create** and step through the wizard:
 
 Click **Create**.
 
-Keep it stricter if you need to.
+Browsers upload audio straight to the bucket, so the bucket needs CORS. Save this as `cors.json`, with your frontend address:
+
+```json
+[
+  {
+    "origin": ["https://<your frontend address>"],
+    "method": ["GET", "PUT", "POST"],
+    "responseHeader": ["*"],
+    "maxAgeSeconds": 3600
+  }
+]
+```
+
+Then apply it:
+
+```bash
+gcloud storage buckets update gs://calibrate-backend-artifacts --cors-file=cors.json
+```
 
 ## Create a service account + HMAC keys
 
@@ -437,7 +485,7 @@ DOCS_USERNAME=admin
 DOCS_PASSWORD=CHANGE_ME
 
 # CORS — restrict to your frontend origin in production
-CORS_ALLOWED_ORIGINS=*
+CORS_ALLOWED_ORIGINS=https://<your frontend address>
 
 # Concurrency
 MAX_CONCURRENT_JOBS=1
@@ -460,6 +508,9 @@ GOOGLE_CLOUD_PROJECT_ID=
 
 # Auth
 GOOGLE_CLIENT_ID=
+
+# Encrypts the AI provider keys a workspace saves in the app. Generate once, never change.
+PROVIDER_KEYS_ENCRYPTION_KEY=
 
 # Email. Leave RESEND_API_KEY empty to send nothing.
 # FRONTEND_URL is the address of your frontend, used for links inside emails.
@@ -486,9 +537,12 @@ chmod 600 .env
 
 # Generate JWT secret and paste into .env
 openssl rand -base64 32
+
+# Generate PROVIDER_KEYS_ENCRYPTION_KEY and paste into .env
+docker run --rm calibrate-backend:local uv run python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"
 ```
 
-Update the default values given above as needed. For example, you might want to set the `SUPERADMIN_EMAIL` to an email address you own. Set the API keys for different providers (e.g. OpenRouter, OpenAI, etc.). Set the `GOOGLE_CLIENT_ID` to the same value as the one used for self-hosting the frontend. Set `FRONTEND_URL` to the address your frontend runs on, or the links in invite emails will point at localhost. If you want email at all, you also have to create the three Resend templates once: see [Set up the email templates](#set-up-the-email-templates).
+Update the default values given above as needed. For example, you might want to set the `SUPERADMIN_EMAIL` to an email address you own. Set the API keys for different providers (e.g. OpenRouter, OpenAI, etc.). Set the `GOOGLE_CLIENT_ID` to the same value as the one used for self-hosting the frontend. Set `FRONTEND_URL` to the address your frontend runs on, or the links in invite emails will point at localhost. If you want email at all, you also have to create the Resend templates once: see [Set up the email templates](#set-up-the-email-templates).
 
 `AWS_ACCESS_KEY_ID` and `AWS_SECRET_ACCESS_KEY` need to be set as the HMAC secret and access keys from step 2. Let `S3_ENDPOINT_URL` be as it is.
 
@@ -511,7 +565,7 @@ Open `http://<STATIC_IP>/docs` on your browser. It should load the FastAPI docs.
 
 ## Moving from HTTP to HTTPS
 
-Use nginx to route your custom domain (e.g. calibrate-backend.<yourdomain.com>) to the server. Use certbot to make the connection secure using HTTPS.
+Use nginx to route your custom domain (e.g. calibrate-backend.<yourdomain.com>) to the server. Use certbot to make the connection secure using HTTPS. Set `client_max_body_size 50m;` in the nginx server block. The nginx default of 1 MB refuses audio uploads and run imports sent through the API.
 
 ## Verify everything works
 
@@ -543,22 +597,9 @@ gcloud compute instances add-metadata calibrate-backend-prod \
 
 Test from your laptop: `ssh -i ~/.ssh/calibrate-deploy ubuntu@<STATIC_IP>` should log you in.
 
-### 2. Let the VM pull from ghcr.io
+### 2. Set GitHub Actions environment secrets
 
-The workflow pushes to `ghcr.io/<your-org>/calibrate-backend`. Since your repo is private, the image is private too — the VM needs credentials to pull.
-
-1. Create a **Personal Access Token (classic)** at **GitHub → Settings → Developer settings → Personal access tokens → Tokens (classic) → Generate new token**. Only scope needed: `read:packages`. Copy the token (`ghp_...`).
-2. On the VM, log in once:
-
-   ```bash
-   echo "<ghp_xxx>" | docker login ghcr.io -u <your-github-username> --password-stdin
-   ```
-
-   Writes `~/.docker/config.json`; `docker compose pull` reads it on every subsequent deploy.
-
-### 3. Set GitHub Actions environment secrets
-
-Go to **GitHub → Repo settings → Environments → New environment** named `Production` (or `Staging`). Create new secrets for the environment variables you set in the `.env` file along with the following:
+Go to **GitHub → Repo settings → Environments → New environment** named `Production` (or `Staging`). Create new secrets for the environment variables you set in the `.env` file along with the following. On every deploy the workflow starts the backend with these secrets, not with the `.env` file on the machine, so every value in your `.env` needs a matching secret.
 
 | Secret                                        | Value                                                       |
 | --------------------------------------------- | ----------------------------------------------------------- |
@@ -568,11 +609,11 @@ Go to **GitHub → Repo settings → Environments → New environment** named `P
 | Provider API keys (`OPENROUTER_API_KEY` etc.) | As needed                                                   |
 | `SENTRY_*`, `LANGFUSE_*`, etc.                | Optional                                                    |
 
-### 4. Trigger a deploy
+### 3. Trigger a deploy
 
-GitHub → **Actions** → **Deploy to Production** → **Run workflow** → choose the branch → Run.
+Publish a GitHub release (**Releases → Draft a new release**, new tag, Publish). That runs **Deploy to Production**. **Deploy to Staging** is started by hand from **Actions → Deploy to Staging → Run workflow**.
 
-Watch the run. If SSH connects and `docker compose up -d` succeeds, you're set — subsequent deploys are one click.
+Watch the run. If SSH connects and `docker compose up -d` succeeds, you're set. The workflow logs the machine in to ghcr.io with its own short-lived token, so the machine needs no GitHub token of its own.
 
 ### Common gotchas
 
