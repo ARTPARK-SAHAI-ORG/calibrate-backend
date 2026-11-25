@@ -724,11 +724,13 @@ def _swallow_settle(fn: Callable[..., Any], run: dict[str, Any], **kwargs: Any) 
 
 
 def _settle_or_defer_terminal(
-    run: dict[str, Any], *, reason: str, now: str, rng: random.Random | None,
-    max_attempts: int,
+    run: dict[str, Any], *, reason: TraceEvalSkipReason | TraceEvalSettleSkipReason,
+    now: str, rng: random.Random | None, max_attempts: int,
 ) -> None:
     from db import settle_trace_eval_run_terminal
 
+    if isinstance(reason, TraceEvalSettleSkipReason):
+        reason = reason.value
     try:
         settle_trace_eval_run_terminal(
             run["uuid"], status=TraceEvalRunStatus.SKIPPED, error=reason, now=now,
@@ -826,14 +828,9 @@ def process_claimed_runs(
             )
         return
     if not isinstance(evaluators, BatchEvaluators):
-        reason = (
-            evaluators.value
-            if isinstance(evaluators, TraceEvalSettleSkipReason)
-            else evaluators
-        )
         for item in prepared:
             _settle_or_defer_terminal(
-                item.run, reason=reason, now=prepare_now, rng=rng,
+                item.run, reason=evaluators, now=prepare_now, rng=rng,
                 max_attempts=max_attempts,
             )
         return

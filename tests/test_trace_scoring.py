@@ -710,6 +710,18 @@ def test_a_deleted_agent_settles_its_claimed_runs_as_skipped():
     assert row["error"] == ts.TraceEvalSettleSkipReason.AGENT_DELETED.value
 
 
+def test_a_batch_resolving_to_a_settle_reason_stores_its_text(monkeypatch):
+    claimed, _, _ = _agent_with_traces(1)
+    monkeypatch.setattr(
+        ts, "resolve_batch_evaluators",
+        lambda *a, **k: ts.TraceEvalSettleSkipReason.SCORING_DISABLED,
+    )
+    ts.process_claimed_runs(claimed, invoke=lambda *a, **k: None)
+    row = db.get_trace_eval_run(claimed[0]["uuid"])
+    assert row["status"] == "skipped"
+    assert row["error"] == "scoring_disabled"
+
+
 def test_hydrated_evaluators_carry_the_execution_fields_the_cli_needs():
     claimed, evaluator_uuid, version_uuid = _agent_with_traces(1)
     resolved = ts.resolve_batch_evaluators(claimed[0]["agent_id"])
