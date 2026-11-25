@@ -19,6 +19,7 @@ from pydantic import BaseModel, Field
 from calibrate_agent.connections import TextAgentConnection
 
 from utils import (
+    default_agent_llm_model,
     public_url_error,
     env_bool,
     with_calibrate_eval_header,
@@ -178,7 +179,7 @@ def _default_agent_config() -> Dict[str, Any]:
             "DEFAULT_AGENT_SYSTEM_PROMPT", "You are a helpful assistant."
         ),
         "llm": {
-            "model": env_str("DEFAULT_AGENT_LLM_MODEL", "google/gemini-3.5-flash-lite"),
+            "model": default_agent_llm_model(),
         },
         "stt": {
             "provider": env_str("DEFAULT_AGENT_STT_PROVIDER", "google"),

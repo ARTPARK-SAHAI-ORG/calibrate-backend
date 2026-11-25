@@ -47,6 +47,7 @@ from db import (
 from llm_judge import build_evaluator_cli_payload
 from shared_enums import EvaluatorType
 from utils import (
+    default_agent_llm_model,
     compute_share_token_toggle,
     job_slot,
     with_calibrate_eval_header,
@@ -1277,8 +1278,7 @@ def _build_calibrate_simulation_config(
 
     # Calibrate agent mode
     llm_config = agent_config.get("llm", {})
-    # calibrate sends the model to OpenRouter, so the fallback needs the provider prefix.
-    model = llm_config.get("model", env_str("DEFAULT_AGENT_LLM_MODEL", "openai/gpt-4.1"))
+    model = llm_config.get("model", default_agent_llm_model())
 
     agent_tools = get_tools_for_agent(agent["uuid"])
     tool_configs = build_tool_configs(agent_tools)
