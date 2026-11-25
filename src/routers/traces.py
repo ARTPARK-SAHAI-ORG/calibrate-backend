@@ -40,6 +40,7 @@ from db import (
     get_evaluators_by_uuids,
     get_latest_trace_run_summaries,
     get_trace,
+    set_trace_feedback,
     get_traces_by_uuids,
     list_trace_conversation_ids,
     list_trace_conversations,
@@ -54,7 +55,7 @@ from db import (
 )
 from org_scope import ensure_owned_agent
 from pagination import PaginatedResponse, PaginationParams, page_envelope
-from routers.org_limits import effective_limits, record_limit_hit
+from routers.org_limits import chat_replies_per_day, effective_limits, record_limit_hit
 
 # Reuse the tests router's validation so a converted test accepts exactly what
 # POST /tests does (evaluator visible to the workspace, evaluator_type matches).
@@ -156,17 +157,17 @@ _SORT_BY_EVALUATOR_DESCRIPTION = (
 )
 
 TraceSource = Literal["api", "chat"]
-TraceFeedbackFilter = Literal["up", "down", "any", "none"]
+TraceFeedbackFilter = Literal["correct", "incorrect", "any", "none"]
 
 _SOURCE_VALUES = (
     "\n\n- `api`: sent to `POST /traces`\n"
     "- `chat`: a reply the agent gave on its chat link"
 )
 _FEEDBACK_VALUES = (
-    "\n\n- `up`: rated thumbs up\n"
-    "- `down`: rated thumbs down\n"
-    "- `any`: rated either way\n"
-    "- `none`: not rated"
+    "\n\n- `correct`: marked correct\n"
+    "- `incorrect`: marked incorrect\n"
+    "- `any`: marked either way\n"
+    "- `none`: no feedback"
 )
 
 _SORT_ORDER_DESCRIPTION = (
@@ -311,6 +312,19 @@ class TraceMetadataEntry(BaseModel):
     )
 
 
+_IS_CORRECT_DESCRIPTION = "Whether the agent's output for this turn was correct"
+_FEEDBACK_COMMENT_DESCRIPTION = "What was right or wrong about the agent's output"
+
+
+class TraceFeedbackIngest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    is_correct: bool = Field(description=_IS_CORRECT_DESCRIPTION)
+    comment: Optional[str] = Field(
+        None, max_length=2000, description=_FEEDBACK_COMMENT_DESCRIPTION + ". Omit if you have none"
+    )
+
+
 class TraceIngest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -343,6 +357,10 @@ class TraceIngest(BaseModel):
         max_length=MAX_LABELS,
         description=_LABELS_DESCRIPTION + ". Omit if you have none",
     )
+    feedback: Optional[TraceFeedbackIngest] = Field(
+        None,
+        description="A verdict on the agent's output, if you already have one. Omit if you have none",
+    )
 
 
 class TraceIngestResponse(BaseModel):
@@ -362,18 +380,14 @@ class TraceIngestResponse(BaseModel):
 
 
 class TraceFeedback(BaseModel):
-    rating: Literal["up", "down"] = Field(
-        description="Whether the person chatting liked the reply"
-    )
-    comment: Optional[str] = Field(
-        None, description="What the person chatting wrote about the reply"
-    )
+    is_correct: bool = Field(description=_IS_CORRECT_DESCRIPTION)
+    comment: Optional[str] = Field(None, description=_FEEDBACK_COMMENT_DESCRIPTION)
     at: str = Field(description="When the feedback was last given (ISO 8601 UTC)")
 
 
 _TRACE_SOURCE_DESCRIPTION = "Where the trace came from:" + _SOURCE_VALUES
 _TRACE_FEEDBACK_DESCRIPTION = (
-    "The rating and comment the person chatting gave this reply on the chat link"
+    "The verdict and comment given on the trace, through the API or on the chat link"
 )
 
 
@@ -692,7 +706,7 @@ class _TraceSelection(BaseModel):
     )
     feedback: Optional[TraceFeedbackFilter] = Field(
         None,
-        description="With `select_all` on, act only on traces with this chat feedback:" + _FEEDBACK_VALUES,
+        description="With `select_all` on, act only on traces with this feedback:" + _FEEDBACK_VALUES,
     )
 
     @model_validator(mode="after")
@@ -866,6 +880,7 @@ def ingest_trace(
             else None
         ),
         labels=list(dict.fromkeys(payload.labels)),
+        feedback=payload.feedback.model_dump() if payload.feedback else None,
     )
     return {
         "uuid": row["uuid"],
@@ -950,7 +965,7 @@ class _TraceListFilters:
     )
     feedback: Optional[TraceFeedbackFilter] = Query(
         None,
-        description="Return only traces with this chat feedback:" + _FEEDBACK_VALUES,
+        description="Return only traces with this feedback:" + _FEEDBACK_VALUES,
     )
 
 
@@ -1062,7 +1077,7 @@ class _ConversationFilters:
     )
     feedback: Optional[TraceFeedbackFilter] = Query(
         None,
-        description="Return only conversations with a turn with this chat feedback:" + _FEEDBACK_VALUES,
+        description="Return only conversations with a turn with this feedback:" + _FEEDBACK_VALUES,
     )
     # Not parameters: this route has no date filters.
     created_after: ClassVar[None] = None
@@ -1108,10 +1123,13 @@ class TraceUsageResponse(BaseModel):
         description="How many traces you may have scored. No limit (`null`) while your workspace uses its own AI provider keys"
     )
     chat_replies_today: int = Field(
-        description="How many replies the agent's chat link has given since midnight UTC, deleted ones included. 0 without `agent_id`"
+        description="How many replies the agent's chat link has given since midnight UTC, including ones whose traces were deleted or never stored. 0 without `agent_id`"
+    )
+    chat_replies_per_day: Optional[int] = Field(
+        description="How many replies the agent's chat link may give in a day: its own `talk_to_agent.messages_per_day`, else the workspace's `talk_to_agent.default_messages_per_day`, never above `max_chat_replies_per_day`. Sent only with `agent_id`"
     )
     max_chat_replies_per_day: Optional[int] = Field(
-        description="How many replies one agent's chat link may give in a day. No limit (`null`) while your workspace uses its own AI provider keys and has turned off `chat_link.limit_with_own_keys`"
+        description="The highest daily chat reply limit an agent or the workspace default may be set to. No limit (`null`) while your workspace uses its own AI provider keys"
     )
 
 
@@ -1123,18 +1141,22 @@ class TraceUsageResponse(BaseModel):
 def get_trace_usage_endpoint(
     ctx: OrgContext = Depends(get_current_org),
     agent_id: Optional[str] = Query(
-        None, description="Count the chat replies of this agent"
+        None, description="Count the chat replies of this agent and read its daily limit"
     ),
 ):
     """Report how much of each trace limit you have used"""
     usage_limits = effective_limits(ctx.org_uuid)
+    agent = ensure_owned_agent(agent_id, ctx.org_uuid) if agent_id else None
     return {
         "traces_stored": count_live_traces(ctx.org_uuid),
         "max_traces": usage_limits["max_traces"],
         "traces_scored": count_scored_traces(ctx.org_uuid),
         "max_scored_traces": usage_limits["max_scored_traces"],
-        "chat_replies_today": (
-            count_chat_replies_today(ctx.org_uuid, agent_id) if agent_id else 0
+        "chat_replies_today": count_chat_replies_today(agent["uuid"]) if agent else 0,
+        "chat_replies_per_day": (
+            chat_replies_per_day(agent, usage_limits["max_chat_replies_per_day"])
+            if agent
+            else None
         ),
         "max_chat_replies_per_day": usage_limits["max_chat_replies_per_day"],
     }
@@ -1577,3 +1599,40 @@ def get_trace_endpoint(
     if not row:
         raise HTTPException(status_code=404, detail="Trace not found")
     return row
+
+
+class TraceFeedbackUpdate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    is_correct: Optional[bool] = Field(
+        description=_IS_CORRECT_DESCRIPTION + ". `null` clears the feedback"
+    )
+    comment: Optional[str] = Field(
+        None, max_length=2000, description=_FEEDBACK_COMMENT_DESCRIPTION + ". Omit if you have none"
+    )
+
+
+class TraceFeedbackResponse(BaseModel):
+    feedback: Optional[TraceFeedback] = Field(
+        description="The feedback now on the trace"
+    )
+
+
+@router.put(
+    "/{trace_uuid}/feedback",
+    response_model=TraceFeedbackResponse,
+    summary="Set trace feedback",
+    tags=["Public API"],
+)
+def set_trace_feedback_endpoint(
+    body: TraceFeedbackUpdate,
+    trace_uuid: str = Path(
+        description="The trace to give feedback on",
+        examples=[_EXAMPLE_TRACE_UUID],
+    ),
+    ctx: OrgContext = Depends(get_org_jwt_or_api_key),
+):
+    """Set whether the agent's output on a trace was correct, replacing any earlier feedback, or clear it"""
+    if not set_trace_feedback(ctx.org_uuid, trace_uuid, body.is_correct, body.comment):
+        raise HTTPException(status_code=404, detail="Trace not found")
+    return {"feedback": get_trace(ctx.org_uuid, trace_uuid)["feedback"]}

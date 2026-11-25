@@ -21,6 +21,10 @@ from mailer import (
     send_email,
 )
 from utils import MemberRoleLiteral
+from routers.org_limits import (
+    effective_max_chat_replies_per_day,
+    ensure_messages_per_day_allowed,
+)
 from db import (
     add_organization_member,
     add_organization_member_by_user_id,
@@ -54,14 +58,17 @@ class ModelBenchmarkingSettings(BaseModel):
     )
 
 
-_LIMIT_WITH_OWN_KEYS_DESCRIPTION = (
-    "`true` keeps the daily chat reply limit while the workspace uses its own AI "
-    "provider keys, `false` lifts it"
+_DEFAULT_MESSAGES_PER_DAY_DESCRIPTION = (
+    "How many replies an agent's chat link may give in a day, counted from "
+    "midnight UTC, for an agent that sets no number of its own. At most "
+    "`max_chat_replies_per_day` from `GET /org-limits/me`"
 )
 
 
-class ChatLinkSettings(BaseModel):
-    limit_with_own_keys: bool = Field(description=_LIMIT_WITH_OWN_KEYS_DESCRIPTION)
+class TalkToAgentSettings(BaseModel):
+    default_messages_per_day: int = Field(
+        description=_DEFAULT_MESSAGES_PER_DAY_DESCRIPTION, examples=[200]
+    )
 
 
 class OrganizationSettings(BaseModel):
@@ -70,7 +77,7 @@ class OrganizationSettings(BaseModel):
     model_benchmarking: ModelBenchmarkingSettings = Field(
         description="How this workspace compares models"
     )
-    chat_link: ChatLinkSettings = Field(
+    talk_to_agent: TalkToAgentSettings = Field(
         description="How this workspace's agent chat links are limited"
     )
 
@@ -84,12 +91,13 @@ class ModelBenchmarkingSettingsUpdate(BaseModel):
     )
 
 
-class ChatLinkSettingsUpdate(BaseModel):
+class TalkToAgentSettingsUpdate(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    limit_with_own_keys: Optional[bool] = Field(
+    default_messages_per_day: int = Field(
         None,
-        description=f"{_LIMIT_WITH_OWN_KEYS_DESCRIPTION}. Omit to leave it as it is",
+        description=f"{_DEFAULT_MESSAGES_PER_DAY_DESCRIPTION}. Omit to leave it as it is",
+        examples=[200],
     )
 
 
@@ -100,7 +108,7 @@ class OrganizationSettingsUpdate(BaseModel):
         None,
         description="How this workspace compares models. Omit to leave the whole section as it is",
     )
-    chat_link: Optional[ChatLinkSettingsUpdate] = Field(
+    talk_to_agent: Optional[TalkToAgentSettingsUpdate] = Field(
         None,
         description="How this workspace's agent chat links are limited. Omit to leave the whole section as it is",
     )
@@ -293,6 +301,13 @@ def update_org(
         raise HTTPException(
             status_code=400,
             detail="Provide name or settings to update",
+        )
+    default = (fields.get("settings") or {}).get("talk_to_agent", {}).get(
+        "default_messages_per_day"
+    )
+    if default is not None:
+        ensure_messages_per_day_allowed(
+            default, effective_max_chat_replies_per_day(org_uuid)
         )
     update_organization(org_uuid, **fields)
     org = get_organization(org_uuid)

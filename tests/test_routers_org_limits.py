@@ -6,6 +6,7 @@ import uuid
 from unittest.mock import patch
 
 import pytest
+from fastapi import HTTPException
 from fastapi.testclient import TestClient
 
 import auth_utils
@@ -202,7 +203,7 @@ def test_own_provider_keys_lift_only_the_spend_limits(client, monkeypatch):
     assert me["max_scored_traces"] is None
     assert me["max_traces"] == 5
     assert me["trace_scoring_batch_size"] == org_limits.DEFAULT_TRACE_SCORING_BATCH_SIZE
-    assert me["max_chat_replies_per_day"] == org_limits.DEFAULT_MAX_CHAT_REPLIES_PER_DAY
+    assert me["max_chat_replies_per_day"] is None
     assert me["uses_own_provider_keys"] is True
     assert client.get("/org-limits/me/max-rows-per-eval", headers=h).json() == {
         "max_rows_per_eval": None
@@ -220,33 +221,39 @@ def test_own_provider_keys_lift_only_the_spend_limits(client, monkeypatch):
     assert org_limits.effective_max_scored_traces(org) == 4
 
 
-@pytest.mark.parametrize(
-    "own_keys,limit_with_own_keys,expected",
-    [
-        (False, True, 7),
-        (False, False, 7),
-        (True, True, 7),
-        (True, False, None),
-    ],
-)
-def test_chat_reply_limit_is_lifted_only_on_own_keys_with_the_setting_off(
-    client, monkeypatch, own_keys, limit_with_own_keys, expected
+def _agent(config=None, org_uuid="org"):
+    return {"org_uuid": org_uuid, "config": config}
+
+
+def test_chat_replies_per_day_takes_the_agents_number_else_the_workspace_default(
+    monkeypatch,
 ):
-    import provider_keys
+    org = {"settings": {"talk_to_agent": {"default_messages_per_day": 30}}}
+    monkeypatch.setattr(org_limits, "get_organization", lambda uuid: org)
 
-    h, org = _signup_as_superadmin(client, monkeypatch)
-    client.post(
-        "/org-limits",
-        json={"org_uuid": org, "limits": {"max_rows_per_eval": 3, "max_chat_replies_per_day": 7}},
-        headers=h,
-    )
-    saved = client.patch(
-        f"/organizations/{org}",
-        json={"settings": {"chat_link": {"limit_with_own_keys": limit_with_own_keys}}},
-        headers=h,
-    )
-    assert saved.status_code == 200, saved.text
-    monkeypatch.setattr(provider_keys, "org_uses_own_keys", lambda o: own_keys)
+    assert org_limits.chat_replies_per_day(_agent(), None) == 30
+    assert org_limits.chat_replies_per_day(_agent({"talk_to_agent": {}}), 100) == 30
+    own = _agent({"talk_to_agent": {"messages_per_day": 12}})
+    assert org_limits.chat_replies_per_day(own, 100) == 12
+    # A maximum lowered after either number was saved still holds.
+    assert org_limits.chat_replies_per_day(own, 5) == 5
+    assert org_limits.chat_replies_per_day(_agent(), 20) == 20
 
-    assert org_limits.effective_max_chat_replies_per_day(org) == expected
-    assert client.get("/org-limits/me", headers=h).json()["max_chat_replies_per_day"] == expected
+
+@pytest.mark.parametrize("value", [0, -1, 1.5, "3", True])
+def test_messages_per_day_must_be_a_whole_number_of_at_least_one(value):
+    with pytest.raises(HTTPException) as err:
+        org_limits.ensure_messages_per_day_allowed(value, None)
+    assert err.value.status_code == 422
+    assert err.value.detail == "Messages per day must be a whole number of at least 1"
+
+
+def test_messages_per_day_must_not_pass_the_workspace_maximum():
+    org_limits.ensure_messages_per_day_allowed(10, 10)
+    org_limits.ensure_messages_per_day_allowed(10_000, None)
+    with pytest.raises(HTTPException) as err:
+        org_limits.ensure_messages_per_day_allowed(11, 10)
+    assert err.value.status_code == 422
+    assert err.value.detail == (
+        "Messages per day cannot be more than 10, the most your workspace allows"
+    )

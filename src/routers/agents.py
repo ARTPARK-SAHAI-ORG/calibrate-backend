@@ -60,6 +60,11 @@ from org_scope import ensure_owned_agent, ensure_owned_evaluator
 # `response_model` references `EvaluatorResponse` and it shares that router's
 # page-shaping helper.
 from routers.evaluators import EvaluatorResponse, build_evaluator_page
+from routers.org_limits import (
+    TALK_TO_AGENT_KEY,
+    effective_max_chat_replies_per_day,
+    ensure_messages_per_day_allowed,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -283,6 +288,12 @@ _AGENT_CONFIG_DESCRIPTION = """Agent behavioral config. The keys depend on `type
 
 ```json
 {"traces": {"scoring": {"enabled": false}}}
+```
+
+- `talk_to_agent.messages_per_day`: how many replies the agent's chat link may give in a day, counted from midnight UTC. From 1 up to `max_chat_replies_per_day` from `GET /org-limits/me`. Omit to use the workspace's `talk_to_agent.default_messages_per_day`
+
+```json
+{"talk_to_agent": {"messages_per_day": 50}}
 ```
 
 Every request Calibrate makes to your endpoint carries the header
@@ -806,6 +817,18 @@ def resolve_agent_names(
     return ResolveAgentNamesResponse(resolved=resolved, not_found=not_found)
 
 
+def _check_messages_per_day(config: Optional[Dict[str, Any]], org_uuid: str) -> None:
+    section = (config or {}).get(TALK_TO_AGENT_KEY)
+    if section is None:
+        return
+    if not isinstance(section, dict):
+        raise HTTPException(status_code=422, detail="talk_to_agent must be an object")
+    if section.get("messages_per_day") is not None:
+        ensure_messages_per_day_allowed(
+            section["messages_per_day"], effective_max_chat_replies_per_day(org_uuid)
+        )
+
+
 @router.post(
     "",
     response_model=AgentCreateResponse,
@@ -818,6 +841,7 @@ def create_agent_endpoint(
     ctx: OrgContext = Depends(get_org_jwt_or_api_key),
 ):
     """Create an agent to test inside Calibrate or connect your existing agent to Calibrate"""
+    _check_messages_per_day(agent.config, ctx.org_uuid)
     if agent.type == "agent":
         merged_config = _deep_merge(_default_agent_config(), agent.config or {})
     else:
@@ -1023,6 +1047,13 @@ def update_agent_endpoint(
             agent.config["connection_verified"] = agent.connection_verified
         if agent.benchmark_models_verified is not None:
             agent.config["benchmark_models_verified"] = agent.benchmark_models_verified
+
+    if agent.config is not None:
+        if TALK_TO_AGENT_KEY in agent.config:
+            _check_messages_per_day(agent.config, ctx.org_uuid)
+        elif TALK_TO_AGENT_KEY in (existing_agent.get("config") or {}):
+            # A config body replaces the stored one; keep the chat limit.
+            agent.config[TALK_TO_AGENT_KEY] = existing_agent["config"][TALK_TO_AGENT_KEY]
 
     was_scoring = trace_scoring_enabled(existing_agent)
     now_scoring = was_scoring

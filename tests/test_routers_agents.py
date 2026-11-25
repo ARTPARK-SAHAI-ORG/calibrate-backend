@@ -1759,3 +1759,44 @@ def test_chat_link_of_another_workspaces_agent_is_refused(client):
         assert response.status_code == 403
         assert "organization_uuid" not in response.json()
     assert db.get_agent(agent["uuid"])["chat_link_public"] == 0
+
+
+def _messages_per_day(agent):
+    return (agent["config"].get("talk_to_agent") or {}).get("messages_per_day")
+
+
+def test_an_agents_daily_chat_limit_is_saved_and_carried_forward(client):
+    h = _signup(client)
+    agent = _create_agent(client, h, f"talk-{uuid.uuid4().hex[:6]}")
+    url = f"/agents/{agent['uuid']}"
+
+    saved = client.put(url, json={"config": {"talk_to_agent": {"messages_per_day": 25}}}, headers=h)
+    assert saved.status_code == 200, saved.text
+    assert _messages_per_day(saved.json()) == 25
+
+    config = client.get(url, headers=h).json()["config"]
+    config.pop("talk_to_agent")
+    config["system_prompt"] = "Be brief."
+    moved = client.put(url, json={"config": config}, headers=h)
+    assert moved.status_code == 200, moved.text
+    assert _messages_per_day(moved.json()) == 25
+
+    cleared = client.put(url, json={"config": {"talk_to_agent": {}}}, headers=h)
+    assert _messages_per_day(cleared.json()) is None
+
+
+@pytest.mark.parametrize("section", [{"messages_per_day": 0}, {"messages_per_day": 201}, 5])
+def test_an_agents_daily_chat_limit_out_of_range_is_refused(client, section):
+    h = _signup(client)
+    agent = _create_agent(client, h, f"talk-bad-{uuid.uuid4().hex[:6]}")
+
+    updated = client.put(
+        f"/agents/{agent['uuid']}", json={"config": {"talk_to_agent": section}}, headers=h
+    )
+    assert updated.status_code == 422, updated.text
+    created = client.post(
+        "/agents",
+        json={"name": f"talk-new-{uuid.uuid4().hex[:6]}", "type": "agent", "config": {"talk_to_agent": section}},
+        headers=h,
+    )
+    assert created.status_code == 422, created.text

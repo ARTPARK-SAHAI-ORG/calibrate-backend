@@ -2847,6 +2847,7 @@ def test_usage_reports_both_counts_and_both_limits(client, monkeypatch):
         "traces_scored": 0,
         "max_scored_traces": 2,
         "chat_replies_today": 0,
+        "chat_replies_per_day": None,
         "max_chat_replies_per_day": org_limits.DEFAULT_MAX_CHAT_REPLIES_PER_DAY,
     }
 
@@ -2859,6 +2860,7 @@ def test_usage_reports_both_counts_and_both_limits(client, monkeypatch):
         "traces_scored": 2,
         "max_scored_traces": 2,
         "chat_replies_today": 0,
+        "chat_replies_per_day": None,
         "max_chat_replies_per_day": org_limits.DEFAULT_MAX_CHAT_REPLIES_PER_DAY,
     }
 
@@ -2919,25 +2921,29 @@ def _set_trace_columns(trace_uuid, **columns):
         conn.commit()
 
 
-def test_usage_counts_one_agents_chat_replies_today(client):
+def test_usage_counts_one_agents_chat_replies_and_reads_its_limit(client):
     h, agent_id = _signup_with_agent(client)
     _, other_agent = _signup_with_agent(client)
-    chat = [_post_trace(client, h, _payload(agent_id, _mid())) for _ in range(3)]
-    _post_trace(client, h, _payload(agent_id, _mid()))
-    for trace in chat:
-        _set_trace_columns(trace["uuid"], source="chat")
-    _set_trace_columns(chat[0]["uuid"], created_at="2020-01-01 00:00:00")
-    _set_trace_columns(chat[1]["uuid"], deleted_at="2026-01-01 00:00:00")
+    for _ in range(2):
+        db.record_chat_reply(agent_id)
 
     usage = client.get("/traces/usage", params={"agent_id": agent_id}, headers=h)
     assert usage.status_code == 200, usage.text
     assert usage.json()["chat_replies_today"] == 2
+    assert usage.json()["chat_replies_per_day"] == 200
     assert client.get("/traces/usage", headers=h).json()["chat_replies_today"] == 0
-    assert (
-        client.get("/traces/usage", params={"agent_id": other_agent}, headers=h)
-        .json()["chat_replies_today"]
-        == 0
+
+    res = client.put(
+        f"/agents/{agent_id}",
+        json={"config": {"talk_to_agent": {"messages_per_day": 7}}},
+        headers=h,
     )
+    assert res.status_code == 200, res.text
+    usage = client.get("/traces/usage", params={"agent_id": agent_id}, headers=h).json()
+    assert usage["chat_replies_per_day"] == 7
+
+    foreign = client.get("/traces/usage", params={"agent_id": other_agent}, headers=h)
+    assert foreign.status_code == 404
 
 
 def test_a_trace_sent_to_the_api_reads_as_api_with_no_feedback(client):
@@ -2958,19 +2964,74 @@ def test_ingest_refuses_a_source(client):
     assert res.status_code == 422
 
 
-def test_chat_feedback_shows_on_the_list_and_the_detail(client):
+def test_feedback_sent_with_a_trace_shows_on_the_list_and_the_detail(client):
     h, agent_id = _signup_with_agent(client)
-    trace = _post_trace(client, h, _payload(agent_id, _mid()))
-    _set_trace_columns(trace["uuid"], source="chat")
-    assert db.set_trace_feedback(_org_of(agent_id), trace["uuid"], "down", "Wrong date")
+    trace = _post_trace(client, h, _payload(agent_id, _mid(), feedback=_INCORRECT))
 
     row = client.get("/traces", headers=h).json()["items"][0]
     detail = client.get(f"/traces/{trace['uuid']}", headers=h).json()
     for got in (row, detail):
-        assert got["source"] == "chat"
-        assert got["feedback"]["rating"] == "down"
+        assert got["feedback"]["is_correct"] is False
         assert got["feedback"]["comment"] == "Wrong date"
         assert got["feedback"]["at"].endswith("Z")
+
+
+def test_ingest_refuses_a_feedback_comment_over_2000_characters(client):
+    h, agent_id = _signup_with_agent(client)
+    feedback = {"is_correct": True, "comment": "x" * 2001}
+    res = client.post(
+        "/traces", json=_payload(agent_id, _mid(), feedback=feedback), headers=h
+    )
+    assert res.status_code == 422
+
+
+def test_feedback_is_set_replaced_and_cleared_through_the_api(client):
+    h, agent_id = _signup_with_agent(client)
+    trace = _post_trace(client, h, _payload(agent_id, _mid()))
+    url = f"/traces/{trace['uuid']}/feedback"
+
+    first = client.put(url, json={"is_correct": False, "comment": "Wrong dose"}, headers=h)
+    assert first.status_code == 200, first.text
+    assert first.json()["feedback"]["is_correct"] is False
+    assert first.json()["feedback"]["comment"] == "Wrong dose"
+
+    replaced = client.put(url, json={"is_correct": True}, headers=h).json()["feedback"]
+    assert (replaced["is_correct"], replaced["comment"]) == (True, None)
+    assert client.get(f"/traces/{trace['uuid']}", headers=h).json()["feedback"]["is_correct"] is True
+
+    cleared = client.put(url, json={"is_correct": None, "comment": "dropped"}, headers=h)
+    assert cleared.json() == {"feedback": None}
+    assert client.get(f"/traces/{trace['uuid']}", headers=h).json()["feedback"] is None
+
+    assert client.put(url, json={}, headers=h).status_code == 422
+
+
+def test_feedback_through_the_api_takes_a_workspace_key(client):
+    h, agent_id = _signup_with_agent(client)
+    trace = _post_trace(client, h, _payload(agent_id, _mid()))
+    res = client.put(
+        f"/traces/{trace['uuid']}/feedback",
+        json={"is_correct": True},
+        headers=_api_key_headers(client, h),
+    )
+    assert res.status_code == 200, res.text
+    assert res.json()["feedback"]["is_correct"] is True
+
+
+def test_feedback_through_the_api_is_refused_outside_the_workspace(client):
+    h, agent_id = _signup_with_agent(client)
+    trace = _post_trace(client, h, _payload(agent_id, _mid()))
+    other_h, _ = _signup_with_agent(client)
+
+    res = client.put(
+        f"/traces/{trace['uuid']}/feedback", json={"is_correct": True}, headers=other_h
+    )
+    assert res.status_code == 403
+    assert client.get(f"/traces/{trace['uuid']}", headers=h).json()["feedback"] is None
+    unknown = client.put(
+        f"/traces/{uuid.uuid4()}/feedback", json={"is_correct": True}, headers=h
+    )
+    assert unknown.status_code == 404
 
 
 _EVAL_A = str(uuid.uuid4())
@@ -3865,6 +3926,9 @@ def test_the_published_list_parameters_keep_their_order():
 
 # For each filter: what the matching trace carries, what the other one carries,
 # and the filter that tells them apart.
+_CORRECT = {"is_correct": True}
+_INCORRECT = {"is_correct": False, "comment": "Wrong date"}
+
 _ONE_FILTER_CASES = {
     "q": ({"metadata": [{"key": "tag", "value": "needle"}]}, {}, {"q": "needle"}),
     "output_type": (
@@ -3891,14 +3955,14 @@ _ONE_FILTER_CASES = {
     "source=chat": ({"source": "chat"}, {}, {"source": "chat"}),
     "source=api": ({}, {"source": "chat"}, {"source": "api"}),
     "source=api reads null as api": ({"source": None}, {"source": "chat"}, {"source": "api"}),
-    "feedback=up": ({"feedback_rating": "up"}, {"feedback_rating": "down"}, {"feedback": "up"}),
-    "feedback=down": ({"feedback_rating": "down"}, {"feedback_rating": "up"}, {"feedback": "down"}),
-    "feedback=any": ({"feedback_rating": "up"}, {}, {"feedback": "any"}),
-    "feedback=none": ({}, {"feedback_rating": "down"}, {"feedback": "none"}),
+    "feedback=correct": ({"feedback": _CORRECT}, {"feedback": _INCORRECT}, {"feedback": "correct"}),
+    "feedback=incorrect": ({"feedback": _INCORRECT}, {"feedback": _CORRECT}, {"feedback": "incorrect"}),
+    "feedback=any": ({"feedback": _INCORRECT}, {}, {"feedback": "any"}),
+    "feedback=none": ({}, {"feedback": _CORRECT}, {"feedback": "none"}),
 }
 
 # Columns no request can set, written straight to the row.
-_ROW_ONLY_FIELDS = ("created_at", "source", "feedback_rating")
+_ROW_ONLY_FIELDS = ("created_at", "source")
 
 
 def _matching_and_other_trace(client, h, agent_id, filter_name):
@@ -3908,8 +3972,6 @@ def _matching_and_other_trace(client, h, agent_id, filter_name):
     for conversation_id, fields in (("conv-a", matching), ("conv-b", other)):
         fields = dict(fields)
         columns = {k: fields.pop(k) for k in _ROW_ONLY_FIELDS if k in fields}
-        if "feedback_rating" in columns:
-            columns["feedback_at"] = "2026-01-01 00:00:00"
         message_id = _mid()
         if filter_name != "conversation_id":
             fields.setdefault("conversation_id", conversation_id)
@@ -3953,7 +4015,7 @@ def test_convert_select_all_skips_a_trace_outside_one_filter(client, filter_name
 
 @pytest.mark.parametrize(
     "filter_name",
-    ["q", "output_type", "labels", "source=chat", "feedback=down", "feedback=none"],
+    ["q", "output_type", "labels", "source=chat", "feedback=incorrect", "feedback=none"],
 )
 def test_score_averages_leave_out_a_trace_outside_one_filter(client, filter_name):
     h, agent_id = _signup_with_agent(client)
@@ -3987,7 +4049,7 @@ def test_conversations_leave_out_one_outside_one_filter(client, filter_name):
 
 
 @pytest.mark.parametrize(
-    "filter_name", ["source=chat", "source=api", "feedback=down", "feedback=any", "feedback=none"]
+    "filter_name", ["source=chat", "source=api", "feedback=incorrect", "feedback=any", "feedback=none"]
 )
 def test_conversations_leave_out_one_outside_a_chat_filter(client, filter_name):
     h, agent_id = _signup_with_agent(client)
@@ -3996,7 +4058,7 @@ def test_conversations_leave_out_one_outside_a_chat_filter(client, filter_name):
     assert _conversation_ids(client, h, **query) == ["conv-a"]
 
 
-@pytest.mark.parametrize("filter_name", ["source=chat", "feedback=up", "feedback=none"])
+@pytest.mark.parametrize("filter_name", ["source=chat", "feedback=correct", "feedback=none"])
 def test_list_leaves_out_a_trace_outside_a_chat_filter(client, filter_name):
     h, agent_id = _signup_with_agent(client)
     matching, _, query = _matching_and_other_trace(client, h, agent_id, filter_name)
