@@ -80,6 +80,7 @@ from annotation_metrics import KappaFields
 from utils import (
     utc_now,
     evaluators_fitting_row,
+    is_tool_call_evaluator,
     is_tool_call_row,
     job_slot,
     TaskStatus,
@@ -1220,7 +1221,7 @@ def _resolve_evaluator_results(
                     status_code=400, detail=f"Evaluator {ev_id} not found"
                 )
             row_is_tool_call = is_tool_call_row({"payload": payloads[idx]})
-            if not evaluators_fitting_row([evaluator], row_is_tool_call):
+            if is_tool_call_evaluator(evaluator) != row_is_tool_call:
                 raise HTTPException(
                     status_code=400,
                     detail=(
