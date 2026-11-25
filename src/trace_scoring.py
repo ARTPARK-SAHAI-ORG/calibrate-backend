@@ -75,7 +75,6 @@ class IneligibleReason(str, Enum):
 
     WRONG_TYPE = "wrong_type_for_agent"
     NO_LIVE_VERSION = "no_live_version"
-    NO_JUDGE_PROMPT = "no_judge_prompt"
     DECLARES_VARIABLES = "declares_variables"
 
 
@@ -193,8 +192,7 @@ def resolve_trace_scoring(
     for ev, version in live_evaluators:
         name = ev.get("name") or ev["uuid"]
         evaluator_type = ev.get("evaluator_type")
-        is_tool_call_evaluator = evaluator_type == TOOL_CALL_EVALUATOR_TYPE
-        if evaluator_type != required_evaluator_type and not is_tool_call_evaluator:
+        if evaluator_type not in (required_evaluator_type, TOOL_CALL_EVALUATOR_TYPE):
             ineligible.append(
                 TraceScoringIneligible(
                     evaluator_uuid=ev["uuid"],
@@ -209,15 +207,6 @@ def resolve_trace_scoring(
                     evaluator_uuid=ev["uuid"],
                     name=name,
                     reason=IneligibleReason.NO_LIVE_VERSION,
-                )
-            )
-            continue
-        if is_tool_call_evaluator and not (version.get("system_prompt") or "").strip():
-            ineligible.append(
-                TraceScoringIneligible(
-                    evaluator_uuid=ev["uuid"],
-                    name=name,
-                    reason=IneligibleReason.NO_JUDGE_PROMPT,
                 )
             )
             continue

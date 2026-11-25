@@ -1342,25 +1342,9 @@ def test_enable_rejected_when_only_default_correctness_evaluator_is_linked(clien
 def test_eligibility_and_enable_with_tool_call_evaluators(client):
     h = _signup(client)
     agent = _create_agent(client, h, f"elig-tool-{uuid.uuid4().hex[:6]}")
-    org_uuid = db.get_agent(agent["uuid"])["org_uuid"]
-    blank = db.create_evaluator(
-        name=f"tool-blank-{uuid.uuid4().hex[:6]}",
-        evaluator_type="tool-call",
-        org_uuid=org_uuid,
-    )
-    version = db.create_evaluator_version(blank, "", "")
-    db.set_evaluator_live_version(blank, version["uuid"])
     _unlink_all_evaluators(client, h, agent["uuid"])
-    db.add_evaluator_to_agent(agent["uuid"], blank)
     _disable_trace_scoring(client, h, agent["uuid"])
-
     url = f"/agents/{agent['uuid']}/trace-scoring-eligibility"
-    body = client.get(url, headers=h).json()
-    assert body["eligible"] == []
-    assert body["ineligible"][0]["reason"] == "no_judge_prompt"
-    blocked = _set_trace_scoring(client, h, agent["uuid"], True)
-    assert blocked.status_code == 422, blocked.text
-    assert blocked.json()["detail"]["ineligible"][0]["reason"] == "no_judge_prompt"
 
     with_prompt = _create_evaluator(client, h, evaluator_type="tool-call")
     _link_evaluators(client, h, agent["uuid"], with_prompt)
@@ -1885,5 +1869,5 @@ def test_ineligible_reason_docs_show_the_values_the_api_returns():
     from routers.agents import TraceScoringIneligibleEvaluator
 
     description = TraceScoringIneligibleEvaluator.model_fields["reason"].description
-    assert "`no_judge_prompt`" in description
+    assert "`no_live_version`" in description
     assert "IneligibleReason" not in description

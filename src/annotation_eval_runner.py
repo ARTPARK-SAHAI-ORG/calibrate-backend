@@ -206,8 +206,8 @@ def _resolve_evaluator_dicts(
     requested evaluator is linked to the task and the version belongs to it.
 
     A tool-call evaluator is dropped here, the one choke point every launch
-    path goes through, when its version has a blank prompt (people answer it)
-    or the task type has no tool-call rows. A request left with nothing has
+    path goes through, when it has no live version or the task type has no
+    tool-call rows. A request left with nothing has
     nothing to judge and is rejected instead of starting an empty CLI run."""
     resolved: List[Dict[str, Any]] = []
     for entry in requested:
@@ -238,8 +238,6 @@ def _resolve_evaluator_dicts(
             raise EvaluatorResolutionError(
                 f"Version {version_uuid} does not belong to evaluator {evaluator_id}"
             )
-        if is_tool_call and not (version.get("system_prompt") or "").strip():
-            continue
         # `output_type`, `kind`, `data_type` are required identity columns on
         # the evaluator row (set at create time, backfilled by migration). A
         # missing value here means the row is malformed — surface it instead
@@ -276,8 +274,7 @@ def _resolve_evaluator_dicts(
     if requested and not resolved:
         raise EvaluatorResolutionError(
             "None of the selected evaluators can run a judge on this task. "
-            "A tool-call evaluator needs a prompt, and runs only on llm and "
-            "llm-general tasks."
+            "A tool-call evaluator runs only on llm and llm-general tasks."
         )
     _dedupe_evaluator_names(resolved)
     return resolved

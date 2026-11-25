@@ -130,45 +130,21 @@ def test_a_tool_call_evaluator_with_a_prompt_is_eligible_on_both_agent_types(
     assert result.ineligible == []
 
 
-@pytest.mark.parametrize("prompt", ["", "  \n", None])
-def test_a_tool_call_evaluator_with_a_blank_prompt_has_no_judge_prompt(prompt):
-    live = str(uuid.uuid4())
-    ev = _ev("tool-call", live=live)
-    result = ts.resolve_trace_scoring(
-        "conversation", [(ev, _version(live, system_prompt=prompt))]
-    )
-    assert result.eligible == []
-    assert result.ineligible[0].reason == ts.IneligibleReason.NO_JUDGE_PROMPT
-    assert result.skip_reason == "no_usable_evaluators"
-
-
 def test_tool_call_evaluator_checks_run_in_order():
     live = str(uuid.uuid4())
     no_live = _ev("tool-call", name="no-live")
-    blank_with_vars = _ev("tool-call", live=live, name="blank-vars")
     with_vars = _ev("tool-call", live=live, name="vars")
     result = ts.resolve_trace_scoring(
         "conversation",
         [
             (no_live, None),
-            (blank_with_vars, _version(live, system_prompt="", variables=[{"name": "x"}])),
             (with_vars, _version(live, variables=[{"name": "x"}])),
         ],
     )
     assert {i.name: i.reason for i in result.ineligible} == {
         "no-live": ts.IneligibleReason.NO_LIVE_VERSION,
-        "blank-vars": ts.IneligibleReason.NO_JUDGE_PROMPT,
         "vars": ts.IneligibleReason.DECLARES_VARIABLES,
     }
-
-
-def test_a_blank_prompt_only_disqualifies_a_tool_call_evaluator():
-    live = str(uuid.uuid4())
-    ev = _ev("llm", live=live)
-    result = ts.resolve_trace_scoring(
-        "conversation", [(ev, _version(live, system_prompt=""))]
-    )
-    assert len(result.eligible) == 1
 
 
 _NAMED_CALL = {"tool": "get_schedule", "arguments": {"weeks": 14}}

@@ -373,7 +373,7 @@ def test_required_evaluator_ids_for_item_normal_row():
     )
 
 
-def _resolve_with_tool_call_evaluator(requested, tc_prompt="", task_type="llm", **tc):
+def _resolve_with_tool_call_evaluator(requested, tc_prompt="Judge the calls", task_type="llm", **tc):
     """Resolve `requested` where ev-tc is a tool-call evaluator and ev-1 is a
     normal LLM judge."""
     evaluators = {
@@ -407,22 +407,8 @@ def _resolve_with_tool_call_evaluator(requested, tc_prompt="", task_type="llm", 
 
 NOTHING_TO_RUN = (
     "None of the selected evaluators can run a judge on this task. A tool-call "
-    "evaluator needs a prompt, and runs only on llm and llm-general tasks."
+    "evaluator runs only on llm and llm-general tasks."
 )
-
-
-@pytest.mark.parametrize("prompt", ["", "   "])
-def test_blank_prompt_tool_call_evaluator_never_reaches_calibrate_payload(prompt):
-    resolved = _resolve_with_tool_call_evaluator(["ev-1", "ev-tc"], tc_prompt=prompt)
-    assert [ev["uuid"] for ev in resolved] == ["ev-1"]
-    payload = runner.build_evaluator_cli_payload_unrendered(resolved)
-    assert [p["name"] for p in payload] == ["Safety"]
-
-
-def test_resolve_rejects_only_blank_prompt_tool_call_evaluators():
-    with pytest.raises(runner.EvaluatorResolutionError) as e:
-        _resolve_with_tool_call_evaluator(["ev-tc"])
-    assert str(e.value) == NOTHING_TO_RUN
 
 
 def test_resolve_leaves_out_tool_call_evaluator_with_no_version():

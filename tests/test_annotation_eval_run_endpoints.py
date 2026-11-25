@@ -237,12 +237,11 @@ def _llm_task_with_evaluator(client, h):
 
 NOTHING_FITS = (
     "None of the selected evaluators fit the chosen items. Tool-call items need "
-    "a tool-call evaluator with a prompt, and all other items need any other "
-    "evaluator."
+    "a tool-call evaluator, and all other items need any other evaluator."
 )
 NOTHING_CAN_RUN = (
     "None of the selected evaluators can run a judge on this task. A tool-call "
-    "evaluator needs a prompt, and runs only on llm and llm-general tasks."
+    "evaluator runs only on llm and llm-general tasks."
 )
 TOOL_ROW = {"name": "tc", "chat_history": [], "agent_response": "", "tool_calls": [{"tool": "t", "arguments": {}}]}
 REPLY_ROW = {"name": "resp", "chat_history": [], "agent_response": "hi"}
@@ -260,15 +259,6 @@ def _tool_call_ev(client, h):
     )
     assert resp.status_code == 200, resp.text
     return resp.json()["uuid"]
-
-
-def _blank_prompt_tool_call_ev(client, h):
-    import db as db_mod
-
-    ev = _tool_call_ev(client, h)
-    version = db_mod.create_evaluator_version(ev, judge_model="", system_prompt="")
-    db_mod.set_evaluator_live_version(ev, version["uuid"])
-    return ev
 
 
 def _task_with(client, h, task_type, evaluator_ids, payloads=()):
@@ -321,15 +311,6 @@ def test_evaluator_run_reply_rows_with_only_a_tool_call_evaluator_blocked(client
     resp = _start_run(client, h, task_uuid, [tc_ev])
     assert resp.status_code == 400
     assert resp.json()["detail"] == NOTHING_FITS
-
-
-def test_evaluator_run_blank_prompt_tool_call_evaluator_blocked(client):
-    h = _signup(client)["headers"]
-    tc_ev = _blank_prompt_tool_call_ev(client, h)
-    task_uuid = _task_with(client, h, "llm", [tc_ev], [TOOL_ROW])
-    resp = _start_run(client, h, task_uuid, [tc_ev])
-    assert resp.status_code == 400
-    assert resp.json()["detail"] == NOTHING_CAN_RUN
 
 
 def test_evaluator_run_tool_call_evaluator_on_stt_task_blocked(client):
@@ -392,18 +373,6 @@ def test_evaluator_run_does_not_record_an_evaluator_no_row_pairs_with(client):
     resp = _start_run(client, h, task_uuid, [llm_ev, tc_ev])
     assert resp.status_code == 200, resp.text
     assert resp.json()["evaluator_count"] == 1
-    details = _job_details(resp.json()["job_uuid"])
-    assert [e["evaluator_id"] for e in details["evaluators"]] == [llm_ev]
-
-
-def test_evaluator_run_does_not_record_a_blank_prompt_tool_call_evaluator(client):
-    h = _signup(client)["headers"]
-    llm_ev = _llm_ev(client, h)["uuid"]
-    tc_ev = _blank_prompt_tool_call_ev(client, h)
-    task_uuid = _task_with(client, h, "llm", [llm_ev, tc_ev], [TOOL_ROW, REPLY_ROW])
-    resp = _start_run(client, h, task_uuid, [llm_ev, tc_ev])
-    assert resp.status_code == 200, resp.text
-    assert resp.json()["item_count"] == 1
     details = _job_details(resp.json()["job_uuid"])
     assert [e["evaluator_id"] for e in details["evaluators"]] == [llm_ev]
 

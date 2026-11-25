@@ -2416,8 +2416,8 @@ def start_evaluator_run(
             status_code=400,
             detail=(
                 "None of the selected evaluators fit the chosen items. "
-                "Tool-call items need a tool-call evaluator with a prompt, "
-                "and all other items need any other evaluator."
+                "Tool-call items need a tool-call evaluator, and all other "
+                "items need any other evaluator."
             ),
         )
     paired = {ev["uuid"] for it in items for ev in fits[it["uuid"]]}

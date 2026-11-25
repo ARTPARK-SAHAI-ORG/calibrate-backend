@@ -537,9 +537,9 @@ def test_a_tool_call_trace_with_a_linked_tool_call_evaluator_that_cannot_run_kee
         owner_user_id=str(uuid.uuid4()),
         output_type="binary",
     )
-    blank = db.create_evaluator_version(ev, "", "")
-    db.set_evaluator_live_version(ev, blank["uuid"])
-    run = _run(org, agent, _trace(org, agent, output=_TOOL_ONLY), [(ev, blank["uuid"])])
+    unusable = db.create_evaluator_version(ev, "openai/gpt-4.1", "Judge {{x}}", variables=[{"name": "x"}])
+    db.set_evaluator_live_version(ev, unusable["uuid"])
+    run = _run(org, agent, _trace(org, agent, output=_TOOL_ONLY), [(ev, unusable["uuid"])])
 
     ts.claim_and_score_batch(now=_at(1000), invoke=_never_invoked)
 
@@ -550,10 +550,16 @@ def test_a_tool_call_trace_beside_a_reply_evaluator_and_a_broken_tool_call_one_k
     org = _org()
     agent = _agent(org)
     reply_ev = _evaluator(org, name="Correctness")
-    tool_ev, _ = _evaluator(org, evaluator_type="tool-call")
-    blank = db.create_evaluator_version(tool_ev, "", "")
-    db.set_evaluator_live_version(tool_ev, blank["uuid"])
-    reply_run = _run(org, agent, _trace(org, agent), [reply_ev, (tool_ev, blank["uuid"])], available_at=1)
+    tool_ev = db.create_evaluator(
+        name=f"tc-{uuid.uuid4().hex[:6]}",
+        evaluator_type="tool-call",
+        org_uuid=org,
+        owner_user_id=str(uuid.uuid4()),
+        output_type="binary",
+    )
+    unusable = db.create_evaluator_version(tool_ev, "openai/gpt-4.1", "Judge {{x}}", variables=[{"name": "x"}])
+    db.set_evaluator_live_version(tool_ev, unusable["uuid"])
+    reply_run = _run(org, agent, _trace(org, agent), [reply_ev, (tool_ev, unusable["uuid"])], available_at=1)
     tool_run = _run(org, agent, _trace(org, agent, output=_TOOL_ONLY), [], available_at=2)
 
     ts.claim_and_score_batch(
