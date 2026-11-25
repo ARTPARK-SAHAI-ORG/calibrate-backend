@@ -466,8 +466,8 @@ def test_annotation_eval_run_job_end_to_end_with_fake_cli(task_type):
 def test_annotation_eval_tool_call_rows_pair_with_their_evaluators_with_fake_cli(
     task_type,
 ):
-    """A task with both kinds of row: each row keeps only its own evaluator's
-    score, and calibrate general's means, which cover every pairing, are dropped."""
+    """A task with both kinds of row: each row is judged only by its own
+    evaluator, so only those pairs are stored and the run keeps its metrics."""
     from annotation_eval_runner import _run_job
 
     def resolved(uuid, evaluator_type):
@@ -539,19 +539,12 @@ def test_annotation_eval_tool_call_rows_pair_with_their_evaluators_with_fake_cli
         )
 
     done = next(u for u in updates if u.get("status") == "done")
-    assert ("metrics" in done["details"]) and (
-        (done["details"]["metrics"] is None) == (task_type == "llm-general")
-    )
-    assert {(r["item_id"], r["evaluator_id"]) for r in created} >= {
+    assert done["details"]["metrics"]
+    assert {(r["item_id"], r["evaluator_id"]) for r in created} == {
         ("reply", "ev-reply"),
         ("tool", "ev-tool"),
     }
-    assert ("reply", "ev-tool") not in {
-        (r["item_id"], r["evaluator_id"]) for r in created
-    }
-    assert ("tool", "ev-reply") not in {
-        (r["item_id"], r["evaluator_id"]) for r in created
-    }
+    assert all(r["status"] == "completed" for r in created)
 
 
 @pytest.mark.parametrize(

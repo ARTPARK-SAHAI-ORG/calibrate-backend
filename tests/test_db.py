@@ -2952,7 +2952,7 @@ def test_tool_call_evaluator_is_seeded_with_a_judge():
     purpose = db.DEFAULT_PROMPTS_BY_PURPOSE["tool-call"]
     assert version["judge_model"] == db.DEFAULT_TEXT_JUDGE_MODEL
     assert version["system_prompt"] == purpose["system_prompt"]
-    assert version["system_prompt"].startswith("Evaluate the tool calls")
+    assert "Tool calls made by the agent" in version["system_prompt"]
     assert version["variables"] in (None, [])
     scale = version["output_config"]["scale"]
     assert [(s["value"], s["name"]) for s in scale] == [

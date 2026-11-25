@@ -2162,13 +2162,14 @@ DEFAULT_PROMPTS_BY_PURPOSE: Dict[str, Dict[str, Any]] = {
     "tool-call": {
         "name": "Tool call correctness",
         "system_prompt": (
-            "Evaluate the tool calls an AI agent made, given the conversation so far. "
-            "Decide whether they are right for what the user needs: the right tools, "
-            "the right arguments, nothing missing and nothing extra. The agent's tools "
-            "are its own and are not listed here, so never mark a call wrong because "
-            "you do not recognise the tool. If an "
-            "`Expected tool calls` section is present, compare against it. A call is "
-            "not wrong because of an argument that section says to ignore. There, "
+            "You are shown the `Chat history` with an AI agent, the `Reply from the "
+            "agent` if it gave one, and the `Tool calls made by the agent`. Decide whether those "
+            "calls are right for what the user needs: the right tools, the right "
+            "arguments, nothing missing and nothing extra. The agent's tools are its "
+            "own and are not listed here, so never mark a call wrong because you do "
+            "not recognise the tool. If an `Expected tool calls` section is present, "
+            "compare against it. A call is not wrong because of an argument that "
+            "section says to ignore. There, "
             '`{"match_type": "llm_judge", "criteria": ...}` means the value must meet '
             "those criteria."
         ),

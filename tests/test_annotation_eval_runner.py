@@ -466,13 +466,17 @@ def _llm_tool_row(**payload):
     return row[0]
 
 
-def test_build_llm_tool_call_row_with_expected_calls():
+def test_build_llm_tool_call_row_goes_to_the_tool_call_judge():
     assert runner._build_llm_dataset(
         [
             {
                 "uuid": "tc",
                 "payload": {
-                    "chat_history": [{"role": "user", "content": "find x", "label": "en"}],
+                    "chat_history": [
+                        {"role": "user", "content": "find x", "label": "en", "versions": {}},
+                        {"role": "assistant", "content": "", "tool_calls": [CALL_X]},
+                        {"role": "tool", "content": "found", "tool_call_id": "1"},
+                    ],
                     "agent_response": "",
                     "actual_tool_calls": [CALL_X],
                     "expected_tool_calls": [CALL_Y],
@@ -484,67 +488,42 @@ def test_build_llm_tool_call_row_with_expected_calls():
         {
             "test_case": {
                 "id": "tc",
-                "history": [{"role": "user", "content": "find x"}],
-                "evaluation": {"type": "response", "criteria": [{"name": "Tool judge"}]},
+                "history": [
+                    {"role": "user", "content": "find x"},
+                    {"role": "assistant", "content": "", "tool_calls": [CALL_X]},
+                    {"role": "tool", "content": "found", "tool_call_id": "1"},
+                ],
+                "evaluation": {
+                    "type": "tool_call_judge",
+                    "criteria": [{"name": "Tool judge"}],
+                    "expected_tool_calls": [CALL_Y],
+                },
             },
-            "output": {
-                "response": (
-                    'Tool calls made by the agent:\nsearch {"q": "x"}\n\n'
-                    'Expected tool calls:\nsearch {"q": "y"}'
-                ),
-                "tool_calls": [],
-            },
+            "output": {"response": "", "tool_calls": [CALL_X]},
         }
     ]
 
 
-def test_build_llm_tool_call_row_without_expected_calls():
-    row = _llm_tool_row(agent_response="let me look", actual_tool_calls=[CALL_X])
-    assert row["output"] == {
-        "response": (
-            "Reply from the agent:\nlet me look\n\n"
-            'Tool calls made by the agent:\nsearch {"q": "x"}'
-        ),
-        "tool_calls": [],
-    }
+def test_build_llm_tool_call_row_keeps_the_reply_and_omits_missing_expected_calls():
+    row = _llm_tool_row(agent_response={"content": "let me look"}, actual_tool_calls=[CALL_X])
+    assert "expected_tool_calls" not in row["test_case"]["evaluation"]
+    assert row["output"] == {"response": "let me look", "tool_calls": [CALL_X]}
 
 
 def test_build_llm_tool_call_row_with_tool_calls_only_and_no_reply():
     row = _llm_tool_row(tool_calls=[CALL_X])
-    assert row["output"] == {
-        "response": 'Tool calls made by the agent:\nsearch {"q": "x"}',
-        "tool_calls": [],
-    }
+    assert row["output"] == {"response": "", "tool_calls": [CALL_X]}
 
 
 def test_build_llm_tool_call_row_where_the_agent_made_no_calls():
     row = _llm_tool_row(
-        agent_response={"content": "I cannot"},
+        agent_response="I cannot",
         actual_tool_calls=[],
         expected_tool_calls=[CALL_Y],
         tool_calls=[CALL_X],
     )
-    assert row["output"]["response"] == (
-        "Reply from the agent:\nI cannot\n\n"
-        "The agent made no tool calls.\n\n"
-        'Expected tool calls:\nsearch {"q": "y"}'
-    )
-
-
-def test_build_llm_tool_call_row_writes_earlier_calls_into_history():
-    row = _llm_tool_row(
-        chat_history=[
-            {"role": "user", "content": "find x"},
-            {"role": "assistant", "content": "", "tool_calls": [CALL_X]},
-            {"role": "tool", "content": "found", "tool_call_id": "1"},
-        ],
-        actual_tool_calls=[CALL_Y],
-    )
-    assert row["test_case"]["history"] == [
-        {"role": "user", "content": "find x"},
-        {"role": "assistant", "content": '[Tool Call] search {"q": "x"}'},
-        {"role": "tool", "content": "found"},
-    ]
+    assert row["output"] == {"response": "I cannot", "tool_calls": []}
+    assert row["test_case"]["evaluation"]["expected_tool_calls"] == [CALL_Y]
 
 
 def test_build_llm_tool_call_row_needs_history():
@@ -625,7 +604,7 @@ def test_build_llm_mixed_task_gives_each_row_only_its_evaluators():
     }
 
 
-def test_build_llm_general_tool_call_row_output_text():
+def test_build_llm_general_tool_call_row_carries_its_calls():
     assert runner._build_llm_general_dataset(
         [
             {
@@ -643,20 +622,29 @@ def test_build_llm_general_tool_call_row_output_text():
         {
             "id": "tc",
             "input": "find x",
-            "output": (
-                "Reply from the agent:\nlet me look\n\n"
-                'Tool calls made by the agent:\nsearch {"q": "x"}\n\n'
-                'Expected tool calls:\nsearch {"q": "y"}'
-            ),
+            "output": "let me look",
+            "evaluators": ["Tool judge"],
+            "tool_calls": [CALL_X],
+            "expected_tool_calls": [CALL_Y],
         }
     ]
 
 
-def test_build_llm_general_tool_call_row_without_output_uses_tool_calls():
+def test_build_llm_general_tool_call_row_without_output_sends_an_empty_one():
     out = runner._build_llm_general_dataset(
         [{"uuid": "tc", "payload": {"input": "i", "tool_calls": [CALL_X]}}], [TOOL_EV]
     )
-    assert out[0]["output"] == 'Tool calls made by the agent:\nsearch {"q": "x"}'
+    assert out == [
+        {"id": "tc", "input": "i", "output": "", "evaluators": ["Tool judge"], "tool_calls": [CALL_X]}
+    ]
+
+
+def test_build_llm_general_tool_call_row_rejects_calls_that_are_not_a_list():
+    with pytest.raises(runner.DatasetBuildError):
+        runner._build_llm_general_dataset(
+            [{"uuid": "tc", "payload": {"input": "i", "actual_tool_calls": [], "expected_tool_calls": "x"}}],
+            [TOOL_EV],
+        )
 
 
 def test_build_llm_general_tool_call_row_still_needs_input():
@@ -685,9 +673,9 @@ def test_build_llm_general_mixed_task_names_only_the_rows_evaluators():
         ],
         [REPLY_EV, TOOL_EV],
     )
-    assert {r["id"]: r["arguments"] for r in out} == {
-        "r": {"Reply judge": {"a": 1}},
-        "tc": {"Tool judge": {"b": 2}},
+    assert {r["id"]: (r["evaluators"], r["arguments"]) for r in out} == {
+        "r": (["Reply judge"], {"Reply judge": {"a": 1}}),
+        "tc": (["Tool judge"], {"Tool judge": {"b": 2}}),
     }
 
 
@@ -695,33 +683,24 @@ def test_build_llm_general_skips_rows_with_no_evaluator():
     assert runner._build_llm_general_dataset([TC_ROW], [REPLY_EV]) == []
 
 
-def test_parse_llm_general_drops_scores_that_do_not_pair_with_their_row(tmp_path):
-    # calibrate general runs every evaluator on every row.
+def test_parse_llm_general_stores_nothing_for_a_blank_cell(tmp_path):
+    # calibrate general leaves an evaluator that did not run on a row blank.
     (tmp_path / "config.json").write_text(
         json.dumps({"evaluators_map": {"ev-1": "Reply", "ev-tc": "Tool"}})
     )
     (tmp_path / "results.csv").write_text(
         "id,input,output,Reply,Reply_reasoning,Tool,Tool_reasoning\n"
-        "r,i,o,1,ok,0,no\n"
-        "tc,i,o,0,no,1,ok\n"
+        "r,i,o,1,ok,,\n"
+        "tc,i,,,,0,no\n"
     )
     evs = [
         {**_ev_resolved("ev-1", "Reply"), "evaluator_type": "llm"},
         {**_ev_resolved("ev-tc", "Tool"), "evaluator_type": "tool-call"},
     ]
-    runs = runner.parse_results_for_task_type(
-        "llm-general",
-        tmp_path,
-        evs,
-        "job-1",
-        items=[
-            {"uuid": "r", "payload": {"input": "i", "output": "o"}},
-            {"uuid": "tc", "payload": {"input": "i", "actual_tool_calls": [CALL_X]}},
-        ],
-    )
+    runs = runner.parse_results_for_task_type("llm-general", tmp_path, evs, "job-1")
     assert sorted((r["item_id"], r["evaluator_id"], r["value"]["value"]) for r in runs) == [
         ("r", "ev-1", True),
-        ("tc", "ev-tc", True),
+        ("tc", "ev-tc", False),
     ]
 
 
@@ -770,9 +749,9 @@ def test_build_llm_general_dataset_happy():
         ],
         evs,
     )
-    # Flat `calibrate general` shape: {id, input, output}. No vars → no arguments.
+    # Flat `calibrate general` shape: {id, input, output, evaluators}. No vars → no arguments.
     assert out == [
-        {"id": "i1", "input": "summarize this", "output": "a summary"}
+        {"id": "i1", "input": "summarize this", "output": "a summary", "evaluators": ["judge"]}
     ]
 
 
@@ -794,7 +773,9 @@ def test_build_llm_general_dataset_judge_sees_only_default_text():
         ],
         evs,
     )
-    assert out == [{"id": "i1", "input": "summarize this", "output": "a summary"}]
+    assert out == [
+        {"id": "i1", "input": "summarize this", "output": "a summary", "evaluators": ["judge"]}
+    ]
 
 
 def test_build_llm_general_dataset_object_without_content():
@@ -848,7 +829,7 @@ def test_build_dataset_dispatch_llm_general():
         [{"uuid": "i1", "payload": {"input": "i", "output": "o"}}],
         [{"uuid": "e1", "name": "judge"}],
     )
-    assert out == [{"id": "i1", "input": "i", "output": "o"}]
+    assert out == [{"id": "i1", "input": "i", "output": "o", "evaluators": ["judge"]}]
 
 
 def test_build_tts_dataset():
@@ -1124,6 +1105,13 @@ def test_parse_results_stt_empty_value(tmp_path):
     )
     runs = runner._parse_results_stt(tmp_path, [_ev_resolved()], "job-1")
     assert runs[0]["status"] == "failed"
+
+
+def test_parse_results_general_skips_an_evaluator_the_row_did_not_run(tmp_path):
+    (tmp_path / "results.csv").write_text(
+        "id,input,output,Safety,Safety_reasoning\ni1,a,b,,\n"
+    )
+    assert runner._parse_results_general(tmp_path, [_ev_resolved()], "job-1") == []
 
 
 def test_parse_results_stt_no_id_row(tmp_path):

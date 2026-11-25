@@ -33,9 +33,7 @@ from utils import (
     TOOL_CALL_EVALUATOR_TYPE,
     evaluators_fitting_row,
     get_calibrate_agent_cli,
-    history_with_calls_as_text,
     kill_process_group,
-    tool_calls_as_text,
     utc_now,
 )
 
@@ -376,38 +374,28 @@ def build_dataset_item(
     runner echoes back as `test_case_id` — the only thing results are mapped
     by, so a reordered or partial results file still lands correctly."""
     output = trace.get("output") if isinstance(trace.get("output"), dict) else {}
+    response = output.get("response")
+    tool_calls = output.get("tool_calls")
     tool_call_trace = is_tool_call_trace(trace)
-    response = (
-        tool_calls_as_text(output.get("tool_calls"))
-        if tool_call_trace
-        else output.get("response")
-    )
     test_case: dict[str, Any] = {
         "id": run_uuid,
-        "evaluation": {"type": evaluation_type, "criteria": criteria_refs},
+        "evaluation": {
+            "type": "tool_call_judge" if tool_call_trace else evaluation_type,
+            "criteria": criteria_refs,
+        },
     }
     if evaluation_type == "general":
         raw_input = trace.get("input")
         test_case["input"] = (
             raw_input if isinstance(raw_input, str) else str(raw_input or "")
         )
-        return {
-            "test_case": test_case,
-            "output": {"response": "" if response is None else str(response)},
-        }
-    history = trace.get("input")
-    history = history if isinstance(history, list) else []
-    test_case["history"] = (
-        history_with_calls_as_text(history) if tool_call_trace else history
-    )
-    tool_calls = [] if tool_call_trace else output.get("tool_calls")
-    return {
-        "test_case": test_case,
-        "output": {
-            "response": "" if response is None else str(response),
-            "tool_calls": tool_calls if isinstance(tool_calls, list) else [],
-        },
-    }
+    else:
+        history = trace.get("input")
+        test_case["history"] = history if isinstance(history, list) else []
+    item_output: dict[str, Any] = {"response": "" if response is None else str(response)}
+    if evaluation_type != "general" or tool_call_trace:
+        item_output["tool_calls"] = tool_calls if isinstance(tool_calls, list) else []
+    return {"test_case": test_case, "output": item_output}
 
 
 def build_eval_only_batch(

@@ -54,7 +54,6 @@ from utils import (
     get_calibrate_agent_cli,
     get_s3_client,
     get_s3_output_config,
-    history_with_calls_as_text,
     is_job_timed_out,
     is_tool_call_row,
     judge_turn,
@@ -63,7 +62,6 @@ from utils import (
     normalize_stored_audio_path,
     register_job_starter,
     resolve_stored_audio_bucket_and_key,
-    tool_calls_as_text,
     try_start_queued_job,
     upload_file_to_s3,
     upload_top_level_files_to_s3,
@@ -354,9 +352,8 @@ def _build_stt_dataset(items: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     return out
 
 
-def _tool_call_row_text(
-    it: Dict[str, Any], payload: Dict[str, Any], reply: Any
-) -> str:
+def _tool_call_lists(it: Dict[str, Any], payload: Dict[str, Any]) -> Tuple[list, Optional[list]]:
+    """The calls the agent made and the expected calls (None when absent)."""
     actual = payload.get("actual_tool_calls")
     if not isinstance(actual, list):
         actual = payload.get("tool_calls")
@@ -365,7 +362,7 @@ def _tool_call_row_text(
         raise DatasetBuildError(
             f"Item {it['uuid']}: tool calls must be a list if provided"
         )
-    return tool_calls_as_text(actual, expected, reply)
+    return actual or [], expected if isinstance(expected, list) else None
 
 
 def _build_llm_dataset(
@@ -378,9 +375,9 @@ def _build_llm_dataset(
         "evaluator_variables"?: { "<evaluator_uuid>": { "<var>": <value>, ... } } }
     `agent_response` may also be `{content, label?, versions?}`; the judge sees only `content`.
 
-    A tool-call row may also carry `expected_tool_calls` / `actual_tool_calls`,
-    and goes to the reply judge with its calls written out as text, in both the
-    response and the history. A row no resolved evaluator pairs with is left out.
+    A tool-call row may also carry `expected_tool_calls` / `actual_tool_calls`
+    and goes as a `tool_call_judge` case. A row no resolved evaluator pairs
+    with is left out.
 
     `evaluator_variables` lets each item supply per-evaluator `{{variable}}`
     values for evaluators whose prompts contain placeholders. Values are
@@ -404,29 +401,31 @@ def _build_llm_dataset(
                 f"Item {it['uuid']}: LLM items need `chat_history` (list) and "
                 "`agent_response` in payload"
             )
-        turns = [judge_turn(t) for t in history]
+        evaluation: Dict[str, Any] = {
+            "type": "tool_call_judge" if row_is_tool_call else "response",
+            "criteria": _criteria_refs_for_item(it, payload, row_evaluators),
+        }
         if row_is_tool_call:
-            response = _tool_call_row_text(it, payload, response)
-            tool_calls = []
-            turns = history_with_calls_as_text(turns)
+            tool_calls, expected = _tool_call_lists(it, payload)
+            if expected is not None:
+                evaluation["expected_tool_calls"] = expected
         else:
             tool_calls = payload.get("tool_calls", [])
             if not isinstance(tool_calls, list):
                 raise DatasetBuildError(
                     f"Item {it['uuid']}: `tool_calls` must be a list if provided"
                 )
-        criteria_refs = _criteria_refs_for_item(it, payload, row_evaluators)
         out.append(
             {
                 "test_case": {
                     "id": it["uuid"],
-                    "history": turns,
-                    "evaluation": {
-                        "type": "response",
-                        "criteria": criteria_refs,
-                    },
+                    "history": [judge_turn(t) for t in history],
+                    "evaluation": evaluation,
                 },
-                "output": {"response": str(response), "tool_calls": tool_calls},
+                "output": {
+                    "response": "" if response is None else str(response),
+                    "tool_calls": tool_calls,
+                },
             }
         )
     return out
@@ -483,7 +482,8 @@ def _build_llm_general_dataset(
     items: List[Dict[str, Any]], evaluators_resolved: List[Dict[str, Any]]
 ) -> List[Dict[str, Any]]:
     """`calibrate general` dataset: a flat list of non-conversational
-    `{id, input, output, arguments?}` rows. No agent and no conversation —
+    `{id, input, output, evaluators, arguments?, tool_calls?, expected_tool_calls?}`
+    rows, `evaluators` naming the ones that fit the row. No agent and no conversation —
     `calibrate general` grades each pre-existing input/output pair against the
     config's evaluators (see `calibrate general --dataset … -c …`).
 
@@ -515,24 +515,24 @@ def _build_llm_general_dataset(
                 f"Item {it['uuid']}: llm-general items need `input` and "
                 "`output` in payload"
             )
-        if row_is_tool_call:
-            output_text = _tool_call_row_text(it, payload, output_text)
-        # Identical per-evaluator resolution to the `llm` builder; just reshape
-        # the criteria refs into general's name-keyed `arguments` map.
-        # ponytail: calibrate general runs every evaluator on every row, so a task with both kinds of row pays for judge calls parse_results_for_task_type discards. Split into two CLI runs if that cost matters.
         criteria_refs = _criteria_refs_for_item(it, payload, row_evaluators)
+        row: Dict[str, Any] = {
+            "id": it["uuid"],
+            "input": str(input_text),
+            "output": "" if output_text is None else str(output_text),
+            "evaluators": [ref["name"] for ref in criteria_refs],
+        }
         arguments = {
             ref["name"]: ref["arguments"]
             for ref in criteria_refs
             if "arguments" in ref
         }
-        row: Dict[str, Any] = {
-            "id": it["uuid"],
-            "input": str(input_text),
-            "output": str(output_text),
-        }
         if arguments:
             row["arguments"] = arguments
+        if row_is_tool_call:
+            row["tool_calls"], expected = _tool_call_lists(it, payload)
+            if expected is not None:
+                row["expected_tool_calls"] = expected
         out.append(row)
     return out
 
@@ -855,8 +855,10 @@ def _parse_results_general(
     column→uuid mapping recorded in `config.json`'s `evaluators_map`. The only
     difference is the built-in columns (`input, output` instead of `gt, pred,
     wer`), which the column-map-driven parser ignores — so the STT CSV parser
-    handles general results verbatim."""
-    return _parse_results_stt(output_dir, evaluators_resolved, job_uuid)
+    handles general results verbatim. A blank cell is an evaluator the row did
+    not name in its `evaluators`, so it stores nothing."""
+    runs = _parse_results_stt(output_dir, evaluators_resolved, job_uuid)
+    return [r for r in runs if r["value"] is not None]
 
 
 def _parse_results_llm(
@@ -1068,20 +1070,13 @@ def parse_results_for_task_type(
 ) -> List[Dict[str, Any]]:
     """Dispatch per task type. `items` (in dataset order) is required for
     simulation — calibrate uses internal `row_<i>` ids and we map back to
-    annotation_item.uuid via `dataset_map.json` + this list. llm-general also
-    requires it, to decide which scores pair with their row."""
+    annotation_item.uuid via `dataset_map.json` + this list."""
     if task_type == "stt":
         return _parse_results_stt(output_dir, evaluators_resolved, job_uuid)
     if task_type == "llm":
         return _parse_results_llm(output_dir, evaluators_resolved, job_uuid)
     if task_type == "llm-general":
-        runs = _parse_results_general(output_dir, evaluators_resolved, job_uuid)
-        paired = {
-            (it["uuid"], ev["uuid"])
-            for it in items or []
-            for ev in evaluators_for_item(it, evaluators_resolved)
-        }
-        return [r for r in runs if (r["item_id"], r["evaluator_id"]) in paired]
+        return _parse_results_general(output_dir, evaluators_resolved, job_uuid)
     if task_type == "conversation":
         return _parse_results_simulation(
             output_dir, evaluators_resolved, job_uuid, items=items
@@ -1462,13 +1457,6 @@ def _run_job(
                     task_type, output_dir, evaluators_resolved, job_uuid, items=items
                 )
                 metrics = _read_metrics_json(output_dir)
-                # calibrate general's means cover every evaluator on every row,
-                # including the pairings parsing just discarded.
-                if task_type == "llm-general" and {
-                    ev.get("evaluator_type") == TOOL_CALL_EVALUATOR_TYPE
-                    for ev in evaluators_resolved
-                } == {True, False}:
-                    metrics = None
                 # The finished files are the authority: anything stored in
                 # flight was read while calibrate was still appending, so its
                 # reasoning text may have been cut mid-write. Rewriting also

@@ -191,7 +191,7 @@ def test_each_trace_gets_only_the_evaluators_for_its_kind():
     assert ts.evaluators_for_trace(reply_trace, [tool_ev, llm_ev]) == [llm_ev]
 
 
-def test_a_conversation_tool_call_trace_sends_the_calls_as_the_reply():
+def test_a_conversation_tool_call_trace_goes_to_the_tool_call_judge():
     history = [
         {"role": "user", "content": "when?"},
         {"role": "assistant", "tool_calls": [{"tool": "lookup", "arguments": {"a": 1}}]},
@@ -200,31 +200,33 @@ def test_a_conversation_tool_call_trace_sends_the_calls_as_the_reply():
     item = ts.build_dataset_item(
         "run-1",
         "response",
-        {"input": history, "output": {"response": " ", "tool_calls": [_NAMED_CALL]}},
+        {"input": history, "output": {"response": None, "tool_calls": [_NAMED_CALL]}},
         [{"name": "Tools"}],
     )
-    assert item["test_case"]["history"] == [
-        {"role": "user", "content": "when?"},
-        {"role": "assistant", "content": '[Tool Call] lookup {"a": 1}'},
-        {"role": "user", "content": "and now?"},
-    ]
-    assert item["output"] == {
-        "response": 'Tool calls made by the agent:\nget_schedule {"weeks": 14}',
-        "tool_calls": [],
+    assert item == {
+        "test_case": {
+            "id": "run-1",
+            "evaluation": {"type": "tool_call_judge", "criteria": [{"name": "Tools"}]},
+            "history": history,
+        },
+        "output": {"response": "", "tool_calls": [_NAMED_CALL]},
     }
 
 
-def test_a_general_tool_call_trace_sends_only_the_calls_as_the_reply():
+def test_a_general_tool_call_trace_goes_to_the_tool_call_judge_with_its_input():
     item = ts.build_dataset_item(
         "run-1",
         "general",
         {"input": "When?", "output": {"tool_calls": [_NAMED_CALL]}},
         [{"name": "Tools"}],
     )
-    assert item["test_case"]["input"] == "When?"
-    assert "history" not in item["test_case"]
-    assert item["output"] == {
-        "response": 'Tool calls made by the agent:\nget_schedule {"weeks": 14}',
+    assert item == {
+        "test_case": {
+            "id": "run-1",
+            "evaluation": {"type": "tool_call_judge", "criteria": [{"name": "Tools"}]},
+            "input": "When?",
+        },
+        "output": {"response": "", "tool_calls": [_NAMED_CALL]},
     }
 
 

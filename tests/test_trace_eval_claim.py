@@ -504,7 +504,8 @@ def test_a_mixed_batch_scores_each_trace_with_only_its_own_evaluators():
     assert _criteria_names(by_run[reply_run]) == ["Correctness"]
     assert _criteria_names(by_run[tool_run]) == ["Tools"]
     assert by_run[reply_run]["output"]["response"] == "hello"
-    assert "get_schedule" in by_run[tool_run]["output"]["response"]
+    assert by_run[tool_run]["test_case"]["evaluation"]["type"] == "tool_call_judge"
+    assert by_run[tool_run]["output"] == _TOOL_ONLY
     assert {ev["name"] for ev in invoke.captured["config"]["evaluators"]} == {
         "Correctness",
         "Tools",
