@@ -1163,10 +1163,9 @@ def upsert_public_annotations(
     # so post-creation link/unlink on the parent task can't shift the
     # completion bar under the annotator.
     job_items = get_job_items(job["uuid"])
-    required_evaluator_ids = get_evaluator_ids_for_job(
-        job["uuid"], required_only=True
-    )
-    job_evaluators = get_evaluators_for_job(job["uuid"])
+    required_evaluators = [
+        ev for ev in get_evaluators_for_job(job["uuid"]) if not ev["is_optional"]
+    ]
     job_annotations = get_annotations_for_job(job["uuid"])
     annotated_pairs = {
         (a["item_id"], a.get("evaluator_id"))
@@ -1176,9 +1175,7 @@ def upsert_public_annotations(
     expected_pairs = {
         (it["uuid"], ev_id)
         for it in job_items
-        for ev_id in required_evaluator_ids_for_item(
-            it, job_evaluators, required_evaluator_ids
-        )
+        for ev_id in required_evaluator_ids_for_item(it, required_evaluators)
     }
     items_touched = {a["item_id"] for a in job_annotations}
     completed = (

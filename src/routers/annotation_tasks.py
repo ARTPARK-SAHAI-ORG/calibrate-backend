@@ -80,6 +80,7 @@ from annotation_metrics import KappaFields
 from utils import (
     utc_now,
     evaluators_fitting_row,
+    is_tool_call_evaluator,
     is_tool_call_row,
     job_slot,
     TaskStatus,
@@ -1220,7 +1221,7 @@ def _resolve_evaluator_results(
                     status_code=400, detail=f"Evaluator {ev_id} not found"
                 )
             row_is_tool_call = is_tool_call_row({"payload": payloads[idx]})
-            if not evaluators_fitting_row([evaluator], row_is_tool_call):
+            if is_tool_call_evaluator(evaluator) != row_is_tool_call:
                 raise HTTPException(
                     status_code=400,
                     detail=(
@@ -1659,16 +1660,13 @@ def bulk_create_items(
         # (required_evaluator_ids_for_item). Same source of truth as the
         # public-form auto-complete path — see also the snapshot-mismatch gate
         # above, which measures against the full snapshot instead.
-        required_evaluator_ids = set(
-            get_evaluator_ids_for_job(job_uuid, required_only=True)
-        )
-        job_evaluators = get_evaluators_for_job(job_uuid)
+        required_evaluators = [
+            ev for ev in get_evaluators_for_job(job_uuid) if not ev["is_optional"]
+        ]
         items_fully_annotated = all(
             it.annotations
             and required_evaluator_ids_for_item(
-                {"payload": payloads[i]},
-                job_evaluators,
-                required_evaluator_ids,
+                {"payload": payloads[i]}, required_evaluators
             ).issubset(set(it.annotations.keys()))
             for i, it in enumerate(payload.items)
         )
@@ -2380,10 +2378,9 @@ def start_evaluator_run(
     linked = {
         e["uuid"] for e in get_evaluators_for_annotation_task(task_uuid)
     }
+    requested = [e.dict() for e in payload.evaluators]
     try:
-        resolved = _resolve_evaluator_dicts(
-            [e.dict() for e in payload.evaluators], linked
-        )
+        resolved = _resolve_evaluator_dicts(requested, linked)
     except EvaluatorResolutionError as e:
         raise HTTPException(status_code=400, detail=str(e))
 
@@ -2405,7 +2402,12 @@ def start_evaluator_run(
             ),
         )
     paired = {ev["uuid"] for it in items for ev in fits[it["uuid"]]}
-    resolved = [ev for ev in resolved if ev["uuid"] in paired]
+    if len(paired) < len(resolved):
+        # Resolved again so the stored names are deduped over the kept
+        # evaluators only, matching what a queued job resolves later.
+        resolved = _resolve_evaluator_dicts(
+            [r for r in requested if r["evaluator_id"] in paired], linked
+        )
 
     enforce_max_rows_per_eval(ctx.org_uuid, len(items), "labelling_evaluator_run")
 

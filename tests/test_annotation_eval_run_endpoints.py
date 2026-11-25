@@ -405,6 +405,35 @@ def test_evaluator_run_does_not_record_an_evaluator_no_row_pairs_with(client):
     assert [e["evaluator_id"] for e in details["evaluators"]] == [llm_ev]
 
 
+def test_evaluator_run_stores_names_deduped_over_kept_evaluators_only(client):
+    import db as db_mod
+
+    h = _signup(client)["headers"]
+    llm_ev = _llm_ev(client, h)["uuid"]
+    tc_ev = _tool_call_ev(client, h)
+    task_uuid = _task_with(client, h, "llm", [llm_ev, tc_ev], [REPLY_ROW])
+    # Names are unique only within one org, so a linked evaluator from another
+    # namespace can share one.
+    name = f"Judge-{uuid.uuid4().hex[:6]}"
+    with db_mod.get_db_connection() as conn:
+        org_uuid = conn.execute("SELECT org_uuid FROM evaluators WHERE uuid = ?", (tc_ev,)).fetchone()[0]
+        conn.execute("UPDATE evaluators SET name = ?, org_uuid = NULL WHERE uuid = ?", (name, tc_ev))
+        conn.execute("UPDATE evaluators SET name = ? WHERE uuid = ?", (name, llm_ev))
+        conn.commit()
+    try:
+        resp = _start_run(client, h, task_uuid, [tc_ev, llm_ev])
+    finally:
+        with db_mod.get_db_connection() as conn:
+            conn.execute(
+                "UPDATE evaluators SET name = ?, org_uuid = ? WHERE uuid = ?",
+                (f"{name}-tc", org_uuid, tc_ev),
+            )
+            conn.commit()
+    assert resp.status_code == 200, resp.text
+    details = _job_details(resp.json()["job_uuid"])
+    assert [(e["evaluator_id"], e["name"]) for e in details["evaluators"]] == [(llm_ev, name)]
+
+
 def test_evaluator_run_mixed_tool_call_rows_launches(client):
     """A mixed run with only a reply evaluator launches — no evaluator pairs
     with the tool-call row, so only the text row is counted and run."""

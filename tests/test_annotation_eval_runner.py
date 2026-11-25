@@ -221,6 +221,18 @@ def test_build_llm_dataset_bad_payload():
         )
 
 
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {"actual_tool_calls": "not-a-list", "tool_calls": [{"tool": "t"}]},
+        {"actual_tool_calls": [], "expected_tool_calls": {}},
+    ],
+)
+def test_tool_call_lists_rejects_a_present_non_list(payload):
+    with pytest.raises(runner.DatasetBuildError):
+        runner._tool_call_lists({"uuid": "i1"}, payload)
+
+
 def test_build_llm_dataset_happy():
     evs = [{"uuid": "e1", "name": "judge"}]
     out = runner._build_llm_dataset(
@@ -360,23 +372,15 @@ EV_TC = {"uuid": "ev-tc", "evaluator_type": "tool-call"}
 
 
 def test_required_evaluator_ids_for_item_tool_call_row():
-    assert runner.required_evaluator_ids_for_item(
-        TC_ROW, [EV_TEXT, EV_TC], ["ev-1", "ev-tc"]
-    ) == {"ev-tc"}
-    # No tool-call evaluator on the job → nothing is required on the row.
-    assert runner.required_evaluator_ids_for_item(TC_ROW, [EV_TEXT], ["ev-1"]) == set()
-    # An optional tool-call evaluator is not required.
-    assert runner.required_evaluator_ids_for_item(
-        TC_ROW, [EV_TEXT, EV_TC], ["ev-1"]
-    ) == set()
+    assert runner.required_evaluator_ids_for_item(TC_ROW, [EV_TEXT, EV_TC]) == {"ev-tc"}
+    # No required tool-call evaluator on the job → nothing is required on the row.
+    assert runner.required_evaluator_ids_for_item(TC_ROW, [EV_TEXT]) == set()
 
 
 def test_required_evaluator_ids_for_item_normal_row():
-    assert runner.required_evaluator_ids_for_item(
-        TEXT_ROW, [EV_TEXT, EV_TC], ["ev-1", "ev-tc"]
-    ) == {"ev-1"}
+    assert runner.required_evaluator_ids_for_item(TEXT_ROW, [EV_TEXT, EV_TC]) == {"ev-1"}
     # Job carries only the tool-call evaluator → nothing is required here.
-    assert runner.required_evaluator_ids_for_item(TEXT_ROW, [EV_TC], ["ev-tc"]) == set()
+    assert runner.required_evaluator_ids_for_item(TEXT_ROW, [EV_TC]) == set()
 
 
 def _resolve_with_tool_call_evaluator(requested, **tc):

@@ -49,7 +49,6 @@ def test_conversation_agent_maps_to_response_llm():
     ev = _ev("llm", live=live, name="clean")
     result = ts.resolve_trace_scoring("conversation", [(ev, _version(live))])
     assert result.evaluation_type == "response"
-    assert result.evaluator_type == "llm"
     assert [p.evaluator_uuid for p in result.eligible] == [ev["uuid"]]
     assert result.eligible[0].evaluator_version_id == live
     assert result.ineligible == []
@@ -60,7 +59,6 @@ def test_general_agent_maps_to_general_llm_general():
     ev = _ev("llm-general", live=live, name="gen")
     result = ts.resolve_trace_scoring("general", [(ev, _version(live))])
     assert result.evaluation_type == "general"
-    assert result.evaluator_type == "llm-general"
     assert result.eligible[0].evaluator_uuid == ev["uuid"]
 
 

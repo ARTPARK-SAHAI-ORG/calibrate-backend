@@ -787,7 +787,7 @@ def _cmd_annotation_stt_or_general(opts: Dict[str, List[str]]) -> None:
     dataset = _load_json(_first(opts, "--dataset")) or []
 
     ev_cols, ev_values = _evaluator_row_cols(evaluators)
-    names = ev_cols[::2]
+    names = [ev["name"] for ev in evaluators if ev.get("name")]
     with open(output_dir / "results.csv", "w", newline="", encoding="utf-8") as f:
         writer = csv.writer(f)
         writer.writerow(["id", "gt", "pred"] + ev_cols)

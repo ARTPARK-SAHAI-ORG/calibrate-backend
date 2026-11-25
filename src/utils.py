@@ -302,7 +302,7 @@ EvalJobType = Literal["stt-eval", "tts-eval", "annotation-eval"]
 AnnotationTaskTypeLiteral = Literal["stt", "llm", "llm-general", "conversation", "tts"]
 MemberRoleLiteral = Literal["owner", "admin"]  # mirrors DB CHECK(role IN ('owner','admin'))
 EvaluatorUuid = Annotated[str, StringConstraints(min_length=36, max_length=36)]
-NonBlankStr = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1)]
+NonBlankStr = Annotated[str, StringConstraints(pattern=r"\S")]
 TestUuid = Annotated[str, StringConstraints(min_length=36, max_length=36)]
 
 # Evaluator names that collide with reserved bulk-CSV output columns (an
@@ -1071,15 +1071,15 @@ def judge_turn(turn: Any) -> Any:
     return {k: v for k, v in turn.items() if k in JUDGE_TURN_KEYS}
 
 
+def is_tool_call_evaluator(ev: Dict[str, Any]) -> bool:
+    return ev.get("evaluator_type") == TOOL_CALL_EVALUATOR_TYPE
+
+
 def evaluators_fitting_row(
     evaluators: List[Dict[str, Any]], row_is_tool_call: bool
 ) -> List[Dict[str, Any]]:
     """Tool-call evaluators judge only tool-call rows, every other evaluator only the rest."""
-    return [
-        ev
-        for ev in evaluators
-        if (ev.get("evaluator_type") == TOOL_CALL_EVALUATOR_TYPE) == row_is_tool_call
-    ]
+    return [ev for ev in evaluators if is_tool_call_evaluator(ev) == row_is_tool_call]
 
 
 def is_tool_call_row(item: Dict[str, Any]) -> bool:

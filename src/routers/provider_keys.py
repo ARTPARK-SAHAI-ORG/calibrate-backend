@@ -4,7 +4,8 @@ import os
 from typing import List, Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Path
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, StringConstraints, field_validator
+from typing_extensions import Annotated
 
 import db
 import provider_keys
@@ -12,7 +13,6 @@ from auth_utils import OrgContext, get_current_org
 from provider_status import PROVIDER_ENV_VARS
 from routers.api_keys import _to_utc_iso
 from routers.org_limits import effective_max_scored_traces
-from utils import NonBlankStr
 
 router = APIRouter(prefix="/provider-keys", tags=["provider-keys"])
 
@@ -20,7 +20,7 @@ Provider = Literal[tuple(PROVIDER_ENV_VARS)]
 
 
 class ProviderKeyRequest(BaseModel):
-    value: NonBlankStr = Field(
+    value: Annotated[str, StringConstraints(strip_whitespace=True, min_length=1)] = Field(
         description="Your API key for the provider, or the service account JSON when the provider is `google`"
     )
 

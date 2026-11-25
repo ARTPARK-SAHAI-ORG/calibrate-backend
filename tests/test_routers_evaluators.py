@@ -439,7 +439,7 @@ def test_blank_judge_prompt_or_model_is_rejected(client, evaluator_type, version
     assert len(detail["versions"]) == 1
 
 
-def test_judge_prompt_and_model_are_stored_trimmed(client):
+def test_judge_prompt_and_model_are_stored_as_sent(client):
     h = _signup(client)
     created = client.post(
         "/evaluators",
@@ -453,8 +453,8 @@ def test_judge_prompt_and_model_are_stored_trimmed(client):
     )
     assert created.status_code == 200, created.text
     version = client.get(f"/evaluators/{created.json()['uuid']}", headers=h).json()["versions"][0]
-    assert version["judge_model"] == "openai/gpt-4.1"
-    assert version["system_prompt"] == "Judge it"
+    assert version["judge_model"] == " openai/gpt-4.1 "
+    assert version["system_prompt"] == "\nJudge it  "
 
 
 def test_every_evaluator_type_has_a_default_prompt():

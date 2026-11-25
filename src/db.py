@@ -2162,14 +2162,14 @@ DEFAULT_PROMPTS_BY_PURPOSE: Dict[str, Dict[str, Any]] = {
     "tool-call": {
         "name": "Tool call correctness",
         "system_prompt": (
-            "The `Tool calls made by the agent` are what the agent did in answer to the "
-            "last message in the `Chat history`. Calls inside the `Chat history` were made "
-            "earlier and are context only, so judge the new calls against the conversation "
-            "as it stands at the end, including any correction the user made. "
             "You are shown the `Chat history` with an AI agent, the `Reply from the "
-            "agent` if it gave one, and the `Tool calls made by the agent`. Decide whether those "
-            "calls are right for what the user needs: the right tools, the right "
-            "arguments, nothing missing and nothing extra. The agent's tools are its "
+            "agent` if it gave one, and the `Tool calls made by the agent`. The `Tool "
+            "calls made by the agent` are what the agent did in answer to the last "
+            "message in the `Chat history`. Calls inside the `Chat history` were made "
+            "earlier and are context only, so judge the new calls against the conversation "
+            "as it stands at the end, including any correction the user made. Decide "
+            "whether those calls are right for what the user needs: the right tools, the "
+            "right arguments, nothing missing and nothing extra. The agent's tools are its "
             "own and are not listed here, so never mark a call wrong because you do "
             "not recognise the tool. If an `Expected tool calls` section is present, "
             "compare against it. A call is not wrong because of an argument that "
@@ -9995,22 +9995,14 @@ def create_annotation_job(
     return job_uuid
 
 
-def get_evaluator_ids_for_job(
-    job_uuid: str, required_only: bool = False
-) -> List[str]:
+def get_evaluator_ids_for_job(job_uuid: str) -> List[str]:
     """Return the snapshotted evaluator UUIDs for a job, NOT the live linked
-    set on the parent task.
-
-    `required_only=True` drops the ones annotators may leave blank — that is
-    the set the auto-completion check measures against.
-    """
+    set on the parent task."""
     with get_db_connection() as conn:
         cursor = conn.cursor()
         cursor.execute(
             "SELECT evaluator_id FROM annotation_job_evaluators "
-            "WHERE job_id = ? "
-            + ("AND is_optional = 0 " if required_only else "")
-            + "ORDER BY position ASC, id ASC",
+            "WHERE job_id = ? ORDER BY position ASC, id ASC",
             (job_uuid,),
         )
         return [r["evaluator_id"] for r in cursor.fetchall()]

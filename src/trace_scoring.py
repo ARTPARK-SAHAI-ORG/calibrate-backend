@@ -30,9 +30,9 @@ from shared_enums import (
     EvaluatorType,
 )
 from utils import (
-    TOOL_CALL_EVALUATOR_TYPE,
     evaluators_fitting_row,
     get_calibrate_agent_cli,
+    is_tool_call_evaluator,
     kill_process_group,
     utc_now,
 )
@@ -143,7 +143,6 @@ class TraceScoringIneligible:
 @dataclass(frozen=True)
 class TraceScoringResolution:
     evaluation_type: TraceScorableEvaluationType | None
-    evaluator_type: EvaluatorType | None
     eligible: list[TraceScoringEligible] = field(default_factory=list)
     ineligible: list[TraceScoringIneligible] = field(default_factory=list)
 
@@ -163,7 +162,6 @@ def resolve_trace_scoring(
     if mode is None:
         return TraceScoringResolution(
             evaluation_type=None,
-            evaluator_type=None,
             eligible=[],
             ineligible=[
                 TraceScoringIneligible(
@@ -181,7 +179,7 @@ def resolve_trace_scoring(
     for ev, version in live_evaluators:
         name = ev.get("name") or ev["uuid"]
         evaluator_type = ev.get("evaluator_type")
-        if evaluator_type not in (required_evaluator_type, TOOL_CALL_EVALUATOR_TYPE):
+        if evaluator_type != required_evaluator_type and not is_tool_call_evaluator(ev):
             ineligible.append(
                 TraceScoringIneligible(
                     evaluator_uuid=ev["uuid"],
@@ -227,7 +225,6 @@ def resolve_trace_scoring(
         )
     return TraceScoringResolution(
         evaluation_type=evaluation_type,
-        evaluator_type=required_evaluator_type,
         eligible=eligible,
         ineligible=ineligible,
     )
@@ -326,7 +323,7 @@ def resolve_batch_evaluators(
         evaluation_type=resolution.evaluation_type,
         hydrated=[item.execution for item in resolution.eligible],
         has_tool_call_evaluator=any(
-            ev.get("evaluator_type") == TOOL_CALL_EVALUATOR_TYPE for ev, _ in live
+            is_tool_call_evaluator(ev) for ev, _ in live
         ),
     )
 

@@ -22,7 +22,7 @@ import threading
 import time
 import traceback
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Optional, Set, Tuple
+from typing import Any, Dict, List, Optional, Set, Tuple
 
 
 from db import (
@@ -120,18 +120,14 @@ SUPPORTED_EVAL_TASK_TYPES = ("stt", "llm", "llm-general", "conversation", "tts")
 
 
 def required_evaluator_ids_for_item(
-    item: Dict[str, Any],
-    evaluators: List[Dict[str, Any]],
-    required_ids: Iterable[str],
+    item: Dict[str, Any], required_evaluators: List[Dict[str, Any]]
 ) -> Set[str]:
-    """Which required evaluators must carry an answer on this row before a
-    labelling job counts as finished: the ones `evaluators_fitting_row` pairs
-    with it, which is what the labelling form draws."""
-    required = set(required_ids)
+    """Which of the job's required evaluators must carry an answer on this row
+    before a labelling job counts as finished: the ones `evaluators_fitting_row`
+    pairs with it, which is what the labelling form draws."""
     return {
         ev["uuid"]
-        for ev in evaluators_fitting_row(evaluators, is_tool_call_row(item))
-        if ev["uuid"] in required
+        for ev in evaluators_fitting_row(required_evaluators, is_tool_call_row(item))
     }
 
 
@@ -333,14 +329,14 @@ def _build_stt_dataset(items: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
 def _tool_call_lists(it: Dict[str, Any], payload: Dict[str, Any]) -> Tuple[list, Optional[list]]:
     """The calls the agent made and the expected calls (None when absent)."""
     actual = payload.get("actual_tool_calls")
-    if not isinstance(actual, list):
+    if actual is None:
         actual = payload.get("tool_calls")
     expected = payload.get("expected_tool_calls")
-    if not isinstance(actual or [], list) or not isinstance(expected or [], list):
+    if any(v is not None and not isinstance(v, list) for v in (actual, expected)):
         raise DatasetBuildError(
             f"Item {it['uuid']}: tool calls must be a list if provided"
         )
-    return actual or [], expected if isinstance(expected, list) else None
+    return actual or [], expected
 
 
 def _build_llm_dataset(
@@ -354,8 +350,8 @@ def _build_llm_dataset(
     `agent_response` may also be `{content, label?, versions?}`; the judge sees only `content`.
 
     A tool-call row may also carry `expected_tool_calls` / `actual_tool_calls`
-    and goes as a `tool_call_judge` case. A row no resolved evaluator pairs
-    with is left out.
+    and goes as a `tool_call_judge` case. Skipping a row no evaluator fits only
+    guards direct calls, since the router never sends one.
 
     `evaluator_variables` lets each item supply per-evaluator `{{variable}}`
     values for evaluators whose prompts contain placeholders. Values are
