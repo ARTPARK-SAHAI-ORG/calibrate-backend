@@ -113,7 +113,7 @@ def create_agent_tool_links(
     agent_tools: AgentToolsCreate,
     ctx: OrgContext = Depends(get_current_org),
 ):
-    """Link one or more tools to an agent. Tools that are already linked are skipped. The workspace's Tool call correctness evaluator is linked to the agent too"""
+    """Link one or more tools to an agent. Tools that are already linked are skipped. If any tool is newly linked, your Tool call correctness evaluator is also linked to the agent"""
     _require_owned_agent(agent_tools.agent_uuid, ctx.org_uuid)
     for tool_uuid in agent_tools.tool_uuids:
         _require_owned_tool(tool_uuid, ctx.org_uuid)
