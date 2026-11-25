@@ -1284,14 +1284,20 @@ async def _llm_reply(**kwargs: Any) -> Dict[str, Any]:
 
 
 async def _agent_reply(chat: Dict[str, Any]) -> Dict[str, Any]:
-    """`{response, tool_calls}` from the agent, tool calls in the trace shape."""
+    """`{response, tool_calls, stopped_early}` from the agent, tool calls in the
+    trace shape. `stopped_early` is true when it used every tool round it is
+    allowed and was cut off before replying."""
     if env_bool("FAKE_AI_PROVIDERS", False):
         return {"response": FAKE_RESPONSE, "tool_calls": []}
     agent = chat["agent"]
     config = agent.get("config") or {}
     if not config.get("agent_url"):
         result = await _llm_reply(messages=chat["messages"], **chat["llm"])
-        return {"response": result["reply"] or None, "tool_calls": result["tool_calls"]}
+        return {
+            "response": result["reply"] or None,
+            "tool_calls": result["tool_calls"],
+            "stopped_early": result.get("stopped") == "max_tool_rounds",
+        }
     error = await run_in_threadpool(public_url_error, config["agent_url"])
     if error:
         raise ValueError(f"agent_url {error}")
@@ -1417,6 +1423,10 @@ class ChatMessageResponse(BaseModel):
     reply: Optional[str] = Field(None, description="What the agent said")
     tool_calls: List[ChatToolCall] = Field(description="Tools the agent called before replying")
     ended: bool = Field(description="Whether the agent ended the conversation")
+    stopped_early: bool = Field(
+        False,
+        description="Whether the agent was stopped after calling tools as many times in a row as it may, before it replied",
+    )
 
 
 class ChatFeedbackRequest(BaseModel):
@@ -1497,6 +1507,7 @@ async def send_public_agent_chat_message(
                 output={
                     "response": result.get("response"),
                     "tool_calls": [call for call in tool_calls if call["tool"] != "end_call"],
+                    **({"stopped_early": True} if result.get("stopped_early") else {}),
                 },
                 source="chat",
             )
@@ -1507,6 +1518,7 @@ async def send_public_agent_chat_message(
         reply=result.get("response"),
         tool_calls=tool_calls,
         ended=any(call["tool"] == "end_call" for call in tool_calls),
+        stopped_early=bool(result.get("stopped_early")),
     )
 
 

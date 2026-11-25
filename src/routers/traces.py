@@ -290,6 +290,10 @@ class TraceOutput(BaseModel):
         max_length=MAX_TOOL_CALLS,
         description="Tool calls the agent issued for this turn. Omit for plain text replies",
     )
+    stopped_early: Optional[bool] = Field(
+        None,
+        description="True when the agent was stopped after calling tools as many times in a row as it may, before it replied",
+    )
 
     @model_validator(mode="after")
     def _require_response_or_tool_calls(self):

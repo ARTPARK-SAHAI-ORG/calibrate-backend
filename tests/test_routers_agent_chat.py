@@ -566,3 +566,27 @@ def test_llm_reply_hands_everything_to_calibrates_agent_reply():
         result = asyncio.run(public._llm_reply(messages=[], model="m", api_key="k"))
     assert result == {"reply": "ok"}
     chat_module.agent_reply.assert_awaited_once_with(messages=[], model="m", api_key="k")
+
+
+def test_a_reply_cut_off_after_the_tool_rounds_says_so_and_stores_it(client):
+    h, agent, token = _chat_agent(client)
+    calls = [{"id": "x", "tool": "lookup", "arguments": {}, "output": {"n": 1}}]
+    cut_off = AsyncMock(
+        return_value={"reply": "", "tool_calls": calls, "ended": False, "stopped": "max_tool_rounds"}
+    )
+    with patch.object(public, "_llm_reply", cut_off):
+        body = _send(client, token).json()
+    assert body["stopped_early"] is True
+    assert body["reply"] is None
+    detail = client.get(f"/traces/{body['trace_uuid']}", headers=h)
+    assert detail.status_code == 200, detail.text
+    assert detail.json()["output"]["stopped_early"] is True
+
+
+def test_a_finished_reply_is_not_marked_as_cut_off(client):
+    _, agent, token = _chat_agent(client)
+    finished = AsyncMock(return_value={"reply": "Hi", "tool_calls": [], "ended": False, "stopped": "reply"})
+    with patch.object(public, "_llm_reply", finished):
+        body = _send(client, token).json()
+    assert body["stopped_early"] is False
+    assert "stopped_early" not in db.get_trace(agent["org_uuid"], body["trace_uuid"])["output"]
