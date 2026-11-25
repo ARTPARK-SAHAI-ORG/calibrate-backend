@@ -9952,7 +9952,7 @@ def create_annotation_job(
             [(job_uuid, item_id, *snapshot_by_uuid[item_id]) for item_id in item_uuids],
         )
         # Snapshot the currently-linked evaluator set. Reads via
-        # `get_evaluator_ids_for_job` give the auto-complete check a stable
+        # `get_evaluators_for_job` give the auto-complete check a stable
         # view independent of later link/unlink on the parent task. The
         # parent task's display order (`position`) is snapshotted into the
         # job pivot so the annotator's form keeps the order in place at

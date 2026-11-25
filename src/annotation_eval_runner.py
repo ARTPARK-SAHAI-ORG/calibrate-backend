@@ -350,8 +350,7 @@ def _build_llm_dataset(
     `agent_response` may also be `{content, label?, versions?}`; the judge sees only `content`.
 
     A tool-call row may also carry `expected_tool_calls` / `actual_tool_calls`
-    and goes as a `tool_call_judge` case. Skipping a row no evaluator fits only
-    guards direct calls, since the router never sends one.
+    and goes as a `tool_call_judge` case. A row no evaluator fits is skipped.
 
     `evaluator_variables` lets each item supply per-evaluator `{{variable}}`
     values for evaluators whose prompts contain placeholders. Values are
@@ -371,9 +370,11 @@ def _build_llm_dataset(
         history = payload.get("chat_history")
         response = message_text(payload.get("agent_response"))
         if not isinstance(history, list) or (response is None and not row_is_tool_call):
+            needs = "`chat_history` (list)" if row_is_tool_call else (
+                "`chat_history` (list) and `agent_response`"
+            )
             raise DatasetBuildError(
-                f"Item {it['uuid']}: LLM items need `chat_history` (list) and "
-                "`agent_response` in payload"
+                f"Item {it['uuid']}: LLM items need {needs} in payload"
             )
         evaluation: Dict[str, Any] = {
             "type": "tool_call_judge" if row_is_tool_call else "response",
@@ -478,9 +479,9 @@ def _build_llm_general_dataset(
         input_text = message_text(payload.get("input"))
         output_text = message_text(payload.get("output"))
         if input_text is None or (output_text is None and not row_is_tool_call):
+            needs = "`input`" if row_is_tool_call else "`input` and `output`"
             raise DatasetBuildError(
-                f"Item {it['uuid']}: llm-general items need `input` and "
-                "`output` in payload"
+                f"Item {it['uuid']}: llm-general items need {needs} in payload"
             )
         criteria_refs = _criteria_refs_for_item(it, payload, row_evaluators)
         row: Dict[str, Any] = {
@@ -1040,9 +1041,9 @@ def parse_results_for_task_type(
     output_dir: Path,
     evaluators_resolved: List[Dict[str, Any]],
     job_uuid: str,
-    items: Optional[List[Dict[str, Any]]] = None,
+    items: List[Dict[str, Any]],
 ) -> List[Dict[str, Any]]:
-    """Dispatch per task type. `items` (in dataset order) is required for
+    """Dispatch per task type. `items` (in dataset order) is read for
     simulation — calibrate uses internal `row_<i>` ids and we map back to
     annotation_item.uuid via `dataset_map.json` + this list — and for
     `llm-general`, which keeps only the scores each row was sent."""
@@ -1051,8 +1052,6 @@ def parse_results_for_task_type(
     if task_type == "llm":
         return _parse_results_llm(output_dir, evaluators_resolved, job_uuid)
     if task_type == "llm-general":
-        if items is None:
-            raise ValueError("llm-general results need the run's items to parse")
         return _parse_results_general(output_dir, evaluators_resolved, job_uuid, items)
     if task_type == "conversation":
         return _parse_results_simulation(

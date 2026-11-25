@@ -41,7 +41,7 @@ def _ev(evaluator_type, *, live=None, name="ev", ev_uuid=None):
 
 
 def _version(version_uuid, *, variables=None):
-    return {"uuid": version_uuid, "variables": variables, "system_prompt": "Judge it."}
+    return {"uuid": version_uuid, "variables": variables}
 
 
 def test_conversation_agent_maps_to_response_llm():
@@ -125,7 +125,7 @@ def test_a_tool_call_evaluator_is_eligible_on_both_agent_types(
     assert result.ineligible == []
 
 
-def test_tool_call_evaluator_checks_run_in_order():
+def test_tool_call_evaluator_ineligible_reasons():
     live = str(uuid.uuid4())
     no_live = _ev("tool-call", name="no-live")
     with_vars = _ev("tool-call", live=live, name="vars")

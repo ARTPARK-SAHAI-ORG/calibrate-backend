@@ -383,6 +383,16 @@ def test_required_evaluator_ids_for_item_normal_row():
     assert runner.required_evaluator_ids_for_item(TEXT_ROW, [EV_TC]) == set()
 
 
+def test_tool_call_row_missing_context_error_asks_only_for_context():
+    ev = {**_ev_resolved("ev-tc", "Tool"), "evaluator_type": "tool-call"}
+    with pytest.raises(runner.DatasetBuildError) as llm_err:
+        runner._build_llm_dataset([TC_ROW], [ev])
+    assert str(llm_err.value) == "Item tc: LLM items need `chat_history` (list) in payload"
+    with pytest.raises(runner.DatasetBuildError) as general_err:
+        runner._build_llm_general_dataset([TC_ROW], [ev])
+    assert str(general_err.value) == "Item tc: llm-general items need `input` in payload"
+
+
 def _resolve_with_tool_call_evaluator(requested, **tc):
     """Resolve `requested` where ev-tc is a tool-call evaluator and ev-1 is a
     normal LLM judge."""
@@ -1240,7 +1250,7 @@ def test_parse_results_for_task_type_dispatch(tmp_path):
     # Unknown task type → []
     assert (
         runner.parse_results_for_task_type(
-            "unknown", tmp_path, [_ev_resolved()], "job-1"
+            "unknown", tmp_path, [_ev_resolved()], "job-1", items=[]
         )
         == []
     )
@@ -1286,13 +1296,6 @@ def test_parse_results_for_task_type_dispatch_llm_general(tmp_path):
     assert runs[0]["value"]["value"] is True
 
 
-def test_parse_results_for_task_type_llm_general_requires_items(tmp_path):
-    with pytest.raises(ValueError, match="need the run's items"):
-        runner.parse_results_for_task_type(
-            "llm-general", tmp_path, [_ev_resolved()], "job-1"
-        )
-
-
 def test_parse_results_for_task_type_dispatch_conversation(tmp_path):
     # The `conversation` task type routes to the simulation results parser.
     (tmp_path / "dataset_map.json").write_text(
@@ -1304,7 +1307,7 @@ def test_parse_results_for_task_type_dispatch_conversation(tmp_path):
         "name,type,value,reasoning,evaluator_id\nSafety,binary,1,ok,ev-1\n"
     )
     runs = runner.parse_results_for_task_type(
-        "conversation", tmp_path, [_ev_resolved()], "job-1", items=None
+        "conversation", tmp_path, [_ev_resolved()], "job-1", items=[]
     )
     assert runs[0]["item_id"] == "from-name"
 

@@ -2282,7 +2282,11 @@ class EvaluatorRunRequestEntry(BaseModel):
 
 class EvaluatorRunStartRequest(BaseModel):
     evaluators: List[EvaluatorRunRequestEntry] = Field(
-        description="The evaluators to run. Each must be linked to the task"
+        description=(
+            "The evaluators to run. Each must be linked to the task. "
+            "Items that none of the chosen evaluators can judge are left out, and so are evaluators "
+            "that can judge none of the chosen items, so `item_count` and `evaluator_count` can be lower than what you sent"
+        )
     )
     item_ids: List[str] = Field(
         default=[],
