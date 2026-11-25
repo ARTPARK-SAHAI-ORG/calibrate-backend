@@ -30,6 +30,7 @@ from shared_enums import (
     EvaluatorType,
 )
 from utils import (
+    TOOL_CALL_EVALUATOR_TYPE,
     evaluators_fitting_row,
     get_calibrate_agent_cli,
     is_tool_call_evaluator,
@@ -177,7 +178,7 @@ def resolve_trace_scoring(
     for ev, version in live_evaluators:
         name = ev.get("name") or ev["uuid"]
         evaluator_type = ev.get("evaluator_type")
-        if evaluator_type != required_evaluator_type and not is_tool_call_evaluator(ev):
+        if evaluator_type not in (required_evaluator_type, TOOL_CALL_EVALUATOR_TYPE):
             ineligible.append(
                 TraceScoringIneligible(
                     evaluator_uuid=ev["uuid"],
