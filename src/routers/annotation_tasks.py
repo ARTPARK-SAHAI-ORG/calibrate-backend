@@ -2408,7 +2408,8 @@ def start_evaluator_run(
 
     # Rows no chosen evaluator pairs with never enter the run, and evaluators
     # no chosen row pairs with are not recorded as having run.
-    items = [it for it in items if evaluators_for_item(it, resolved)]
+    fits = {it["uuid"]: evaluators_for_item(it, resolved) for it in items}
+    items = [it for it in items if fits[it["uuid"]]]
     item_ids_persisted = [it["uuid"] for it in items]
     if not items:
         raise HTTPException(
@@ -2419,9 +2420,7 @@ def start_evaluator_run(
                 "and all other items need any other evaluator."
             ),
         )
-    paired = {
-        ev["uuid"] for it in items for ev in evaluators_for_item(it, resolved)
-    }
+    paired = {ev["uuid"] for it in items for ev in fits[it["uuid"]]}
     resolved = [ev for ev in resolved if ev["uuid"] in paired]
 
     enforce_max_rows_per_eval(ctx.org_uuid, len(items), "labelling_evaluator_run")
