@@ -3605,6 +3605,10 @@ def _backfill_rename_tool_call_evaluator_description(cursor: sqlite3.Cursor) -> 
     return cursor.rowcount
 
 
+# The characters SQL TRIM must strip for a value to count as blank.
+_SQL_BLANK_CHARS = "' ' || char(9) || char(10) || char(13)"
+
+
 def _backfill_fill_tool_call_evaluator_judge(cursor: sqlite3.Cursor) -> int:
     """One-time migration: give every workspace's tool-call evaluator, copies
     included, the seed's prompt and model. Fills every blank version in place
@@ -3612,7 +3616,7 @@ def _backfill_fill_tool_call_evaluator_judge(cursor: sqlite3.Cursor) -> int:
     an older version made live again still has a judge. A prompt or model a user
     wrote is kept. The template itself is reconciled by `_seed_default_evaluators`."""
     version = _TOOL_CALL_SEED["version"]
-    blank = "TRIM({}, ' ' || char(9) || char(10) || char(13)) = ''"
+    blank = "TRIM({}, " + _SQL_BLANK_CHARS + ") = ''"
     prompt_blank, model_blank = blank.format("system_prompt"), blank.format("judge_model")
     cursor.execute(
         f"""
@@ -11040,8 +11044,7 @@ def _like_escape(text: str) -> str:
 # tool_call_count: a reply is non-blank text, a tool call needs a tool name,
 # and a trace with both counts as a reply only.
 _TRACE_HAS_RESPONSE = (
-    "TRIM(COALESCE(json_extract(output, '$.response'), ''), "
-    "' ' || char(9) || char(10) || char(13)) != ''"
+    f"TRIM(COALESCE(json_extract(output, '$.response'), ''), {_SQL_BLANK_CHARS}) != ''"
 )
 _TRACE_HAS_TOOL_CALL = (
     "EXISTS (SELECT 1 FROM json_each(output, '$.tool_calls') "
