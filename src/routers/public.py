@@ -60,7 +60,6 @@ from routers.org_limits import daily_message_limit, effective_limits, record_lim
 from shared_enums import DEFAULT_AGENT_INTERACTION_TYPE, EvaluatorType
 from testing.fake_calibrate_agent import FAKE_RESPONSE
 from utils import (
-    TOOL_CALL_EVALUATOR_TYPE,
     default_agent_llm_model,
     build_tool_configs,
     capture_exception_to_sentry,
@@ -1167,11 +1166,7 @@ def upsert_public_annotations(
     required_evaluator_ids = get_evaluator_ids_for_job(
         job["uuid"], required_only=True
     )
-    tool_call_evaluator_ids = {
-        ev["uuid"]
-        for ev in get_evaluators_for_job(job["uuid"])
-        if ev.get("evaluator_type") == TOOL_CALL_EVALUATOR_TYPE
-    }
+    job_evaluators = get_evaluators_for_job(job["uuid"])
     job_annotations = get_annotations_for_job(job["uuid"])
     annotated_pairs = {
         (a["item_id"], a.get("evaluator_id"))
@@ -1182,7 +1177,7 @@ def upsert_public_annotations(
         (it["uuid"], ev_id)
         for it in job_items
         for ev_id in required_evaluator_ids_for_item(
-            it, required_evaluator_ids, tool_call_evaluator_ids
+            it, job_evaluators, required_evaluator_ids
         )
     }
     items_touched = {a["item_id"] for a in job_annotations}

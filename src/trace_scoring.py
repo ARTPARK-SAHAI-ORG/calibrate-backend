@@ -284,6 +284,7 @@ class PreparedRun:
     run: dict[str, Any]
     trace: dict[str, Any]
     evaluators: list[dict[str, Any]] = field(default_factory=list)
+    is_tool_call: bool = False
 
 
 @dataclass(frozen=True)
@@ -348,6 +349,7 @@ def build_dataset_item(
     evaluation_type: TraceScorableEvaluationType,
     trace: dict[str, Any],
     criteria_refs: list[dict[str, Any]],
+    tool_call_trace: bool,
 ) -> dict[str, Any]:
     """One eval-only dataset item. `test_case.id` is the run uuid, which the
     runner echoes back as `test_case_id` — the only thing results are mapped
@@ -355,7 +357,6 @@ def build_dataset_item(
     output = trace.get("output") if isinstance(trace.get("output"), dict) else {}
     response = output.get("response")
     tool_calls = output.get("tool_calls")
-    tool_call_trace = is_tool_call_trace(trace)
     test_case: dict[str, Any] = {
         "id": run_uuid,
         "evaluation": {
@@ -402,6 +403,7 @@ def build_eval_only_batch(
             evaluation_type,
             item.trace,
             criteria_per_run.get(item.run["uuid"]) or [],
+            item.is_tool_call,
         )
         for item in prepared
     ]
@@ -844,7 +846,7 @@ def process_claimed_runs(
         tool_call = is_tool_call_trace(item.trace)
         fitting = evaluators_fitting_row(evaluators.hydrated, tool_call)
         if fitting:
-            scorable.append(replace(item, evaluators=fitting))
+            scorable.append(replace(item, evaluators=fitting, is_tool_call=tool_call))
         else:
             _settle_or_defer_terminal(
                 item.run,

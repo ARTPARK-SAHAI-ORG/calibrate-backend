@@ -619,7 +619,7 @@ class DefaultPromptResponse(BaseModel):
 @router.get("/default-prompt", response_model=DefaultPromptResponse, summary="Get default prompt")
 def get_default_prompt(
     purpose: EvaluatorType = Query(
-        description="Evaluation purpose whose canonical default prompt + config to return"
+        description="Evaluation purpose whose canonical default prompt and config to return"
     ),
     _user_id: str = Depends(get_current_user_id),
 ):

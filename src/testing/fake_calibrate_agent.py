@@ -788,7 +788,6 @@ def _cmd_annotation_stt_or_general(opts: Dict[str, List[str]]) -> None:
 
     ev_cols, ev_values = _evaluator_row_cols(evaluators)
     names = ev_cols[::2]
-    ran_on_some_row: set = set()
     with open(output_dir / "results.csv", "w", newline="", encoding="utf-8") as f:
         writer = csv.writer(f)
         writer.writerow(["id", "gt", "pred"] + ev_cols)
@@ -799,7 +798,6 @@ def _cmd_annotation_stt_or_general(opts: Dict[str, List[str]]) -> None:
             pred = row.get("pred", row.get("output", ""))
             # `general` runs only a row's listed `evaluators` and leaves the rest blank.
             ran = row.get("evaluators") if isinstance(row.get("evaluators"), list) else names
-            ran_on_some_row.update(ran)
             cells: List[str] = []
             for name in names:
                 cells += (
@@ -811,11 +809,8 @@ def _cmd_annotation_stt_or_general(opts: Dict[str, List[str]]) -> None:
 
     # Sarvam judges are an STT-eval-only feature; the annotation eval-only
     # and `general` flows never include the Sarvam bundle.
-    metrics = _stt_metrics(evaluators, sarvam=False)
-    for name in set(names) - ran_on_some_row:
-        metrics.pop(name, None)
     with open(output_dir / "metrics.json", "w", encoding="utf-8") as f:
-        json.dump(metrics, f)
+        json.dump(_stt_metrics(evaluators, sarvam=False), f)
 
 
 def _cmd_annotation_llm(opts: Dict[str, List[str]]) -> None:

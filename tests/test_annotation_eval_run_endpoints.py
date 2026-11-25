@@ -237,7 +237,8 @@ def _llm_task_with_evaluator(client, h):
 
 NOTHING_FITS = (
     "None of the selected evaluators fit the chosen items. Tool-call items need "
-    "a tool-call evaluator, and all other items need any other evaluator."
+    "a tool-call evaluator, and every other item needs an evaluator that is not "
+    "a tool-call evaluator."
 )
 TOOL_ROW = {"name": "tc", "chat_history": [], "agent_response": "", "tool_calls": [{"tool": "t", "arguments": {}}]}
 REPLY_ROW = {"name": "resp", "chat_history": [], "agent_response": "hi"}

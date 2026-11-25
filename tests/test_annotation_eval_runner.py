@@ -355,22 +355,28 @@ TC_ROW = {"uuid": "tc", "payload": {"tool_calls": [{"tool": "t", "arguments": {}
 TEXT_ROW = {"uuid": "resp", "payload": {"agent_response": "hi"}}
 
 
+EV_TEXT = {"uuid": "ev-1", "evaluator_type": "llm"}
+EV_TC = {"uuid": "ev-tc", "evaluator_type": "tool-call"}
+
+
 def test_required_evaluator_ids_for_item_tool_call_row():
     assert runner.required_evaluator_ids_for_item(
-        TC_ROW, ["ev-1", "ev-tc"], {"ev-tc"}
+        TC_ROW, [EV_TEXT, EV_TC], ["ev-1", "ev-tc"]
     ) == {"ev-tc"}
     # No tool-call evaluator on the job → nothing is required on the row.
-    assert runner.required_evaluator_ids_for_item(TC_ROW, ["ev-1"], set()) == set()
+    assert runner.required_evaluator_ids_for_item(TC_ROW, [EV_TEXT], ["ev-1"]) == set()
+    # An optional tool-call evaluator is not required.
+    assert runner.required_evaluator_ids_for_item(
+        TC_ROW, [EV_TEXT, EV_TC], ["ev-1"]
+    ) == set()
 
 
 def test_required_evaluator_ids_for_item_normal_row():
     assert runner.required_evaluator_ids_for_item(
-        TEXT_ROW, ["ev-1", "ev-tc"], {"ev-tc"}
+        TEXT_ROW, [EV_TEXT, EV_TC], ["ev-1", "ev-tc"]
     ) == {"ev-1"}
     # Job carries only the tool-call evaluator → nothing is required here.
-    assert (
-        runner.required_evaluator_ids_for_item(TEXT_ROW, ["ev-tc"], {"ev-tc"}) == set()
-    )
+    assert runner.required_evaluator_ids_for_item(TEXT_ROW, [EV_TC], ["ev-tc"]) == set()
 
 
 def _resolve_with_tool_call_evaluator(requested, **tc):
@@ -1274,6 +1280,13 @@ def test_parse_results_for_task_type_dispatch_llm_general(tmp_path):
     )
     assert len(runs) == 1
     assert runs[0]["value"]["value"] is True
+
+
+def test_parse_results_for_task_type_llm_general_requires_items(tmp_path):
+    with pytest.raises(ValueError, match="need the run's items"):
+        runner.parse_results_for_task_type(
+            "llm-general", tmp_path, [_ev_resolved()], "job-1"
+        )
 
 
 def test_parse_results_for_task_type_dispatch_conversation(tmp_path):

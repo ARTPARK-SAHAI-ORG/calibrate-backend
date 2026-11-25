@@ -79,7 +79,6 @@ from annotation_eval_runner import (
 from annotation_metrics import KappaFields
 from utils import (
     utc_now,
-    TOOL_CALL_EVALUATOR_TYPE,
     evaluators_fitting_row,
     is_tool_call_row,
     job_slot,
@@ -1033,7 +1032,7 @@ class ItemPayload(BaseModel):
     )
     expected_tool_calls: Optional[List[ToolCall]] = Field(
         None,
-        description="Tool calls the agent should have made, shown to the judge beside the calls the agent made. Omit to judge without them. Sending this marks the item as a tool call, which only a tool-call evaluator scores. For `llm` and `llm-general` tasks",
+        description="Tool calls the agent should have made, shown to the judge beside the calls the agent made. Omit to judge without expected calls. Sending this marks the item as a tool call, which only a tool-call evaluator scores. For `llm` and `llm-general` tasks",
     )
     actual_tool_calls: Optional[List[ToolCall]] = Field(
         None,
@@ -1220,28 +1219,16 @@ def _resolve_evaluator_results(
                 raise HTTPException(
                     status_code=400, detail=f"Evaluator {ev_id} not found"
                 )
-            # Same pairing the labelling form draws and
-            # `required_evaluator_ids_for_item` enforces: a tool-call row is
-            # answered by the tool-call evaluator alone, every other row by
-            # everything except it.
             row_is_tool_call = is_tool_call_row({"payload": payloads[idx]})
-            evaluator_is_tool_call = (
-                evaluator.get("evaluator_type") == TOOL_CALL_EVALUATOR_TYPE
-            )
-            if row_is_tool_call and not evaluator_is_tool_call:
+            if not evaluators_fitting_row([evaluator], row_is_tool_call):
                 raise HTTPException(
                     status_code=400,
                     detail=(
                         f"items[{idx}] records a tool call, which only the "
                         f"tool-call evaluator scores. Evaluator {ev_id} does not "
                         f"run on it."
-                    ),
-                )
-            if evaluator_is_tool_call and not row_is_tool_call:
-                raise HTTPException(
-                    status_code=400,
-                    detail=(
-                        f"Evaluator {ev_id} scores tool calls, and items[{idx}] "
+                        if row_is_tool_call
+                        else f"Evaluator {ev_id} scores tool calls, and items[{idx}] "
                         f"records a reply rather than a tool call."
                     ),
                 )
@@ -1675,17 +1662,13 @@ def bulk_create_items(
         required_evaluator_ids = set(
             get_evaluator_ids_for_job(job_uuid, required_only=True)
         )
-        tool_call_evaluator_ids = {
-            ev["uuid"]
-            for ev in get_evaluators_for_job(job_uuid)
-            if ev.get("evaluator_type") == TOOL_CALL_EVALUATOR_TYPE
-        }
+        job_evaluators = get_evaluators_for_job(job_uuid)
         items_fully_annotated = all(
             it.annotations
             and required_evaluator_ids_for_item(
                 {"payload": payloads[i]},
+                job_evaluators,
                 required_evaluator_ids,
-                tool_call_evaluator_ids,
             ).issubset(set(it.annotations.keys()))
             for i, it in enumerate(payload.items)
         )
@@ -2417,8 +2400,8 @@ def start_evaluator_run(
             status_code=400,
             detail=(
                 "None of the selected evaluators fit the chosen items. "
-                "Tool-call items need a tool-call evaluator, and all other "
-                "items need any other evaluator."
+                "Tool-call items need a tool-call evaluator, and every other "
+                "item needs an evaluator that is not a tool-call evaluator."
             ),
         )
     paired = {ev["uuid"] for it in items for ev in fits[it["uuid"]]}

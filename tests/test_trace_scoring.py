@@ -200,6 +200,7 @@ def test_a_conversation_tool_call_trace_goes_to_the_tool_call_judge():
         "response",
         {"input": history, "output": {"response": None, "tool_calls": [_NAMED_CALL]}},
         [{"name": "Tools"}],
+        True,
     )
     assert item == {
         "test_case": {
@@ -217,6 +218,7 @@ def test_a_general_tool_call_trace_goes_to_the_tool_call_judge_with_its_input():
         "general",
         {"input": "When?", "output": {"tool_calls": [_NAMED_CALL]}},
         [{"name": "Tools"}],
+        True,
     )
     assert item == {
         "test_case": {
@@ -238,6 +240,7 @@ def test_a_reply_trace_with_tool_calls_is_sent_unchanged():
         "response",
         {"input": history, "output": {"response": "Week 14.", "tool_calls": [_NAMED_CALL]}},
         [],
+        False,
     )
     assert item["test_case"]["history"] == history
     assert item["output"] == {"response": "Week 14.", "tool_calls": [_NAMED_CALL]}
@@ -255,6 +258,7 @@ def test_the_evaluator_type_is_not_sent_to_the_cli():
                 {"uuid": "run-1"},
                 {"input": [], "output": {"tool_calls": [_NAMED_CALL]}},
                 [execution],
+                is_tool_call=True,
             )
         ],
         "response",

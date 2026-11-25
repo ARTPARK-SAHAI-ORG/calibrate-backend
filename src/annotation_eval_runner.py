@@ -121,17 +121,18 @@ SUPPORTED_EVAL_TASK_TYPES = ("stt", "llm", "llm-general", "conversation", "tts")
 
 def required_evaluator_ids_for_item(
     item: Dict[str, Any],
-    evaluator_ids: Iterable[str],
-    tool_call_evaluator_ids: Set[str],
+    evaluators: List[Dict[str, Any]],
+    required_ids: Iterable[str],
 ) -> Set[str]:
-    """Which evaluators must carry an answer on this row before a labelling job
-    counts as finished, mirroring what the labelling form draws: a tool-call
-    row shows only the tool-call evaluator, every other row shows everything
-    except it. Either side can come back empty (e.g. a tool-call row in a job
-    with no tool-call evaluator)."""
-    if is_tool_call_row(item):
-        return {e for e in evaluator_ids if e in tool_call_evaluator_ids}
-    return {e for e in evaluator_ids if e not in tool_call_evaluator_ids}
+    """Which required evaluators must carry an answer on this row before a
+    labelling job counts as finished: the ones `evaluators_fitting_row` pairs
+    with it, which is what the labelling form draws."""
+    required = set(required_ids)
+    return {
+        ev["uuid"]
+        for ev in evaluators_fitting_row(evaluators, is_tool_call_row(item))
+        if ev["uuid"] in required
+    }
 
 
 logger = logging.getLogger(__name__)
@@ -1047,15 +1048,16 @@ def parse_results_for_task_type(
 ) -> List[Dict[str, Any]]:
     """Dispatch per task type. `items` (in dataset order) is required for
     simulation — calibrate uses internal `row_<i>` ids and we map back to
-    annotation_item.uuid via `dataset_map.json` + this list."""
+    annotation_item.uuid via `dataset_map.json` + this list — and for
+    `llm-general`, which keeps only the scores each row was sent."""
     if task_type == "stt":
         return _parse_results_stt(output_dir, evaluators_resolved, job_uuid)
     if task_type == "llm":
         return _parse_results_llm(output_dir, evaluators_resolved, job_uuid)
     if task_type == "llm-general":
-        return _parse_results_general(
-            output_dir, evaluators_resolved, job_uuid, items or []
-        )
+        if items is None:
+            raise ValueError("llm-general results need the run's items to parse")
+        return _parse_results_general(output_dir, evaluators_resolved, job_uuid, items)
     if task_type == "conversation":
         return _parse_results_simulation(
             output_dir, evaluators_resolved, job_uuid, items=items
