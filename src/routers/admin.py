@@ -101,6 +101,7 @@ class WorkspaceRow(PeriodCounts):
     is_personal: bool = Field(description="Whether this is someone's personal workspace")
     members: int = Field(description="Members of the workspace now")
     owner: Optional[WorkspaceOwner] = Field(description="Who owns the workspace now")
+    created_at: str = Field(description="When the workspace was created (ISO 8601 UTC)")
     last_active_at: Optional[str] = Field(
         description="When the workspace last started an evaluation, received a trace, or collected a label, all time (ISO 8601 UTC)"
     )

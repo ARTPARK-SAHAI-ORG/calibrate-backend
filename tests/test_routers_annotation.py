@@ -3386,6 +3386,192 @@ def test_job_form_settings_round_trip(client):
     assert bad.status_code == 422
 
 
+def _reasoning_task(client, h):
+    """A task with two LLM evaluators, one item and one annotator."""
+    ev_a, ev_b = [
+        e["uuid"]
+        for e in client.get("/evaluators", headers=h).json()["items"]
+        if e.get("evaluator_type") == "llm"
+    ][:2]
+    task_uuid = client.post(
+        "/annotation-tasks",
+        json={
+            "name": f"t-{uuid.uuid4().hex[:6]}",
+            "type": "llm",
+            "evaluator_ids": [ev_a, ev_b],
+        },
+        headers=h,
+    ).json()["uuid"]
+    item_ids = client.post(
+        f"/annotation-tasks/{task_uuid}/items",
+        json={"items": [{"payload": llm_item_payload("i1")}]},
+        headers=h,
+    ).json()["item_ids"]
+    annotator = client.post(
+        "/annotators", json={"name": f"ann-{uuid.uuid4().hex[:6]}"}, headers=h
+    ).json()
+    body = {"annotator_ids": [annotator["uuid"]], "item_ids": item_ids}
+    return task_uuid, ev_a, ev_b, body
+
+
+def _reasoning_modes_on_job(client, token, route="/public/annotation-jobs/"):
+    payload = client.get(f"{route}{token}").json()
+    return {ev["uuid"]: ev["reasoning_mode"] for ev in payload["evaluators"]}
+
+
+def test_evaluator_reasoning_modes_round_trip_with_job_fallback(client):
+    """An evaluator named in the map reads back its own mode on both public
+    routes, and one left out reads back the job's mode."""
+    import db as db_mod
+
+    h = _signup(client)["headers"]
+    task_uuid, ev_a, ev_b, body = _reasoning_task(client, h)
+
+    r = client.post(
+        f"/annotation-tasks/{task_uuid}/jobs",
+        json={
+            **body,
+            "reasoning_mode": "required",
+            "evaluator_reasoning_modes": {ev_a: "hidden"},
+        },
+        headers=h,
+    )
+    assert r.status_code == 200, r.text
+    job = r.json()["jobs"][0]
+
+    assert _reasoning_modes_on_job(client, job["public_token"]) == {
+        ev_a: "hidden",
+        ev_b: "required",
+    }
+    assert (
+        client.get(f"/public/annotation-jobs/{job['public_token']}").json()["job"][
+            "reasoning_mode"
+        ]
+        == "required"
+    )
+
+    # The pivot keeps NULL for the evaluator left out, so the fallback is a
+    # read-time rule rather than a copied value.
+    assert {
+        ev["uuid"]: ev["reasoning_mode"]
+        for ev in db_mod.get_evaluators_for_job(job["uuid"])
+    } == {ev_a: "hidden", ev_b: None}
+
+    view_token = uuid.uuid4().hex
+    db_mod.update_annotation_job_visibility(job["uuid"], True, view_token)
+    assert _reasoning_modes_on_job(
+        client, view_token, route="/public/annotation-jobs/view/"
+    ) == {ev_a: "hidden", ev_b: "required"}
+
+
+def test_job_without_reasoning_map_uses_job_mode_for_every_evaluator(client):
+    """An older job has NULL on every evaluator, so each reads the job's mode."""
+    import db as db_mod
+
+    h = _signup(client)["headers"]
+    task_uuid, ev_a, ev_b, body = _reasoning_task(client, h)
+
+    r = client.post(
+        f"/annotation-tasks/{task_uuid}/jobs",
+        json={**body, "reasoning_mode": "hidden"},
+        headers=h,
+    )
+    assert r.status_code == 200, r.text
+    job = r.json()["jobs"][0]
+
+    assert _reasoning_modes_on_job(client, job["public_token"]) == {
+        ev_a: "hidden",
+        ev_b: "hidden",
+    }
+    assert {
+        ev["reasoning_mode"] for ev in db_mod.get_evaluators_for_job(job["uuid"])
+    } == {None}
+
+
+def test_evaluator_reasoning_modes_rejects_id_not_on_the_job(client):
+    """An unlinked id, and a linked id outside `evaluator_ids`, both give a 400
+    naming the id, and no job is created."""
+    h = _signup(client)["headers"]
+    task_uuid, ev_a, ev_b, body = _reasoning_task(client, h)
+    unknown = str(uuid.uuid4())
+
+    for extra, bad_id in (
+        ({"evaluator_reasoning_modes": {unknown: "hidden"}}, unknown),
+        (
+            {
+                "evaluator_ids": [ev_a],
+                "evaluator_reasoning_modes": {ev_b: "hidden"},
+            },
+            ev_b,
+        ),
+    ):
+        r = client.post(
+            f"/annotation-tasks/{task_uuid}/jobs",
+            json={**body, **extra},
+            headers=h,
+        )
+        assert r.status_code == 400, r.text
+        assert bad_id in r.json()["detail"]
+        assert "evaluator_reasoning_modes" in r.json()["detail"]
+
+    assert client.get(f"/annotation-tasks/{task_uuid}/jobs", headers=h).json() == []
+
+
+def test_evaluator_reasoning_modes_rejects_unknown_mode(client):
+    h = _signup(client)["headers"]
+    task_uuid, ev_a, _, body = _reasoning_task(client, h)
+
+    r = client.post(
+        f"/annotation-tasks/{task_uuid}/jobs",
+        json={**body, "evaluator_reasoning_modes": {ev_a: "mandatory"}},
+        headers=h,
+    )
+    assert r.status_code == 422
+    assert client.get(f"/annotation-tasks/{task_uuid}/jobs", headers=h).json() == []
+
+
+def test_evaluator_reasoning_modes_and_tool_call_evaluator(client):
+    """The tool-call evaluator is on the job, and accepted in the map, when every
+    linked evaluator is snapshotted. An `evaluator_ids` that leaves it out keeps
+    it off the job, so naming it then is a 400."""
+    h = _signup(client)["headers"]
+    llm_ev = _llm_evaluator(client, h)
+    task_uuid = _llm_task(client, h, llm_ev)
+    item_ids = client.post(
+        f"/annotation-tasks/{task_uuid}/items",
+        json={"items": [{"payload": _tool_call_payload("tc1")}]},
+        headers=h,
+    ).json()["item_ids"]
+    tool_call_id = _tool_call_links(client, h, task_uuid)[0]["uuid"]
+    annotator = client.post(
+        "/annotators", json={"name": f"ann-{uuid.uuid4().hex[:6]}"}, headers=h
+    ).json()
+    body = {"annotator_ids": [annotator["uuid"]], "item_ids": item_ids}
+
+    r = client.post(
+        f"/annotation-tasks/{task_uuid}/jobs",
+        json={**body, "evaluator_reasoning_modes": {tool_call_id: "hidden"}},
+        headers=h,
+    )
+    assert r.status_code == 200, r.text
+    assert _reasoning_modes_on_job(client, r.json()["jobs"][0]["public_token"]) == {
+        llm_ev["uuid"]: "optional",
+        tool_call_id: "hidden",
+    }
+
+    r = client.post(
+        f"/annotation-tasks/{task_uuid}/jobs",
+        json={
+            **body,
+            "evaluator_ids": [llm_ev["uuid"]],
+            "evaluator_reasoning_modes": {tool_call_id: "hidden"},
+        },
+        headers=h,
+    )
+    assert r.status_code == 400, r.text
+    assert tool_call_id in r.json()["detail"]
+
+
 # ---------------------------------------------------------------------------
 # Tool-call rows: automatic evaluator attach + completion rule
 # ---------------------------------------------------------------------------
