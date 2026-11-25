@@ -5,6 +5,7 @@ import uuid
 from os.path import join
 import os
 from pathlib import Path
+from dataclasses import dataclass
 from typing import Optional, List, Dict, Any, Set, Tuple, TYPE_CHECKING
 from contextlib import contextmanager
 
@@ -1061,6 +1062,8 @@ def init_db():
                 -- Snapshotted alongside `position`. Marking an evaluator
                 -- optional on the task later does NOT reach existing jobs.
                 is_optional INTEGER NOT NULL DEFAULT 0,
+                -- NULL means the evaluator uses `annotation_jobs.reasoning_mode`.
+                reasoning_mode TEXT DEFAULT NULL,
                 UNIQUE(job_id, evaluator_id),
                 FOREIGN KEY (job_id) REFERENCES annotation_jobs(uuid),
                 FOREIGN KEY (evaluator_id) REFERENCES evaluators(uuid)
@@ -1116,6 +1119,7 @@ def init_db():
             # rows land 0 (required), preserving the previous behavior.
             "ALTER TABLE annotation_task_evaluators ADD COLUMN is_optional INTEGER NOT NULL DEFAULT 0",
             "ALTER TABLE annotation_job_evaluators ADD COLUMN is_optional INTEGER NOT NULL DEFAULT 0",
+            "ALTER TABLE annotation_job_evaluators ADD COLUMN reasoning_mode TEXT DEFAULT NULL",
             # Denormalized STT/TTS list-header fields, promoted out of the heavy
             # `details` JSON blob so the jobs-list query never has to read or
             # parse it. Written at create time by `create_job`; legacy rows
@@ -1839,6 +1843,8 @@ def init_db():
             "ON annotation_items(task_id, deleted_at)",
             "CREATE INDEX IF NOT EXISTS idx_evaluator_runs_job "
             "ON evaluator_runs(job_id, deleted_at)",
+            "CREATE INDEX IF NOT EXISTS idx_evaluator_runs_item "
+            "ON evaluator_runs(item_id, deleted_at)",
             "CREATE INDEX IF NOT EXISTS idx_dataset_items_dataset "
             "ON dataset_items(dataset_id, deleted_at)",
             # Queue poller: WHERE status = ? [AND type IN (...)] ORDER BY created_at.
@@ -9745,6 +9751,7 @@ def create_annotation_job(
     evaluator_ids: Optional[List[str]] = None,
     comments_enabled: bool = True,
     reasoning_mode: str = "optional",
+    evaluator_reasoning_modes: Optional[Dict[str, str]] = None,
 ) -> str:
     """Create one job (annotator × N rows). Items AND linked evaluators are
     SNAPSHOTTED at creation time — subsequent edits/soft-deletes on the
@@ -9762,7 +9769,9 @@ def create_annotation_job(
     dropped (callers validate up front for a clean error).
 
     `comments_enabled` and `reasoning_mode` are the labelling form's own
-    settings and are likewise frozen per job."""
+    settings and are likewise frozen per job. `evaluator_reasoning_modes` maps
+    an evaluator id to its own reasoning mode; an evaluator left out stores NULL
+    and uses `reasoning_mode`."""
     if not item_uuids:
         raise ValueError("item_uuids must be non-empty")
     if len(item_uuids) != len(set(item_uuids)):
@@ -9838,11 +9847,19 @@ def create_annotation_job(
             wanted = set(evaluator_ids)
             snapshot_rows = [r for r in snapshot_rows if r["evaluator_id"] in wanted]
         if snapshot_rows:
+            modes = evaluator_reasoning_modes or {}
             cursor.executemany(
                 "INSERT INTO annotation_job_evaluators "
-                "(job_id, evaluator_id, position, is_optional) VALUES (?, ?, ?, ?)",
+                "(job_id, evaluator_id, position, is_optional, reasoning_mode) "
+                "VALUES (?, ?, ?, ?, ?)",
                 [
-                    (job_uuid, r["evaluator_id"], idx, r["is_optional"])
+                    (
+                        job_uuid,
+                        r["evaluator_id"],
+                        idx,
+                        r["is_optional"],
+                        modes.get(r["evaluator_id"]),
+                    )
                     for idx, r in enumerate(snapshot_rows, start=1)
                 ],
             )
@@ -9895,7 +9912,8 @@ def get_evaluators_for_job(job_uuid: str) -> List[Dict[str, Any]]:
                 e.owner_user_id AS owner_user_id,
                 e.slug AS slug,
                 e.live_version_id AS live_version_id,
-                je.is_optional AS is_optional
+                je.is_optional AS is_optional,
+                je.reasoning_mode AS reasoning_mode
               FROM annotation_job_evaluators je
               JOIN evaluators e ON e.uuid = je.evaluator_id
              WHERE je.job_id = ?
@@ -10887,6 +10905,20 @@ _LATEST_TRACE_RUN_SQL = (
     "ORDER BY r.created_at DESC, r.id DESC LIMIT 1)"
 )
 
+
+def _evaluator_still_linked_sql(agent_column: str) -> str:
+    """Scores stay stored when an evaluator is unlinked, and are hidden from
+    every read until it is linked again. Deleting an agent also soft-deletes its
+    links but leaves its traces live, so that alone must not hide their scores."""
+    return (
+        "(EXISTS (SELECT 1 FROM agent_evaluators ae "
+        f"WHERE ae.agent_id = {agent_column} "
+        "AND ae.evaluator_id = ts.evaluator_uuid AND ae.deleted_at IS NULL) "
+        "OR EXISTS (SELECT 1 FROM agents a "
+        f"WHERE a.uuid = {agent_column} AND a.deleted_at IS NOT NULL))"
+    )
+
+
 # Highest value in the rubric the score was written under, not the evaluator's
 # current one, so a later edit cannot change what a stored score means.
 _TRACE_SCORE_SCALE_MAX_SQL = (
@@ -10913,12 +10945,27 @@ TRACE_SCORE_COMPARISONS = ("=", "!=", "<", "<=", ">", ">=")
 _TRACE_SCORE_VALUE_SQL = (
     "(SELECT ts.value FROM trace_eval_scores ts "
     f"WHERE ts.run_uuid = {_LATEST_TRACE_RUN_SQL} "
-    "AND ts.evaluator_uuid = ?)"
+    "AND ts.evaluator_uuid = ? "
+    f"AND {_evaluator_still_linked_sql('traces.agent_id')})"
 )
 
 # One score condition: the evaluator, the operator, and the number to compare
 # against, which is None for "passed" and "failed".
 TraceScoreFilter = Tuple[str, str, Optional[float]]
+
+
+@dataclass(frozen=True)
+class TraceFilters:
+    """Which live traces a query covers. Unset means no narrowing."""
+
+    agent_id: Optional[str] = None
+    conversation_id: Optional[str] = None
+    q: Optional[str] = None
+    output_type: Optional[str] = None
+    labels: Optional[List[str]] = None
+    scores: Optional[List[TraceScoreFilter]] = None
+    created_after: Optional[str] = None
+    created_before: Optional[str] = None
 
 
 def _trace_score_clause(condition: TraceScoreFilter) -> Tuple[str, List[Any]]:
@@ -10935,48 +10982,41 @@ def _trace_score_clause(condition: TraceScoreFilter) -> Tuple[str, List[Any]]:
     return (
         "EXISTS (SELECT 1 FROM trace_eval_scores ts "
         f"WHERE ts.run_uuid = {_LATEST_TRACE_RUN_SQL} "
-        f"AND ts.evaluator_uuid = ? AND ({test}))",
+        f"AND ts.evaluator_uuid = ? AND ({test}) "
+        f"AND {_evaluator_still_linked_sql('traces.agent_id')})",
         [evaluator_uuid] + params,
     )
 
 
 def _trace_filters(
-    org_uuid: str,
-    agent_id: Optional[str] = None,
-    q: Optional[str] = None,
-    output_type: Optional[str] = None,
-    labels: Optional[List[str]] = None,
-    scores: Optional[List[TraceScoreFilter]] = None,
-    conversation_id: Optional[str] = None,
-    created_after: Optional[str] = None,
-    created_before: Optional[str] = None,
+    org_uuid: str, filters: TraceFilters = TraceFilters()
 ) -> Tuple[str, List[Any]]:
     """Build the shared WHERE clause for every live-trace query."""
     where = ["org_uuid = ?", "deleted_at IS NULL"]
     params: List[Any] = [org_uuid]
-    if created_after:
+    if filters.created_after:
         where.append("created_at >= ?")
-        params.append(created_after)
-    if created_before:
+        params.append(filters.created_after)
+    if filters.created_before:
         where.append("created_at < ?")
-        params.append(created_before)
-    if agent_id:
+        params.append(filters.created_before)
+    if filters.agent_id:
         where.append("agent_id = ?")
-        params.append(agent_id)
-    if conversation_id:
+        params.append(filters.agent_id)
+    if filters.conversation_id:
         where.append("conversation_id = ?")
-        params.append(conversation_id)
-    if labels:
-        placeholders = ",".join("?" * len(labels))
+        params.append(filters.conversation_id)
+    if filters.labels:
+        placeholders = ",".join("?" * len(filters.labels))
         where.append(
             "EXISTS (SELECT 1 FROM json_each(traces.labels) "
             f"WHERE value IN ({placeholders}))"
         )
-        params.extend(labels)
-    if output_type:
-        where.append("(" + TRACE_OUTPUT_TYPE_SQL[output_type] + ")")
-    if q and q.strip():
-        lowered = q.strip().lower()
+        params.extend(filters.labels)
+    if filters.output_type:
+        where.append("(" + TRACE_OUTPUT_TYPE_SQL[filters.output_type] + ")")
+    if filters.q and filters.q.strip():
+        lowered = filters.q.strip().lower()
         # json.dumps escapes non-ASCII, so a Hindi word sits in the JSON columns
         # as \uXXXX and the typed word alone would never find it.
         escaped = json.dumps(lowered)[1:-1]
@@ -10989,7 +11029,7 @@ def _trace_filters(
                 clauses.append(f"PY_LOWER({column}) LIKE ? ESCAPE '\\'")
                 params.append(f"%{_like_escape(form)}%")
         where.append("(" + " OR ".join(clauses) + ")")
-    for condition in scores or []:
+    for condition in filters.scores or []:
         clause, score_params = _trace_score_clause(condition)
         where.append(clause)
         params.extend(score_params)
@@ -11030,7 +11070,7 @@ def list_trace_labels(org_uuid: str, agent_id: Optional[str] = None) -> List[str
     Deliberately not narrowed by the label filter itself: picking one label must
     not hide the rest. Sorted case-insensitively, or every capitalised label
     would sort ahead of every lowercase one."""
-    where, params = _trace_filters(org_uuid, agent_id)
+    where, params = _trace_filters(org_uuid, TraceFilters(agent_id=agent_id))
     with get_db_connection() as conn:
         rows = conn.execute(
             f"SELECT DISTINCT value FROM traces, json_each(traces.labels) "
@@ -11045,7 +11085,7 @@ def list_trace_conversation_ids(
 ) -> List[str]:
     """Every conversation ID on the live traces, newest activity first, so a
     filter can offer the whole set rather than the conversations on screen."""
-    where, params = _trace_filters(org_uuid, agent_id)
+    where, params = _trace_filters(org_uuid, TraceFilters(agent_id=agent_id))
     with get_db_connection() as conn:
         rows = conn.execute(
             f"SELECT conversation_id FROM traces WHERE {where} "
@@ -11351,14 +11391,7 @@ def list_traces(
     *,
     limit: int,
     offset: int,
-    agent_id: Optional[str] = None,
-    q: Optional[str] = None,
-    output_type: Optional[str] = None,
-    labels: Optional[List[str]] = None,
-    scores: Optional[List[TraceScoreFilter]] = None,
-    conversation_id: Optional[str] = None,
-    created_after: Optional[str] = None,
-    created_before: Optional[str] = None,
+    filters: TraceFilters = TraceFilters(),
     sort_evaluator: Optional[str] = None,
     sort_order: str = "desc",
 ) -> Tuple[List[Dict[str, Any]], int]:
@@ -11368,10 +11401,7 @@ def list_traces(
     A trace that evaluator has not scored sorts last in both directions: an
     unscored trace is unknown, not a low score, so it must not lead the page.
     """
-    where, params = _trace_filters(
-        org_uuid, agent_id, q, output_type, labels, scores, conversation_id,
-        created_after, created_before,
-    )
+    where, params = _trace_filters(org_uuid, filters)
     order = "ORDER BY created_at DESC, id DESC"
     order_params: List[Any] = []
     if sort_evaluator:
@@ -11398,12 +11428,7 @@ def list_trace_conversations(
     *,
     limit: int,
     offset: int,
-    agent_id: Optional[str] = None,
-    q: Optional[str] = None,
-    output_type: Optional[str] = None,
-    labels: Optional[List[str]] = None,
-    scores: Optional[List[TraceScoreFilter]] = None,
-    conversation_id: Optional[str] = None,
+    filters: TraceFilters = TraceFilters(),
 ) -> Tuple[List[Dict[str, Any]], int]:
     """Return `(page, total)` of conversations, newest last turn first.
 
@@ -11411,9 +11436,7 @@ def list_trace_conversations(
     The filters pick which conversations appear (any one matching turn is
     enough); the counts, times and last turn cover the whole conversation.
     """
-    where, params = _trace_filters(
-        org_uuid, agent_id, q, output_type, labels, scores, conversation_id
-    )
+    where, params = _trace_filters(org_uuid, filters)
     keys = (
         "SELECT DISTINCT agent_id, conversation_id FROM traces "
         f"WHERE {where} AND conversation_id IS NOT NULL"
@@ -11492,25 +11515,11 @@ def list_trace_conversations(
 _TRACE_DELETE_CHUNK = 500
 
 
-def soft_delete_traces_matching(
-    org_uuid: str,
-    *,
-    agent_id: Optional[str] = None,
-    q: Optional[str] = None,
-    output_type: Optional[str] = None,
-    labels: Optional[List[str]] = None,
-    scores: Optional[List[TraceScoreFilter]] = None,
-    conversation_id: Optional[str] = None,
-    created_after: Optional[str] = None,
-    created_before: Optional[str] = None,
-) -> int:
+def soft_delete_traces_matching(org_uuid: str, *, filters: TraceFilters) -> int:
     """Soft-delete every live trace matching the list filters, returning the
     number of rows flipped. No UUID list, so a workspace-wide delete stays one
     statement however many traces it covers."""
-    where, params = _trace_filters(
-        org_uuid, agent_id, q, output_type, labels, scores, conversation_id,
-        created_after, created_before,
-    )
+    where, params = _trace_filters(org_uuid, filters)
     with get_db_connection() as conn:
         cursor = conn.execute(
             f"UPDATE traces SET deleted_at = CURRENT_TIMESTAMP, "
@@ -11631,9 +11640,10 @@ def _hydrate_trace_score_row(row: sqlite3.Row) -> Dict[str, Any]:
 # Scores join through the pinned version for the rating scale, and through the
 # evaluator row for name/type -- soft-deleted evaluators and historical versions
 # still resolve, so a finished run renders after later edits or deletes.
-_TRACE_SCORE_JOIN_SQL = """
+_TRACE_SCORE_JOIN_SQL = f"""
 LEFT JOIN trace_eval_scores ts
   ON ts.run_uuid = runs.uuid
+ AND {_evaluator_still_linked_sql('runs.agent_id')}
 LEFT JOIN evaluators e
   ON e.uuid = ts.evaluator_uuid
 LEFT JOIN evaluator_versions ev
@@ -11660,16 +11670,7 @@ _TRACE_SCORE_SELECT_SQL = """
 
 
 def average_trace_scores(
-    org_uuid: str,
-    *,
-    agent_id: Optional[str] = None,
-    q: Optional[str] = None,
-    output_type: Optional[str] = None,
-    labels: Optional[List[str]] = None,
-    scores: Optional[List[TraceScoreFilter]] = None,
-    conversation_id: Optional[str] = None,
-    created_after: Optional[str] = None,
-    created_before: Optional[str] = None,
+    org_uuid: str, *, filters: TraceFilters = TraceFilters()
 ) -> List[Dict[str, Any]]:
     """Mean score per evaluator over the live traces matching the list filters.
 
@@ -11683,16 +11684,13 @@ def average_trace_scores(
     than whichever version happened to sort highest. An evaluator that has
     scored nothing in the filtered set is absent rather than zero.
     """
-    where, params = _trace_filters(
-        org_uuid, agent_id, q, output_type, labels, scores, conversation_id,
-        created_after, created_before,
-    )
+    where, params = _trace_filters(org_uuid, filters)
     sql = f"""
         WITH matched AS (
             SELECT uuid FROM traces WHERE {where}
         ),
         latest AS (
-            SELECT r.uuid, ROW_NUMBER() OVER (
+            SELECT r.uuid, r.agent_id, ROW_NUMBER() OVER (
                        PARTITION BY r.trace_uuid
                         ORDER BY r.created_at DESC, r.id DESC
                    ) AS rn
@@ -11712,6 +11710,7 @@ def average_trace_scores(
           LEFT JOIN evaluator_versions live ON live.uuid = e.live_version_id
          WHERE latest.rn = 1
            AND ts.output_type = COALESCE(e.output_type, ts.output_type)
+           AND {_evaluator_still_linked_sql('latest.agent_id')}
          GROUP BY ts.evaluator_uuid
          ORDER BY MAX(e.name), ts.evaluator_uuid
     """
@@ -11753,7 +11752,7 @@ def get_latest_trace_run_summaries(
     placeholders = ",".join("?" * len(unique))
     sql = f"""
         WITH ranked AS (
-            SELECT uuid, trace_uuid, org_uuid, status, error,
+            SELECT uuid, trace_uuid, org_uuid, agent_id, status, error,
                    created_at, completed_at, id,
                    ROW_NUMBER() OVER (
                        PARTITION BY trace_uuid
@@ -11787,7 +11786,7 @@ def list_trace_scoring_runs(org_uuid: str, trace_uuid: str) -> List[Dict[str, An
     """Every run for a trace, newest first, each with hydrated per-evaluator results."""
     sql = f"""
         WITH runs AS (
-            SELECT uuid, trace_uuid, org_uuid, status, error,
+            SELECT uuid, trace_uuid, org_uuid, agent_id, status, error,
                    created_at, completed_at, id
             FROM trace_eval_runs
             WHERE org_uuid = ? AND trace_uuid = ?

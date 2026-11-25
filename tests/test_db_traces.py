@@ -163,12 +163,21 @@ def test_list_filters_by_agent_id():
     _ingest(org, "m-x2", agent_id="agent-x")
     _ingest(org, "m-y1", agent_id="agent-y")
 
-    rows, total = db.list_traces(org, limit=50, offset=0, agent_id="agent-x")
+    rows, total = db.list_traces(
+        org, limit=50, offset=0, filters=db.TraceFilters(agent_id="agent-x")
+    )
     assert total == 2
     assert {r["message_id"] for r in rows} == {"m-x1", "m-x2"}
 
-    rows, total = db.list_traces(org, limit=50, offset=0, agent_id="agent-y")
+    rows, total = db.list_traces(
+        org, limit=50, offset=0, filters=db.TraceFilters(agent_id="agent-y")
+    )
     assert total == 1 and rows[0]["message_id"] == "m-y1"
+
+
+def test_delete_by_filters_refuses_to_run_without_any():
+    with pytest.raises(TypeError):
+        db.soft_delete_traces_matching(_org())
 
 
 def test_reused_message_id_keeps_both_turns():

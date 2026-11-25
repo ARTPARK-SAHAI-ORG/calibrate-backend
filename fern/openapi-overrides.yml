@@ -185,5 +185,5 @@ paths:
       x-fern-sdk-method-name: upload_item
   /organizations/current:
     get:
-      x-fern-sdk-group-name: workspace
+      x-fern-sdk-group-name: organizations
       x-fern-sdk-method-name: current

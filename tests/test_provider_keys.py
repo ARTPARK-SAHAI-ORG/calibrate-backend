@@ -9,6 +9,7 @@ import stat
 import uuid
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import httpx
 import pytest
 from cryptography.fernet import Fernet
 
@@ -288,3 +289,54 @@ def test_create_trace_with_eval_run_no_cap_never_skips():
         ]
     assert statuses == ["pending", "pending"]
     assert row["uuid"]
+
+
+def _openrouter(handler):
+    real = httpx.AsyncClient
+    return patch.object(
+        pk.httpx, "AsyncClient", lambda **kw: real(transport=httpx.MockTransport(handler), **kw)
+    )
+
+
+@pytest.mark.parametrize(
+    "status, expected",
+    [
+        (200, None),
+        (401, "OpenRouter did not accept this key. Check that you copied the full API key."),
+        (403, "OpenRouter did not accept this key. Check that you copied the full API key."),
+        (500, "Could not check the OpenRouter key. OpenRouter answered with error 500."),
+    ],
+)
+def test_check_openrouter_key_uses_key_endpoint_not_the_cli(status, expected):
+    seen = []
+
+    def handler(request):
+        seen.append(request)
+        return httpx.Response(status, json={})
+
+    with _openrouter(handler), patch("asyncio.create_subprocess_exec") as spawn:
+        assert asyncio.run(pk.check_provider_key("openrouter", "sk-or-1")) == expected
+    spawn.assert_not_called()
+    assert str(seen[0].url) == "https://openrouter.ai/api/v1/key"
+    assert seen[0].headers["Authorization"] == "Bearer sk-or-1"
+
+
+@pytest.mark.parametrize(
+    "error, expected",
+    [
+        (httpx.ReadTimeout("slow"), f"No answer from OpenRouter within {pk.CHECK_TIMEOUT_SECONDS} seconds."),
+        (httpx.ConnectError("down"), "Could not reach OpenRouter."),
+    ],
+)
+def test_check_openrouter_key_network_failures(error, expected):
+    def handler(request):
+        raise error
+
+    with _openrouter(handler):
+        assert asyncio.run(pk.check_provider_key("openrouter", "sk-or-1")) == expected
+
+
+def test_check_openrouter_key_with_non_ascii_character_is_refused():
+    assert asyncio.run(pk.check_provider_key("openrouter", "sk–or")) == (
+        "OpenRouter did not accept this key. Check that you copied the full API key."
+    )

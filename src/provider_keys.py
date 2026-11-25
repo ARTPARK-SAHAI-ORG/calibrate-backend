@@ -4,6 +4,7 @@ import os
 import tempfile
 from typing import Dict, Optional
 
+import httpx
 from cryptography.fernet import Fernet, InvalidToken
 
 import db
@@ -23,6 +24,7 @@ PROVIDER_NAMES = {
     "gemini": "Gemini",
     "google": "Google Cloud",
 }
+REFUSED_KEY_ERROR = "{name} did not accept this key. Check that you copied the full API key."
 UNREADABLE_KEYS_ERROR = (
     "Your saved provider keys cannot be read. Add them again in Workspace settings."
 )
@@ -114,6 +116,8 @@ async def check_provider_key(provider: str, value: str) -> Optional[str]:
     """Run calibrate-agent's own provider check with only this key. None when it works."""
     if env_bool("FAKE_AI_PROVIDERS", False):
         return None
+    if provider == "openrouter":
+        return await _check_openrouter_key(value)
     # calibrate-agent loads a .env from its working folder upward with override,
     # so it runs from an empty folder or the server's own keys would leak in.
     with tempfile.TemporaryDirectory() as cwd:
@@ -141,5 +145,27 @@ async def check_provider_key(provider: str, value: str) -> Optional[str]:
         return None
     error = result.get("error") or ""
     if error.startswith(("HTTP 401", "HTTP 403")):
-        return f"{PROVIDER_NAMES.get(provider, provider)} did not accept this key. Check that you copied the full API key."
+        return REFUSED_KEY_ERROR.format(name=PROVIDER_NAMES.get(provider, provider))
     return error or f"Could not check the {provider} key."
+
+
+async def _check_openrouter_key(value: str) -> Optional[str]:
+    # The key endpoint checks the key without calling a model, so a key whose
+    # guardrails block calibrate-agent's fixed test model still saves.
+    try:
+        async with httpx.AsyncClient(timeout=CHECK_TIMEOUT_SECONDS) as client:
+            response = await client.get(
+                "https://openrouter.ai/api/v1/key",
+                headers={"Authorization": f"Bearer {value}"},
+            )
+    except httpx.TimeoutException:
+        return f"No answer from OpenRouter within {CHECK_TIMEOUT_SECONDS} seconds."
+    except httpx.HTTPError:
+        return "Could not reach OpenRouter."
+    except UnicodeError:
+        return REFUSED_KEY_ERROR.format(name="OpenRouter")
+    if response.status_code == 200:
+        return None
+    if response.status_code in (401, 403):
+        return REFUSED_KEY_ERROR.format(name="OpenRouter")
+    return f"Could not check the OpenRouter key. OpenRouter answered with error {response.status_code}."
