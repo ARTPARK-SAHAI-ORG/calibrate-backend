@@ -320,13 +320,21 @@ _IS_CORRECT_DESCRIPTION = "Whether the agent's output for this turn was correct"
 _FEEDBACK_COMMENT_DESCRIPTION = "What was right or wrong about the agent's output"
 
 
-class TraceFeedbackIngest(BaseModel):
+class TraceFeedbackUpdate(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    is_correct: bool = Field(description=_IS_CORRECT_DESCRIPTION)
+    is_correct: Optional[bool] = Field(
+        description=_IS_CORRECT_DESCRIPTION + ". `null` clears the feedback"
+    )
     comment: Optional[str] = Field(
         None, max_length=2000, description=_FEEDBACK_COMMENT_DESCRIPTION + ". Omit if you have none"
     )
+
+
+class TraceFeedbackIngest(TraceFeedbackUpdate):
+    """Feedback sent with a new trace, which has nothing to clear."""
+
+    is_correct: bool = Field(description=_IS_CORRECT_DESCRIPTION)
 
 
 class TraceIngest(BaseModel):
@@ -383,9 +391,7 @@ class TraceIngestResponse(BaseModel):
     created_at: str = Field(description="When the trace was created (ISO 8601 UTC)")
 
 
-class TraceFeedback(BaseModel):
-    is_correct: bool = Field(description=_IS_CORRECT_DESCRIPTION)
-    comment: Optional[str] = Field(None, description=_FEEDBACK_COMMENT_DESCRIPTION)
+class TraceFeedback(TraceFeedbackIngest):
     at: str = Field(description="When the feedback was last given (ISO 8601 UTC)")
 
 
@@ -1627,17 +1633,6 @@ def get_trace_endpoint(
     if not row:
         raise HTTPException(status_code=404, detail="Trace not found")
     return row
-
-
-class TraceFeedbackUpdate(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    is_correct: Optional[bool] = Field(
-        description=_IS_CORRECT_DESCRIPTION + ". `null` clears the feedback"
-    )
-    comment: Optional[str] = Field(
-        None, max_length=2000, description=_FEEDBACK_COMMENT_DESCRIPTION + ". Omit if you have none"
-    )
 
 
 class TraceFeedbackResponse(BaseModel):

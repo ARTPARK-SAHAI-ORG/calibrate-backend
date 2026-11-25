@@ -54,6 +54,7 @@ from db import (
 from provider_keys import MissingProviderKey, org_provider_key
 from provider_status import PROVIDER_ENV_VARS
 from routers.agents import _sanitize_headers
+from routers.traces import TraceFeedbackResponse, TraceFeedbackUpdate
 from auth_utils import get_optional_user_id
 from routers.org_limits import daily_message_limit, effective_limits, record_limit_hit
 from shared_enums import DEFAULT_AGENT_INTERACTION_TYPE, EvaluatorType
@@ -1429,18 +1430,6 @@ class ChatMessageResponse(BaseModel):
     )
 
 
-class ChatFeedbackRequest(BaseModel):
-    is_correct: Optional[bool] = Field(
-        description="Whether the reply was correct. `null` clears the feedback"
-    )
-    comment: Optional[str] = Field(None, max_length=2000, description="What was right or wrong about the reply")
-
-
-class ChatFeedbackResponse(BaseModel):
-    is_correct: Optional[bool] = Field(None, description="Whether the reply was correct")
-    comment: Optional[str] = Field(None, description="What was right or wrong about the reply")
-
-
 @router.get(
     "/agent-chat/{token}",
     response_model=PublicAgentChatResponse,
@@ -1524,13 +1513,13 @@ async def send_public_agent_chat_message(
 
 @router.put(
     "/agent-chat/{token}/traces/{trace_uuid}/feedback",
-    response_model=ChatFeedbackResponse,
+    response_model=TraceFeedbackResponse,
     summary="Set chat reply feedback",
 )
 def set_public_agent_chat_feedback(
     token: str = Path(description=_CHAT_TOKEN_DESCRIPTION, examples=[_EXAMPLE_JOB_UUID]),
     trace_uuid: str = Path(description="The reply to leave feedback on", examples=[_EXAMPLE_ITEM_UUID]),
-    body: ChatFeedbackRequest = ...,
+    body: TraceFeedbackUpdate = ...,
     user_id: Optional[str] = Depends(get_optional_user_id),
 ):
     """Rate a reply from the agent behind a chat link, or clear the rating"""
@@ -1543,7 +1532,4 @@ def set_public_agent_chat_feedback(
         or not set_trace_feedback(agent["org_uuid"], trace_uuid, body.is_correct, body.comment)
     ):
         raise _chat_error(404, "not_found")
-    return ChatFeedbackResponse(
-        is_correct=body.is_correct,
-        comment=body.comment if body.is_correct is not None else None,
-    )
+    return {"feedback": get_trace(agent["org_uuid"], trace_uuid)["feedback"]}

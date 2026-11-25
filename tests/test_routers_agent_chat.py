@@ -521,17 +521,16 @@ def test_feedback_is_set_and_cleared(client):
     with patch.object(public, "_llm_reply", _llm()):
         trace_uuid = _send(client, token).json()["trace_uuid"]
 
-    assert _feedback(client, token, trace_uuid, False, "Wrong date").json() == {
-        "is_correct": False,
-        "comment": "Wrong date",
-    }
+    saved = _feedback(client, token, trace_uuid, False, "Wrong date").json()["feedback"]
+    assert saved["is_correct"] is False and saved["comment"] == "Wrong date" and saved["at"]
     stored = db.get_trace(agent["org_uuid"], trace_uuid)["feedback"]
     assert stored["is_correct"] is False and stored["comment"] == "Wrong date"
 
-    assert _feedback(client, token, trace_uuid, True).json() == {"is_correct": True, "comment": None}
+    saved = _feedback(client, token, trace_uuid, True).json()["feedback"]
+    assert saved["is_correct"] is True and saved["comment"] is None
     assert db.get_trace(agent["org_uuid"], trace_uuid)["feedback"]["is_correct"] is True
 
-    assert _feedback(client, token, trace_uuid, None, "ignored").json() == {"is_correct": None, "comment": None}
+    assert _feedback(client, token, trace_uuid, None, "ignored").json() == {"feedback": None}
     assert db.get_trace(agent["org_uuid"], trace_uuid)["feedback"] is None
     assert _feedback(client, token, trace_uuid, True, "x" * 2001).status_code == 422
 
