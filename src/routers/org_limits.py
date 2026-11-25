@@ -9,7 +9,7 @@ the effective values via `/me`.
 import logging
 import sqlite3
 
-from fastapi import APIRouter, HTTPException, Depends, Path, Response
+from fastapi import APIRouter, HTTPException, Depends, Path
 from typing import Any, Dict, Literal, Optional
 
 from pydantic import BaseModel, Field
@@ -329,35 +329,6 @@ def get_max_rows_per_eval(ctx: OrgContext = Depends(get_current_org)):
 def get_max_scored_traces(ctx: OrgContext = Depends(get_current_org)):
     """Get how many traces your workspace may have scored automatically"""
     return {"max_scored_traces": effective_max_scored_traces(ctx.org_uuid)}
-
-
-class LimitHitCreate(BaseModel):
-    limit_name: Literal["max_rows_per_eval"] = Field(
-        description="The limit the run went over",
-        examples=["max_rows_per_eval"],
-    )
-    kind: Optional[EvalKind] = Field(
-        None,
-        description="What kind of evaluation was refused, or `null` when unknown",
-        examples=["test_run"],
-    )
-    requested: int = Field(
-        ge=0,
-        description="How many rows the refused run would have processed",
-        examples=[600],
-    )
-
-
-@router.post("/hits", status_code=204, summary="Record a limit hit")
-def record_limit_hit_endpoint(
-    data: LimitHitCreate, ctx: OrgContext = Depends(get_current_org)
-):
-    """Record that a run in your workspace was stopped before it started for going over a limit"""
-    cap = effective_limits(ctx.org_uuid)[data.limit_name]
-    # Only a run that really was over the limit is a hit.
-    if cap is not None and data.requested > cap:
-        record_limit_hit(ctx.org_uuid, data.limit_name, data.kind, data.requested, cap)
-    return Response(status_code=204)
 
 
 @router.post("", response_model=OrgLimitsCreateResponse, summary="Create workspace limits")
