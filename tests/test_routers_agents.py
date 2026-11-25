@@ -1757,7 +1757,6 @@ def test_chat_link_keeps_its_token_when_turned_off_and_on(client):
     token = first.pop("share_token")
     assert first == {
         "is_public": False,
-        "text_chat_supported": True,
         "connection_verified": True,
     }
     # Reading the link makes it, so a private link can be previewed.

@@ -938,9 +938,6 @@ class ChatLinkResponse(BaseModel):
 
 
 class ChatLinkStatusResponse(ChatLinkResponse):
-    text_chat_supported: bool = Field(
-        description="Whether the agent can be reached by text chat"
-    )
     connection_verified: bool = Field(
         description="Whether the agent's connection has passed its check. Always true for an agent built in Calibrate"
     )
@@ -980,12 +977,9 @@ def get_chat_link(
     if not token:
         token = str(uuid.uuid4())
         set_agent_chat_link(agent_uuid, is_public, token)
-    # ponytail: every connection agent is a plain HTTP(S) text endpoint today
-    # (public_url_error refuses any other scheme), so no voice check exists yet.
     return ChatLinkStatusResponse(
         is_public=is_public,
         share_token=token,
-        text_chat_supported=True,
         connection_verified=not _chat_connection_unverified(agent),
     )
 
