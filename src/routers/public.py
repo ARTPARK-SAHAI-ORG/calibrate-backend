@@ -60,6 +60,7 @@ from routers.org_limits import daily_message_limit, effective_limits, record_lim
 from shared_enums import DEFAULT_AGENT_INTERACTION_TYPE, EvaluatorType
 from testing.fake_calibrate_agent import FAKE_RESPONSE
 from utils import (
+    default_agent_llm_model,
     build_tool_configs,
     capture_exception_to_sentry,
     env_bool,
@@ -1362,7 +1363,7 @@ def _prepare_chat_reply(
         chat["llm"] = {
             "system_prompt": config.get("system_prompt", ""),
             "tools": build_tool_configs(get_tools_for_agent(agent["uuid"])),
-            "model": llm.get("model", "openai/gpt-4.1"),
+            "model": llm.get("model", default_agent_llm_model()),
             "provider": provider,
             "api_key": api_key,
             "max_tool_rounds": max(1, env_int("CHAT_MAX_TOOL_ROUNDS", DEFAULT_CHAT_MAX_TOOL_ROUNDS)),

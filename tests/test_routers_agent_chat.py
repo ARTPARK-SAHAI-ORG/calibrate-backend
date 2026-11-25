@@ -607,3 +607,12 @@ def test_a_finished_reply_is_not_marked_as_cut_off(client):
         body = _send(client, token).json()
     assert body["stopped_early"] is False
     assert "stopped_early" not in db.get_trace(agent["org_uuid"], body["trace_uuid"])["output"]
+
+
+def test_an_agent_with_no_model_saved_chats_on_the_default_agent_model(client, monkeypatch):
+    _, agent, token = _chat_agent(client)
+    db.update_agent(agent["uuid"], config={})
+    monkeypatch.setenv("DEFAULT_AGENT_LLM_MODEL", "google/gemini-3.5-flash-lite")
+    with patch.object(public, "agent_reply", _llm()) as llm:
+        _send(client, token)
+    assert llm.call_args.kwargs["model"] == "google/gemini-3.5-flash-lite"
