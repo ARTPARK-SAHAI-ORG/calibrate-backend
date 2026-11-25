@@ -6,6 +6,7 @@ from sqlite3 import IntegrityError
 from auth_utils import get_current_org, OrgContext
 from routers.agents import AgentSummary, to_agent_summary
 from db import (
+    add_evaluator_to_agent,
     add_tool_to_agent,
     remove_tool_from_agent,
     get_tools_for_agent,
@@ -14,6 +15,7 @@ from db import (
     get_all_agent_tools,
     get_agent,
     get_tool,
+    get_tool_call_evaluator_for_org,
 )
 
 
@@ -111,7 +113,7 @@ def create_agent_tool_links(
     agent_tools: AgentToolsCreate,
     ctx: OrgContext = Depends(get_current_org),
 ):
-    """Link one or more tools to an agent. Tools that are already linked are skipped"""
+    """Link one or more tools to an agent. Tools that are already linked are skipped. The workspace's Tool call correctness evaluator is linked to the agent too"""
     _require_owned_agent(agent_tools.agent_uuid, ctx.org_uuid)
     for tool_uuid in agent_tools.tool_uuids:
         _require_owned_tool(tool_uuid, ctx.org_uuid)
@@ -129,6 +131,10 @@ def create_agent_tool_links(
             link_ids.append(link_id)
         except IntegrityError:
             continue
+
+    tool_call_evaluator = get_tool_call_evaluator_for_org(ctx.org_uuid)
+    if agent_tools.tool_uuids and tool_call_evaluator:
+        add_evaluator_to_agent(agent_tools.agent_uuid, tool_call_evaluator["uuid"])
 
     return AgentToolsCreateResponse(
         ids=link_ids, message="Tools added to agent successfully"

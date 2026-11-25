@@ -27,6 +27,7 @@ from pydantic import BaseModel, ConfigDict, Field, StringConstraints, model_vali
 from auth_utils import OrgContext, get_current_org, get_org_jwt_or_api_key
 from db import (
     _trace_iso,
+    add_evaluator_to_agent,
     add_test_to_agent,
     bulk_create_tests,
     bulk_delete_tests,
@@ -39,6 +40,7 @@ from db import (
     get_evaluator_versions_by_uuids,
     get_evaluators_by_uuids,
     get_latest_trace_run_summaries,
+    get_tool_call_evaluator_for_org,
     get_trace,
     set_trace_feedback,
     get_traces_by_uuids,
@@ -64,7 +66,7 @@ from shared_enums import (
     EvaluatorType,
     required_agent_interaction_type,
 )
-from trace_scoring import TraceEvalRunStatus
+from trace_scoring import TraceEvalRunStatus, is_tool_call_trace
 from routers.tests import (
     EvaluatorRef,
     _validate_evaluators,
@@ -870,6 +872,12 @@ def ingest_trace(
             },
         )
 
+    output = payload.output.model_dump(exclude_none=True)
+    if is_tool_call_trace({"output": output}):
+        tool_call_evaluator = get_tool_call_evaluator_for_org(ctx.org_uuid)
+        if tool_call_evaluator:
+            add_evaluator_to_agent(agent["uuid"], tool_call_evaluator["uuid"])
+
     row = create_trace_with_eval_run(
         org_uuid=ctx.org_uuid,
         agent=agent,
@@ -882,7 +890,7 @@ def ingest_trace(
             if isinstance(payload.input, str)
             else [turn.model_dump(exclude_none=True) for turn in payload.input]
         ),
-        output=payload.output.model_dump(exclude_none=True),
+        output=output,
         metadata=(
             [entry.model_dump() for entry in payload.metadata]
             if payload.metadata

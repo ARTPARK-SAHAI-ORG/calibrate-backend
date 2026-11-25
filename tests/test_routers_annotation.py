@@ -3626,6 +3626,12 @@ def test_tool_call_row_links_tool_call_evaluator_once(client):
     assert first.status_code == 200
     links = _tool_call_links(client, h, task_uuid)
     assert len(links) == 1
+    detail = client.get(f"/annotation-tasks/{task_uuid}", headers=h).json()
+    assert [
+        e["source_default_slug"]
+        for e in detail["evaluators"]
+        if e["evaluator_type"] == "tool-call"
+    ] == ["default-tool-call-correctness"]
     order_after_first = [e["uuid"] for e in _task_evaluators(client, h, task_uuid)]
 
     # A later batch with another tool-call row neither duplicates the link
