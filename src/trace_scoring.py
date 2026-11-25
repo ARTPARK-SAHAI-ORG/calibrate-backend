@@ -750,7 +750,7 @@ def _prepare_claimed_run(run: dict[str, Any], now: str) -> PreparedRun | None:
         settle_trace_eval_run_terminal(
             run["uuid"],
             status=TraceEvalRunStatus.SKIPPED,
-            error=reason.value,
+            error=reason,
             now=now,
             attempts=run.get("attempts"),
         )
