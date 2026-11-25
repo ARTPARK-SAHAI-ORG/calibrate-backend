@@ -248,18 +248,27 @@ TOOL_ROW = {"name": "tc", "chat_history": [], "agent_response": "", "tool_calls"
 REPLY_ROW = {"name": "resp", "chat_history": [], "agent_response": "hi"}
 
 
-def _tool_call_ev(client, h, prompt="Did the agent call the right tool?"):
+def _tool_call_ev(client, h):
     resp = client.post(
         "/evaluators",
         json={
             "name": f"tc-{uuid.uuid4().hex[:6]}",
             "evaluator_type": "tool-call",
-            "version": {"judge_model": "openai/gpt-4.1", "system_prompt": prompt},
+            "version": {"judge_model": "openai/gpt-4.1", "system_prompt": "Did the agent call the right tool?"},
         },
         headers=h,
     )
     assert resp.status_code == 200, resp.text
     return resp.json()["uuid"]
+
+
+def _blank_prompt_tool_call_ev(client, h):
+    import db as db_mod
+
+    ev = _tool_call_ev(client, h)
+    version = db_mod.create_evaluator_version(ev, judge_model="", system_prompt="")
+    db_mod.set_evaluator_live_version(ev, version["uuid"])
+    return ev
 
 
 def _task_with(client, h, task_type, evaluator_ids, payloads=()):
@@ -316,7 +325,7 @@ def test_evaluator_run_reply_rows_with_only_a_tool_call_evaluator_blocked(client
 
 def test_evaluator_run_blank_prompt_tool_call_evaluator_blocked(client):
     h = _signup(client)["headers"]
-    tc_ev = _tool_call_ev(client, h, prompt="")
+    tc_ev = _blank_prompt_tool_call_ev(client, h)
     task_uuid = _task_with(client, h, "llm", [tc_ev], [TOOL_ROW])
     resp = _start_run(client, h, task_uuid, [tc_ev])
     assert resp.status_code == 400
@@ -390,7 +399,7 @@ def test_evaluator_run_does_not_record_an_evaluator_no_row_pairs_with(client):
 def test_evaluator_run_does_not_record_a_blank_prompt_tool_call_evaluator(client):
     h = _signup(client)["headers"]
     llm_ev = _llm_ev(client, h)["uuid"]
-    tc_ev = _tool_call_ev(client, h, prompt="")
+    tc_ev = _blank_prompt_tool_call_ev(client, h)
     task_uuid = _task_with(client, h, "llm", [llm_ev, tc_ev], [TOOL_ROW, REPLY_ROW])
     resp = _start_run(client, h, task_uuid, [llm_ev, tc_ev])
     assert resp.status_code == 200, resp.text

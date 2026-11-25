@@ -8,7 +8,7 @@ Replaces the legacy `metrics` router. Adds:
  - API-key-authenticated invocation endpoint
 """
 
-from typing import Any, Dict, List, Literal, Optional
+from typing import Annotated, Any, Dict, List, Literal, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Path, Query
 from pagination import (
@@ -28,7 +28,7 @@ _EvaluatorDetailProjection = make_projection_params(
         "versions[].variables",
     ]
 )
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, Field, StringConstraints, model_validator
 
 from auth_utils import get_current_org, get_current_user_id, get_org_jwt_or_api_key, OrgContext
 from db import (
@@ -121,6 +121,8 @@ _RUBRIC_DESCRIPTION = (
 
 # ============ Pydantic models ============
 
+NonBlankStr = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1)]
+
 
 class OutputScaleEntry(BaseModel):
     """One entry in an evaluator's output_config.scale. `value` is bool|number|string
@@ -153,8 +155,8 @@ class VariableSpec(BaseModel):
 class EvaluatorVersionCreate(BaseModel):
     """One version of an evaluator: its judge prompt, model, variables, and rubric."""
 
-    judge_model: str = Field(description=_JUDGE_MODEL_DESCRIPTION)
-    system_prompt: str = Field(description="Judge system prompt. May contain `{{variable}}` placeholders")
+    judge_model: NonBlankStr = Field(description=_JUDGE_MODEL_DESCRIPTION)
+    system_prompt: NonBlankStr = Field(description="Judge system prompt. May contain `{{variable}}` placeholders")
     output_config: Optional[OutputConfig] = Field(
         None,
         description=_RUBRIC_DESCRIPTION,
