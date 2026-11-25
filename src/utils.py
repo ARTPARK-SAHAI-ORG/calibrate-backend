@@ -50,6 +50,12 @@ def env_str(var: str, fallback: str) -> str:
     return os.getenv(var) or fallback
 
 
+def default_agent_llm_model() -> str:
+    """The model of an agent built in Calibrate that has none saved: what a new
+    agent starts on, and what a run, simulation or chat falls back to."""
+    return env_str("DEFAULT_AGENT_LLM_MODEL", "google/gemini-3.5-flash-lite")
+
+
 def env_bool(var: str, fallback: bool) -> bool:
     """Parse a truthy/falsy env var. Empty/unset → fallback."""
     raw = os.getenv(var)

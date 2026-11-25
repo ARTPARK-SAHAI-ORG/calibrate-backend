@@ -89,6 +89,7 @@ from read_calibrate_run_output import (
     unanswered_case_count,
 )
 from utils import (
+    default_agent_llm_model,
     compute_share_token_toggle,
     job_slot,
     with_calibrate_eval_header,
@@ -1886,7 +1887,7 @@ def _build_calibrate_config(
     # Calibrate agent mode
     if model is None:
         llm_config = agent_config.get("llm", {})
-        model = llm_config.get("model", "openai/gpt-4.1")
+        model = llm_config.get("model", default_agent_llm_model())
 
     agent_tools = get_tools_for_agent(agent["uuid"])
     tool_configs = build_tool_configs(agent_tools)

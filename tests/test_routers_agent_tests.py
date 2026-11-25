@@ -5495,8 +5495,13 @@ def test_batch_run_does_not_skip_when_the_workspace_has_no_row_limit():
     assert result.skipped == []
 
 
-def test_build_calibrate_config_model_fallback_is_an_openrouter_id():
+def test_build_calibrate_config_model_fallback_is_the_default_agent_model(monkeypatch):
     from routers.agent_tests import _build_calibrate_config
 
+    monkeypatch.delenv("DEFAULT_AGENT_LLM_MODEL", raising=False)
     config, _ = _build_calibrate_config({"type": "agent", "uuid": "a", "config": {}}, [])
-    assert config["params"]["model"] == "openai/gpt-4.1"
+    assert config["params"]["model"] == "google/gemini-3.5-flash-lite"
+
+    monkeypatch.setenv("DEFAULT_AGENT_LLM_MODEL", "openai/gpt-5.4-mini")
+    config, _ = _build_calibrate_config({"type": "agent", "uuid": "a", "config": {}}, [])
+    assert config["params"]["model"] == "openai/gpt-5.4-mini"

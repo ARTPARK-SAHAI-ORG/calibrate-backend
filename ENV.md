@@ -127,7 +127,7 @@ Partial defaults applied when creating agents ([`src/routers/agents.py`](src/rou
 | Variable                          | Meaning                                                                                               |
 | --------------------------------- | ----------------------------------------------------------------------------------------------------- |
 | **`DEFAULT_AGENT_SYSTEM_PROMPT`** | Default `system_prompt`. Hardcoded fallback: “You are a helpful assistant.”                           |
-| **`DEFAULT_AGENT_LLM_MODEL`**     | Default LLM model string (OpenRouter-style id). Fallback **`google/gemini-3.5-flash-lite`**.               |
+| **`DEFAULT_AGENT_LLM_MODEL`**     | Model a new agent built in Calibrate starts on, and the one a test run, comparison or simulation uses for an agent with none saved (OpenRouter-style id, `utils.default_agent_llm_model`). Fallback **`google/gemini-3.5-flash-lite`**.               |
 | **`DEFAULT_AGENT_STT_PROVIDER`**  | Default speech-to-text provider name. Fallback **`google`**.                                          |
 | **`DEFAULT_AGENT_TTS_PROVIDER`**  | Default text-to-speech provider name. Fallback **`google`**.                                          |
 | **`DEFAULT_AGENT_SPEAKS_FIRST`**  | Boolean (`1`/`true`/`yes`/`on`, etc.). Fallback in code is **`true`** (matches simulation behaviour). |
