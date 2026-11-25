@@ -178,7 +178,7 @@ def _default_agent_config() -> Dict[str, Any]:
             "DEFAULT_AGENT_SYSTEM_PROMPT", "You are a helpful assistant."
         ),
         "llm": {
-            "model": env_str("DEFAULT_AGENT_LLM_MODEL", "google/gemini-2.5-flash"),
+            "model": env_str("DEFAULT_AGENT_LLM_MODEL", "google/gemini-3.5-flash-lite"),
         },
         "stt": {
             "provider": env_str("DEFAULT_AGENT_STT_PROVIDER", "google"),
@@ -246,7 +246,7 @@ _AGENT_CONFIG_DESCRIPTION = """Agent behavioral config. The keys depend on `type
 
 **`type=agent`**, built inside Calibrate:
 - `system_prompt`: the agent's instructions
-- `llm.model`: `provider/model`, e.g. `openai/gpt-4.1` or `google/gemini-2.5-flash`
+- `llm.model`: `provider/model`, e.g. `openai/gpt-4.1` or `google/gemini-3.5-flash-lite`
 - `stt.provider`: `deepgram`, `openai`, `cartesia`, `elevenlabs`, `google`, `sarvam`, or `smallest`
 - `tts.provider`: `cartesia`, `openai`, `google`, `elevenlabs`, `sarvam`, or `smallest`
 - `settings.agent_speaks_first`, `settings.max_assistant_turns`
