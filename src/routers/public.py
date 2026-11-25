@@ -39,6 +39,7 @@ from db import (
     get_evaluator_runs_for_job,
     get_eval_job_items,
     count_chat_replies_today,
+    get_chat_conversation,
     count_live_traces,
     create_trace_with_eval_run,
     get_agent_by_chat_token,
@@ -46,6 +47,7 @@ from db import (
     get_trace,
     release_chat_reply,
     reserve_chat_reply,
+    save_chat_conversation,
     get_tools_for_agent,
     set_trace_feedback,
 )
@@ -1233,8 +1235,6 @@ def get_public_invite(
 
 CHAT_REPLY_TIMEOUT_SECONDS = 60
 MAX_CHAT_TURNS = 500
-# The conversation the chat page sends back, measured as the agent reads it.
-MAX_CHAT_HISTORY_CHARS = 200_000
 # How many times one chat reply may go back to the model after running tools.
 DEFAULT_CHAT_MAX_TOOL_ROUNDS = 5
 _CHAT_TOKEN_DESCRIPTION = "Token from the chat link you were sent"
@@ -1256,30 +1256,25 @@ def _chat_link_agent(token: str, user_id: Optional[str]) -> Dict[str, Any]:
     return agent
 
 
-def _history_messages(history: List["ChatHistoryTurn"]) -> List[Dict[str, Any]]:
-    """The earlier turns the chat page sent, as the messages the agent reads."""
-    messages: List[Dict[str, Any]] = []
-    for i, turn in enumerate(history):
-        if turn.role == "user":
-            messages.append({"role": "user", "content": turn.content or ""})
-            continue
-        ids = [f"call_{i}_{j}" for j in range(len(turn.tool_calls))]
-        assistant: Dict[str, Any] = {"role": "assistant", "content": turn.content}
-        if turn.tool_calls:
-            assistant["tool_calls"] = [
-                {
-                    "id": call_id,
-                    "type": "function",
-                    "function": {"name": call.tool, "arguments": json.dumps(call.arguments or {})},
-                }
-                for call_id, call in zip(ids, turn.tool_calls)
-            ]
-        messages.append(assistant)
-        messages.extend(
-            {"role": "tool", "tool_call_id": call_id, "content": json.dumps(call.output)}
-            for call_id, call in zip(ids, turn.tool_calls)
-        )
-    return messages
+def _agent_turns(result: Dict[str, Any], id_prefix: str) -> List[Dict[str, Any]]:
+    """The agent's reply as messages: its turn, with any tool calls, then one
+    tool message per call."""
+    calls = result.get("tool_calls") or []
+    ids = [f"call_{id_prefix}_{i}" for i in range(len(calls))]
+    assistant: Dict[str, Any] = {"role": "assistant", "content": result.get("response")}
+    if calls:
+        assistant["tool_calls"] = [
+            {
+                "id": call_id,
+                "type": "function",
+                "function": {"name": call["tool"], "arguments": json.dumps(call.get("arguments") or {})},
+            }
+            for call_id, call in zip(ids, calls)
+        ]
+    return [assistant] + [
+        {"role": "tool", "tool_call_id": call_id, "content": json.dumps(call.get("output"))}
+        for call_id, call in zip(ids, calls)
+    ]
 
 
 async def _llm_reply(**kwargs: Any) -> Dict[str, Any]:
@@ -1351,10 +1346,13 @@ def _prepare_chat_reply(
     if agent.get("interaction_type") == "general":
         messages, trace_input = [user_message], body.message
     else:
-        # The chat page sends the conversation so far, so the agent keeps it
-        # even once the workspace is too full to store the replies as traces.
-        messages = _history_messages(body.history) + [user_message]
-        if len(messages) > MAX_CHAT_TURNS or len(json.dumps(messages)) > MAX_CHAT_HISTORY_CHARS:
+        # Kept by the backend, never sent by the caller, so earlier turns cannot
+        # be made up, and kept apart from traces so a full workspace keeps them.
+        history = (
+            get_chat_conversation(agent["uuid"], body.conversation_id) if body.conversation_id else []
+        )
+        messages = history + [user_message]
+        if len(messages) > MAX_CHAT_TURNS:
             raise _chat_error(409, "conversation_too_long")
         trace_input = messages
 
@@ -1401,14 +1399,6 @@ class ChatToolCall(BaseModel):
     output: Any = Field(None, description="What the tool gave back")
 
 
-class ChatHistoryTurn(BaseModel):
-    role: Literal["user", "assistant"] = Field(description="Who said it: `user` or `assistant`")
-    content: Optional[str] = Field(None, description="What was said")
-    tool_calls: List[ChatToolCall] = Field(
-        default_factory=list, description="Tools the agent called before this reply. Only on `assistant` turns"
-    )
-
-
 class ChatMessageRequest(BaseModel):
     conversation_id: Optional[str] = Field(
         None,
@@ -1416,10 +1406,6 @@ class ChatMessageRequest(BaseModel):
         description="Conversation to continue, as returned by an earlier reply. Omit to start a new one",
     )
     message: str = Field(min_length=1, max_length=4000, description="What you say to the agent")
-    history: List[ChatHistoryTurn] = Field(
-        default_factory=list,
-        description="The conversation so far, oldest first, as returned in earlier replies. Leave it empty to start a new one",
-    )
 
 
 class ChatMessageResponse(BaseModel):
@@ -1491,6 +1477,13 @@ async def send_public_agent_chat_message(
         {key: call[key] for key in ("tool", "arguments", "output") if key in call}
         for call in result.get("tool_calls") or []
     ]
+    if agent.get("interaction_type") != "general":
+        await run_in_threadpool(
+            save_chat_conversation,
+            agent["uuid"],
+            chat["conversation_id"],
+            chat["messages"] + _agent_turns(result, str(len(chat["messages"]))),
+        )
     row = None
     if chat["store_trace"]:
         row = await run_in_threadpool(

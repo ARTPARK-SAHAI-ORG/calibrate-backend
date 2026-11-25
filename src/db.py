@@ -1735,6 +1735,19 @@ def init_db():
             )
             """
         )
+        # A chat link conversation as the agent read it, kept apart from traces
+        # so it survives a workspace too full to store them.
+        cursor.execute(
+            """
+            CREATE TABLE IF NOT EXISTS chat_conversations (
+                agent_id TEXT NOT NULL,
+                conversation_id TEXT NOT NULL,
+                messages TEXT NOT NULL,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                PRIMARY KEY (agent_id, conversation_id)
+            )
+            """
+        )
         conn.commit()
 
         # Durable scoring runs. `status` is the source of truth for "scored?";
@@ -11662,6 +11675,27 @@ def release_chat_reply(agent_id: str) -> None:
             "UPDATE chat_reply_counts SET count = count - 1 "
             "WHERE agent_id = ? AND day = date('now') AND count > 0",
             (agent_id,),
+        )
+        conn.commit()
+
+
+def get_chat_conversation(agent_id: str, conversation_id: str) -> List[Dict[str, Any]]:
+    """The messages of one chat link conversation, or [] when there is none."""
+    with get_db_connection() as conn:
+        row = conn.execute(
+            "SELECT messages FROM chat_conversations WHERE agent_id = ? AND conversation_id = ?",
+            (agent_id, conversation_id),
+        ).fetchone()
+        return json.loads(row[0]) if row else []
+
+
+def save_chat_conversation(agent_id: str, conversation_id: str, messages: List[Dict[str, Any]]) -> None:
+    with get_db_connection() as conn:
+        conn.execute(
+            "INSERT INTO chat_conversations (agent_id, conversation_id, messages) VALUES (?, ?, ?) "
+            "ON CONFLICT (agent_id, conversation_id) DO UPDATE SET "
+            "messages = excluded.messages, updated_at = CURRENT_TIMESTAMP",
+            (agent_id, conversation_id, json.dumps(messages)),
         )
         conn.commit()
 
