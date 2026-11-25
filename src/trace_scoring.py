@@ -364,10 +364,21 @@ def evaluators_for_trace(
     return evaluators_fitting_row(hydrated, is_tool_call_trace(trace))
 
 
-def _skip_reason_for(trace: dict[str, Any], reason: str) -> str:
-    """A tool-only trace with nothing to judge it says what is missing, so the
-    app can offer to add a tool-call evaluator."""
-    if reason == "no_usable_evaluators" and is_tool_call_trace(trace):
+def _skip_reason_for(trace: dict[str, Any], reason: str, agent_id: str) -> str:
+    """A tool-only trace on an agent with no tool-call evaluator linked says so,
+    so the app can offer to add one. A linked one that cannot run (no prompt,
+    no live version) leaves the general reason, since adding another is not
+    the fix."""
+    from db import get_evaluators_for_agent
+
+    if (
+        reason == "no_usable_evaluators"
+        and is_tool_call_trace(trace)
+        and not any(
+            ev.get("evaluator_type") == TOOL_CALL_EVALUATOR_TYPE
+            for ev in get_evaluators_for_agent(agent_id)
+        )
+    ):
         return "no_tool_call_evaluator"
     return reason
 
@@ -872,7 +883,8 @@ def process_claimed_runs(
         )
         for item in prepared:
             _settle_or_defer_terminal(
-                item.run, reason=_skip_reason_for(item.trace, reason),
+                item.run,
+                reason=_skip_reason_for(item.trace, reason, item.run["agent_id"]),
                 now=prepare_now, rng=rng, max_attempts=max_attempts,
             )
         return
@@ -883,7 +895,10 @@ def process_claimed_runs(
             scorable.append(item)
         else:
             _settle_or_defer_terminal(
-                item.run, reason=_skip_reason_for(item.trace, "no_usable_evaluators"),
+                item.run,
+                reason=_skip_reason_for(
+                    item.trace, "no_usable_evaluators", item.run["agent_id"]
+                ),
                 now=prepare_now, rng=rng, max_attempts=max_attempts,
             )
     prepared = scorable

@@ -527,6 +527,25 @@ def test_a_tool_call_trace_with_only_reply_evaluators_is_skipped_without_a_judge
     assert db.get_trace_eval_scores(run) == []
 
 
+def test_a_tool_call_trace_with_a_linked_tool_call_evaluator_that_cannot_run_keeps_the_general_reason():
+    org = _org()
+    agent = _agent(org)
+    ev = db.create_evaluator(
+        name=f"tc-{uuid.uuid4().hex[:6]}",
+        evaluator_type="tool-call",
+        org_uuid=org,
+        owner_user_id=str(uuid.uuid4()),
+        output_type="binary",
+    )
+    blank = db.create_evaluator_version(ev, "", "")
+    db.set_evaluator_live_version(ev, blank["uuid"])
+    run = _run(org, agent, _trace(org, agent, output=_TOOL_ONLY), [(ev, blank["uuid"])])
+
+    ts.claim_and_score_batch(now=_at(1000), invoke=_never_invoked)
+
+    assert db.get_trace_eval_run(run)["error"] == "no_usable_evaluators"
+
+
 def test_a_tool_call_trace_on_an_agent_with_no_evaluators_says_the_tool_call_one_is_missing():
     org = _org()
     agent = _agent(org)
