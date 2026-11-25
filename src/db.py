@@ -2162,6 +2162,10 @@ DEFAULT_PROMPTS_BY_PURPOSE: Dict[str, Dict[str, Any]] = {
     "tool-call": {
         "name": "Tool call correctness",
         "system_prompt": (
+            "The `Tool calls made by the agent` are what the agent did in answer to the "
+            "last message in the `Chat history`. Calls inside the `Chat history` were made "
+            "earlier and are context only, so judge the new calls against the conversation "
+            "as it stands at the end, including any correction the user made. "
             "You are shown the `Chat history` with an AI agent, the `Reply from the "
             "agent` if it gave one, and the `Tool calls made by the agent`. Decide whether those "
             "calls are right for what the user needs: the right tools, the right "
