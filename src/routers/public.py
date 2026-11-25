@@ -1233,6 +1233,8 @@ def get_public_invite(
 
 CHAT_REPLY_TIMEOUT_SECONDS = 60
 MAX_CHAT_TURNS = 500
+# The conversation the chat page sends back, measured as the agent reads it.
+MAX_CHAT_HISTORY_CHARS = 200_000
 # How many times one chat reply may go back to the model after running tools.
 DEFAULT_CHAT_MAX_TOOL_ROUNDS = 5
 _CHAT_TOKEN_DESCRIPTION = "Token from the chat link you were sent"
@@ -1352,7 +1354,7 @@ def _prepare_chat_reply(
         # The chat page sends the conversation so far, so the agent keeps it
         # even once the workspace is too full to store the replies as traces.
         messages = _history_messages(body.history) + [user_message]
-        if len(messages) > MAX_CHAT_TURNS:
+        if len(messages) > MAX_CHAT_TURNS or len(json.dumps(messages)) > MAX_CHAT_HISTORY_CHARS:
             raise _chat_error(409, "conversation_too_long")
         trace_input = messages
 
@@ -1401,7 +1403,7 @@ class ChatToolCall(BaseModel):
 
 class ChatHistoryTurn(BaseModel):
     role: Literal["user", "assistant"] = Field(description="Who said it: `user` or `assistant`")
-    content: Optional[str] = Field(None, max_length=20000, description="What was said")
+    content: Optional[str] = Field(None, description="What was said")
     tool_calls: List[ChatToolCall] = Field(
         default_factory=list, description="Tools the agent called before this reply. Only on `assistant` turns"
     )
@@ -1416,7 +1418,6 @@ class ChatMessageRequest(BaseModel):
     message: str = Field(min_length=1, max_length=4000, description="What you say to the agent")
     history: List[ChatHistoryTurn] = Field(
         default_factory=list,
-        max_length=MAX_CHAT_TURNS,
         description="The conversation so far, oldest first, as returned in earlier replies. Leave it empty to start a new one",
     )
 
@@ -1477,8 +1478,12 @@ async def send_public_agent_chat_message(
     await run_in_threadpool(_reserve_daily_reply, agent, chat["daily_cap"])
     try:
         result = await asyncio.wait_for(_agent_reply(chat), CHAT_REPLY_TIMEOUT_SECONDS)
-    except Exception as exc:
-        await run_in_threadpool(release_chat_reply, agent["uuid"])
+    except BaseException as exc:
+        # Also when the person leaves mid-reply, which cancels the request:
+        # a reply nobody got is not counted against the day.
+        release_chat_reply(agent["uuid"])
+        if not isinstance(exc, Exception):
+            raise
         await run_in_threadpool(capture_exception_to_sentry, exc)
         raise _chat_error(502, "agent_failed")
 

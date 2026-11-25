@@ -201,6 +201,7 @@ def test_a_conversation_id_alone_brings_back_nothing_stored(client):
         output={"response": "private", "tool_calls": []},
         max_scored_traces=None,
         batch_size=20,
+        source="chat",
     )
     with patch.object(public, "_llm_reply", _llm()) as llm:
         _send(client, token, "Hi", "shared")
@@ -227,7 +228,7 @@ def test_general_agent_gets_only_the_new_message(client):
     with patch.object(public, "_llm_reply", _llm()):
         first = _send(client, token, "One").json()
     with patch.object(public, "_llm_reply", _llm()) as llm:
-        second = _send(client, token, "Two", first["conversation_id"]).json()
+        second = _send(client, token, "Two", first["conversation_id"], history=_turns(("One", first))).json()
     assert llm.call_args.kwargs["messages"] == [{"role": "user", "content": "Two"}]
     assert db.get_trace(agent["org_uuid"], second["trace_uuid"])["input"] == "Two"
 
@@ -242,6 +243,26 @@ def test_conversation_that_would_pass_the_turn_limit_is_refused(client, monkeypa
     assert refused.status_code == 409
     assert refused.json()["detail"] == {"error": "conversation_too_long"}
     llm.assert_not_called()
+
+
+def test_a_conversation_too_large_is_refused_before_a_reply_is_counted(client, monkeypatch):
+    _, agent, token = _chat_agent(client)
+    monkeypatch.setattr(public, "MAX_CHAT_HISTORY_CHARS", 100)
+    big = [{"role": "user", "content": "x" * 200}, {"role": "assistant", "content": "ok", "tool_calls": []}]
+    with patch.object(public, "_llm_reply", _llm()) as llm:
+        refused = _send(client, token, "Again", history=big)
+    assert refused.status_code == 409
+    assert refused.json()["detail"] == {"error": "conversation_too_long"}
+    llm.assert_not_called()
+    assert db.count_chat_replies_today(agent["uuid"]) == 0
+
+
+def test_a_reply_cut_off_by_the_person_leaving_is_not_counted(client):
+    _, agent, token = _chat_agent(client)
+    with patch.object(public, "_llm_reply", AsyncMock(side_effect=asyncio.CancelledError())):
+        with pytest.raises(BaseException):
+            _send(client, token)
+    assert db.count_chat_replies_today(agent["uuid"]) == 0
 
 
 def _limits(monkeypatch, **overrides):
