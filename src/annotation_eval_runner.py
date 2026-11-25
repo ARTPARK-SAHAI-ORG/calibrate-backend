@@ -445,7 +445,7 @@ def _criteria_refs_for_item(
     """Build the per-test `evaluation.criteria` refs from an item's optional
     `evaluator_variables` map. Each ref is `{name, arguments?}`; missing entries
     → no arguments → calibrate falls back to the prompt placeholder/default.
-    Used by the `llm` dataset builder."""
+    Used by the `llm` and `llm-general` dataset builders."""
     per_evaluator_vars = _validated_evaluator_variables(it, payload)
     criteria_refs: List[Dict[str, Any]] = []
     for ev in evaluators_resolved:
@@ -464,7 +464,7 @@ def _build_llm_general_dataset(
     `{id, input, output, evaluators, arguments?, tool_calls?, expected_tool_calls?}`
     rows, `evaluators` naming the ones that fit the row. No agent and no conversation —
     `calibrate general` grades each pre-existing input/output pair against the
-    config's evaluators (see `calibrate general --dataset … -c …`).
+    evaluators the row names (see `calibrate general --dataset … -c …`).
 
     Annotation convention for payload:
       { "input": "...", "output": "...",
