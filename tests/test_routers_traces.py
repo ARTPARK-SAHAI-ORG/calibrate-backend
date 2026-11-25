@@ -2957,7 +2957,7 @@ def test_usage_counts_one_agents_chat_replies_and_reads_its_limit(client):
     h, agent_id = _signup_with_agent(client)
     _, other_agent = _signup_with_agent(client)
     for _ in range(2):
-        db.record_chat_reply(agent_id)
+        db.reserve_chat_reply(agent_id, 100)
 
     usage = client.get("/traces/usage", params={"agent_id": agent_id}, headers=h)
     assert usage.status_code == 200, usage.text

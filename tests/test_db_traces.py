@@ -623,12 +623,23 @@ def test_feedback_sent_with_the_trace_is_stored_with_it():
     assert feedback["at"].endswith("Z")
 
 
+def test_reserving_a_chat_reply_stops_at_the_cap_and_a_release_gives_one_back():
+    agent = _insert_agent(_org())
+    assert db.reserve_chat_reply(agent["uuid"], 2)
+    assert db.reserve_chat_reply(agent["uuid"], 2)
+    assert not db.reserve_chat_reply(agent["uuid"], 2)
+    assert db.count_chat_replies_today(agent["uuid"]) == 2
+    db.release_chat_reply(agent["uuid"])
+    assert db.reserve_chat_reply(agent["uuid"], 2)
+    assert not db.reserve_chat_reply(_insert_agent(_org())["uuid"], 0)
+
+
 def test_chat_replies_today_count_every_reply_of_one_agent_since_midnight():
     agent = _insert_agent(_org())
     other = _insert_agent(_org())
     for _ in range(3):
-        db.record_chat_reply(agent["uuid"])
-    db.record_chat_reply(other["uuid"])
+        db.reserve_chat_reply(agent["uuid"], 100)
+    db.reserve_chat_reply(other["uuid"], 100)
     with db.get_db_connection() as conn:
         conn.execute(
             "INSERT INTO chat_reply_counts (agent_id, day, count) VALUES (?, date('now', '-1 day'), 9)",

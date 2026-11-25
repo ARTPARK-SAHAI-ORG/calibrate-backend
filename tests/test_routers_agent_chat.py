@@ -66,12 +66,21 @@ def _llm(reply="Hello", tool_calls=()):
     return AsyncMock(return_value={"reply": reply, "tool_calls": list(tool_calls), "ended": False})
 
 
-def _send(client, token, message="Hi", conversation_id=None, headers=None):
+def _send(client, token, message="Hi", conversation_id=None, headers=None, history=()):
     return client.post(
         f"/public/agent-chat/{token}/messages",
-        json={"message": message, "conversation_id": conversation_id},
+        json={"message": message, "conversation_id": conversation_id, "history": list(history)},
         headers=headers or {},
     )
+
+
+def _turns(*pairs):
+    """The history the chat page sends: each user message, then the reply it got."""
+    history = []
+    for message, reply in pairs:
+        history.append({"role": "user", "content": message})
+        history.append({"role": "assistant", "content": reply["reply"], "tool_calls": reply["tool_calls"]})
+    return history
 
 
 def _traces(org_uuid):
@@ -152,7 +161,7 @@ def test_reply_is_stored_as_a_chat_trace_with_a_new_conversation(client):
     assert trace["output"] == {"response": "Hello there", "tool_calls": []}
 
 
-def test_history_is_rebuilt_from_the_previous_reply_with_its_tool_calls(client):
+def test_history_sent_with_the_message_reaches_the_agent_with_its_tool_calls(client):
     _, agent, token = _chat_agent(client)
     calls = [{"id": "x", "tool": "book", "arguments": {"day": 1}, "output": {"ok": True}}]
     with patch.object(public, "_llm_reply", _llm("Booked", calls)):
@@ -160,9 +169,11 @@ def test_history_is_rebuilt_from_the_previous_reply_with_its_tool_calls(client):
     assert first["tool_calls"] == [{"tool": "book", "arguments": {"day": 1}, "output": {"ok": True}}]
 
     with patch.object(public, "_llm_reply", _llm("Done")) as llm:
-        second = _send(client, token, "Thanks", first["conversation_id"]).json()
+        second = _send(
+            client, token, "Thanks", first["conversation_id"], history=_turns(("Book it", first))
+        ).json()
 
-    call_id = f"call_{first['trace_uuid'][:8]}_0"
+    call_id = "call_1_0"
     expected = [
         {"role": "user", "content": "Book it"},
         {
@@ -180,7 +191,7 @@ def test_history_is_rebuilt_from_the_previous_reply_with_its_tool_calls(client):
     assert db.get_trace(agent["org_uuid"], second["trace_uuid"])["input"] == expected
 
 
-def test_history_ignores_an_api_trace_with_the_same_conversation_id(client):
+def test_a_conversation_id_alone_brings_back_nothing_stored(client):
     _, agent, token = _chat_agent(client)
     db.create_trace_with_eval_run(
         org_uuid=agent["org_uuid"],
@@ -194,6 +205,21 @@ def test_history_ignores_an_api_trace_with_the_same_conversation_id(client):
     with patch.object(public, "_llm_reply", _llm()) as llm:
         _send(client, token, "Hi", "shared")
     assert llm.call_args.kwargs["messages"] == [{"role": "user", "content": "Hi"}]
+
+
+def test_a_full_workspace_keeps_the_conversation(client, monkeypatch):
+    _, agent, token = _chat_agent(client)
+    _limits(monkeypatch, max_traces=0)
+    with patch.object(public, "_llm_reply", _llm("Hello")):
+        first = _send(client, token, "Hi").json()
+    assert first["trace_uuid"] is None
+    with patch.object(public, "_llm_reply", _llm()) as llm:
+        _send(client, token, "Again", first["conversation_id"], history=_turns(("Hi", first)))
+    assert llm.call_args.kwargs["messages"] == [
+        {"role": "user", "content": "Hi"},
+        {"role": "assistant", "content": "Hello"},
+        {"role": "user", "content": "Again"},
+    ]
 
 
 def test_general_agent_gets_only_the_new_message(client):
@@ -212,7 +238,7 @@ def test_conversation_that_would_pass_the_turn_limit_is_refused(client, monkeypa
     with patch.object(public, "_llm_reply", _llm()):
         first = _send(client, token).json()
     with patch.object(public, "_llm_reply", _llm()) as llm:
-        refused = _send(client, token, "Again", first["conversation_id"])
+        refused = _send(client, token, "Again", first["conversation_id"], history=_turns(("Hi", first)))
     assert refused.status_code == 409
     assert refused.json()["detail"] == {"error": "conversation_too_long"}
     llm.assert_not_called()
@@ -234,6 +260,24 @@ def test_daily_limit_refuses_and_records_the_hit(client, monkeypatch):
     assert refused.json()["detail"] == {"error": "daily_limit", "limit": 1}
     assert ("max_chat_replies_per_day", "chat", 2, 1) in _hits(agent["org_uuid"])
     llm.assert_not_called()
+
+
+def test_the_last_reply_of_the_day_is_taken_before_the_agent_is_asked(client, monkeypatch):
+    _, agent, token = _chat_agent(client)
+    _limits(monkeypatch, max_chat_replies_per_day=1)
+
+    # While the agent is still answering, the reply is already counted, so a
+    # second message arriving now cannot take it too.
+    async def answering(**kwargs):
+        seen.append(db.count_chat_replies_today(agent["uuid"]))
+        seen.append(db.reserve_chat_reply(agent["uuid"], 1))
+        return {"reply": "Hi", "tool_calls": [], "ended": False}
+
+    seen = []
+    with patch.object(public, "_llm_reply", answering):
+        assert _send(client, token).status_code == 200
+    assert seen == [1, False]
+    assert db.count_chat_replies_today(agent["uuid"]) == 1
 
 
 def _send_until_refused(client, token, attempts=5):
@@ -338,6 +382,8 @@ def test_agent_failure_stores_nothing_and_is_reported(client):
     assert refused.json()["detail"] == {"error": "agent_failed"}
     sentry.assert_called_once()
     assert _traces(agent["org_uuid"]) == []
+    # The reply it never gave is not counted against the day.
+    assert db.count_chat_replies_today(agent["uuid"]) == 0
 
 
 def test_end_call_ends_the_chat_and_is_not_stored(client):
@@ -385,8 +431,8 @@ def test_connection_agent_is_sent_plain_turns_without_its_tool_calls(client):
     with patch.object(public, "public_url_error", return_value=None), patch.object(
         public, "TextAgentConnection", connection
     ):
-        conversation_id = _send(client, token, "Find it").json()["conversation_id"]
-        _send(client, token, "Thanks", conversation_id)
+        first_reply = _send(client, token, "Find it").json()
+        _send(client, token, "Thanks", first_reply["conversation_id"], history=_turns(("Find it", first_reply)))
 
     assert connection.return_value.call.await_args_list[1].args[0] == [
         {"role": "user", "content": "Find it"},

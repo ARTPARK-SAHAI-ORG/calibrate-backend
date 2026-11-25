@@ -11640,12 +11640,27 @@ def set_trace_feedback(
         return cursor.rowcount > 0
 
 
-def record_chat_reply(agent_id: str) -> None:
-    """Count one chat reply against the agent's day (UTC)."""
+def reserve_chat_reply(agent_id: str, cap: int) -> bool:
+    """Count one chat reply against the agent's day (UTC), unless the day already
+    holds `cap`. One statement, so two messages at once cannot both take the last
+    reply."""
+    with get_db_connection() as conn:
+        cursor = conn.execute(
+            "INSERT INTO chat_reply_counts (agent_id, day, count) "
+            "SELECT ?, date('now'), 1 WHERE ? > 0 "
+            "ON CONFLICT (agent_id, day) DO UPDATE SET count = count + 1 WHERE count < ?",
+            (agent_id, cap, cap),
+        )
+        conn.commit()
+        return cursor.rowcount == 1
+
+
+def release_chat_reply(agent_id: str) -> None:
+    """Give back a reply reserved for a message the agent never answered."""
     with get_db_connection() as conn:
         conn.execute(
-            "INSERT INTO chat_reply_counts (agent_id, day, count) VALUES (?, date('now'), 1) "
-            "ON CONFLICT (agent_id, day) DO UPDATE SET count = count + 1",
+            "UPDATE chat_reply_counts SET count = count - 1 "
+            "WHERE agent_id = ? AND day = date('now') AND count > 0",
             (agent_id,),
         )
         conn.commit()
