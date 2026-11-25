@@ -61,6 +61,7 @@ from utils import (
     build_tool_configs,
     capture_exception_to_sentry,
     env_bool,
+    env_int,
     public_url_error,
     with_calibrate_eval_header,
     TaskStatus,
@@ -1233,6 +1234,8 @@ def get_public_invite(
 
 CHAT_REPLY_TIMEOUT_SECONDS = 60
 MAX_CHAT_TURNS = 500
+# How many times one chat reply may go back to the model after running tools.
+DEFAULT_CHAT_MAX_TOOL_ROUNDS = 5
 _CHAT_TOKEN_DESCRIPTION = "Token from the chat link you were sent"
 
 
@@ -1375,6 +1378,7 @@ def _prepare_chat_reply(
             "model": llm.get("model", "openai/gpt-4.1"),
             "provider": provider,
             "api_key": api_key,
+            "max_tool_rounds": max(1, env_int("CHAT_MAX_TOOL_ROUNDS", DEFAULT_CHAT_MAX_TOOL_ROUNDS)),
         }
     return chat
 

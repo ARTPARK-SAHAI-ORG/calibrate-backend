@@ -306,6 +306,18 @@ def test_built_agent_uses_the_server_key_when_the_workspace_has_none(client):
     assert llm.call_args.kwargs["api_key"] == "sk-server"
 
 
+@pytest.mark.parametrize("setting, rounds", [(None, 5), ("2", 2), ("0", 1), ("lots", 5)])
+def test_built_agent_tool_rounds_come_from_the_setting(client, monkeypatch, setting, rounds):
+    if setting is None:
+        monkeypatch.delenv("CHAT_MAX_TOOL_ROUNDS", raising=False)
+    else:
+        monkeypatch.setenv("CHAT_MAX_TOOL_ROUNDS", setting)
+    _, _, token = _chat_agent(client)
+    with patch.object(public, "_llm_reply", _llm()) as llm:
+        _send(client, token)
+    assert llm.call_args.kwargs["max_tool_rounds"] == rounds
+
+
 def test_workspace_keys_without_this_provider_make_the_agent_unavailable(client):
     _, agent, token = _chat_agent(client)
     _save_key(agent["org_uuid"], "openai", "sk-openai")
