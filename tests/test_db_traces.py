@@ -601,10 +601,9 @@ def test_feedback_is_set_replaced_and_cleared_on_any_live_trace():
     assert db.get_trace(org, chat["uuid"])["feedback"] is None
     with db.get_db_connection() as conn:
         stored = conn.execute(
-            "SELECT feedback_is_correct, feedback_comment, feedback_at FROM traces WHERE uuid = ?",
-            (chat["uuid"],),
+            "SELECT feedback FROM traces WHERE uuid = ?", (chat["uuid"],)
         ).fetchone()
-    assert tuple(stored) == (None, None, None)
+    assert stored[0] is None
 
     assert db.set_trace_feedback(org, api["uuid"], False, "Wrong date")
     assert db.get_trace(org, api["uuid"])["feedback"]["is_correct"] is False

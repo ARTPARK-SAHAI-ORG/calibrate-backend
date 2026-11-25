@@ -1715,9 +1715,9 @@ def init_db():
         for column in (
             "labels TEXT DEFAULT NULL",
             "source TEXT DEFAULT 'api'",
-            "feedback_is_correct INTEGER DEFAULT NULL",
-            "feedback_comment TEXT DEFAULT NULL",
-            "feedback_at TIMESTAMP DEFAULT NULL",
+            # JSON {is_correct, comment, at}, or NULL for none: one column so
+            # the shape of feedback can grow without a migration each time.
+            "feedback TEXT DEFAULT NULL",
         ):
             try:
                 cursor.execute(f"ALTER TABLE traces ADD COLUMN {column}")
@@ -10931,18 +10931,36 @@ def _trace_row(row: sqlite3.Row) -> Dict[str, Any]:
         "metadata": json.loads(row["metadata"]) if row["metadata"] else None,
         "labels": json.loads(row["labels"]) if row["labels"] else [],
         "source": row["source"] or "api",
-        "feedback": (
-            {
-                "is_correct": bool(row["feedback_is_correct"]),
-                "comment": row["feedback_comment"],
-                "at": _trace_iso(row["feedback_at"]),
-            }
-            if row["feedback_is_correct"] is not None
-            else None
-        ),
+        "feedback": _trace_feedback(row["feedback"]),
         "created_at": _trace_iso(row["created_at"]),
         "updated_at": _trace_iso(row["updated_at"]),
     }
+
+
+def _trace_feedback(stored: Optional[str]) -> Optional[Dict[str, Any]]:
+    if not stored:
+        return None
+    feedback = json.loads(stored)
+    return {
+        "is_correct": bool(feedback["is_correct"]),
+        "comment": feedback.get("comment"),
+        "at": _trace_iso(feedback.get("at")),
+    }
+
+
+# The feedback column's value from (is_correct, is_correct as JSON, comment):
+# NULL when is_correct is NULL, so one statement both sets and clears it, and
+# `at` comes from the database clock like every other timestamp.
+_FEEDBACK_JSON_SQL = (
+    "CASE WHEN ? IS NULL THEN NULL ELSE "
+    "json_object('is_correct', json(?), 'comment', ?, 'at', CURRENT_TIMESTAMP) END"
+)
+
+
+def _trace_feedback_params(is_correct: Optional[bool], comment: Optional[str]) -> tuple:
+    if is_correct is None:
+        return (None, None, None)
+    return (int(is_correct), "true" if is_correct else "false", comment)
 
 
 def _trace_iso(ts: Optional[str]) -> Optional[str]:
@@ -11189,9 +11207,9 @@ def count_live_traces(org_uuid: str) -> int:
 
 
 _TRACE_FEEDBACK_SQL = {
-    "correct": "feedback_is_correct = 1",
-    "wrong": "feedback_is_correct = 0",
-    "any": "feedback_is_correct IS NOT NULL",
+    "correct": "json_extract(feedback, '$.is_correct') = 1",
+    "wrong": "json_extract(feedback, '$.is_correct') = 0",
+    "any": "feedback IS NOT NULL",
 }
 
 
@@ -11215,10 +11233,8 @@ def _insert_trace_row(
         """
         INSERT INTO traces
             (uuid, org_uuid, agent_id, message_id, conversation_id,
-             input, output, metadata, labels, source,
-             feedback_is_correct, feedback_comment, feedback_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
-                CASE WHEN ? IS NULL THEN NULL ELSE CURRENT_TIMESTAMP END)
+             input, output, metadata, labels, source, feedback)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, """ + _FEEDBACK_JSON_SQL + """)
         """,
         (
             trace_uuid,
@@ -11231,9 +11247,10 @@ def _insert_trace_row(
             json.dumps(metadata) if metadata is not None else None,
             json.dumps(labels) if labels else None,
             source,
-            int(feedback["is_correct"]) if feedback else None,
-            feedback.get("comment") if feedback else None,
-            int(feedback["is_correct"]) if feedback else None,
+            *_trace_feedback_params(
+                feedback["is_correct"] if feedback else None,
+                feedback.get("comment") if feedback else None,
+            ),
         ),
     )
     row = cur.execute(
@@ -11638,16 +11655,12 @@ def set_trace_feedback(
 ) -> bool:
     """Set or replace the feedback on a live trace, or clear it when
     `is_correct` is None. Returns whether such a trace was updated."""
-    value = None if is_correct is None else int(is_correct)
-    if value is None:
-        comment = None
     with get_db_connection() as conn:
         cursor = conn.execute(
-            "UPDATE traces SET feedback_is_correct = ?, feedback_comment = ?, "
-            "feedback_at = CASE WHEN ? IS NULL THEN NULL ELSE CURRENT_TIMESTAMP END, "
+            f"UPDATE traces SET feedback = {_FEEDBACK_JSON_SQL}, "
             "updated_at = CURRENT_TIMESTAMP "
             "WHERE org_uuid = ? AND uuid = ? AND deleted_at IS NULL",
-            (value, comment, value, org_uuid, trace_uuid),
+            (*_trace_feedback_params(is_correct, comment), org_uuid, trace_uuid),
         )
         conn.commit()
         return cursor.rowcount > 0
