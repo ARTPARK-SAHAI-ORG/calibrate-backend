@@ -1150,7 +1150,7 @@ class ConvertTracesToTestsResponse(BaseModel):
     )
     warnings: Optional[List[str]] = Field(
         None,
-        description="What was created but not fully wired up, such as a test whose agent no longer exists",
+        description="Tests that were created but cannot be run, or were not added to their agent, named with what to do about them",
     )
 
 
@@ -1240,6 +1240,14 @@ def _dedupe_test_names(candidates: List[str], taken: set) -> List[str]:
         taken.add(name)
         out.append(name)
     return out
+
+
+def _test_names_line(names: List[str], shown: int = 5) -> str:
+    """The first few test names, then how many more, for a warning line."""
+    line = ", ".join(names[:shown])
+    if len(names) > shown:
+        line += f" and {len(names) - shown} more"
+    return line
 
 
 @router.post(
@@ -1409,25 +1417,26 @@ def convert_traces_to_tests(
     # The tests are already committed, so a failure here must not 500 and lose
     # them: report what did not get wired up and let the user fix it in place.
     warnings: List[str] = []
-    unjudged = 0
+    unjudged: List[str] = []
     if resolved_refs:
-        for test_uuid in test_uuids:
+        for test_uuid, db_test in zip(test_uuids, db_tests):
             try:
                 set_test_evaluators(test_uuid, resolved_refs)
             except Exception as e:
-                unjudged += 1
+                unjudged.append(db_test["name"])
                 logger.warning(f"Failed to link evaluators to test {test_uuid}: {e}")
     if unjudged:
         warnings.append(
-            f"{unjudged} of {len(test_uuids)} tests were created without evaluators "
-            "and will not run until you attach one"
+            f"{len(unjudged)} of the {len(test_uuids)} new tests have no evaluator, "
+            f"so they cannot be run: {_test_names_line(unjudged)}. "
+            "Open each one on the agent's Tests tab and add an evaluator."
         )
 
     # Each test links to the agent that produced its trace. One agent deleted
     # since ingest, or switched to an interaction_type the created test no longer
     # fits, must not fail a batch the user cannot retry.
     agents_seen: Dict[str, Optional[Dict[str, Any]]] = {}
-    unlinked = 0
+    unlinked: List[str] = []
     for trace, test_uuid, db_test in zip(traces, test_uuids, db_tests):
         agent_id = trace["agent_id"]
         if agent_id not in agents_seen:
@@ -1439,17 +1448,18 @@ def convert_traces_to_tests(
         if not agent or required_agent_interaction_type(
             payload.type, db_test["config"]
         ) != (agent.get("interaction_type") or DEFAULT_AGENT_INTERACTION_TYPE):
-            unlinked += 1
+            unlinked.append(db_test["name"])
             continue
         try:
             add_test_to_agent(agent_id, test_uuid)
         except Exception as e:
-            unlinked += 1
+            unlinked.append(db_test["name"])
             logger.warning(f"Failed to link test {test_uuid} to agent {agent_id}: {e}")
     if unlinked:
         warnings.append(
-            f"{unlinked} of {len(test_uuids)} tests were not linked to an agent, "
-            "so they will not appear on any agent's test list"
+            f"{len(unlinked)} of the {len(test_uuids)} new tests could not be added "
+            "to the agent's Tests tab, so they do not show anywhere in the app: "
+            f"{_test_names_line(unlinked)}. Add those traces to tests again."
         )
 
     return {

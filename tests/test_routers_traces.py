@@ -1366,9 +1366,11 @@ def test_convert_still_creates_the_test_when_the_agent_is_gone(client):
     assert client.get(f"/tests/{body['test_uuids'][0]}", headers=h).status_code == 200
     assert get_tests_for_agent(agent_id) == []
     # The response says what was created but not wired up.
+    name = client.get(f"/tests/{body['test_uuids'][0]}", headers=h).json()["name"]
     assert body["warnings"] == [
-        "1 of 1 tests were not linked to an agent, "
-        "so they will not appear on any agent's test list"
+        "1 of the 1 new tests could not be added to the agent's Tests tab, "
+        f"so they do not show anywhere in the app: {name}. "
+        "Add those traces to tests again."
     ]
 
 
@@ -1546,11 +1548,15 @@ def test_convert_warns_when_evaluators_could_not_be_linked(client, monkeypatch):
         assert client.get(f"/tests/{test_uuid}", headers=h).status_code == 200
         assert get_evaluators_for_test(test_uuid) == []
     assert get_tests_for_agent(agent_id) == []
+    names = ", ".join(
+        client.get(f"/tests/{u}", headers=h).json()["name"] for u in body["test_uuids"]
+    )
     assert body["warnings"] == [
-        "2 of 2 tests were created without evaluators "
-        "and will not run until you attach one",
-        "2 of 2 tests were not linked to an agent, "
-        "so they will not appear on any agent's test list",
+        f"2 of the 2 new tests have no evaluator, so they cannot be run: {names}. "
+        "Open each one on the agent's Tests tab and add an evaluator.",
+        "2 of the 2 new tests could not be added to the agent's Tests tab, "
+        f"so they do not show anywhere in the app: {names}. "
+        "Add those traces to tests again.",
     ]
 
 
@@ -1814,11 +1820,20 @@ def test_convert_skips_the_link_when_the_agent_switched_interaction_type(client)
     assert res.status_code == 200, res.text
     body = res.json()
     assert body["created"] == 1
+    name = client.get(f"/tests/{body['test_uuids'][0]}", headers=h).json()["name"]
     assert body["warnings"] == [
-        "1 of 1 tests were not linked to an agent, "
-        "so they will not appear on any agent's test list"
+        "1 of the 1 new tests could not be added to the agent's Tests tab, "
+        f"so they do not show anywhere in the app: {name}. "
+        "Add those traces to tests again."
     ]
     assert get_tests_for_agent(agent_id) == []
+
+
+def test_test_names_line_shows_five_names_then_a_count():
+    from routers.traces import _test_names_line
+
+    assert _test_names_line(["a", "b"]) == "a, b"
+    assert _test_names_line([str(i) for i in range(8)]) == "0, 1, 2, 3, 4 and 3 more"
 
 
 def test_last_user_content_handles_both_input_shapes():
