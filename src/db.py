@@ -10,7 +10,7 @@ from typing import Optional, List, Dict, Any, Set, Tuple, TYPE_CHECKING
 from contextlib import contextmanager
 
 import trace_scoring
-from utils import env_int, is_tool_call_row, trace_scoring_enabled
+from utils import env_int, is_tool_call_row, trace_scoring_enabled, utc_now
 
 if TYPE_CHECKING:
     from routers.org_limits import OrgLimits
@@ -10963,15 +10963,11 @@ def _trace_feedback(stored: Optional[str]) -> Optional[Dict[str, Any]]:
     }
 
 
-# Stores the feedback JSON from `_feedback_json` with `at` stamped by the
-# database clock, like every other timestamp. NULL in gives NULL, which clears it.
-_FEEDBACK_JSON_SQL = "json_set(?, '$.at', CURRENT_TIMESTAMP)"
-
-
 def _feedback_json(is_correct: Optional[bool], comment: Optional[str]) -> Optional[str]:
+    """The feedback column's value, or None, which clears it."""
     if is_correct is None:
         return None
-    return json.dumps({"is_correct": is_correct, "comment": comment})
+    return json.dumps({"is_correct": is_correct, "comment": comment, "at": utc_now()})
 
 
 def _trace_iso(ts: Optional[str]) -> Optional[str]:
@@ -11245,7 +11241,7 @@ def _insert_trace_row(
         INSERT INTO traces
             (uuid, org_uuid, agent_id, message_id, conversation_id,
              input, output, metadata, labels, source, feedback)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, """ + _FEEDBACK_JSON_SQL + """)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             trace_uuid,
@@ -11665,7 +11661,7 @@ def set_trace_feedback(
     `is_correct` is None. Returns whether such a trace was updated."""
     with get_db_connection() as conn:
         cursor = conn.execute(
-            f"UPDATE traces SET feedback = {_FEEDBACK_JSON_SQL}, "
+            "UPDATE traces SET feedback = ?, "
             "updated_at = CURRENT_TIMESTAMP "
             "WHERE org_uuid = ? AND uuid = ? AND deleted_at IS NULL",
             (_feedback_json(is_correct, comment), org_uuid, trace_uuid),
