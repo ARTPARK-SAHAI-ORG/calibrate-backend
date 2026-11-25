@@ -3120,6 +3120,39 @@ def test_tool_call_judge_backfill_fills_blank_forks_in_place():
     assert db.get_evaluator_version(deleted["live_version_id"])["system_prompt"] == ""
 
 
+def test_tool_call_judge_backfill_fills_every_blank_version_of_a_fork():
+    """An older blank version can be made live again, so it needs a judge too."""
+    _user, org_uuid = _fresh_org()
+    fork = db.get_tool_call_evaluator_for_org(org_uuid)
+    first = fork["live_version_id"]
+    second = db.create_evaluator_version(fork["uuid"], "", "")["uuid"]
+    deleted = db.create_evaluator_version(fork["uuid"], "", "")["uuid"]
+    with db.get_db_connection() as conn:
+        conn.execute(
+            "UPDATE evaluator_versions SET system_prompt = '', judge_model = '' "
+            "WHERE uuid = ?",
+            (first,),
+        )
+        conn.execute(
+            "UPDATE evaluator_versions SET deleted_at = CURRENT_TIMESTAMP WHERE uuid = ?",
+            (deleted,),
+        )
+        conn.execute(
+            "DELETE FROM _schema_migrations WHERE name = ?",
+            (db.FILL_TOOL_CALL_EVALUATOR_JUDGE_MIGRATION,),
+        )
+        conn.commit()
+
+    db.init_db()
+
+    seed = db._TOOL_CALL_SEED["version"]
+    for version_uuid in (first, second):
+        version = db.get_evaluator_version(version_uuid)
+        assert version["system_prompt"] == seed["system_prompt"]
+        assert version["judge_model"] == seed["judge_model"]
+    assert db.get_evaluator_version(deleted)["system_prompt"] == ""
+
+
 def test_tool_call_judge_backfill_runs_once():
     """A prompt emptied after the one-time fill must not be filled again on restart."""
     _user, org_uuid = _fresh_org()

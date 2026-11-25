@@ -833,9 +833,8 @@ def process_claimed_runs(
         )
         for item in prepared:
             _settle_or_defer_terminal(
-                item.run,
-                reason=reason,
-                now=prepare_now, rng=rng, max_attempts=max_attempts,
+                item.run, reason=reason, now=prepare_now, rng=rng,
+                max_attempts=max_attempts,
             )
         return
 

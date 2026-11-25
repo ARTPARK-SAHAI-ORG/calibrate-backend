@@ -3601,16 +3601,16 @@ def _backfill_rename_tool_call_evaluator_description(cursor: sqlite3.Cursor) -> 
 
 def _backfill_fill_tool_call_evaluator_judge(cursor: sqlite3.Cursor) -> int:
     """One-time migration: give each org's fork of the tool-call correctness
-    evaluator the seed's prompt and model. Updates the live version in place
-    rather than adding one, so answers people already recorded stay on it. A
-    prompt a user wrote is kept. The template itself is reconciled by
-    `_seed_default_evaluators`."""
+    evaluator the seed's prompt and model. Fills every blank version in place
+    rather than adding one, so answers people already recorded stay on them, and
+    an older version made live again still has a judge. A prompt a user wrote is
+    kept. The template itself is reconciled by `_seed_default_evaluators`."""
     version = _TOOL_CALL_SEED["version"]
     cursor.execute(
         """
         UPDATE evaluator_versions SET system_prompt = ?, judge_model = ?
-        WHERE TRIM(system_prompt) = '' AND uuid IN (
-            SELECT live_version_id FROM evaluators
+        WHERE TRIM(system_prompt) = '' AND deleted_at IS NULL AND evaluator_id IN (
+            SELECT uuid FROM evaluators
             WHERE source_default_slug = ? AND deleted_at IS NULL
         )
         """,
