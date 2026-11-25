@@ -302,6 +302,7 @@ EvalJobType = Literal["stt-eval", "tts-eval", "annotation-eval"]
 AnnotationTaskTypeLiteral = Literal["stt", "llm", "llm-general", "conversation", "tts"]
 MemberRoleLiteral = Literal["owner", "admin"]  # mirrors DB CHECK(role IN ('owner','admin'))
 EvaluatorUuid = Annotated[str, StringConstraints(min_length=36, max_length=36)]
+NonBlankStr = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1)]
 TestUuid = Annotated[str, StringConstraints(min_length=36, max_length=36)]
 
 # Evaluator names that collide with reserved bulk-CSV output columns (an

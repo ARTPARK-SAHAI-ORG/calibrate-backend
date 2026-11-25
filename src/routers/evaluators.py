@@ -8,7 +8,7 @@ Replaces the legacy `metrics` router. Adds:
  - API-key-authenticated invocation endpoint
 """
 
-from typing import Annotated, Any, Dict, List, Literal, Optional
+from typing import Any, Dict, List, Literal, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Path, Query
 from pagination import (
@@ -28,7 +28,7 @@ _EvaluatorDetailProjection = make_projection_params(
         "versions[].variables",
     ]
 )
-from pydantic import BaseModel, Field, StringConstraints, model_validator
+from pydantic import BaseModel, Field, model_validator
 
 from auth_utils import get_current_org, get_current_user_id, get_org_jwt_or_api_key, OrgContext
 from db import (
@@ -52,6 +52,7 @@ from db import (
 from shared_enums import EvaluatorType
 from utils import (
     DataTypeLiteral,
+    NonBlankStr,
     EVALUATOR_TYPE_DESCRIPTION,
     DATA_TYPE_DESCRIPTION,
     OUTPUT_TYPE_DESCRIPTION,
@@ -120,8 +121,6 @@ _RUBRIC_DESCRIPTION = (
 
 
 # ============ Pydantic models ============
-
-NonBlankStr = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1)]
 
 
 class OutputScaleEntry(BaseModel):

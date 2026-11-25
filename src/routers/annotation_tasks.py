@@ -72,16 +72,16 @@ from annotation_eval_runner import (
     EvaluatorResolutionError,
     DatasetBuildError,
     _resolve_evaluator_dicts,
-    evaluators_fitting_row,
     build_dataset_for_task_type,
-    is_tool_call_row,
     required_evaluator_ids_for_item,
     start_annotation_eval_job,
-    TOOL_CALL_EVALUATOR_TYPE,
 )
 from annotation_metrics import KappaFields
 from utils import (
     utc_now,
+    TOOL_CALL_EVALUATOR_TYPE,
+    evaluators_fitting_row,
+    is_tool_call_row,
     job_slot,
     TaskStatus,
     AnnotationTaskTypeLiteral,

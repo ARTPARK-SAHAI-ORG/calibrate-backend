@@ -373,7 +373,7 @@ def test_required_evaluator_ids_for_item_normal_row():
     )
 
 
-def _resolve_with_tool_call_evaluator(requested, tc_prompt="Judge the calls", **tc):
+def _resolve_with_tool_call_evaluator(requested, **tc):
     """Resolve `requested` where ev-tc is a tool-call evaluator and ev-1 is a
     normal LLM judge."""
     evaluators = {
@@ -390,9 +390,7 @@ def _resolve_with_tool_call_evaluator(requested, tc_prompt="Judge the calls", **
     }
     versions = {
         "ver-1": _version_record(),
-        "ver-tc": _version_record(
-            uuid="ver-tc", evaluator_id="ev-tc", system_prompt=tc_prompt
-        ),
+        "ver-tc": _version_record(uuid="ver-tc", evaluator_id="ev-tc"),
     }
     with patch(
         "annotation_eval_runner.get_evaluator", side_effect=lambda u: evaluators[u]
@@ -655,8 +653,9 @@ def test_build_llm_general_skips_rows_with_no_evaluator():
     assert runner._build_llm_general_dataset([TC_ROW], [REPLY_EV]) == []
 
 
-def test_parse_llm_general_stores_nothing_for_a_blank_cell(tmp_path):
-    # calibrate general leaves an evaluator that did not run on a row blank.
+def test_parse_llm_general_blank_cell_fails_only_where_the_evaluator_was_sent(tmp_path):
+    # calibrate general leaves blank an evaluator a row was not sent, and also
+    # an evaluator whose judge call failed on a row it was sent.
     (tmp_path / "config.json").write_text(
         json.dumps({"evaluators_map": {"ev-1": "Reply", "ev-tc": "Tool"}})
     )
@@ -664,15 +663,24 @@ def test_parse_llm_general_stores_nothing_for_a_blank_cell(tmp_path):
         "id,input,output,Reply,Reply_reasoning,Tool,Tool_reasoning\n"
         "r,i,o,1,ok,,\n"
         "tc,i,,,,0,no\n"
+        "broken,i,o,,,,\n"
     )
     evs = [
         {**_ev_resolved("ev-1", "Reply"), "evaluator_type": "llm"},
         {**_ev_resolved("ev-tc", "Tool"), "evaluator_type": "tool-call"},
     ]
-    runs = runner.parse_results_for_task_type("llm-general", tmp_path, evs, "job-1")
-    assert sorted((r["item_id"], r["evaluator_id"], r["value"]["value"]) for r in runs) == [
-        ("r", "ev-1", True),
-        ("tc", "ev-tc", False),
+    items = [
+        {"uuid": "r", "payload": {"input": "i", "output": "o"}},
+        {**TC_ROW, "uuid": "tc"},
+        {"uuid": "broken", "payload": {"input": "i", "output": "o"}},
+    ]
+    runs = runner.parse_results_for_task_type(
+        "llm-general", tmp_path, evs, "job-1", items=items
+    )
+    assert sorted((r["item_id"], r["evaluator_id"], r["status"]) for r in runs) == [
+        ("broken", "ev-1", "failed"),
+        ("r", "ev-1", "completed"),
+        ("tc", "ev-tc", "completed"),
     ]
 
 
@@ -1079,13 +1087,6 @@ def test_parse_results_stt_empty_value(tmp_path):
     assert runs[0]["status"] == "failed"
 
 
-def test_parse_results_general_skips_an_evaluator_the_row_did_not_run(tmp_path):
-    (tmp_path / "results.csv").write_text(
-        "id,input,output,Safety,Safety_reasoning\ni1,a,b,,\n"
-    )
-    assert runner._parse_results_general(tmp_path, [_ev_resolved()], "job-1") == []
-
-
 def test_parse_results_stt_no_id_row(tmp_path):
     (tmp_path / "results.csv").write_text(
         "id,gt,pred,Safety,Safety_reasoning\n,a,a,1,ok\n"
@@ -1246,7 +1247,10 @@ def test_parse_results_general(tmp_path):
         "i1,in1,out1,1,ok\n"
         "i2,in2,out2,0,not ok\n"
     )
-    runs = runner._parse_results_general(tmp_path, [_ev_resolved()], "job-1")
+    items = [
+        {"uuid": i, "payload": {"input": "in", "output": "out"}} for i in ("i1", "i2")
+    ]
+    runs = runner._parse_results_general(tmp_path, [_ev_resolved()], "job-1", items)
     assert len(runs) == 2
     assert runs[0]["evaluator_id"] == "ev-1"
     assert runs[0]["value"]["value"] is True

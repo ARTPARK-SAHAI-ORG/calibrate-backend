@@ -147,15 +147,6 @@ class TraceScoringResolution:
     eligible: list[TraceScoringEligible] = field(default_factory=list)
     ineligible: list[TraceScoringIneligible] = field(default_factory=list)
 
-    @property
-    def skip_reason(self) -> TraceEvalSkipReason | None:
-        """Why nothing can score, or None when the eligible list is runnable."""
-        if self.evaluation_type is None:
-            return "unsupported_interaction_type"
-        if not self.eligible:
-            return "no_usable_evaluators"
-        return None
-
 
 def resolve_trace_scoring(
     interaction_type: AgentInteractionType | None,
@@ -308,6 +299,7 @@ class BatchEvaluators:
     hydrated: list[dict[str, Any]]
     has_tool_call_evaluator: bool = False
 
+
 def resolve_batch_evaluators(
     agent_id: str,
 ) -> BatchEvaluators | TraceEvalSkipReason | TraceEvalSettleSkipReason:
@@ -326,7 +318,7 @@ def resolve_batch_evaluators(
     live = resolve_live_evaluators(agent["uuid"])
     resolution = resolve_trace_scoring(agent.get("interaction_type"), live)
     if resolution.evaluation_type is None:
-        return resolution.skip_reason
+        return "unsupported_interaction_type"
     # An agent with no usable evaluator still resolves, so each trace settles
     # with its own skip reason.
     return BatchEvaluators(
@@ -349,8 +341,6 @@ def is_tool_call_trace(trace: dict[str, Any]) -> bool:
     return isinstance(calls, list) and any(
         isinstance(call, dict) and call.get("tool") for call in calls
     )
-
-
 
 
 def build_dataset_item(
@@ -389,7 +379,7 @@ def build_dataset_item(
 
 def build_eval_only_batch(
     prepared: Sequence[PreparedRun],
-    evaluators: BatchEvaluators,
+    evaluation_type: TraceScorableEvaluationType,
 ) -> tuple[dict[str, Any], list[dict[str, Any]], dict[str, str]]:
     """Assemble one invocation covering the whole batch.
 
@@ -409,7 +399,7 @@ def build_eval_only_batch(
     dataset = [
         build_dataset_item(
             item.run["uuid"],
-            evaluators.evaluation_type,
+            evaluation_type,
             item.trace,
             criteria_per_run.get(item.run["uuid"]) or [],
         )
@@ -870,7 +860,9 @@ def process_claimed_runs(
         return
 
     try:
-        config, dataset, manifest = build_eval_only_batch(prepared, evaluators)
+        config, dataset, manifest = build_eval_only_batch(
+            prepared, evaluators.evaluation_type
+        )
     except Exception as exc:
         logger.exception("trace-scoring: building the batch raised")
         build_now = utc_now()

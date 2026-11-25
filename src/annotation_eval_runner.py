@@ -45,7 +45,6 @@ from llm_judge import (
 )
 from utils import (
     utc_now,
-    TOOL_CALL_EVALUATOR_TYPE,
     TaskStatus,
     capture_exception_to_sentry,
     coerce_evaluator_score,
@@ -383,16 +382,9 @@ def _build_llm_dataset(
             "type": "tool_call_judge" if row_is_tool_call else "response",
             "criteria": _criteria_refs_for_item(it, payload, row_evaluators),
         }
-        if row_is_tool_call:
-            tool_calls, expected = _tool_call_lists(it, payload)
-            if expected is not None:
-                evaluation["expected_tool_calls"] = expected
-        else:
-            tool_calls = payload.get("tool_calls", [])
-            if not isinstance(tool_calls, list):
-                raise DatasetBuildError(
-                    f"Item {it['uuid']}: `tool_calls` must be a list if provided"
-                )
+        tool_calls, expected = _tool_call_lists(it, payload)
+        if row_is_tool_call and expected is not None:
+            evaluation["expected_tool_calls"] = expected
         out.append(
             {
                 "test_case": {
@@ -827,16 +819,23 @@ def _parse_results_general(
     output_dir: Path,
     evaluators_resolved: List[Dict[str, Any]],
     job_uuid: str,
+    items: List[Dict[str, Any]],
 ) -> List[Dict[str, Any]]:
     """`calibrate general` writes the same `results.csv` shape as STT: an `id`
     column plus a `<name>`/`<name>_reasoning` pair per evaluator, with the
     column→uuid mapping recorded in `config.json`'s `evaluators_map`. The only
     difference is the built-in columns (`input, output` instead of `gt, pred,
     wer`), which the column-map-driven parser ignores — so the STT CSV parser
-    handles general results verbatim. A blank cell is an evaluator the row did
-    not name in its `evaluators`, so it stores nothing."""
+    handles general results verbatim. A row leaves blank the evaluators it was
+    not sent, which store nothing; a blank from an evaluator it was sent is a
+    failed run."""
+    sent = {
+        (it["uuid"], ev["uuid"])
+        for it in items
+        for ev in evaluators_fitting_row(evaluators_resolved, is_tool_call_row(it))
+    }
     runs = _parse_results_stt(output_dir, evaluators_resolved, job_uuid)
-    return [r for r in runs if r["value"] is not None]
+    return [r for r in runs if (r["item_id"], r["evaluator_id"]) in sent]
 
 
 def _parse_results_llm(
@@ -1054,7 +1053,9 @@ def parse_results_for_task_type(
     if task_type == "llm":
         return _parse_results_llm(output_dir, evaluators_resolved, job_uuid)
     if task_type == "llm-general":
-        return _parse_results_general(output_dir, evaluators_resolved, job_uuid)
+        return _parse_results_general(
+            output_dir, evaluators_resolved, job_uuid, items or []
+        )
     if task_type == "conversation":
         return _parse_results_simulation(
             output_dir, evaluators_resolved, job_uuid, items=items

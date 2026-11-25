@@ -60,6 +60,7 @@ from routers.org_limits import daily_message_limit, effective_limits, record_lim
 from shared_enums import DEFAULT_AGENT_INTERACTION_TYPE, EvaluatorType
 from testing.fake_calibrate_agent import FAKE_RESPONSE
 from utils import (
+    TOOL_CALL_EVALUATOR_TYPE,
     default_agent_llm_model,
     build_tool_configs,
     capture_exception_to_sentry,
@@ -117,7 +118,6 @@ from routers.annotation_tasks import (
 )
 from annotation_eval_runner import (
     ANNOTATION_EVAL_JOB_TYPE,
-    TOOL_CALL_EVALUATOR_TYPE,
     required_evaluator_ids_for_item,
 )
 

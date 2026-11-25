@@ -53,7 +53,6 @@ def test_conversation_agent_maps_to_response_llm():
     assert [p.evaluator_uuid for p in result.eligible] == [ev["uuid"]]
     assert result.eligible[0].evaluator_version_id == live
     assert result.ineligible == []
-    assert result.skip_reason is None
 
 
 def test_general_agent_maps_to_general_llm_general():
@@ -63,7 +62,6 @@ def test_general_agent_maps_to_general_llm_general():
     assert result.evaluation_type == "general"
     assert result.evaluator_type == "llm-general"
     assert result.eligible[0].evaluator_uuid == ev["uuid"]
-    assert result.skip_reason is None
 
 
 def test_mixed_evaluator_types_are_filtered_before_validation():
@@ -104,7 +102,6 @@ def test_no_live_version_disqualifies():
         "none": ts.IneligibleReason.NO_LIVE_VERSION,
         "missing": ts.IneligibleReason.NO_LIVE_VERSION,
     }
-    assert result.skip_reason == "no_usable_evaluators"
 
 
 def test_declares_variables_disqualifies():
@@ -260,7 +257,7 @@ def test_the_evaluator_type_is_not_sent_to_the_cli():
                 [execution],
             )
         ],
-        ts.BatchEvaluators(evaluation_type="response", hydrated=[execution]),
+        "response",
     )
     assert "evaluator_type" not in config["evaluators"][0]
     assert dataset[0]["test_case"]["evaluation"]["criteria"] == [{"name": "Tools"}]
@@ -283,14 +280,12 @@ def test_unsupported_interaction_type_skips_and_marks_wrong_type():
     assert result.evaluation_type is None
     assert result.eligible == []
     assert result.ineligible[0].reason == ts.IneligibleReason.WRONG_TYPE
-    assert result.skip_reason == "unsupported_interaction_type"
 
 
 def test_empty_linked_set_is_not_usable():
     result = ts.resolve_trace_scoring("conversation", [])
     assert result.eligible == []
     assert result.ineligible == []
-    assert result.skip_reason == "no_usable_evaluators"
 
 
 def test_resolve_live_evaluators_pairs_version_or_none():
