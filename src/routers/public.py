@@ -1257,27 +1257,6 @@ def _chat_link_agent(token: str, user_id: Optional[str]) -> Dict[str, Any]:
     return agent
 
 
-def _agent_turns(result: Dict[str, Any], id_prefix: str) -> List[Dict[str, Any]]:
-    """The agent's reply as messages: its turn, with any tool calls, then one
-    tool message per call."""
-    calls = result.get("tool_calls") or []
-    ids = [f"call_{id_prefix}_{i}" for i in range(len(calls))]
-    assistant: Dict[str, Any] = {"role": "assistant", "content": result.get("response")}
-    if calls:
-        assistant["tool_calls"] = [
-            {
-                "id": call_id,
-                "type": "function",
-                "function": {"name": call["tool"], "arguments": json.dumps(call.get("arguments") or {})},
-            }
-            for call_id, call in zip(ids, calls)
-        ]
-    return [assistant] + [
-        {"role": "tool", "tool_call_id": call_id, "content": json.dumps(call.get("output"))}
-        for call_id, call in zip(ids, calls)
-    ]
-
-
 async def _llm_reply(**kwargs: Any) -> Dict[str, Any]:
     from calibrate_agent.chat import agent_reply
 
@@ -1285,11 +1264,12 @@ async def _llm_reply(**kwargs: Any) -> Dict[str, Any]:
 
 
 async def _agent_reply(chat: Dict[str, Any]) -> Dict[str, Any]:
-    """`{response, tool_calls, stopped_early}` from the agent, tool calls in the
-    trace shape. `stopped_early` is true when it used every tool round it is
-    allowed and was cut off before replying."""
+    """`{response, tool_calls, stopped_early, new_messages}` from the agent, tool
+    calls in the trace shape. `stopped_early` is true when it used every tool
+    round it is allowed and was cut off before replying. `new_messages` is its
+    turn as the next message of the conversation will need it."""
     if env_bool("FAKE_AI_PROVIDERS", False):
-        return {"response": FAKE_RESPONSE, "tool_calls": []}
+        return _plain_reply(FAKE_RESPONSE)
     agent = chat["agent"]
     config = agent.get("config") or {}
     if not config.get("agent_url"):
@@ -1298,6 +1278,7 @@ async def _agent_reply(chat: Dict[str, Any]) -> Dict[str, Any]:
             "response": result["reply"] or None,
             "tool_calls": result["tool_calls"],
             "stopped_early": result.get("stopped") == "max_tool_rounds",
+            "new_messages": result["new_messages"],
         }
     error = await run_in_threadpool(public_url_error, config["agent_url"])
     if error:
@@ -1315,18 +1296,24 @@ async def _agent_reply(chat: Dict[str, Any]) -> Dict[str, Any]:
         for m in chat["messages"]
         if m["role"] in ("user", "assistant") and m.get("content")
     ]
-    return await connection.call(turns)
+    reply = await connection.call(turns)
+    return {**reply, "new_messages": [{"role": "assistant", "content": reply.get("response")}]}
 
 
-def _refuse_daily_limit(org_uuid: str, today: int, cap: int) -> None:
-    record_limit_hit(org_uuid, "max_chat_replies_per_day", "chat", today + 1, cap)
-    raise _chat_error(429, "daily_limit", limit=cap)
+def _plain_reply(text: str) -> Dict[str, Any]:
+    return {
+        "response": text,
+        "tool_calls": [],
+        "new_messages": [{"role": "assistant", "content": text}],
+    }
 
 
 def _reserve_daily_reply(agent: Dict[str, Any], cap: int) -> None:
     """Take one of today's replies before the agent is asked, or refuse."""
     if not reserve_chat_reply(agent["uuid"], cap):
-        _refuse_daily_limit(agent["org_uuid"], count_chat_replies_today(agent["uuid"]), cap)
+        today = count_chat_replies_today(agent["uuid"])
+        record_limit_hit(agent["org_uuid"], "max_chat_replies_per_day", "chat", today + 1, cap)
+        raise _chat_error(429, "daily_limit", limit=cap)
 
 
 def _prepare_chat_reply(
@@ -1337,10 +1324,8 @@ def _prepare_chat_reply(
     org_uuid = agent["org_uuid"]
     limits = effective_limits(org_uuid)
 
+    # Checked when the reply is counted, just before the agent is asked.
     daily_cap = daily_message_limit(agent, limits["max_chat_replies_per_day"])
-    today = count_chat_replies_today(agent["uuid"])
-    if today >= daily_cap:
-        _refuse_daily_limit(org_uuid, today, daily_cap)
 
     # A workspace full of traces still gets its reply; it is just not stored.
     trace_cap = limits["max_traces"]
@@ -1481,7 +1466,7 @@ async def send_public_agent_chat_message(
             save_chat_conversation,
             agent["uuid"],
             chat["conversation_id"],
-            chat["messages"] + _agent_turns(result, str(len(chat["messages"]))),
+            chat["messages"] + result["new_messages"],
         )
     row = None
     if chat["store_trace"]:

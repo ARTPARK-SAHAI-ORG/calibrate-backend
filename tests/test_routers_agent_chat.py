@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import uuid
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -62,8 +63,36 @@ def _chat_agent(client, interaction_type=None, config=None, h=None):
     return h, db.get_agent(agent["uuid"]), token
 
 
+def _library_reply(reply="Hello", tool_calls=(), stopped="reply"):
+    """What calibrate_agent.chat.agent_reply returns, new_messages built the way
+    it builds them: the tool round, one message per tool, then the reply."""
+    calls = list(tool_calls)
+    new_messages = []
+    if calls:
+        new_messages.append(
+            {
+                "role": "assistant",
+                "content": None,
+                "tool_calls": [
+                    {
+                        "id": c["id"],
+                        "type": "function",
+                        "function": {"name": c["tool"], "arguments": json.dumps(c["arguments"])},
+                    }
+                    for c in calls
+                ],
+            }
+        )
+        new_messages += [
+            {"role": "tool", "tool_call_id": c["id"], "content": json.dumps(c["output"])} for c in calls
+        ]
+    if stopped == "reply":
+        new_messages.append({"role": "assistant", "content": reply})
+    return {"reply": reply, "tool_calls": calls, "ended": False, "stopped": stopped, "new_messages": new_messages}
+
+
 def _llm(reply="Hello", tool_calls=()):
-    return AsyncMock(return_value={"reply": reply, "tool_calls": list(tool_calls), "ended": False})
+    return AsyncMock(return_value=_library_reply(reply, tool_calls))
 
 
 def _send(client, token, message="Hi", conversation_id=None, headers=None):
@@ -162,17 +191,18 @@ def test_the_conversation_kept_by_the_backend_reaches_the_agent_with_its_tool_ca
     with patch.object(public, "_llm_reply", _llm("Done")) as llm:
         second = _send(client, token, "Thanks", first["conversation_id"]).json()
 
-    call_id = "call_1_0"
+    # calibrate-agent's own messages, kept as it returned them.
     expected = [
         {"role": "user", "content": "Book it"},
         {
             "role": "assistant",
-            "content": "Booked",
+            "content": None,
             "tool_calls": [
-                {"id": call_id, "type": "function", "function": {"name": "book", "arguments": '{"day": 1}'}}
+                {"id": "x", "type": "function", "function": {"name": "book", "arguments": '{"day": 1}'}}
             ],
         },
-        {"role": "tool", "tool_call_id": call_id, "content": '{"ok": true}'},
+        {"role": "tool", "tool_call_id": "x", "content": '{"ok": true}'},
+        {"role": "assistant", "content": "Booked"},
         {"role": "user", "content": "Thanks"},
     ]
     assert llm.call_args.kwargs["messages"] == expected
@@ -289,7 +319,7 @@ def test_the_last_reply_of_the_day_is_taken_before_the_agent_is_asked(client, mo
     async def answering(**kwargs):
         seen.append(db.count_chat_replies_today(agent["uuid"]))
         seen.append(db.reserve_chat_reply(agent["uuid"], 1))
-        return {"reply": "Hi", "tool_calls": [], "ended": False}
+        return _library_reply("Hi")
 
     seen = []
     with patch.object(public, "_llm_reply", answering):
@@ -570,9 +600,7 @@ def test_llm_reply_hands_everything_to_calibrates_agent_reply():
 def test_a_reply_cut_off_after_the_tool_rounds_says_so_and_stores_it(client):
     h, agent, token = _chat_agent(client)
     calls = [{"id": "x", "tool": "lookup", "arguments": {}, "output": {"n": 1}}]
-    cut_off = AsyncMock(
-        return_value={"reply": "", "tool_calls": calls, "ended": False, "stopped": "max_tool_rounds"}
-    )
+    cut_off = AsyncMock(return_value=_library_reply("", calls, stopped="max_tool_rounds"))
     with patch.object(public, "_llm_reply", cut_off):
         body = _send(client, token).json()
     assert body["stopped_early"] is True
@@ -584,7 +612,7 @@ def test_a_reply_cut_off_after_the_tool_rounds_says_so_and_stores_it(client):
 
 def test_a_finished_reply_is_not_marked_as_cut_off(client):
     _, agent, token = _chat_agent(client)
-    finished = AsyncMock(return_value={"reply": "Hi", "tool_calls": [], "ended": False, "stopped": "reply"})
+    finished = AsyncMock(return_value=_library_reply("Hi"))
     with patch.object(public, "_llm_reply", finished):
         body = _send(client, token).json()
     assert body["stopped_early"] is False
