@@ -55,7 +55,7 @@ from provider_keys import MissingProviderKey, org_provider_key
 from provider_status import PROVIDER_ENV_VARS
 from routers.agents import _sanitize_headers
 from auth_utils import get_optional_user_id
-from routers.org_limits import chat_replies_per_day, effective_limits, record_limit_hit
+from routers.org_limits import daily_message_limit, effective_limits, record_limit_hit
 from shared_enums import DEFAULT_AGENT_INTERACTION_TYPE, EvaluatorType
 from testing.fake_calibrate_agent import FAKE_RESPONSE
 from utils import (
@@ -1336,7 +1336,7 @@ def _prepare_chat_reply(
     org_uuid = agent["org_uuid"]
     limits = effective_limits(org_uuid)
 
-    daily_cap = chat_replies_per_day(agent, limits["max_chat_replies_per_day"])
+    daily_cap = daily_message_limit(agent, limits["max_chat_replies_per_day"])
     today = count_chat_replies_today(agent["uuid"])
     if today >= daily_cap:
         _refuse_daily_limit(org_uuid, today, daily_cap)

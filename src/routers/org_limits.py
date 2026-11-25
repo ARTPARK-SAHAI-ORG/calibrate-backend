@@ -7,7 +7,6 @@ the effective values via `/me`.
 """
 
 import logging
-import os
 import sqlite3
 
 from fastapi import APIRouter, HTTPException, Depends, Path, Response
@@ -27,6 +26,7 @@ from db import (
 from auth_utils import get_current_org, OrgContext, require_superadmin, is_superadmin_user
 import provider_keys
 from admin_analytics import EVAL_FIELDS
+from utils import env_int
 
 logger = logging.getLogger(__name__)
 
@@ -35,16 +35,17 @@ router = APIRouter(prefix="/org-limits", tags=["org-limits"])
 # The kinds of run a limit hit can name: the same list the analytics count.
 EvalKind = Literal[tuple(EVAL_FIELDS)]
 
-DEFAULT_MAX_ROWS_PER_EVAL = int(os.getenv("DEFAULT_MAX_ROWS_PER_EVAL", "20"))
-DEFAULT_MAX_SCORED_TRACES = int(os.getenv("DEFAULT_MAX_SCORED_TRACES", "100"))
-DEFAULT_MAX_TRACES = int(os.getenv("DEFAULT_MAX_TRACES", "50000"))
-DEFAULT_TRACE_SCORING_BATCH_SIZE = int(os.getenv("DEFAULT_TRACE_SCORING_BATCH_SIZE", "20"))
-DEFAULT_MAX_CONCURRENT_TRACE_SCORING_BATCHES = int(
-    os.getenv("MAX_CONCURRENT_TRACE_SCORING_BATCHES_PER_ORG", "1")
+# env_int, not int(os.getenv(...)): the deploy workflows export every one of
+# these, as an empty string when its secret is missing, and int("") would stop
+# the server from starting.
+DEFAULT_MAX_ROWS_PER_EVAL = env_int("DEFAULT_MAX_ROWS_PER_EVAL", 20)
+DEFAULT_MAX_SCORED_TRACES = env_int("DEFAULT_MAX_SCORED_TRACES", 100)
+DEFAULT_MAX_TRACES = env_int("DEFAULT_MAX_TRACES", 50000)
+DEFAULT_TRACE_SCORING_BATCH_SIZE = env_int("DEFAULT_TRACE_SCORING_BATCH_SIZE", 20)
+DEFAULT_MAX_CONCURRENT_TRACE_SCORING_BATCHES = env_int(
+    "MAX_CONCURRENT_TRACE_SCORING_BATCHES_PER_ORG", 1
 )
-DEFAULT_MAX_CHAT_REPLIES_PER_DAY = int(
-    os.getenv("DEFAULT_MAX_CHAT_REPLIES_PER_DAY", "200")
-)
+DEFAULT_MAX_CHAT_REPLIES_PER_DAY = env_int("DEFAULT_MAX_CHAT_REPLIES_PER_DAY", 200)
 
 
 class OrgLimits(BaseModel):
@@ -244,23 +245,23 @@ def effective_max_chat_replies_per_day(org_uuid: str) -> Optional[int]:
 TALK_TO_AGENT_KEY = "talk_to_agent"
 
 
-def agent_messages_per_day(agent: Dict[str, Any]) -> Optional[int]:
+def agent_daily_message_limit(agent: Dict[str, Any]) -> Optional[int]:
     """The daily chat reply limit the agent's own config sets, if any."""
     return ((agent.get("config") or {}).get(TALK_TO_AGENT_KEY) or {}).get("messages_per_day")
 
 
-def chat_replies_per_day(agent: Dict[str, Any], maximum: Optional[int]) -> int:
+def daily_message_limit(agent: Dict[str, Any], maximum: Optional[int]) -> int:
     """The agent's daily chat reply limit: its own number, else the workspace
     default, and never above the workspace maximum, which may have been lowered
     since either was saved."""
-    number = agent_messages_per_day(agent)
+    number = agent_daily_message_limit(agent)
     if number is None:
         org = get_organization(agent["org_uuid"])
         number = org["settings"][TALK_TO_AGENT_KEY]["default_messages_per_day"]
     return number if maximum is None else min(number, maximum)
 
 
-def ensure_messages_per_day_allowed(value: Any, maximum: Optional[int]) -> None:
+def ensure_daily_message_limit_allowed(value: Any, maximum: Optional[int]) -> None:
     """422 unless `value` is a whole number from 1 up to the workspace maximum."""
     if isinstance(value, bool) or not isinstance(value, int) or value < 1:
         raise HTTPException(

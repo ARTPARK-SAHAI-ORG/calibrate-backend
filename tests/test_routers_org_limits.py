@@ -231,29 +231,54 @@ def test_chat_replies_per_day_takes_the_agents_number_else_the_workspace_default
     org = {"settings": {"talk_to_agent": {"default_messages_per_day": 30}}}
     monkeypatch.setattr(org_limits, "get_organization", lambda uuid: org)
 
-    assert org_limits.chat_replies_per_day(_agent(), None) == 30
-    assert org_limits.chat_replies_per_day(_agent({"talk_to_agent": {}}), 100) == 30
+    assert org_limits.daily_message_limit(_agent(), None) == 30
+    assert org_limits.daily_message_limit(_agent({"talk_to_agent": {}}), 100) == 30
     own = _agent({"talk_to_agent": {"messages_per_day": 12}})
-    assert org_limits.chat_replies_per_day(own, 100) == 12
+    assert org_limits.daily_message_limit(own, 100) == 12
     # A maximum lowered after either number was saved still holds.
-    assert org_limits.chat_replies_per_day(own, 5) == 5
-    assert org_limits.chat_replies_per_day(_agent(), 20) == 20
+    assert org_limits.daily_message_limit(own, 5) == 5
+    assert org_limits.daily_message_limit(_agent(), 20) == 20
 
 
 @pytest.mark.parametrize("value", [0, -1, 1.5, "3", True])
 def test_messages_per_day_must_be_a_whole_number_of_at_least_one(value):
     with pytest.raises(HTTPException) as err:
-        org_limits.ensure_messages_per_day_allowed(value, None)
+        org_limits.ensure_daily_message_limit_allowed(value, None)
     assert err.value.status_code == 422
     assert err.value.detail == "Messages per day must be a whole number of at least 1"
 
 
 def test_messages_per_day_must_not_pass_the_workspace_maximum():
-    org_limits.ensure_messages_per_day_allowed(10, 10)
-    org_limits.ensure_messages_per_day_allowed(10_000, None)
+    org_limits.ensure_daily_message_limit_allowed(10, 10)
+    org_limits.ensure_daily_message_limit_allowed(10_000, None)
     with pytest.raises(HTTPException) as err:
-        org_limits.ensure_messages_per_day_allowed(11, 10)
+        org_limits.ensure_daily_message_limit_allowed(11, 10)
     assert err.value.status_code == 422
     assert err.value.detail == (
         "Messages per day cannot be more than 10, the most your workspace allows"
     )
+
+
+def test_an_empty_limit_setting_falls_back_instead_of_stopping_the_server(monkeypatch):
+    # The deploy workflows export each setting as "" when its secret is missing.
+    import importlib
+
+    import routers.org_limits as org_limits_module
+
+    for name in (
+        "DEFAULT_MAX_ROWS_PER_EVAL",
+        "DEFAULT_MAX_SCORED_TRACES",
+        "DEFAULT_MAX_TRACES",
+        "DEFAULT_TRACE_SCORING_BATCH_SIZE",
+        "MAX_CONCURRENT_TRACE_SCORING_BATCHES_PER_ORG",
+        "DEFAULT_MAX_CHAT_REPLIES_PER_DAY",
+    ):
+        monkeypatch.setenv(name, "")
+    try:
+        reloaded = importlib.reload(org_limits_module)
+        assert reloaded.DEFAULT_MAX_CHAT_REPLIES_PER_DAY == 200
+        assert reloaded.DEFAULT_MAX_ROWS_PER_EVAL == 20
+        assert reloaded.DEFAULT_MAX_TRACES == 50000
+    finally:
+        monkeypatch.undo()
+        importlib.reload(org_limits_module)

@@ -56,7 +56,7 @@ from db import (
 )
 from org_scope import ensure_owned_agent
 from pagination import PaginatedResponse, PaginationParams, page_envelope
-from routers.org_limits import chat_replies_per_day, effective_limits, record_limit_hit
+from routers.org_limits import daily_message_limit, effective_limits, record_limit_hit
 
 # Reuse the tests router's validation so a converted test accepts exactly what
 # POST /tests does (evaluator visible to the workspace, evaluator_type matches).
@@ -1158,7 +1158,7 @@ def get_trace_usage_endpoint(
         "max_scored_traces": usage_limits["max_scored_traces"],
         "chat_replies_today": count_chat_replies_today(agent["uuid"]) if agent else 0,
         "chat_replies_per_day": (
-            chat_replies_per_day(agent, usage_limits["max_chat_replies_per_day"])
+            daily_message_limit(agent, usage_limits["max_chat_replies_per_day"])
             if agent
             else None
         ),
