@@ -80,7 +80,6 @@ from annotation_metrics import KappaFields
 from utils import (
     utc_now,
     evaluators_fitting_row,
-    is_tool_call_evaluator,
     is_tool_call_row,
     job_slot,
     TaskStatus,
@@ -1062,7 +1061,7 @@ class AnnotationItemPayload(BaseModel):
     )
     evaluator_results: Optional[Dict[str, Any]] = Field(
         None,
-        description="Evaluator scores to record, keyed by evaluator ID. Each evaluator ID must be linked to the task. Put the score in `value`, a bool for binary or a number within the scale for rating, with optional `reasoning` and `version_number`. Omit `version_number` to record against the evaluator's live version. An item recording a tool call takes the tool-call evaluator and no other, and every other item takes any evaluator except that one",
+        description="Evaluator scores to record, keyed by evaluator ID. Each evaluator ID must be linked to the task. Put the score in `value`, a bool for binary or a number within the scale for rating, with optional `reasoning` and `version_number`. Omit `version_number` to record against the evaluator's live version. An item recording a tool call takes only tool-call evaluators, and every other item takes any evaluator that is not a tool-call evaluator",
         examples=[{_EXAMPLE_ID: {"value": True, "reasoning": "meets the bar", "version_number": 2}}],
     )
 
@@ -1221,13 +1220,13 @@ def _resolve_evaluator_results(
                     status_code=400, detail=f"Evaluator {ev_id} not found"
                 )
             row_is_tool_call = is_tool_call_row({"payload": payloads[idx]})
-            if is_tool_call_evaluator(evaluator) != row_is_tool_call:
+            if not evaluators_fitting_row([evaluator], row_is_tool_call):
                 raise HTTPException(
                     status_code=400,
                     detail=(
-                        f"items[{idx}] records a tool call, which only the "
-                        f"tool-call evaluator scores. Evaluator {ev_id} does not "
-                        f"run on it."
+                        f"items[{idx}] records a tool call, which only a "
+                        f"tool-call evaluator scores. Evaluator {ev_id} is not a "
+                        f"tool-call evaluator."
                         if row_is_tool_call
                         else f"Evaluator {ev_id} scores tool calls, and items[{idx}] "
                         f"records a reply rather than a tool call."
@@ -1603,7 +1602,8 @@ def bulk_create_items(
         # annotations on slots the job doesn't own, polluting downstream
         # `annotations`-by-task reads. Same contract enforced by the
         # public-form upsert endpoint in `routers/public.py`.
-        snapshot_evaluator_ids = set(get_evaluator_ids_for_job(job_uuid))
+        job_evaluators = get_evaluators_for_job(job_uuid)
+        snapshot_evaluator_ids = {ev["uuid"] for ev in job_evaluators}
         snapshot_mismatch: List[str] = []
         for it in payload.items:
             if not it.annotations:
@@ -1655,14 +1655,12 @@ def bulk_create_items(
         # Auto-complete contract: every REQUIRED slot an item actually shows
         # must have a row, and every item must carry at least one judgement
         # (so a job whose evaluators are all optional still needs the
-        # annotator to visit each item). A tool-call row shows only the
-        # tool-call evaluator, every other row shows everything except it
+        # annotator to visit each item). A tool-call row shows only tool-call
+        # evaluators, every other row shows every other evaluator
         # (required_evaluator_ids_for_item). Same source of truth as the
         # public-form auto-complete path — see also the snapshot-mismatch gate
         # above, which measures against the full snapshot instead.
-        required_evaluators = [
-            ev for ev in get_evaluators_for_job(job_uuid) if not ev["is_optional"]
-        ]
+        required_evaluators = [ev for ev in job_evaluators if not ev["is_optional"]]
         items_fully_annotated = all(
             it.annotations
             and required_evaluator_ids_for_item(

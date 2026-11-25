@@ -807,9 +807,9 @@ def _cmd_annotation_stt_or_general(opts: Dict[str, List[str]]) -> None:
                 )
             writer.writerow([row.get("id"), gt, pred] + cells)
 
-    # Sarvam judges are an STT-eval-only feature; the annotation eval-only
-    # and `general` flows never include the Sarvam bundle.
     with open(output_dir / "metrics.json", "w", encoding="utf-8") as f:
+        # Sarvam judges are an STT-eval-only feature; the annotation eval-only
+        # and `general` flows never include the Sarvam bundle.
         json.dump(_stt_metrics(evaluators, sarvam=False), f)
 
 

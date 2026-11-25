@@ -226,6 +226,8 @@ def test_build_llm_dataset_bad_payload():
     [
         {"actual_tool_calls": "not-a-list", "tool_calls": [{"tool": "t"}]},
         {"actual_tool_calls": [], "expected_tool_calls": {}},
+        {"tool_calls": ["search"]},
+        {"actual_tool_calls": [{"tool": "t"}], "expected_tool_calls": [None]},
     ],
 )
 def test_tool_call_lists_rejects_a_present_non_list(payload):

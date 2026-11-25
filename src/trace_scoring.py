@@ -330,10 +330,11 @@ def resolve_batch_evaluators(
 
 def is_tool_call_trace(trace: dict[str, Any]) -> bool:
     """A trace with no reply and at least one named tool call. Must agree with
-    `db.TRACE_OUTPUT_TYPE_SQL["tool_call"]`, whose SQLite TRIM removes spaces only."""
+    `db.TRACE_OUTPUT_TYPE_SQL["tool_call"]`: a reply of only spaces, tabs and
+    line breaks is no reply."""
     output = trace.get("output") if isinstance(trace.get("output"), dict) else {}
     response = output.get("response")
-    if response is not None and str(response).strip(" "):
+    if response is not None and str(response).strip(" \t\n\r"):
         return False
     calls = output.get("tool_calls")
     return isinstance(calls, list) and any(

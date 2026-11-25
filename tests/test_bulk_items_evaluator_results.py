@@ -227,7 +227,7 @@ def test_any_other_evaluator_on_a_tool_call_row_is_rejected(client):
         f"/annotation-tasks/{task}/items", json={"items": [item]}, headers=h
     )
     assert r.status_code == 400
-    assert "only the tool-call evaluator scores" in r.json()["detail"]
+    assert "only a tool-call evaluator scores" in r.json()["detail"]
 
 
 def test_the_tool_call_evaluator_on_a_reply_row_is_rejected(client):
@@ -482,7 +482,7 @@ def test_a_rolled_back_request_leaves_no_run(client, monkeypatch):
 
     # Stand in for an evaluator unlinked between validation and job creation,
     # the one path that rolls the whole request back near the end.
-    monkeypatch.setattr(mod, "get_evaluator_ids_for_job", lambda j, **kw: [])
+    monkeypatch.setattr(mod, "get_evaluators_for_job", lambda j, **kw: [])
 
     r = client.post(
         f"/annotation-tasks/{task}/items",

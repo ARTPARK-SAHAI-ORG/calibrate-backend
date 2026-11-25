@@ -11029,7 +11029,10 @@ def _like_escape(text: str) -> str:
 # Mirrors how routers/traces._to_summary fills response_preview and
 # tool_call_count: a reply is non-blank text, a tool call needs a tool name,
 # and a trace with both counts as a reply only.
-_TRACE_HAS_RESPONSE = "TRIM(COALESCE(json_extract(output, '$.response'), '')) != ''"
+_TRACE_HAS_RESPONSE = (
+    "TRIM(COALESCE(json_extract(output, '$.response'), ''), "
+    "' ' || char(9) || char(10) || char(13)) != ''"
+)
 _TRACE_HAS_TOOL_CALL = (
     "EXISTS (SELECT 1 FROM json_each(output, '$.tool_calls') "
     "WHERE COALESCE(json_extract(value, '$.tool'), '') != '')"

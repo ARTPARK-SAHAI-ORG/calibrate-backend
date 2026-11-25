@@ -336,6 +336,10 @@ def _tool_call_lists(it: Dict[str, Any], payload: Dict[str, Any]) -> Tuple[list,
         raise DatasetBuildError(
             f"Item {it['uuid']}: tool calls must be a list if provided"
         )
+    if any(not isinstance(c, dict) for c in [*(actual or []), *(expected or [])]):
+        raise DatasetBuildError(
+            f"Item {it['uuid']}: each tool call must be a JSON object"
+        )
     return actual or [], expected
 
 
