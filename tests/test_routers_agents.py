@@ -1702,3 +1702,144 @@ def test_a_new_agent_defaults_to_gemini_3_5_flash_lite(monkeypatch):
 
     monkeypatch.delenv("DEFAULT_AGENT_LLM_MODEL", raising=False)
     assert _default_agent_config()["llm"]["model"] == "google/gemini-3.5-flash-lite"
+def _messages_per_day(agent):
+    return (agent["config"].get("talk_to_agent") or {}).get("messages_per_day")
+
+
+def test_an_agents_daily_chat_limit_is_saved_and_carried_forward(client):
+    h = _signup(client)
+    agent = _create_agent(client, h, f"talk-{uuid.uuid4().hex[:6]}")
+    url = f"/agents/{agent['uuid']}"
+
+    saved = client.put(url, json={"config": {"talk_to_agent": {"messages_per_day": 25}}}, headers=h)
+    assert saved.status_code == 200, saved.text
+    assert _messages_per_day(saved.json()) == 25
+
+    config = client.get(url, headers=h).json()["config"]
+    config.pop("talk_to_agent")
+    config["system_prompt"] = "Be brief."
+    moved = client.put(url, json={"config": config}, headers=h)
+    assert moved.status_code == 200, moved.text
+    assert _messages_per_day(moved.json()) == 25
+
+    cleared = client.put(url, json={"config": {"talk_to_agent": {}}}, headers=h)
+    assert _messages_per_day(cleared.json()) is None
+
+
+@pytest.mark.parametrize("section", [{"messages_per_day": 0}, {"messages_per_day": 201}, 5])
+def test_an_agents_daily_chat_limit_out_of_range_is_refused(client, section):
+    h = _signup(client)
+    agent = _create_agent(client, h, f"talk-bad-{uuid.uuid4().hex[:6]}")
+
+    updated = client.put(
+        f"/agents/{agent['uuid']}", json={"config": {"talk_to_agent": section}}, headers=h
+    )
+    assert updated.status_code == 422, updated.text
+    created = client.post(
+        "/agents",
+        json={"name": f"talk-new-{uuid.uuid4().hex[:6]}", "type": "agent", "config": {"talk_to_agent": section}},
+        headers=h,
+    )
+    assert created.status_code == 422, created.text
+def _chat_link(client, h, agent_uuid, is_public=None):
+    if is_public is None:
+        return client.get(f"/agents/{agent_uuid}/chat-link", headers=h)
+    return client.patch(
+        f"/agents/{agent_uuid}/chat-link/visibility", json={"is_public": is_public}, headers=h
+    )
+
+
+def test_chat_link_keeps_its_token_when_turned_off_and_on(client):
+    h = _signup(client)
+    agent = _create_agent(client, h, f"chat-{uuid.uuid4().hex[:6]}")
+
+    first = _chat_link(client, h, agent["uuid"]).json()
+    token = first.pop("share_token")
+    assert first == {
+        "is_public": False,
+        "connection_verified": True,
+        "messages_today": 0,
+        "daily_message_limit": 200,
+    }
+    # Reading the link makes it, so a private link can be previewed.
+    uuid.UUID(token)
+    assert db.get_agent(agent["uuid"])["chat_token"] == token
+    assert db.get_agent(agent["uuid"])["chat_link_public"] == 0
+    assert _chat_link(client, h, agent["uuid"]).json()["share_token"] == token
+
+    on = _chat_link(client, h, agent["uuid"], True).json()
+    assert on == {"is_public": True, "share_token": token}
+    assert _chat_link(client, h, agent["uuid"]).json()["share_token"] == on["share_token"]
+
+    off = _chat_link(client, h, agent["uuid"], False).json()
+    assert off == {"is_public": False, "share_token": token}
+    assert db.get_agent(agent["uuid"])["chat_token"] == on["share_token"]
+    assert _chat_link(client, h, agent["uuid"]).json()["share_token"] == token
+
+    again = _chat_link(client, h, agent["uuid"], True).json()
+    assert again["share_token"] == on["share_token"]
+
+
+def _create_connection_agent(client, h):
+    return client.post(
+        "/agents", json={"name": f"conn-{uuid.uuid4().hex[:6]}", "type": "connection"}, headers=h
+    ).json()
+
+
+def test_chat_link_refuses_a_connection_agent_with_no_address_yet(client):
+    h = _signup(client)
+    agent = _create_connection_agent(client, h)
+
+    assert _chat_link(client, h, agent["uuid"]).json()["connection_verified"] is False
+    assert _chat_link(client, h, agent["uuid"], True).status_code == 400
+
+
+def test_chat_link_refuses_an_unverified_connection_agent(client):
+    h = _signup(client)
+    agent = _create_connection_agent(client, h)
+    db.update_agent(agent["uuid"], config={"agent_url": "https://example.com/a"})
+
+    assert _chat_link(client, h, agent["uuid"]).json()["connection_verified"] is False
+    refused = _chat_link(client, h, agent["uuid"], True)
+    assert refused.status_code == 400
+    assert refused.json()["detail"] == {"error": "connection_unverified"}
+    assert db.get_agent(agent["uuid"])["chat_link_public"] == 0
+    assert _chat_link(client, h, agent["uuid"], False).status_code == 200
+
+    db.update_agent(
+        agent["uuid"],
+        config={"agent_url": "https://example.com/a", "connection_verified": True},
+    )
+    assert _chat_link(client, h, agent["uuid"]).json()["connection_verified"] is True
+    assert _chat_link(client, h, agent["uuid"], True).json()["is_public"] is True
+
+
+def test_chat_link_of_another_workspaces_agent_is_refused(client):
+    owner = _signup(client)
+    agent = _create_agent(client, owner, f"own-{uuid.uuid4().hex[:6]}")
+    stranger = _signup(client)
+    for response in (
+        _chat_link(client, stranger, agent["uuid"]),
+        _chat_link(client, stranger, agent["uuid"], True),
+    ):
+        assert response.status_code == 403
+        assert "organization_uuid" not in response.json()
+    assert db.get_agent(agent["uuid"])["chat_link_public"] == 0
+
+
+def test_chat_link_reports_todays_messages_against_the_agents_own_limit(client):
+    h = _signup(client)
+    agent = _create_agent(client, h, f"talk-{uuid.uuid4().hex[:6]}")
+    for _ in range(2):
+        db.reserve_chat_reply(agent["uuid"], 100)
+
+    link = _chat_link(client, h, agent["uuid"]).json()
+    assert (link["messages_today"], link["daily_message_limit"]) == (2, 200)
+
+    res = client.put(
+        f"/agents/{agent['uuid']}",
+        json={"config": {"talk_to_agent": {"messages_per_day": 7}}},
+        headers=h,
+    )
+    assert res.status_code == 200, res.text
+    assert _chat_link(client, h, agent["uuid"]).json()["daily_message_limit"] == 7

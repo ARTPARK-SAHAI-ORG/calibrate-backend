@@ -570,3 +570,99 @@ def test_score_filter_refuses_an_operator_it_does_not_know():
     outside the known set must be refused instead of passed through."""
     with pytest.raises(ValueError):
         db._trace_score_clause(("ev-1", "; DROP TABLE traces", 1))
+
+
+def test_a_trace_is_from_the_api_unless_told_otherwise():
+    org = _org()
+    agent = _insert_agent(org)
+    api = _combined_ingest(org, agent)
+    chat = _combined_ingest(org, agent, source="chat")
+
+    assert (api["source"], api["feedback"]) == ("api", None)
+    assert db.get_trace(org, chat["uuid"])["source"] == "chat"
+
+
+def test_feedback_is_set_replaced_and_cleared_on_any_live_trace():
+    org = _org()
+    agent = _insert_agent(org)
+    chat = _combined_ingest(org, agent, source="chat")
+    api = _combined_ingest(org, agent)
+
+    assert db.set_trace_feedback(org, chat["uuid"], True, "Clear answer")
+    first = db.get_trace(org, chat["uuid"])["feedback"]
+    assert (first["is_correct"], first["comment"]) == (True, "Clear answer")
+    assert first["at"].endswith("Z")
+
+    assert db.set_trace_feedback(org, chat["uuid"], False, None)
+    changed = db.get_trace(org, chat["uuid"])["feedback"]
+    assert (changed["is_correct"], changed["comment"]) == (False, None)
+
+    assert db.set_trace_feedback(org, chat["uuid"], None, "ignored")
+    assert db.get_trace(org, chat["uuid"])["feedback"] is None
+    with db.get_db_connection() as conn:
+        stored = conn.execute(
+            "SELECT feedback FROM traces WHERE uuid = ?", (chat["uuid"],)
+        ).fetchone()
+    assert stored[0] is None
+
+    assert db.set_trace_feedback(org, api["uuid"], False, "Wrong date")
+    assert db.get_trace(org, api["uuid"])["feedback"]["is_correct"] is False
+    assert not db.set_trace_feedback(_org(), chat["uuid"], True, None)
+    db.soft_delete_traces(org, trace_ids=[chat["uuid"]])
+    assert not db.set_trace_feedback(org, chat["uuid"], True, None)
+
+
+def test_feedback_sent_with_the_trace_is_stored_with_it():
+    org = _org()
+    agent = _insert_agent(org)
+    row = _combined_ingest(org, agent, feedback={"is_correct": False, "comment": "Wrong dose"})
+
+    feedback = db.get_trace(org, row["uuid"])["feedback"]
+    assert (feedback["is_correct"], feedback["comment"]) == (False, "Wrong dose")
+    assert feedback["at"].endswith("Z")
+
+
+def test_reserving_a_chat_reply_stops_at_the_cap_and_a_release_gives_one_back():
+    agent = _insert_agent(_org())
+    assert db.reserve_chat_reply(agent["uuid"], 2)
+    assert db.reserve_chat_reply(agent["uuid"], 2)
+    assert not db.reserve_chat_reply(agent["uuid"], 2)
+    assert db.count_chat_replies_today(agent["uuid"]) == 2
+    db.release_chat_reply(agent["uuid"])
+    assert db.reserve_chat_reply(agent["uuid"], 2)
+    assert not db.reserve_chat_reply(_insert_agent(_org())["uuid"], 0)
+
+
+def test_chat_replies_today_count_every_reply_of_one_agent_since_midnight():
+    agent = _insert_agent(_org())
+    other = _insert_agent(_org())
+    for _ in range(3):
+        db.reserve_chat_reply(agent["uuid"], 100)
+    db.reserve_chat_reply(other["uuid"], 100)
+    with db.get_db_connection() as conn:
+        conn.execute(
+            "INSERT INTO chat_reply_counts (agent_id, day, count) VALUES (?, date('now', '-1 day'), 9)",
+            (agent["uuid"],),
+        )
+        conn.commit()
+
+    assert db.count_chat_replies_today(agent["uuid"]) == 3
+    assert db.count_chat_replies_today(other["uuid"]) == 1
+    assert db.count_chat_replies_today(str(uuid.uuid4())) == 0
+
+
+def test_deleting_an_agent_soft_deletes_its_chat_count_and_conversations():
+    agent = _insert_agent(_org())
+    db.reserve_chat_reply(agent["uuid"], 10)
+    db.save_chat_conversation(agent["uuid"], "c1", [{"role": "user", "content": "hi"}])
+
+    assert db.delete_agent(agent["uuid"])
+
+    assert db.count_chat_replies_today(agent["uuid"]) == 0
+    assert db.get_chat_conversation(agent["uuid"], "c1") == []
+    with db.get_db_connection() as conn:
+        for table in ("chat_reply_counts", "chat_conversations"):
+            row = conn.execute(
+                f"SELECT deleted_at FROM {table} WHERE agent_id = ?", (agent["uuid"],)
+            ).fetchone()
+            assert row[0] is not None

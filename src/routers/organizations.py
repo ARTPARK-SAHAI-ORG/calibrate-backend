@@ -21,7 +21,9 @@ from mailer import (
     send_email,
 )
 from utils import MemberRoleLiteral
+from routers.org_limits import ensure_daily_message_limit_allowed
 from db import (
+    TALK_TO_AGENT_KEY,
     add_organization_member,
     add_organization_member_by_user_id,
     create_org_invite,
@@ -54,11 +56,27 @@ class ModelBenchmarkingSettings(BaseModel):
     )
 
 
+_DEFAULT_MESSAGES_PER_DAY_DESCRIPTION = (
+    "How many replies an agent's chat link may give in a day, counted from "
+    "midnight UTC, for an agent that sets no number of its own. At most "
+    "`max_chat_replies_per_day` from `GET /org-limits/me`"
+)
+
+
+class TalkToAgentSettings(BaseModel):
+    default_messages_per_day: int = Field(
+        description=_DEFAULT_MESSAGES_PER_DAY_DESCRIPTION, examples=[200]
+    )
+
+
 class OrganizationSettings(BaseModel):
     model_config = ConfigDict(protected_namespaces=())
 
     model_benchmarking: ModelBenchmarkingSettings = Field(
         description="How this workspace compares models"
+    )
+    talk_to_agent: TalkToAgentSettings = Field(
+        description="How this workspace's agent chat links are limited"
     )
 
 
@@ -71,12 +89,26 @@ class ModelBenchmarkingSettingsUpdate(BaseModel):
     )
 
 
+class TalkToAgentSettingsUpdate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    default_messages_per_day: int = Field(
+        None,
+        description=f"{_DEFAULT_MESSAGES_PER_DAY_DESCRIPTION}. Omit to leave it as it is",
+        examples=[200],
+    )
+
+
 class OrganizationSettingsUpdate(BaseModel):
     model_config = ConfigDict(extra="forbid", protected_namespaces=())
 
     model_benchmarking: Optional[ModelBenchmarkingSettingsUpdate] = Field(
         None,
         description="How this workspace compares models. Omit to leave the whole section as it is",
+    )
+    talk_to_agent: Optional[TalkToAgentSettingsUpdate] = Field(
+        None,
+        description="How this workspace's agent chat links are limited. Omit to leave the whole section as it is",
     )
 
 
@@ -268,6 +300,11 @@ def update_org(
             status_code=400,
             detail="Provide name or settings to update",
         )
+    default = (fields.get("settings") or {}).get(TALK_TO_AGENT_KEY, {}).get(
+        "default_messages_per_day"
+    )
+    if default is not None:
+        ensure_daily_message_limit_allowed(default, org_uuid)
     update_organization(org_uuid, **fields)
     org = get_organization(org_uuid)
     return OrganizationResponse(**org, member_role=role)

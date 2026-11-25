@@ -20,6 +20,7 @@ from calibrate_agent.connections import TextAgentConnection
 
 from utils import (
     default_agent_llm_model,
+    compute_share_token_toggle,
     public_url_error,
     env_bool,
     with_calibrate_eval_header,
@@ -36,6 +37,7 @@ from utils import (
 from shared_enums import AgentInteractionType, DEFAULT_AGENT_INTERACTION_TYPE
 
 from db import (
+    TALK_TO_AGENT_KEY,
     create_agent,
     ensure_name_unique,
     get_agent,
@@ -49,6 +51,8 @@ from db import (
     add_evaluator_to_agent,
     remove_evaluator_from_agent,
     resolve_live_evaluators,
+    set_agent_chat_link,
+    count_chat_replies_today,
 )
 from trace_scoring import IneligibleReason, resolve_trace_scoring
 from auth_utils import get_current_org, get_org_jwt_or_api_key, OrgContext
@@ -59,6 +63,11 @@ from org_scope import ensure_owned_agent, ensure_owned_evaluator
 # `response_model` references `EvaluatorResponse` and it shares that router's
 # page-shaping helper.
 from routers.evaluators import EvaluatorResponse, build_evaluator_page
+from routers.org_limits import (
+    daily_message_limit,
+    effective_max_chat_replies_per_day,
+    ensure_daily_message_limit_allowed,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -282,6 +291,12 @@ _AGENT_CONFIG_DESCRIPTION = """Agent behavioral config. The keys depend on `type
 
 ```json
 {"traces": {"scoring": {"enabled": false}}}
+```
+
+- `talk_to_agent.messages_per_day`: how many replies the agent's chat link may give in a day, counted from midnight UTC. From 1 up to `max_chat_replies_per_day` from `GET /org-limits/me`. Omit to use the workspace's `talk_to_agent.default_messages_per_day`
+
+```json
+{"talk_to_agent": {"messages_per_day": 50}}
 ```
 
 Every request Calibrate makes to your endpoint carries the header
@@ -805,6 +820,16 @@ def resolve_agent_names(
     return ResolveAgentNamesResponse(resolved=resolved, not_found=not_found)
 
 
+def _check_daily_message_limit(config: Optional[Dict[str, Any]], org_uuid: str) -> None:
+    section = (config or {}).get(TALK_TO_AGENT_KEY)
+    if section is None:
+        return
+    if not isinstance(section, dict):
+        raise HTTPException(status_code=422, detail="talk_to_agent must be an object")
+    if section.get("messages_per_day") is not None:
+        ensure_daily_message_limit_allowed(section["messages_per_day"], org_uuid)
+
+
 @router.post(
     "",
     response_model=AgentCreateResponse,
@@ -817,6 +842,7 @@ def create_agent_endpoint(
     ctx: OrgContext = Depends(get_org_jwt_or_api_key),
 ):
     """Create an agent to test inside Calibrate or connect your existing agent to Calibrate"""
+    _check_daily_message_limit(agent.config, ctx.org_uuid)
     if agent.type == "agent":
         merged_config = _deep_merge(_default_agent_config(), agent.config or {})
     else:
@@ -902,6 +928,92 @@ def get_trace_scoring_eligibility(
     return _eligibility_response(_resolve_agent_scoring(agent))
 
 
+class ChatLinkResponse(BaseModel):
+    is_public: bool = Field(description="Whether anyone with the link can chat with the agent")
+    share_token: str = Field(
+        description="Token for building the chat link. While the link is private, only members of your workspace who are logged in can open it",
+    )
+
+
+class ChatLinkStatusResponse(ChatLinkResponse):
+    connection_verified: bool = Field(
+        description="Whether the agent's connection has passed its check. Always true for an agent built in Calibrate"
+    )
+    messages_today: int = Field(
+        description="How many messages the agent has replied to on its chat link since midnight UTC, including ones whose traces were deleted or never stored"
+    )
+    daily_message_limit: int = Field(
+        description="How many messages the agent may reply to on its chat link in a day: its own `talk_to_agent.messages_per_day`, else the workspace's `talk_to_agent.default_messages_per_day`, never above `max_chat_replies_per_day`"
+    )
+
+
+def _chat_connection_unverified(agent: Dict[str, Any]) -> bool:
+    """A connection agent whose connection has not passed its check, including
+    one with no address yet. Stricter than the test-run rule, which lets an
+    agent with no address through."""
+    return agent.get("type") == "connection" and not (agent.get("config") or {}).get(
+        "connection_verified"
+    )
+
+
+class ChatLinkVisibilityRequest(BaseModel):
+    is_public: bool = Field(
+        description="True to turn the chat link on. False to turn it off, keeping the same link for when it is turned back on"
+    )
+
+
+@router.get(
+    "/{agent_uuid}/chat-link",
+    response_model=ChatLinkStatusResponse,
+    summary="Get chat link",
+)
+def get_chat_link(
+    agent_uuid: str = Path(
+        description="The agent whose chat link to read",
+        examples=["f47ac10b-58cc-4372-a567-0e02b2c3d479"],
+    ),
+    ctx: OrgContext = Depends(get_current_org),
+):
+    """Get the link anyone can use to chat with an agent, and whether it can be turned on"""
+    agent = ensure_owned_agent(agent_uuid, ctx.org_uuid)
+    is_public = bool(agent.get("chat_link_public"))
+    token = agent.get("chat_token")
+    if not token:
+        token, _ = compute_share_token_toggle(agent, True, token_field="chat_token")
+        set_agent_chat_link(agent_uuid, is_public, token)
+    return ChatLinkStatusResponse(
+        is_public=is_public,
+        share_token=token,
+        connection_verified=not _chat_connection_unverified(agent),
+        messages_today=count_chat_replies_today(agent_uuid),
+        daily_message_limit=daily_message_limit(
+            agent, effective_max_chat_replies_per_day(ctx.org_uuid)
+        ),
+    )
+
+
+@router.patch(
+    "/{agent_uuid}/chat-link/visibility",
+    response_model=ChatLinkResponse,
+    summary="Update chat link visibility",
+)
+def update_chat_link_visibility(
+    agent_uuid: str = Path(
+        description="The agent whose chat link to turn on or off",
+        examples=["f47ac10b-58cc-4372-a567-0e02b2c3d479"],
+    ),
+    body: ChatLinkVisibilityRequest = ...,
+    ctx: OrgContext = Depends(get_current_org),
+):
+    """Turn on or off the link anyone can use to chat with an agent"""
+    agent = ensure_owned_agent(agent_uuid, ctx.org_uuid)
+    if body.is_public and _chat_connection_unverified(agent):
+        raise HTTPException(status_code=400, detail={"error": "connection_unverified"})
+    token, _ = compute_share_token_toggle(agent, body.is_public, token_field="chat_token")
+    set_agent_chat_link(agent_uuid, body.is_public, token)
+    return ChatLinkResponse(is_public=body.is_public, share_token=token)
+
+
 @router.put(
     "/{agent_uuid}",
     response_model=AgentResponse,
@@ -947,6 +1059,13 @@ def update_agent_endpoint(
             agent.config["connection_verified"] = agent.connection_verified
         if agent.benchmark_models_verified is not None:
             agent.config["benchmark_models_verified"] = agent.benchmark_models_verified
+
+    if agent.config is not None:
+        if TALK_TO_AGENT_KEY in agent.config:
+            _check_daily_message_limit(agent.config, ctx.org_uuid)
+        elif TALK_TO_AGENT_KEY in (existing_agent.get("config") or {}):
+            # A config body replaces the stored one; keep the chat limit.
+            agent.config[TALK_TO_AGENT_KEY] = existing_agent["config"][TALK_TO_AGENT_KEY]
 
     was_scoring = trace_scoring_enabled(existing_agent)
     now_scoring = was_scoring

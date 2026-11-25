@@ -40,6 +40,7 @@ from db import (
     get_evaluators_by_uuids,
     get_latest_trace_run_summaries,
     get_trace,
+    set_trace_feedback,
     get_traces_by_uuids,
     list_trace_conversation_ids,
     list_trace_conversations,
@@ -153,6 +154,19 @@ _SORT_BY_EVALUATOR_DESCRIPTION = (
     "Order traces by this evaluator's score on each trace's latest scoring "
     "run. Traces this evaluator has not scored come last whichever direction you pick, and "
     "an evaluator not linked to the agent counts as having scored none"
+)
+
+TraceSource = Literal["api", "chat"]
+TraceFeedbackFilter = Literal["correct", "wrong", "any"]
+
+_SOURCE_VALUES = (
+    "\n\n- `api`: sent to `POST /traces`\n"
+    "- `chat`: a reply the agent gave on its chat link"
+)
+_FEEDBACK_VALUES = (
+    "\n\n- `correct`: marked correct\n"
+    "- `wrong`: marked wrong\n"
+    "- `any`: marked either way"
 )
 
 _SORT_ORDER_DESCRIPTION = (
@@ -275,6 +289,10 @@ class TraceOutput(BaseModel):
         max_length=MAX_TOOL_CALLS,
         description="Tool calls the agent issued for this turn. Omit for plain text replies",
     )
+    stopped_early: Optional[bool] = Field(
+        None,
+        description="True when the agent was stopped after calling tools as many times in a row as it may, before it replied",
+    )
 
     @model_validator(mode="after")
     def _require_response_or_tool_calls(self):
@@ -295,6 +313,27 @@ class TraceMetadataEntry(BaseModel):
         max_length=8192,
         description="Value of the metadata entry",
     )
+
+
+_IS_CORRECT_DESCRIPTION = "Whether the agent's output for this turn was correct"
+_FEEDBACK_COMMENT_DESCRIPTION = "What was right or wrong about the agent's output"
+
+
+class TraceFeedbackUpdate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    is_correct: Optional[bool] = Field(
+        description=_IS_CORRECT_DESCRIPTION + ". `null` clears the feedback"
+    )
+    comment: Optional[str] = Field(
+        None, max_length=2000, description=_FEEDBACK_COMMENT_DESCRIPTION + ". Omit if you have none"
+    )
+
+
+class TraceFeedbackIngest(TraceFeedbackUpdate):
+    """Feedback sent with a new trace, which has nothing to clear."""
+
+    is_correct: bool = Field(description=_IS_CORRECT_DESCRIPTION)
 
 
 class TraceIngest(BaseModel):
@@ -329,6 +368,10 @@ class TraceIngest(BaseModel):
         max_length=MAX_LABELS,
         description=_LABELS_DESCRIPTION + ". Omit if you have none",
     )
+    feedback: Optional[TraceFeedbackIngest] = Field(
+        None,
+        description="A verdict on the agent's output, if you already have one. Omit if you have none",
+    )
 
 
 class TraceIngestResponse(BaseModel):
@@ -345,6 +388,16 @@ class TraceIngestResponse(BaseModel):
         None, description="The conversation ID you sent, if any"
     )
     created_at: str = Field(description="When the trace was created (ISO 8601 UTC)")
+
+
+class TraceFeedback(TraceFeedbackIngest):
+    at: str = Field(description="When the feedback was last given (ISO 8601 UTC)")
+
+
+_TRACE_SOURCE_DESCRIPTION = "Where the trace came from:" + _SOURCE_VALUES
+_TRACE_FEEDBACK_DESCRIPTION = (
+    "The verdict and comment given on the trace, through the API or on the chat link"
+)
 
 
 class TraceSummary(BaseModel):
@@ -384,6 +437,10 @@ class TraceSummary(BaseModel):
         description="Number of metadata entries stored with the trace"
     )
     labels: List[str] = Field(description=_LABELS_DESCRIPTION)
+    source: TraceSource = Field(description=_TRACE_SOURCE_DESCRIPTION)
+    feedback: Optional[TraceFeedback] = Field(
+        None, description=_TRACE_FEEDBACK_DESCRIPTION
+    )
     input: Optional[TraceInput] = Field(
         None,
         description=_TRACE_INPUT_DESCRIPTION + ". Sent only with `include_content`",
@@ -505,6 +562,10 @@ class TraceResponse(BaseModel):
         None, description="Key-value pairs stored with the trace"
     )
     labels: List[str] = Field(description=_LABELS_DESCRIPTION)
+    source: TraceSource = Field(description=_TRACE_SOURCE_DESCRIPTION)
+    feedback: Optional[TraceFeedback] = Field(
+        None, description=_TRACE_FEEDBACK_DESCRIPTION
+    )
     created_at: str = Field(description="When the trace was created (ISO 8601 UTC)")
     updated_at: str = Field(
         description="When the trace was last updated (ISO 8601 UTC)"
@@ -578,6 +639,8 @@ def _to_trace_filters(source: Any) -> TraceFilters:
         output_type=source.output_type,
         labels=source.labels,
         scores=scores,
+        source=source.source,
+        feedback=source.feedback,
         created_after=_stored_time(source.created_after),
         created_before=_stored_time(source.created_before),
     )
@@ -645,6 +708,14 @@ class _TraceSelection(BaseModel):
     created_before: Optional[datetime] = Field(
         None,
         description="With `select_all` on, act only on traces created before this time (ISO 8601). A time with no timezone is read as UTC. Omit for no latest date",
+    )
+    source: Optional[TraceSource] = Field(
+        None,
+        description="With `select_all` on, act only on traces from this source:" + _SOURCE_VALUES,
+    )
+    feedback: Optional[TraceFeedbackFilter] = Field(
+        None,
+        description="With `select_all` on, act only on traces with this feedback:" + _FEEDBACK_VALUES,
     )
 
     @model_validator(mode="after")
@@ -731,6 +802,8 @@ def _to_summary(
         "tool_call_count": len(calls),
         "metadata_count": len(row.get("metadata") or []),
         "labels": row.get("labels") or [],
+        "source": row["source"],
+        "feedback": row["feedback"],
         "created_at": row["created_at"],
         "latest_run_status": scoring.get("status"),
         "latest_run_error": scoring.get("error"),
@@ -816,6 +889,7 @@ def ingest_trace(
             else None
         ),
         labels=list(dict.fromkeys(payload.labels)),
+        feedback=payload.feedback.model_dump() if payload.feedback else None,
     )
     return {
         "uuid": row["uuid"],
@@ -893,6 +967,14 @@ class _TraceListFilters:
     created_before: Optional[datetime] = Query(
         None,
         description="Return only traces created before this time (ISO 8601). A time with no timezone is read as UTC. Omit for no latest date",
+    )
+    source: Optional[TraceSource] = Query(
+        None,
+        description="Return only traces from this source:" + _SOURCE_VALUES,
+    )
+    feedback: Optional[TraceFeedbackFilter] = Query(
+        None,
+        description="Return only traces with this feedback:" + _FEEDBACK_VALUES,
     )
 
 
@@ -997,6 +1079,14 @@ class _ConversationFilters:
     score: Optional[List[str]] = Query(
         None,
         description="Return only conversations with a turn whose latest scoring run matches every one of these conditions. " + _SCORE_CONDITION_SYNTAX,
+    )
+    source: Optional[TraceSource] = Query(
+        None,
+        description="Return only conversations with a turn from this source:" + _SOURCE_VALUES,
+    )
+    feedback: Optional[TraceFeedbackFilter] = Query(
+        None,
+        description="Return only conversations with a turn with this feedback:" + _FEEDBACK_VALUES,
     )
     # Not parameters: this route has no date filters.
     created_after: ClassVar[None] = None
@@ -1520,3 +1610,29 @@ def get_trace_endpoint(
     if not row:
         raise HTTPException(status_code=404, detail="Trace not found")
     return row
+
+
+class TraceFeedbackResponse(BaseModel):
+    feedback: Optional[TraceFeedback] = Field(
+        description="The feedback now on the trace"
+    )
+
+
+@router.put(
+    "/{trace_uuid}/feedback",
+    response_model=TraceFeedbackResponse,
+    summary="Set trace feedback",
+    tags=["Public API"],
+)
+def set_trace_feedback_endpoint(
+    body: TraceFeedbackUpdate,
+    trace_uuid: str = Path(
+        description="The trace to give feedback on",
+        examples=[_EXAMPLE_TRACE_UUID],
+    ),
+    ctx: OrgContext = Depends(get_org_jwt_or_api_key),
+):
+    """Set whether the agent's output on a trace was correct, replacing any earlier feedback, or clear it"""
+    if not set_trace_feedback(ctx.org_uuid, trace_uuid, body.is_correct, body.comment):
+        raise HTTPException(status_code=404, detail="Trace not found")
+    return {"feedback": get_trace(ctx.org_uuid, trace_uuid)["feedback"]}

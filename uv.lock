@@ -432,9 +432,10 @@ wheels = [
 
 [[package]]
 name = "calibrate-agent"
-version = "0.0.80"
+version = "0.0.83"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
+    { name = "aiohttp" },
     { name = "backoff" },
     { name = "cartesia" },
     { name = "elevenlabs" },
@@ -462,9 +463,9 @@ dependencies = [
     { name = "uvicorn" },
     { name = "whisper-normalizer" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/e0/7d/f5516069107c7d05a7c8a0f5dfbbefd5c817b79453d91b73d2d48ec7e40d/calibrate_agent-0.0.80.tar.gz", hash = "sha256:889cb52beccd412c6abb3f606681be73102a71b08637a16889493b8b37ab580f", size = 66637259, upload-time = "2026-11-11T06:46:06.856Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/99/d3/452a262b4e9153da8b5af5fb1a48edc11fdacb466cda935c8cfddebd9505/calibrate_agent-0.0.83.tar.gz", hash = "sha256:12b34f57ffdee2cfbaa854888dae351f5f62683a133f717f9e4d86f6db77f791", size = 66644888, upload-time = "2026-11-25T10:37:21.308Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/67/14/4b9f8d24a5bdebde2e1650a6ff718e5c7980437e428ea9f8a520a0168a07/calibrate_agent-0.0.80-py3-none-any.whl", hash = "sha256:8c0e2f9eb76de91c2153426d81e65f8d38acb778e66a4a30bb0658f01213adea", size = 912386, upload-time = "2026-11-11T06:46:04.532Z" },
+    { url = "https://files.pythonhosted.org/packages/7d/5a/594c82a23619814e649ecaa0f619ba4c1d8d0221ea56206cf9469297fe83/calibrate_agent-0.0.83-py3-none-any.whl", hash = "sha256:dfa8812089b534c54b2343488548fd8ddd02cdbf025f085e60265e332ec23248", size = 921029, upload-time = "2026-11-25T10:37:17.27Z" },
 ]
 
 [[package]]
@@ -498,7 +499,7 @@ dev = [
 requires-dist = [
     { name = "bcrypt", specifier = ">=4.0.0" },
     { name = "boto3", specifier = ">=1.34.0" },
-    { name = "calibrate-agent", specifier = ">=0.0.80" },
+    { name = "calibrate-agent", specifier = ">=0.0.83" },
     { name = "cryptography", specifier = ">=46.0.3" },
     { name = "fastapi", specifier = ">=0.115.6,<0.122.0" },
     { name = "httpx", specifier = ">=0.27.0" },

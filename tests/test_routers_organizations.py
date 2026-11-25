@@ -130,13 +130,62 @@ def test_a_new_workspace_reads_every_setting_at_its_default(client):
     org = client.post(
         "/organizations", json={"name": "Parallel"}, headers=auth["headers"]
     ).json()
-    assert org["settings"] == {"model_benchmarking": {"run_models_in_parallel": True}}
+    defaults = {
+        "model_benchmarking": {"run_models_in_parallel": True},
+        "talk_to_agent": {"default_messages_per_day": 200},
+    }
+    assert org["settings"] == defaults
 
     listed = client.get("/organizations", headers=auth["headers"]).json()
-    assert all(
-        o["settings"] == {"model_benchmarking": {"run_models_in_parallel": True}}
-        for o in listed
+    assert all(o["settings"] == defaults for o in listed)
+
+
+def test_the_chat_limit_setting_saves_without_touching_the_other_one(client):
+    auth = _signup(client)
+    h = auth["headers"]
+    org = client.post("/organizations", json={"name": "Chat"}, headers=h).json()
+    url = f"/organizations/{org['uuid']}"
+
+    resp = client.patch(
+        url, json={"settings": {"talk_to_agent": {"default_messages_per_day": 40}}}, headers=h
     )
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["settings"] == {
+        "model_benchmarking": {"run_models_in_parallel": True},
+        "talk_to_agent": {"default_messages_per_day": 40},
+    }
+    for bad in (0, None, "x"):
+        refused = client.patch(
+            url, json={"settings": {"talk_to_agent": {"default_messages_per_day": bad}}}, headers=h
+        )
+        assert refused.status_code == 422, bad
+    unknown = client.patch(
+        url, json={"settings": {"talk_to_agent": {"messages_per_day": 3}}}, headers=h
+    )
+    assert unknown.status_code == 422
+
+
+def test_the_chat_limit_default_cannot_pass_the_workspace_maximum(client, monkeypatch):
+    from routers import org_limits
+
+    auth = _signup(client)
+    h = auth["headers"]
+    org = client.post("/organizations", json={"name": "Capped"}, headers=h).json()
+    url = f"/organizations/{org['uuid']}"
+    body = {"settings": {"talk_to_agent": {"default_messages_per_day": 51}}}
+
+    monkeypatch.setattr(org_limits, "DEFAULT_MAX_CHAT_REPLIES_PER_DAY", 50)
+    refused = client.patch(url, json=body, headers=h)
+    assert refused.status_code == 422
+    assert refused.json()["detail"] == (
+        "Messages per day cannot be more than 50, the most your workspace allows"
+    )
+
+    # On its own keys a workspace has no maximum.
+    import provider_keys
+
+    monkeypatch.setattr(provider_keys, "org_uses_own_keys", lambda o: True)
+    assert client.patch(url, json=body, headers=h).status_code == 200
 
 
 def test_running_models_one_after_another_is_remembered(client):

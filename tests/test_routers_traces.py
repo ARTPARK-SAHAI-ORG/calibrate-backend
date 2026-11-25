@@ -2937,6 +2937,103 @@ def test_usage_is_scoped_to_the_callers_workspace(client):
     assert client.get("/traces/usage", headers=h).json()["traces_stored"] == 1
 
 
+def _set_trace_columns(trace_uuid, **columns):
+    with db.get_db_connection() as conn:
+        for column, value in columns.items():
+            conn.execute(
+                f"UPDATE traces SET {column} = ? WHERE uuid = ?", (value, trace_uuid)
+            )
+        conn.commit()
+
+
+def test_a_trace_sent_to_the_api_reads_as_api_with_no_feedback(client):
+    h, agent_id = _signup_with_agent(client)
+    trace = _post_trace(client, h, _payload(agent_id, _mid()))
+
+    row = client.get("/traces", headers=h).json()["items"][0]
+    detail = client.get(f"/traces/{trace['uuid']}", headers=h).json()
+    assert (row["source"], row["feedback"]) == ("api", None)
+    assert (detail["source"], detail["feedback"]) == ("api", None)
+
+
+def test_ingest_refuses_a_source(client):
+    h, agent_id = _signup_with_agent(client)
+    res = client.post(
+        "/traces", json=_payload(agent_id, _mid(), source="chat"), headers=h
+    )
+    assert res.status_code == 422
+
+
+def test_feedback_sent_with_a_trace_shows_on_the_list_and_the_detail(client):
+    h, agent_id = _signup_with_agent(client)
+    trace = _post_trace(client, h, _payload(agent_id, _mid(), feedback=_INCORRECT))
+
+    row = client.get("/traces", headers=h).json()["items"][0]
+    detail = client.get(f"/traces/{trace['uuid']}", headers=h).json()
+    for got in (row, detail):
+        assert got["feedback"]["is_correct"] is False
+        assert got["feedback"]["comment"] == "Wrong date"
+        assert got["feedback"]["at"].endswith("Z")
+
+
+def test_ingest_refuses_a_feedback_comment_over_2000_characters(client):
+    h, agent_id = _signup_with_agent(client)
+    feedback = {"is_correct": True, "comment": "x" * 2001}
+    res = client.post(
+        "/traces", json=_payload(agent_id, _mid(), feedback=feedback), headers=h
+    )
+    assert res.status_code == 422
+
+
+def test_feedback_is_set_replaced_and_cleared_through_the_api(client):
+    h, agent_id = _signup_with_agent(client)
+    trace = _post_trace(client, h, _payload(agent_id, _mid()))
+    url = f"/traces/{trace['uuid']}/feedback"
+
+    first = client.put(url, json={"is_correct": False, "comment": "Wrong dose"}, headers=h)
+    assert first.status_code == 200, first.text
+    assert first.json()["feedback"]["is_correct"] is False
+    assert first.json()["feedback"]["comment"] == "Wrong dose"
+
+    replaced = client.put(url, json={"is_correct": True}, headers=h).json()["feedback"]
+    assert (replaced["is_correct"], replaced["comment"]) == (True, None)
+    assert client.get(f"/traces/{trace['uuid']}", headers=h).json()["feedback"]["is_correct"] is True
+
+    cleared = client.put(url, json={"is_correct": None, "comment": "dropped"}, headers=h)
+    assert cleared.json() == {"feedback": None}
+    assert client.get(f"/traces/{trace['uuid']}", headers=h).json()["feedback"] is None
+
+    assert client.put(url, json={}, headers=h).status_code == 422
+
+
+def test_feedback_through_the_api_takes_a_workspace_key(client):
+    h, agent_id = _signup_with_agent(client)
+    trace = _post_trace(client, h, _payload(agent_id, _mid()))
+    res = client.put(
+        f"/traces/{trace['uuid']}/feedback",
+        json={"is_correct": True},
+        headers=_api_key_headers(client, h),
+    )
+    assert res.status_code == 200, res.text
+    assert res.json()["feedback"]["is_correct"] is True
+
+
+def test_feedback_through_the_api_is_refused_outside_the_workspace(client):
+    h, agent_id = _signup_with_agent(client)
+    trace = _post_trace(client, h, _payload(agent_id, _mid()))
+    other_h, _ = _signup_with_agent(client)
+
+    res = client.put(
+        f"/traces/{trace['uuid']}/feedback", json={"is_correct": True}, headers=other_h
+    )
+    assert res.status_code == 403
+    assert client.get(f"/traces/{trace['uuid']}", headers=h).json()["feedback"] is None
+    unknown = client.put(
+        f"/traces/{uuid.uuid4()}/feedback", json={"is_correct": True}, headers=h
+    )
+    assert unknown.status_code == 404
+
+
 _EVAL_A = str(uuid.uuid4())
 _VER_A = str(uuid.uuid4())
 _EVAL_B = str(uuid.uuid4())
@@ -3816,6 +3913,8 @@ def test_the_published_list_parameters_keep_their_order():
         "score",
         "created_after",
         "created_before",
+        "source",
+        "feedback",
         "sort_by_evaluator",
         "sort_order",
         "include_content",
@@ -3827,6 +3926,9 @@ def test_the_published_list_parameters_keep_their_order():
 
 # For each filter: what the matching trace carries, what the other one carries,
 # and the filter that tells them apart.
+_CORRECT = {"is_correct": True}
+_INCORRECT = {"is_correct": False, "comment": "Wrong date"}
+
 _ONE_FILTER_CASES = {
     "q": ({"metadata": [{"key": "tag", "value": "needle"}]}, {}, {"q": "needle"}),
     "output_type": (
@@ -3850,20 +3952,30 @@ _ONE_FILTER_CASES = {
         {"created_at": "2026-02-01 00:00:00"},
         {"created_before": "2026-01-15T00:00:00Z"},
     ),
+    "source=chat": ({"source": "chat"}, {}, {"source": "chat"}),
+    "source=api": ({}, {"source": "chat"}, {"source": "api"}),
+    "source=api reads null as api": ({"source": None}, {"source": "chat"}, {"source": "api"}),
+    "feedback=correct": ({"feedback": _CORRECT}, {"feedback": _INCORRECT}, {"feedback": "correct"}),
+    "feedback=wrong": ({"feedback": _INCORRECT}, {"feedback": _CORRECT}, {"feedback": "wrong"}),
+    "feedback=any": ({"feedback": _INCORRECT}, {}, {"feedback": "any"}),
 }
+
+# Columns no request can set, written straight to the row.
+_ROW_ONLY_FIELDS = ("created_at", "source")
 
 
 def _matching_and_other_trace(client, h, agent_id, filter_name):
     """Post a trace the filter keeps and one it leaves out."""
     matching, other, query = _ONE_FILTER_CASES[filter_name]
     traces = []
-    for fields in (matching, other):
+    for conversation_id, fields in (("conv-a", matching), ("conv-b", other)):
         fields = dict(fields)
-        created_at = fields.pop("created_at", None)
+        columns = {k: fields.pop(k) for k in _ROW_ONLY_FIELDS if k in fields}
         message_id = _mid()
+        if filter_name != "conversation_id":
+            fields.setdefault("conversation_id", conversation_id)
         trace = _post_trace(client, h, _payload(agent_id, message_id, **fields))
-        if created_at:
-            _set_created_at(trace["uuid"], created_at)
+        _set_trace_columns(trace["uuid"], **columns)
         traces.append({**trace, "message_id": message_id})
     return traces[0], traces[1], query
 
@@ -3900,7 +4012,10 @@ def test_convert_select_all_skips_a_trace_outside_one_filter(client, filter_name
     assert _test_names(client, h) == [matching["message_id"]]
 
 
-@pytest.mark.parametrize("filter_name", ["q", "output_type", "labels"])
+@pytest.mark.parametrize(
+    "filter_name",
+    ["q", "output_type", "labels", "source=chat", "feedback=wrong"],
+)
 def test_score_averages_leave_out_a_trace_outside_one_filter(client, filter_name):
     h, agent_id = _signup_with_agent(client)
     _disable_auto_score(client, h, agent_id)
@@ -3932,6 +4047,26 @@ def test_conversations_leave_out_one_outside_one_filter(client, filter_name):
     assert _conversation_ids(client, h, **query) == ["conv-a"]
 
 
+@pytest.mark.parametrize(
+    "filter_name", ["source=chat", "source=api", "feedback=wrong", "feedback=any"]
+)
+def test_conversations_leave_out_one_outside_a_chat_filter(client, filter_name):
+    h, agent_id = _signup_with_agent(client)
+    _, _, query = _matching_and_other_trace(client, h, agent_id, filter_name)
+
+    assert _conversation_ids(client, h, **query) == ["conv-a"]
+
+
+@pytest.mark.parametrize("filter_name", ["source=chat", "feedback=correct"])
+def test_list_leaves_out_a_trace_outside_a_chat_filter(client, filter_name):
+    h, agent_id = _signup_with_agent(client)
+    matching, _, query = _matching_and_other_trace(client, h, agent_id, filter_name)
+
+    body = client.get("/traces", params=query, headers=h).json()
+    assert body["total"] == 1
+    assert [t["uuid"] for t in body["items"]] == [matching["uuid"]]
+
+
 def test_conversations_leave_out_one_outside_the_score_filter(client):
     h, agent_id = _signup_with_agent(client)
     _disable_auto_score(client, h, agent_id)
@@ -3953,6 +4088,8 @@ _ALL_FILTERS = {
     "score": ["ev-a:passed", "ev-b:>=4"],
     "created_after": "2026-01-15T05:30:00+05:30",
     "created_before": "2026-02-01T00:00:00Z",
+    "source": "chat",
+    "feedback": "any",
 }
 
 
@@ -3987,6 +4124,15 @@ def test_a_body_with_every_filter_reaches_trace_filters_intact(
         output_type="tool_call",
         labels=["vip", "prod"],
         scores=[("ev-a", "passed", None), ("ev-b", ">=", 4.0)],
+        source="chat",
+        feedback="any",
         created_after="2026-01-15 00:00:00",
         created_before="2026-02-01 00:00:00",
     )
+
+
+@pytest.mark.parametrize("value", ["none", "incorrect"])
+def test_feedback_filter_refuses_values_it_does_not_take(client, value):
+    h, agent_id = _signup_with_agent(client)
+    res = client.get("/traces", params={"agent_id": agent_id, "feedback": value}, headers=h)
+    assert res.status_code == 422
