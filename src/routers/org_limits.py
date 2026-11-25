@@ -15,6 +15,7 @@ from typing import Any, Dict, Literal, Optional
 from pydantic import BaseModel, Field
 
 from db import (
+    TALK_TO_AGENT_KEY,
     DEFAULT_MAX_CHAT_REPLIES_PER_DAY,
     create_limit_hit,
     create_org_limits,
@@ -246,10 +247,10 @@ def daily_message_limit(agent: Dict[str, Any], maximum: Optional[int]) -> int:
     """The agent's daily chat reply limit: its own number, else the workspace
     default, and never above the workspace maximum, which may have been lowered
     since either was saved."""
-    number = ((agent.get("config") or {}).get("talk_to_agent") or {}).get("messages_per_day")
+    number = ((agent.get("config") or {}).get(TALK_TO_AGENT_KEY) or {}).get("messages_per_day")
     if number is None:
         org = get_organization(agent["org_uuid"])
-        number = org["settings"]["talk_to_agent"]["default_messages_per_day"]
+        number = org["settings"][TALK_TO_AGENT_KEY]["default_messages_per_day"]
     return number if maximum is None else min(number, maximum)
 
 

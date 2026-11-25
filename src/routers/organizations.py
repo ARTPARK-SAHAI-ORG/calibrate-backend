@@ -23,6 +23,7 @@ from mailer import (
 from utils import MemberRoleLiteral
 from routers.org_limits import ensure_daily_message_limit_allowed
 from db import (
+    TALK_TO_AGENT_KEY,
     add_organization_member,
     add_organization_member_by_user_id,
     create_org_invite,
@@ -299,7 +300,7 @@ def update_org(
             status_code=400,
             detail="Provide name or settings to update",
         )
-    default = (fields.get("settings") or {}).get("talk_to_agent", {}).get(
+    default = (fields.get("settings") or {}).get(TALK_TO_AGENT_KEY, {}).get(
         "default_messages_per_day"
     )
     if default is not None:

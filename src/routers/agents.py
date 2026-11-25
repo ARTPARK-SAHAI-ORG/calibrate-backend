@@ -37,6 +37,7 @@ from utils import (
 from shared_enums import AgentInteractionType, DEFAULT_AGENT_INTERACTION_TYPE
 
 from db import (
+    TALK_TO_AGENT_KEY,
     create_agent,
     ensure_name_unique,
     get_agent,
@@ -820,7 +821,7 @@ def resolve_agent_names(
 
 
 def _check_daily_message_limit(config: Optional[Dict[str, Any]], org_uuid: str) -> None:
-    section = (config or {}).get("talk_to_agent")
+    section = (config or {}).get(TALK_TO_AGENT_KEY)
     if section is None:
         return
     if not isinstance(section, dict):
@@ -1060,11 +1061,11 @@ def update_agent_endpoint(
             agent.config["benchmark_models_verified"] = agent.benchmark_models_verified
 
     if agent.config is not None:
-        if "talk_to_agent" in agent.config:
+        if TALK_TO_AGENT_KEY in agent.config:
             _check_daily_message_limit(agent.config, ctx.org_uuid)
-        elif "talk_to_agent" in (existing_agent.get("config") or {}):
+        elif TALK_TO_AGENT_KEY in (existing_agent.get("config") or {}):
             # A config body replaces the stored one; keep the chat limit.
-            agent.config["talk_to_agent"] = existing_agent["config"]["talk_to_agent"]
+            agent.config[TALK_TO_AGENT_KEY] = existing_agent["config"][TALK_TO_AGENT_KEY]
 
     was_scoring = trace_scoring_enabled(existing_agent)
     now_scoring = was_scoring

@@ -4263,9 +4263,12 @@ def mark_email_verified(user_uuid: str, password_hash: Optional[str] = None) -> 
 # another for it. A new workspace's default starts at it.
 DEFAULT_MAX_CHAT_REPLIES_PER_DAY = env_int("DEFAULT_MAX_CHAT_REPLIES_PER_DAY", 200)
 
+# The settings section for talking to an agent, on a workspace and on an agent's config.
+TALK_TO_AGENT_KEY = "talk_to_agent"
+
 ORG_SETTINGS_DEFAULTS: Dict[str, Dict[str, Any]] = {
     "model_benchmarking": {"run_models_in_parallel": True},
-    "talk_to_agent": {"default_messages_per_day": DEFAULT_MAX_CHAT_REPLIES_PER_DAY},
+    TALK_TO_AGENT_KEY: {"default_messages_per_day": DEFAULT_MAX_CHAT_REPLIES_PER_DAY},
 }
 
 
