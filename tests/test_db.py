@@ -3121,8 +3121,7 @@ def test_tool_call_judge_backfill_fills_blank_forks_in_place():
 
 
 def test_tool_call_judge_backfill_runs_once():
-    """A person blanking the prompt later chooses people-only answers, so a
-    restart must not fill it back in."""
+    """A prompt emptied after the one-time fill must not be filled again on restart."""
     _user, org_uuid = _fresh_org()
     fork = db.get_tool_call_evaluator_for_org(org_uuid)
     with db.get_db_connection() as conn:

@@ -72,7 +72,7 @@ from annotation_eval_runner import (
     EvaluatorResolutionError,
     DatasetBuildError,
     _resolve_evaluator_dicts,
-    evaluators_for_item,
+    evaluators_fitting_row,
     build_dataset_for_task_type,
     is_tool_call_row,
     required_evaluator_ids_for_item,
@@ -2368,7 +2368,6 @@ def start_evaluator_run(
             )
         items_by_id = {it["uuid"]: it for it in all_items}
         items = [items_by_id[i] for i in target_ids]
-        item_ids_persisted: List[str] = target_ids
     else:
         if not payload.item_ids:
             raise HTTPException(
@@ -2394,21 +2393,23 @@ def start_evaluator_run(
                 ordered_subset_ids.append(i)
         items_by_id = {it["uuid"]: it for it in all_items}
         items = [items_by_id[i] for i in ordered_subset_ids]
-        item_ids_persisted = ordered_subset_ids
 
     linked = {
         e["uuid"] for e in get_evaluators_for_annotation_task(task_uuid)
     }
     try:
         resolved = _resolve_evaluator_dicts(
-            [e.dict() for e in payload.evaluators], linked, task.get("type")
+            [e.dict() for e in payload.evaluators], linked
         )
     except EvaluatorResolutionError as e:
         raise HTTPException(status_code=400, detail=str(e))
 
     # Rows no chosen evaluator pairs with never enter the run, and evaluators
     # no chosen row pairs with are not recorded as having run.
-    fits = {it["uuid"]: evaluators_for_item(it, resolved) for it in items}
+    fits = {
+        it["uuid"]: evaluators_fitting_row(resolved, is_tool_call_row(it))
+        for it in items
+    }
     items = [it for it in items if fits[it["uuid"]]]
     item_ids_persisted = [it["uuid"] for it in items]
     if not items:

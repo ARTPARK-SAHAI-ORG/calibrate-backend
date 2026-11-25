@@ -457,6 +457,15 @@ def test_judge_prompt_and_model_are_stored_trimmed(client):
     assert version["system_prompt"] == "Judge it"
 
 
+def test_every_evaluator_type_has_a_default_prompt():
+    from typing import get_args
+
+    from db import DEFAULT_PROMPTS_BY_PURPOSE
+    from shared_enums import EvaluatorType
+
+    assert set(get_args(EvaluatorType)) == set(DEFAULT_PROMPTS_BY_PURPOSE)
+
+
 def test_default_prompt_for_tool_call(client):
     from db import DEFAULT_PROMPTS_BY_PURPOSE, DEFAULT_TEXT_JUDGE_MODEL
 

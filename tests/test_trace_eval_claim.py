@@ -528,9 +528,8 @@ def test_a_tool_call_trace_with_only_reply_evaluators_is_skipped_without_a_judge
     assert db.get_trace_eval_scores(run) == []
 
 
-def test_a_tool_call_trace_with_a_linked_tool_call_evaluator_that_cannot_run_keeps_the_general_reason():
-    org = _org()
-    agent = _agent(org)
+def _unusable_tool_call_evaluator(org):
+    """A tool-call evaluator whose live version declares a variable, so trace scoring cannot use it."""
     ev = db.create_evaluator(
         name=f"tc-{uuid.uuid4().hex[:6]}",
         evaluator_type="tool-call",
@@ -538,9 +537,15 @@ def test_a_tool_call_trace_with_a_linked_tool_call_evaluator_that_cannot_run_kee
         owner_user_id=str(uuid.uuid4()),
         output_type="binary",
     )
-    unusable = db.create_evaluator_version(ev, "openai/gpt-4.1", "Judge {{x}}", variables=[{"name": "x"}])
-    db.set_evaluator_live_version(ev, unusable["uuid"])
-    run = _run(org, agent, _trace(org, agent, output=_TOOL_ONLY), [(ev, unusable["uuid"])])
+    version = db.create_evaluator_version(ev, "openai/gpt-4.1", "Judge {{x}}", variables=[{"name": "x"}])
+    db.set_evaluator_live_version(ev, version["uuid"])
+    return ev, version["uuid"]
+
+
+def test_a_tool_call_trace_with_a_linked_tool_call_evaluator_that_cannot_run_keeps_the_general_reason():
+    org = _org()
+    agent = _agent(org)
+    run = _run(org, agent, _trace(org, agent, output=_TOOL_ONLY), [_unusable_tool_call_evaluator(org)])
 
     ts.claim_and_score_batch(now=_at(1000), invoke=_never_invoked)
 
@@ -551,16 +556,7 @@ def test_a_tool_call_trace_beside_a_reply_evaluator_and_a_broken_tool_call_one_k
     org = _org()
     agent = _agent(org)
     reply_ev = _evaluator(org, name="Correctness")
-    tool_ev = db.create_evaluator(
-        name=f"tc-{uuid.uuid4().hex[:6]}",
-        evaluator_type="tool-call",
-        org_uuid=org,
-        owner_user_id=str(uuid.uuid4()),
-        output_type="binary",
-    )
-    unusable = db.create_evaluator_version(tool_ev, "openai/gpt-4.1", "Judge {{x}}", variables=[{"name": "x"}])
-    db.set_evaluator_live_version(tool_ev, unusable["uuid"])
-    reply_run = _run(org, agent, _trace(org, agent), [reply_ev, (tool_ev, unusable["uuid"])], available_at=1)
+    reply_run = _run(org, agent, _trace(org, agent), [reply_ev, _unusable_tool_call_evaluator(org)], available_at=1)
     tool_run = _run(org, agent, _trace(org, agent, output=_TOOL_ONLY), [], available_at=2)
 
     ts.claim_and_score_batch(

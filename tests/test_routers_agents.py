@@ -1346,10 +1346,10 @@ def test_eligibility_and_enable_with_tool_call_evaluators(client):
     _disable_trace_scoring(client, h, agent["uuid"])
     url = f"/agents/{agent['uuid']}/trace-scoring-eligibility"
 
-    with_prompt = _create_evaluator(client, h, evaluator_type="tool-call")
-    _link_evaluators(client, h, agent["uuid"], with_prompt)
+    tool_call_ev = _create_evaluator(client, h, evaluator_type="tool-call")
+    _link_evaluators(client, h, agent["uuid"], tool_call_ev)
     assert [e["evaluator_uuid"] for e in client.get(url, headers=h).json()["eligible"]] == [
-        with_prompt
+        tool_call_ev
     ]
     enabled = _set_trace_scoring(client, h, agent["uuid"], True)
     assert enabled.status_code == 200, enabled.text
@@ -1861,8 +1861,6 @@ def test_chat_link_reports_todays_messages_against_the_agents_own_limit(client):
     )
     assert res.status_code == 200, res.text
     assert _chat_link(client, h, agent["uuid"]).json()["daily_message_limit"] == 7
-
-
 
 
 def test_ineligible_reason_docs_show_the_values_the_api_returns():

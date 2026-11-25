@@ -40,8 +40,8 @@ def _ev(evaluator_type, *, live=None, name="ev", ev_uuid=None):
     }
 
 
-def _version(version_uuid, *, variables=None, system_prompt="Judge it."):
-    return {"uuid": version_uuid, "variables": variables, "system_prompt": system_prompt}
+def _version(version_uuid, *, variables=None):
+    return {"uuid": version_uuid, "variables": variables, "system_prompt": "Judge it."}
 
 
 def test_conversation_agent_maps_to_response_llm():
@@ -119,7 +119,7 @@ def test_declares_variables_disqualifies():
 
 
 @pytest.mark.parametrize("interaction_type", ["conversation", "general"])
-def test_a_tool_call_evaluator_with_a_prompt_is_eligible_on_both_agent_types(
+def test_a_tool_call_evaluator_is_eligible_on_both_agent_types(
     interaction_type,
 ):
     live = str(uuid.uuid4())
@@ -187,8 +187,9 @@ def test_each_trace_gets_only_the_evaluators_for_its_kind():
     llm_ev = {"uuid": "l", "evaluator_type": "llm"}
     tool_trace = {"output": {"tool_calls": [_NAMED_CALL]}}
     reply_trace = {"output": {"response": "Week 14.", "tool_calls": [_NAMED_CALL]}}
-    assert ts.evaluators_for_trace(tool_trace, [tool_ev, llm_ev]) == [tool_ev]
-    assert ts.evaluators_for_trace(reply_trace, [tool_ev, llm_ev]) == [llm_ev]
+    evs = [tool_ev, llm_ev]
+    assert ts.evaluators_fitting_row(evs, ts.is_tool_call_trace(tool_trace)) == [tool_ev]
+    assert ts.evaluators_fitting_row(evs, ts.is_tool_call_trace(reply_trace)) == [llm_ev]
 
 
 def test_a_conversation_tool_call_trace_goes_to_the_tool_call_judge():
@@ -256,6 +257,7 @@ def test_the_evaluator_type_is_not_sent_to_the_cli():
             ts.PreparedRun(
                 {"uuid": "run-1"},
                 {"input": [], "output": {"tool_calls": [_NAMED_CALL]}},
+                [execution],
             )
         ],
         ts.BatchEvaluators(evaluation_type="response", hydrated=[execution]),

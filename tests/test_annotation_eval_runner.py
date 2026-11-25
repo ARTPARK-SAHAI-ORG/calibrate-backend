@@ -73,13 +73,13 @@ def _version_record(**overrides):
 
 def test_resolve_evaluator_dicts_missing_id():
     with pytest.raises(runner.EvaluatorResolutionError):
-        runner._resolve_evaluator_dicts([{"evaluator_id": None}], {"ev-1"}, "llm")
+        runner._resolve_evaluator_dicts([{"evaluator_id": None}], {"ev-1"})
 
 
 def test_resolve_evaluator_dicts_not_linked():
     with pytest.raises(runner.EvaluatorResolutionError):
         runner._resolve_evaluator_dicts(
-            [{"evaluator_id": "ev-1"}], set(), "llm"  # not linked
+            [{"evaluator_id": "ev-1"}], set()  # not linked
         )
 
 
@@ -87,7 +87,7 @@ def test_resolve_evaluator_dicts_evaluator_missing():
     with patch("annotation_eval_runner.get_evaluator", return_value=None):
         with pytest.raises(runner.EvaluatorResolutionError):
             runner._resolve_evaluator_dicts(
-                [{"evaluator_id": "ev-1"}], {"ev-1"}, "llm"
+                [{"evaluator_id": "ev-1"}], {"ev-1"}
             )
 
 
@@ -98,7 +98,7 @@ def test_resolve_evaluator_dicts_no_live_version():
     ):
         with pytest.raises(runner.EvaluatorResolutionError):
             runner._resolve_evaluator_dicts(
-                [{"evaluator_id": "ev-1"}], {"ev-1"}, "llm"
+                [{"evaluator_id": "ev-1"}], {"ev-1"}
             )
 
 
@@ -111,7 +111,7 @@ def test_resolve_evaluator_dicts_version_mismatch():
     ):
         with pytest.raises(runner.EvaluatorResolutionError):
             runner._resolve_evaluator_dicts(
-                [{"evaluator_id": "ev-1"}], {"ev-1"}, "llm"
+                [{"evaluator_id": "ev-1"}], {"ev-1"}
             )
 
 
@@ -124,7 +124,7 @@ def test_resolve_evaluator_dicts_missing_identity_field():
     ):
         with pytest.raises(runner.EvaluatorResolutionError):
             runner._resolve_evaluator_dicts(
-                [{"evaluator_id": "ev-1"}], {"ev-1"}, "llm"
+                [{"evaluator_id": "ev-1"}], {"ev-1"}
             )
 
 
@@ -135,7 +135,7 @@ def test_resolve_evaluator_dicts_happy_path():
         "annotation_eval_runner.get_evaluator_version", return_value=_version_record()
     ):
         out = runner._resolve_evaluator_dicts(
-            [{"evaluator_id": "ev-1"}], {"ev-1"}, "llm"
+            [{"evaluator_id": "ev-1"}], {"ev-1"}
         )
     assert out[0]["uuid"] == "ev-1"
     assert out[0]["_evaluator_version_id"] == "ver-1"
@@ -373,7 +373,7 @@ def test_required_evaluator_ids_for_item_normal_row():
     )
 
 
-def _resolve_with_tool_call_evaluator(requested, tc_prompt="Judge the calls", task_type="llm", **tc):
+def _resolve_with_tool_call_evaluator(requested, tc_prompt="Judge the calls", **tc):
     """Resolve `requested` where ev-tc is a tool-call evaluator and ev-1 is a
     normal LLM judge."""
     evaluators = {
@@ -383,7 +383,7 @@ def _resolve_with_tool_call_evaluator(requested, tc_prompt="Judge the calls", ta
                 "uuid": "ev-tc",
                 "name": "Tool call",
                 "live_version_id": "ver-tc",
-                "evaluator_type": runner.TOOL_CALL_EVALUATOR_TYPE,
+                "evaluator_type": "tool-call",
                 **tc,
             }
         ),
@@ -401,27 +401,20 @@ def _resolve_with_tool_call_evaluator(requested, tc_prompt="Judge the calls", ta
         side_effect=lambda u: versions[u],
     ):
         return runner._resolve_evaluator_dicts(
-            [{"evaluator_id": e} for e in requested], set(evaluators), task_type
+            [{"evaluator_id": e} for e in requested], set(evaluators)
         )
 
 
-NOTHING_TO_RUN = (
-    "None of the selected evaluators can run a judge on this task. A tool-call "
-    "evaluator runs only on llm and llm-general tasks."
-)
-
-
-def test_resolve_leaves_out_tool_call_evaluator_with_no_version():
+def test_resolve_rejects_tool_call_evaluator_with_no_version():
     with pytest.raises(runner.EvaluatorResolutionError) as e:
         _resolve_with_tool_call_evaluator(["ev-tc"], live_version_id=None)
-    assert str(e.value) == NOTHING_TO_RUN
-
-
-@pytest.mark.parametrize("task_type", ["llm", "llm-general"])
-def test_resolve_keeps_tool_call_evaluator_with_a_prompt(task_type):
-    resolved = _resolve_with_tool_call_evaluator(
-        ["ev-1", "ev-tc"], tc_prompt="Judge the calls", task_type=task_type
+    assert str(e.value) == (
+        "Evaluator ev-tc has no live version; pass evaluator_version_id"
     )
+
+
+def test_resolve_keeps_tool_call_evaluator_with_a_prompt():
+    resolved = _resolve_with_tool_call_evaluator(["ev-1", "ev-tc"])
     assert [ev["uuid"] for ev in resolved] == ["ev-1", "ev-tc"]
     assert [ev["evaluator_type"] for ev in resolved] == ["llm", "tool-call"]
     for build in (
@@ -431,31 +424,10 @@ def test_resolve_keeps_tool_call_evaluator_with_a_prompt(task_type):
         assert all("evaluator_type" not in p for p in build(resolved))
 
 
-@pytest.mark.parametrize("task_type", ["stt", "tts", "conversation"])
-def test_resolve_leaves_out_tool_call_evaluator_on_other_task_types(task_type):
-    resolved = _resolve_with_tool_call_evaluator(
-        ["ev-1", "ev-tc"], tc_prompt="Judge the calls", task_type=task_type
-    )
-    assert [ev["uuid"] for ev in resolved] == ["ev-1"]
-    with pytest.raises(runner.EvaluatorResolutionError) as e:
-        _resolve_with_tool_call_evaluator(
-            ["ev-tc"], tc_prompt="Judge the calls", task_type=task_type
-        )
-    assert str(e.value) == NOTHING_TO_RUN
-
-
 REPLY_EV = {"uuid": "ev-1", "name": "Reply judge", "evaluator_type": "llm"}
 TOOL_EV = {"uuid": "ev-tc", "name": "Tool judge", "evaluator_type": "tool-call"}
 CALL_X = {"tool": "search", "arguments": {"q": "x"}}
 CALL_Y = {"tool": "search", "arguments": {"q": "y"}}
-
-
-def test_evaluators_for_item_pairs_each_kind_of_row():
-    evs = [REPLY_EV, TOOL_EV]
-    assert runner.evaluators_for_item(TC_ROW, evs) == [TOOL_EV]
-    assert runner.evaluators_for_item(TEXT_ROW, evs) == [REPLY_EV]
-    assert runner.evaluators_for_item(TC_ROW, [REPLY_EV]) == []
-    assert runner.evaluators_for_item(TEXT_ROW, [TOOL_EV]) == []
 
 
 def _llm_tool_row(**payload):
@@ -1394,28 +1366,6 @@ def test_queue_starter_no_evaluators():
         runner._start_annotation_eval_job_from_queue(
             {"uuid": "j-1", "user_id": "u-1", "details": {"task_id": "t-1"}}
         )
-
-
-def test_queue_starter_resolves_with_the_tasks_type():
-    with patch(
-        "db.get_evaluators_for_annotation_task", return_value=[{"uuid": "ev-1"}]
-    ), patch(
-        "annotation_eval_runner.get_annotation_task",
-        return_value={"type": "llm-general"},
-    ), patch(
-        "annotation_eval_runner._resolve_evaluator_dicts",
-        return_value=[_ev_resolved()],
-    ) as resolve, patch(
-        "annotation_eval_runner.start_annotation_eval_job"
-    ):
-        runner._start_annotation_eval_job_from_queue(
-            {
-                "uuid": "j-1",
-                "user_id": "u-1",
-                "details": {"task_id": "t-1", "evaluators": [{"evaluator_id": "ev-1"}]},
-            }
-        )
-    assert resolve.call_args.args[2] == "llm-general"
 
 
 def test_queue_starter_happy_path():

@@ -17,7 +17,7 @@ import shutil
 import subprocess
 import tempfile
 from collections.abc import Callable, Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime, timedelta
 from enum import Enum
 from pathlib import Path
@@ -287,16 +287,18 @@ class EvalOnlyCliResult:
 
 @dataclass(frozen=True)
 class PreparedRun:
-    """A claimed run whose trace and agent are still live."""
+    """A claimed run whose trace and agent are still live, with the evaluators
+    that fit its trace once the batch's evaluators are known."""
 
     run: dict[str, Any]
     trace: dict[str, Any]
+    evaluators: list[dict[str, Any]] = field(default_factory=list)
 
 
 @dataclass(frozen=True)
 class BatchEvaluators:
     """Every evaluator the runs in one claimed batch can be scored against.
-    `evaluators_for_trace` picks each run's own from `hydrated`.
+    `evaluators_fitting_row` picks each run's own from `hydrated`.
 
     A claim only ever returns runs of a single agent, so the agent's evaluators
     are resolved once for the batch rather than once for each run.
@@ -304,6 +306,7 @@ class BatchEvaluators:
 
     evaluation_type: TraceScorableEvaluationType
     hydrated: list[dict[str, Any]]
+    has_tool_call_evaluator: bool = False
 
 def resolve_batch_evaluators(
     agent_id: str,
@@ -320,15 +323,18 @@ def resolve_batch_evaluators(
     # leaves a pending run the off-switch found nothing to delete.
     if not trace_scoring_enabled(agent):
         return TraceEvalSettleSkipReason.SCORING_DISABLED
-    resolution = resolve_trace_scoring(
-        agent.get("interaction_type"), resolve_live_evaluators(agent["uuid"])
-    )
-    skip = resolution.skip_reason
-    if skip is not None:
-        return skip
-    hydrated = [item.execution for item in resolution.eligible]
+    live = resolve_live_evaluators(agent["uuid"])
+    resolution = resolve_trace_scoring(agent.get("interaction_type"), live)
+    if resolution.evaluation_type is None:
+        return resolution.skip_reason
+    # An agent with no usable evaluator still resolves, so each trace settles
+    # with its own skip reason.
     return BatchEvaluators(
-        evaluation_type=resolution.evaluation_type, hydrated=hydrated
+        evaluation_type=resolution.evaluation_type,
+        hydrated=[item.execution for item in resolution.eligible],
+        has_tool_call_evaluator=any(
+            ev.get("evaluator_type") == TOOL_CALL_EVALUATOR_TYPE for ev, _ in live
+        ),
     )
 
 
@@ -345,23 +351,6 @@ def is_tool_call_trace(trace: dict[str, Any]) -> bool:
     )
 
 
-def evaluators_for_trace(
-    trace: dict[str, Any], hydrated: list[dict[str, Any]]
-) -> list[dict[str, Any]]:
-    return evaluators_fitting_row(hydrated, is_tool_call_trace(trace))
-
-
-def _skip_reason_for(trace: dict[str, Any], reason: str, agent_has_tool_call_evaluator: bool) -> str:
-    """A tool-only trace says `no_tool_call_evaluator` only when the agent links none."""
-    if reason == "no_usable_evaluators" and is_tool_call_trace(trace) and not agent_has_tool_call_evaluator:
-        return "no_tool_call_evaluator"
-    return reason
-
-
-def _agent_has_tool_call_evaluator(agent_id: str) -> bool:
-    from db import get_evaluators_for_agent
-
-    return any(ev.get("evaluator_type") == TOOL_CALL_EVALUATOR_TYPE for ev in get_evaluators_for_agent(agent_id))
 
 
 def build_dataset_item(
@@ -412,7 +401,7 @@ def build_eval_only_batch(
         [
             {
                 "test_uuid": item.run["uuid"],
-                "evaluators": evaluators_for_trace(item.trace, evaluators.hydrated),
+                "evaluators": item.evaluators,
             }
             for item in prepared
         ]
@@ -838,7 +827,6 @@ def process_claimed_runs(
             # the wrong verdicts as real scores, so refuse rather than guess.
             raise RuntimeError(f"a batch must be one agent's runs, got {agent_ids}")
         evaluators = resolve_batch_evaluators(claimed[0]["agent_id"])
-        has_tool_call_evaluator = _agent_has_tool_call_evaluator(claimed[0]["agent_id"])
     except Exception as exc:
         logger.exception("trace-scoring: resolving evaluators raised")
         for item in prepared:
@@ -856,20 +844,24 @@ def process_claimed_runs(
         for item in prepared:
             _settle_or_defer_terminal(
                 item.run,
-                reason=_skip_reason_for(item.trace, reason, has_tool_call_evaluator),
+                reason=reason,
                 now=prepare_now, rng=rng, max_attempts=max_attempts,
             )
         return
 
     scorable: list[PreparedRun] = []
     for item in prepared:
-        if evaluators_for_trace(item.trace, evaluators.hydrated):
-            scorable.append(item)
+        tool_call = is_tool_call_trace(item.trace)
+        fitting = evaluators_fitting_row(evaluators.hydrated, tool_call)
+        if fitting:
+            scorable.append(replace(item, evaluators=fitting))
         else:
             _settle_or_defer_terminal(
                 item.run,
-                reason=_skip_reason_for(
-                    item.trace, "no_usable_evaluators", has_tool_call_evaluator
+                reason=(
+                    "no_tool_call_evaluator"
+                    if tool_call and not evaluators.has_tool_call_evaluator
+                    else "no_usable_evaluators"
                 ),
                 now=prepare_now, rng=rng, max_attempts=max_attempts,
             )
@@ -914,10 +906,7 @@ def process_claimed_runs(
         scores = map_item_scores(
             entry,
             name_to_uuid=manifest,
-            hydrated_by_uuid={
-                ev["uuid"]: ev
-                for ev in evaluators_for_trace(item.trace, evaluators.hydrated)
-            },
+            hydrated_by_uuid={ev["uuid"]: ev for ev in item.evaluators},
         )
         if scores is not None:
             scored[item.run["uuid"]] = scores

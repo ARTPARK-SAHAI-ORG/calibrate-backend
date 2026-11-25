@@ -239,10 +239,6 @@ NOTHING_FITS = (
     "None of the selected evaluators fit the chosen items. Tool-call items need "
     "a tool-call evaluator, and all other items need any other evaluator."
 )
-NOTHING_CAN_RUN = (
-    "None of the selected evaluators can run a judge on this task. A tool-call "
-    "evaluator runs only on llm and llm-general tasks."
-)
 TOOL_ROW = {"name": "tc", "chat_history": [], "agent_response": "", "tool_calls": [{"tool": "t", "arguments": {}}]}
 REPLY_ROW = {"name": "resp", "chat_history": [], "agent_response": "hi"}
 
@@ -325,7 +321,25 @@ def test_evaluator_run_tool_call_evaluator_on_stt_task_blocked(client):
     )
     resp = _start_run(client, h, task_uuid, [tc_ev])
     assert resp.status_code == 400
-    assert resp.json()["detail"] == NOTHING_CAN_RUN
+    assert resp.json()["detail"] == NOTHING_FITS
+
+
+def test_evaluator_run_leaves_a_tool_call_evaluator_out_of_an_stt_run(client):
+    h = _signup(client)["headers"]
+    tc_ev = _tool_call_ev(client, h)
+    evs = client.get("/evaluators", headers=h).json()["items"]
+    stt_ev = next(e for e in evs if e.get("evaluator_type") == "stt")["uuid"]
+    task_uuid = _task_with(
+        client,
+        h,
+        "stt",
+        [stt_ev, tc_ev],
+        [{"name": "i1", "reference_transcript": "a", "predicted_transcript": "a"}],
+    )
+    resp = _start_run(client, h, task_uuid, [stt_ev, tc_ev])
+    assert resp.status_code == 200, resp.text
+    details = _job_details(resp.json()["job_uuid"])
+    assert [e["evaluator_id"] for e in details["evaluators"]] == [stt_ev]
 
 
 def _job_details(job_uuid):
@@ -346,8 +360,8 @@ def _job_details(job_uuid):
     ],
 )
 def test_evaluator_run_mixed_task_runs_both_kinds(client, task_type, tool_row, reply_row):
-    """Every row runs, and the row limit counts evaluator and row pairs: two rows
-    and two evaluators is 2 judge calls, not 4."""
+    """Every row runs, and the row limit counts the rows that run: two rows,
+    each paired with one of the two evaluators, counts 2."""
     h = _signup(client)["headers"]
     tc_ev = _tool_call_ev(client, h)
     evs = client.get("/evaluators", headers=h).json()["items"]
@@ -363,6 +377,19 @@ def test_evaluator_run_mixed_task_runs_both_kinds(client, task_type, tool_row, r
     details = _job_details(resp.json()["job_uuid"])
     assert len(details["item_ids"]) == 2
     assert {e["evaluator_id"] for e in details["evaluators"]} == {reply_ev, tc_ev}
+
+
+def test_evaluator_run_row_limit_counts_rows_not_evaluators(client):
+    h = _signup(client)["headers"]
+    evs = client.get("/evaluators", headers=h).json()["items"]
+    reply_evs = [e["uuid"] for e in evs if e.get("evaluator_type") == "llm"][:2]
+    assert len(reply_evs) == 2
+    task_uuid = _task_with(client, h, "llm", reply_evs, [REPLY_ROW])
+    with patch("routers.annotation_tasks.enforce_max_rows_per_eval") as limit:
+        resp = _start_run(client, h, task_uuid, reply_evs)
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["evaluator_count"] == 2
+    assert limit.call_args.args[1] == 1
 
 
 def test_evaluator_run_does_not_record_an_evaluator_no_row_pairs_with(client):
