@@ -10,7 +10,7 @@ from typing import Optional, List, Dict, Any, Set, Tuple, TYPE_CHECKING
 from contextlib import contextmanager
 
 import trace_scoring
-from utils import is_tool_call_row, trace_scoring_enabled
+from utils import env_int, is_tool_call_row, trace_scoring_enabled
 
 if TYPE_CHECKING:
     from routers.org_limits import OrgLimits
@@ -4259,9 +4259,13 @@ def mark_email_verified(user_uuid: str, password_hash: Optional[str] = None) -> 
 # time, False runs them one after another, which is what every comparison did
 # before a workspace could remember a choice. `default_messages_per_day` is
 # the daily chat reply limit of an agent that sets none of its own.
+# The highest daily message limit a workspace may set, unless an admin sets
+# another for it. A new workspace's default starts at it.
+DEFAULT_MAX_CHAT_REPLIES_PER_DAY = env_int("DEFAULT_MAX_CHAT_REPLIES_PER_DAY", 200)
+
 ORG_SETTINGS_DEFAULTS: Dict[str, Dict[str, Any]] = {
     "model_benchmarking": {"run_models_in_parallel": True},
-    "talk_to_agent": {"default_messages_per_day": 200},
+    "talk_to_agent": {"default_messages_per_day": DEFAULT_MAX_CHAT_REPLIES_PER_DAY},
 }
 
 

@@ -15,6 +15,7 @@ from typing import Any, Dict, Literal, Optional
 from pydantic import BaseModel, Field
 
 from db import (
+    DEFAULT_MAX_CHAT_REPLIES_PER_DAY,
     create_limit_hit,
     create_org_limits,
     get_member_role,
@@ -45,7 +46,6 @@ DEFAULT_TRACE_SCORING_BATCH_SIZE = env_int("DEFAULT_TRACE_SCORING_BATCH_SIZE", 2
 DEFAULT_MAX_CONCURRENT_TRACE_SCORING_BATCHES = env_int(
     "MAX_CONCURRENT_TRACE_SCORING_BATCHES_PER_ORG", 1
 )
-DEFAULT_MAX_CHAT_REPLIES_PER_DAY = env_int("DEFAULT_MAX_CHAT_REPLIES_PER_DAY", 200)
 
 
 class OrgLimits(BaseModel):

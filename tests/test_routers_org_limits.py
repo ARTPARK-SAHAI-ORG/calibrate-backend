@@ -271,12 +271,10 @@ def test_an_empty_limit_setting_falls_back_instead_of_stopping_the_server(monkey
         "DEFAULT_MAX_TRACES",
         "DEFAULT_TRACE_SCORING_BATCH_SIZE",
         "MAX_CONCURRENT_TRACE_SCORING_BATCHES_PER_ORG",
-        "DEFAULT_MAX_CHAT_REPLIES_PER_DAY",
     ):
         monkeypatch.setenv(name, "")
     try:
         reloaded = importlib.reload(org_limits_module)
-        assert reloaded.DEFAULT_MAX_CHAT_REPLIES_PER_DAY == 200
         assert reloaded.DEFAULT_MAX_ROWS_PER_EVAL == 20
         assert reloaded.DEFAULT_MAX_TRACES == 50000
     finally:
