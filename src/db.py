@@ -4869,11 +4869,10 @@ def get_agent(agent_uuid: str) -> Optional[Dict[str, Any]]:
 
 
 def get_agent_by_chat_token(token: str) -> Optional[Dict[str, Any]]:
-    """The live agent whose chat link is on and carries this token."""
+    """The live agent whose chat link carries this token, public or not."""
     with get_db_connection() as conn:
         row = conn.execute(
-            "SELECT * FROM agents WHERE chat_token = ? AND chat_link_public = 1 "
-            "AND deleted_at IS NULL",
+            "SELECT * FROM agents WHERE chat_token = ? AND deleted_at IS NULL",
             (token,),
         ).fetchone()
         return _parse_agent_row(row) if row else None
