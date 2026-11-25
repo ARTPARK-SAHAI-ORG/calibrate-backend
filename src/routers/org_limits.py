@@ -243,11 +243,16 @@ def effective_max_chat_replies_per_day(org_uuid: str) -> Optional[int]:
     return _effective_limit(org_uuid, "max_chat_replies_per_day")
 
 
+def agent_daily_message_limit(agent: Dict[str, Any]) -> Optional[int]:
+    """The daily message limit the agent's own config sets, if any."""
+    return ((agent.get("config") or {}).get(TALK_TO_AGENT_KEY) or {}).get("messages_per_day")
+
+
 def daily_message_limit(agent: Dict[str, Any], maximum: Optional[int]) -> int:
     """The agent's daily chat reply limit: its own number, else the workspace
     default, and never above the workspace maximum, which may have been lowered
     since either was saved."""
-    number = ((agent.get("config") or {}).get(TALK_TO_AGENT_KEY) or {}).get("messages_per_day")
+    number = agent_daily_message_limit(agent)
     if number is None:
         org = get_organization(agent["org_uuid"])
         number = org["settings"][TALK_TO_AGENT_KEY]["default_messages_per_day"]
