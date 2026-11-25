@@ -10954,25 +10954,21 @@ def _trace_feedback(stored: Optional[str]) -> Optional[Dict[str, Any]]:
         return None
     feedback = json.loads(stored)
     return {
-        "is_correct": bool(feedback["is_correct"]),
+        "is_correct": feedback["is_correct"],
         "comment": feedback.get("comment"),
         "at": _trace_iso(feedback.get("at")),
     }
 
 
-# The feedback column's value from (is_correct, is_correct as JSON, comment):
-# NULL when is_correct is NULL, so one statement both sets and clears it, and
-# `at` comes from the database clock like every other timestamp.
-_FEEDBACK_JSON_SQL = (
-    "CASE WHEN ? IS NULL THEN NULL ELSE "
-    "json_object('is_correct', json(?), 'comment', ?, 'at', CURRENT_TIMESTAMP) END"
-)
+# Stores the feedback JSON from `_feedback_json` with `at` stamped by the
+# database clock, like every other timestamp. NULL in gives NULL, which clears it.
+_FEEDBACK_JSON_SQL = "json_set(?, '$.at', CURRENT_TIMESTAMP)"
 
 
-def _trace_feedback_params(is_correct: Optional[bool], comment: Optional[str]) -> tuple:
+def _feedback_json(is_correct: Optional[bool], comment: Optional[str]) -> Optional[str]:
     if is_correct is None:
-        return (None, None, None)
-    return (int(is_correct), "true" if is_correct else "false", comment)
+        return None
+    return json.dumps({"is_correct": is_correct, "comment": comment})
 
 
 def _trace_iso(ts: Optional[str]) -> Optional[str]:
@@ -11259,10 +11255,7 @@ def _insert_trace_row(
             json.dumps(metadata) if metadata is not None else None,
             json.dumps(labels) if labels else None,
             source,
-            *_trace_feedback_params(
-                feedback["is_correct"] if feedback else None,
-                feedback.get("comment") if feedback else None,
-            ),
+            _feedback_json(feedback["is_correct"], feedback.get("comment")) if feedback else None,
         ),
     )
     row = cur.execute(
@@ -11672,7 +11665,7 @@ def set_trace_feedback(
             f"UPDATE traces SET feedback = {_FEEDBACK_JSON_SQL}, "
             "updated_at = CURRENT_TIMESTAMP "
             "WHERE org_uuid = ? AND uuid = ? AND deleted_at IS NULL",
-            (*_trace_feedback_params(is_correct, comment), org_uuid, trace_uuid),
+            (_feedback_json(is_correct, comment), org_uuid, trace_uuid),
         )
         conn.commit()
         return cursor.rowcount > 0

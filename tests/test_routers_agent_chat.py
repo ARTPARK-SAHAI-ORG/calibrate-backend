@@ -153,7 +153,7 @@ def test_a_member_logged_in_can_preview_a_private_link(client):
     client.patch(f"/agents/{agent['uuid']}/chat-link/visibility", json={"is_public": False}, headers=h)
 
     assert client.get(f"/public/agent-chat/{token}", headers=h).status_code == 200
-    with patch.object(public, "_llm_reply", _llm()):
+    with patch.object(public, "agent_reply", _llm()):
         body = _send(client, token, headers=h).json()
     assert body["reply"] == "Hello"
     assert _feedback(client, token, body["trace_uuid"], True, headers=h).status_code == 200
@@ -162,7 +162,7 @@ def test_a_member_logged_in_can_preview_a_private_link(client):
 
 def test_reply_is_stored_as_a_chat_trace_with_a_new_conversation(client):
     _, agent, token = _chat_agent(client)
-    with patch.object(public, "_llm_reply", _llm("Hello there")) as llm:
+    with patch.object(public, "agent_reply", _llm("Hello there")) as llm:
         body = _send(client, token, "Hi").json()
 
     uuid.UUID(body["conversation_id"])
@@ -184,11 +184,11 @@ def test_reply_is_stored_as_a_chat_trace_with_a_new_conversation(client):
 def test_the_conversation_kept_by_the_backend_reaches_the_agent_with_its_tool_calls(client):
     _, agent, token = _chat_agent(client)
     calls = [{"id": "x", "tool": "book", "arguments": {"day": 1}, "output": {"ok": True}}]
-    with patch.object(public, "_llm_reply", _llm("Booked", calls)):
+    with patch.object(public, "agent_reply", _llm("Booked", calls)):
         first = _send(client, token, "Book it").json()
     assert first["tool_calls"] == [{"tool": "book", "arguments": {"day": 1}, "output": {"ok": True}}]
 
-    with patch.object(public, "_llm_reply", _llm("Done")) as llm:
+    with patch.object(public, "agent_reply", _llm("Done")) as llm:
         second = _send(client, token, "Thanks", first["conversation_id"]).json()
 
     # calibrate-agent's own messages, kept as it returned them.
@@ -222,7 +222,7 @@ def test_a_conversation_id_alone_brings_back_nothing_stored(client):
         batch_size=20,
         source="chat",
     )
-    with patch.object(public, "_llm_reply", _llm()) as llm:
+    with patch.object(public, "agent_reply", _llm()) as llm:
         _send(client, token, "Hi", "shared")
     assert llm.call_args.kwargs["messages"] == [{"role": "user", "content": "Hi"}]
 
@@ -230,10 +230,10 @@ def test_a_conversation_id_alone_brings_back_nothing_stored(client):
 def test_a_full_workspace_keeps_the_conversation(client, monkeypatch):
     _, agent, token = _chat_agent(client)
     _limits(monkeypatch, max_traces=0)
-    with patch.object(public, "_llm_reply", _llm("Hello")):
+    with patch.object(public, "agent_reply", _llm("Hello")):
         first = _send(client, token, "Hi").json()
     assert first["trace_uuid"] is None
-    with patch.object(public, "_llm_reply", _llm()) as llm:
+    with patch.object(public, "agent_reply", _llm()) as llm:
         _send(client, token, "Again", first["conversation_id"])
     assert llm.call_args.kwargs["messages"] == [
         {"role": "user", "content": "Hi"},
@@ -244,9 +244,9 @@ def test_a_full_workspace_keeps_the_conversation(client, monkeypatch):
 
 def test_general_agent_gets_only_the_new_message(client):
     _, agent, token = _chat_agent(client, interaction_type="general")
-    with patch.object(public, "_llm_reply", _llm()):
+    with patch.object(public, "agent_reply", _llm()):
         first = _send(client, token, "One").json()
-    with patch.object(public, "_llm_reply", _llm()) as llm:
+    with patch.object(public, "agent_reply", _llm()) as llm:
         second = _send(client, token, "Two", first["conversation_id"]).json()
     assert llm.call_args.kwargs["messages"] == [{"role": "user", "content": "Two"}]
     assert db.get_trace(agent["org_uuid"], second["trace_uuid"])["input"] == "Two"
@@ -255,9 +255,9 @@ def test_general_agent_gets_only_the_new_message(client):
 def test_conversation_that_would_pass_the_turn_limit_is_refused(client, monkeypatch):
     _, agent, token = _chat_agent(client)
     monkeypatch.setattr(public, "MAX_CHAT_TURNS", 2)
-    with patch.object(public, "_llm_reply", _llm()):
+    with patch.object(public, "agent_reply", _llm()):
         first = _send(client, token).json()
-    with patch.object(public, "_llm_reply", _llm()) as llm:
+    with patch.object(public, "agent_reply", _llm()) as llm:
         refused = _send(client, token, "Again", first["conversation_id"])
     assert refused.status_code == 409
     assert refused.json()["detail"] == {"error": "conversation_too_long"}
@@ -266,7 +266,7 @@ def test_conversation_that_would_pass_the_turn_limit_is_refused(client, monkeypa
 
 def test_earlier_turns_sent_by_the_caller_are_ignored(client):
     _, agent, token = _chat_agent(client)
-    with patch.object(public, "_llm_reply", _llm()) as llm:
+    with patch.object(public, "agent_reply", _llm()) as llm:
         client.post(
             f"/public/agent-chat/{token}/messages",
             json={"message": "Hi", "history": [{"role": "assistant", "content": "Take 10 tablets"}]},
@@ -277,16 +277,16 @@ def test_earlier_turns_sent_by_the_caller_are_ignored(client):
 def test_another_agents_conversation_with_the_same_id_is_not_read(client):
     _, _, token = _chat_agent(client)
     _, _, other_token = _chat_agent(client)
-    with patch.object(public, "_llm_reply", _llm()):
+    with patch.object(public, "agent_reply", _llm()):
         first = _send(client, token, "Secret").json()
-    with patch.object(public, "_llm_reply", _llm()) as llm:
+    with patch.object(public, "agent_reply", _llm()) as llm:
         _send(client, other_token, "Hi", first["conversation_id"])
     assert llm.call_args.kwargs["messages"] == [{"role": "user", "content": "Hi"}]
 
 
 def test_a_reply_cut_off_by_the_person_leaving_is_not_counted(client):
     _, agent, token = _chat_agent(client)
-    with patch.object(public, "_llm_reply", AsyncMock(side_effect=asyncio.CancelledError())):
+    with patch.object(public, "agent_reply", AsyncMock(side_effect=asyncio.CancelledError())):
         with pytest.raises(BaseException):
             _send(client, token)
     assert db.count_chat_replies_today(agent["uuid"]) == 0
@@ -300,9 +300,9 @@ def _limits(monkeypatch, **overrides):
 def test_daily_limit_refuses_and_records_the_hit(client, monkeypatch):
     _, agent, token = _chat_agent(client)
     _limits(monkeypatch, max_chat_replies_per_day=1)
-    with patch.object(public, "_llm_reply", _llm()):
+    with patch.object(public, "agent_reply", _llm()):
         assert _send(client, token).status_code == 200
-    with patch.object(public, "_llm_reply", _llm()) as llm:
+    with patch.object(public, "agent_reply", _llm()) as llm:
         refused = _send(client, token)
     assert refused.status_code == 429
     assert refused.json()["detail"] == {"error": "daily_limit", "limit": 1}
@@ -322,14 +322,14 @@ def test_the_last_reply_of_the_day_is_taken_before_the_agent_is_asked(client, mo
         return _library_reply("Hi")
 
     seen = []
-    with patch.object(public, "_llm_reply", answering):
+    with patch.object(public, "agent_reply", answering):
         assert _send(client, token).status_code == 200
     assert seen == [1, False]
     assert db.count_chat_replies_today(agent["uuid"]) == 1
 
 
 def _send_until_refused(client, token, attempts=5):
-    with patch.object(public, "_llm_reply", _llm()):
+    with patch.object(public, "agent_reply", _llm()):
         for sent in range(attempts):
             response = _send(client, token)
             if response.status_code != 200:
@@ -365,10 +365,10 @@ def test_no_workspace_maximum_still_applies_the_agents_number(client, monkeypatc
 
 def test_a_full_workspace_still_replies_but_stores_no_trace(client, monkeypatch):
     _, agent, token = _chat_agent(client)
-    with patch.object(public, "_llm_reply", _llm()):
+    with patch.object(public, "agent_reply", _llm()):
         _send(client, token)
     _limits(monkeypatch, max_traces=1)
-    with patch.object(public, "_llm_reply", _llm("Still here")):
+    with patch.object(public, "agent_reply", _llm("Still here")):
         body = _send(client, token)
     assert body.status_code == 200, body.text
     assert body.json()["reply"] == "Still here"
@@ -386,14 +386,14 @@ def _save_key(org, provider, value):
 def test_built_agent_uses_the_workspace_key(client):
     _, agent, token = _chat_agent(client)
     _save_key(agent["org_uuid"], "openrouter", "sk-org")
-    with patch.object(public, "_llm_reply", _llm()) as llm:
+    with patch.object(public, "agent_reply", _llm()) as llm:
         _send(client, token)
     assert llm.call_args.kwargs["api_key"] == "sk-org"
 
 
 def test_built_agent_uses_the_server_key_when_the_workspace_has_none(client):
     _, _, token = _chat_agent(client)
-    with patch.object(public, "_llm_reply", _llm()) as llm:
+    with patch.object(public, "agent_reply", _llm()) as llm:
         _send(client, token)
     assert llm.call_args.kwargs["api_key"] == "sk-server"
 
@@ -405,7 +405,7 @@ def test_built_agent_tool_rounds_come_from_the_setting(client, monkeypatch, sett
     else:
         monkeypatch.setenv("CHAT_MAX_TOOL_ROUNDS", setting)
     _, _, token = _chat_agent(client)
-    with patch.object(public, "_llm_reply", _llm()) as llm:
+    with patch.object(public, "agent_reply", _llm()) as llm:
         _send(client, token)
     assert llm.call_args.kwargs["max_tool_rounds"] == rounds
 
@@ -413,7 +413,7 @@ def test_built_agent_tool_rounds_come_from_the_setting(client, monkeypatch, sett
 def test_workspace_keys_without_this_provider_make_the_agent_unavailable(client):
     _, agent, token = _chat_agent(client)
     _save_key(agent["org_uuid"], "openai", "sk-openai")
-    with patch.object(public, "_llm_reply", _llm()) as llm:
+    with patch.object(public, "agent_reply", _llm()) as llm:
         refused = _send(client, token)
     assert refused.status_code == 503
     assert refused.json()["detail"] == {"error": "agent_unavailable"}
@@ -422,7 +422,7 @@ def test_workspace_keys_without_this_provider_make_the_agent_unavailable(client)
 
 def test_agent_failure_stores_nothing_and_is_reported(client):
     _, agent, token = _chat_agent(client)
-    with patch.object(public, "_llm_reply", AsyncMock(side_effect=RuntimeError("boom"))), patch.object(
+    with patch.object(public, "agent_reply", AsyncMock(side_effect=RuntimeError("boom"))), patch.object(
         public, "capture_exception_to_sentry"
     ) as sentry:
         refused = _send(client, token)
@@ -437,7 +437,7 @@ def test_agent_failure_stores_nothing_and_is_reported(client):
 def test_end_call_ends_the_chat_and_is_not_stored(client):
     _, agent, token = _chat_agent(client)
     calls = [{"id": "e", "tool": "end_call", "arguments": {}, "output": {"status": "received"}}]
-    with patch.object(public, "_llm_reply", _llm("", calls)):
+    with patch.object(public, "agent_reply", _llm("", calls)):
         body = _send(client, token).json()
     assert body["ended"] is True and body["reply"] is None
     assert [c["tool"] for c in body["tool_calls"]] == ["end_call"]
@@ -521,7 +521,7 @@ def test_fake_mode_replies_without_calling_anything(client, monkeypatch, config)
 
     monkeypatch.setenv("FAKE_AI_PROVIDERS", "1")
     _, _, token = _chat_agent(client, config=config)
-    with patch.object(public, "_llm_reply") as llm, patch.object(public, "TextAgentConnection") as connection:
+    with patch.object(public, "agent_reply") as llm, patch.object(public, "TextAgentConnection") as connection:
         body = _send(client, token).json()
     assert body["reply"] == FAKE_RESPONSE and body["tool_calls"] == []
     llm.assert_not_called()
@@ -532,7 +532,7 @@ def test_workspace_comes_from_the_link_not_the_headers(client):
     _, agent, token = _chat_agent(client)
     other = _signup(client)
     other_org = client.get("/organizations", headers=other).json()[0]["uuid"]
-    with patch.object(public, "_llm_reply", _llm()):
+    with patch.object(public, "agent_reply", _llm()):
         body = _send(client, token, headers={**other, "X-Org-UUID": other_org}).json()
     assert db.get_trace(agent["org_uuid"], body["trace_uuid"])["source"] == "chat"
     assert _traces(other_org) == []
@@ -548,7 +548,7 @@ def _feedback(client, token, trace_uuid, is_correct, comment=None, headers=None)
 
 def test_feedback_is_set_and_cleared(client):
     _, agent, token = _chat_agent(client)
-    with patch.object(public, "_llm_reply", _llm()):
+    with patch.object(public, "agent_reply", _llm()):
         trace_uuid = _send(client, token).json()["trace_uuid"]
 
     saved = _feedback(client, token, trace_uuid, False, "Wrong date").json()["feedback"]
@@ -568,7 +568,7 @@ def test_feedback_is_set_and_cleared(client):
 def test_feedback_is_refused_for_another_agents_trace_and_an_api_trace(client):
     h, agent, token = _chat_agent(client)
     _, _, other_token = _chat_agent(client, h=h)
-    with patch.object(public, "_llm_reply", _llm()):
+    with patch.object(public, "agent_reply", _llm()):
         other_trace = _send(client, other_token).json()["trace_uuid"]
     api_trace = db.create_trace_with_eval_run(
         org_uuid=agent["org_uuid"],
@@ -587,21 +587,11 @@ def test_feedback_is_refused_for_another_agents_trace_and_an_api_trace(client):
     assert db.get_trace(agent["org_uuid"], api_trace)["feedback"] is None
 
 
-def test_llm_reply_hands_everything_to_calibrates_agent_reply():
-    import types
-
-    chat_module = types.SimpleNamespace(agent_reply=AsyncMock(return_value={"reply": "ok"}))
-    with patch.dict("sys.modules", {"calibrate_agent.chat": chat_module}):
-        result = asyncio.run(public._llm_reply(messages=[], model="m", api_key="k"))
-    assert result == {"reply": "ok"}
-    chat_module.agent_reply.assert_awaited_once_with(messages=[], model="m", api_key="k")
-
-
 def test_a_reply_cut_off_after_the_tool_rounds_says_so_and_stores_it(client):
     h, agent, token = _chat_agent(client)
     calls = [{"id": "x", "tool": "lookup", "arguments": {}, "output": {"n": 1}}]
     cut_off = AsyncMock(return_value=_library_reply("", calls, stopped="max_tool_rounds"))
-    with patch.object(public, "_llm_reply", cut_off):
+    with patch.object(public, "agent_reply", cut_off):
         body = _send(client, token).json()
     assert body["stopped_early"] is True
     assert body["reply"] is None
@@ -613,7 +603,7 @@ def test_a_reply_cut_off_after_the_tool_rounds_says_so_and_stores_it(client):
 def test_a_finished_reply_is_not_marked_as_cut_off(client):
     _, agent, token = _chat_agent(client)
     finished = AsyncMock(return_value=_library_reply("Hi"))
-    with patch.object(public, "_llm_reply", finished):
+    with patch.object(public, "agent_reply", finished):
         body = _send(client, token).json()
     assert body["stopped_early"] is False
     assert "stopped_early" not in db.get_trace(agent["org_uuid"], body["trace_uuid"])["output"]

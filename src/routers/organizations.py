@@ -21,10 +21,7 @@ from mailer import (
     send_email,
 )
 from utils import MemberRoleLiteral
-from routers.org_limits import (
-    effective_max_chat_replies_per_day,
-    ensure_daily_message_limit_allowed,
-)
+from routers.org_limits import ensure_daily_message_limit_allowed
 from db import (
     add_organization_member,
     add_organization_member_by_user_id,
@@ -306,9 +303,7 @@ def update_org(
         "default_messages_per_day"
     )
     if default is not None:
-        ensure_daily_message_limit_allowed(
-            default, effective_max_chat_replies_per_day(org_uuid)
-        )
+        ensure_daily_message_limit_allowed(default, org_uuid)
     update_organization(org_uuid, **fields)
     org = get_organization(org_uuid)
     return OrganizationResponse(**org, member_role=role)

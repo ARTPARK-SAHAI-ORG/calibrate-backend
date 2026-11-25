@@ -112,21 +112,6 @@ def provider_env(org_uuid: str) -> Optional[Dict[str, str]]:
     return env
 
 
-class MissingProviderKey(Exception):
-    """The workspace uses its own keys and has none for this provider."""
-
-
-def org_provider_key(org_uuid: str, provider: str) -> Optional[str]:
-    """The workspace's own key for `provider`, or None when it has no keys at all."""
-    rows = db.list_org_provider_keys(org_uuid)
-    if not rows:
-        return None
-    for row in rows:
-        if row["provider"] == provider:
-            return decrypt(row["encrypted_value"])
-    raise MissingProviderKey(provider)
-
-
 async def check_provider_key(provider: str, value: str) -> Optional[str]:
     """Run calibrate-agent's own provider check with only this key. None when it works."""
     if env_bool("FAKE_AI_PROVIDERS", False):

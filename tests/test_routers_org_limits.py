@@ -241,18 +241,21 @@ def test_chat_replies_per_day_takes_the_agents_number_else_the_workspace_default
 
 
 @pytest.mark.parametrize("value", [0, -1, 1.5, "3", True])
-def test_messages_per_day_must_be_a_whole_number_of_at_least_one(value):
+def test_messages_per_day_must_be_a_whole_number_of_at_least_one(value, monkeypatch):
+    monkeypatch.setattr(org_limits, "effective_max_chat_replies_per_day", lambda org: None)
     with pytest.raises(HTTPException) as err:
-        org_limits.ensure_daily_message_limit_allowed(value, None)
+        org_limits.ensure_daily_message_limit_allowed(value, "org")
     assert err.value.status_code == 422
     assert err.value.detail == "Messages per day must be a whole number of at least 1"
 
 
-def test_messages_per_day_must_not_pass_the_workspace_maximum():
-    org_limits.ensure_daily_message_limit_allowed(10, 10)
-    org_limits.ensure_daily_message_limit_allowed(10_000, None)
+def test_messages_per_day_must_not_pass_the_workspace_maximum(monkeypatch):
+    maximum = {"capped": 10, "free": None}
+    monkeypatch.setattr(org_limits, "effective_max_chat_replies_per_day", lambda org: maximum[org])
+    org_limits.ensure_daily_message_limit_allowed(10, "capped")
+    org_limits.ensure_daily_message_limit_allowed(10_000, "free")
     with pytest.raises(HTTPException) as err:
-        org_limits.ensure_daily_message_limit_allowed(11, 10)
+        org_limits.ensure_daily_message_limit_allowed(11, "capped")
     assert err.value.status_code == 422
     assert err.value.detail == (
         "Messages per day cannot be more than 10, the most your workspace allows"

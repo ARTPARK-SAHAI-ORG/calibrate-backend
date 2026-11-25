@@ -1,5 +1,4 @@
 import copy
-import uuid
 import json
 import logging
 from dataclasses import asdict
@@ -64,7 +63,6 @@ from org_scope import ensure_owned_agent, ensure_owned_evaluator
 # page-shaping helper.
 from routers.evaluators import EvaluatorResponse, build_evaluator_page
 from routers.org_limits import (
-    TALK_TO_AGENT_KEY,
     daily_message_limit,
     effective_max_chat_replies_per_day,
     ensure_daily_message_limit_allowed,
@@ -822,15 +820,13 @@ def resolve_agent_names(
 
 
 def _check_daily_message_limit(config: Optional[Dict[str, Any]], org_uuid: str) -> None:
-    section = (config or {}).get(TALK_TO_AGENT_KEY)
+    section = (config or {}).get("talk_to_agent")
     if section is None:
         return
     if not isinstance(section, dict):
         raise HTTPException(status_code=422, detail="talk_to_agent must be an object")
     if section.get("messages_per_day") is not None:
-        ensure_daily_message_limit_allowed(
-            section["messages_per_day"], effective_max_chat_replies_per_day(org_uuid)
-        )
+        ensure_daily_message_limit_allowed(section["messages_per_day"], org_uuid)
 
 
 @router.post(
@@ -933,8 +929,7 @@ def get_trace_scoring_eligibility(
 
 class ChatLinkResponse(BaseModel):
     is_public: bool = Field(description="Whether anyone with the link can chat with the agent")
-    share_token: Optional[str] = Field(
-        None,
+    share_token: str = Field(
         description="Token for building the chat link. While the link is private, only members of your workspace who are logged in can open it",
     )
 
@@ -983,7 +978,7 @@ def get_chat_link(
     is_public = bool(agent.get("chat_link_public"))
     token = agent.get("chat_token")
     if not token:
-        token = str(uuid.uuid4())
+        token, _ = compute_share_token_toggle(agent, True, token_field="chat_token")
         set_agent_chat_link(agent_uuid, is_public, token)
     return ChatLinkStatusResponse(
         is_public=is_public,
@@ -1065,11 +1060,11 @@ def update_agent_endpoint(
             agent.config["benchmark_models_verified"] = agent.benchmark_models_verified
 
     if agent.config is not None:
-        if TALK_TO_AGENT_KEY in agent.config:
+        if "talk_to_agent" in agent.config:
             _check_daily_message_limit(agent.config, ctx.org_uuid)
-        elif TALK_TO_AGENT_KEY in (existing_agent.get("config") or {}):
+        elif "talk_to_agent" in (existing_agent.get("config") or {}):
             # A config body replaces the stored one; keep the chat limit.
-            agent.config[TALK_TO_AGENT_KEY] = existing_agent["config"][TALK_TO_AGENT_KEY]
+            agent.config["talk_to_agent"] = existing_agent["config"]["talk_to_agent"]
 
     was_scoring = trace_scoring_enabled(existing_agent)
     now_scoring = was_scoring

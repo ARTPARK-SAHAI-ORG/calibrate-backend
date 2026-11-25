@@ -6,12 +6,12 @@ a separate token for read-write access.
 """
 
 import asyncio
-import json
 import logging
 import os
 import uuid
 from typing import Any, Dict, List, Literal, Optional, Union
 
+from calibrate_agent.chat import agent_reply
 from calibrate_agent.connections import TextAgentConnection
 from fastapi import APIRouter, Depends, HTTPException, Query, Path
 from starlette.concurrency import run_in_threadpool
@@ -51,7 +51,7 @@ from db import (
     get_tools_for_agent,
     set_trace_feedback,
 )
-from provider_keys import MissingProviderKey, org_provider_key
+from provider_keys import provider_env
 from provider_status import PROVIDER_ENV_VARS
 from routers.agents import _sanitize_headers
 from routers.traces import TraceFeedbackResponse, TraceFeedbackUpdate
@@ -1257,23 +1257,21 @@ def _chat_link_agent(token: str, user_id: Optional[str]) -> Dict[str, Any]:
     return agent
 
 
-async def _llm_reply(**kwargs: Any) -> Dict[str, Any]:
-    from calibrate_agent.chat import agent_reply
-
-    return await agent_reply(**kwargs)
-
-
 async def _agent_reply(chat: Dict[str, Any]) -> Dict[str, Any]:
     """`{response, tool_calls, stopped_early, new_messages}` from the agent, tool
     calls in the trace shape. `stopped_early` is true when it used every tool
     round it is allowed and was cut off before replying. `new_messages` is its
     turn as the next message of the conversation will need it."""
     if env_bool("FAKE_AI_PROVIDERS", False):
-        return _plain_reply(FAKE_RESPONSE)
+        return {
+            "response": FAKE_RESPONSE,
+            "tool_calls": [],
+            "new_messages": [{"role": "assistant", "content": FAKE_RESPONSE}],
+        }
     agent = chat["agent"]
     config = agent.get("config") or {}
-    if not config.get("agent_url"):
-        result = await _llm_reply(messages=chat["messages"], **chat["llm"])
+    if "llm" in chat:  # set by _prepare_chat_reply for an agent built in Calibrate
+        result = await agent_reply(messages=chat["messages"], **chat["llm"])
         return {
             "response": result["reply"] or None,
             "tool_calls": result["tool_calls"],
@@ -1298,14 +1296,6 @@ async def _agent_reply(chat: Dict[str, Any]) -> Dict[str, Any]:
     ]
     reply = await connection.call(turns)
     return {**reply, "new_messages": [{"role": "assistant", "content": reply.get("response")}]}
-
-
-def _plain_reply(text: str) -> Dict[str, Any]:
-    return {
-        "response": text,
-        "tool_calls": [],
-        "new_messages": [{"role": "assistant", "content": text}],
-    }
 
 
 def _reserve_daily_reply(agent: Dict[str, Any], cap: int) -> None:
@@ -1361,12 +1351,13 @@ def _prepare_chat_reply(
     if not config.get("agent_url"):
         llm = config.get("llm", {})
         provider = llm.get("provider", "openrouter")
-        try:
-            api_key = org_provider_key(org_uuid, provider)
-        except MissingProviderKey:
+        # The workspace's own keys when it has any, else the server's, the
+        # same choice a test run makes.
+        org_env = provider_env(org_uuid)
+        env_var = PROVIDER_ENV_VARS.get(provider, ("",))[0]
+        api_key = (org_env if org_env is not None else os.environ).get(env_var)
+        if org_env is not None and not api_key:
             raise _chat_error(503, "agent_unavailable")
-        if api_key is None and provider in PROVIDER_ENV_VARS:
-            api_key = os.environ.get(PROVIDER_ENV_VARS[provider][0])
         chat["llm"] = {
             "system_prompt": config.get("system_prompt", ""),
             "tools": build_tool_configs(get_tools_for_agent(agent["uuid"])),
