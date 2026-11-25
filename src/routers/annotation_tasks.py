@@ -2407,9 +2407,12 @@ def start_evaluator_run(
     if len(paired) < len(resolved):
         # Resolved again so the stored names are deduped over the kept
         # evaluators only, matching what a queued job resolves later.
-        resolved = _resolve_evaluator_dicts(
-            [r for r in requested if r["evaluator_id"] in paired], linked
-        )
+        try:
+            resolved = _resolve_evaluator_dicts(
+                [r for r in requested if r["evaluator_id"] in paired], linked
+            )
+        except EvaluatorResolutionError as e:
+            raise HTTPException(status_code=400, detail=str(e))
 
     enforce_max_rows_per_eval(ctx.org_uuid, len(items), "labelling_evaluator_run")
 

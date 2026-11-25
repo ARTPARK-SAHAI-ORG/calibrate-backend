@@ -434,6 +434,28 @@ def test_evaluator_run_stores_names_deduped_over_kept_evaluators_only(client):
     assert [(e["evaluator_id"], e["name"]) for e in details["evaluators"]] == [(llm_ev, name)]
 
 
+def test_evaluator_run_second_resolve_failure_is_400(client):
+    import routers.annotation_tasks as at
+
+    h = _signup(client)["headers"]
+    llm_ev = _llm_ev(client, h)["uuid"]
+    tc_ev = _tool_call_ev(client, h)
+    task_uuid = _task_with(client, h, "llm", [llm_ev, tc_ev], [REPLY_ROW])
+    real = at._resolve_evaluator_dicts
+    calls = []
+
+    def resolve(requested, linked):
+        calls.append(1)
+        if len(calls) == 2:
+            raise at.EvaluatorResolutionError("Evaluator gone")
+        return real(requested, linked)
+
+    with patch.object(at, "_resolve_evaluator_dicts", side_effect=resolve):
+        resp = _start_run(client, h, task_uuid, [llm_ev, tc_ev])
+    assert resp.status_code == 400, resp.text
+    assert resp.json()["detail"] == "Evaluator gone"
+
+
 def test_evaluator_run_mixed_tool_call_rows_launches(client):
     """A mixed run with only a reply evaluator launches — no evaluator pairs
     with the tool-call row, so only the text row is counted and run."""

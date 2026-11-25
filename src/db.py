@@ -2025,7 +2025,7 @@ def init_db():
             if filled:
                 logger.info(
                     f"Filled the tool-call correctness judge on {filled} "
-                    "workspace fork(s)"
+                    "evaluator version(s)"
                 )
 
         # Re-point pre-existing evaluator links from the shared default templates
