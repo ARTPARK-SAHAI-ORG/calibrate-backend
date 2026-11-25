@@ -1352,26 +1352,18 @@ def test_convert_rejects_an_unknown_key(client):
     assert client.get("/tests", headers=h).json()["total"] == 0
 
 
-def test_convert_still_creates_the_test_when_the_agent_is_gone(client):
-    from db import get_tests_for_agent
-
+def test_convert_refuses_and_keeps_no_test_when_the_agent_is_gone(client):
     h, agent_id = _signup_with_agent(client)
     trace = _post_trace(client, h, _payload(agent_id, _mid()))
     assert client.delete(f"/agents/{agent_id}", headers=h).status_code == 200
 
     res = _convert(client, h, trace_ids=[trace["uuid"]], type="tool_call")
-    assert res.status_code == 200, res.text
-    body = res.json()
-    assert body["created"] == 1
-    assert client.get(f"/tests/{body['test_uuids'][0]}", headers=h).status_code == 200
-    assert get_tests_for_agent(agent_id) == []
-    # The response says what was created but not wired up.
-    name = client.get(f"/tests/{body['test_uuids'][0]}", headers=h).json()["name"]
-    assert body["warnings"] == [
-        "1 of the 1 new tests could not be added to the agent's Tests tab, "
-        f"so they do not show anywhere in the app: {name}. "
-        "Add those traces to tests again."
-    ]
+    assert res.status_code == 400, res.text
+    assert res.json()["detail"] == (
+        "None of these traces could be added to their agent's tests. Try again."
+    )
+    # A test no screen lists is not left behind.
+    assert client.get("/tests", headers=h).json()["total"] == 0
 
 
 def test_convert_rejects_a_malformed_evaluator_id(client):
@@ -1517,22 +1509,21 @@ def test_convert_tool_call_captures_every_recorded_call(client):
 
 
 def test_convert_warns_when_evaluators_could_not_be_linked(client, monkeypatch):
-    """The tests are already committed, so a failed evaluator link must warn
-    rather than 500 and lose them."""
+    """The tests are committed and on the agent, so a failed evaluator link must
+    warn rather than 500 and lose them."""
     from db import get_evaluators_for_test, get_tests_for_agent
     from routers import traces as traces_mod
 
     h, agent_id = _signup_with_agent(client)
     evaluator = _create_evaluator(client, h)
-    trace_a = _post_trace(client, h, _payload(agent_id, _mid()))
-    trace_b = _post_trace(client, h, _payload(agent_id, _mid()))
+    mid_a, mid_b = _mid(), _mid()
+    trace_a = _post_trace(client, h, _payload(agent_id, mid_a))
+    trace_b = _post_trace(client, h, _payload(agent_id, mid_b))
 
     def _boom(*args, **kwargs):
         raise RuntimeError("link failed")
 
     monkeypatch.setattr(traces_mod, "set_test_evaluators", _boom)
-    # Deleting the agent makes the agent link fail too, so both warnings appear.
-    assert client.delete(f"/agents/{agent_id}", headers=h).status_code == 200
 
     res = _convert(
         client,
@@ -1545,18 +1536,51 @@ def test_convert_warns_when_evaluators_could_not_be_linked(client, monkeypatch):
     body = res.json()
     assert body["created"] == 2
     for test_uuid in body["test_uuids"]:
-        assert client.get(f"/tests/{test_uuid}", headers=h).status_code == 200
         assert get_evaluators_for_test(test_uuid) == []
-    assert get_tests_for_agent(agent_id) == []
-    names = ", ".join(
-        client.get(f"/tests/{u}", headers=h).json()["name"] for u in body["test_uuids"]
-    )
+    assert {t["uuid"] for t in get_tests_for_agent(agent_id)} == set(body["test_uuids"])
     assert body["warnings"] == [
-        f"2 of the 2 new tests have no evaluator, so they cannot be run: {names}. "
+        f"2 of the 2 new tests have no evaluator, so they cannot be run: "
+        f"{mid_a}, {mid_b}. "
         "Open each one on the agent's Tests tab and add an evaluator.",
-        "2 of the 2 new tests could not be added to the agent's Tests tab, "
-        f"so they do not show anywhere in the app: {names}. "
-        "Add those traces to tests again.",
+    ]
+
+
+def test_convert_deletes_and_names_a_test_it_could_not_add_to_the_agent(
+    client, monkeypatch
+):
+    from db import get_tests_for_agent
+    from routers import traces as traces_mod
+
+    h, agent_id = _signup_with_agent(client)
+    mid_a, mid_b = _mid(), _mid()
+    trace_a = _post_trace(client, h, _payload(agent_id, mid_a))
+    trace_b = _post_trace(client, h, _payload(agent_id, mid_b))
+
+    real_link = traces_mod.add_test_to_agent
+    calls = []
+
+    def _fail_first(agent, test):
+        calls.append(test)
+        if len(calls) == 1:
+            raise RuntimeError("link failed")
+        return real_link(agent, test)
+
+    monkeypatch.setattr(traces_mod, "add_test_to_agent", _fail_first)
+
+    res = _convert(
+        client, h, trace_ids=[trace_a["uuid"], trace_b["uuid"]], type="tool_call"
+    )
+    assert res.status_code == 200, res.text
+    body = res.json()
+    assert body["created"] == 1
+    assert body["test_uuids"] == [calls[1]]
+    assert [t["uuid"] for t in get_tests_for_agent(agent_id)] == [calls[1]]
+    # The test that could not be added is gone, not left where nothing lists it.
+    assert client.get(f"/tests/{calls[0]}", headers=h).status_code == 404
+    assert client.get("/tests", headers=h).json()["total"] == 1
+    assert body["warnings"] == [
+        f"1 of the 2 traces could not be added to tests: {mid_a}. "
+        "Add those traces to tests again."
     ]
 
 
@@ -1817,16 +1841,9 @@ def test_convert_skips_the_link_when_the_agent_switched_interaction_type(client)
         type="general",
         evaluators=[evaluator["uuid"]],
     )
-    assert res.status_code == 200, res.text
-    body = res.json()
-    assert body["created"] == 1
-    name = client.get(f"/tests/{body['test_uuids'][0]}", headers=h).json()["name"]
-    assert body["warnings"] == [
-        "1 of the 1 new tests could not be added to the agent's Tests tab, "
-        f"so they do not show anywhere in the app: {name}. "
-        "Add those traces to tests again."
-    ]
+    assert res.status_code == 400, res.text
     assert get_tests_for_agent(agent_id) == []
+    assert client.get("/tests", headers=h).json()["total"] == 0
 
 
 def test_test_names_line_shows_five_names_then_a_count():

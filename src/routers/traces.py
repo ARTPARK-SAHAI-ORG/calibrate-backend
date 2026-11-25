@@ -18,7 +18,7 @@ OTel-gateway migration.
 import logging
 import math
 from datetime import datetime, timezone
-from typing import Annotated, Any, ClassVar, Dict, List, Literal, Optional, Union
+from typing import Annotated, Any, ClassVar, Dict, List, Literal, Optional, Tuple, Union
 
 from fastapi import APIRouter, Depends, HTTPException, Path, Query
 from pydantic import BaseModel, ConfigDict, Field, StringConstraints, model_validator
@@ -28,6 +28,7 @@ from db import (
     _trace_iso,
     add_test_to_agent,
     bulk_create_tests,
+    bulk_delete_tests,
     average_trace_scores,
     count_live_traces,
     count_scored_traces,
@@ -1145,12 +1146,12 @@ class ConvertTracesToTestsRequest(_TraceSelection):
 class ConvertTracesToTestsResponse(BaseModel):
     created: int = Field(description="Number of tests created")
     test_uuids: List[str] = Field(
-        description="IDs of the created tests, in the order their traces were given",
+        description="IDs of the created tests, in the order their traces were given. A trace that could not be added is left out and named in warnings",
         examples=[[EXAMPLE_TEST_UUID]],
     )
     warnings: Optional[List[str]] = Field(
         None,
-        description="Tests that were created but cannot be run, or were not added to their agent, named with what to do about them",
+        description="Traces that could not be added to tests, and tests created without an evaluator, named with what to do about them",
     )
 
 
@@ -1414,29 +1415,14 @@ def convert_traces_to_tests(
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
 
-    # The tests are already committed, so a failure here must not 500 and lose
-    # them: report what did not get wired up and let the user fix it in place.
-    warnings: List[str] = []
-    unjudged: List[str] = []
-    if resolved_refs:
-        for test_uuid, db_test in zip(test_uuids, db_tests):
-            try:
-                set_test_evaluators(test_uuid, resolved_refs)
-            except Exception as e:
-                unjudged.append(db_test["name"])
-                logger.warning(f"Failed to link evaluators to test {test_uuid}: {e}")
-    if unjudged:
-        warnings.append(
-            f"{len(unjudged)} of the {len(test_uuids)} new tests have no evaluator, "
-            f"so they cannot be run: {_test_names_line(unjudged)}. "
-            "Open each one on the agent's Tests tab and add an evaluator."
-        )
-
-    # Each test links to the agent that produced its trace. One agent deleted
-    # since ingest, or switched to an interaction_type the created test no longer
-    # fits, must not fail a batch the user cannot retry.
+    # Each test links to the agent that produced its trace. A test that cannot
+    # be linked (its agent deleted since ingest, switched to an interaction_type
+    # the test no longer fits, or a failed write) would sit in the workspace
+    # where no screen lists it, so it is deleted and the reader is told to retry.
     agents_seen: Dict[str, Optional[Dict[str, Any]]] = {}
     unlinked: List[str] = []
+    unlinked_uuids: List[str] = []
+    kept: List[Tuple[str, str]] = []
     for trace, test_uuid, db_test in zip(traces, test_uuids, db_tests):
         agent_id = trace["agent_id"]
         if agent_id not in agents_seen:
@@ -1445,26 +1431,55 @@ def convert_traces_to_tests(
                 found if found and found["org_uuid"] == ctx.org_uuid else None
             )
         agent = agents_seen[agent_id]
-        if not agent or required_agent_interaction_type(
+        linked = bool(agent) and required_agent_interaction_type(
             payload.type, db_test["config"]
-        ) != (agent.get("interaction_type") or DEFAULT_AGENT_INTERACTION_TYPE):
+        ) == (agent.get("interaction_type") or DEFAULT_AGENT_INTERACTION_TYPE)
+        if linked:
+            try:
+                add_test_to_agent(agent_id, test_uuid)
+            except Exception as e:
+                linked = False
+                logger.warning(f"Failed to link test {test_uuid} to agent {agent_id}: {e}")
+        if linked:
+            kept.append((test_uuid, db_test["name"]))
+        else:
             unlinked.append(db_test["name"])
-            continue
-        try:
-            add_test_to_agent(agent_id, test_uuid)
-        except Exception as e:
-            unlinked.append(db_test["name"])
-            logger.warning(f"Failed to link test {test_uuid} to agent {agent_id}: {e}")
+            unlinked_uuids.append(test_uuid)
+    bulk_delete_tests(unlinked_uuids, ctx.org_uuid)
+    if not kept:
+        raise HTTPException(
+            status_code=400,
+            detail="None of these traces could be added to their agent's tests. "
+            "Try again.",
+        )
+
+    # The kept tests are committed and linked, so a failed evaluator link must
+    # not 500 and lose them: name them so the reader can add one in place.
+    warnings: List[str] = []
     if unlinked:
         warnings.append(
-            f"{len(unlinked)} of the {len(test_uuids)} new tests could not be added "
-            "to the agent's Tests tab, so they do not show anywhere in the app: "
-            f"{_test_names_line(unlinked)}. Add those traces to tests again."
+            f"{len(unlinked)} of the {len(test_uuids)} traces could not be added "
+            f"to tests: {_test_names_line(unlinked)}. Add those traces to tests "
+            "again."
+        )
+    unjudged: List[str] = []
+    if resolved_refs:
+        for test_uuid, name in kept:
+            try:
+                set_test_evaluators(test_uuid, resolved_refs)
+            except Exception as e:
+                unjudged.append(name)
+                logger.warning(f"Failed to link evaluators to test {test_uuid}: {e}")
+    if unjudged:
+        warnings.append(
+            f"{len(unjudged)} of the {len(kept)} new tests have no evaluator, "
+            f"so they cannot be run: {_test_names_line(unjudged)}. "
+            "Open each one on the agent's Tests tab and add an evaluator."
         )
 
     return {
-        "created": len(test_uuids),
-        "test_uuids": test_uuids,
+        "created": len(kept),
+        "test_uuids": [test_uuid for test_uuid, _ in kept],
         "warnings": warnings or None,
     }
 
