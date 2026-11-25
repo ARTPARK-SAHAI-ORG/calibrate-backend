@@ -1731,6 +1731,7 @@ def init_db():
                 agent_id TEXT NOT NULL,
                 day TEXT NOT NULL,
                 count INTEGER NOT NULL DEFAULT 0,
+                deleted_at TIMESTAMP DEFAULT NULL,
                 PRIMARY KEY (agent_id, day)
             )
             """
@@ -1744,6 +1745,7 @@ def init_db():
                 conversation_id TEXT NOT NULL,
                 messages TEXT NOT NULL,
                 updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                deleted_at TIMESTAMP DEFAULT NULL,
                 PRIMARY KEY (agent_id, conversation_id)
             )
             """
@@ -4991,7 +4993,13 @@ def update_agent(
 # Pivot tables whose rows are soft-deleted when their parent agent is. Job-run
 # tables are deliberately excluded — deleting an agent keeps its run history.
 # Single source of truth for both delete_agent and bulk_delete_agents.
-_AGENT_CASCADE_PIVOTS = ("agent_tools", "agent_tests", "agent_evaluators")
+_AGENT_CASCADE_PIVOTS = (
+    "agent_tools",
+    "agent_tests",
+    "agent_evaluators",
+    "chat_reply_counts",
+    "chat_conversations",
+)
 
 
 def delete_agent(agent_uuid: str) -> bool:
@@ -11696,7 +11704,8 @@ def get_chat_conversation(agent_id: str, conversation_id: str) -> List[Dict[str,
     """The messages of one chat link conversation, or [] when there is none."""
     with get_db_connection() as conn:
         row = conn.execute(
-            "SELECT messages FROM chat_conversations WHERE agent_id = ? AND conversation_id = ?",
+            "SELECT messages FROM chat_conversations "
+            "WHERE agent_id = ? AND conversation_id = ? AND deleted_at IS NULL",
             (agent_id, conversation_id),
         ).fetchone()
         return json.loads(row[0]) if row else []
@@ -11718,7 +11727,8 @@ def count_chat_replies_today(agent_id: str) -> int:
     their traces were stored or later deleted."""
     with get_db_connection() as conn:
         row = conn.execute(
-            "SELECT count FROM chat_reply_counts WHERE agent_id = ? AND day = date('now')",
+            "SELECT count FROM chat_reply_counts "
+            "WHERE agent_id = ? AND day = date('now') AND deleted_at IS NULL",
             (agent_id,),
         ).fetchone()
         return row[0] if row else 0

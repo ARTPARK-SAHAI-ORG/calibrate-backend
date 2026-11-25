@@ -649,3 +649,20 @@ def test_chat_replies_today_count_every_reply_of_one_agent_since_midnight():
     assert db.count_chat_replies_today(agent["uuid"]) == 3
     assert db.count_chat_replies_today(other["uuid"]) == 1
     assert db.count_chat_replies_today(str(uuid.uuid4())) == 0
+
+
+def test_deleting_an_agent_soft_deletes_its_chat_count_and_conversations():
+    agent = _insert_agent(_org())
+    db.reserve_chat_reply(agent["uuid"], 10)
+    db.save_chat_conversation(agent["uuid"], "c1", [{"role": "user", "content": "hi"}])
+
+    assert db.delete_agent(agent["uuid"])
+
+    assert db.count_chat_replies_today(agent["uuid"]) == 0
+    assert db.get_chat_conversation(agent["uuid"], "c1") == []
+    with db.get_db_connection() as conn:
+        for table in ("chat_reply_counts", "chat_conversations"):
+            row = conn.execute(
+                f"SELECT deleted_at FROM {table} WHERE agent_id = ?", (agent["uuid"],)
+            ).fetchone()
+            assert row[0] is not None
