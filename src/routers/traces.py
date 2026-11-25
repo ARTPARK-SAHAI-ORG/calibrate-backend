@@ -32,7 +32,6 @@ from db import (
     bulk_delete_tests,
     average_trace_scores,
     count_live_traces,
-    count_chat_replies_today,
     count_scored_traces,
     create_trace_with_eval_run,
     get_agent,
@@ -56,7 +55,7 @@ from db import (
 )
 from org_scope import ensure_owned_agent
 from pagination import PaginatedResponse, PaginationParams, page_envelope
-from routers.org_limits import daily_message_limit, effective_limits, record_limit_hit
+from routers.org_limits import effective_limits, record_limit_hit
 
 # Reuse the tests router's validation so a converted test accepts exactly what
 # POST /tests does (evaluator visible to the workspace, evaluator_type matches).
@@ -1132,15 +1131,6 @@ class TraceUsageResponse(BaseModel):
     max_scored_traces: Optional[int] = Field(
         description="How many traces you may have scored. No limit (`null`) while your workspace uses its own AI provider keys"
     )
-    chat_replies_today: int = Field(
-        description="How many replies the agent's chat link has given since midnight UTC, including ones whose traces were deleted or never stored. 0 without `agent_id`"
-    )
-    chat_replies_per_day: Optional[int] = Field(
-        description="How many replies the agent's chat link may give in a day: its own `talk_to_agent.messages_per_day`, else the workspace's `talk_to_agent.default_messages_per_day`, never above `max_chat_replies_per_day`. Sent only with `agent_id`"
-    )
-    max_chat_replies_per_day: Optional[int] = Field(
-        description="The highest daily chat reply limit an agent or the workspace default may be set to. No limit (`null`) while your workspace uses its own AI provider keys"
-    )
 
 
 @router.get(
@@ -1148,27 +1138,14 @@ class TraceUsageResponse(BaseModel):
     response_model=TraceUsageResponse,
     summary="Get your trace usage against your limits",
 )
-def get_trace_usage_endpoint(
-    ctx: OrgContext = Depends(get_current_org),
-    agent_id: Optional[str] = Query(
-        None, description="Count the chat replies of this agent and read its daily limit"
-    ),
-):
+def get_trace_usage_endpoint(ctx: OrgContext = Depends(get_current_org)):
     """Report how much of each trace limit you have used"""
     usage_limits = effective_limits(ctx.org_uuid)
-    agent = ensure_owned_agent(agent_id, ctx.org_uuid) if agent_id else None
     return {
         "traces_stored": count_live_traces(ctx.org_uuid),
         "max_traces": usage_limits["max_traces"],
         "traces_scored": count_scored_traces(ctx.org_uuid),
         "max_scored_traces": usage_limits["max_scored_traces"],
-        "chat_replies_today": count_chat_replies_today(agent["uuid"]) if agent else 0,
-        "chat_replies_per_day": (
-            daily_message_limit(agent, usage_limits["max_chat_replies_per_day"])
-            if agent
-            else None
-        ),
-        "max_chat_replies_per_day": usage_limits["max_chat_replies_per_day"],
     }
 
 

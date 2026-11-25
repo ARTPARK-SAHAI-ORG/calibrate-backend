@@ -1758,6 +1758,8 @@ def test_chat_link_keeps_its_token_when_turned_off_and_on(client):
     assert first == {
         "is_public": False,
         "connection_verified": True,
+        "messages_today": 0,
+        "daily_message_limit": 200,
     }
     # Reading the link makes it, so a private link can be previewed.
     uuid.UUID(token)
@@ -1823,3 +1825,21 @@ def test_chat_link_of_another_workspaces_agent_is_refused(client):
         assert response.status_code == 403
         assert "organization_uuid" not in response.json()
     assert db.get_agent(agent["uuid"])["chat_link_public"] == 0
+
+
+def test_chat_link_reports_todays_messages_against_the_agents_own_limit(client):
+    h = _signup(client)
+    agent = _create_agent(client, h, f"talk-{uuid.uuid4().hex[:6]}")
+    for _ in range(2):
+        db.reserve_chat_reply(agent["uuid"], 100)
+
+    link = _chat_link(client, h, agent["uuid"]).json()
+    assert (link["messages_today"], link["daily_message_limit"]) == (2, 200)
+
+    res = client.put(
+        f"/agents/{agent['uuid']}",
+        json={"config": {"talk_to_agent": {"messages_per_day": 7}}},
+        headers=h,
+    )
+    assert res.status_code == 200, res.text
+    assert _chat_link(client, h, agent["uuid"]).json()["daily_message_limit"] == 7

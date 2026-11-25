@@ -2865,7 +2865,6 @@ def test_scores_cross_org_is_403(client):
 
 
 def test_usage_reports_both_counts_and_both_limits(client, monkeypatch):
-    from routers import org_limits
     from routers import traces as traces_mod
 
     h, agent_id = _signup_with_agent(client)
@@ -2878,9 +2877,6 @@ def test_usage_reports_both_counts_and_both_limits(client, monkeypatch):
         "max_traces": 5,
         "traces_scored": 0,
         "max_scored_traces": 2,
-        "chat_replies_today": 0,
-        "chat_replies_per_day": None,
-        "max_chat_replies_per_day": org_limits.DEFAULT_MAX_CHAT_REPLIES_PER_DAY,
     }
 
     first = _post_trace(client, h, _payload(agent_id, _mid()))
@@ -2891,9 +2887,6 @@ def test_usage_reports_both_counts_and_both_limits(client, monkeypatch):
         "max_traces": 5,
         "traces_scored": 2,
         "max_scored_traces": 2,
-        "chat_replies_today": 0,
-        "chat_replies_per_day": None,
-        "max_chat_replies_per_day": org_limits.DEFAULT_MAX_CHAT_REPLIES_PER_DAY,
     }
 
     # Past the scoring limit the trace is still stored, so only one count moves.
@@ -2951,31 +2944,6 @@ def _set_trace_columns(trace_uuid, **columns):
                 f"UPDATE traces SET {column} = ? WHERE uuid = ?", (value, trace_uuid)
             )
         conn.commit()
-
-
-def test_usage_counts_one_agents_chat_replies_and_reads_its_limit(client):
-    h, agent_id = _signup_with_agent(client)
-    _, other_agent = _signup_with_agent(client)
-    for _ in range(2):
-        db.reserve_chat_reply(agent_id, 100)
-
-    usage = client.get("/traces/usage", params={"agent_id": agent_id}, headers=h)
-    assert usage.status_code == 200, usage.text
-    assert usage.json()["chat_replies_today"] == 2
-    assert usage.json()["chat_replies_per_day"] == 200
-    assert client.get("/traces/usage", headers=h).json()["chat_replies_today"] == 0
-
-    res = client.put(
-        f"/agents/{agent_id}",
-        json={"config": {"talk_to_agent": {"messages_per_day": 7}}},
-        headers=h,
-    )
-    assert res.status_code == 200, res.text
-    usage = client.get("/traces/usage", params={"agent_id": agent_id}, headers=h).json()
-    assert usage["chat_replies_per_day"] == 7
-
-    foreign = client.get("/traces/usage", params={"agent_id": other_agent}, headers=h)
-    assert foreign.status_code == 404
 
 
 def test_a_trace_sent_to_the_api_reads_as_api_with_no_feedback(client):

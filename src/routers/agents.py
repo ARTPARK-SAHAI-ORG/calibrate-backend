@@ -52,6 +52,7 @@ from db import (
     remove_evaluator_from_agent,
     resolve_live_evaluators,
     set_agent_chat_link,
+    count_chat_replies_today,
 )
 from trace_scoring import IneligibleReason, resolve_trace_scoring
 from auth_utils import get_current_org, get_org_jwt_or_api_key, OrgContext
@@ -64,6 +65,7 @@ from org_scope import ensure_owned_agent, ensure_owned_evaluator
 from routers.evaluators import EvaluatorResponse, build_evaluator_page
 from routers.org_limits import (
     TALK_TO_AGENT_KEY,
+    daily_message_limit,
     effective_max_chat_replies_per_day,
     ensure_daily_message_limit_allowed,
 )
@@ -941,6 +943,12 @@ class ChatLinkStatusResponse(ChatLinkResponse):
     connection_verified: bool = Field(
         description="Whether the agent's connection has passed its check. Always true for an agent built in Calibrate"
     )
+    messages_today: int = Field(
+        description="How many messages the agent has replied to on its chat link since midnight UTC, including ones whose traces were deleted or never stored"
+    )
+    daily_message_limit: int = Field(
+        description="How many messages the agent may reply to on its chat link in a day: its own `talk_to_agent.messages_per_day`, else the workspace's `talk_to_agent.default_messages_per_day`, never above `max_chat_replies_per_day`"
+    )
 
 
 def _chat_connection_unverified(agent: Dict[str, Any]) -> bool:
@@ -981,6 +989,10 @@ def get_chat_link(
         is_public=is_public,
         share_token=token,
         connection_verified=not _chat_connection_unverified(agent),
+        messages_today=count_chat_replies_today(agent_uuid),
+        daily_message_limit=daily_message_limit(
+            agent, effective_max_chat_replies_per_day(ctx.org_uuid)
+        ),
     )
 
 
