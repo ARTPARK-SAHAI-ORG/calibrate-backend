@@ -8,6 +8,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 from fastapi.testclient import TestClient
 
+import db
 from conftest import NONEXISTENT_UUID, NONEXISTENT_UUID_2
 
 @pytest.fixture(scope="module")
@@ -2464,12 +2465,24 @@ def test_run_agent_test_queued_path(client, monkeypatch):
         headers=h,
     )
     assert on.status_code == 200
+    share_token = on.json()["share_token"]
+    assert share_token
     off = client.patch(
         f"/agent-tests/run/{task_id}/visibility",
         json={"is_public": False},
         headers=h,
     )
     assert off.status_code == 200
+    assert off.json()["share_token"] is None
+    assert db.get_agent_test_job_by_share_token(share_token) is None
+    # Turning sharing back on brings back the same link
+    on_again = client.patch(
+        f"/agent-tests/run/{task_id}/visibility",
+        json={"is_public": True},
+        headers=h,
+    )
+    assert on_again.json()["share_token"] == share_token
+    assert db.get_agent_test_job_by_share_token(share_token) is not None
     # Someone in another workspace cannot change sharing on this run → refused (403)
     other = _signup(client)
     assert (
@@ -3237,12 +3250,24 @@ def test_run_agent_benchmark_queued_path(client, monkeypatch):
         headers=h,
     )
     assert on.status_code == 200
+    share_token = on.json()["share_token"]
+    assert share_token
     off = client.patch(
         f"/agent-tests/benchmark/{task_id}/visibility",
         json={"is_public": False},
         headers=h,
     )
     assert off.status_code == 200
+    assert off.json()["share_token"] is None
+    assert db.get_agent_test_job_by_share_token(share_token) is None
+    # Turning sharing back on brings back the same link
+    on_again = client.patch(
+        f"/agent-tests/benchmark/{task_id}/visibility",
+        json={"is_public": True},
+        headers=h,
+    )
+    assert on_again.json()["share_token"] == share_token
+    assert db.get_agent_test_job_by_share_token(share_token) is not None
     assert (
         client.patch(
             "/agent-tests/benchmark/missing/visibility",

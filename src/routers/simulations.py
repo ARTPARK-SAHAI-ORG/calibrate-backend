@@ -47,6 +47,7 @@ from db import (
 from llm_judge import build_evaluator_cli_payload
 from shared_enums import EvaluatorType
 from utils import (
+    compute_share_token_toggle,
     job_slot,
     with_calibrate_eval_header,
     AGENT_TYPE_DESCRIPTION,
@@ -817,14 +818,9 @@ def update_simulation_run_visibility(
     else:
         raise HTTPException(status_code=404, detail="Task not found")
 
-    if body.is_public:
-        import uuid as _uuid
-        share_token = job.get("share_token") or str(_uuid.uuid4())
-    else:
-        share_token = None
-
-    update_simulation_job_visibility(task_id, body.is_public, share_token)
-    return VisibilityResponse(is_public=body.is_public, share_token=share_token)
+    token_to_persist, token_to_return = compute_share_token_toggle(job, body.is_public)
+    update_simulation_job_visibility(task_id, body.is_public, token_to_persist)
+    return VisibilityResponse(is_public=body.is_public, share_token=token_to_return)
 
 
 @router.get("/run/{task_id}", response_model=SimulationRunStatusResponse, summary="Get simulation run status")
