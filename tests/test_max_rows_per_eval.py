@@ -232,16 +232,21 @@ def test_simulation_run_counts_personas_times_scenarios(client, monkeypatch):
     assert _hits(auth) == [("max_rows_per_eval", "simulation", 2, 1)]
 
 
-def test_evaluator_run_counts_items_times_evaluators(client):
+def test_evaluator_run_counts_items_not_evaluators(client):
     auth = _signup(client)
     h = auth["headers"]
-    llm_ev = _llm_ev(client, h)
+    llm_evs = [
+        e
+        for e in client.get("/evaluators", headers=h).json()["items"]
+        if e.get("evaluator_type") == "llm"
+    ][:2]
+    assert len(llm_evs) == 2
     task_uuid = client.post(
         "/annotation-tasks",
         json={
             "name": f"t-{uuid.uuid4().hex[:6]}",
             "type": "llm",
-            "evaluator_ids": [llm_ev["uuid"]],
+            "evaluator_ids": [e["uuid"] for e in llm_evs],
         },
         headers=h,
     ).json()["uuid"]
@@ -264,7 +269,10 @@ def test_evaluator_run_counts_items_times_evaluators(client):
 
     resp = client.post(
         f"/annotation-tasks/{task_uuid}/evaluator-runs",
-        json={"evaluators": [{"evaluator_id": llm_ev["uuid"]}], "select_all": True},
+        json={
+            "evaluators": [{"evaluator_id": e["uuid"]} for e in llm_evs],
+            "select_all": True,
+        },
         headers=h,
     )
     assert resp.status_code == 400
