@@ -364,23 +364,17 @@ def evaluators_for_trace(
     return evaluators_fitting_row(hydrated, is_tool_call_trace(trace))
 
 
-def _skip_reason_for(trace: dict[str, Any], reason: str, agent_id: str) -> str:
-    """A tool-only trace on an agent with no tool-call evaluator linked says so,
-    so the app can offer to add one. A linked one that cannot run (no prompt,
-    no live version) leaves the general reason, since adding another is not
-    the fix."""
-    from db import get_evaluators_for_agent
-
-    if (
-        reason == "no_usable_evaluators"
-        and is_tool_call_trace(trace)
-        and not any(
-            ev.get("evaluator_type") == TOOL_CALL_EVALUATOR_TYPE
-            for ev in get_evaluators_for_agent(agent_id)
-        )
-    ):
+def _skip_reason_for(trace: dict[str, Any], reason: str, agent_has_tool_call_evaluator: bool) -> str:
+    """A tool-only trace says `no_tool_call_evaluator` only when the agent links none."""
+    if reason == "no_usable_evaluators" and is_tool_call_trace(trace) and not agent_has_tool_call_evaluator:
         return "no_tool_call_evaluator"
     return reason
+
+
+def _agent_has_tool_call_evaluator(agent_id: str) -> bool:
+    from db import get_evaluators_for_agent
+
+    return any(ev.get("evaluator_type") == TOOL_CALL_EVALUATOR_TYPE for ev in get_evaluators_for_agent(agent_id))
 
 
 def build_dataset_item(
@@ -867,6 +861,7 @@ def process_claimed_runs(
             # the wrong verdicts as real scores, so refuse rather than guess.
             raise RuntimeError(f"a batch must be one agent's runs, got {agent_ids}")
         evaluators = resolve_batch_evaluators(claimed[0]["agent_id"])
+        has_tool_call_evaluator = _agent_has_tool_call_evaluator(claimed[0]["agent_id"])
     except Exception as exc:
         logger.exception("trace-scoring: resolving evaluators raised")
         for item in prepared:
@@ -884,7 +879,7 @@ def process_claimed_runs(
         for item in prepared:
             _settle_or_defer_terminal(
                 item.run,
-                reason=_skip_reason_for(item.trace, reason, item.run["agent_id"]),
+                reason=_skip_reason_for(item.trace, reason, has_tool_call_evaluator),
                 now=prepare_now, rng=rng, max_attempts=max_attempts,
             )
         return
@@ -897,7 +892,7 @@ def process_claimed_runs(
             _settle_or_defer_terminal(
                 item.run,
                 reason=_skip_reason_for(
-                    item.trace, "no_usable_evaluators", item.run["agent_id"]
+                    item.trace, "no_usable_evaluators", has_tool_call_evaluator
                 ),
                 now=prepare_now, rng=rng, max_attempts=max_attempts,
             )

@@ -546,6 +546,24 @@ def test_a_tool_call_trace_with_a_linked_tool_call_evaluator_that_cannot_run_kee
     assert db.get_trace_eval_run(run)["error"] == "no_usable_evaluators"
 
 
+def test_a_tool_call_trace_beside_a_reply_evaluator_and_a_broken_tool_call_one_keeps_the_general_reason():
+    org = _org()
+    agent = _agent(org)
+    reply_ev = _evaluator(org, name="Correctness")
+    tool_ev, _ = _evaluator(org, evaluator_type="tool-call")
+    blank = db.create_evaluator_version(tool_ev, "", "")
+    db.set_evaluator_live_version(tool_ev, blank["uuid"])
+    reply_run = _run(org, agent, _trace(org, agent), [reply_ev, (tool_ev, blank["uuid"])], available_at=1)
+    tool_run = _run(org, agent, _trace(org, agent, output=_TOOL_ONLY), [], available_at=2)
+
+    ts.claim_and_score_batch(
+        now=_at(1000), invoke=_invoker([_judged(reply_run, {"Correctness": {"match": True}})])
+    )
+
+    assert _status(reply_run) == RunStatus.COMPLETED.value
+    assert db.get_trace_eval_run(tool_run)["error"] == "no_usable_evaluators"
+
+
 def test_a_tool_call_trace_on_an_agent_with_no_evaluators_says_the_tool_call_one_is_missing():
     org = _org()
     agent = _agent(org)
