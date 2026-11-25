@@ -344,7 +344,7 @@ Browsers upload audio straight to the bucket, so the bucket needs CORS. Save thi
   {
     "origin": ["https://<your frontend address>"],
     "method": ["GET", "PUT", "POST"],
-    "responseHeader": ["*"],
+    "responseHeader": ["Content-Type"],
     "maxAgeSeconds": 3600
   }
 ]
