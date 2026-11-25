@@ -946,6 +946,15 @@ class ChatLinkStatusResponse(ChatLinkResponse):
     )
 
 
+def _chat_connection_unverified(agent: Dict[str, Any]) -> bool:
+    """A connection agent whose connection has not passed its check, including
+    one with no address yet. Stricter than the test-run rule, which lets an
+    agent with no address through."""
+    return agent.get("type") == "connection" and not (agent.get("config") or {}).get(
+        "connection_verified"
+    )
+
+
 class ChatLinkVisibilityRequest(BaseModel):
     is_public: bool = Field(
         description="True to turn the chat link on. False to turn it off, keeping the same link for when it is turned back on"
@@ -965,8 +974,6 @@ def get_chat_link(
     ctx: OrgContext = Depends(get_current_org),
 ):
     """Get the link anyone can use to chat with an agent, and whether it can be turned on"""
-    from routers.agent_tests import _agent_connection_unverified
-
     agent = ensure_owned_agent(agent_uuid, ctx.org_uuid)
     is_public = bool(agent.get("chat_link_public"))
     token = agent.get("chat_token")
@@ -979,7 +986,7 @@ def get_chat_link(
         is_public=is_public,
         share_token=token,
         text_chat_supported=True,
-        connection_verified=not _agent_connection_unverified(agent),
+        connection_verified=not _chat_connection_unverified(agent),
     )
 
 
@@ -997,10 +1004,8 @@ def update_chat_link_visibility(
     ctx: OrgContext = Depends(get_current_org),
 ):
     """Turn on or off the link anyone can use to chat with an agent"""
-    from routers.agent_tests import _agent_connection_unverified
-
     agent = ensure_owned_agent(agent_uuid, ctx.org_uuid)
-    if body.is_public and _agent_connection_unverified(agent):
+    if body.is_public and _chat_connection_unverified(agent):
         raise HTTPException(status_code=400, detail={"error": "connection_unverified"})
     token, _ = compute_share_token_toggle(agent, body.is_public, token_field="chat_token")
     set_agent_chat_link(agent_uuid, body.is_public, token)

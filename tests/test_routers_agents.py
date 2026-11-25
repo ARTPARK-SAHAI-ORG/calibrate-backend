@@ -1779,9 +1779,23 @@ def test_chat_link_keeps_its_token_when_turned_off_and_on(client):
     assert again["share_token"] == on["share_token"]
 
 
+def _create_connection_agent(client, h):
+    return client.post(
+        "/agents", json={"name": f"conn-{uuid.uuid4().hex[:6]}", "type": "connection"}, headers=h
+    ).json()
+
+
+def test_chat_link_refuses_a_connection_agent_with_no_address_yet(client):
+    h = _signup(client)
+    agent = _create_connection_agent(client, h)
+
+    assert _chat_link(client, h, agent["uuid"]).json()["connection_verified"] is False
+    assert _chat_link(client, h, agent["uuid"], True).status_code == 400
+
+
 def test_chat_link_refuses_an_unverified_connection_agent(client):
     h = _signup(client)
-    agent = _create_agent(client, h, f"conn-{uuid.uuid4().hex[:6]}")
+    agent = _create_connection_agent(client, h)
     db.update_agent(agent["uuid"], config={"agent_url": "https://example.com/a"})
 
     assert _chat_link(client, h, agent["uuid"]).json()["connection_verified"] is False
