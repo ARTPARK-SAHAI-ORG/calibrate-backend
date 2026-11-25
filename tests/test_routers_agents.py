@@ -1695,3 +1695,10 @@ def test_scoring_written_as_a_plain_false_turns_it_off(client):
     assert r.status_code == 200, r.text
     assert _scoring_on(r.json()) is False
     assert _scoring_on(client.get(f"/agents/{agent['uuid']}", headers=h).json()) is False
+
+
+def test_a_new_agent_defaults_to_gemini_3_5_flash_lite(monkeypatch):
+    from routers.agents import _default_agent_config
+
+    monkeypatch.delenv("DEFAULT_AGENT_LLM_MODEL", raising=False)
+    assert _default_agent_config()["llm"]["model"] == "google/gemini-3.5-flash-lite"

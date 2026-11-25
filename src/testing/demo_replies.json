@@ -94,7 +94,7 @@
   ],
   "benchmark_models": [
     {"model": "openai/gpt-4.1-mini", "pass_rate": 75.0, "latency_ms": 820, "cost": 0.0011},
-    {"model": "google/gemini-2.5-flash", "pass_rate": 100.0, "latency_ms": 640, "cost": 0.0007},
+    {"model": "google/gemini-3.5-flash-lite", "pass_rate": 100.0, "latency_ms": 640, "cost": 0.0007},
     {"model": "anthropic/claude-haiku-4.5", "pass_rate": 100.0, "latency_ms": 910, "cost": 0.0016}
   ],
   "personas": [
