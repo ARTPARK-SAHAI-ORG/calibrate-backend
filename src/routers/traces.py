@@ -158,7 +158,7 @@ _SORT_BY_EVALUATOR_DESCRIPTION = (
 )
 
 TraceSource = Literal["api", "chat"]
-TraceFeedbackFilter = Literal["correct", "incorrect", "any", "none"]
+TraceFeedbackFilter = Literal["correct", "wrong", "any"]
 
 _SOURCE_VALUES = (
     "\n\n- `api`: sent to `POST /traces`\n"
@@ -166,9 +166,8 @@ _SOURCE_VALUES = (
 )
 _FEEDBACK_VALUES = (
     "\n\n- `correct`: marked correct\n"
-    "- `incorrect`: marked incorrect\n"
-    "- `any`: marked either way\n"
-    "- `none`: no feedback"
+    "- `wrong`: marked wrong\n"
+    "- `any`: marked either way"
 )
 
 _SORT_ORDER_DESCRIPTION = (
