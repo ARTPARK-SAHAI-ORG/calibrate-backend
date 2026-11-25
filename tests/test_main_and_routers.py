@@ -486,11 +486,27 @@ def test_openrouter_providers_disabled(client, monkeypatch):
     assert resp.json() is None
 
 
+def test_openrouter_providers_disabled_ignores_zero_data_retention(client, monkeypatch):
+    monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
+    monkeypatch.setenv("OPENROUTER_ZERO_DATA_RETENTION", "true")
+    assert client.get("/openrouter/providers").json() is None
+
+
 def test_openrouter_providers_all(client, monkeypatch):
     monkeypatch.setenv("OPENROUTER_API_KEY", "key")
     monkeypatch.setenv("OPENROUTER_ALLOWED_PROVIDERS", "")
+    monkeypatch.delenv("OPENROUTER_ZERO_DATA_RETENTION", raising=False)
     resp = client.get("/openrouter/providers")
-    assert resp.json() == {"providers": "all"}
+    assert resp.json() == {"providers": "all", "zero_data_retention": False}
+
+
+@pytest.mark.parametrize("value,expected", [("true", True), ("false", False), ("", False)])
+def test_openrouter_providers_all_zero_data_retention(client, monkeypatch, value, expected):
+    monkeypatch.setenv("OPENROUTER_API_KEY", "key")
+    monkeypatch.setenv("OPENROUTER_ALLOWED_PROVIDERS", "")
+    monkeypatch.setenv("OPENROUTER_ZERO_DATA_RETENTION", value)
+    resp = client.get("/openrouter/providers")
+    assert resp.json() == {"providers": "all", "zero_data_retention": expected}
 
 
 # ---------------------------------------------------------------------------
