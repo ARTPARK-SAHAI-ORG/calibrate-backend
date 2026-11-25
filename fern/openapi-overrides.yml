@@ -171,6 +171,10 @@ paths:
     post:
       x-fern-sdk-group-name: traces
       x-fern-sdk-method-name: create
+  /traces/{trace_uuid}/feedback:
+    put:
+      x-fern-sdk-group-name: traces
+      x-fern-sdk-method-name: set_feedback
   /datasets:
     post:
       x-fern-sdk-group-name: datasets

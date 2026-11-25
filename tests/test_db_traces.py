@@ -582,51 +582,60 @@ def test_a_trace_is_from_the_api_unless_told_otherwise():
     assert db.get_trace(org, chat["uuid"])["source"] == "chat"
 
 
-def test_feedback_is_set_changed_and_cleared_on_a_chat_trace_only():
+def test_feedback_is_set_replaced_and_cleared_on_any_live_trace():
     org = _org()
     agent = _insert_agent(org)
     chat = _combined_ingest(org, agent, source="chat")
     api = _combined_ingest(org, agent)
 
-    assert db.set_trace_feedback(org, chat["uuid"], "up", "Clear answer")
+    assert db.set_trace_feedback(org, chat["uuid"], True, "Clear answer")
     first = db.get_trace(org, chat["uuid"])["feedback"]
-    assert (first["rating"], first["comment"]) == ("up", "Clear answer")
+    assert (first["is_correct"], first["comment"]) == (True, "Clear answer")
     assert first["at"].endswith("Z")
 
-    assert db.set_trace_feedback(org, chat["uuid"], "down", None)
+    assert db.set_trace_feedback(org, chat["uuid"], False, None)
     changed = db.get_trace(org, chat["uuid"])["feedback"]
-    assert (changed["rating"], changed["comment"]) == ("down", None)
+    assert (changed["is_correct"], changed["comment"]) == (False, None)
 
     assert db.set_trace_feedback(org, chat["uuid"], None, "ignored")
     assert db.get_trace(org, chat["uuid"])["feedback"] is None
     with db.get_db_connection() as conn:
         stored = conn.execute(
-            "SELECT feedback_comment, feedback_at FROM traces WHERE uuid = ?",
+            "SELECT feedback_is_correct, feedback_comment, feedback_at FROM traces WHERE uuid = ?",
             (chat["uuid"],),
         ).fetchone()
-    assert tuple(stored) == (None, None)
+    assert tuple(stored) == (None, None, None)
 
-    assert not db.set_trace_feedback(org, api["uuid"], "up", None)
-    assert db.get_trace(org, api["uuid"])["feedback"] is None
-    assert not db.set_trace_feedback(_org(), chat["uuid"], "up", None)
+    assert db.set_trace_feedback(org, api["uuid"], False, "Wrong date")
+    assert db.get_trace(org, api["uuid"])["feedback"]["is_correct"] is False
+    assert not db.set_trace_feedback(_org(), chat["uuid"], True, None)
     db.soft_delete_traces(org, trace_ids=[chat["uuid"]])
-    assert not db.set_trace_feedback(org, chat["uuid"], "up", None)
+    assert not db.set_trace_feedback(org, chat["uuid"], True, None)
 
 
-def test_chat_replies_today_count_deleted_ones_but_not_yesterday():
+def test_feedback_sent_with_the_trace_is_stored_with_it():
     org = _org()
     agent = _insert_agent(org)
-    other = _insert_agent(org)
-    today = [_combined_ingest(org, agent, source="chat") for _ in range(3)]
-    _combined_ingest(org, agent)
-    _combined_ingest(org, other, source="chat")
+    row = _combined_ingest(org, agent, feedback={"is_correct": False, "comment": "Wrong dose"})
+
+    feedback = db.get_trace(org, row["uuid"])["feedback"]
+    assert (feedback["is_correct"], feedback["comment"]) == (False, "Wrong dose")
+    assert feedback["at"].endswith("Z")
+
+
+def test_chat_replies_today_count_every_reply_of_one_agent_since_midnight():
+    agent = _insert_agent(_org())
+    other = _insert_agent(_org())
+    for _ in range(3):
+        db.record_chat_reply(agent["uuid"])
+    db.record_chat_reply(other["uuid"])
     with db.get_db_connection() as conn:
         conn.execute(
-            "UPDATE traces SET created_at = datetime(date('now'), '-1 second') WHERE uuid = ?",
-            (today[0]["uuid"],),
+            "INSERT INTO chat_reply_counts (agent_id, day, count) VALUES (?, date('now', '-1 day'), 9)",
+            (agent["uuid"],),
         )
         conn.commit()
-    db.soft_delete_traces(org, trace_ids=[today[1]["uuid"]])
 
-    assert db.count_chat_replies_today(org, agent["uuid"]) == 2
-    assert db.count_chat_replies_today(_org(), agent["uuid"]) == 0
+    assert db.count_chat_replies_today(agent["uuid"]) == 3
+    assert db.count_chat_replies_today(other["uuid"]) == 1
+    assert db.count_chat_replies_today(str(uuid.uuid4())) == 0
