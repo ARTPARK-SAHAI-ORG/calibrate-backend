@@ -43,7 +43,10 @@ logger = logging.getLogger(__name__)
 
 # Stored on a skipped `trace_eval_runs.error`.
 TraceEvalSkipReason = Literal[
-    "unsupported_interaction_type", "no_usable_evaluators", "over_limit"
+    "unsupported_interaction_type",
+    "no_usable_evaluators",
+    "no_tool_call_evaluator",
+    "over_limit",
 ]
 
 
@@ -359,6 +362,14 @@ def evaluators_for_trace(
     trace: dict[str, Any], hydrated: list[dict[str, Any]]
 ) -> list[dict[str, Any]]:
     return evaluators_fitting_row(hydrated, is_tool_call_trace(trace))
+
+
+def _skip_reason_for(trace: dict[str, Any], reason: str) -> str:
+    """A tool-only trace with nothing to judge it says what is missing, so the
+    app can offer to add a tool-call evaluator."""
+    if reason == "no_usable_evaluators" and is_tool_call_trace(trace):
+        return "no_tool_call_evaluator"
+    return reason
 
 
 def build_dataset_item(
@@ -861,8 +872,8 @@ def process_claimed_runs(
         )
         for item in prepared:
             _settle_or_defer_terminal(
-                item.run, reason=reason, now=prepare_now, rng=rng,
-                max_attempts=max_attempts,
+                item.run, reason=_skip_reason_for(item.trace, reason),
+                now=prepare_now, rng=rng, max_attempts=max_attempts,
             )
         return
 
@@ -872,8 +883,8 @@ def process_claimed_runs(
             scorable.append(item)
         else:
             _settle_or_defer_terminal(
-                item.run, reason="no_usable_evaluators", now=prepare_now, rng=rng,
-                max_attempts=max_attempts,
+                item.run, reason=_skip_reason_for(item.trace, "no_usable_evaluators"),
+                now=prepare_now, rng=rng, max_attempts=max_attempts,
             )
     prepared = scorable
     if not prepared:

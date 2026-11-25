@@ -523,8 +523,20 @@ def test_a_tool_call_trace_with_only_reply_evaluators_is_skipped_without_a_judge
 
     row = db.get_trace_eval_run(run)
     assert row["status"] == RunStatus.SKIPPED.value
-    assert row["error"] == "no_usable_evaluators"
+    assert row["error"] == "no_tool_call_evaluator"
     assert db.get_trace_eval_scores(run) == []
+
+
+def test_a_tool_call_trace_on_an_agent_with_no_evaluators_says_the_tool_call_one_is_missing():
+    org = _org()
+    agent = _agent(org)
+    tool_run = _run(org, agent, _trace(org, agent, output=_TOOL_ONLY), [], available_at=1)
+    reply_run = _run(org, agent, _trace(org, agent), [], available_at=2)
+
+    ts.claim_and_score_batch(now=_at(1000), invoke=_never_invoked)
+
+    assert db.get_trace_eval_run(tool_run)["error"] == "no_tool_call_evaluator"
+    assert db.get_trace_eval_run(reply_run)["error"] == "no_usable_evaluators"
 
 
 def test_a_batch_of_only_skipped_runs_never_calls_the_cli():
@@ -553,7 +565,7 @@ def test_a_skipped_run_stays_out_of_the_call_while_the_rest_are_scored():
 
     assert [item["test_case"]["id"] for item in invoke.captured["dataset"]] == [reply_run]
     assert _status(reply_run) == RunStatus.COMPLETED.value
-    assert db.get_trace_eval_run(tool_run)["error"] == "no_usable_evaluators"
+    assert db.get_trace_eval_run(tool_run)["error"] == "no_tool_call_evaluator"
 
 
 def test_a_result_naming_another_kinds_evaluator_is_not_settled():
