@@ -384,9 +384,16 @@ def _build_llm_dataset(
             "type": "tool_call_judge" if row_is_tool_call else "response",
             "criteria": _criteria_refs_for_item(it, payload, row_evaluators),
         }
-        tool_calls, expected = _tool_call_lists(it["uuid"], payload)
-        if row_is_tool_call and expected is not None:
-            evaluation["expected_tool_calls"] = expected
+        if row_is_tool_call:
+            tool_calls, expected = _tool_call_lists(it["uuid"], payload)
+            if expected is not None:
+                evaluation["expected_tool_calls"] = expected
+        else:
+            tool_calls = payload.get("tool_calls", [])
+            if not isinstance(tool_calls, list):
+                raise DatasetBuildError(
+                    f"Item {it['uuid']}: `tool_calls` must be a list if provided"
+                )
         out.append(
             {
                 "test_case": {

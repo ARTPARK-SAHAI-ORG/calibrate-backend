@@ -3153,6 +3153,30 @@ def test_tool_call_judge_backfill_fills_every_blank_version_of_a_fork():
     assert db.get_evaluator_version(deleted)["system_prompt"] == ""
 
 
+def test_tool_call_judge_backfill_fills_a_duplicated_copy():
+    user_uuid, org_uuid = _fresh_org()
+    fork = db.get_tool_call_evaluator_for_org(org_uuid)
+    copy = db.duplicate_evaluator(fork["uuid"], _u("tc-copy"), org_uuid, user_uuid)
+    copy_version = db.get_evaluator(copy)["live_version_id"]
+    with db.get_db_connection() as conn:
+        conn.execute(
+            "UPDATE evaluator_versions SET system_prompt = '', judge_model = '' "
+            "WHERE uuid = ?",
+            (copy_version,),
+        )
+        conn.execute(
+            "DELETE FROM _schema_migrations WHERE name = ?",
+            (db.FILL_TOOL_CALL_EVALUATOR_JUDGE_MIGRATION,),
+        )
+        conn.commit()
+
+    db.init_db()
+
+    version = db.get_evaluator_version(copy_version)
+    assert version["system_prompt"] == db._TOOL_CALL_SEED["version"]["system_prompt"]
+    assert version["judge_model"] == db._TOOL_CALL_SEED["version"]["judge_model"]
+
+
 def test_tool_call_judge_backfill_runs_once():
     """A prompt emptied after the one-time fill must not be filled again on restart."""
     _user, org_uuid = _fresh_org()

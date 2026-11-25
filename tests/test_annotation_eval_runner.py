@@ -235,6 +235,23 @@ def test_tool_call_lists_rejects_a_present_non_list(payload):
         runner._tool_call_lists("i1", payload)
 
 
+def test_build_llm_dataset_reply_row_ignores_a_non_list_expected_value():
+    out = runner._build_llm_dataset(
+        [
+            {
+                "uuid": "i1",
+                "payload": {
+                    "chat_history": [],
+                    "agent_response": "r",
+                    "expected_tool_calls": "not-a-list",
+                },
+            }
+        ],
+        [{"uuid": "e1", "name": "judge"}],
+    )
+    assert out[0]["output"]["tool_calls"] == []
+
+
 def test_build_llm_dataset_happy():
     evs = [{"uuid": "e1", "name": "judge"}]
     out = runner._build_llm_dataset(

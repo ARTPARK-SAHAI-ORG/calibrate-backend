@@ -729,8 +729,6 @@ def _settle_or_defer_terminal(
 ) -> None:
     from db import settle_trace_eval_run_terminal
 
-    if isinstance(reason, TraceEvalSettleSkipReason):
-        reason = reason.value
     try:
         settle_trace_eval_run_terminal(
             run["uuid"], status=TraceEvalRunStatus.SKIPPED, error=reason, now=now,
