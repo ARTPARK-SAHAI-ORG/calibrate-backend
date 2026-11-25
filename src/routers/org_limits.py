@@ -11,7 +11,7 @@ import os
 import sqlite3
 
 from fastapi import APIRouter, HTTPException, Depends, Path, Response
-from typing import Dict, Literal, Optional
+from typing import Any, Dict, Literal, Optional
 
 from pydantic import BaseModel, Field
 
@@ -86,7 +86,7 @@ class OrgLimits(BaseModel):
         None,
         gt=0,
         le=1_000_000,
-        description="Maximum replies one agent's chat link may give in a day, counted from midnight UTC",
+        description="The highest daily chat reply limit an agent or the workspace default may be set to, counted from midnight UTC",
         examples=[DEFAULT_MAX_CHAT_REPLIES_PER_DAY],
     )
 
@@ -153,7 +153,7 @@ class OwnLimitsResponse(BaseModel):
         examples=[DEFAULT_MAX_CONCURRENT_TRACE_SCORING_BATCHES],
     )
     max_chat_replies_per_day: Optional[int] = Field(
-        description="Maximum replies one agent's chat link may give in a day, counted from midnight UTC. No limit (`null`) while your workspace uses its own AI provider keys and has turned off `chat_link.limit_with_own_keys`",
+        description="The highest daily chat reply limit an agent or the workspace default may be set to, counted from midnight UTC. No limit (`null`) while your workspace uses its own AI provider keys",
         examples=[DEFAULT_MAX_CHAT_REPLIES_PER_DAY],
     )
     uses_own_provider_keys: bool = Field(
@@ -176,7 +176,7 @@ class MaxScoredTracesResponse(BaseModel):
 
 
 # A workspace paying its own providers is not capped on what it spends.
-_SPEND_LIMITS = ("max_rows_per_eval", "max_scored_traces")
+_SPEND_LIMITS = ("max_rows_per_eval", "max_scored_traces", "max_chat_replies_per_day")
 
 _DEFAULT_LIMITS = {
     "max_rows_per_eval": lambda: DEFAULT_MAX_ROWS_PER_EVAL,
@@ -204,11 +204,6 @@ def effective_limits(org_uuid: str) -> Dict[str, Optional[int]]:
     }
     if provider_keys.org_uses_own_keys(org_uuid):
         limits.update(dict.fromkeys(_SPEND_LIMITS))
-        # A public chat link spends on behalf of strangers, so it stays capped
-        # on the workspace's own keys unless the workspace turns that off.
-        org = get_organization(org_uuid)
-        if org and org["settings"]["chat_link"]["limit_with_own_keys"] is False:
-            limits["max_chat_replies_per_day"] = None
     return limits
 
 
@@ -244,6 +239,39 @@ def effective_max_concurrent_trace_scoring_batches(org_uuid: str) -> int:
 def effective_max_chat_replies_per_day(org_uuid: str) -> Optional[int]:
     """Workspace cap on one chat link's replies per day, falling back to the server default."""
     return _effective_limit(org_uuid, "max_chat_replies_per_day")
+
+
+TALK_TO_AGENT_KEY = "talk_to_agent"
+
+
+def agent_messages_per_day(agent: Dict[str, Any]) -> Optional[int]:
+    """The daily chat reply limit the agent's own config sets, if any."""
+    return ((agent.get("config") or {}).get(TALK_TO_AGENT_KEY) or {}).get("messages_per_day")
+
+
+def chat_replies_per_day(agent: Dict[str, Any], maximum: Optional[int]) -> int:
+    """The agent's daily chat reply limit: its own number, else the workspace
+    default, and never above the workspace maximum, which may have been lowered
+    since either was saved."""
+    number = agent_messages_per_day(agent)
+    if number is None:
+        org = get_organization(agent["org_uuid"])
+        number = org["settings"][TALK_TO_AGENT_KEY]["default_messages_per_day"]
+    return number if maximum is None else min(number, maximum)
+
+
+def ensure_messages_per_day_allowed(value: Any, maximum: Optional[int]) -> None:
+    """422 unless `value` is a whole number from 1 up to the workspace maximum."""
+    if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+        raise HTTPException(
+            status_code=422,
+            detail="Messages per day must be a whole number of at least 1",
+        )
+    if maximum is not None and value > maximum:
+        raise HTTPException(
+            status_code=422,
+            detail=f"Messages per day cannot be more than {maximum}, the most your workspace allows",
+        )
 
 
 def record_limit_hit(
