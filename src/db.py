@@ -11131,9 +11131,8 @@ def count_live_traces(org_uuid: str) -> int:
 
 _TRACE_FEEDBACK_SQL = {
     "correct": "feedback_is_correct = 1",
-    "incorrect": "feedback_is_correct = 0",
+    "wrong": "feedback_is_correct = 0",
     "any": "feedback_is_correct IS NOT NULL",
-    "none": "feedback_is_correct IS NULL",
 }
 
 

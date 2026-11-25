@@ -3956,9 +3956,8 @@ _ONE_FILTER_CASES = {
     "source=api": ({}, {"source": "chat"}, {"source": "api"}),
     "source=api reads null as api": ({"source": None}, {"source": "chat"}, {"source": "api"}),
     "feedback=correct": ({"feedback": _CORRECT}, {"feedback": _INCORRECT}, {"feedback": "correct"}),
-    "feedback=incorrect": ({"feedback": _INCORRECT}, {"feedback": _CORRECT}, {"feedback": "incorrect"}),
+    "feedback=wrong": ({"feedback": _INCORRECT}, {"feedback": _CORRECT}, {"feedback": "wrong"}),
     "feedback=any": ({"feedback": _INCORRECT}, {}, {"feedback": "any"}),
-    "feedback=none": ({}, {"feedback": _CORRECT}, {"feedback": "none"}),
 }
 
 # Columns no request can set, written straight to the row.
@@ -4015,7 +4014,7 @@ def test_convert_select_all_skips_a_trace_outside_one_filter(client, filter_name
 
 @pytest.mark.parametrize(
     "filter_name",
-    ["q", "output_type", "labels", "source=chat", "feedback=incorrect", "feedback=none"],
+    ["q", "output_type", "labels", "source=chat", "feedback=wrong"],
 )
 def test_score_averages_leave_out_a_trace_outside_one_filter(client, filter_name):
     h, agent_id = _signup_with_agent(client)
@@ -4049,7 +4048,7 @@ def test_conversations_leave_out_one_outside_one_filter(client, filter_name):
 
 
 @pytest.mark.parametrize(
-    "filter_name", ["source=chat", "source=api", "feedback=incorrect", "feedback=any", "feedback=none"]
+    "filter_name", ["source=chat", "source=api", "feedback=wrong", "feedback=any"]
 )
 def test_conversations_leave_out_one_outside_a_chat_filter(client, filter_name):
     h, agent_id = _signup_with_agent(client)
@@ -4058,7 +4057,7 @@ def test_conversations_leave_out_one_outside_a_chat_filter(client, filter_name):
     assert _conversation_ids(client, h, **query) == ["conv-a"]
 
 
-@pytest.mark.parametrize("filter_name", ["source=chat", "feedback=correct", "feedback=none"])
+@pytest.mark.parametrize("filter_name", ["source=chat", "feedback=correct"])
 def test_list_leaves_out_a_trace_outside_a_chat_filter(client, filter_name):
     h, agent_id = _signup_with_agent(client)
     matching, _, query = _matching_and_other_trace(client, h, agent_id, filter_name)
@@ -4130,3 +4129,10 @@ def test_a_body_with_every_filter_reaches_trace_filters_intact(
         created_after="2026-01-15 00:00:00",
         created_before="2026-02-01 00:00:00",
     )
+
+
+@pytest.mark.parametrize("value", ["none", "incorrect"])
+def test_feedback_filter_refuses_values_it_does_not_take(client, value):
+    h, agent_id = _signup_with_agent(client)
+    res = client.get("/traces", params={"agent_id": agent_id, "feedback": value}, headers=h)
+    assert res.status_code == 422
