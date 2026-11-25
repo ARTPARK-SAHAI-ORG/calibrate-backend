@@ -335,6 +335,7 @@ def _openrouter_models_client(payload):
 def test_openrouter_filtered_list(client, monkeypatch):
     monkeypatch.setenv("OPENROUTER_API_KEY", "k")
     monkeypatch.setenv("OPENROUTER_ALLOWED_PROVIDERS", "anthropic,openai")
+    monkeypatch.delenv("OPENROUTER_ZERO_DATA_RETENTION", raising=False)
 
     payload = {
         "data": [
@@ -355,6 +356,21 @@ def test_openrouter_filtered_list(client, monkeypatch):
         {"slug": "anthropic", "name": "Anthropic"},
         {"slug": "openai", "name": "OpenAI"},
     ]
+    assert body["zero_data_retention"] is False
+
+
+def test_openrouter_filtered_list_zero_data_retention(client, monkeypatch):
+    monkeypatch.setenv("OPENROUTER_API_KEY", "k")
+    monkeypatch.setenv("OPENROUTER_ALLOWED_PROVIDERS", "openai")
+    monkeypatch.setenv("OPENROUTER_ZERO_DATA_RETENTION", "true")
+
+    fake_client = _openrouter_models_client({"data": [{"id": "openai/gpt-5", "name": "OpenAI: GPT-5"}]})
+    with patch("main.httpx.AsyncClient", return_value=fake_client):
+        resp = client.get("/openrouter/providers")
+    assert resp.json() == {
+        "providers": [{"slug": "openai", "name": "OpenAI"}],
+        "zero_data_retention": True,
+    }
 
 
 def test_openrouter_filters_by_author_prefix_not_serving_provider(client, monkeypatch):

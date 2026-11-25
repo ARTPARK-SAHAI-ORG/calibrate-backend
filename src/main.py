@@ -82,6 +82,7 @@ from routers.provider_keys import router as provider_keys_router
 from routers.admin import router as admin_router
 from utils import (
     LOCAL_ARTIFACTS_URL_PREFIX,
+    env_bool,
     generate_presigned_upload_url,
     get_local_artifact_path,
     get_s3_output_config,
@@ -733,6 +734,9 @@ async def list_openrouter_providers() -> Optional[Dict[str, Any]]:
 
     If `OPENROUTER_ALLOWED_PROVIDERS` is empty/unset, all authors are supported —
     returns `{"providers": "all"}`.
+
+    Both replies carry `zero_data_retention`: true when `OPENROUTER_ZERO_DATA_RETENTION`
+    says the server's key only allows providers that keep no copy of the data.
     """
     api_key = os.getenv("OPENROUTER_API_KEY")
     if not api_key:
@@ -741,8 +745,9 @@ async def list_openrouter_providers() -> Optional[Dict[str, Any]]:
     allowed_env = os.getenv("OPENROUTER_ALLOWED_PROVIDERS", "")
     allowed = {s.strip() for s in allowed_env.split(",") if s.strip()}
 
+    zdr = env_bool("OPENROUTER_ZERO_DATA_RETENTION", False)
     if not allowed:
-        return {"providers": "all"}
+        return {"providers": "all", "zero_data_retention": zdr}
 
     try:
         async with httpx.AsyncClient(timeout=15) as client:
@@ -771,7 +776,7 @@ async def list_openrouter_providers() -> Optional[Dict[str, Any]]:
         display = (model.get("name") or "").split(":", 1)[0].strip() or slug
         providers.append({"slug": slug, "name": display})
 
-    return {"providers": providers}
+    return {"providers": providers, "zero_data_retention": zdr}
 
 
 @app.get("/sentry-debug")
