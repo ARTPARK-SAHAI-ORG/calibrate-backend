@@ -11123,7 +11123,7 @@ def _trace_filters(
         where.append("COALESCE(source, 'api') = ?")
         params.append(filters.source)
     if filters.feedback:
-        where.append(_TRACE_FEEDBACK_SQL[filters.feedback])
+        where.append(_TRACE_FEEDBACK_FILTER_SQL[filters.feedback])
     if filters.q and filters.q.strip():
         lowered = filters.q.strip().lower()
         # json.dumps escapes non-ASCII, so a Hindi word sits in the JSON columns
@@ -11214,7 +11214,7 @@ def count_live_traces(org_uuid: str) -> int:
         ).fetchone()[0]
 
 
-_TRACE_FEEDBACK_SQL = {
+_TRACE_FEEDBACK_FILTER_SQL = {
     "correct": "json_extract(feedback, '$.is_correct') = 1",
     "wrong": "json_extract(feedback, '$.is_correct') = 0",
     "any": "feedback IS NOT NULL",
