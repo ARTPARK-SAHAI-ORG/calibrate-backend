@@ -154,9 +154,7 @@ def resolve_trace_scoring(
     """Partition linked evaluators for this interaction type.
 
     `live_evaluators` is `(evaluators row, live evaluator_versions row or None)`
-    from `resolve_live_evaluators`. Type is checked before live-version /
-    variable checks so a mixed set never reaches `_validate_evaluators`.
-    Never raises.
+    from `resolve_live_evaluators`. Never raises.
     """
     mode = TRACE_SCORING_MODE_BY_INTERACTION_TYPE.get(interaction_type) if interaction_type is not None else None
     if mode is None:

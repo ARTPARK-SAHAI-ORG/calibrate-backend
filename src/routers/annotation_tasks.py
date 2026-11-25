@@ -1485,7 +1485,7 @@ def bulk_create_items(
         )
 
     # A tool-call row is answered only through a tool-call evaluator, so the
-    # workspace's one has to be on the task before anyone opens the labelling
+    # workspace's tool-call evaluator has to be on the task before anyone opens the labelling
     # form. `add_evaluator_to_annotation_task` inserts
     # unconditionally on an active link, so skip when it is already there:
     # later batches must not duplicate the link or move its display position.

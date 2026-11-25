@@ -3609,13 +3609,17 @@ def _backfill_fill_tool_call_evaluator_judge(cursor: sqlite3.Cursor) -> int:
     """One-time migration: give every workspace's tool-call evaluator, copies
     included, the seed's prompt and model. Fills every blank version in place
     rather than adding one, so answers people already recorded stay on them, and
-    an older version made live again still has a judge. A prompt a user wrote is
-    kept. The template itself is reconciled by `_seed_default_evaluators`."""
+    an older version made live again still has a judge. A prompt or model a user
+    wrote is kept. The template itself is reconciled by `_seed_default_evaluators`."""
     version = _TOOL_CALL_SEED["version"]
+    blank = "TRIM({}, ' ' || char(9) || char(10) || char(13)) = ''"
+    prompt_blank, model_blank = blank.format("system_prompt"), blank.format("judge_model")
     cursor.execute(
-        """
-        UPDATE evaluator_versions SET system_prompt = ?, judge_model = ?
-        WHERE TRIM(system_prompt) = '' AND deleted_at IS NULL AND evaluator_id IN (
+        f"""
+        UPDATE evaluator_versions
+           SET system_prompt = CASE WHEN {prompt_blank} THEN ? ELSE system_prompt END,
+               judge_model = CASE WHEN {model_blank} THEN ? ELSE judge_model END
+        WHERE ({prompt_blank} OR {model_blank}) AND deleted_at IS NULL AND evaluator_id IN (
             SELECT uuid FROM evaluators
             WHERE evaluator_type = ? AND org_uuid IS NOT NULL AND deleted_at IS NULL
         )

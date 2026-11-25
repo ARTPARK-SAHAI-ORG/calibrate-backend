@@ -3077,7 +3077,9 @@ def test_tool_call_judge_backfill_fills_blank_forks_in_place():
     _u2, org_edited = _fresh_org()
     _u3, org_spaces = _fresh_org()
     _u4, org_deleted = _fresh_org()
+    _u5, org_no_model = _fresh_org()
     blank = db.get_tool_call_evaluator_for_org(org_blank)
+    no_model = db.get_tool_call_evaluator_for_org(org_no_model)
     edited = db.get_tool_call_evaluator_for_org(org_edited)
     spaces = db.get_tool_call_evaluator_for_org(org_spaces)
     deleted = db.get_tool_call_evaluator_for_org(org_deleted)
@@ -3085,8 +3087,9 @@ def test_tool_call_judge_backfill_fills_blank_forks_in_place():
         for fork, prompt, model in (
             (blank, "", ""),
             (edited, "my own prompt", "my/model"),
-            (spaces, "   ", ""),
+            (spaces, " \n\t", ""),
             (deleted, "", ""),
+            (no_model, "my own prompt", "\n"),
         ):
             conn.execute(
                 "UPDATE evaluator_versions SET system_prompt = ?, judge_model = ? "
@@ -3118,6 +3121,11 @@ def test_tool_call_judge_backfill_fills_blank_forks_in_place():
     )
     assert len(db.get_evaluator_versions(edited["uuid"])) == 1
     assert db.get_evaluator_version(deleted["live_version_id"])["system_prompt"] == ""
+    filled_model = db.get_evaluator_version(no_model["live_version_id"])
+    assert (filled_model["system_prompt"], filled_model["judge_model"]) == (
+        "my own prompt",
+        seed["judge_model"],
+    )
 
 
 def test_tool_call_judge_backfill_fills_every_blank_version_of_a_fork():
