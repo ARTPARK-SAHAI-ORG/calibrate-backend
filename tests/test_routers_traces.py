@@ -4189,6 +4189,17 @@ def test_tool_only_trace_relinks_a_removed_tool_call_evaluator(client):
 def test_tool_only_trace_skips_a_deleted_tool_call_evaluator(client):
     h, agent_id = _signup_with_agent(client)
     org_uuid = db.get_agent(agent_id)["org_uuid"]
-    db.delete_evaluator(db.get_tool_call_evaluator_for_org(org_uuid)["uuid"])
+    deleted = db.get_tool_call_evaluator_for_org(org_uuid)["uuid"]
+    db.delete_evaluator(deleted)
     _post_trace(client, h, _payload(agent_id, _mid(), output=_ONLY_CALLS))
-    assert db.get_tool_call_evaluator_for_org(org_uuid) is None
+    with db.get_db_connection() as conn:
+        types = [
+            r[0]
+            for r in conn.execute(
+                "SELECT e.evaluator_type FROM agent_evaluators ae "
+                "JOIN evaluators e ON e.uuid = ae.evaluator_id "
+                "WHERE ae.agent_id = ? AND ae.deleted_at IS NULL",
+                (agent_id,),
+            )
+        ]
+    assert "tool-call" not in types

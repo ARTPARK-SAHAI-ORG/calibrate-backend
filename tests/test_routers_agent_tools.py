@@ -94,3 +94,34 @@ def test_a_deleted_tool_call_evaluator_is_not_linked(client):
 
     _link(client, h, agent_uuid, [tool_uuid])
     assert _active_links(agent_uuid, evaluator["uuid"]) == 0
+
+
+def test_relinking_an_already_linked_tool_does_not_restore_a_removed_evaluator(client):
+    h, agent_uuid, tool_uuid = _workspace_with_agent_and_tool(client)
+    evaluator = _tool_call_evaluator(agent_uuid)
+    _link(client, h, agent_uuid, [tool_uuid])
+    db.remove_evaluator_from_agent(agent_uuid, evaluator["uuid"])
+
+    _link(client, h, agent_uuid, [tool_uuid])
+    assert _active_links(agent_uuid, evaluator["uuid"]) == 0
+
+
+def test_backfill_links_the_evaluator_to_agents_that_already_have_tools(client):
+    h, with_tool, tool_uuid = _workspace_with_agent_and_tool(client)
+    db.add_tool_to_agent(agent_id=with_tool, tool_id=tool_uuid)
+    without_tool = client.post(
+        "/agents", json={"name": f"b-{uuid.uuid4().hex[:8]}", "type": "agent"}, headers=h
+    ).json()["uuid"]
+    evaluator = _tool_call_evaluator(with_tool)
+
+    for _ in range(2):
+        with db.get_db_connection() as conn:
+            conn.execute(
+                "DELETE FROM _schema_migrations WHERE name = ?",
+                (db.LINK_TOOL_CALL_EVALUATOR_TO_AGENTS_WITH_TOOLS_MIGRATION,),
+            )
+            conn.commit()
+        db.init_db()
+
+    assert _active_links(with_tool, evaluator["uuid"]) == 1
+    assert _active_links(without_tool, evaluator["uuid"]) == 0

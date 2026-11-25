@@ -133,7 +133,7 @@ def create_agent_tool_links(
             continue
 
     tool_call_evaluator = get_tool_call_evaluator_for_org(ctx.org_uuid)
-    if agent_tools.tool_uuids and tool_call_evaluator:
+    if link_ids and tool_call_evaluator:
         add_evaluator_to_agent(agent_tools.agent_uuid, tool_call_evaluator["uuid"])
 
     return AgentToolsCreateResponse(

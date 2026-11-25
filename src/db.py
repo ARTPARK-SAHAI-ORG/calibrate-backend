@@ -2022,6 +2022,20 @@ def init_db():
                     "workspace fork(s)"
                 )
 
+        if not _schema_migration_applied(
+            cursor, LINK_TOOL_CALL_EVALUATOR_TO_AGENTS_WITH_TOOLS_MIGRATION
+        ):
+            linked = _backfill_link_tool_call_evaluator_to_agents_with_tools(cursor)
+            _mark_schema_migration_applied(
+                cursor, LINK_TOOL_CALL_EVALUATOR_TO_AGENTS_WITH_TOOLS_MIGRATION
+            )
+            conn.commit()
+            if linked:
+                logger.info(
+                    f"Linked the tool-call correctness evaluator to {linked} "
+                    "agent(s) with tools"
+                )
+
         # Re-point pre-existing evaluator links from the shared default templates
         # to each org's fork (one-time). Runs after the fork backfill so the
         # forks exist. Finished-run job snapshots stay frozen.
@@ -3527,6 +3541,9 @@ RENAME_TOOL_CALL_EVALUATOR_DESCRIPTION_MIGRATION = (
     "rename_tool_call_evaluator_description_v1"
 )
 FILL_TOOL_CALL_EVALUATOR_JUDGE_MIGRATION = "fill_tool_call_evaluator_judge_v1"
+LINK_TOOL_CALL_EVALUATOR_TO_AGENTS_WITH_TOOLS_MIGRATION = (
+    "link_tool_call_evaluator_to_agents_with_tools_v1"
+)
 _TOOL_CALL_EVALUATOR_OLD_DESCRIPTION = (
     "Records whether the agent made the right tool call, judged by a person"
 )
@@ -3612,6 +3629,31 @@ def _backfill_fill_tool_call_evaluator_judge(cursor: sqlite3.Cursor) -> int:
         (version["system_prompt"], version["judge_model"], TOOL_CALL_EVALUATOR_SLUG),
     )
     return cursor.rowcount
+
+
+def _backfill_link_tool_call_evaluator_to_agents_with_tools(
+    cursor: sqlite3.Cursor,
+) -> int:
+    """One-time migration: link each org's fork of the tool-call correctness
+    evaluator to every live agent that already has a tool linked, the same link
+    `POST /agent-tools` makes for a newly linked tool. A link already present,
+    active or removed, is left as it is."""
+    cursor.execute(
+        """
+        INSERT OR IGNORE INTO agent_evaluators (agent_id, evaluator_id)
+        SELECT DISTINCT a.uuid, e.uuid
+          FROM agents a
+          JOIN agent_tools t ON t.agent_id = a.uuid AND t.deleted_at IS NULL
+          JOIN evaluators e
+            ON e.org_uuid = a.org_uuid
+           AND e.source_default_slug = ?
+           AND e.deleted_at IS NULL
+         WHERE a.deleted_at IS NULL
+        """,
+        (TOOL_CALL_EVALUATOR_SLUG,),
+    )
+    cursor.execute("SELECT changes()")
+    return cursor.fetchone()[0]
 
 
 def _backfill_link_tool_call_evaluator_to_tasks(cursor: sqlite3.Cursor) -> int:
