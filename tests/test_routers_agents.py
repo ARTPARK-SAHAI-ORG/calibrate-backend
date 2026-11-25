@@ -1753,20 +1753,27 @@ def test_chat_link_keeps_its_token_when_turned_off_and_on(client):
     h = _signup(client)
     agent = _create_agent(client, h, f"chat-{uuid.uuid4().hex[:6]}")
 
-    assert _chat_link(client, h, agent["uuid"]).json() == {
+    first = _chat_link(client, h, agent["uuid"]).json()
+    token = first.pop("share_token")
+    assert first == {
         "is_public": False,
-        "share_token": None,
         "text_chat_supported": True,
         "connection_verified": True,
     }
+    # Reading the link makes it, so a private link can be previewed.
+    uuid.UUID(token)
+    assert db.get_agent(agent["uuid"])["chat_token"] == token
+    assert db.get_agent(agent["uuid"])["chat_link_public"] == 0
+    assert _chat_link(client, h, agent["uuid"]).json()["share_token"] == token
+
     on = _chat_link(client, h, agent["uuid"], True).json()
-    assert on["is_public"] is True and on["share_token"]
+    assert on == {"is_public": True, "share_token": token}
     assert _chat_link(client, h, agent["uuid"]).json()["share_token"] == on["share_token"]
 
     off = _chat_link(client, h, agent["uuid"], False).json()
-    assert off == {"is_public": False, "share_token": None}
+    assert off == {"is_public": False, "share_token": token}
     assert db.get_agent(agent["uuid"])["chat_token"] == on["share_token"]
-    assert _chat_link(client, h, agent["uuid"]).json()["share_token"] is None
+    assert _chat_link(client, h, agent["uuid"]).json()["share_token"] == token
 
     again = _chat_link(client, h, agent["uuid"], True).json()
     assert again["share_token"] == on["share_token"]
@@ -1781,7 +1788,7 @@ def test_chat_link_refuses_an_unverified_connection_agent(client):
     refused = _chat_link(client, h, agent["uuid"], True)
     assert refused.status_code == 400
     assert refused.json()["detail"] == {"error": "connection_unverified"}
-    assert db.get_agent(agent["uuid"])["chat_token"] is None
+    assert db.get_agent(agent["uuid"])["chat_link_public"] == 0
     assert _chat_link(client, h, agent["uuid"], False).status_code == 200
 
     db.update_agent(

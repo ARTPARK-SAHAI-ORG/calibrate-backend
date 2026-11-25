@@ -1,4 +1,5 @@
 import copy
+import uuid
 import json
 import logging
 from dataclasses import asdict
@@ -931,7 +932,8 @@ def get_trace_scoring_eligibility(
 class ChatLinkResponse(BaseModel):
     is_public: bool = Field(description="Whether anyone with the link can chat with the agent")
     share_token: Optional[str] = Field(
-        None, description="Token for building the chat link while it is on"
+        None,
+        description="Token for building the chat link. While the link is private, only members of your workspace who are logged in can open it",
     )
 
 
@@ -967,11 +969,15 @@ def get_chat_link(
 
     agent = ensure_owned_agent(agent_uuid, ctx.org_uuid)
     is_public = bool(agent.get("chat_link_public"))
+    token = agent.get("chat_token")
+    if not token:
+        token = str(uuid.uuid4())
+        set_agent_chat_link(agent_uuid, is_public, token)
     # ponytail: every connection agent is a plain HTTP(S) text endpoint today
     # (public_url_error refuses any other scheme), so no voice check exists yet.
     return ChatLinkStatusResponse(
         is_public=is_public,
-        share_token=agent.get("chat_token") if is_public else None,
+        share_token=token,
         text_chat_supported=True,
         connection_verified=not _agent_connection_unverified(agent),
     )
@@ -996,11 +1002,9 @@ def update_chat_link_visibility(
     agent = ensure_owned_agent(agent_uuid, ctx.org_uuid)
     if body.is_public and _agent_connection_unverified(agent):
         raise HTTPException(status_code=400, detail={"error": "connection_unverified"})
-    token_to_persist, token_to_return = compute_share_token_toggle(
-        agent, body.is_public, token_field="chat_token"
-    )
-    set_agent_chat_link(agent_uuid, body.is_public, token_to_persist)
-    return ChatLinkResponse(is_public=body.is_public, share_token=token_to_return)
+    token, _ = compute_share_token_toggle(agent, body.is_public, token_field="chat_token")
+    set_agent_chat_link(agent_uuid, body.is_public, token)
+    return ChatLinkResponse(is_public=body.is_public, share_token=token)
 
 
 @router.put(

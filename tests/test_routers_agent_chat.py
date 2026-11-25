@@ -108,11 +108,27 @@ def test_link_that_is_off_unknown_or_of_a_deleted_agent_is_not_found(client):
     client.patch(f"/agents/{agent['uuid']}/chat-link/visibility", json={"is_public": False}, headers=h)
     assert client.get(f"/public/agent-chat/{token}").status_code == 404
     assert _send(client, token).json()["detail"] == {"error": "not_found"}
+    stranger = _signup(client)
+    assert client.get(f"/public/agent-chat/{token}", headers=stranger).status_code == 404
+    bad_login = {"Authorization": "Bearer not-a-token"}
+    assert client.get(f"/public/agent-chat/{token}", headers=bad_login).status_code == 404
 
     client.patch(f"/agents/{agent['uuid']}/chat-link/visibility", json={"is_public": True}, headers=h)
     assert client.get(f"/public/agent-chat/{token}").status_code == 200
     db.delete_agent(agent["uuid"])
     assert client.get(f"/public/agent-chat/{token}").status_code == 404
+
+
+def test_a_member_logged_in_can_preview_a_private_link(client):
+    h, agent, token = _chat_agent(client)
+    client.patch(f"/agents/{agent['uuid']}/chat-link/visibility", json={"is_public": False}, headers=h)
+
+    assert client.get(f"/public/agent-chat/{token}", headers=h).status_code == 200
+    with patch.object(public, "_llm_reply", _llm()):
+        body = _send(client, token, headers=h).json()
+    assert body["reply"] == "Hello"
+    assert _feedback(client, token, body["trace_uuid"], True, headers=h).status_code == 200
+    assert _feedback(client, token, body["trace_uuid"], True).status_code == 404
 
 
 def test_reply_is_stored_as_a_chat_trace_with_a_new_conversation(client):
@@ -220,22 +236,55 @@ def test_daily_limit_refuses_and_records_the_hit(client, monkeypatch):
     llm.assert_not_called()
 
 
-def test_no_daily_limit_lets_replies_through(client, monkeypatch):
-    _, _, token = _chat_agent(client)
-    _limits(monkeypatch, max_chat_replies_per_day=None)
+def _send_until_refused(client, token, attempts=5):
     with patch.object(public, "_llm_reply", _llm()):
-        assert _send(client, token).status_code == 200
+        for sent in range(attempts):
+            response = _send(client, token)
+            if response.status_code != 200:
+                return sent, response
+    return attempts, None
 
 
-def test_trace_cap_refuses_and_records_the_hit(client, monkeypatch):
+def test_the_agents_own_daily_number_is_enforced(client, monkeypatch):
+    _, agent, token = _chat_agent(client, config={"talk_to_agent": {"messages_per_day": 2}})
+    sent, refused = _send_until_refused(client, token)
+    assert sent == 2
+    assert refused.json()["detail"] == {"error": "daily_limit", "limit": 2}
+
+
+def test_the_workspace_default_applies_to_an_agent_without_its_own_number(client):
+    h, agent, token = _chat_agent(client)
+    client.patch(
+        f"/organizations/{agent['org_uuid']}",
+        json={"settings": {"talk_to_agent": {"default_messages_per_day": 3}}},
+        headers=h,
+    )
+    sent, refused = _send_until_refused(client, token)
+    assert sent == 3
+    assert refused.json()["detail"] == {"error": "daily_limit", "limit": 3}
+
+
+def test_no_workspace_maximum_still_applies_the_agents_number(client, monkeypatch):
+    _, _, token = _chat_agent(client, config={"talk_to_agent": {"messages_per_day": 1}})
+    _limits(monkeypatch, max_chat_replies_per_day=None)
+    sent, refused = _send_until_refused(client, token)
+    assert sent == 1 and refused.status_code == 429
+
+
+def test_a_full_workspace_still_replies_but_stores_no_trace(client, monkeypatch):
     _, agent, token = _chat_agent(client)
     with patch.object(public, "_llm_reply", _llm()):
         _send(client, token)
     _limits(monkeypatch, max_traces=1)
-    refused = _send(client, token)
-    assert refused.status_code == 429
-    assert refused.json()["detail"] == {"error": "trace_limit"}
+    with patch.object(public, "_llm_reply", _llm("Still here")):
+        body = _send(client, token)
+    assert body.status_code == 200, body.text
+    assert body.json()["reply"] == "Still here"
+    assert body.json()["trace_uuid"] is None
+    assert len(_traces(agent["org_uuid"])) == 1
     assert ("max_traces", "trace", 2, 1) in _hits(agent["org_uuid"])
+    # The reply counts towards the daily limit even with no trace stored.
+    assert db.count_chat_replies_today(agent["uuid"]) == 2
 
 
 def _save_key(org, provider, value):
@@ -383,10 +432,11 @@ def test_workspace_comes_from_the_link_not_the_headers(client):
     assert _traces(other_org) == []
 
 
-def _feedback(client, token, trace_uuid, rating, comment=None):
+def _feedback(client, token, trace_uuid, is_correct, comment=None, headers=None):
     return client.put(
         f"/public/agent-chat/{token}/traces/{trace_uuid}/feedback",
-        json={"rating": rating, "comment": comment},
+        json={"is_correct": is_correct, "comment": comment},
+        headers=headers or {},
     )
 
 
@@ -395,16 +445,19 @@ def test_feedback_is_set_and_cleared(client):
     with patch.object(public, "_llm_reply", _llm()):
         trace_uuid = _send(client, token).json()["trace_uuid"]
 
-    assert _feedback(client, token, trace_uuid, "down", "Wrong date").json() == {
-        "rating": "down",
+    assert _feedback(client, token, trace_uuid, False, "Wrong date").json() == {
+        "is_correct": False,
         "comment": "Wrong date",
     }
     stored = db.get_trace(agent["org_uuid"], trace_uuid)["feedback"]
-    assert stored["rating"] == "down" and stored["comment"] == "Wrong date"
+    assert stored["is_correct"] is False and stored["comment"] == "Wrong date"
 
-    assert _feedback(client, token, trace_uuid, None, "ignored").json() == {"rating": None, "comment": None}
+    assert _feedback(client, token, trace_uuid, True).json() == {"is_correct": True, "comment": None}
+    assert db.get_trace(agent["org_uuid"], trace_uuid)["feedback"]["is_correct"] is True
+
+    assert _feedback(client, token, trace_uuid, None, "ignored").json() == {"is_correct": None, "comment": None}
     assert db.get_trace(agent["org_uuid"], trace_uuid)["feedback"] is None
-    assert _feedback(client, token, trace_uuid, "up", "x" * 2001).status_code == 422
+    assert _feedback(client, token, trace_uuid, True, "x" * 2001).status_code == 422
 
 
 def test_feedback_is_refused_for_another_agents_trace_and_an_api_trace(client):
@@ -422,10 +475,11 @@ def test_feedback_is_refused_for_another_agents_trace_and_an_api_trace(client):
     )["uuid"]
 
     for trace_uuid in (other_trace, api_trace, str(uuid.uuid4())):
-        refused = _feedback(client, token, trace_uuid, "up")
+        refused = _feedback(client, token, trace_uuid, True)
         assert refused.status_code == 404
         assert refused.json()["detail"] == {"error": "not_found"}
     assert db.get_trace(agent["org_uuid"], other_trace)["feedback"] is None
+    assert db.get_trace(agent["org_uuid"], api_trace)["feedback"] is None
 
 
 def test_llm_reply_hands_everything_to_calibrates_agent_reply():
