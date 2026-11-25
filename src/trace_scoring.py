@@ -295,7 +295,7 @@ class BatchEvaluators:
 
     evaluation_type: TraceScorableEvaluationType
     hydrated: list[dict[str, Any]]
-    has_tool_call_evaluator: bool = False
+    has_tool_call_evaluator: bool
 
 
 def resolve_batch_evaluators(

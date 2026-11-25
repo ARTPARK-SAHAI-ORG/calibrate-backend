@@ -763,6 +763,7 @@ def test_batch_invokes_the_cli_with_the_workspace_provider_env(monkeypatch, env)
         lambda agent_id: ts.BatchEvaluators(
             evaluation_type="response",
             hydrated=[{"uuid": "e1", "evaluator_type": "llm"}],
+            has_tool_call_evaluator=False,
         ),
     )
     monkeypatch.setattr(ts, "build_eval_only_batch", lambda prepared, ev: ({}, [], {}))

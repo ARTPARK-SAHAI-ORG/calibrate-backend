@@ -232,7 +232,7 @@ def test_build_llm_dataset_bad_payload():
 )
 def test_tool_call_lists_rejects_a_present_non_list(payload):
     with pytest.raises(runner.DatasetBuildError):
-        runner._tool_call_lists({"uuid": "i1"}, payload)
+        runner._tool_call_lists("i1", payload)
 
 
 def test_build_llm_dataset_happy():

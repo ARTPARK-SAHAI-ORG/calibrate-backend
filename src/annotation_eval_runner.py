@@ -326,7 +326,7 @@ def _build_stt_dataset(items: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     return out
 
 
-def _tool_call_lists(it: Dict[str, Any], payload: Dict[str, Any]) -> Tuple[list, Optional[list]]:
+def _tool_call_lists(item_id: str, payload: Dict[str, Any]) -> Tuple[list, Optional[list]]:
     """The calls the agent made and the expected calls (None when absent)."""
     actual = payload.get("actual_tool_calls")
     if actual is None:
@@ -334,11 +334,11 @@ def _tool_call_lists(it: Dict[str, Any], payload: Dict[str, Any]) -> Tuple[list,
     expected = payload.get("expected_tool_calls")
     if any(v is not None and not isinstance(v, list) for v in (actual, expected)):
         raise DatasetBuildError(
-            f"Item {it['uuid']}: tool calls must be a list if provided"
+            f"Item {item_id}: tool calls must be a list if provided"
         )
     if any(not isinstance(c, dict) for c in [*(actual or []), *(expected or [])]):
         raise DatasetBuildError(
-            f"Item {it['uuid']}: each tool call must be a JSON object"
+            f"Item {item_id}: each tool call must be a JSON object"
         )
     return actual or [], expected
 
@@ -384,7 +384,7 @@ def _build_llm_dataset(
             "type": "tool_call_judge" if row_is_tool_call else "response",
             "criteria": _criteria_refs_for_item(it, payload, row_evaluators),
         }
-        tool_calls, expected = _tool_call_lists(it, payload)
+        tool_calls, expected = _tool_call_lists(it["uuid"], payload)
         if row_is_tool_call and expected is not None:
             evaluation["expected_tool_calls"] = expected
         out.append(
@@ -502,7 +502,7 @@ def _build_llm_general_dataset(
         if arguments:
             row["arguments"] = arguments
         if row_is_tool_call:
-            row["tool_calls"], expected = _tool_call_lists(it, payload)
+            row["tool_calls"], expected = _tool_call_lists(it["uuid"], payload)
             if expected is not None:
                 row["expected_tool_calls"] = expected
         out.append(row)

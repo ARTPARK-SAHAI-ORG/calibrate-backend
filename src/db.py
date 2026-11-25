@@ -10,7 +10,13 @@ from typing import Optional, List, Dict, Any, Set, Tuple, TYPE_CHECKING
 from contextlib import contextmanager
 
 import trace_scoring
-from utils import env_int, is_tool_call_row, trace_scoring_enabled, utc_now
+from utils import (
+    TOOL_CALL_EVALUATOR_TYPE,
+    env_int,
+    is_tool_call_row,
+    trace_scoring_enabled,
+    utc_now,
+)
 
 if TYPE_CHECKING:
     from routers.org_limits import OrgLimits
@@ -2178,7 +2184,7 @@ DEFAULT_PROMPTS_BY_PURPOSE: Dict[str, Dict[str, Any]] = {
             "those criteria."
         ),
         "judge_model": DEFAULT_TEXT_JUDGE_MODEL,
-        "evaluator_type": "tool-call",
+        "evaluator_type": TOOL_CALL_EVALUATOR_TYPE,
         "data_type": "text",
         "kind": "single",
         "output_type": "binary",
