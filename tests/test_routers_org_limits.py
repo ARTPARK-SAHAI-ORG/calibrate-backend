@@ -6,6 +6,7 @@ import uuid
 from unittest.mock import patch
 
 import pytest
+from fastapi import HTTPException
 from fastapi.testclient import TestClient
 
 import auth_utils
@@ -56,6 +57,7 @@ def test_updating_only_rows_keeps_the_stored_scored_traces_cap(client, monkeypat
         "max_traces": None,
         "trace_scoring_batch_size": None,
         "max_concurrent_trace_scoring_batches": None,
+        "max_chat_replies_per_day": None,
     }
     assert org_limits.effective_max_scored_traces(org) == 5000
     assert client.get("/org-limits/me/max-scored-traces", headers=h).json() == {
@@ -82,6 +84,12 @@ NEW_LIMITS = [
         "DEFAULT_MAX_CONCURRENT_TRACE_SCORING_BATCHES",
         org_limits.effective_max_concurrent_trace_scoring_batches,
         4,
+    ),
+    (
+        "max_chat_replies_per_day",
+        "DEFAULT_MAX_CHAT_REPLIES_PER_DAY",
+        org_limits.effective_max_chat_replies_per_day,
+        9,
     ),
 ]
 
@@ -148,6 +156,7 @@ def test_me_returns_every_effective_limit(client, monkeypatch):
         "max_traces": org_limits.DEFAULT_MAX_TRACES,
         "trace_scoring_batch_size": org_limits.DEFAULT_TRACE_SCORING_BATCH_SIZE,
         "max_concurrent_trace_scoring_batches": org_limits.DEFAULT_MAX_CONCURRENT_TRACE_SCORING_BATCHES,
+        "max_chat_replies_per_day": org_limits.DEFAULT_MAX_CHAT_REPLIES_PER_DAY,
         "uses_own_provider_keys": False,
     }
 
@@ -161,6 +170,7 @@ def test_me_returns_every_effective_limit(client, monkeypatch):
                 "max_traces": 13,
                 "trace_scoring_batch_size": 14,
                 "max_concurrent_trace_scoring_batches": 15,
+                "max_chat_replies_per_day": 16,
             },
         },
         headers=h,
@@ -172,6 +182,7 @@ def test_me_returns_every_effective_limit(client, monkeypatch):
         "max_traces": 13,
         "trace_scoring_batch_size": 14,
         "max_concurrent_trace_scoring_batches": 15,
+        "max_chat_replies_per_day": 16,
         "uses_own_provider_keys": False,
     }
 
@@ -192,6 +203,7 @@ def test_own_provider_keys_lift_only_the_spend_limits(client, monkeypatch):
     assert me["max_scored_traces"] is None
     assert me["max_traces"] == 5
     assert me["trace_scoring_batch_size"] == org_limits.DEFAULT_TRACE_SCORING_BATCH_SIZE
+    assert me["max_chat_replies_per_day"] is None
     assert me["uses_own_provider_keys"] is True
     assert client.get("/org-limits/me/max-rows-per-eval", headers=h).json() == {
         "max_rows_per_eval": None
@@ -207,3 +219,67 @@ def test_own_provider_keys_lift_only_the_spend_limits(client, monkeypatch):
     monkeypatch.setattr(provider_keys, "org_uses_own_keys", lambda o: False)
     assert org_limits.effective_max_rows_per_eval(org) == 3
     assert org_limits.effective_max_scored_traces(org) == 4
+
+
+def _agent(config=None, org_uuid="org"):
+    return {"org_uuid": org_uuid, "config": config}
+
+
+def test_chat_replies_per_day_takes_the_agents_number_else_the_workspace_default(
+    monkeypatch,
+):
+    org = {"settings": {"talk_to_agent": {"default_messages_per_day": 30}}}
+    monkeypatch.setattr(org_limits, "get_organization", lambda uuid: org)
+
+    assert org_limits.daily_message_limit(_agent(), None) == 30
+    assert org_limits.daily_message_limit(_agent({"talk_to_agent": {}}), 100) == 30
+    own = _agent({"talk_to_agent": {"messages_per_day": 12}})
+    assert org_limits.daily_message_limit(own, 100) == 12
+    # A maximum lowered after either number was saved still holds.
+    assert org_limits.daily_message_limit(own, 5) == 5
+    assert org_limits.daily_message_limit(_agent(), 20) == 20
+
+
+@pytest.mark.parametrize("value", [0, -1, 1.5, "3", True])
+def test_messages_per_day_must_be_a_whole_number_of_at_least_one(value, monkeypatch):
+    monkeypatch.setattr(org_limits, "effective_max_chat_replies_per_day", lambda org: None)
+    with pytest.raises(HTTPException) as err:
+        org_limits.ensure_daily_message_limit_allowed(value, "org")
+    assert err.value.status_code == 422
+    assert err.value.detail == "Messages per day must be a whole number of at least 1"
+
+
+def test_messages_per_day_must_not_pass_the_workspace_maximum(monkeypatch):
+    maximum = {"capped": 10, "free": None}
+    monkeypatch.setattr(org_limits, "effective_max_chat_replies_per_day", lambda org: maximum[org])
+    org_limits.ensure_daily_message_limit_allowed(10, "capped")
+    org_limits.ensure_daily_message_limit_allowed(10_000, "free")
+    with pytest.raises(HTTPException) as err:
+        org_limits.ensure_daily_message_limit_allowed(11, "capped")
+    assert err.value.status_code == 422
+    assert err.value.detail == (
+        "Messages per day cannot be more than 10, the most your workspace allows"
+    )
+
+
+def test_an_empty_limit_setting_falls_back_instead_of_stopping_the_server(monkeypatch):
+    # The deploy workflows export each setting as "" when its secret is missing.
+    import importlib
+
+    import routers.org_limits as org_limits_module
+
+    for name in (
+        "DEFAULT_MAX_ROWS_PER_EVAL",
+        "DEFAULT_MAX_SCORED_TRACES",
+        "DEFAULT_MAX_TRACES",
+        "DEFAULT_TRACE_SCORING_BATCH_SIZE",
+        "MAX_CONCURRENT_TRACE_SCORING_BATCHES_PER_ORG",
+    ):
+        monkeypatch.setenv(name, "")
+    try:
+        reloaded = importlib.reload(org_limits_module)
+        assert reloaded.DEFAULT_MAX_ROWS_PER_EVAL == 20
+        assert reloaded.DEFAULT_MAX_TRACES == 50000
+    finally:
+        monkeypatch.undo()
+        importlib.reload(org_limits_module)

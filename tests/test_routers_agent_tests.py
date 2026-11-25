@@ -8,6 +8,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 from fastapi.testclient import TestClient
 
+import db
 from conftest import NONEXISTENT_UUID, NONEXISTENT_UUID_2
 
 @pytest.fixture(scope="module")
@@ -2539,12 +2540,24 @@ def test_run_agent_test_queued_path(client, monkeypatch):
         headers=h,
     )
     assert on.status_code == 200
+    share_token = on.json()["share_token"]
+    assert share_token
     off = client.patch(
         f"/agent-tests/run/{task_id}/visibility",
         json={"is_public": False},
         headers=h,
     )
     assert off.status_code == 200
+    assert off.json()["share_token"] is None
+    assert db.get_agent_test_job_by_share_token(share_token) is None
+    # Turning sharing back on brings back the same link
+    on_again = client.patch(
+        f"/agent-tests/run/{task_id}/visibility",
+        json={"is_public": True},
+        headers=h,
+    )
+    assert on_again.json()["share_token"] == share_token
+    assert db.get_agent_test_job_by_share_token(share_token) is not None
     # Someone in another workspace cannot change sharing on this run → refused (403)
     other = _signup(client)
     assert (
@@ -3312,12 +3325,24 @@ def test_run_agent_benchmark_queued_path(client, monkeypatch):
         headers=h,
     )
     assert on.status_code == 200
+    share_token = on.json()["share_token"]
+    assert share_token
     off = client.patch(
         f"/agent-tests/benchmark/{task_id}/visibility",
         json={"is_public": False},
         headers=h,
     )
     assert off.status_code == 200
+    assert off.json()["share_token"] is None
+    assert db.get_agent_test_job_by_share_token(share_token) is None
+    # Turning sharing back on brings back the same link
+    on_again = client.patch(
+        f"/agent-tests/benchmark/{task_id}/visibility",
+        json={"is_public": True},
+        headers=h,
+    )
+    assert on_again.json()["share_token"] == share_token
+    assert db.get_agent_test_job_by_share_token(share_token) is not None
     assert (
         client.patch(
             "/agent-tests/benchmark/missing/visibility",
@@ -5545,8 +5570,13 @@ def test_batch_run_does_not_skip_when_the_workspace_has_no_row_limit():
     assert result.skipped == []
 
 
-def test_build_calibrate_config_model_fallback_is_an_openrouter_id():
+def test_build_calibrate_config_model_fallback_is_the_default_agent_model(monkeypatch):
     from routers.agent_tests import _build_calibrate_config
 
+    monkeypatch.delenv("DEFAULT_AGENT_LLM_MODEL", raising=False)
     config, _ = _build_calibrate_config({"type": "agent", "uuid": "a", "config": {}}, [])
-    assert config["params"]["model"] == "openai/gpt-4.1"
+    assert config["params"]["model"] == "google/gemini-3.5-flash-lite"
+
+    monkeypatch.setenv("DEFAULT_AGENT_LLM_MODEL", "openai/gpt-5.4-mini")
+    config, _ = _build_calibrate_config({"type": "agent", "uuid": "a", "config": {}}, [])
+    assert config["params"]["model"] == "openai/gpt-5.4-mini"

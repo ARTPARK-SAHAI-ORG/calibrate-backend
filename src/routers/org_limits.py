@@ -1,20 +1,22 @@
 """Workspace limits (superadmin configuration).
 
 Set caps for each workspace: dataset rows per eval run, stored traces, traces
-scored automatically, and trace scoring batch size and concurrency. Members read
+scored automatically, trace scoring batch size and concurrency, and chat
+replies per day. Members read
 the effective values via `/me`.
 """
 
 import logging
-import os
 import sqlite3
 
 from fastapi import APIRouter, HTTPException, Depends, Path, Response
-from typing import Dict, Literal, Optional
+from typing import Any, Dict, Literal, Optional
 
 from pydantic import BaseModel, Field
 
 from db import (
+    TALK_TO_AGENT_KEY,
+    DEFAULT_MAX_CHAT_REPLIES_PER_DAY,
     create_limit_hit,
     create_org_limits,
     get_member_role,
@@ -26,6 +28,7 @@ from db import (
 from auth_utils import get_current_org, OrgContext, require_superadmin, is_superadmin_user
 import provider_keys
 from admin_analytics import EVAL_FIELDS
+from utils import env_int
 
 logger = logging.getLogger(__name__)
 
@@ -34,12 +37,15 @@ router = APIRouter(prefix="/org-limits", tags=["org-limits"])
 # The kinds of run a limit hit can name: the same list the analytics count.
 EvalKind = Literal[tuple(EVAL_FIELDS)]
 
-DEFAULT_MAX_ROWS_PER_EVAL = int(os.getenv("DEFAULT_MAX_ROWS_PER_EVAL", "20"))
-DEFAULT_MAX_SCORED_TRACES = int(os.getenv("DEFAULT_MAX_SCORED_TRACES", "100"))
-DEFAULT_MAX_TRACES = int(os.getenv("DEFAULT_MAX_TRACES", "50000"))
-DEFAULT_TRACE_SCORING_BATCH_SIZE = int(os.getenv("DEFAULT_TRACE_SCORING_BATCH_SIZE", "20"))
-DEFAULT_MAX_CONCURRENT_TRACE_SCORING_BATCHES = int(
-    os.getenv("MAX_CONCURRENT_TRACE_SCORING_BATCHES_PER_ORG", "1")
+# env_int, not int(os.getenv(...)): the deploy workflows export every one of
+# these, as an empty string when its secret is missing, and int("") would stop
+# the server from starting.
+DEFAULT_MAX_ROWS_PER_EVAL = env_int("DEFAULT_MAX_ROWS_PER_EVAL", 20)
+DEFAULT_MAX_SCORED_TRACES = env_int("DEFAULT_MAX_SCORED_TRACES", 100)
+DEFAULT_MAX_TRACES = env_int("DEFAULT_MAX_TRACES", 50000)
+DEFAULT_TRACE_SCORING_BATCH_SIZE = env_int("DEFAULT_TRACE_SCORING_BATCH_SIZE", 20)
+DEFAULT_MAX_CONCURRENT_TRACE_SCORING_BATCHES = env_int(
+    "MAX_CONCURRENT_TRACE_SCORING_BATCHES_PER_ORG", 1
 )
 
 
@@ -77,6 +83,13 @@ class OrgLimits(BaseModel):
         le=100,
         description="Maximum scoring batches a workspace may run at once",
         examples=[DEFAULT_MAX_CONCURRENT_TRACE_SCORING_BATCHES],
+    )
+    max_chat_replies_per_day: Optional[int] = Field(
+        None,
+        gt=0,
+        le=1_000_000,
+        description="The highest daily chat reply limit an agent or the workspace default may be set to, counted from midnight UTC",
+        examples=[DEFAULT_MAX_CHAT_REPLIES_PER_DAY],
     )
 
 
@@ -141,6 +154,10 @@ class OwnLimitsResponse(BaseModel):
         description="Maximum scoring batches your workspace may run at once",
         examples=[DEFAULT_MAX_CONCURRENT_TRACE_SCORING_BATCHES],
     )
+    max_chat_replies_per_day: Optional[int] = Field(
+        description="The highest daily chat reply limit an agent or the workspace default may be set to, counted from midnight UTC. No limit (`null`) while your workspace uses its own AI provider keys",
+        examples=[DEFAULT_MAX_CHAT_REPLIES_PER_DAY],
+    )
     uses_own_provider_keys: bool = Field(
         description="Whether your workspace's runs use only its own AI provider keys instead of Calibrate's"
     )
@@ -161,7 +178,7 @@ class MaxScoredTracesResponse(BaseModel):
 
 
 # A workspace paying its own providers is not capped on what it spends.
-_SPEND_LIMITS = ("max_rows_per_eval", "max_scored_traces")
+_SPEND_LIMITS = ("max_rows_per_eval", "max_scored_traces", "max_chat_replies_per_day")
 
 _DEFAULT_LIMITS = {
     "max_rows_per_eval": lambda: DEFAULT_MAX_ROWS_PER_EVAL,
@@ -171,6 +188,7 @@ _DEFAULT_LIMITS = {
     "max_concurrent_trace_scoring_batches": (
         lambda: DEFAULT_MAX_CONCURRENT_TRACE_SCORING_BATCHES
     ),
+    "max_chat_replies_per_day": lambda: DEFAULT_MAX_CHAT_REPLIES_PER_DAY,
 }
 
 
@@ -218,6 +236,42 @@ def effective_trace_scoring_batch_size(org_uuid: str) -> int:
 def effective_max_concurrent_trace_scoring_batches(org_uuid: str) -> int:
     """Workspace cap on trace scoring batches running at once, falling back to the server default."""
     return _effective_limit(org_uuid, "max_concurrent_trace_scoring_batches")
+
+
+def effective_max_chat_replies_per_day(org_uuid: str) -> Optional[int]:
+    """Workspace cap on one chat link's replies per day, falling back to the server default."""
+    return _effective_limit(org_uuid, "max_chat_replies_per_day")
+
+
+def agent_daily_message_limit(agent: Dict[str, Any]) -> Optional[int]:
+    """The daily message limit the agent's own config sets, if any."""
+    return ((agent.get("config") or {}).get(TALK_TO_AGENT_KEY) or {}).get("messages_per_day")
+
+
+def daily_message_limit(agent: Dict[str, Any], maximum: Optional[int]) -> int:
+    """The agent's daily chat reply limit: its own number, else the workspace
+    default, and never above the workspace maximum, which may have been lowered
+    since either was saved."""
+    number = agent_daily_message_limit(agent)
+    if number is None:
+        org = get_organization(agent["org_uuid"])
+        number = org["settings"][TALK_TO_AGENT_KEY]["default_messages_per_day"]
+    return number if maximum is None else min(number, maximum)
+
+
+def ensure_daily_message_limit_allowed(value: Any, org_uuid: str) -> None:
+    """422 unless `value` is a whole number from 1 up to the workspace maximum."""
+    if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+        raise HTTPException(
+            status_code=422,
+            detail="Messages per day must be a whole number of at least 1",
+        )
+    maximum = effective_max_chat_replies_per_day(org_uuid)
+    if maximum is not None and value > maximum:
+        raise HTTPException(
+            status_code=422,
+            detail=f"Messages per day cannot be more than {maximum}, the most your workspace allows",
+        )
 
 
 def record_limit_hit(

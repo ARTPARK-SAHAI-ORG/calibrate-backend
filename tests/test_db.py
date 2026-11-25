@@ -3317,6 +3317,7 @@ def test_writing_one_setting_leaves_the_others_alone(user):
             "show_likely_ranges": False,
         },
         "second_section": {"a_key": "kept"},
+        "talk_to_agent": {"default_messages_per_day": 200},
     }
 
 

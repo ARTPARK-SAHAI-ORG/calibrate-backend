@@ -1352,24 +1352,18 @@ def test_convert_rejects_an_unknown_key(client):
     assert client.get("/tests", headers=h).json()["total"] == 0
 
 
-def test_convert_still_creates_the_test_when_the_agent_is_gone(client):
-    from db import get_tests_for_agent
-
+def test_convert_refuses_and_keeps_no_test_when_the_agent_is_gone(client):
     h, agent_id = _signup_with_agent(client)
     trace = _post_trace(client, h, _payload(agent_id, _mid()))
     assert client.delete(f"/agents/{agent_id}", headers=h).status_code == 200
 
     res = _convert(client, h, trace_ids=[trace["uuid"]], type="tool_call")
-    assert res.status_code == 200, res.text
-    body = res.json()
-    assert body["created"] == 1
-    assert client.get(f"/tests/{body['test_uuids'][0]}", headers=h).status_code == 200
-    assert get_tests_for_agent(agent_id) == []
-    # The response says what was created but not wired up.
-    assert body["warnings"] == [
-        "1 of 1 tests were not linked to an agent, "
-        "so they will not appear on any agent's test list"
-    ]
+    assert res.status_code == 400, res.text
+    assert res.json()["detail"] == (
+        "None of these traces could be added to their agent's tests. Try again."
+    )
+    # A test no screen lists is not left behind.
+    assert client.get("/tests", headers=h).json()["total"] == 0
 
 
 def test_convert_rejects_a_malformed_evaluator_id(client):
@@ -1515,22 +1509,21 @@ def test_convert_tool_call_captures_every_recorded_call(client):
 
 
 def test_convert_warns_when_evaluators_could_not_be_linked(client, monkeypatch):
-    """The tests are already committed, so a failed evaluator link must warn
-    rather than 500 and lose them."""
+    """The tests are committed and on the agent, so a failed evaluator link must
+    warn rather than 500 and lose them."""
     from db import get_evaluators_for_test, get_tests_for_agent
     from routers import traces as traces_mod
 
     h, agent_id = _signup_with_agent(client)
     evaluator = _create_evaluator(client, h)
-    trace_a = _post_trace(client, h, _payload(agent_id, _mid()))
-    trace_b = _post_trace(client, h, _payload(agent_id, _mid()))
+    mid_a, mid_b = _mid(), _mid()
+    trace_a = _post_trace(client, h, _payload(agent_id, mid_a))
+    trace_b = _post_trace(client, h, _payload(agent_id, mid_b))
 
     def _boom(*args, **kwargs):
         raise RuntimeError("link failed")
 
     monkeypatch.setattr(traces_mod, "set_test_evaluators", _boom)
-    # Deleting the agent makes the agent link fail too, so both warnings appear.
-    assert client.delete(f"/agents/{agent_id}", headers=h).status_code == 200
 
     res = _convert(
         client,
@@ -1543,14 +1536,51 @@ def test_convert_warns_when_evaluators_could_not_be_linked(client, monkeypatch):
     body = res.json()
     assert body["created"] == 2
     for test_uuid in body["test_uuids"]:
-        assert client.get(f"/tests/{test_uuid}", headers=h).status_code == 200
         assert get_evaluators_for_test(test_uuid) == []
-    assert get_tests_for_agent(agent_id) == []
+    assert {t["uuid"] for t in get_tests_for_agent(agent_id)} == set(body["test_uuids"])
     assert body["warnings"] == [
-        "2 of 2 tests were created without evaluators "
-        "and will not run until you attach one",
-        "2 of 2 tests were not linked to an agent, "
-        "so they will not appear on any agent's test list",
+        f"The evaluators could not be added to 2 of the 2 new tests: "
+        f"{mid_a}, {mid_b}. "
+        "Open each one on the agent's Tests tab and add the evaluators again.",
+    ]
+
+
+def test_convert_deletes_and_names_a_test_it_could_not_add_to_the_agent(
+    client, monkeypatch
+):
+    from db import get_tests_for_agent
+    from routers import traces as traces_mod
+
+    h, agent_id = _signup_with_agent(client)
+    mid_a, mid_b = _mid(), _mid()
+    trace_a = _post_trace(client, h, _payload(agent_id, mid_a))
+    trace_b = _post_trace(client, h, _payload(agent_id, mid_b))
+
+    real_link = traces_mod.add_test_to_agent
+    calls = []
+
+    def _fail_first(agent, test):
+        calls.append(test)
+        if len(calls) == 1:
+            raise RuntimeError("link failed")
+        return real_link(agent, test)
+
+    monkeypatch.setattr(traces_mod, "add_test_to_agent", _fail_first)
+
+    res = _convert(
+        client, h, trace_ids=[trace_a["uuid"], trace_b["uuid"]], type="tool_call"
+    )
+    assert res.status_code == 200, res.text
+    body = res.json()
+    assert body["created"] == 1
+    assert body["test_uuids"] == [calls[1]]
+    assert [t["uuid"] for t in get_tests_for_agent(agent_id)] == [calls[1]]
+    # The test that could not be added is gone, not left where nothing lists it.
+    assert client.get(f"/tests/{calls[0]}", headers=h).status_code == 404
+    assert client.get("/tests", headers=h).json()["total"] == 1
+    assert body["warnings"] == [
+        f"1 of the 2 traces could not be added to tests: {mid_a}. "
+        "Add those traces to tests again."
     ]
 
 
@@ -1811,14 +1841,16 @@ def test_convert_skips_the_link_when_the_agent_switched_interaction_type(client)
         type="general",
         evaluators=[evaluator["uuid"]],
     )
-    assert res.status_code == 200, res.text
-    body = res.json()
-    assert body["created"] == 1
-    assert body["warnings"] == [
-        "1 of 1 tests were not linked to an agent, "
-        "so they will not appear on any agent's test list"
-    ]
+    assert res.status_code == 400, res.text
     assert get_tests_for_agent(agent_id) == []
+    assert client.get("/tests", headers=h).json()["total"] == 0
+
+
+def test_test_names_line_shows_five_names_then_a_count():
+    from routers.traces import _test_names_line
+
+    assert _test_names_line(["a", "b"]) == "a, b"
+    assert _test_names_line([str(i) for i in range(8)]) == "0, 1, 2, 3, 4 and 3 more"
 
 
 def test_last_user_content_handles_both_input_shapes():
@@ -2530,6 +2562,11 @@ def _insert_score(run_uuid: str, **overrides) -> None:
     row.update(overrides)
     with db.get_db_connection() as conn:
         conn.execute(
+            "INSERT OR IGNORE INTO agent_evaluators (agent_id, evaluator_id) "
+            "SELECT agent_id, ? FROM trace_eval_runs WHERE uuid = ?",
+            (row["evaluator_uuid"], run_uuid),
+        )
+        conn.execute(
             "INSERT INTO trace_eval_scores "
             "(run_uuid, evaluator_uuid, evaluator_version_id, "
             "value, output_type, reasoning, completed_at) "
@@ -2898,6 +2935,103 @@ def test_usage_is_scoped_to_the_callers_workspace(client):
 
     assert client.get("/traces/usage", headers=other_h).json()["traces_stored"] == 0
     assert client.get("/traces/usage", headers=h).json()["traces_stored"] == 1
+
+
+def _set_trace_columns(trace_uuid, **columns):
+    with db.get_db_connection() as conn:
+        for column, value in columns.items():
+            conn.execute(
+                f"UPDATE traces SET {column} = ? WHERE uuid = ?", (value, trace_uuid)
+            )
+        conn.commit()
+
+
+def test_a_trace_sent_to_the_api_reads_as_api_with_no_feedback(client):
+    h, agent_id = _signup_with_agent(client)
+    trace = _post_trace(client, h, _payload(agent_id, _mid()))
+
+    row = client.get("/traces", headers=h).json()["items"][0]
+    detail = client.get(f"/traces/{trace['uuid']}", headers=h).json()
+    assert (row["source"], row["feedback"]) == ("api", None)
+    assert (detail["source"], detail["feedback"]) == ("api", None)
+
+
+def test_ingest_refuses_a_source(client):
+    h, agent_id = _signup_with_agent(client)
+    res = client.post(
+        "/traces", json=_payload(agent_id, _mid(), source="chat"), headers=h
+    )
+    assert res.status_code == 422
+
+
+def test_feedback_sent_with_a_trace_shows_on_the_list_and_the_detail(client):
+    h, agent_id = _signup_with_agent(client)
+    trace = _post_trace(client, h, _payload(agent_id, _mid(), feedback=_INCORRECT))
+
+    row = client.get("/traces", headers=h).json()["items"][0]
+    detail = client.get(f"/traces/{trace['uuid']}", headers=h).json()
+    for got in (row, detail):
+        assert got["feedback"]["is_correct"] is False
+        assert got["feedback"]["comment"] == "Wrong date"
+        assert got["feedback"]["at"].endswith("Z")
+
+
+def test_ingest_refuses_a_feedback_comment_over_2000_characters(client):
+    h, agent_id = _signup_with_agent(client)
+    feedback = {"is_correct": True, "comment": "x" * 2001}
+    res = client.post(
+        "/traces", json=_payload(agent_id, _mid(), feedback=feedback), headers=h
+    )
+    assert res.status_code == 422
+
+
+def test_feedback_is_set_replaced_and_cleared_through_the_api(client):
+    h, agent_id = _signup_with_agent(client)
+    trace = _post_trace(client, h, _payload(agent_id, _mid()))
+    url = f"/traces/{trace['uuid']}/feedback"
+
+    first = client.put(url, json={"is_correct": False, "comment": "Wrong dose"}, headers=h)
+    assert first.status_code == 200, first.text
+    assert first.json()["feedback"]["is_correct"] is False
+    assert first.json()["feedback"]["comment"] == "Wrong dose"
+
+    replaced = client.put(url, json={"is_correct": True}, headers=h).json()["feedback"]
+    assert (replaced["is_correct"], replaced["comment"]) == (True, None)
+    assert client.get(f"/traces/{trace['uuid']}", headers=h).json()["feedback"]["is_correct"] is True
+
+    cleared = client.put(url, json={"is_correct": None, "comment": "dropped"}, headers=h)
+    assert cleared.json() == {"feedback": None}
+    assert client.get(f"/traces/{trace['uuid']}", headers=h).json()["feedback"] is None
+
+    assert client.put(url, json={}, headers=h).status_code == 422
+
+
+def test_feedback_through_the_api_takes_a_workspace_key(client):
+    h, agent_id = _signup_with_agent(client)
+    trace = _post_trace(client, h, _payload(agent_id, _mid()))
+    res = client.put(
+        f"/traces/{trace['uuid']}/feedback",
+        json={"is_correct": True},
+        headers=_api_key_headers(client, h),
+    )
+    assert res.status_code == 200, res.text
+    assert res.json()["feedback"]["is_correct"] is True
+
+
+def test_feedback_through_the_api_is_refused_outside_the_workspace(client):
+    h, agent_id = _signup_with_agent(client)
+    trace = _post_trace(client, h, _payload(agent_id, _mid()))
+    other_h, _ = _signup_with_agent(client)
+
+    res = client.put(
+        f"/traces/{trace['uuid']}/feedback", json={"is_correct": True}, headers=other_h
+    )
+    assert res.status_code == 403
+    assert client.get(f"/traces/{trace['uuid']}", headers=h).json()["feedback"] is None
+    unknown = client.put(
+        f"/traces/{uuid.uuid4()}/feedback", json={"is_correct": True}, headers=h
+    )
+    assert unknown.status_code == 404
 
 
 _EVAL_A = str(uuid.uuid4())
@@ -3612,3 +3746,393 @@ def test_a_conversation_filter_needs_its_agent(client):
         )
         assert res.status_code == 422, path
     assert client.get("/traces", params={"agent_id": agent_id}, headers=h).json()["total"] == 1
+
+
+def test_unlinked_evaluator_scores_are_hidden_until_relinked(client):
+    h, agent_id = _signup_with_agent(client)
+    _disable_auto_score(client, h, agent_id)
+    kept, kept_ver = _create_clean_evaluator(client, h)
+    removed, removed_ver = _create_clean_evaluator(client, h)
+    client.post(
+        f"/agents/{agent_id}/evaluators",
+        json={"evaluator_ids": [kept, removed]},
+        headers=h,
+    )
+    trace = _post_trace(client, h, _payload(agent_id, _mid()))
+    run = _insert_run(
+        _org_of(agent_id),
+        trace["uuid"],
+        status="completed",
+        created_at=_at(20),
+        completed_at=_at(21),
+        agent_id=agent_id,
+    )
+    _insert_score(run, evaluator_uuid=kept, evaluator_version_id=kept_ver, value=1)
+    _insert_score(run, evaluator_uuid=removed, evaluator_version_id=removed_ver, value=0)
+
+    def listed(**params):
+        return client.get(
+            "/traces",
+            headers=h,
+            params={"agent_id": agent_id, "include_score_averages": True, **params},
+        ).json()
+
+    def shown():
+        body = listed()
+        return (
+            {a["evaluator_uuid"] for a in body["score_averages"]},
+            {
+                r["evaluator_uuid"]
+                for r in next(i for i in body["items"] if i["uuid"] == trace["uuid"])[
+                    "results"
+                ]
+            },
+            {
+                r["evaluator_uuid"]
+                for r in client.get(f"/traces/{trace['uuid']}/scores", headers=h).json()[
+                    "runs"
+                ][0]["results"]
+            },
+        )
+
+    assert shown() == ({kept, removed},) * 3
+    assert listed(score=f"{removed}:failed")["total"] == 1
+
+    other = _post_trace(client, h, _payload(agent_id, _mid()))
+    other_run = _insert_run(
+        _org_of(agent_id),
+        other["uuid"],
+        status="completed",
+        created_at=_at(20),
+        completed_at=_at(21),
+        agent_id=agent_id,
+    )
+    _insert_score(other_run, evaluator_uuid=removed, evaluator_version_id=removed_ver, value=1)
+    sorted_ids = [
+        i["uuid"]
+        for i in listed(sort_by_evaluator=removed, sort_order="asc")["items"]
+    ]
+    assert sorted_ids == [trace["uuid"], other["uuid"]]
+
+    r = client.delete(f"/agents/{agent_id}/evaluators/{removed}", headers=h)
+    assert r.status_code == 200, r.text
+
+    assert shown() == ({kept},) * 3
+    assert listed(score=f"{removed}:failed")["total"] == 0
+    bulk = client.post(
+        "/traces/bulk-delete",
+        json={"select_all": True, "agent_id": agent_id, "score": [f"{removed}:failed"]},
+        headers=h,
+    )
+    assert bulk.status_code == 200, bulk.text
+    assert listed()["total"] == 2
+    conversation_row = client.get(
+        "/traces/conversations", headers=h, params={"agent_id": agent_id}
+    ).json()["items"]
+    for row in conversation_row:
+        assert removed not in {
+            r["evaluator_uuid"] for r in row["last_turn"]["results"]
+        }
+    # With the removed evaluator unknown on every trace, sorting falls back to newest first.
+    assert [
+        i["uuid"]
+        for i in listed(sort_by_evaluator=removed, sort_order="asc")["items"]
+    ] == [other["uuid"], trace["uuid"]]
+
+    r = client.post(
+        f"/agents/{agent_id}/evaluators",
+        json={"evaluator_ids": [removed]},
+        headers=h,
+    )
+    assert r.status_code == 200, r.text
+    assert shown() == ({kept, removed},) * 3
+
+
+def test_deleting_an_agent_keeps_the_scores_on_its_traces(client):
+    h, agent_id = _signup_with_agent(client)
+    _disable_auto_score(client, h, agent_id)
+    ev, ver = _create_clean_evaluator(client, h)
+    trace = _scored_trace(
+        client, h, agent_id, evaluator=ev, version=ver, value=1, output_type="binary"
+    )
+
+    assert client.delete(f"/agents/{agent_id}", headers=h).status_code == 200
+
+    body = client.get(
+        "/traces", headers=h, params={"include_score_averages": True}
+    ).json()
+    row = next(i for i in body["items"] if i["uuid"] == trace)
+    assert [r["evaluator_uuid"] for r in row["results"]] == [ev]
+    assert ev in {a["evaluator_uuid"] for a in body["score_averages"]}
+
+
+def test_trace_routes_do_not_hold_up_other_requests():
+    """A route written `async def` runs on the one worker that serves every
+    request, so its database calls make every other request wait."""
+    import inspect
+
+    from routers.traces import router
+
+    assert [
+        route.path
+        for route in router.routes
+        if inspect.iscoroutinefunction(route.endpoint)
+    ] == []
+
+
+@pytest.mark.parametrize(
+    "path, extra",
+    [
+        ("/traces/bulk-delete", {}),
+        ("/traces/convert-to-tests", {"type": "tool_call"}),
+    ],
+)
+def test_select_all_refuses_an_empty_agent_id(client, path, extra):
+    """An empty id used to mean no agent filter, so it acted on the whole workspace."""
+    h, agent_id = _signup_with_agent(client)
+    trace = _post_trace(client, h, _payload(agent_id, _mid()))
+
+    res = client.post(
+        path, json={"select_all": True, "agent_id": "", **extra}, headers=h
+    )
+
+    assert res.status_code == 422
+    assert client.get(f"/traces/{trace['uuid']}", headers=h).status_code == 200
+
+
+def test_the_published_list_parameters_keep_their_order():
+    from main import _build_public_openapi
+
+    parameters = _build_public_openapi()["paths"]["/traces"]["get"]["parameters"]
+    assert [p["name"] for p in parameters if p["in"] == "query"] == [
+        "agent_id",
+        "conversation_id",
+        "q",
+        "output_type",
+        "labels",
+        "score",
+        "created_after",
+        "created_before",
+        "source",
+        "feedback",
+        "sort_by_evaluator",
+        "sort_order",
+        "include_content",
+        "include_score_averages",
+        "limit",
+        "offset",
+    ]
+
+
+# For each filter: what the matching trace carries, what the other one carries,
+# and the filter that tells them apart.
+_CORRECT = {"is_correct": True}
+_INCORRECT = {"is_correct": False, "comment": "Wrong date"}
+
+_ONE_FILTER_CASES = {
+    "q": ({"metadata": [{"key": "tag", "value": "needle"}]}, {}, {"q": "needle"}),
+    "output_type": (
+        {"output": {"tool_calls": [{"tool": "get_schedule", "arguments": {}}]}},
+        {},
+        {"output_type": "tool_call"},
+    ),
+    "labels": ({"labels": ["vip"]}, {"labels": ["other"]}, {"labels": ["vip"]}),
+    "conversation_id": (
+        {"conversation_id": "conv-a"},
+        {"conversation_id": "conv-b"},
+        {"conversation_id": "conv-a"},
+    ),
+    "created_after": (
+        {"created_at": "2026-02-01 00:00:00"},
+        {"created_at": "2026-01-01 00:00:00"},
+        {"created_after": "2026-01-15T00:00:00Z"},
+    ),
+    "created_before": (
+        {"created_at": "2026-01-01 00:00:00"},
+        {"created_at": "2026-02-01 00:00:00"},
+        {"created_before": "2026-01-15T00:00:00Z"},
+    ),
+    "source=chat": ({"source": "chat"}, {}, {"source": "chat"}),
+    "source=api": ({}, {"source": "chat"}, {"source": "api"}),
+    "source=api reads null as api": ({"source": None}, {"source": "chat"}, {"source": "api"}),
+    "feedback=correct": ({"feedback": _CORRECT}, {"feedback": _INCORRECT}, {"feedback": "correct"}),
+    "feedback=wrong": ({"feedback": _INCORRECT}, {"feedback": _CORRECT}, {"feedback": "wrong"}),
+    "feedback=any": ({"feedback": _INCORRECT}, {}, {"feedback": "any"}),
+}
+
+# Columns no request can set, written straight to the row.
+_ROW_ONLY_FIELDS = ("created_at", "source")
+
+
+def _matching_and_other_trace(client, h, agent_id, filter_name):
+    """Post a trace the filter keeps and one it leaves out."""
+    matching, other, query = _ONE_FILTER_CASES[filter_name]
+    traces = []
+    for conversation_id, fields in (("conv-a", matching), ("conv-b", other)):
+        fields = dict(fields)
+        columns = {k: fields.pop(k) for k in _ROW_ONLY_FIELDS if k in fields}
+        message_id = _mid()
+        if filter_name != "conversation_id":
+            fields.setdefault("conversation_id", conversation_id)
+        trace = _post_trace(client, h, _payload(agent_id, message_id, **fields))
+        _set_trace_columns(trace["uuid"], **columns)
+        traces.append({**trace, "message_id": message_id})
+    return traces[0], traces[1], query
+
+
+@pytest.mark.parametrize("filter_name", _ONE_FILTER_CASES)
+def test_bulk_delete_select_all_spares_a_trace_outside_one_filter(client, filter_name):
+    h, agent_id = _signup_with_agent(client)
+    matching, other, query = _matching_and_other_trace(client, h, agent_id, filter_name)
+
+    res = client.post(
+        "/traces/bulk-delete",
+        json={"select_all": True, "agent_id": agent_id, **query},
+        headers=h,
+    )
+
+    assert res.status_code == 200, res.text
+    assert res.json() == {"deleted": 1}
+    assert client.get(f"/traces/{matching['uuid']}", headers=h).status_code == 404
+    assert client.get(f"/traces/{other['uuid']}", headers=h).status_code == 200
+
+
+@pytest.mark.parametrize("filter_name", _ONE_FILTER_CASES)
+def test_convert_select_all_skips_a_trace_outside_one_filter(client, filter_name):
+    h, agent_id = _signup_with_agent(client)
+    matching, _other, query = _matching_and_other_trace(
+        client, h, agent_id, filter_name
+    )
+
+    res = _convert(
+        client, h, select_all=True, agent_id=agent_id, type="tool_call", **query
+    )
+
+    assert res.status_code == 200, res.text
+    assert _test_names(client, h) == [matching["message_id"]]
+
+
+@pytest.mark.parametrize(
+    "filter_name",
+    ["q", "output_type", "labels", "source=chat", "feedback=wrong"],
+)
+def test_score_averages_leave_out_a_trace_outside_one_filter(client, filter_name):
+    h, agent_id = _signup_with_agent(client)
+    _disable_auto_score(client, h, agent_id)
+    matching, other, query = _matching_and_other_trace(client, h, agent_id, filter_name)
+    for trace, value in ((matching, 1), (other, 0)):
+        run = _insert_run(_org_of(agent_id), trace["uuid"], status="completed",
+                          completed_at=_at(9), agent_id=agent_id)
+        _insert_score(run, evaluator_uuid=_EVAL_A, evaluator_version_id=_VER_A, value=value)
+
+    got = _averages(client, h, **query)[_EVAL_A]
+
+    assert got["traces_scored"] == 1
+    assert got["average"] == 1
+
+
+def _conversation_ids(client, h, **params):
+    res = client.get("/traces/conversations", params=params, headers=h)
+    assert res.status_code == 200, res.text
+    return [c["conversation_id"] for c in res.json()["items"]]
+
+
+@pytest.mark.parametrize("filter_name", ["q", "output_type"])
+def test_conversations_leave_out_one_outside_one_filter(client, filter_name):
+    h, agent_id = _signup_with_agent(client)
+    matching, other, query = _ONE_FILTER_CASES[filter_name]
+    _post_trace(client, h, _payload(agent_id, _mid(), "conv-a", **matching))
+    _post_trace(client, h, _payload(agent_id, _mid(), "conv-b", **other))
+
+    assert _conversation_ids(client, h, **query) == ["conv-a"]
+
+
+@pytest.mark.parametrize(
+    "filter_name", ["source=chat", "source=api", "feedback=wrong", "feedback=any"]
+)
+def test_conversations_leave_out_one_outside_a_chat_filter(client, filter_name):
+    h, agent_id = _signup_with_agent(client)
+    _, _, query = _matching_and_other_trace(client, h, agent_id, filter_name)
+
+    assert _conversation_ids(client, h, **query) == ["conv-a"]
+
+
+@pytest.mark.parametrize("filter_name", ["source=chat", "feedback=correct"])
+def test_list_leaves_out_a_trace_outside_a_chat_filter(client, filter_name):
+    h, agent_id = _signup_with_agent(client)
+    matching, _, query = _matching_and_other_trace(client, h, agent_id, filter_name)
+
+    body = client.get("/traces", params=query, headers=h).json()
+    assert body["total"] == 1
+    assert [t["uuid"] for t in body["items"]] == [matching["uuid"]]
+
+
+def test_conversations_leave_out_one_outside_the_score_filter(client):
+    h, agent_id = _signup_with_agent(client)
+    _disable_auto_score(client, h, agent_id)
+    for conversation_id, value in (("conv-a", 1), ("conv-b", 0)):
+        trace = _post_trace(client, h, _payload(agent_id, _mid(), conversation_id))
+        run = _insert_run(_org_of(agent_id), trace["uuid"], status="completed",
+                          completed_at=_at(9), agent_id=agent_id)
+        _insert_score(run, evaluator_uuid=_EVAL_A, evaluator_version_id=_VER_A, value=value)
+
+    assert _conversation_ids(client, h, score=f"{_EVAL_A}:passed") == ["conv-a"]
+
+
+_ALL_FILTERS = {
+    "agent_id": "agent-1",
+    "conversation_id": "conv-a",
+    "q": "needle",
+    "output_type": "tool_call",
+    "labels": ["vip", "prod"],
+    "score": ["ev-a:passed", "ev-b:>=4"],
+    "created_after": "2026-01-15T05:30:00+05:30",
+    "created_before": "2026-02-01T00:00:00Z",
+    "source": "chat",
+    "feedback": "any",
+}
+
+
+@pytest.mark.parametrize(
+    "db_function, path, extra",
+    [
+        ("soft_delete_traces_matching", "/traces/bulk-delete", {}),
+        ("list_traces", "/traces/convert-to-tests", {"type": "tool_call"}),
+    ],
+)
+def test_a_body_with_every_filter_reaches_trace_filters_intact(
+    client, monkeypatch, db_function, path, extra
+):
+    from routers import traces as traces_mod
+
+    h = _signup(client)
+    seen = {}
+
+    def capture(org_uuid, **kwargs):
+        seen.update(kwargs)
+        return ([], 0) if db_function == "list_traces" else 0
+
+    monkeypatch.setattr(traces_mod, db_function, capture)
+    client.post(
+        path, json={"select_all": True, **_ALL_FILTERS, **extra}, headers=h
+    )
+
+    assert seen["filters"] == db.TraceFilters(
+        agent_id="agent-1",
+        conversation_id="conv-a",
+        q="needle",
+        output_type="tool_call",
+        labels=["vip", "prod"],
+        scores=[("ev-a", "passed", None), ("ev-b", ">=", 4.0)],
+        source="chat",
+        feedback="any",
+        created_after="2026-01-15 00:00:00",
+        created_before="2026-02-01 00:00:00",
+    )
+
+
+@pytest.mark.parametrize("value", ["none", "incorrect"])
+def test_feedback_filter_refuses_values_it_does_not_take(client, value):
+    h, agent_id = _signup_with_agent(client)
+    res = client.get("/traces", params={"agent_id": agent_id, "feedback": value}, headers=h)
+    assert res.status_code == 422

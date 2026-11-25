@@ -204,7 +204,7 @@ def test_simulation_config_marks_the_call_as_an_evaluation():
     }
 
 
-def test_simulation_model_fallback_is_an_openrouter_id(monkeypatch):
+def test_simulation_model_fallback_is_the_default_agent_model(monkeypatch):
     from routers.simulations import _build_calibrate_simulation_config
 
     monkeypatch.delenv("DEFAULT_AGENT_LLM_MODEL", raising=False)
@@ -214,4 +214,21 @@ def test_simulation_model_fallback_is_an_openrouter_id(monkeypatch):
         scenarios=[{"description": "s"}],
         evaluators=[],
     )
-    assert config["params"] == {"model": "openai/gpt-4.1"}
+    assert config["params"] == {"model": "google/gemini-3.5-flash-lite"}
+
+
+def test_voice_persona_sends_sensitivity_inside_interruption_config():
+    from routers.simulations import _build_calibrate_simulation_config
+
+    config = _build_calibrate_simulation_config(
+        {"type": "agent", "uuid": "a", "config": {}},
+        personas=[
+            {"description": "p", "config": {"interruption_sensitivity": "high"}}
+        ],
+        scenarios=[{"description": "s"}],
+        evaluators=[],
+        simulation_type="voice",
+    )
+    persona = config["personas"][0]
+    assert persona["interruption_config"] == {"sensitivity": "high"}
+    assert "interruption_sensitivity" not in persona

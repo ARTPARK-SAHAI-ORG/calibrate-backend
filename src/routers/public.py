@@ -5,10 +5,16 @@ results via share links, no sign-in required. Annotator labelling jobs use
 a separate token for read-write access.
 """
 
+import asyncio
 import logging
-from typing import Any, Dict, List, Optional, Union
+import os
+import uuid
+from typing import Any, Dict, List, Literal, Optional, Union
 
-from fastapi import APIRouter, HTTPException, Query, Path
+from calibrate_agent.chat import agent_reply
+from calibrate_agent.connections import TextAgentConnection
+from fastapi import APIRouter, Depends, HTTPException, Query, Path
+from starlette.concurrency import run_in_threadpool
 from pydantic import BaseModel, ConfigDict, Field, StrictBool, StrictFloat, StrictInt
 
 from db import (
@@ -32,9 +38,35 @@ from db import (
     update_annotation_job_status,
     get_evaluator_runs_for_job,
     get_eval_job_items,
+    count_chat_replies_today,
+    get_chat_conversation,
+    count_live_traces,
+    create_trace_with_eval_run,
+    get_agent_by_chat_token,
+    get_member_role,
+    get_trace,
+    release_chat_reply,
+    reserve_chat_reply,
+    save_chat_conversation,
+    get_tools_for_agent,
+    set_trace_feedback,
 )
-from shared_enums import EvaluatorType
+from provider_keys import provider_env
+from provider_status import PROVIDER_ENV_VARS
+from routers.agents import _sanitize_headers
+from routers.traces import TraceFeedbackResponse, TraceFeedbackUpdate
+from auth_utils import get_optional_user_id
+from routers.org_limits import daily_message_limit, effective_limits, record_limit_hit
+from shared_enums import DEFAULT_AGENT_INTERACTION_TYPE, EvaluatorType
+from testing.fake_calibrate_agent import FAKE_RESPONSE
 from utils import (
+    default_agent_llm_model,
+    build_tool_configs,
+    capture_exception_to_sentry,
+    env_bool,
+    env_int,
+    public_url_error,
+    with_calibrate_eval_header,
     TaskStatus,
     AnnotationStatus,
     SimulationRunType,
@@ -345,7 +377,7 @@ class PublicAnnotationEvalResponse(BaseModel):
 
 class PublicDefaultEvaluatorVersionResponse(BaseModel):
     output_config: Optional[Dict[str, Any]] = Field(
-        None, description="The rubric: the scale points and their labels"
+        None, description="The rubric: the rows of the rating scale, each a number and its label"
     )
 
 
@@ -957,7 +989,9 @@ def _build_annotation_job_payload(
     # the labelling form without a second roundtrip.
     from llm_judge import _scale_bounds  # local to avoid module-load cycle
 
+    job_reasoning_mode = job.get("reasoning_mode") or "optional"
     for ev in evaluators:
+        ev["reasoning_mode"] = ev.get("reasoning_mode") or job_reasoning_mode
         version = (
             get_evaluator_version(ev["live_version_id"])
             if ev.get("live_version_id")
@@ -982,7 +1016,7 @@ def _build_annotation_job_payload(
             "created_at": job["created_at"],
             "completed_at": job.get("completed_at"),
             "comments_enabled": bool(job.get("comments_enabled", 1)),
-            "reasoning_mode": job.get("reasoning_mode") or "optional",
+            "reasoning_mode": job_reasoning_mode,
         },
         "annotator": {
             "uuid": annotator["uuid"] if annotator else None,
@@ -1206,3 +1240,281 @@ def get_public_invite(
     if org is None:
         raise HTTPException(status_code=404, detail="Invite not found")
     return PublicInviteResponse(organization_name=org["name"])
+
+
+CHAT_REPLY_TIMEOUT_SECONDS = 60
+MAX_CHAT_TURNS = 500
+# How many times one chat reply may go back to the model after running tools.
+DEFAULT_CHAT_MAX_TOOL_ROUNDS = 5
+_CHAT_TOKEN_DESCRIPTION = "Token from the chat link you were sent"
+
+
+def _chat_error(status_code: int, error: str, **extra: Any) -> HTTPException:
+    return HTTPException(status_code=status_code, detail={"error": error, **extra})
+
+
+def _chat_link_agent(token: str, user_id: Optional[str]) -> Dict[str, Any]:
+    """The agent behind the token, when its link is public or the caller is a
+    logged-in member of its workspace previewing a private link."""
+    agent = get_agent_by_chat_token(token)
+    if agent is None or not (
+        agent.get("chat_link_public")
+        or (user_id and get_member_role(agent["org_uuid"], user_id))
+    ):
+        raise _chat_error(404, "not_found")
+    return agent
+
+
+async def _agent_reply(chat: Dict[str, Any]) -> Dict[str, Any]:
+    """`{response, tool_calls, stopped_early, new_messages}` from the agent, tool
+    calls in the trace shape. `stopped_early` is true when it used every tool
+    round it is allowed and was cut off before replying. `new_messages` is its
+    turn as the next message of the conversation will need it."""
+    if env_bool("FAKE_AI_PROVIDERS", False):
+        return {
+            "response": FAKE_RESPONSE,
+            "tool_calls": [],
+            "new_messages": [{"role": "assistant", "content": FAKE_RESPONSE}],
+        }
+    agent = chat["agent"]
+    config = agent.get("config") or {}
+    if "llm" in chat:  # set by _prepare_chat_reply for an agent built in Calibrate
+        result = await agent_reply(messages=chat["messages"], **chat["llm"])
+        return {
+            "response": result["reply"] or None,
+            "tool_calls": result["tool_calls"],
+            "stopped_early": result.get("stopped") == "max_tool_rounds",
+            "new_messages": result["new_messages"],
+        }
+    error = await run_in_threadpool(public_url_error, config["agent_url"])
+    if error:
+        raise ValueError(f"agent_url {error}")
+    connection = TextAgentConnection(
+        url=config["agent_url"],
+        headers=_sanitize_headers(with_calibrate_eval_header(config.get("agent_headers"))),
+        default_inputs=config.get("default_inputs"),
+        type=agent.get("interaction_type") or DEFAULT_AGENT_INTERACTION_TYPE,
+    )
+    # A connected agent takes plain turns, as in a simulation; its own tool
+    # calls stay on its side, so they are left out of what it is sent.
+    turns = [
+        {"role": m["role"], "content": m["content"]}
+        for m in chat["messages"]
+        if m["role"] in ("user", "assistant") and m.get("content")
+    ]
+    reply = await connection.call(turns)
+    return {**reply, "new_messages": [{"role": "assistant", "content": reply.get("response")}]}
+
+
+def _reserve_daily_reply(agent: Dict[str, Any], cap: int) -> None:
+    """Take one of today's replies before the agent is asked, or refuse."""
+    if not reserve_chat_reply(agent["uuid"], cap):
+        today = count_chat_replies_today(agent["uuid"])
+        record_limit_hit(agent["org_uuid"], "max_chat_replies_per_day", "chat", today + 1, cap)
+        raise _chat_error(429, "daily_limit", limit=cap)
+
+
+def _prepare_chat_reply(
+    token: str, body: "ChatMessageRequest", user_id: Optional[str]
+) -> Dict[str, Any]:
+    """The checks and reads before the agent is asked, in the order their errors
+    are answered. The daily limit is checked later, when the reply is counted."""
+    agent = _chat_link_agent(token, user_id)
+    org_uuid = agent["org_uuid"]
+    limits = effective_limits(org_uuid)
+
+    # Checked when the reply is counted, just before the agent is asked.
+    daily_cap = daily_message_limit(agent, limits["max_chat_replies_per_day"])
+
+    # A workspace full of traces still gets its reply; it is just not stored.
+    trace_cap = limits["max_traces"]
+    current = count_live_traces(org_uuid)
+    store_trace = current < trace_cap
+    if not store_trace:
+        record_limit_hit(org_uuid, "max_traces", "trace", current + 1, trace_cap)
+
+    user_message = {"role": "user", "content": body.message}
+    if agent.get("interaction_type") == "general":
+        messages, trace_input = [user_message], body.message
+    else:
+        # Kept by the backend, never sent by the caller, so earlier turns cannot
+        # be made up, and kept apart from traces so a full workspace keeps them.
+        history = (
+            get_chat_conversation(agent["uuid"], body.conversation_id) if body.conversation_id else []
+        )
+        messages = history + [user_message]
+        if len(messages) > MAX_CHAT_TURNS:
+            raise _chat_error(409, "conversation_too_long")
+        trace_input = messages
+
+    chat = {
+        "agent": agent,
+        "limits": limits,
+        "messages": messages,
+        "trace_input": trace_input,
+        "conversation_id": body.conversation_id or str(uuid.uuid4()),
+        "store_trace": store_trace,
+        "daily_cap": daily_cap,
+    }
+    config = agent.get("config") or {}
+    if not config.get("agent_url"):
+        llm = config.get("llm", {})
+        provider = llm.get("provider", "openrouter")
+        # The workspace's own keys when it has any, else the server's, the
+        # same choice a test run makes.
+        org_env = provider_env(org_uuid)
+        env_var = PROVIDER_ENV_VARS.get(provider, ("",))[0]
+        api_key = (org_env if org_env is not None else os.environ).get(env_var)
+        if org_env is not None and not api_key:
+            raise _chat_error(503, "agent_unavailable")
+        chat["llm"] = {
+            "system_prompt": config.get("system_prompt", ""),
+            "tools": build_tool_configs(get_tools_for_agent(agent["uuid"])),
+            "model": llm.get("model", default_agent_llm_model()),
+            "provider": provider,
+            "api_key": api_key,
+            "max_tool_rounds": max(1, env_int("CHAT_MAX_TOOL_ROUNDS", DEFAULT_CHAT_MAX_TOOL_ROUNDS)),
+        }
+    return chat
+
+
+class PublicAgentChatResponse(BaseModel):
+    agent_name: str = Field(description="Name of the agent you can chat with")
+    interaction_type: Literal["conversation", "general"] = Field(
+        description="`conversation` for an agent that talks back and forth, `general` for one that answers each message on its own"
+    )
+
+
+class ChatToolCall(BaseModel):
+    tool: str = Field(description="Name of the tool the agent called")
+    arguments: Any = Field(None, description="What the agent passed to the tool")
+    output: Any = Field(None, description="What the tool gave back")
+
+
+class ChatMessageRequest(BaseModel):
+    conversation_id: Optional[str] = Field(
+        None,
+        max_length=200,
+        description="Conversation to continue, as returned by an earlier reply. Omit to start a new one",
+    )
+    message: str = Field(min_length=1, max_length=4000, description="What you say to the agent")
+
+
+class ChatMessageResponse(BaseModel):
+    conversation_id: str = Field(description="Conversation this reply belongs to. Send it with your next message")
+    trace_uuid: Optional[str] = Field(
+        None,
+        description="ID of the stored reply, for leaving feedback on it. Missing when the workspace holds as many traces as it may, so the reply was not stored",
+    )
+    reply: Optional[str] = Field(None, description="What the agent said")
+    tool_calls: List[ChatToolCall] = Field(description="Tools the agent called before replying")
+    ended: bool = Field(description="Whether the agent ended the conversation")
+    stopped_early: bool = Field(
+        False,
+        description="Whether the agent was stopped after calling tools as many times in a row as it may, before it replied",
+    )
+
+
+@router.get(
+    "/agent-chat/{token}",
+    response_model=PublicAgentChatResponse,
+    summary="Get chat link",
+)
+def get_public_agent_chat(
+    token: str = Path(description=_CHAT_TOKEN_DESCRIPTION, examples=[_EXAMPLE_JOB_UUID]),
+    user_id: Optional[str] = Depends(get_optional_user_id),
+):
+    """Get the agent a chat link lets you talk to"""
+    agent = _chat_link_agent(token, user_id)
+    return PublicAgentChatResponse(
+        agent_name=agent["name"],
+        interaction_type=agent.get("interaction_type") or DEFAULT_AGENT_INTERACTION_TYPE,
+    )
+
+
+@router.post(
+    "/agent-chat/{token}/messages",
+    response_model=ChatMessageResponse,
+    summary="Send chat message",
+)
+async def send_public_agent_chat_message(
+    token: str = Path(description=_CHAT_TOKEN_DESCRIPTION, examples=[_EXAMPLE_JOB_UUID]),
+    body: ChatMessageRequest = ...,
+    user_id: Optional[str] = Depends(get_optional_user_id),
+):
+    """Send a message to the agent behind a chat link and get its reply"""
+    chat = await run_in_threadpool(_prepare_chat_reply, token, body, user_id)
+    agent = chat["agent"]
+    await run_in_threadpool(_reserve_daily_reply, agent, chat["daily_cap"])
+    try:
+        result = await asyncio.wait_for(_agent_reply(chat), CHAT_REPLY_TIMEOUT_SECONDS)
+    except BaseException as exc:
+        # Also when the person leaves mid-reply, which cancels the request:
+        # a reply nobody got is not counted against the day.
+        release_chat_reply(agent["uuid"])
+        if not isinstance(exc, Exception):
+            raise
+        await run_in_threadpool(capture_exception_to_sentry, exc)
+        raise _chat_error(502, "agent_failed")
+
+    tool_calls = [
+        {key: call[key] for key in ("tool", "arguments", "output") if key in call}
+        for call in result.get("tool_calls") or []
+    ]
+    if agent.get("interaction_type") != "general":
+        await run_in_threadpool(
+            save_chat_conversation,
+            agent["uuid"],
+            chat["conversation_id"],
+            chat["messages"] + result["new_messages"],
+        )
+    row = None
+    if chat["store_trace"]:
+        row = await run_in_threadpool(
+            lambda: create_trace_with_eval_run(
+                org_uuid=agent["org_uuid"],
+                agent=agent,
+                max_scored_traces=chat["limits"]["max_scored_traces"],
+                batch_size=chat["limits"]["trace_scoring_batch_size"],
+                conversation_id=chat["conversation_id"],
+                input=chat["trace_input"],
+                output={
+                    "response": result.get("response"),
+                    "tool_calls": [call for call in tool_calls if call["tool"] != "end_call"],
+                    **({"stopped_early": True} if result.get("stopped_early") else {}),
+                },
+                source="chat",
+            )
+        )
+    return ChatMessageResponse(
+        conversation_id=chat["conversation_id"],
+        trace_uuid=row["uuid"] if row else None,
+        reply=result.get("response"),
+        tool_calls=tool_calls,
+        ended=any(call["tool"] == "end_call" for call in tool_calls),
+        stopped_early=bool(result.get("stopped_early")),
+    )
+
+
+@router.put(
+    "/agent-chat/{token}/traces/{trace_uuid}/feedback",
+    response_model=TraceFeedbackResponse,
+    summary="Set chat reply feedback",
+)
+def set_public_agent_chat_feedback(
+    token: str = Path(description=_CHAT_TOKEN_DESCRIPTION, examples=[_EXAMPLE_JOB_UUID]),
+    trace_uuid: str = Path(description="The reply to leave feedback on", examples=[_EXAMPLE_ITEM_UUID]),
+    body: TraceFeedbackUpdate = ...,
+    user_id: Optional[str] = Depends(get_optional_user_id),
+):
+    """Rate a reply from the agent behind a chat link, or clear the rating"""
+    agent = _chat_link_agent(token, user_id)
+    trace = get_trace(agent["org_uuid"], trace_uuid)
+    if (
+        trace is None
+        or trace["agent_id"] != agent["uuid"]
+        or trace["source"] != "chat"
+        or not set_trace_feedback(agent["org_uuid"], trace_uuid, body.is_correct, body.comment)
+    ):
+        raise _chat_error(404, "not_found")
+    return {"feedback": get_trace(agent["org_uuid"], trace_uuid)["feedback"]}

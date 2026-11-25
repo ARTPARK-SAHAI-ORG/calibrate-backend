@@ -16,6 +16,8 @@ from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pytest
+import sentry_sdk
+import sentry_sdk.transport
 
 import db
 import utils
@@ -102,11 +104,29 @@ def test_env_helpers(monkeypatch):
 # ---------------------------------------------------------------------------
 
 
-def test_capture_exception_to_sentry_calls_sentry():
-    with patch("utils.sentry_sdk") as sentry:
+def test_capture_exception_to_sentry_sends_an_unhandled_event():
+    sent = []
+
+    class CaptureTransport(sentry_sdk.transport.Transport):
+        def capture_envelope(self, envelope):
+            sent.extend(i.payload.json for i in envelope.items if i.type == "event")
+
+    with sentry_sdk.isolation_scope() as scope:
+        scope.set_client(
+            sentry_sdk.Client(dsn="https://a@example.com/1", transport=CaptureTransport)
+        )
         capture_exception_to_sentry(RuntimeError("oh no"))
-        assert sentry.capture_exception.called
-        sentry.flush.assert_called_once()
+
+    assert len(sent) == 1
+    exception = sent[0]["exception"]["values"][-1]
+    assert exception["type"] == "RuntimeError"
+    assert exception["value"] == "oh no"
+    assert exception["mechanism"]["handled"] is False
+
+
+def test_capture_exception_to_sentry_without_a_dsn_does_nothing():
+    with sentry_sdk.isolation_scope():
+        capture_exception_to_sentry(RuntimeError("oh no"))
 
 
 # ---------------------------------------------------------------------------

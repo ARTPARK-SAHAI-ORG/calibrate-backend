@@ -31,6 +31,7 @@ import boto3
 from botocore.config import Config
 import openpyxl
 import sentry_sdk
+from sentry_sdk.utils import event_from_exception
 from fastapi import HTTPException
 from pydantic import BaseModel, Field, StringConstraints
 
@@ -47,6 +48,12 @@ def env_str(var: str, fallback: str) -> str:
     back. Using `or` collapses both unset and empty to the fallback.
     """
     return os.getenv(var) or fallback
+
+
+def default_agent_llm_model() -> str:
+    """The model of an agent built in Calibrate that has none saved: what a new
+    agent starts on, and what a run, simulation or chat falls back to."""
+    return env_str("DEFAULT_AGENT_LLM_MODEL", "google/gemini-3.5-flash-lite")
 
 
 def env_bool(var: str, fallback: bool) -> bool:
@@ -101,10 +108,12 @@ def capture_exception_to_sentry(exception: Exception) -> None:
     This ensures job failures appear as unresolved issues in Sentry
     rather than handled/resolved exceptions.
     """
-    sentry_sdk.capture_exception(
+    event, hint = event_from_exception(
         exception,
-        hint={"mechanism": {"type": "generic", "handled": False}},
+        client_options=sentry_sdk.get_client().options,
+        mechanism={"type": "generic", "handled": False},
     )
+    sentry_sdk.capture_event(event, hint=hint)
     # Flush to ensure the event is sent immediately (important for background tasks)
     sentry_sdk.flush(timeout=2)
 

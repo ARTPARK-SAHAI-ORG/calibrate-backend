@@ -101,6 +101,7 @@ class WorkspaceRow(PeriodCounts):
     is_personal: bool = Field(description="Whether this is someone's personal workspace")
     members: int = Field(description="Members of the workspace now")
     owner: Optional[WorkspaceOwner] = Field(description="Who owns the workspace now")
+    created_at: str = Field(description="When the workspace was created (ISO 8601 UTC)")
     last_active_at: Optional[str] = Field(
         description="When the workspace last started an evaluation, received a trace, or collected a label, all time (ISO 8601 UTC)"
     )
@@ -122,10 +123,10 @@ class LimitHit(BaseModel):
     org_uuid: str = Field(description="Workspace ID")
     org_name: str = Field(description="Workspace name")
     limit_name: str = Field(
-        description="Which limit: `max_rows_per_eval`, `max_traces` or `max_scored_traces`"
+        description="Which limit: `max_rows_per_eval`, `max_traces`, `max_scored_traces` or `max_chat_replies_per_day`"
     )
     kind: Optional[str] = Field(description="What was being started when the limit was hit")
-    requested: Optional[int] = Field(description="How many rows or traces were asked for")
+    requested: Optional[int] = Field(description="How many rows, traces or chat replies were asked for")
     cap: Optional[int] = Field(description="The limit at the time")
 
 

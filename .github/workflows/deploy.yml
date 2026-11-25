@@ -41,7 +41,9 @@ jobs:
         with:
           context: .
           push: true
-          tags: ${{ env.IMAGE_NAME }}:${{ env.IMAGE_TAG }}
+          tags: |
+            ${{ env.IMAGE_NAME }}:${{ env.IMAGE_TAG }}
+            ${{ env.IMAGE_NAME }}:${{ github.event.release.tag_name }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
@@ -145,6 +147,8 @@ jobs:
             export MAX_CONCURRENT_JOBS_PER_ORG="${{ secrets.MAX_CONCURRENT_JOBS_PER_ORG }}"
             export DEFAULT_MAX_ROWS_PER_EVAL="${{ secrets.DEFAULT_MAX_ROWS_PER_EVAL }}"
             export DEFAULT_MAX_TRACES="${{ secrets.DEFAULT_MAX_TRACES }}"
+            export DEFAULT_MAX_CHAT_REPLIES_PER_DAY="${{ secrets.DEFAULT_MAX_CHAT_REPLIES_PER_DAY }}"
+            export CHAT_MAX_TOOL_ROUNDS="${{ secrets.CHAT_MAX_TOOL_ROUNDS }}"
             export DEFAULT_MAX_SCORED_TRACES="${{ secrets.DEFAULT_MAX_SCORED_TRACES }}"
             export DEFAULT_TRACE_SCORING_BATCH_SIZE="${{ secrets.DEFAULT_TRACE_SCORING_BATCH_SIZE }}"
             export MAX_CONCURRENT_TRACE_SCORING_BATCHES_PER_ORG="${{ secrets.MAX_CONCURRENT_TRACE_SCORING_BATCHES_PER_ORG }}"

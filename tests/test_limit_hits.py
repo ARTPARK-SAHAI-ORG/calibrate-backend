@@ -132,3 +132,22 @@ def test_trace_cap_hits_are_kept_to_one_an_hour_but_row_limit_hits_are_not():
         conn.commit()
     db.create_limit_hit(org, "max_traces", "trace", 12, 10)
     assert hits(org).count(("max_traces", "trace", 12, 10)) == 1
+
+
+def test_chat_reply_limit_hits_are_kept_to_one_an_hour_apart_from_trace_cap_hits():
+    org = str(uuid.uuid4())
+    db.create_limit_hit(org, "max_traces", "trace", 11, 10)
+    for _ in range(3):
+        db.create_limit_hit(org, "max_chat_replies_per_day", "chat", 201, 200)
+    assert sorted(hits(org)) == [
+        ("max_chat_replies_per_day", "chat", 201, 200),
+        ("max_traces", "trace", 11, 10),
+    ]
+    with db.get_db_connection() as conn:
+        conn.execute(
+            "UPDATE limit_hits SET created_at = datetime('now', '-2 hours') WHERE org_uuid = ?",
+            (org,),
+        )
+        conn.commit()
+    db.create_limit_hit(org, "max_chat_replies_per_day", "chat", 202, 200)
+    assert hits(org).count(("max_chat_replies_per_day", "chat", 202, 200)) == 1
