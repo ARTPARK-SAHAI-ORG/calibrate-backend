@@ -1539,9 +1539,9 @@ def test_convert_warns_when_evaluators_could_not_be_linked(client, monkeypatch):
         assert get_evaluators_for_test(test_uuid) == []
     assert {t["uuid"] for t in get_tests_for_agent(agent_id)} == set(body["test_uuids"])
     assert body["warnings"] == [
-        f"2 of the 2 new tests have no evaluator, so they cannot be run: "
+        f"The evaluators could not be added to 2 of the 2 new tests: "
         f"{mid_a}, {mid_b}. "
-        "Open each one on the agent's Tests tab and add an evaluator.",
+        "Open each one on the agent's Tests tab and add the evaluators again.",
     ]
 
 

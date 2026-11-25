@@ -1472,9 +1472,9 @@ def convert_traces_to_tests(
                 logger.warning(f"Failed to link evaluators to test {test_uuid}: {e}")
     if unjudged:
         warnings.append(
-            f"{len(unjudged)} of the {len(kept)} new tests have no evaluator, "
-            f"so they cannot be run: {_test_names_line(unjudged)}. "
-            "Open each one on the agent's Tests tab and add an evaluator."
+            f"The evaluators could not be added to {len(unjudged)} of the "
+            f"{len(kept)} new tests: {_test_names_line(unjudged)}. Open each one "
+            "on the agent's Tests tab and add the evaluators again."
         )
 
     return {
