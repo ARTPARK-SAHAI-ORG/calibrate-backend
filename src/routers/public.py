@@ -1309,7 +1309,8 @@ def _reserve_daily_reply(agent: Dict[str, Any], cap: int) -> None:
 def _prepare_chat_reply(
     token: str, body: "ChatMessageRequest", user_id: Optional[str]
 ) -> Dict[str, Any]:
-    """Every check and read before the agent is asked, in the order the errors are answered."""
+    """The checks and reads before the agent is asked, in the order their errors
+    are answered. The daily limit is checked later, when the reply is counted."""
     agent = _chat_link_agent(token, user_id)
     org_uuid = agent["org_uuid"]
     limits = effective_limits(org_uuid)
