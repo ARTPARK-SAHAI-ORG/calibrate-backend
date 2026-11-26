@@ -621,20 +621,26 @@ def test_run_simulation_voice_connection_blocked(client, monkeypatch):
     assert resp.status_code == 400
 
 
-def test_run_simulation_text_default_inputs_blocked(client, monkeypatch):
-    """A connection agent with default_inputs cannot run text sims."""
+@pytest.mark.parametrize("default_inputs", [{"foo": "bar"}, None])
+def test_run_simulation_text_sends_default_inputs(client, monkeypatch, default_inputs):
+    """A connection agent's custom fields reach calibrate on a text run, and an
+    agent without any sends no `agent_default_inputs` key."""
+    import routers.simulations as sims
+
     auth = _signup(client)
     h = auth["headers"]
+    agent_config = {
+        "agent_url": "https://example.com/agent",
+        "connection_verified": True,
+    }
+    if default_inputs:
+        agent_config["default_inputs"] = default_inputs
     agent = client.post(
         "/agents",
         json={
             "name": f"conn-{uuid.uuid4().hex[:6]}",
             "type": "connection",
-            "config": {
-                "agent_url": "https://example.com/agent",
-                "connection_verified": True,
-                "default_inputs": {"foo": "bar"},
-            },
+            "config": agent_config,
         },
         headers=h,
     ).json()
@@ -652,47 +658,23 @@ def test_run_simulation_text_default_inputs_blocked(client, monkeypatch):
     ).json()
 
     monkeypatch.setenv("S3_OUTPUT_BUCKET", "test-bucket")
-    resp = client.post(
-        f"/simulations/{create['uuid']}/run",
-        json={"type": "text"},
-        headers=h,
+    with patch("routers.simulations.can_start_simulation_job", return_value=True), patch(
+        "threading.Thread"
+    ) as thread:
+        resp = client.post(
+            f"/simulations/{create['uuid']}/run",
+            json={"type": "text"},
+            headers=h,
+        )
+    assert resp.status_code == 200, resp.text
+    _job_id, run_agent, personas, scenarios, evaluators, *_ = thread.call_args.kwargs["args"]
+    config = sims._build_calibrate_simulation_config(
+        run_agent, personas, scenarios, evaluators
     )
-    assert resp.status_code == 400
-
-
-def test_run_simulation_voice_default_inputs_blocked(client, monkeypatch):
-    """A managed agent with default_inputs cannot run voice sims either."""
-    auth = _signup(client)
-    h = auth["headers"]
-    agent = client.post(
-        "/agents",
-        json={
-            "name": f"managed-{uuid.uuid4().hex[:6]}",
-            "type": "agent",
-            "config": {"default_inputs": {"foo": "bar"}},
-        },
-        headers=h,
-    ).json()
-    persona = _create_persona(client, h)
-    scenario = _create_scenario(client, h)
-    create = client.post(
-        "/simulations",
-        json={
-            "name": f"sim-{uuid.uuid4().hex[:6]}",
-            "agent_uuid": agent["uuid"],
-            "persona_uuids": [persona["uuid"]],
-            "scenario_uuids": [scenario["uuid"]],
-        },
-        headers=h,
-    ).json()
-
-    monkeypatch.setenv("S3_OUTPUT_BUCKET", "test-bucket")
-    resp = client.post(
-        f"/simulations/{create['uuid']}/run",
-        json={"type": "voice"},
-        headers=h,
-    )
-    assert resp.status_code == 400
+    if default_inputs:
+        assert config["agent_default_inputs"] == default_inputs
+    else:
+        assert "agent_default_inputs" not in config
 
 
 @pytest.mark.parametrize("env", [None, {"OPENAI_API_KEY": "sk-org"}])
