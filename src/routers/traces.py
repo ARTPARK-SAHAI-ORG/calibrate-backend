@@ -33,6 +33,7 @@ from db import (
     average_trace_scores,
     count_live_traces,
     count_scored_traces,
+    create_trace_rescore_run,
     create_trace_with_eval_run,
     get_agent,
     get_all_tests_summary,
@@ -75,6 +76,7 @@ from utils import (
     EvaluatorUuid,
     OUTPUT_TYPE_DESCRIPTION,
     OutputTypeLiteral,
+    trace_scoring_enabled,
 )
 
 logger = logging.getLogger(__name__)
@@ -1595,6 +1597,62 @@ def get_trace_scores_endpoint(
             for run in runs
         ]
     }
+
+
+class TraceScoreRunResponse(BaseModel):
+    run_uuid: str = Field(
+        min_length=36,
+        max_length=36,
+        description="ID of the new scoring run",
+        examples=["9b1deb4d-3b7d-4bad-9bdd-2b0d7b3dcb6d"],
+    )
+    status: Literal["pending"] = Field(
+        description="Status of the new run, which waits for a worker to judge it"
+    )
+
+
+@router.post(
+    "/{trace_uuid}/score",
+    response_model=TraceScoreRunResponse,
+    summary="Score trace",
+)
+def score_trace_endpoint(
+    trace_uuid: str = Path(
+        description="The trace to score again",
+        examples=[_EXAMPLE_TRACE_UUID],
+    ),
+    ctx: OrgContext = Depends(get_current_org),
+):
+    """Run the agent's evaluators again on a trace that was skipped or whose scoring failed"""
+    trace = get_trace(ctx.org_uuid, trace_uuid)
+    if not trace:
+        raise HTTPException(status_code=404, detail="Trace not found")
+    agent = ensure_owned_agent(trace["agent_id"], ctx.org_uuid)
+    if not trace_scoring_enabled(agent):
+        raise HTTPException(
+            status_code=400, detail="Trace scoring is turned off for this agent"
+        )
+    run_uuid, refusal = create_trace_rescore_run(
+        org_uuid=ctx.org_uuid,
+        trace_uuid=trace_uuid,
+        agent_id=agent["uuid"],
+        max_scored_traces=effective_limits(ctx.org_uuid)["max_scored_traces"],
+    )
+    if refusal == "open_run":
+        raise HTTPException(
+            status_code=409, detail="This trace is already being scored"
+        )
+    if refusal == "not_retryable":
+        raise HTTPException(
+            status_code=409,
+            detail="Only a trace that was skipped or failed can be scored again",
+        )
+    if refusal == "over_limit":
+        raise HTTPException(
+            status_code=429,
+            detail="This workspace has reached its limit of scored traces",
+        )
+    return {"run_uuid": run_uuid, "status": "pending"}
 
 
 @router.get("/{trace_uuid}", response_model=TraceResponse, summary="Get trace")
