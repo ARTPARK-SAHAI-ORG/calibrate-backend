@@ -1243,6 +1243,10 @@ class ConvertTracesToTestsRequest(_TraceSelection):
         False,
         description="For `tool_call`, match only the tool name and ignore the arguments the trace recorded",
     )
+    name: Optional[str] = Field(
+        None,
+        description="The name to give the test. Only when converting exactly one trace by its ID. Omit to name it after the trace's `message_id`, else the last user message",
+    )
 
 
 class ConvertTracesToTestsResponse(BaseModel):
@@ -1377,6 +1381,14 @@ def convert_traces_to_tests(
             status_code=400,
             detail="tool_call tests compare the recorded tool calls and cannot take evaluators",
         )
+    name = payload.name.strip() if payload.name is not None else None
+    if payload.name is not None and (
+        not name or payload.select_all or len(payload.trace_ids) != 1
+    ):
+        raise HTTPException(
+            status_code=400,
+            detail="A name can only be given when converting exactly one trace, and cannot be blank",
+        )
     resolved_refs: List[Dict[str, Any]] = []
     if payload.evaluators:
         resolved_refs = _resolve_evaluators(
@@ -1470,7 +1482,7 @@ def convert_traces_to_tests(
 
     existing_names = {t["name"] for t in get_all_tests_summary(org_uuid=ctx.org_uuid)}
     names = _dedupe_test_names(
-        [_test_name_for_trace(trace) for trace in traces], existing_names
+        [name or _test_name_for_trace(trace) for trace in traces], existing_names
     )
 
     db_tests: List[Dict[str, Any]] = []

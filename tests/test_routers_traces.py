@@ -1163,6 +1163,31 @@ def test_convert_names_a_trace_without_a_message_id_by_its_last_user_message(cli
     ]
 
 
+def test_convert_uses_the_name_given_for_one_trace(client):
+    h, agent_id = _signup_with_agent(client)
+    traces = [_post_trace(client, h, _payload(agent_id, _mid())) for _ in range(2)]
+    one = [traces[0]["uuid"]]
+
+    res = _convert(client, h, trace_ids=one, type="tool_call", name="  Skipped rotavirus  ")
+    assert res.status_code == 200, res.text
+    test_uuid = res.json()["test_uuids"][0]
+    assert client.get(f"/tests/{test_uuid}", headers=h).json()["name"] == "Skipped rotavirus"
+
+    # Converting it again keeps the given name, made unique like any other.
+    res = _convert(client, h, trace_ids=one, type="tool_call", name="Skipped rotavirus")
+    test_uuid = res.json()["test_uuids"][0]
+    assert client.get(f"/tests/{test_uuid}", headers=h).json()["name"] == "Skipped rotavirus (2)"
+
+    for body in (
+        {"trace_ids": [t["uuid"] for t in traces], "name": "x"},
+        {"trace_ids": one, "name": "   "},
+        {"select_all": True, "agent_id": agent_id, "name": "x"},
+    ):
+        res = _convert(client, h, type="tool_call", **body)
+        assert res.status_code == 400, res.text
+        assert "exactly one trace" in res.json()["detail"]
+
+
 def test_test_name_for_a_general_trace_is_its_prompt():
     from routers.traces import _test_name_for_trace
 
