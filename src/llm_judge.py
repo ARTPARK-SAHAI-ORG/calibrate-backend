@@ -10,7 +10,7 @@ import logging
 import re
 from typing import Any, Dict, List, Optional
 
-from utils import TOOL_CALL_EVALUATOR_TYPE
+from utils import is_tool_call_evaluator
 
 logger = logging.getLogger(__name__)
 
@@ -131,7 +131,7 @@ def _calibrate_evaluator_def(
     }
     if ev.get("uuid"):
         out["id"] = ev["uuid"]
-    if ev.get("evaluator_type") == TOOL_CALL_EVALUATOR_TYPE:
+    if is_tool_call_evaluator(ev):
         out["tool_call"] = True
     if out["type"] == "rating":
         scale_min, scale_max = _scale_bounds(ev.get("output_config"))
