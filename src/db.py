@@ -11523,12 +11523,12 @@ def create_trace_rescore_run(
 ) -> Tuple[Optional[str], Optional[str]]:
     """Queue one more scoring run for a stored trace, claimable at once.
 
-    Only a trace whose latest run was skipped qualifies, so a scored trace is
-    never counted against the limit twice. Returns `(run_uuid, None)`, or
-    `(None, reason)` with nothing written: `open_run` when the latest run is
-    pending or processing, `not_skipped` when it is anything else but skipped
-    (or there is none), `over_limit` when the workspace holds
-    `max_scored_traces` (None: no limit).
+    Only a trace whose latest run was skipped or failed qualifies, so a scored
+    trace is never counted against the limit twice. Returns `(run_uuid, None)`,
+    or `(None, reason)` with nothing written: `open_run` when the latest run is
+    pending or processing, `not_retryable` when it completed (or there is
+    none), `over_limit` when the workspace holds `max_scored_traces` (None: no
+    limit).
     """
     now = trace_scoring.utc_now()
     with get_db_connection() as conn:
@@ -11543,9 +11543,9 @@ def create_trace_rescore_run(
         if status in ("pending", "processing"):
             conn.rollback()
             return None, "open_run"
-        if status != "skipped":
+        if status not in ("skipped", "failed"):
             conn.rollback()
-            return None, "not_skipped"
+            return None, "not_retryable"
         if _at_scored_trace_limit(cur, org_uuid, max_scored_traces):
             conn.rollback()
             return None, "over_limit"
