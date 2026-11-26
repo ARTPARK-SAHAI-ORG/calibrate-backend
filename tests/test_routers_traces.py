@@ -4205,6 +4205,24 @@ def test_score_trace_retries_a_trace_whose_scoring_failed(client):
     assert res.status_code == 200, res.text
     assert [r["status"] for r in _runs_for_trace(trace["uuid"])].count("pending") == 1
 
+    # The worker takes the new run and leaves the old failed one alone. Open
+    # runs left by earlier tests would otherwise be claimed first.
+    with db.get_db_connection() as conn:
+        conn.execute(
+            "DELETE FROM trace_eval_runs WHERE trace_uuid != ? "
+            "AND status IN ('pending', 'processing')",
+            (trace["uuid"],),
+        )
+        conn.commit()
+    claimed = db.claim_trace_eval_runs(
+        now=ts.utc_now(),
+        lease_seconds=ts.CLAIM_LEASE_SECONDS,
+        default_batch_size=20,
+        default_max_batches_per_org=1,
+    )
+    assert [run["uuid"] for run in claimed] == [res.json()["run_uuid"]]
+    assert sorted(r["status"] for r in _runs_for_trace(trace["uuid"])) == ["failed", "processing"]
+
 
 def test_score_trace_refuses_a_trace_that_was_scored(client):
     h, agent_id = _signup_with_agent(client)
