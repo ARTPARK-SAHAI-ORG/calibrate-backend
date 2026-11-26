@@ -1049,6 +1049,17 @@ def test_errored_row_reason_reads_only_rows_calibrate_marked_errored():
     assert ts.errored_row_reason({"error": True, "metrics": {}}) is None
     assert (
         ts.errored_row_reason(
+            {
+                "error": True,
+                "metrics": {
+                    "reasoning": "<last_exception>\n    Request timed out.\n</last_exception>"
+                },
+            }
+        )
+        == "Request timed out."
+    )
+    assert (
+        ts.errored_row_reason(
             {"error": True, "metrics": {"reasoning": "Agent request timed out (60s)"}}
         )
         == "Agent request timed out (60s)"

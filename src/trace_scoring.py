@@ -13,7 +13,6 @@ import json
 import logging
 import os
 import random
-import re
 import shutil
 import subprocess
 import tempfile
@@ -523,10 +522,10 @@ def errored_row_reason(entry: Any) -> str | None:
     """The one line saying why calibrate could not judge this row, or None.
 
     calibrate marks such a row `error: true` and puts the provider's error in
-    `metrics.reasoning`, wrapped in tags (`<last_exception>...`) when the judge
-    retried. The last line naming an error is the provider's own message.
+    `metrics.reasoning`, ending with a `<last_exception>` block when the judge
+    retried, so the last line outside the tags is the provider's own message.
     """
-    if not isinstance(entry, dict) or not entry.get("error"):
+    if not entry or not entry.get("error"):
         return None
     metrics = entry.get("metrics")
     reasoning = metrics.get("reasoning") if isinstance(metrics, dict) else None
@@ -535,9 +534,6 @@ def errored_row_reason(entry: Any) -> str | None:
         for line in str(reasoning or "").splitlines()
         if line.strip() and not line.strip().startswith("<")
     ]
-    for line in reversed(lines):
-        if re.search(r"\berror\b", line, re.I):
-            return line
     return lines[-1] if lines else None
 
 
