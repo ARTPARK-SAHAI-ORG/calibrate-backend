@@ -1274,6 +1274,8 @@ def _build_calibrate_simulation_config(
         config["agent_headers"] = with_calibrate_eval_header(
             agent_config.get("agent_headers")
         )
+        if agent_config.get("default_inputs"):
+            config["agent_default_inputs"] = agent_config["default_inputs"]
         return config
 
     # Calibrate agent mode
@@ -2479,12 +2481,6 @@ def run_simulation_endpoint(
                 status_code=400,
                 detail="Agent connection not verified. Call POST /agents/{agent_uuid}/verify-connection first.",
             )
-
-    if agent_config.get("default_inputs"):
-        raise HTTPException(
-            status_code=400,
-            detail="Simulations are not supported for agents with default inputs. Run an agent test instead.",
-        )
 
     # Get linked entities
     personas = get_personas_for_simulation(simulation_uuid)
