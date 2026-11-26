@@ -3748,7 +3748,7 @@ def test_a_conversation_filter_needs_its_agent(client):
     assert client.get("/traces", params={"agent_id": agent_id}, headers=h).json()["total"] == 1
 
 
-def test_unlinked_evaluator_scores_are_hidden_until_relinked(client):
+def test_scores_stay_after_their_evaluator_is_unlinked(client):
     h, agent_id = _signup_with_agent(client)
     _disable_auto_score(client, h, agent_id)
     kept, kept_ver = _create_clean_evaluator(client, h)
@@ -3817,35 +3817,14 @@ def test_unlinked_evaluator_scores_are_hidden_until_relinked(client):
     r = client.delete(f"/agents/{agent_id}/evaluators/{removed}", headers=h)
     assert r.status_code == 200, r.text
 
-    assert shown() == ({kept},) * 3
-    assert listed(score=f"{removed}:failed")["total"] == 0
-    bulk = client.post(
-        "/traces/bulk-delete",
-        json={"select_all": True, "agent_id": agent_id, "score": [f"{removed}:failed"]},
-        headers=h,
-    )
-    assert bulk.status_code == 200, bulk.text
-    assert listed()["total"] == 2
-    conversation_row = client.get(
-        "/traces/conversations", headers=h, params={"agent_id": agent_id}
-    ).json()["items"]
-    for row in conversation_row:
-        assert removed not in {
-            r["evaluator_uuid"] for r in row["last_turn"]["results"]
-        }
-    # With the removed evaluator unknown on every trace, sorting falls back to newest first.
+    # A trace keeps the scores it was given, whatever happens to the evaluator
+    # afterwards: every read still shows them, filters and sorts on them.
+    assert shown() == ({kept, removed},) * 3
+    assert listed(score=f"{removed}:failed")["total"] == 1
     assert [
         i["uuid"]
         for i in listed(sort_by_evaluator=removed, sort_order="asc")["items"]
-    ] == [other["uuid"], trace["uuid"]]
-
-    r = client.post(
-        f"/agents/{agent_id}/evaluators",
-        json={"evaluator_ids": [removed]},
-        headers=h,
-    )
-    assert r.status_code == 200, r.text
-    assert shown() == ({kept, removed},) * 3
+    ] == [trace["uuid"], other["uuid"]]
 
 
 def test_deleting_an_agent_keeps_the_scores_on_its_traces(client):
