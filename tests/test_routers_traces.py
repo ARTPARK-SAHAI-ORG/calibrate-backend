@@ -4136,3 +4136,162 @@ def test_feedback_filter_refuses_values_it_does_not_take(client, value):
     h, agent_id = _signup_with_agent(client)
     res = client.get("/traces", params={"agent_id": agent_id, "feedback": value}, headers=h)
     assert res.status_code == 422
+
+
+# ---------------------------------------------------------------------------
+# Score one trace again
+# ---------------------------------------------------------------------------
+
+
+def _skip_open_runs(trace_uuid: str, error: str = "no_tool_call_evaluator"):
+    with db.get_db_connection() as conn:
+        conn.execute(
+            "UPDATE trace_eval_runs SET status = 'skipped', error = ?, "
+            "completed_at = updated_at WHERE trace_uuid = ? "
+            "AND status IN ('pending', 'processing')",
+            (error, trace_uuid),
+        )
+        conn.commit()
+
+
+def test_score_trace_queues_a_claimable_run_and_wakes_the_worker(client, monkeypatch):
+    import trace_scoring_nudge
+
+    h, agent_id = _signup_with_agent(client)
+    _enable_auto_score(client, h, agent_id)
+    trace = _post_trace(client, h, _payload(agent_id, _mid()))
+    _skip_open_runs(trace["uuid"])
+    woken = []
+    monkeypatch.setattr(trace_scoring_nudge, "set", lambda: woken.append(True))
+
+    res = client.post(f"/traces/{trace['uuid']}/score", headers=h)
+    assert res.status_code == 200, res.text
+    body = res.json()
+    assert body["status"] == "pending"
+    new = [r for r in _runs_for_trace(trace["uuid"]) if r["uuid"] == body["run_uuid"]]
+    assert len(new) == 1
+    assert new[0]["status"] == "pending"
+    assert new[0]["agent_id"] == agent_id
+    assert new[0]["available_at"] <= ts.utc_now()
+    assert woken == [True]
+    runs = client.get(f"/traces/{trace['uuid']}/scores", headers=h).json()["runs"]
+    assert [r["status"] for r in runs] == ["pending", "skipped"]
+
+
+def test_score_trace_refuses_while_a_run_is_open(client):
+    h, agent_id = _signup_with_agent(client)
+    _enable_auto_score(client, h, agent_id)
+    trace = _post_trace(client, h, _payload(agent_id, _mid()))
+
+    res = client.post(f"/traces/{trace['uuid']}/score", headers=h)
+    assert res.status_code == 409
+    assert res.json()["detail"] == "This trace is already being scored"
+    assert len(_runs_for_trace(trace["uuid"])) == 1
+
+
+def test_score_trace_retries_a_trace_whose_scoring_failed(client):
+    h, agent_id = _signup_with_agent(client)
+    _enable_auto_score(client, h, agent_id)
+    trace = _post_trace(client, h, _payload(agent_id, _mid()))
+    _skip_open_runs(trace["uuid"])
+    with db.get_db_connection() as conn:
+        conn.execute(
+            "UPDATE trace_eval_runs SET status = 'failed' WHERE trace_uuid = ?",
+            (trace["uuid"],),
+        )
+        conn.commit()
+
+    res = client.post(f"/traces/{trace['uuid']}/score", headers=h)
+    assert res.status_code == 200, res.text
+    assert [r["status"] for r in _runs_for_trace(trace["uuid"])].count("pending") == 1
+
+    # The worker takes the new run and leaves the old failed one alone. Open
+    # runs left by earlier tests would otherwise be claimed first.
+    with db.get_db_connection() as conn:
+        conn.execute(
+            "DELETE FROM trace_eval_runs WHERE trace_uuid != ? "
+            "AND status IN ('pending', 'processing')",
+            (trace["uuid"],),
+        )
+        conn.commit()
+    claimed = db.claim_trace_eval_runs(
+        now=ts.utc_now(),
+        lease_seconds=ts.CLAIM_LEASE_SECONDS,
+        default_batch_size=20,
+        default_max_batches_per_org=1,
+    )
+    assert [run["uuid"] for run in claimed] == [res.json()["run_uuid"]]
+    assert sorted(r["status"] for r in _runs_for_trace(trace["uuid"])) == ["failed", "processing"]
+
+
+def test_score_trace_refuses_a_trace_that_was_scored(client):
+    h, agent_id = _signup_with_agent(client)
+    _enable_auto_score(client, h, agent_id)
+    trace = _post_trace(client, h, _payload(agent_id, _mid()))
+    with db.get_db_connection() as conn:
+        conn.execute(
+            "UPDATE trace_eval_runs SET status = 'completed' WHERE trace_uuid = ?",
+            (trace["uuid"],),
+        )
+        conn.commit()
+
+    res = client.post(f"/traces/{trace['uuid']}/score", headers=h)
+    assert res.status_code == 409
+    assert res.json()["detail"] == "Only a trace that was skipped or failed can be scored again"
+    assert len(_runs_for_trace(trace["uuid"])) == 1
+
+    _disable_auto_score(client, h, agent_id)
+    never_scored = _post_trace(client, h, _payload(agent_id, _mid()))
+    _set_trace_scoring(client, h, agent_id, True)
+    assert client.post(f"/traces/{never_scored['uuid']}/score", headers=h).status_code == 409
+    assert _runs_for_trace(never_scored["uuid"]) == []
+
+
+def test_score_trace_refuses_when_scoring_is_off(client):
+    h, agent_id = _signup_with_agent(client)
+    _disable_auto_score(client, h, agent_id)
+    trace = _post_trace(client, h, _payload(agent_id, _mid()))
+
+    res = client.post(f"/traces/{trace['uuid']}/score", headers=h)
+    assert res.status_code == 400
+    assert res.json()["detail"] == "Trace scoring is turned off for this agent"
+    assert _runs_for_trace(trace["uuid"]) == []
+
+
+def test_score_trace_refuses_past_the_scored_traces_limit(client, monkeypatch):
+    h, agent_id = _signup_with_agent(client)
+    _enable_auto_score(client, h, agent_id)
+    _post_trace(client, h, _payload(agent_id, _mid()))
+    trace = _post_trace(client, h, _payload(agent_id, _mid()))
+    _skip_open_runs(trace["uuid"])
+    _cap(monkeypatch, max_scored_traces=1)
+
+    res = client.post(f"/traces/{trace['uuid']}/score", headers=h)
+    assert res.status_code == 429
+    assert res.json()["detail"] == "This workspace has reached its limit of scored traces"
+    assert len(_runs_for_trace(trace["uuid"])) == 1
+
+    _cap(monkeypatch, max_scored_traces=None)
+    assert client.post(f"/traces/{trace['uuid']}/score", headers=h).status_code == 200
+
+
+def test_score_trace_unknown_or_other_workspace_writes_nothing(client):
+    h, agent_id = _signup_with_agent(client)
+    _enable_auto_score(client, h, agent_id)
+    trace = _post_trace(client, h, _payload(agent_id, _mid()))
+    _skip_open_runs(trace["uuid"])
+
+    assert client.post(f"/traces/{uuid.uuid4()}/score", headers=h).status_code == 404
+    other = _signup(client)
+    assert client.post(f"/traces/{trace['uuid']}/score", headers=other).status_code in (403, 404)
+    assert len(_runs_for_trace(trace["uuid"])) == 1
+
+
+def test_score_trace_is_jwt_only(client):
+    h, agent_id = _signup_with_agent(client)
+    _enable_auto_score(client, h, agent_id)
+    trace = _post_trace(client, h, _payload(agent_id, _mid()))
+    _skip_open_runs(trace["uuid"])
+    res = client.post(f"/traces/{trace['uuid']}/score", headers=_api_key_headers(client, h))
+    assert res.status_code in (401, 403)
+    assert len(_runs_for_trace(trace["uuid"])) == 1

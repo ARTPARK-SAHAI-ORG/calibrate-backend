@@ -98,6 +98,9 @@ def _seed(conn):
         traces.append(str(uuid.uuid4()))
         _ins(conn, "traces", uuid=traces[-1], org_uuid=org, agent_id=agents[org], input="[]",
              output="{}", created_at=at, deleted_at=deleted)
+    # A message answered on the chat link: a chat message, not a trace received.
+    _ins(conn, "traces", uuid=str(uuid.uuid4()), org_uuid=B, agent_id=agents[B], input="[]",
+         output="{}", created_at="2026-10-12 12:00:00", source="chat")
     for org, status, error, at, done in [
         (A, "completed", None, "2026-10-10 10:00:00", "2026-10-11 01:00:00"),
         (A, "failed", "judge unreachable", "2026-10-12 05:00:00", None),
@@ -202,10 +205,11 @@ def test_end_before_start_is_422(env):
 ALICE_OWNER = {"email": "alice@example.com", "first_name": "Alice", "last_name": ""}
 ZERO_DAY = dict(new_users=0, active_workspaces=0, test_runs=0, model_comparisons=0,
                 simulations=0, stt=0, tts=0, labelling_evaluator_runs=0, failed_evaluations=0,
-                traces_received=0, traces_scored=0, labels_collected=0, labelling_jobs_finished=0)
+                traces_received=0, chat_messages=0, traces_scored=0, labels_collected=0,
+                labelling_jobs_finished=0)
 ZERO_RANGE = dict(evaluations=0, failed_evaluations=0, test_runs=0, model_comparisons=0,
                   simulations=0, stt=0, tts=0, labelling_evaluator_runs=0, cost=None,
-                  traces_received=0, traces_scored=0, labelling_jobs_finished=0,
+                  traces_received=0, chat_messages=0, traces_scored=0, labelling_jobs_finished=0,
                   labels_collected=0, items_labelled=0, limit_hits=0)
 
 
@@ -217,13 +221,15 @@ def test_numbers_for_a_period(env):
     assert body["activity"] == {
         "new_users": 2, "active_workspaces": 2, "evaluations": 7, "failed_evaluations": 3,
         "test_runs": 2, "model_comparisons": 1, "simulations": 2, "stt": 1, "tts": 1,
-        "labelling_evaluator_runs": 0, "cost": 1.75, "traces_received": 2, "traces_scored": 1,
+        "labelling_evaluator_runs": 0, "cost": 1.75, "traces_received": 2, "chat_messages": 1,
+        "traces_scored": 1,
         "labelling_jobs_finished": 1, "labels_collected": 3, "items_labelled": 2, "limit_hits": 2,
     }
     assert body["previous"] == {
         "new_users": 1, "active_workspaces": 2, "evaluations": 3, "failed_evaluations": 0,
         "test_runs": 0, "model_comparisons": 1, "simulations": 0, "stt": 0, "tts": 1,
-        "labelling_evaluator_runs": 1, "cost": None, "traces_received": 1, "traces_scored": 0,
+        "labelling_evaluator_runs": 1, "cost": None, "traces_received": 1, "chat_messages": 0,
+        "traces_scored": 0,
         "labelling_jobs_finished": 0, "labels_collected": 1, "items_labelled": 1, "limit_hits": 0,
     }
     assert body["per_day"] == [
@@ -233,12 +239,12 @@ def test_numbers_for_a_period(env):
          "test_runs": 1, "simulations": 1, "failed_evaluations": 2, "traces_received": 1,
          "traces_scored": 1, "labels_collected": 3, "labelling_jobs_finished": 1},
         {**ZERO_DAY, "date": "2026-10-12", "active_workspaces": 2, "model_comparisons": 1,
-         "simulations": 1, "tts": 1, "failed_evaluations": 1},
+         "simulations": 1, "tts": 1, "failed_evaluations": 1, "chat_messages": 1},
     ]
     assert body["workspaces"] == [
         {**ZERO_RANGE, "org_uuid": B, "name": "Alice personal", "is_personal": True, "members": 1,
          "created_at": "2026-10-01T08:00:00Z", "owner": ALICE_OWNER, "last_active_at": "2026-10-12T23:00:00Z", "evaluations": 3, "failed_evaluations": 1,
-         "model_comparisons": 1, "stt": 1, "tts": 1, "cost": 1.25},
+         "model_comparisons": 1, "stt": 1, "tts": 1, "cost": 1.25, "chat_messages": 1},
         {**ZERO_RANGE, "org_uuid": A, "name": "Acme", "is_personal": False, "members": 2,
          "created_at": "2026-10-01T08:00:00Z", "owner": ALICE_OWNER,
          "last_active_at": "2026-10-12T09:30:00Z", "evaluations": 4, "failed_evaluations": 2,
