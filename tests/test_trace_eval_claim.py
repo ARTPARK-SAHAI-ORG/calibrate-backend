@@ -1058,6 +1058,28 @@ def test_errored_row_reason_reads_only_rows_calibrate_marked_errored():
         )
         == "Request timed out."
     )
+
+
+def test_errored_row_reason_keeps_a_judge_parse_error_and_drops_the_docs_link():
+    import pydantic
+
+    class Verdict(pydantic.BaseModel):
+        match: bool
+
+    try:
+        Verdict.model_validate_json("not json")
+    except pydantic.ValidationError as exc:
+        message = str(exc)
+    reasoning = (
+        f"<failed_attempts>\n<exception>\n    first try\n</exception>\n"
+        f"</failed_attempts>\n\n<last_exception>\n    {message}\n</last_exception>"
+    )
+
+    reason = ts.errored_row_reason({"error": True, "metrics": {"reasoning": reasoning}})
+
+    assert reason.startswith("1 validation error for Verdict Invalid JSON:")
+    assert "first try" not in reason
+    assert "errors.pydantic.dev" not in reason
     assert (
         ts.errored_row_reason(
             {"error": True, "metrics": {"reasoning": "Agent request timed out (60s)"}}

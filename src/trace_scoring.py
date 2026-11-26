@@ -519,22 +519,25 @@ def backoff_available_at(
 
 
 def errored_row_reason(entry: Any) -> str | None:
-    """The one line saying why calibrate could not judge this row, or None.
+    """Why calibrate could not judge this row, on one line, or None.
 
     calibrate marks such a row `error: true` and puts the provider's error in
-    `metrics.reasoning`, ending with a `<last_exception>` block when the judge
-    retried, so the last line outside the tags is the provider's own message.
+    `metrics.reasoning`. When the judge retried, the text ends with a
+    `<last_exception>` block, which is the error worth keeping. pydantic ends
+    its errors with a docs link, which says nothing about this run.
     """
     if not entry or not entry.get("error"):
         return None
     metrics = entry.get("metrics")
-    reasoning = metrics.get("reasoning") if isinstance(metrics, dict) else None
+    text = str((metrics.get("reasoning") if isinstance(metrics, dict) else None) or "")
+    text = text.rsplit("<last_exception>", 1)[-1]
     lines = [
         line.strip()
-        for line in str(reasoning or "").splitlines()
-        if line.strip() and not line.strip().startswith("<")
+        for line in text.splitlines()
+        if line.strip()
+        and not line.strip().startswith(("<", "For further information visit"))
     ]
-    return lines[-1] if lines else None
+    return " ".join(lines) or None
 
 
 def _truncate_error(detail: str) -> str:
