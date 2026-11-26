@@ -1131,16 +1131,44 @@ def test_convert_tool_call_with_accept_any_arguments(client):
     assert call["arguments"] == {"child_age_weeks": 14}
 
 
-def test_convert_names_a_trace_without_a_message_id_by_its_uuid(client):
+def test_convert_names_a_trace_without_a_message_id_by_its_last_user_message(client):
     h, agent_id = _signup_with_agent(client)
-    body = _payload(agent_id, _mid())
-    del body["message_id"]
-    trace = _post_trace(client, h, body)
+    long_text = "word " * 20
 
-    res = _convert(client, h, trace_ids=[trace["uuid"]], type="tool_call")
+    def trace_with(user_text):
+        turns = [{"role": "system", "content": "You are a vaccination assistant."}]
+        if user_text is not None:
+            turns.append({"role": "user", "content": user_text})
+        body = _payload(agent_id, _mid(), input=turns)
+        del body["message_id"]
+        return _post_trace(client, h, body)
+
+    traces = [
+        trace_with("  When is the next dose?  "),
+        trace_with("When is the next dose?"),
+        trace_with(long_text),
+        trace_with(None),
+    ]
+    res = _convert(client, h, trace_ids=[t["uuid"] for t in traces], type="tool_call")
     assert res.status_code == 200, res.text
-    created = client.get(f"/tests/{res.json()['test_uuids'][0]}", headers=h).json()
-    assert created["name"] == trace["uuid"]
+    names = [
+        client.get(f"/tests/{test_uuid}", headers=h).json()["name"]
+        for test_uuid in res.json()["test_uuids"]
+    ]
+    assert names == [
+        "When is the next dose?",
+        "When is the next dose? (2)",
+        long_text[:60].rstrip() + "…",
+        traces[3]["uuid"],
+    ]
+
+
+def test_test_name_for_a_general_trace_is_its_prompt():
+    from routers.traces import _test_name_for_trace
+
+    trace = {"message_id": None, "uuid": "u-1", "input": " Summarize it. "}
+    assert _test_name_for_trace(trace) == "Summarize it."
+    assert _test_name_for_trace({**trace, "input": "  "}) == "u-1"
 
 
 def test_convert_suffixes_colliding_test_names(client):

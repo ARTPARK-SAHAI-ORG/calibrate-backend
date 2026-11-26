@@ -769,6 +769,17 @@ def _last_user_content(stored_input: Any) -> Optional[str]:
     return None
 
 
+def _test_name_for_trace(trace: Dict[str, Any]) -> str:
+    """`message_id`, else the last thing the user said (cut to 60 characters),
+    else the trace uuid."""
+    if trace["message_id"]:
+        return trace["message_id"]
+    text = (_last_user_content(trace["input"]) or "").strip()
+    if not text:
+        return trace["uuid"]
+    return text if len(text) <= 60 else text[:60].rstrip() + "…"
+
+
 def _turn_count(stored_input: Any) -> int:
     """A standalone prompt is the single turn it stands for."""
     return 1 if isinstance(stored_input, str) else len(stored_input or [])
@@ -1459,7 +1470,7 @@ def convert_traces_to_tests(
 
     existing_names = {t["name"] for t in get_all_tests_summary(org_uuid=ctx.org_uuid)}
     names = _dedupe_test_names(
-        [trace["message_id"] or trace["uuid"] for trace in traces], existing_names
+        [_test_name_for_trace(trace) for trace in traces], existing_names
     )
 
     db_tests: List[Dict[str, Any]] = []
