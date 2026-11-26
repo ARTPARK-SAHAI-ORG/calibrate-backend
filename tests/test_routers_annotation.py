@@ -3748,14 +3748,20 @@ def test_removing_every_tool_call_evaluator_from_a_task_keeps_one(client):
     assert _custom in body["unlinked"]
 
 
-def test_unlinking_the_last_tool_call_evaluator_puts_tool_call_correctness_back(client):
+def test_unlinking_the_last_tool_call_evaluator_is_refused(client):
     h = _signup(client)["headers"]
-    task_uuid, _llm_ev, custom = _task_with_a_tool_call_item_and_custom_evaluator(client, h)
+    task_uuid, llm_ev, custom = _task_with_a_tool_call_item_and_custom_evaluator(client, h)
 
     resp = client.delete(f"/annotation-tasks/{task_uuid}/evaluators/{custom}", headers=h)
-    assert resp.status_code == 200, resp.text
+    assert resp.status_code == 400
+    assert "need a tool call evaluator" in resp.json()["detail"]
+    assert _tool_call_link_slugs(client, h, task_uuid) == [custom]
 
-    assert _tool_call_link_slugs(client, h, task_uuid) == ["default-tool-call-correctness"]
+    # A reply evaluator can still be unlinked.
+    resp = client.delete(
+        f"/annotation-tasks/{task_uuid}/evaluators/{llm_ev['uuid']}", headers=h
+    )
+    assert resp.status_code == 200, resp.text
 
 
 def test_editing_an_item_into_a_tool_call_item_links_tool_call_correctness(client):

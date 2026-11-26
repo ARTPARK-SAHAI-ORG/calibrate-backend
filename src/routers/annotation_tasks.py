@@ -3644,10 +3644,18 @@ def unlink_evaluator_from_task(
 ):
     """Unlink an evaluator from a task without changing existing job snapshots"""
     _ensure_owned_task(task_uuid, ctx.org_uuid)
+    linked = get_evaluators_for_annotation_task(task_uuid)
+    tool_call_ids = {e["uuid"] for e in linked if is_tool_call_evaluator(e)}
+    if tool_call_ids == {evaluator_uuid} and any(
+        is_tool_call_row(item) for item in get_annotation_items_for_task(task_uuid)
+    ):
+        raise HTTPException(
+            status_code=400,
+            detail="This task's tool call items need a tool call evaluator. Link another one before unlinking this one",
+        )
     removed = remove_evaluator_from_annotation_task(task_uuid, evaluator_uuid)
     if not removed:
         raise HTTPException(
             status_code=404, detail="Evaluator is not linked to this task"
         )
-    ensure_tool_call_evaluator_on_tasks(ctx.org_uuid, [task_uuid])
     return {"message": "Evaluator unlinked from annotation task"}
