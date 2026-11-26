@@ -204,6 +204,21 @@ def test_simulation_config_marks_the_call_as_an_evaluation():
     }
 
 
+def test_simulation_config_carries_custom_fields_only_when_set():
+    from routers.simulations import _build_calibrate_simulation_config
+
+    def build(**extra):
+        return _build_calibrate_simulation_config(
+            {"type": "connection", "config": {"agent_url": "https://example.com/agent", **extra}},
+            personas=[{"description": "p", "config": {}}],
+            scenarios=[{"description": "s"}],
+            evaluators=[],
+        )
+
+    assert build(default_inputs={"foo": "bar"})["agent_default_inputs"] == {"foo": "bar"}
+    assert "agent_default_inputs" not in build()
+
+
 def test_simulation_model_fallback_is_the_default_agent_model(monkeypatch):
     from routers.simulations import _build_calibrate_simulation_config
 

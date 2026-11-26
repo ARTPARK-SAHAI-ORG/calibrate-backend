@@ -621,26 +621,20 @@ def test_run_simulation_voice_connection_blocked(client, monkeypatch):
     assert resp.status_code == 400
 
 
-@pytest.mark.parametrize("default_inputs", [{"foo": "bar"}, None])
-def test_run_simulation_text_sends_default_inputs(client, monkeypatch, default_inputs):
-    """A connection agent's custom fields reach calibrate on a text run, and an
-    agent without any sends no `agent_default_inputs` key."""
-    import routers.simulations as sims
-
+def test_run_simulation_text_accepts_default_inputs(client, monkeypatch):
+    """A connection agent with custom fields can run a text simulation."""
     auth = _signup(client)
     h = auth["headers"]
-    agent_config = {
-        "agent_url": "https://example.com/agent",
-        "connection_verified": True,
-    }
-    if default_inputs:
-        agent_config["default_inputs"] = default_inputs
     agent = client.post(
         "/agents",
         json={
             "name": f"conn-{uuid.uuid4().hex[:6]}",
             "type": "connection",
-            "config": agent_config,
+            "config": {
+                "agent_url": "https://example.com/agent",
+                "connection_verified": True,
+                "default_inputs": {"foo": "bar"},
+            },
         },
         headers=h,
     ).json()
@@ -660,21 +654,13 @@ def test_run_simulation_text_sends_default_inputs(client, monkeypatch, default_i
     monkeypatch.setenv("S3_OUTPUT_BUCKET", "test-bucket")
     with patch("routers.simulations.can_start_simulation_job", return_value=True), patch(
         "threading.Thread"
-    ) as thread:
+    ):
         resp = client.post(
             f"/simulations/{create['uuid']}/run",
             json={"type": "text"},
             headers=h,
         )
     assert resp.status_code == 200, resp.text
-    _job_id, run_agent, personas, scenarios, evaluators, *_ = thread.call_args.kwargs["args"]
-    config = sims._build_calibrate_simulation_config(
-        run_agent, personas, scenarios, evaluators
-    )
-    if default_inputs:
-        assert config["agent_default_inputs"] == default_inputs
-    else:
-        assert "agent_default_inputs" not in config
 
 
 @pytest.mark.parametrize("env", [None, {"OPENAI_API_KEY": "sk-org"}])
