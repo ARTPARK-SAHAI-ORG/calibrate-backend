@@ -50,6 +50,7 @@ from db import (
     get_evaluators_for_agent,
     add_evaluator_to_agent,
     remove_evaluator_from_agent,
+    bulk_remove_evaluators_from_agent,
     resolve_live_evaluators,
     set_agent_chat_link,
     count_chat_replies_today,
@@ -604,6 +605,23 @@ class EvaluatorLinkResponse(BaseModel):
     )
     already_linked: List[str] = Field(
         description="Evaluator IDs skipped because they were already linked"
+    )
+
+
+class EvaluatorBulkUnlinkRequest(BaseModel):
+    evaluator_ids: List[EvaluatorUuid] = Field(
+        description="The evaluators to unlink from the agent. Ones that are not linked are skipped",
+        examples=[["f47ac10b-58cc-4372-a567-0e02b2c3d479"]],
+    )
+
+
+class EvaluatorBulkUnlinkResponse(BaseModel):
+    removed_count: int = Field(
+        description="Number of evaluators unlinked. Ones that were not linked are excluded"
+    )
+    message: str = Field(
+        description="Confirmation that the evaluators were unlinked",
+        examples=["Removed 2 evaluator(s) from agent"],
     )
 
 
@@ -1321,3 +1339,27 @@ def unlink_evaluator_from_agent(
             status_code=404, detail="Evaluator is not linked to this agent"
         )
     return {"message": "Evaluator unlinked from agent"}
+
+
+@router.post(
+    "/{agent_uuid}/evaluators/bulk-unlink",
+    response_model=EvaluatorBulkUnlinkResponse,
+    summary="Bulk unlink evaluators from agent",
+)
+def bulk_unlink_evaluators_from_agent(
+    agent_uuid: str = Path(
+        description="The agent to unlink the evaluators from",
+        examples=["f47ac10b-58cc-4372-a567-0e02b2c3d479"],
+    ),
+    payload: EvaluatorBulkUnlinkRequest = ...,
+    ctx: OrgContext = Depends(get_current_org),
+):
+    """Unlink one or more evaluators from an agent, skipping any not linked"""
+    if not payload.evaluator_ids:
+        raise HTTPException(status_code=400, detail="evaluator_ids must not be empty")
+    ensure_owned_agent(agent_uuid, ctx.org_uuid)
+    removed_count = bulk_remove_evaluators_from_agent(agent_uuid, payload.evaluator_ids)
+    return EvaluatorBulkUnlinkResponse(
+        removed_count=removed_count,
+        message=f"Removed {removed_count} evaluator(s) from agent",
+    )
