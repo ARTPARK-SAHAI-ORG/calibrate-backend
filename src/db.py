@@ -11334,16 +11334,15 @@ def _insert_trace_eval_run(
     now: str,
     available_at: Optional[str] = None,
     completed_at: Optional[str] = None,
-) -> str:
-    """Insert one trace_eval_runs row and return its uuid. Caller owns the transaction."""
-    run_uuid = str(uuid.uuid4())
+) -> None:
+    """Insert one trace_eval_runs row. Caller owns the transaction."""
     cur.execute(
         "INSERT INTO trace_eval_runs "
         "(uuid, trace_uuid, org_uuid, agent_id, status, "
         "error, available_at, created_at, updated_at, completed_at) "
         "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         (
-            run_uuid,
+            str(uuid.uuid4()),
             trace_uuid,
             org_uuid,
             agent_id,
@@ -11355,7 +11354,6 @@ def _insert_trace_eval_run(
             completed_at,
         ),
     )
-    return run_uuid
 
 
 def _hold_waiting_trace_eval_runs(
@@ -11465,13 +11463,6 @@ def _scored_trace_count(cur: sqlite3.Cursor, org_uuid: str, cap: int) -> int:
     ).fetchone()[0]
 
 
-def _at_scored_trace_limit(
-    cur: sqlite3.Cursor, org_uuid: str, cap: Optional[int]
-) -> bool:
-    """Whether the workspace holds `cap` scored traces already (None: no limit)."""
-    return cap is not None and _scored_trace_count(cur, org_uuid, cap) >= cap
-
-
 def create_trace_with_eval_run(
     *,
     org_uuid: str,
@@ -11530,7 +11521,12 @@ def create_trace_with_eval_run(
             feedback,
         )
         if scoring_on:
-            if _at_scored_trace_limit(cur, org_uuid, max_scored_traces):
+            over_limit = (
+                max_scored_traces is not None
+                and _scored_trace_count(cur, org_uuid, max_scored_traces)
+                >= max_scored_traces
+            )
+            if over_limit:
                 _insert_trace_eval_run(
                     cur,
                     trace_uuid=row["uuid"],
@@ -11572,58 +11568,6 @@ def create_trace_with_eval_run(
         # row, which an idle worker re-checks on its own poll.
         trace_scoring_nudge.set()
     return row
-
-
-def create_trace_rescore_run(
-    *,
-    org_uuid: str,
-    trace_uuid: str,
-    agent_id: str,
-    max_scored_traces: Optional[int],
-) -> Tuple[Optional[str], Optional[str]]:
-    """Queue one more scoring run for a stored trace, claimable at once.
-
-    Only a trace whose latest run was skipped qualifies, so a scored trace is
-    never counted against the limit twice. Returns `(run_uuid, None)`, or
-    `(None, reason)` with nothing written: `open_run` when the latest run is
-    pending or processing, `not_skipped` when it is anything else but skipped
-    (or there is none), `over_limit` when the workspace holds
-    `max_scored_traces` (None: no limit).
-    """
-    now = trace_scoring.utc_now()
-    with get_db_connection() as conn:
-        cur = conn.cursor()
-        cur.execute("BEGIN IMMEDIATE")
-        latest = cur.execute(
-            "SELECT status FROM trace_eval_runs WHERE trace_uuid = ? "
-            "ORDER BY created_at DESC, id DESC LIMIT 1",
-            (trace_uuid,),
-        ).fetchone()
-        status = latest["status"] if latest else None
-        if status in ("pending", "processing"):
-            conn.rollback()
-            return None, "open_run"
-        if status != "skipped":
-            conn.rollback()
-            return None, "not_skipped"
-        if _at_scored_trace_limit(cur, org_uuid, max_scored_traces):
-            conn.rollback()
-            return None, "over_limit"
-        run_uuid = _insert_trace_eval_run(
-            cur,
-            trace_uuid=trace_uuid,
-            org_uuid=org_uuid,
-            agent_id=agent_id,
-            status=trace_scoring.TraceEvalRunStatus.PENDING,
-            error=None,
-            now=now,
-        )
-        conn.commit()
-
-    import trace_scoring_nudge
-
-    trace_scoring_nudge.set()
-    return run_uuid, None
 
 
 def list_traces(
