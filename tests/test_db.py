@@ -3583,3 +3583,10 @@ def test_annotation_item_metadata_round_trips_and_freezes_in_snapshots(user):
     snap = {i["uuid"]: i["metadata"] for i in db.get_eval_job_items(eval_job_uuid)}
     assert snap == {with_meta: meta, without: []}
 
+
+
+def test_ensure_tool_call_evaluator_links_nothing_when_the_org_has_no_fork():
+    _user, org_uuid = _fresh_org()
+    fork = db.get_tool_call_evaluator_for_org(org_uuid)
+    assert db.delete_evaluator(fork["uuid"]) is True
+    assert db.ensure_tool_call_evaluator_on_tasks(org_uuid) == []

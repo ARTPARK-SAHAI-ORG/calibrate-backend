@@ -9470,6 +9470,46 @@ def add_evaluator_to_annotation_task(
         return link_id
 
 
+def ensure_tool_call_evaluator_on_tasks(
+    org_uuid: str,
+    task_uuids: Optional[List[str]] = None,
+    has_tool_call_items: bool = False,
+) -> List[str]:
+    """Link the org's Tool call correctness to every task (of `task_uuids`, or
+    the whole org) that holds a live tool-call item but no live tool-call
+    evaluator, since such an item has no other question to answer. Returns
+    the tasks it linked. `has_tool_call_items` skips the item check, for a
+    caller linking before it stores the items."""
+    fork = get_tool_call_evaluator_for_org(org_uuid)
+    if fork is None:
+        return []
+    scope = ""
+    params: List[Any] = [org_uuid, TOOL_CALL_EVALUATOR_TYPE]
+    if task_uuids is not None:
+        scope = f" AND t.uuid IN ({','.join('?' * len(task_uuids))})"
+        params.extend(task_uuids)
+    with get_db_connection() as conn:
+        rows = conn.execute(
+            f"""
+            SELECT DISTINCT t.uuid FROM annotation_tasks t
+              LEFT JOIN annotation_items i ON i.task_id = t.uuid AND i.deleted_at IS NULL
+             WHERE t.org_uuid = ? AND t.deleted_at IS NULL
+               AND ({"1" if has_tool_call_items else _TOOL_CALL_ITEM_CONDITION})
+               AND NOT EXISTS (
+                   SELECT 1 FROM annotation_task_evaluators ate
+                     JOIN evaluators e ON e.uuid = ate.evaluator_id
+                    WHERE ate.task_id = t.uuid AND ate.deleted_at IS NULL
+                      AND e.deleted_at IS NULL AND e.evaluator_type = ?
+               ){scope}
+            """,
+            params,
+        ).fetchall()
+    linked = [r[0] for r in rows]
+    for task_uuid in linked:
+        add_evaluator_to_annotation_task(task_uuid, fork["uuid"])
+    return linked
+
+
 def remove_evaluator_from_annotation_task(task_id: str, evaluator_id: str) -> bool:
     with get_db_connection() as conn:
         cursor = conn.cursor()
