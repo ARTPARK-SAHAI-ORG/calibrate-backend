@@ -1100,7 +1100,8 @@ def is_tool_call_row(item: Dict[str, Any]) -> bool:
     / `actual_tool_calls`, and the presence of either list settles it whatever
     the agent produced: an agent that answered in words instead of calling the
     tool is the failure being judged. Any other item qualifies with a non-empty
-    `tool_calls` list."""
+    `tool_calls` list. `db._TOOL_CALL_ITEM_CONDITION` mirrors this in SQL and
+    must move with it."""
     payload = item.get("payload")
     if not isinstance(payload, dict):
         return False

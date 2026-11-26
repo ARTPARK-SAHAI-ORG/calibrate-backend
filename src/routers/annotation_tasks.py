@@ -23,7 +23,7 @@ from db import (
     get_evaluators_for_annotation_task,
     get_evaluators_for_annotation_tasks,
     get_evaluators_for_job,
-    get_tool_call_evaluator_for_org,
+    ensure_tool_call_evaluator_on_tasks,
     get_evaluator,
     get_evaluator_version,
     get_annotations_for_task,
@@ -940,6 +940,7 @@ def set_task_evaluators(
     changed = set_evaluators_for_annotation_task(
         task_uuid, payload.evaluator_ids, payload.optional_evaluator_ids
     )
+    ensure_tool_call_evaluator_on_tasks(ctx.org_uuid, [task_uuid])
     current_ids = [e["uuid"] for e in get_evaluators_for_annotation_task(task_uuid)]
     return EvaluatorSetResponse(
         message="Task evaluators updated",
@@ -1489,18 +1490,10 @@ def bulk_create_items(
             },
         )
 
-    # A tool-call row is answered only through a tool-call evaluator, so the
-    # workspace's tool-call evaluator has to be on the task before anyone opens
-    # the labelling form. `add_evaluator_to_annotation_task` inserts
-    # unconditionally on an active link, so skip when it is already there:
-    # later batches must not duplicate the link or move its display position.
-    # A workspace that deleted its copy simply gets no link.
     if any(is_tool_call_row({"payload": p}) for p in payloads):
-        tool_call_evaluator = get_tool_call_evaluator_for_org(ctx.org_uuid)
-        if tool_call_evaluator and tool_call_evaluator["uuid"] not in {
-            e["uuid"] for e in get_evaluators_for_annotation_task(task_uuid)
-        }:
-            add_evaluator_to_annotation_task(task_uuid, tool_call_evaluator["uuid"])
+        ensure_tool_call_evaluator_on_tasks(
+            ctx.org_uuid, [task_uuid], has_tool_call_items=True
+        )
 
     annotator: Optional[Dict[str, Any]] = None
     linked_evaluator_ids: set = set()
@@ -1792,6 +1785,7 @@ def bulk_update_items(
         )
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
+    ensure_tool_call_evaluator_on_tasks(ctx.org_uuid, [task_uuid])
     return {"updated_count": updated_count}
 
 

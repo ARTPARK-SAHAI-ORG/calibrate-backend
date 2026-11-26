@@ -3546,28 +3546,19 @@ _TOOL_CALL_EVALUATOR_OLD_DESCRIPTION = (
     "Records whether the agent made the right tool call, judged by a person"
 )
 
-# The tool-call row rule as `link_tool_call_evaluator_to_tasks_v1` ran it,
-# frozen with that one-time backfill: an expected_tool_calls or
-# actual_tool_calls list, whatever it holds and whatever the agent produced;
-# otherwise no agent_response / output text and a non-empty tool_calls list.
-# A reply may be a string or `{content, ...}`; the CASE reads an object's text
-# the way `message_text` does, and an object with no `content` falls through.
-# The json_type guards are load-bearing: json_array_length raises "malformed
+# Mirrors `is_tool_call_row` in utils.py for a WHERE clause, which cannot
+# call it per row: an expected_tool_calls or actual_tool_calls list, whatever
+# it holds, or a non-empty tool_calls list. A reply beside them does not matter.
+# The json_type guard is load-bearing: json_array_length raises "malformed
 # JSON" on a value that is not an array, and one such payload anywhere in the
 # table would abort init_db and stop the service from starting.
+# test_db.py::test_tool_call_item_condition_matches_python_rule checks the two
+# stay in step.
 _TOOL_CALL_ITEM_CONDITION = """
     json_type(i.payload, '$.expected_tool_calls') = 'array'
     OR json_type(i.payload, '$.actual_tool_calls') = 'array'
     OR (
-        COALESCE(
-            CASE WHEN json_type(i.payload, '$.agent_response') = 'object'
-                 THEN json_extract(i.payload, '$.agent_response.content')
-                 ELSE json_extract(i.payload, '$.agent_response') END,
-            CASE WHEN json_type(i.payload, '$.output') = 'object'
-                 THEN json_extract(i.payload, '$.output.content')
-                 ELSE json_extract(i.payload, '$.output') END,
-            '') = ''
-        AND json_type(i.payload, '$.tool_calls') = 'array'
+        json_type(i.payload, '$.tool_calls') = 'array'
         AND json_array_length(json_extract(i.payload, '$.tool_calls')) > 0
     )
 """
@@ -9468,6 +9459,46 @@ def add_evaluator_to_annotation_task(
         return link_id
 
 
+def ensure_tool_call_evaluator_on_tasks(
+    org_uuid: str,
+    task_uuids: Optional[List[str]] = None,
+    has_tool_call_items: bool = False,
+) -> List[str]:
+    """Link the org's Tool call correctness to every task (of `task_uuids`, or
+    the whole org) that holds a live tool-call item but no live tool-call
+    evaluator, since such an item has no other question to answer. Returns
+    the tasks it linked. `has_tool_call_items` skips the item check, for a
+    caller linking before it stores the items."""
+    fork = get_tool_call_evaluator_for_org(org_uuid)
+    if fork is None:
+        return []
+    scope = ""
+    params: List[Any] = [org_uuid, TOOL_CALL_EVALUATOR_TYPE]
+    if task_uuids is not None:
+        scope = f" AND t.uuid IN ({','.join('?' * len(task_uuids))})"
+        params.extend(task_uuids)
+    with get_db_connection() as conn:
+        rows = conn.execute(
+            f"""
+            SELECT DISTINCT t.uuid FROM annotation_tasks t
+              LEFT JOIN annotation_items i ON i.task_id = t.uuid AND i.deleted_at IS NULL
+             WHERE t.org_uuid = ? AND t.deleted_at IS NULL
+               AND ({"1" if has_tool_call_items else _TOOL_CALL_ITEM_CONDITION})
+               AND NOT EXISTS (
+                   SELECT 1 FROM annotation_task_evaluators ate
+                     JOIN evaluators e ON e.uuid = ate.evaluator_id
+                    WHERE ate.task_id = t.uuid AND ate.deleted_at IS NULL
+                      AND e.deleted_at IS NULL AND e.evaluator_type = ?
+               ){scope}
+            """,
+            params,
+        ).fetchall()
+    linked = [r[0] for r in rows]
+    for task_uuid in linked:
+        add_evaluator_to_annotation_task(task_uuid, fork["uuid"])
+    return linked
+
+
 def remove_evaluator_from_annotation_task(task_id: str, evaluator_id: str) -> bool:
     with get_db_connection() as conn:
         cursor = conn.cursor()
@@ -11333,16 +11364,15 @@ def _insert_trace_eval_run(
     now: str,
     available_at: Optional[str] = None,
     completed_at: Optional[str] = None,
-) -> str:
-    """Insert one trace_eval_runs row and return its uuid. Caller owns the transaction."""
-    run_uuid = str(uuid.uuid4())
+) -> None:
+    """Insert one trace_eval_runs row. Caller owns the transaction."""
     cur.execute(
         "INSERT INTO trace_eval_runs "
         "(uuid, trace_uuid, org_uuid, agent_id, status, "
         "error, available_at, created_at, updated_at, completed_at) "
         "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         (
-            run_uuid,
+            str(uuid.uuid4()),
             trace_uuid,
             org_uuid,
             agent_id,
@@ -11354,7 +11384,6 @@ def _insert_trace_eval_run(
             completed_at,
         ),
     )
-    return run_uuid
 
 
 def _hold_waiting_trace_eval_runs(
@@ -11464,13 +11493,6 @@ def _scored_trace_count(cur: sqlite3.Cursor, org_uuid: str, cap: int) -> int:
     ).fetchone()[0]
 
 
-def _at_scored_trace_limit(
-    cur: sqlite3.Cursor, org_uuid: str, cap: Optional[int]
-) -> bool:
-    """Whether the workspace holds `cap` scored traces already (None: no limit)."""
-    return cap is not None and _scored_trace_count(cur, org_uuid, cap) >= cap
-
-
 def create_trace_with_eval_run(
     *,
     org_uuid: str,
@@ -11529,7 +11551,12 @@ def create_trace_with_eval_run(
             feedback,
         )
         if scoring_on:
-            if _at_scored_trace_limit(cur, org_uuid, max_scored_traces):
+            over_limit = (
+                max_scored_traces is not None
+                and _scored_trace_count(cur, org_uuid, max_scored_traces)
+                >= max_scored_traces
+            )
+            if over_limit:
                 _insert_trace_eval_run(
                     cur,
                     trace_uuid=row["uuid"],
@@ -11571,58 +11598,6 @@ def create_trace_with_eval_run(
         # row, which an idle worker re-checks on its own poll.
         trace_scoring_nudge.set()
     return row
-
-
-def create_trace_rescore_run(
-    *,
-    org_uuid: str,
-    trace_uuid: str,
-    agent_id: str,
-    max_scored_traces: Optional[int],
-) -> Tuple[Optional[str], Optional[str]]:
-    """Queue one more scoring run for a stored trace, claimable at once.
-
-    Only a trace whose latest run was skipped qualifies, so a scored trace is
-    never counted against the limit twice. Returns `(run_uuid, None)`, or
-    `(None, reason)` with nothing written: `open_run` when the latest run is
-    pending or processing, `not_skipped` when it is anything else but skipped
-    (or there is none), `over_limit` when the workspace holds
-    `max_scored_traces` (None: no limit).
-    """
-    now = trace_scoring.utc_now()
-    with get_db_connection() as conn:
-        cur = conn.cursor()
-        cur.execute("BEGIN IMMEDIATE")
-        latest = cur.execute(
-            "SELECT status FROM trace_eval_runs WHERE trace_uuid = ? "
-            "ORDER BY created_at DESC, id DESC LIMIT 1",
-            (trace_uuid,),
-        ).fetchone()
-        status = latest["status"] if latest else None
-        if status in ("pending", "processing"):
-            conn.rollback()
-            return None, "open_run"
-        if status != "skipped":
-            conn.rollback()
-            return None, "not_skipped"
-        if _at_scored_trace_limit(cur, org_uuid, max_scored_traces):
-            conn.rollback()
-            return None, "over_limit"
-        run_uuid = _insert_trace_eval_run(
-            cur,
-            trace_uuid=trace_uuid,
-            org_uuid=org_uuid,
-            agent_id=agent_id,
-            status=trace_scoring.TraceEvalRunStatus.PENDING,
-            error=None,
-            now=now,
-        )
-        conn.commit()
-
-    import trace_scoring_nudge
-
-    trace_scoring_nudge.set()
-    return run_uuid, None
 
 
 def list_traces(

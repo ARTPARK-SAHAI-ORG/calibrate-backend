@@ -32,6 +32,7 @@ from pydantic import BaseModel, Field, model_validator
 
 from auth_utils import get_current_org, get_current_user_id, get_org_jwt_or_api_key, OrgContext
 from db import (
+    ensure_tool_call_evaluator_on_tasks,
     DEFAULT_PROMPTS_BY_PURPOSE,
     TOOL_CALL_EVALUATOR_SLUG,
     create_evaluator,
@@ -52,6 +53,7 @@ from db import (
 from shared_enums import EvaluatorType
 from utils import (
     DataTypeLiteral,
+    TOOL_CALL_EVALUATOR_TYPE,
     NonBlankStr,
     EVALUATOR_TYPE_DESCRIPTION,
     DATA_TYPE_DESCRIPTION,
@@ -736,6 +738,8 @@ def update_evaluator_endpoint(
         raise HTTPException(status_code=400, detail=str(e))
     if not updated:
         raise HTTPException(status_code=400, detail="No fields to update")
+    if existing.get("evaluator_type") == TOOL_CALL_EVALUATOR_TYPE:
+        ensure_tool_call_evaluator_on_tasks(ctx.org_uuid)
     return _evaluator_response(get_evaluator(evaluator_uuid))
 
 
@@ -756,6 +760,8 @@ def delete_evaluator_endpoint(
         )
     if not delete_evaluator(evaluator_uuid):
         raise HTTPException(status_code=404, detail="Evaluator not found")
+    if existing.get("evaluator_type") == TOOL_CALL_EVALUATOR_TYPE:
+        ensure_tool_call_evaluator_on_tasks(ctx.org_uuid)
     return {"message": "Evaluator deleted"}
 
 
