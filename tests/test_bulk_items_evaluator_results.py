@@ -246,7 +246,25 @@ def test_the_tool_call_evaluator_on_a_reply_row_is_rejected(client):
         headers=h,
     )
     assert r.status_code == 400
-    assert "records a reply rather than a tool call" in r.json()["detail"]
+    assert "records no tool call" in r.json()["detail"]
+
+
+def test_a_reply_with_tool_calls_takes_both_kinds_of_evaluator(client):
+    h = _signup(client)
+    ev = _llm_ev(client, h)
+    task = _task(client, h, ev["uuid"])
+    tc_ev = _tool_call_ev(client, h)
+
+    item = _tool_call_item()
+    item["payload"]["agent_response"] = "I searched"
+    item["evaluator_results"] = {
+        ev["uuid"]: {"value": True}, tc_ev["uuid"]: {"value": False},
+    }
+    r = client.post(
+        f"/annotation-tasks/{task}/items", json={"items": [item]}, headers=h
+    )
+    assert r.status_code == 200, r.text
+    assert r.json()["evaluator_result_count"] == 2
 
 
 def test_scores_on_an_item_that_already_exists_are_refused(client):

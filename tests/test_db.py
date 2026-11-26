@@ -21,7 +21,6 @@ import pytest
 
 import db
 from db import NameAlreadyExistsError
-from utils import is_tool_call_row
 
 
 def _u(prefix: str = "x") -> str:
@@ -3345,80 +3344,55 @@ def test_tool_call_backfill_survives_a_payload_that_is_not_a_list():
     ]
 
 
-def test_tool_call_item_condition_matches_python_rule():
-    """`_TOOL_CALL_ITEM_CONDITION` (SQL, used by the one-time backfill) and
-    `is_tool_call_row` (Python, used everywhere else) must classify every row
-    identically — this is the guardrail the two are allowed to be hand-copied
-    against, per the comment on `_TOOL_CALL_ITEM_CONDITION`."""
+def test_item_reads_stamp_is_tool_call_and_has_reply():
     user_uuid, org_uuid = _fresh_org()
     task_uuid = db.create_annotation_task(
-        name=_u("sql-vs-python"), user_id=user_uuid, org_uuid=org_uuid, type="llm"
+        name=_u("stamps"), user_id=user_uuid, org_uuid=org_uuid, type="llm"
     )
     payloads = [
         {"chat_history": [], "agent_response": "hi"},
-        {"chat_history": [], "tool_calls": [{"tool": "search"}]},
-        {"chat_history": [], "tool_calls": []},
-        {"chat_history": [], "actual_tool_calls": []},
-        {"chat_history": [], "expected_tool_calls": []},
-        {
-            "chat_history": [],
-            "agent_response": "I cannot do that",
-            "expected_tool_calls": [{"tool": "book"}],
-            "actual_tool_calls": [],
-        },
-        {"chat_history": [], "tool_calls": "search(x)"},
-        {"chat_history": [], "actual_tool_calls": "search(x)"},
-        {"chat_history": [], "output": "words", "actual_tool_calls": []},
-        {
-            "chat_history": [],
-            "agent_response": {"content": "words", "label": "en"},
-            "tool_calls": [{"tool": "search"}],
-        },
-        {
-            "chat_history": [],
-            "agent_response": {"content": "", "label": "en"},
-            "tool_calls": [{"tool": "search"}],
-        },
-        {
-            "chat_history": [],
-            "output": {"content": "words"},
-            "tool_calls": [{"tool": "search"}],
-        },
-        {"chat_history": [], "output": {"content": ""}, "tool_calls": [{"tool": "search"}]},
-        {"chat_history": [], "agent_response": {"label": "en"}, "tool_calls": [{"tool": "search"}]},
-        {"chat_history": [], "agent_response": {"content": ""}, "output": "words"},
-        {"chat_history": [], "agent_response": "", "tool_calls": [{"tool": "search"}]},
+        {"chat_history": [], "agent_response": " \n", "tool_calls": [{"tool": "s"}]},
+        {"chat_history": [], "agent_response": "hi", "tool_calls": [{"tool": "s"}]},
     ]
-    item_uuids = db.create_annotation_items(
-        task_uuid, [{"payload": p} for p in payloads]
-    )
+    item_uuids = db.create_annotation_items(task_uuid, [{"payload": p} for p in payloads])
+    by_uuid = {it["uuid"]: it for it in db.get_annotation_items_for_task(task_uuid)}
+    assert [
+        (by_uuid[u]["is_tool_call"], by_uuid[u]["has_reply"]) for u in item_uuids
+    ] == [(False, True), (True, False), (True, True)]
+    single = db.get_annotation_item(item_uuids[2])
+    assert (single["is_tool_call"], single["has_reply"]) == (True, True)
 
-    # Filter via WHERE, exactly how `_TOOL_CALL_ITEM_CONDITION`'s only real
-    # caller (the tool-call-evaluator backfill) uses it. SQLite short-circuits
-    # the AND there; pulled into a SELECT column instead, a non-list
-    # `tool_calls` value would trip `json_array_length` before the preceding
-    # `json_type` guard rules it out.
+
+def test_tool_call_prompt_update_rewrites_only_untouched_copies():
+    _u1, org_old = _fresh_org()
+    _u2, org_edited = _fresh_org()
+    old_fork = db.get_tool_call_evaluator_for_org(org_old)
+    edited_fork = db.get_tool_call_evaluator_for_org(org_edited)
+    edited_prompt = db._TOOL_CALL_OLD_PROMPT + "\nAlso check the dates."
+    assert "Reply from the agent" in db._TOOL_CALL_OLD_PROMPT
     with db.get_db_connection() as conn:
-        cursor = conn.cursor()
-        cursor.execute("""SELECT json_extract('{"a":"hi"}', '$.a.content')""")
-        assert cursor.fetchone()[0] is None
-        sql_result = {}
-        for iu in item_uuids:
-            cursor.execute(
-                f"""
-                SELECT 1 FROM annotation_items i
-                 WHERE i.uuid = ? AND ({db._TOOL_CALL_ITEM_CONDITION})
-                """,
-                (iu,),
+        for fork, prompt in (
+            (old_fork, db._TOOL_CALL_OLD_PROMPT),
+            (edited_fork, edited_prompt),
+        ):
+            conn.execute(
+                "UPDATE evaluator_versions SET system_prompt = ? WHERE uuid = ?",
+                (prompt, fork["live_version_id"]),
             )
-            sql_result[iu] = cursor.fetchone() is not None
-
-    items_by_uuid = {it["uuid"]: it for it in db.get_annotation_items_for_task(task_uuid)}
-    for item_uuid, payload in zip(item_uuids, payloads):
-        item = items_by_uuid[item_uuid]
-        assert sql_result[item_uuid] == is_tool_call_row(item) == item["is_tool_call"], (
-            payload,
+        conn.execute(
+            "DELETE FROM _schema_migrations WHERE name = ?",
+            (db.DROP_REPLY_FROM_TOOL_CALL_PROMPT_MIGRATION,),
         )
+        conn.commit()
+
+    db.init_db()
+
+    updated = db.get_evaluator_version(old_fork["live_version_id"])
+    assert updated["system_prompt"] == db._TOOL_CALL_SEED["version"]["system_prompt"]
+    assert "Reply from the agent" not in updated["system_prompt"]
+    assert len(db.get_evaluator_versions(old_fork["uuid"])) == 1
+    kept = db.get_evaluator_version(edited_fork["live_version_id"])
+    assert kept["system_prompt"] == edited_prompt
 
 
 def test_update_organization_refuses_a_name_that_is_only_spaces(user):

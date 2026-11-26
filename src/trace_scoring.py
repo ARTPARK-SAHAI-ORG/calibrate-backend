@@ -33,6 +33,7 @@ from utils import (
     TOOL_CALL_EVALUATOR_TYPE,
     evaluators_fitting_row,
     get_calibrate_agent_cli,
+    is_blank,
     is_tool_call_evaluator,
     kill_process_group,
     utc_now,
@@ -327,18 +328,21 @@ def resolve_batch_evaluators(
     )
 
 
-def is_tool_call_trace(trace: dict[str, Any]) -> bool:
-    """A trace with no reply and at least one named tool call. Must agree with
-    `db.TRACE_OUTPUT_TYPE_SQL["tool_call"]`: a reply of only spaces, tabs and
-    line breaks is no reply."""
-    output = trace.get("output") if isinstance(trace.get("output"), dict) else {}
-    response = output.get("response")
-    if response is not None and str(response).strip(" \t\n\r"):
-        return False
-    calls = output.get("tool_calls")
+def _trace_output(trace: dict[str, Any]) -> dict[str, Any]:
+    output = trace.get("output")
+    return output if isinstance(output, dict) else {}
+
+
+def trace_has_tool_call(trace: dict[str, Any]) -> bool:
+    """At least one tool call with a named `tool`."""
+    calls = _trace_output(trace).get("tool_calls")
     return isinstance(calls, list) and any(
         isinstance(call, dict) and call.get("tool") for call in calls
     )
+
+
+def trace_has_reply(trace: dict[str, Any]) -> bool:
+    return not is_blank(_trace_output(trace).get("response"))
 
 
 def build_dataset_item(
@@ -834,16 +838,19 @@ def process_claimed_runs(
 
     scorable: list[PreparedRun] = []
     for item in prepared:
-        tool_call = is_tool_call_trace(item.trace)
-        fitting = evaluators_fitting_row(evaluators.hydrated, tool_call)
+        tool_call, reply = trace_has_tool_call(item.trace), trace_has_reply(item.trace)
+        fitting = evaluators_fitting_row(evaluators.hydrated, tool_call, reply)
         if fitting:
-            scorable.append(replace(item, evaluators=fitting, is_tool_call=tool_call))
+            scorable.append(replace(
+                item, evaluators=fitting,
+                is_tool_call=any(is_tool_call_evaluator(ev) for ev in fitting),
+            ))
         else:
             _settle_or_defer_terminal(
                 item.run,
                 reason=(
                     "no_tool_call_evaluator"
-                    if tool_call and not evaluators.has_tool_call_evaluator
+                    if tool_call and not reply and not evaluators.has_tool_call_evaluator
                     else "no_usable_evaluators"
                 ),
                 now=prepare_now, rng=rng, max_attempts=max_attempts,

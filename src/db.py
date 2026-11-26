@@ -14,6 +14,7 @@ from utils import (
     TOOL_CALL_EVALUATOR_TYPE,
     env_int,
     is_tool_call_row,
+    item_has_reply,
     trace_scoring_enabled,
     utc_now,
 )
@@ -2028,6 +2029,20 @@ def init_db():
                     "evaluator version(s)"
                 )
 
+        if not _schema_migration_applied(
+            cursor, DROP_REPLY_FROM_TOOL_CALL_PROMPT_MIGRATION
+        ):
+            rewritten = _backfill_drop_reply_from_tool_call_prompt(cursor)
+            _mark_schema_migration_applied(
+                cursor, DROP_REPLY_FROM_TOOL_CALL_PROMPT_MIGRATION
+            )
+            conn.commit()
+            if rewritten:
+                logger.info(
+                    f"Updated the tool-call correctness prompt on {rewritten} "
+                    "evaluator version(s)"
+                )
+
         # Re-point pre-existing evaluator links from the shared default templates
         # to each org's fork (one-time). Runs after the fork backfill so the
         # forks exist. Finished-run job snapshots stay frozen.
@@ -2170,10 +2185,10 @@ DEFAULT_PROMPTS_BY_PURPOSE: Dict[str, Dict[str, Any]] = {
         "system_prompt": (
             "You are a highly accurate evaluator evaluating the tool calls an agent "
             "made in answer to a user's message.\n\n"
-            "You will be given the `Chat history` between a user and an agent, the "
-            "`Reply from the agent` if it gave one, and the `Tool calls made by the "
-            "agent` in answer to the last message in the `Chat history`. Calls inside "
-            "the `Chat history` were made earlier and are context only.\n\n"
+            "You will be given the `Chat history` between a user and an agent, and "
+            "the `Tool calls made by the agent` in answer to the last message in the "
+            "`Chat history`. Calls inside the `Chat history` were made earlier and "
+            "are context only.\n\n"
             "You need to evaluate if the `Tool calls made by the agent` are right for "
             "what the user needs, judged against the conversation as it stands at the "
             "end, including any correction the user made:\n\n"
@@ -3541,22 +3556,20 @@ RENAME_TOOL_CALL_EVALUATOR_DESCRIPTION_MIGRATION = (
     "rename_tool_call_evaluator_description_v1"
 )
 FILL_TOOL_CALL_EVALUATOR_JUDGE_MIGRATION = "fill_tool_call_evaluator_judge_v1"
+DROP_REPLY_FROM_TOOL_CALL_PROMPT_MIGRATION = "drop_reply_from_tool_call_prompt_v1"
 _TOOL_CALL_EVALUATOR_OLD_DESCRIPTION = (
     "Records whether the agent made the right tool call, judged by a person"
 )
 
-# Mirrors `is_tool_call_row` in utils.py: an expected_tool_calls or
+# The tool-call row rule as `link_tool_call_evaluator_to_tasks_v1` ran it,
+# frozen with that one-time backfill: an expected_tool_calls or
 # actual_tool_calls list, whatever it holds and whatever the agent produced;
 # otherwise no agent_response / output text and a non-empty tool_calls list.
 # A reply may be a string or `{content, ...}`; the CASE reads an object's text
 # the way `message_text` does, and an object with no `content` falls through.
-# Repeated here in SQL — unlike the Python function, this one runs inside a
-# migration's WHERE clause over the whole table, so it can't call out per row.
 # The json_type guards are load-bearing: json_array_length raises "malformed
 # JSON" on a value that is not an array, and one such payload anywhere in the
 # table would abort init_db and stop the service from starting.
-# test_db.py::test_tool_call_item_condition_matches_python_rule checks the two
-# stay in step.
 _TOOL_CALL_ITEM_CONDITION = """
     json_type(i.payload, '$.expected_tool_calls') = 'array'
     OR json_type(i.payload, '$.actual_tool_calls') = 'array'
@@ -3632,6 +3645,32 @@ def _backfill_fill_tool_call_evaluator_judge(cursor: sqlite3.Cursor) -> int:
         )
         """,
         (version["system_prompt"], version["judge_model"], TOOL_CALL_EVALUATOR_TYPE),
+    )
+    return cursor.rowcount
+
+
+# The shipped prompt while the tool-call judge was also shown the reply.
+_TOOL_CALL_OLD_PROMPT = DEFAULT_PROMPTS_BY_PURPOSE["tool-call"]["system_prompt"].replace(
+    "agent, and the `Tool calls",
+    "agent, the `Reply from the agent` if it gave one, and the `Tool calls",
+)
+
+
+def _backfill_drop_reply_from_tool_call_prompt(cursor: sqlite3.Cursor) -> int:
+    """One-time migration: rewrite, in place, every tool-call evaluator version
+    whose prompt is still exactly `_TOOL_CALL_OLD_PROMPT`. Edited copies stay."""
+    cursor.execute(
+        """
+        UPDATE evaluator_versions SET system_prompt = ?
+        WHERE system_prompt = ? AND evaluator_id IN (
+            SELECT uuid FROM evaluators WHERE evaluator_type = ?
+        )
+        """,
+        (
+            DEFAULT_PROMPTS_BY_PURPOSE["tool-call"]["system_prompt"],
+            _TOOL_CALL_OLD_PROMPT,
+            TOOL_CALL_EVALUATOR_TYPE,
+        ),
     )
     return cursor.rowcount
 
@@ -9724,10 +9763,11 @@ def _parse_annotation_item_row(row: sqlite3.Row) -> Dict[str, Any]:
         except (TypeError, ValueError):
             pass
     item["metadata"] = _metadata_list(item.get("metadata"))
-    # Every item read stamps `is_tool_call` here, at the one place both
+    # Every item read stamps these here, at the one place both
     # `get_annotation_item` and `get_annotation_items_for_task` parse a row,
     # so no caller has to remember to do it.
     item["is_tool_call"] = is_tool_call_row(item)
+    item["has_reply"] = item_has_reply(item)
     return item
 
 

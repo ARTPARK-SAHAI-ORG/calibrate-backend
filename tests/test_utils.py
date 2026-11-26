@@ -50,7 +50,9 @@ from utils import (
     get_s3_output_config,
     is_local_object_storage,
     is_evaluator_metric_aggregate,
+    evaluators_fitting_row,
     is_tool_call_row,
+    item_has_reply,
     judge_turn,
     message_text,
     list_object_keys,
@@ -1215,26 +1217,39 @@ def test_judge_turn_keeps_judge_keys_and_drops_the_rest():
     assert judge_turn(None) is None
 
 
-def test_is_tool_call_row_reads_object_form_replies():
+def test_item_has_reply_reads_object_form_and_blank_replies():
+    def has(payload):
+        return item_has_reply({"payload": payload})
+
+    assert has({"agent_response": {"content": "words"}})
+    assert has({"output": {"content": "words", "label": "en"}})
+    assert has({"agent_response": "words"})
+    assert not has({"agent_response": {"content": ""}, "output": "words"})
+    assert not has({"agent_response": " \t\n\r"})
+    assert not has({"output": {"content": "  "}})
+    assert not has({"agent_response": {"label": "en"}})
+    assert not has({})
+    assert not item_has_reply({"payload": "nope"})
+
+
+def test_evaluators_fitting_row_gives_both_kinds_to_a_reply_with_tool_calls():
+    tool_ev = {"uuid": "t", "evaluator_type": "tool-call"}
+    llm_ev = {"uuid": "l", "evaluator_type": "llm"}
+    evs = [tool_ev, llm_ev]
+
+    def fitting(payload):
+        item = {"payload": payload}
+        return evaluators_fitting_row(evs, is_tool_call_row(item), item_has_reply(item))
+
     calls = [{"tool": "search"}]
-    assert not is_tool_call_row(
-        {"payload": {"agent_response": {"content": "words"}, "tool_calls": calls}}
-    )
-    assert is_tool_call_row(
-        {"payload": {"agent_response": {"content": ""}, "tool_calls": calls}}
-    )
-    assert not is_tool_call_row(
-        {"payload": {"output": {"content": "words"}, "tool_calls": calls}}
-    )
-    assert is_tool_call_row(
-        {"payload": {"output": {"content": "", "label": "en"}, "tool_calls": calls}}
-    )
-    assert is_tool_call_row(
-        {"payload": {"agent_response": {"label": "en"}, "tool_calls": calls}}
-    )
-    assert not is_tool_call_row(
-        {"payload": {"agent_response": {"content": ""}, "output": "words"}}
-    )
+    assert fitting({"agent_response": "words", "tool_calls": calls}) == evs
+    assert fitting({"agent_response": "  \n", "tool_calls": calls}) == [tool_ev]
+    assert fitting({"agent_response": "words"}) == [llm_ev]
+    assert fitting({"reference_transcript": "a", "predicted_transcript": "b"}) == [llm_ev]
+    assert fitting(
+        {"agent_response": "words", "expected_tool_calls": calls, "actual_tool_calls": []}
+    ) == evs
+    assert fitting({"agent_response": "", "actual_tool_calls": []}) == [tool_ev]
 
 
 @pytest.mark.parametrize(

@@ -1075,29 +1075,32 @@ def is_tool_call_evaluator(ev: Dict[str, Any]) -> bool:
     return ev.get("evaluator_type") == TOOL_CALL_EVALUATOR_TYPE
 
 
+def is_blank(text: Any) -> bool:
+    """No text, or only spaces, tabs and line breaks."""
+    return text is None or not str(text).strip(" \t\n\r")
+
+
+def evaluator_fits_row(ev: Dict[str, Any], tool_calls: bool, reply: bool) -> bool:
+    """A tool-call evaluator judges a row with tool calls; any other evaluator
+    judges a row with a reply, or one with no tool calls."""
+    return tool_calls if is_tool_call_evaluator(ev) else (not tool_calls or reply)
+
+
 def evaluators_fitting_row(
-    evaluators: List[Dict[str, Any]], row_is_tool_call: bool
+    evaluators: List[Dict[str, Any]], tool_calls: bool, reply: bool
 ) -> List[Dict[str, Any]]:
-    """Tool-call evaluators judge only tool-call rows, every other evaluator only the rest."""
-    return [ev for ev in evaluators if is_tool_call_evaluator(ev) == row_is_tool_call]
+    return [ev for ev in evaluators if evaluator_fits_row(ev, tool_calls, reply)]
 
 
 def is_tool_call_row(item: Dict[str, Any]) -> bool:
-    """True when an annotation item is judged on the tool call it made rather
-    than on a text reply. Safe on any item — returns False for stt/tts/
-    conversation rows, which carry none of these fields.
+    """True when tool-call evaluators judge an annotation item. False for
+    stt/tts/conversation rows, which carry none of these fields.
 
-    Two shapes qualify. An item built from a tool-call test or trace carries
-    `expected_tool_calls` / `actual_tool_calls`, and the mere presence of
-    either list settles it whatever the agent produced: an agent that answered
-    in words instead of calling the tool is the failure being judged, and the
-    empty list it leaves behind must not read as a text row.
-    Any other item qualifies only the original way — a tool call in place of a
-    reply: no `agent_response` / `output` text and a non-empty `tool_calls`
-    list.
-
-    The canonical home for this rule — `db._TOOL_CALL_ITEM_CONDITION` mirrors
-    it in raw SQL for a WHERE clause and must move with it."""
+    An item built from a tool-call test or trace carries `expected_tool_calls`
+    / `actual_tool_calls`, and the presence of either list settles it whatever
+    the agent produced: an agent that answered in words instead of calling the
+    tool is the failure being judged. Any other item qualifies with a non-empty
+    `tool_calls` list."""
     payload = item.get("payload")
     if not isinstance(payload, dict):
         return False
@@ -1105,11 +1108,19 @@ def is_tool_call_row(item: Dict[str, Any]) -> bool:
         payload.get("actual_tool_calls"), list
     ):
         return True
+    calls = payload.get("tool_calls")
+    return isinstance(calls, list) and bool(calls)
+
+
+def item_has_reply(item: Dict[str, Any]) -> bool:
+    """True when an annotation item's `agent_response` (or `output`) has text."""
+    payload = item.get("payload")
+    if not isinstance(payload, dict):
+        return False
     text = message_text(payload.get("agent_response"))
     if text is None:
         text = message_text(payload.get("output"))
-    calls = payload.get("tool_calls")
-    return not text and isinstance(calls, list) and bool(calls)
+    return not is_blank(text)
 
 
 def generate_presigned_upload_url(

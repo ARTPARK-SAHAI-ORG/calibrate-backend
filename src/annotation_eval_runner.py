@@ -54,7 +54,9 @@ from utils import (
     get_s3_client,
     get_s3_output_config,
     is_job_timed_out,
+    is_tool_call_evaluator,
     is_tool_call_row,
+    item_has_reply,
     judge_turn,
     kill_process_group,
     message_text,
@@ -127,7 +129,9 @@ def required_evaluator_ids_for_item(
     pairs with it, which is what the labelling form draws."""
     return {
         ev["uuid"]
-        for ev in evaluators_fitting_row(required_evaluators, is_tool_call_row(item))
+        for ev in evaluators_fitting_row(
+            required_evaluators, is_tool_call_row(item), item_has_reply(item)
+        )
     }
 
 
@@ -353,8 +357,9 @@ def _build_llm_dataset(
         "evaluator_variables"?: { "<evaluator_uuid>": { "<var>": <value>, ... } } }
     `agent_response` may also be `{content, label?, versions?}`; the judge sees only `content`.
 
-    A tool-call row may also carry `expected_tool_calls` / `actual_tool_calls`
-    and goes as a `tool_call_judge` case. A row no evaluator fits is skipped.
+    A row a tool-call evaluator judges may also carry `expected_tool_calls` /
+    `actual_tool_calls` and goes as a `tool_call_judge` case, with every
+    evaluator that fits it. A row no evaluator fits is skipped.
 
     `evaluator_variables` lets each item supply per-evaluator `{{variable}}`
     values for evaluators whose prompts contain placeholders. Values are
@@ -366,10 +371,12 @@ def _build_llm_dataset(
     _require_evaluators(evaluators_resolved, "LLM --eval-only")
     out: List[Dict[str, Any]] = []
     for it in items:
-        row_is_tool_call = is_tool_call_row(it)
-        row_evaluators = evaluators_fitting_row(evaluators_resolved, row_is_tool_call)
+        row_evaluators = evaluators_fitting_row(
+            evaluators_resolved, is_tool_call_row(it), item_has_reply(it)
+        )
         if not row_evaluators:
             continue
+        row_is_tool_call = any(is_tool_call_evaluator(ev) for ev in row_evaluators)
         payload = _payload_dict(it)
         history = payload.get("chat_history")
         response = message_text(payload.get("agent_response"))
@@ -482,10 +489,12 @@ def _build_llm_general_dataset(
     _require_evaluators(evaluators_resolved, "general eval")
     out: List[Dict[str, Any]] = []
     for it in items:
-        row_is_tool_call = is_tool_call_row(it)
-        row_evaluators = evaluators_fitting_row(evaluators_resolved, row_is_tool_call)
+        row_evaluators = evaluators_fitting_row(
+            evaluators_resolved, is_tool_call_row(it), item_has_reply(it)
+        )
         if not row_evaluators:
             continue
+        row_is_tool_call = any(is_tool_call_evaluator(ev) for ev in row_evaluators)
         payload = _payload_dict(it)
         input_text = message_text(payload.get("input"))
         output_text = message_text(payload.get("output"))
@@ -841,7 +850,9 @@ def _parse_results_general(
     sent = {
         (it["uuid"], ev["uuid"])
         for it in items
-        for ev in evaluators_fitting_row(evaluators_resolved, is_tool_call_row(it))
+        for ev in evaluators_fitting_row(
+            evaluators_resolved, is_tool_call_row(it), item_has_reply(it)
+        )
     }
     runs = _parse_results_stt(output_dir, evaluators_resolved, job_uuid)
     return [r for r in runs if (r["item_id"], r["evaluator_id"]) in sent]
