@@ -521,6 +521,86 @@ def test_link_list_and_unlink_evaluator(client):
     assert r.status_code == 404
 
 
+
+def _agent_evaluator_ids(client, h, agent_uuid):
+    r = client.get(f"/agents/{agent_uuid}/evaluators", headers=h)
+    assert r.status_code == 200, r.text
+    return {e["uuid"] for e in r.json()["items"]}
+
+
+def test_bulk_unlink_evaluators_removes_several_in_one_call(client):
+    h = _signup(client)
+    agent = _create_agent(client, h, f"bu-{uuid.uuid4().hex[:6]}")["uuid"]
+    ev1, ev2, keep = (_create_evaluator(client, h) for _ in range(3))
+    _link_evaluators(client, h, agent, ev1, ev2, keep)
+
+    r = client.post(
+        f"/agents/{agent}/evaluators/bulk-unlink",
+        json={"evaluator_ids": [ev1, ev2]},
+        headers=h,
+    )
+    assert r.status_code == 200, r.text
+    assert r.json() == {"removed_count": 2, "message": "Removed 2 evaluator(s) from agent"}
+    remaining = _agent_evaluator_ids(client, h, agent)
+    assert ev1 not in remaining and ev2 not in remaining
+    assert keep in remaining
+
+    # Re-linking after a bulk unlink works.
+    _link_evaluators(client, h, agent, ev1)
+    assert ev1 in _agent_evaluator_ids(client, h, agent)
+
+
+def test_bulk_unlink_evaluators_skips_unlinked_and_unknown(client):
+    h = _signup(client)
+    agent = _create_agent(client, h, f"bu-{uuid.uuid4().hex[:6]}")["uuid"]
+    linked, never_linked = _create_evaluator(client, h), _create_evaluator(client, h)
+    _link_evaluators(client, h, agent, linked)
+
+    r = client.post(
+        f"/agents/{agent}/evaluators/bulk-unlink",
+        json={"evaluator_ids": [linked, never_linked, str(uuid.uuid4())]},
+        headers=h,
+    )
+    assert r.status_code == 200, r.text
+    assert r.json()["removed_count"] == 1
+
+    # Repeating the same call removes nothing and still succeeds.
+    r = client.post(
+        f"/agents/{agent}/evaluators/bulk-unlink",
+        json={"evaluator_ids": [linked]},
+        headers=h,
+    )
+    assert r.status_code == 200, r.text
+    assert r.json()["removed_count"] == 0
+
+
+def test_bulk_unlink_evaluators_rejects_empty(client):
+    h = _signup(client)
+    agent = _create_agent(client, h, f"bu-{uuid.uuid4().hex[:6]}")["uuid"]
+    r = client.post(
+        f"/agents/{agent}/evaluators/bulk-unlink", json={"evaluator_ids": []}, headers=h
+    )
+    assert r.status_code == 400
+    assert r.json()["detail"] == "evaluator_ids must not be empty"
+
+
+def test_bulk_unlink_evaluators_refuses_missing_or_foreign_agent(client):
+    ha = _signup(client)
+    agent = _create_agent(client, ha, f"bu-{uuid.uuid4().hex[:6]}")["uuid"]
+    ev = _create_evaluator(client, ha)
+    _link_evaluators(client, ha, agent, ev)
+    hb = _signup(client)
+
+    for agent_uuid, h, status in ((agent, hb, 403), (str(uuid.uuid4()), ha, 404)):
+        r = client.post(
+            f"/agents/{agent_uuid}/evaluators/bulk-unlink",
+            json={"evaluator_ids": [ev]},
+            headers=h,
+        )
+        assert r.status_code == status, r.text
+    # The other workspace's call removed nothing.
+    assert ev in _agent_evaluator_ids(client, ha, agent)
+
 def test_bulk_delete_agents(client):
     h = _signup(client)
     a1 = _create_agent(client, h, f"bd-{uuid.uuid4().hex[:6]}")["uuid"]

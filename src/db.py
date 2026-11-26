@@ -5449,6 +5449,30 @@ def remove_evaluator_from_agent(agent_id: str, evaluator_id: str) -> bool:
         return deleted
 
 
+def bulk_remove_evaluators_from_agent(agent_id: str, evaluator_ids: List[str]) -> int:
+    """Soft delete multiple evaluator links from an agent. Returns the number of links removed."""
+    if not evaluator_ids:
+        return 0
+
+    placeholders = ",".join("?" for _ in evaluator_ids)
+    with get_db_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            f"UPDATE agent_evaluators SET deleted_at = CURRENT_TIMESTAMP "
+            f"WHERE agent_id = ? AND evaluator_id IN ({placeholders}) AND deleted_at IS NULL",
+            (agent_id, *evaluator_ids),
+        )
+        conn.commit()
+        deleted_count = cursor.rowcount
+
+        if deleted_count > 0:
+            logger.info(
+                f"Bulk soft deleted {deleted_count} evaluator links from agent {agent_id}"
+            )
+
+        return deleted_count
+
+
 def get_evaluators_for_agent(agent_id: str) -> List[Dict[str, Any]]:
     """Get all evaluators linked to an agent.
 
