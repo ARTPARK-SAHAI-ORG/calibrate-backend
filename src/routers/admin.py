@@ -57,7 +57,8 @@ class PeriodCounts(BaseModel):
     cost: Optional[float] = Field(
         description="Cost in USD of the test runs and model comparisons started in the period"
     )
-    traces_received: int = Field(description="Traces received in the period")
+    traces_received: int = Field(description="Traces received from the agent's own app in the period")
+    chat_messages: int = Field(description="Messages answered on agents' chat links in the period")
     traces_scored: int = Field(description="Traces scored in the period")
     labelling_jobs_finished: int = Field(description="Labelling jobs finished in the period")
     labels_collected: int = Field(description="Labels collected in the period")
@@ -68,7 +69,7 @@ class PeriodCounts(BaseModel):
 class Activity(PeriodCounts):
     new_users: int = Field(description="Users who signed up in the period")
     active_workspaces: int = Field(
-        description="Workspaces that started an evaluation, received a trace, or collected a label in the period"
+        description="Workspaces that started an evaluation, received a trace, answered a chat message, or collected a label in the period"
     )
 
 
@@ -83,7 +84,8 @@ class DayCounts(BaseModel):
     tts: int = Field(description="Text to speech evaluations started that day")
     labelling_evaluator_runs: int = Field(description="Evaluator runs over labelling items started that day")
     failed_evaluations: int = Field(description="Evaluations started that day that failed")
-    traces_received: int = Field(description="Traces received that day")
+    traces_received: int = Field(description="Traces received from the agent's own app that day")
+    chat_messages: int = Field(description="Messages answered on agents' chat links that day")
     traces_scored: int = Field(description="Traces scored that day")
     labels_collected: int = Field(description="Labels collected that day")
     labelling_jobs_finished: int = Field(description="Labelling jobs finished that day")
