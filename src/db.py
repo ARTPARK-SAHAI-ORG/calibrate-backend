@@ -10,7 +10,13 @@ from typing import Optional, List, Dict, Any, Set, Tuple, TYPE_CHECKING
 from contextlib import contextmanager
 
 import trace_scoring
-from utils import env_int, is_tool_call_row, trace_scoring_enabled, utc_now
+from utils import (
+    TOOL_CALL_EVALUATOR_TYPE,
+    env_int,
+    is_tool_call_row,
+    trace_scoring_enabled,
+    utc_now,
+)
 
 if TYPE_CHECKING:
     from routers.org_limits import OrgLimits
@@ -2008,6 +2014,20 @@ def init_db():
                     "workspace fork(s)"
                 )
 
+        if not _schema_migration_applied(
+            cursor, FILL_TOOL_CALL_EVALUATOR_JUDGE_MIGRATION
+        ):
+            filled = _backfill_fill_tool_call_evaluator_judge(cursor)
+            _mark_schema_migration_applied(
+                cursor, FILL_TOOL_CALL_EVALUATOR_JUDGE_MIGRATION
+            )
+            conn.commit()
+            if filled:
+                logger.info(
+                    f"Filled the tool-call correctness judge on {filled} "
+                    "evaluator version(s)"
+                )
+
         # Re-point pre-existing evaluator links from the shared default templates
         # to each org's fork (one-time). Runs after the fork backfill so the
         # forks exist. Finished-run job snapshots stay frozen.
@@ -2143,6 +2163,50 @@ DEFAULT_PROMPTS_BY_PURPOSE: Dict[str, Dict[str, Any]] = {
         "kind": "single",
         "output_type": "binary",
         "output_config": _BINARY_CONFIG,
+        "variables": [],
+    },
+    "tool-call": {
+        "name": "Tool call correctness",
+        "system_prompt": (
+            "You are a highly accurate evaluator evaluating the tool calls an agent "
+            "made in answer to a user's message.\n\n"
+            "You will be given the `Chat history` between a user and an agent, the "
+            "`Reply from the agent` if it gave one, and the `Tool calls made by the "
+            "agent` in answer to the last message in the `Chat history`. Calls inside "
+            "the `Chat history` were made earlier and are context only.\n\n"
+            "You need to evaluate if the `Tool calls made by the agent` are right for "
+            "what the user needs, judged against the conversation as it stands at the "
+            "end, including any correction the user made:\n\n"
+            "- The right tools, with the right arguments.\n"
+            "- Nothing missing and nothing extra.\n"
+            "- The agent's tools are its own and are not listed here, so never mark a "
+            "call wrong because you do not recognise the tool.\n"
+            "- If an `Expected tool calls` section is present, compare against it. A "
+            "call is not wrong because of an argument that section says to ignore. "
+            'There, `{"match_type": "llm_judge", "criteria": ...}` means the value '
+            "must meet those criteria."
+        ),
+        "judge_model": DEFAULT_TEXT_JUDGE_MODEL,
+        "evaluator_type": TOOL_CALL_EVALUATOR_TYPE,
+        "data_type": "text",
+        "kind": "single",
+        "output_type": "binary",
+        "output_config": {
+            "scale": [
+                {
+                    "value": True,
+                    "name": "Correct",
+                    "description": "The agent made the right tool call.",
+                    "color": "#16a34a",
+                },
+                {
+                    "value": False,
+                    "name": "Wrong",
+                    "description": "The agent made the wrong tool call.",
+                    "color": "#dc2626",
+                },
+            ]
+        },
         "variables": [],
     },
     "stt": {
@@ -2379,42 +2443,13 @@ _LLM_GENERAL_SEED = {
 }
 
 
-# Seed for `default-tool-call-correctness`: the only default with no AI judge.
-# A tool-call row is labelled by a person, so `judge_model` and `system_prompt`
-# are deliberately empty strings (the columns are NOT NULL) and nothing ever
-# renders or sends them.
 TOOL_CALL_EVALUATOR_SLUG = "default-tool-call-correctness"
 
-_TOOL_CALL_SEED = {
-    "slug": TOOL_CALL_EVALUATOR_SLUG,
-    "name": "Tool call correctness",
-    "description": "Whether the agent made the right tool call",
-    "evaluator_type": "tool-call",
-    "data_type": "text",
-    "kind": "single",
-    "output_type": "binary",
-    "version": {
-        "judge_model": "",
-        "system_prompt": "",
-        "output_config": {
-            "scale": [
-                {
-                    "value": True,
-                    "name": "Correct",
-                    "description": "The agent made the right tool call.",
-                    "color": "#16a34a",
-                },
-                {
-                    "value": False,
-                    "name": "Wrong",
-                    "description": "The agent made the wrong tool call.",
-                    "color": "#dc2626",
-                },
-            ]
-        },
-        "variables": [],
-    },
-}
+_TOOL_CALL_SEED = _seed_from_purpose(
+    TOOL_CALL_EVALUATOR_SLUG,
+    "Whether the agent made the right tool call",
+    "tool-call",
+)
 
 
 DEFAULT_EVALUATORS_SEED = [
@@ -3505,6 +3540,7 @@ LINK_TOOL_CALL_EVALUATOR_TO_TASKS_MIGRATION = "link_tool_call_evaluator_to_tasks
 RENAME_TOOL_CALL_EVALUATOR_DESCRIPTION_MIGRATION = (
     "rename_tool_call_evaluator_description_v1"
 )
+FILL_TOOL_CALL_EVALUATOR_JUDGE_MIGRATION = "fill_tool_call_evaluator_judge_v1"
 _TOOL_CALL_EVALUATOR_OLD_DESCRIPTION = (
     "Records whether the agent made the right tool call, judged by a person"
 )
@@ -3568,6 +3604,34 @@ def _backfill_rename_tool_call_evaluator_description(cursor: sqlite3.Cursor) -> 
             TOOL_CALL_EVALUATOR_SLUG,
             _TOOL_CALL_EVALUATOR_OLD_DESCRIPTION,
         ),
+    )
+    return cursor.rowcount
+
+
+# The characters SQL TRIM must strip for a value to count as blank.
+_SQL_BLANK_CHARS = "' ' || char(9) || char(10) || char(13)"
+
+
+def _backfill_fill_tool_call_evaluator_judge(cursor: sqlite3.Cursor) -> int:
+    """One-time migration: give every workspace's tool-call evaluator, copies
+    included, the seed's prompt and model. Fills every blank version in place
+    rather than adding one, so answers people already recorded stay on them, and
+    an older version made live again still has a judge. A prompt or model a user
+    wrote is kept. The template itself is reconciled by `_seed_default_evaluators`."""
+    version = _TOOL_CALL_SEED["version"]
+    blank = "TRIM({}, " + _SQL_BLANK_CHARS + ") = ''"
+    prompt_blank, model_blank = blank.format("system_prompt"), blank.format("judge_model")
+    cursor.execute(
+        f"""
+        UPDATE evaluator_versions
+           SET system_prompt = CASE WHEN {prompt_blank} THEN ? ELSE system_prompt END,
+               judge_model = CASE WHEN {model_blank} THEN ? ELSE judge_model END
+        WHERE ({prompt_blank} OR {model_blank}) AND deleted_at IS NULL AND evaluator_id IN (
+            SELECT uuid FROM evaluators
+            WHERE evaluator_type = ? AND org_uuid IS NOT NULL AND deleted_at IS NULL
+        )
+        """,
+        (version["system_prompt"], version["judge_model"], TOOL_CALL_EVALUATOR_TYPE),
     )
     return cursor.rowcount
 
@@ -9406,6 +9470,46 @@ def add_evaluator_to_annotation_task(
         return link_id
 
 
+def ensure_tool_call_evaluator_on_tasks(
+    org_uuid: str,
+    task_uuids: Optional[List[str]] = None,
+    has_tool_call_items: bool = False,
+) -> List[str]:
+    """Link the org's Tool call correctness to every task (of `task_uuids`, or
+    the whole org) that holds a live tool-call item but no live tool-call
+    evaluator, since such an item has no other question to answer. Returns
+    the tasks it linked. `has_tool_call_items` skips the item check, for a
+    caller linking before it stores the items."""
+    fork = get_tool_call_evaluator_for_org(org_uuid)
+    if fork is None:
+        return []
+    scope = ""
+    params: List[Any] = [org_uuid, TOOL_CALL_EVALUATOR_TYPE]
+    if task_uuids is not None:
+        scope = f" AND t.uuid IN ({','.join('?' * len(task_uuids))})"
+        params.extend(task_uuids)
+    with get_db_connection() as conn:
+        rows = conn.execute(
+            f"""
+            SELECT DISTINCT t.uuid FROM annotation_tasks t
+              LEFT JOIN annotation_items i ON i.task_id = t.uuid AND i.deleted_at IS NULL
+             WHERE t.org_uuid = ? AND t.deleted_at IS NULL
+               AND ({"1" if has_tool_call_items else _TOOL_CALL_ITEM_CONDITION})
+               AND NOT EXISTS (
+                   SELECT 1 FROM annotation_task_evaluators ate
+                     JOIN evaluators e ON e.uuid = ate.evaluator_id
+                    WHERE ate.task_id = t.uuid AND ate.deleted_at IS NULL
+                      AND e.deleted_at IS NULL AND e.evaluator_type = ?
+               ){scope}
+            """,
+            params,
+        ).fetchall()
+    linked = [r[0] for r in rows]
+    for task_uuid in linked:
+        add_evaluator_to_annotation_task(task_uuid, fork["uuid"])
+    return linked
+
+
 def remove_evaluator_from_annotation_task(task_id: str, evaluator_id: str) -> bool:
     with get_db_connection() as conn:
         cursor = conn.cursor()
@@ -9905,7 +10009,7 @@ def create_annotation_job(
             [(job_uuid, item_id, *snapshot_by_uuid[item_id]) for item_id in item_uuids],
         )
         # Snapshot the currently-linked evaluator set. Reads via
-        # `get_evaluator_ids_for_job` give the auto-complete check a stable
+        # `get_evaluators_for_job` give the auto-complete check a stable
         # view independent of later link/unlink on the parent task. The
         # parent task's display order (`position`) is snapshotted into the
         # job pivot so the annotator's form keeps the order in place at
@@ -9948,22 +10052,14 @@ def create_annotation_job(
     return job_uuid
 
 
-def get_evaluator_ids_for_job(
-    job_uuid: str, required_only: bool = False
-) -> List[str]:
+def get_evaluator_ids_for_job(job_uuid: str) -> List[str]:
     """Return the snapshotted evaluator UUIDs for a job, NOT the live linked
-    set on the parent task.
-
-    `required_only=True` drops the ones annotators may leave blank — that is
-    the set the auto-completion check measures against.
-    """
+    set on the parent task."""
     with get_db_connection() as conn:
         cursor = conn.cursor()
         cursor.execute(
             "SELECT evaluator_id FROM annotation_job_evaluators "
-            "WHERE job_id = ? "
-            + ("AND is_optional = 0 " if required_only else "")
-            + "ORDER BY position ASC, id ASC",
+            "WHERE job_id = ? ORDER BY position ASC, id ASC",
             (job_uuid,),
         )
         return [r["evaluator_id"] for r in cursor.fetchall()]
@@ -10853,6 +10949,7 @@ def get_evaluators_for_annotation_task(task_id: str) -> List[Dict[str, Any]]:
                 e.output_type AS output_type,
                 e.owner_user_id AS owner_user_id,
                 e.slug AS slug,
+                e.source_default_slug AS source_default_slug,
                 e.live_version_id AS live_version_id,
                 ate.created_at AS linked_at,
                 ate.position AS position,
@@ -10904,6 +11001,7 @@ def get_evaluators_for_annotation_tasks(
                 e.output_type AS output_type,
                 e.owner_user_id AS owner_user_id,
                 e.slug AS slug,
+                e.source_default_slug AS source_default_slug,
                 e.live_version_id AS live_version_id,
                 ate.created_at AS linked_at,
                 ate.position AS position,
@@ -10988,7 +11086,9 @@ def _like_escape(text: str) -> str:
 # Mirrors how routers/traces._to_summary fills response_preview and
 # tool_call_count: a reply is non-blank text, a tool call needs a tool name,
 # and a trace with both counts as a reply only.
-_TRACE_HAS_RESPONSE = "TRIM(COALESCE(json_extract(output, '$.response'), '')) != ''"
+_TRACE_HAS_RESPONSE = (
+    f"TRIM(COALESCE(json_extract(output, '$.response'), ''), {_SQL_BLANK_CHARS}) != ''"
+)
 _TRACE_HAS_TOOL_CALL = (
     "EXISTS (SELECT 1 FROM json_each(output, '$.tool_calls') "
     "WHERE COALESCE(json_extract(value, '$.tool'), '') != '')"

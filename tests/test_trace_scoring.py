@@ -6,7 +6,9 @@ Anything touching the claim transaction lives in `test_trace_eval_claim.py`.
 
 from __future__ import annotations
 
+import json
 import random
+import sqlite3
 import uuid
 
 import pytest
@@ -47,11 +49,9 @@ def test_conversation_agent_maps_to_response_llm():
     ev = _ev("llm", live=live, name="clean")
     result = ts.resolve_trace_scoring("conversation", [(ev, _version(live))])
     assert result.evaluation_type == "response"
-    assert result.evaluator_type == "llm"
     assert [p.evaluator_uuid for p in result.eligible] == [ev["uuid"]]
     assert result.eligible[0].evaluator_version_id == live
     assert result.ineligible == []
-    assert result.skip_reason is None
 
 
 def test_general_agent_maps_to_general_llm_general():
@@ -59,9 +59,7 @@ def test_general_agent_maps_to_general_llm_general():
     ev = _ev("llm-general", live=live, name="gen")
     result = ts.resolve_trace_scoring("general", [(ev, _version(live))])
     assert result.evaluation_type == "general"
-    assert result.evaluator_type == "llm-general"
     assert result.eligible[0].evaluator_uuid == ev["uuid"]
-    assert result.skip_reason is None
 
 
 def test_mixed_evaluator_types_are_filtered_before_validation():
@@ -102,7 +100,6 @@ def test_no_live_version_disqualifies():
         "none": ts.IneligibleReason.NO_LIVE_VERSION,
         "missing": ts.IneligibleReason.NO_LIVE_VERSION,
     }
-    assert result.skip_reason == "no_usable_evaluators"
 
 
 def test_declares_variables_disqualifies():
@@ -114,6 +111,161 @@ def test_declares_variables_disqualifies():
     )
     assert result.eligible == []
     assert result.ineligible[0].reason == ts.IneligibleReason.DECLARES_VARIABLES
+
+
+@pytest.mark.parametrize("interaction_type", ["conversation", "general"])
+def test_a_tool_call_evaluator_is_eligible_on_both_agent_types(
+    interaction_type,
+):
+    live = str(uuid.uuid4())
+    ev = _ev("tool-call", live=live)
+    result = ts.resolve_trace_scoring(interaction_type, [(ev, _version(live))])
+    assert [p.evaluator_uuid for p in result.eligible] == [ev["uuid"]]
+    assert result.eligible[0].execution["evaluator_type"] == "tool-call"
+    assert result.ineligible == []
+
+
+def test_tool_call_evaluator_ineligible_reasons():
+    live = str(uuid.uuid4())
+    no_live = _ev("tool-call", name="no-live")
+    with_vars = _ev("tool-call", live=live, name="vars")
+    result = ts.resolve_trace_scoring(
+        "conversation",
+        [
+            (no_live, None),
+            (with_vars, _version(live, variables=[{"name": "x"}])),
+        ],
+    )
+    assert {i.name: i.reason for i in result.ineligible} == {
+        "no-live": ts.IneligibleReason.NO_LIVE_VERSION,
+        "vars": ts.IneligibleReason.DECLARES_VARIABLES,
+    }
+
+
+_NAMED_CALL = {"tool": "get_schedule", "arguments": {"weeks": 14}}
+
+
+@pytest.mark.parametrize(
+    ("output", "expected"),
+    [
+        ({"tool_calls": [_NAMED_CALL]}, True),
+        ({"response": None, "tool_calls": [_NAMED_CALL]}, True),
+        ({"response": "", "tool_calls": [_NAMED_CALL]}, True),
+        ({"response": "   ", "tool_calls": [_NAMED_CALL]}, True),
+        ({"response": "\n", "tool_calls": [_NAMED_CALL]}, True),
+        ({"response": " \t\r\n", "tool_calls": [_NAMED_CALL]}, True),
+        ({"response": "\tok\n", "tool_calls": [_NAMED_CALL]}, False),
+        ({"response": "Week 14.", "tool_calls": [_NAMED_CALL]}, False),
+        ({"response": "", "tool_calls": [{"tool": ""}]}, False),
+        ({"response": "", "tool_calls": [{"arguments": {}}]}, False),
+        ({"response": "", "tool_calls": [{"tool": ""}, _NAMED_CALL]}, True),
+        ({"response": "", "tool_calls": []}, False),
+        ({"response": "", "tool_calls": None}, False),
+        ({"response": "Week 14."}, False),
+    ],
+)
+def test_is_tool_call_trace_agrees_with_the_output_type_filter(output, expected):
+    assert ts.is_tool_call_trace({"output": output}) is expected
+    with sqlite3.connect(":memory:") as conn:
+        in_sql = conn.execute(
+            f"SELECT {db.TRACE_OUTPUT_TYPE_SQL['tool_call']} FROM (SELECT ? AS output)",
+            (json.dumps(output),),
+        ).fetchone()[0]
+    assert bool(in_sql) is expected
+
+
+@pytest.mark.parametrize("trace", [{}, {"output": None}, {"output": "text"}])
+def test_is_tool_call_trace_reads_a_trace_with_no_output_object(trace):
+    assert ts.is_tool_call_trace(trace) is False
+
+
+def test_each_trace_gets_only_the_evaluators_for_its_kind():
+    tool_ev = {"uuid": "t", "evaluator_type": "tool-call"}
+    llm_ev = {"uuid": "l", "evaluator_type": "llm"}
+    tool_trace = {"output": {"tool_calls": [_NAMED_CALL]}}
+    reply_trace = {"output": {"response": "Week 14.", "tool_calls": [_NAMED_CALL]}}
+    evs = [tool_ev, llm_ev]
+    assert ts.evaluators_fitting_row(evs, ts.is_tool_call_trace(tool_trace)) == [tool_ev]
+    assert ts.evaluators_fitting_row(evs, ts.is_tool_call_trace(reply_trace)) == [llm_ev]
+
+
+def test_a_conversation_tool_call_trace_goes_to_the_tool_call_judge():
+    history = [
+        {"role": "user", "content": "when?"},
+        {"role": "assistant", "tool_calls": [{"tool": "lookup", "arguments": {"a": 1}}]},
+        {"role": "user", "content": "and now?"},
+    ]
+    item = ts.build_dataset_item(
+        "run-1",
+        "response",
+        {"input": history, "output": {"response": None, "tool_calls": [_NAMED_CALL]}},
+        [{"name": "Tools"}],
+        True,
+    )
+    assert item == {
+        "test_case": {
+            "id": "run-1",
+            "evaluation": {"type": "tool_call_judge", "criteria": [{"name": "Tools"}]},
+            "history": history,
+        },
+        "output": {"response": "", "tool_calls": [_NAMED_CALL]},
+    }
+
+
+def test_a_general_tool_call_trace_goes_to_the_tool_call_judge_with_its_input():
+    item = ts.build_dataset_item(
+        "run-1",
+        "general",
+        {"input": "When?", "output": {"tool_calls": [_NAMED_CALL]}},
+        [{"name": "Tools"}],
+        True,
+    )
+    assert item == {
+        "test_case": {
+            "id": "run-1",
+            "evaluation": {"type": "tool_call_judge", "criteria": [{"name": "Tools"}]},
+            "input": "When?",
+        },
+        "output": {"response": "", "tool_calls": [_NAMED_CALL]},
+    }
+
+
+def test_a_reply_trace_with_tool_calls_is_sent_unchanged():
+    history = [
+        {"role": "assistant", "tool_calls": [{"tool": "lookup"}]},
+        {"role": "user", "content": "when?", "extra": 1},
+    ]
+    item = ts.build_dataset_item(
+        "run-1",
+        "response",
+        {"input": history, "output": {"response": "Week 14.", "tool_calls": [_NAMED_CALL]}},
+        [],
+        False,
+    )
+    assert item["test_case"]["history"] == history
+    assert item["output"] == {"response": "Week 14.", "tool_calls": [_NAMED_CALL]}
+
+
+def test_the_evaluator_type_is_not_sent_to_the_cli():
+    live = str(uuid.uuid4())
+    ev = _ev("tool-call", live=live, name="Tools")
+    execution = ts.resolve_trace_scoring(
+        "conversation", [(ev, _version(live))]
+    ).eligible[0].execution
+    config, dataset, manifest = ts.build_eval_only_batch(
+        [
+            ts.PreparedRun(
+                {"uuid": "run-1"},
+                {"input": [], "output": {"tool_calls": [_NAMED_CALL]}},
+                [execution],
+                is_tool_call=True,
+            )
+        ],
+        "response",
+    )
+    assert "evaluator_type" not in config["evaluators"][0]
+    assert dataset[0]["test_case"]["evaluation"]["criteria"] == [{"name": "Tools"}]
+    assert manifest == {"Tools": ev["uuid"]}
 
 
 def test_empty_variables_list_is_eligible():
@@ -132,14 +284,12 @@ def test_unsupported_interaction_type_skips_and_marks_wrong_type():
     assert result.evaluation_type is None
     assert result.eligible == []
     assert result.ineligible[0].reason == ts.IneligibleReason.WRONG_TYPE
-    assert result.skip_reason == "unsupported_interaction_type"
 
 
 def test_empty_linked_set_is_not_usable():
     result = ts.resolve_trace_scoring("conversation", [])
     assert result.eligible == []
     assert result.ineligible == []
-    assert result.skip_reason == "no_usable_evaluators"
 
 
 def test_resolve_live_evaluators_pairs_version_or_none():
@@ -560,6 +710,18 @@ def test_a_deleted_agent_settles_its_claimed_runs_as_skipped():
     assert row["error"] == ts.TraceEvalSettleSkipReason.AGENT_DELETED.value
 
 
+def test_a_batch_resolving_to_a_settle_reason_stores_its_text(monkeypatch):
+    claimed, _, _ = _agent_with_traces(1)
+    monkeypatch.setattr(
+        ts, "resolve_batch_evaluators",
+        lambda *a, **k: ts.TraceEvalSettleSkipReason.SCORING_DISABLED,
+    )
+    ts.process_claimed_runs(claimed, invoke=lambda *a, **k: None)
+    row = db.get_trace_eval_run(claimed[0]["uuid"])
+    assert row["status"] == "skipped"
+    assert row["error"] == "scoring_disabled"
+
+
 def test_hydrated_evaluators_carry_the_execution_fields_the_cli_needs():
     claimed, evaluator_uuid, version_uuid = _agent_with_traces(1)
     resolved = ts.resolve_batch_evaluators(claimed[0]["agent_id"])
@@ -610,7 +772,11 @@ def test_batch_invokes_the_cli_with_the_workspace_provider_env(monkeypatch, env)
     monkeypatch.setattr(ts, "_prepare_claimed_run", lambda r, now: ts.PreparedRun(r, {}))
     monkeypatch.setattr(
         ts, "resolve_batch_evaluators",
-        lambda agent_id: ts.BatchEvaluators(evaluation_type="response", hydrated=[]),
+        lambda agent_id: ts.BatchEvaluators(
+            evaluation_type="response",
+            hydrated=[{"uuid": "e1", "evaluator_type": "llm"}],
+            has_tool_call_evaluator=False,
+        ),
     )
     monkeypatch.setattr(ts, "build_eval_only_batch", lambda prepared, ev: ({}, [], {}))
     monkeypatch.setattr(ts, "_swallow_settle", lambda *a, **k: None)

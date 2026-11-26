@@ -396,21 +396,33 @@ def test_delete_version_404s_on_unknown_repeat_and_other_org(client):
     assert client.delete(f"/evaluators/{ev_uuid}/versions/{v2}", headers=other).status_code == 403
 
 
-def test_tool_call_evaluator_has_no_judge_and_stays_editable(client):
-    """A tool-call evaluator is answered by a person, so its judge model and
-    system prompt are empty strings. Creating one from scratch, adding a version
-    to it, and filtering the list by its type must all still work."""
+_BLANK_JUDGE_VERSIONS = [
+    {"judge_model": "", "system_prompt": "Judge it"},
+    {"judge_model": "openai/gpt-4.1", "system_prompt": ""},
+    {"judge_model": "openai/gpt-4.1", "system_prompt": "   \n\t"},
+    {"judge_model": "  ", "system_prompt": "Judge it"},
+]
+
+
+@pytest.mark.parametrize("evaluator_type", ["tool-call", "llm"])
+@pytest.mark.parametrize("version", _BLANK_JUDGE_VERSIONS)
+def test_blank_judge_prompt_or_model_is_rejected(client, evaluator_type, version):
     h = _signup(client)
-    name = f"ev-{uuid.uuid4().hex[:6]}"
+    body = {
+        "name": f"ev-{uuid.uuid4().hex[:6]}",
+        "evaluator_type": evaluator_type,
+        "data_type": "text",
+        "kind": "single",
+        "output_type": "binary",
+    }
+    rejected = client.post("/evaluators", json={**body, "version": version}, headers=h)
+    assert rejected.status_code == 422, rejected.text
+
     created = client.post(
         "/evaluators",
         json={
-            "name": name,
-            "evaluator_type": "tool-call",
-            "data_type": "text",
-            "kind": "single",
-            "output_type": "binary",
-            "version": {"judge_model": "", "system_prompt": ""},
+            **body,
+            "version": {"judge_model": "openai/gpt-4.1", "system_prompt": "Judge it"},
         },
         headers=h,
     )
@@ -419,19 +431,56 @@ def test_tool_call_evaluator_has_no_judge_and_stays_editable(client):
 
     new_version = client.post(
         f"/evaluators/{ev_uuid}/versions",
-        json={"judge_model": "", "system_prompt": "", "make_live": True},
+        json={**version, "make_live": True},
         headers=h,
     )
-    assert new_version.status_code == 200, new_version.text
-    assert new_version.json()["version_number"] == 2
-
+    assert new_version.status_code == 422, new_version.text
     detail = client.get(f"/evaluators/{ev_uuid}", headers=h).json()
-    assert detail["evaluator_type"] == "tool-call"
-    assert detail["live_version_id"] == new_version.json()["version_uuid"]
-    assert detail["versions"][1]["judge_model"] == ""
-    assert detail["versions"][1]["system_prompt"] == ""
-    # Binary rows with no rubric still get the Correct/Wrong default.
-    assert detail["versions"][1]["output_config"]["scale"]
+    assert len(detail["versions"]) == 1
+
+
+def test_judge_prompt_and_model_are_stored_as_sent(client):
+    h = _signup(client)
+    created = client.post(
+        "/evaluators",
+        json={
+            "name": f"ev-{uuid.uuid4().hex[:6]}",
+            "evaluator_type": "tool-call",
+            "output_type": "binary",
+            "version": {"judge_model": " openai/gpt-4.1 ", "system_prompt": "\nJudge it  "},
+        },
+        headers=h,
+    )
+    assert created.status_code == 200, created.text
+    version = client.get(f"/evaluators/{created.json()['uuid']}", headers=h).json()["versions"][0]
+    assert version["judge_model"] == " openai/gpt-4.1 "
+    assert version["system_prompt"] == "\nJudge it  "
+
+
+def test_every_evaluator_type_has_a_default_prompt():
+    from typing import get_args
+
+    from db import DEFAULT_PROMPTS_BY_PURPOSE
+    from shared_enums import EvaluatorType
+
+    assert set(get_args(EvaluatorType)) == set(DEFAULT_PROMPTS_BY_PURPOSE)
+
+
+def test_default_prompt_for_tool_call(client):
+    from db import DEFAULT_PROMPTS_BY_PURPOSE, DEFAULT_TEXT_JUDGE_MODEL
+
+    h = _signup(client)
+    r = client.get("/evaluators/default-prompt?purpose=tool-call", headers=h)
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["purpose"] == "tool-call"
+    assert body["name"] == "Tool call correctness"
+    assert body["system_prompt"] == DEFAULT_PROMPTS_BY_PURPOSE["tool-call"]["system_prompt"]
+    assert body["judge_model"] == DEFAULT_TEXT_JUDGE_MODEL
+    assert body["evaluator_type"] == "tool-call"
+    assert body["output_type"] == "binary"
+    assert [s["name"] for s in body["output_config"]["scale"]] == ["Correct", "Wrong"]
+    assert body["variables"] == []
 
 
 def test_list_evaluators_filtered_by_tool_call_type(client):
@@ -446,7 +495,9 @@ def test_list_evaluators_filtered_by_tool_call_type(client):
     forks = [e for e in items if e["source_default_slug"] == TOOL_CALL_EVALUATOR_SLUG]
     assert len(forks) == 1
     assert forks[0]["is_default"] is True
-    assert forks[0]["live_version"]["judge_model"] == ""
+    from db import DEFAULT_TEXT_JUDGE_MODEL
+
+    assert forks[0]["live_version"]["judge_model"] == DEFAULT_TEXT_JUDGE_MODEL
 
 
 def test_tool_call_default_fork_is_protected(client):
@@ -484,8 +535,8 @@ def test_tool_call_default_fork_is_protected(client):
     new_rubric = client.post(
         f"/evaluators/{fork['uuid']}/versions",
         json={
-            "judge_model": "",
-            "system_prompt": "",
+            "judge_model": "openai/gpt-4.1",
+            "system_prompt": "Check the tool call",
             "make_live": True,
             "output_config": {
                 "scale": [

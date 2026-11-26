@@ -459,7 +459,7 @@ def test_a_conversation_run_sends_history_and_tool_calls():
         org,
         agent,
         input=[{"role": "user", "content": "when?"}],
-        output={"response": "", "tool_calls": calls},
+        output={"response": "Week 14.", "tool_calls": calls},
     )
     evaluator_uuid, version_uuid = _evaluator(org, name="Correctness")
     run = _run(org, agent, trace, [(evaluator_uuid, version_uuid)])
@@ -470,7 +470,160 @@ def test_a_conversation_run_sends_history_and_tool_calls():
     item = invoke.captured["dataset"][0]
     assert item["test_case"]["history"] == [{"role": "user", "content": "when?"}]
     assert "input" not in item["test_case"]
-    assert item["output"] == {"response": "", "tool_calls": calls}
+    assert item["output"] == {"response": "Week 14.", "tool_calls": calls}
+
+
+_TOOL_ONLY = {"response": "", "tool_calls": [{"tool": "get_schedule", "arguments": {"weeks": 14}}]}
+
+
+def _never_invoked(*args, **kwargs):
+    raise AssertionError("the judge must not be invoked")
+
+
+def _criteria_names(item: dict) -> list[str]:
+    return [ref["name"] for ref in item["test_case"]["evaluation"]["criteria"]]
+
+
+def test_a_mixed_batch_scores_each_trace_with_only_its_own_evaluators():
+    org = _org()
+    agent = _agent(org)
+    reply_ev = _evaluator(org, name="Correctness")
+    tool_ev = _evaluator(org, name="Tools", evaluator_type="tool-call")
+    reply_run = _run(org, agent, _trace(org, agent), [reply_ev, tool_ev], available_at=1)
+    tool_run = _run(org, agent, _trace(org, agent, output=_TOOL_ONLY), [], available_at=2)
+
+    invoke = _invoker(
+        [
+            _judged(reply_run, {"Correctness": {"match": True}}),
+            _judged(tool_run, {"Tools": {"match": False}}),
+        ]
+    )
+    ts.claim_and_score_batch(now=_at(1000), invoke=invoke)
+
+    by_run = {item["test_case"]["id"]: item for item in invoke.captured["dataset"]}
+    assert _criteria_names(by_run[reply_run]) == ["Correctness"]
+    assert _criteria_names(by_run[tool_run]) == ["Tools"]
+    assert by_run[reply_run]["output"]["response"] == "hello"
+    assert by_run[tool_run]["test_case"]["evaluation"]["type"] == "tool_call_judge"
+    assert by_run[tool_run]["output"] == _TOOL_ONLY
+    assert {ev["name"] for ev in invoke.captured["config"]["evaluators"]} == {
+        "Correctness",
+        "Tools",
+    }
+    assert _status(reply_run) == _status(tool_run) == RunStatus.COMPLETED.value
+    assert [s["evaluator_uuid"] for s in db.get_trace_eval_scores(reply_run)] == [reply_ev[0]]
+    assert [s["evaluator_uuid"] for s in db.get_trace_eval_scores(tool_run)] == [tool_ev[0]]
+
+
+def test_a_tool_call_trace_with_only_reply_evaluators_is_skipped_without_a_judge_call():
+    org = _org()
+    agent = _agent(org)
+    run = _run(org, agent, _trace(org, agent, output=_TOOL_ONLY), [_evaluator(org)])
+
+    ts.claim_and_score_batch(now=_at(1000), invoke=_never_invoked)
+
+    row = db.get_trace_eval_run(run)
+    assert row["status"] == RunStatus.SKIPPED.value
+    assert row["error"] == "no_tool_call_evaluator"
+    assert db.get_trace_eval_scores(run) == []
+
+
+def _unusable_tool_call_evaluator(org):
+    """A tool-call evaluator whose live version declares a variable, so trace scoring cannot use it."""
+    ev = db.create_evaluator(
+        name=f"tc-{uuid.uuid4().hex[:6]}",
+        evaluator_type="tool-call",
+        org_uuid=org,
+        owner_user_id=str(uuid.uuid4()),
+        output_type="binary",
+    )
+    version = db.create_evaluator_version(ev, "openai/gpt-4.1", "Judge {{x}}", variables=[{"name": "x"}])
+    db.set_evaluator_live_version(ev, version["uuid"])
+    return ev, version["uuid"]
+
+
+def test_a_tool_call_trace_with_a_linked_tool_call_evaluator_that_cannot_run_keeps_the_general_reason():
+    org = _org()
+    agent = _agent(org)
+    run = _run(org, agent, _trace(org, agent, output=_TOOL_ONLY), [_unusable_tool_call_evaluator(org)])
+
+    ts.claim_and_score_batch(now=_at(1000), invoke=_never_invoked)
+
+    assert db.get_trace_eval_run(run)["error"] == "no_usable_evaluators"
+
+
+def test_a_tool_call_trace_beside_a_reply_evaluator_and_a_broken_tool_call_one_keeps_the_general_reason():
+    org = _org()
+    agent = _agent(org)
+    reply_ev = _evaluator(org, name="Correctness")
+    reply_run = _run(org, agent, _trace(org, agent), [reply_ev, _unusable_tool_call_evaluator(org)], available_at=1)
+    tool_run = _run(org, agent, _trace(org, agent, output=_TOOL_ONLY), [], available_at=2)
+
+    ts.claim_and_score_batch(
+        now=_at(1000), invoke=_invoker([_judged(reply_run, {"Correctness": {"match": True}})])
+    )
+
+    assert _status(reply_run) == RunStatus.COMPLETED.value
+    assert db.get_trace_eval_run(tool_run)["error"] == "no_usable_evaluators"
+
+
+def test_a_tool_call_trace_on_an_agent_with_no_evaluators_says_the_tool_call_one_is_missing():
+    org = _org()
+    agent = _agent(org)
+    tool_run = _run(org, agent, _trace(org, agent, output=_TOOL_ONLY), [], available_at=1)
+    reply_run = _run(org, agent, _trace(org, agent), [], available_at=2)
+
+    ts.claim_and_score_batch(now=_at(1000), invoke=_never_invoked)
+
+    assert db.get_trace_eval_run(tool_run)["error"] == "no_tool_call_evaluator"
+    assert db.get_trace_eval_run(reply_run)["error"] == "no_usable_evaluators"
+
+
+def test_a_batch_of_only_skipped_runs_never_calls_the_cli():
+    org = _org()
+    agent = _agent(org)
+    tool_ev = _evaluator(org, evaluator_type="tool-call")
+    runs = [_run(org, agent, _trace(org, agent), [tool_ev], available_at=i) for i in (1, 2)]
+
+    ts.claim_and_score_batch(now=_at(1000), invoke=_never_invoked)
+
+    for run in runs:
+        row = db.get_trace_eval_run(run)
+        assert row["status"] == RunStatus.SKIPPED.value
+        assert row["error"] == "no_usable_evaluators"
+
+
+def test_a_skipped_run_stays_out_of_the_call_while_the_rest_are_scored():
+    org = _org()
+    agent = _agent(org)
+    reply_ev = _evaluator(org, name="Correctness")
+    reply_run = _run(org, agent, _trace(org, agent), [reply_ev], available_at=1)
+    tool_run = _run(org, agent, _trace(org, agent, output=_TOOL_ONLY), [], available_at=2)
+
+    invoke = _invoker([_judged(reply_run, {"Correctness": {"match": True}})])
+    ts.claim_and_score_batch(now=_at(1000), invoke=invoke)
+
+    assert [item["test_case"]["id"] for item in invoke.captured["dataset"]] == [reply_run]
+    assert _status(reply_run) == RunStatus.COMPLETED.value
+    assert db.get_trace_eval_run(tool_run)["error"] == "no_tool_call_evaluator"
+
+
+def test_a_result_naming_another_kinds_evaluator_is_not_settled():
+    org = _org()
+    agent = _agent(org)
+    reply_ev = _evaluator(org, name="Correctness")
+    tool_ev = _evaluator(org, name="Tools", evaluator_type="tool-call")
+    run = _run(org, agent, _trace(org, agent, output=_TOOL_ONLY), [reply_ev, tool_ev])
+
+    ts.claim_and_score_batch(
+        now=_at(1000),
+        invoke=_invoker(
+            [_judged(run, {"Tools": {"match": True}, "Correctness": {"match": True}})]
+        ),
+    )
+
+    assert _status(run) == RunStatus.PENDING.value
+    assert db.get_trace_eval_scores(run) == []
 
 
 def test_results_map_by_id_so_a_reordered_file_still_lands():

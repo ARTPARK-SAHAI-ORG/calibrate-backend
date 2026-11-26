@@ -23,7 +23,7 @@ from db import (
     get_evaluators_for_annotation_task,
     get_evaluators_for_annotation_tasks,
     get_evaluators_for_job,
-    get_tool_call_evaluator_for_org,
+    ensure_tool_call_evaluator_on_tasks,
     get_evaluator,
     get_evaluator_version,
     get_annotations_for_task,
@@ -73,14 +73,15 @@ from annotation_eval_runner import (
     DatasetBuildError,
     _resolve_evaluator_dicts,
     build_dataset_for_task_type,
-    is_tool_call_row,
     required_evaluator_ids_for_item,
     start_annotation_eval_job,
-    TOOL_CALL_EVALUATOR_TYPE,
 )
 from annotation_metrics import KappaFields
 from utils import (
     utc_now,
+    evaluators_fitting_row,
+    is_tool_call_evaluator,
+    is_tool_call_row,
     job_slot,
     TaskStatus,
     AnnotationTaskTypeLiteral,
@@ -585,7 +586,7 @@ class AnnotationTaskResponse(BaseModel):
     # empty (use the dedicated /items and /jobs endpoints for those views).
     items: List[Dict[str, Any]] = Field(
         default=[],
-        description="The task's items, each with its agreement stats and an `is_tool_call` flag marking the rows a person labels on the tool call rather than a text reply. You get these when you fetch one task by ID, not when you list tasks",
+        description="The task's items, each with its agreement stats and an `is_tool_call` flag that says whether the item is judged on tool calls rather than a text reply. You get these when you fetch one task by ID, not when you list tasks",
     )
     jobs: List[Dict[str, Any]] = Field(
         default=[],
@@ -611,7 +612,7 @@ class EvaluatorOrderRequest(BaseModel):
 
 class EvaluatorSetRequest(BaseModel):
     evaluator_ids: List[str] = Field(
-        description="The full ordered set of evaluators the task should end up linked to, in display order. Missing ones are unlinked, new ones are linked, and the order sets their position. Send an empty list to unlink all. Each must be one you created or a built-in default",
+        description="The full ordered set of evaluators the task should end up linked to, in display order. Missing ones are unlinked, new ones are linked, and the order sets their position. Send an empty list to unlink all. A task holding tool-call items always keeps one tool-call evaluator, so Tool call correctness is linked back if none is left. Each must be one you created or a built-in default",
         examples=[["f47ac10b-58cc-4372-a567-0e02b2c3d479"]],
     )
     optional_evaluator_ids: Optional[List[str]] = Field(
@@ -934,15 +935,17 @@ def set_task_evaluators(
     # Validate the whole set up front so a bad id links/unlinks nothing.
     for evaluator_id in payload.evaluator_ids:
         ensure_owned_evaluator(evaluator_id, ctx.org_uuid)
-    changed = set_evaluators_for_annotation_task(
+    before_ids = [e["uuid"] for e in get_evaluators_for_annotation_task(task_uuid)]
+    set_evaluators_for_annotation_task(
         task_uuid, payload.evaluator_ids, payload.optional_evaluator_ids
     )
+    ensure_tool_call_evaluator_on_tasks(ctx.org_uuid, [task_uuid])
     current_ids = [e["uuid"] for e in get_evaluators_for_annotation_task(task_uuid)]
     return EvaluatorSetResponse(
         message="Task evaluators updated",
         evaluator_ids=current_ids,
-        linked=changed["linked"],
-        unlinked=changed["unlinked"],
+        linked=[i for i in current_ids if i not in before_ids],
+        unlinked=[i for i in before_ids if i not in current_ids],
     )
 
 
@@ -1028,15 +1031,15 @@ class ItemPayload(BaseModel):
     output: Optional[Union[str, TurnText]] = Field(None, description="The output to judge. For `llm-general` tasks")
     transcript: Optional[List[ChatTurn]] = Field(None, description="The full conversation to judge. For `conversation` tasks")
     tool_calls: Optional[List[ToolCall]] = Field(
-        None, description="Tool calls the agent made in place of a text reply. With no text reply, sending this marks the item as a tool call for a person to judge. For `llm` and `llm-general` tasks"
+        None, description="Tool calls the agent made. With no text reply, sending at least one marks the item as a tool call, which only a tool-call evaluator scores. Omit when the agent made no tool calls. For `llm` and `llm-general` tasks"
     )
     expected_tool_calls: Optional[List[ToolCall]] = Field(
         None,
-        description="Tool calls the agent should have made. Sending this marks the item as a tool call for a person to judge. For `llm` and `llm-general` tasks",
+        description="Tool calls the agent should have made, shown to the judge beside the calls the agent made. Omit to judge without expected calls. Sending this marks the item as a tool call, which only a tool-call evaluator scores. For `llm` and `llm-general` tasks",
     )
     actual_tool_calls: Optional[List[ToolCall]] = Field(
         None,
-        description="Tool calls the agent made. Sending this marks the item as a tool call for a person to judge. For `llm` and `llm-general` tasks",
+        description="Tool calls the agent made. Sending this marks the item as a tool call, which only a tool-call evaluator scores. Omit for an item judged on its text reply. For `llm` and `llm-general` tasks",
     )
     evaluator_variables: Optional[Dict[str, Dict[str, Any]]] = Field(
         None,
@@ -1061,7 +1064,7 @@ class AnnotationItemPayload(BaseModel):
     )
     evaluator_results: Optional[Dict[str, Any]] = Field(
         None,
-        description="Evaluator scores to record, keyed by evaluator ID. Each evaluator ID must be linked to the task. Put the score in `value`, a bool for binary or a number within the scale for rating, with optional `reasoning` and `version_number`. Omit `version_number` to record against the evaluator's live version. An item recording a tool call takes the tool-call evaluator and no other, and every other item takes any evaluator except that one",
+        description="Evaluator scores to record, keyed by evaluator ID. Each evaluator ID must be linked to the task. Put the score in `value`, a bool for binary or a number within the scale for rating, with optional `reasoning` and `version_number`. Omit `version_number` to record against the evaluator's live version. An item recording a tool call takes only tool-call evaluators, and every other item takes any evaluator that is not a tool-call evaluator",
         examples=[{_EXAMPLE_ID: {"value": True, "reasoning": "meets the bar", "version_number": 2}}],
     )
 
@@ -1219,28 +1222,16 @@ def _resolve_evaluator_results(
                 raise HTTPException(
                     status_code=400, detail=f"Evaluator {ev_id} not found"
                 )
-            # Same pairing the labelling form draws and
-            # `required_evaluator_ids_for_item` enforces: a tool-call row is
-            # answered by the tool-call evaluator alone, every other row by
-            # everything except it.
             row_is_tool_call = is_tool_call_row({"payload": payloads[idx]})
-            evaluator_is_tool_call = (
-                evaluator.get("evaluator_type") == TOOL_CALL_EVALUATOR_TYPE
-            )
-            if row_is_tool_call and not evaluator_is_tool_call:
+            if is_tool_call_evaluator(evaluator) != row_is_tool_call:
                 raise HTTPException(
                     status_code=400,
                     detail=(
-                        f"items[{idx}] records a tool call, which only the "
-                        f"tool-call evaluator scores. Evaluator {ev_id} does not "
-                        f"run on it."
-                    ),
-                )
-            if evaluator_is_tool_call and not row_is_tool_call:
-                raise HTTPException(
-                    status_code=400,
-                    detail=(
-                        f"Evaluator {ev_id} scores tool calls, and items[{idx}] "
+                        f"items[{idx}] records a tool call, which only a "
+                        f"tool-call evaluator scores. Evaluator {ev_id} is not a "
+                        f"tool-call evaluator."
+                        if row_is_tool_call
+                        else f"Evaluator {ev_id} scores tool calls, and items[{idx}] "
                         f"records a reply rather than a tool call."
                     ),
                 )
@@ -1496,18 +1487,10 @@ def bulk_create_items(
             },
         )
 
-    # A tool-call row is answered by a person, never a judge, so the
-    # workspace's tool-call evaluator has to be on the task before anyone
-    # opens the labelling form. `add_evaluator_to_annotation_task` inserts
-    # unconditionally on an active link, so skip when it is already there:
-    # later batches must not duplicate the link or move its display position.
-    # A workspace that deleted its copy simply gets no link.
     if any(is_tool_call_row({"payload": p}) for p in payloads):
-        tool_call_evaluator = get_tool_call_evaluator_for_org(ctx.org_uuid)
-        if tool_call_evaluator and tool_call_evaluator["uuid"] not in {
-            e["uuid"] for e in get_evaluators_for_annotation_task(task_uuid)
-        }:
-            add_evaluator_to_annotation_task(task_uuid, tool_call_evaluator["uuid"])
+        ensure_tool_call_evaluator_on_tasks(
+            ctx.org_uuid, [task_uuid], has_tool_call_items=True
+        )
 
     annotator: Optional[Dict[str, Any]] = None
     linked_evaluator_ids: set = set()
@@ -1614,7 +1597,8 @@ def bulk_create_items(
         # annotations on slots the job doesn't own, polluting downstream
         # `annotations`-by-task reads. Same contract enforced by the
         # public-form upsert endpoint in `routers/public.py`.
-        snapshot_evaluator_ids = set(get_evaluator_ids_for_job(job_uuid))
+        job_evaluators = get_evaluators_for_job(job_uuid)
+        snapshot_evaluator_ids = {ev["uuid"] for ev in job_evaluators}
         snapshot_mismatch: List[str] = []
         for it in payload.items:
             if not it.annotations:
@@ -1666,25 +1650,16 @@ def bulk_create_items(
         # Auto-complete contract: every REQUIRED slot an item actually shows
         # must have a row, and every item must carry at least one judgement
         # (so a job whose evaluators are all optional still needs the
-        # annotator to visit each item). A tool-call row shows only the
-        # tool-call evaluator, every other row shows everything except it
+        # annotator to visit each item). A tool-call row shows only tool-call
+        # evaluators, every other row shows every other evaluator
         # (required_evaluator_ids_for_item). Same source of truth as the
         # public-form auto-complete path — see also the snapshot-mismatch gate
         # above, which measures against the full snapshot instead.
-        required_evaluator_ids = set(
-            get_evaluator_ids_for_job(job_uuid, required_only=True)
-        )
-        tool_call_evaluator_ids = {
-            ev["uuid"]
-            for ev in get_evaluators_for_job(job_uuid)
-            if ev.get("evaluator_type") == TOOL_CALL_EVALUATOR_TYPE
-        }
+        required_evaluators = [ev for ev in job_evaluators if not ev["is_optional"]]
         items_fully_annotated = all(
             it.annotations
             and required_evaluator_ids_for_item(
-                {"payload": payloads[i]},
-                required_evaluator_ids,
-                tool_call_evaluator_ids,
+                {"payload": payloads[i]}, required_evaluators
             ).issubset(set(it.annotations.keys()))
             for i, it in enumerate(payload.items)
         )
@@ -1808,6 +1783,7 @@ def bulk_update_items(
         )
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
+    ensure_tool_call_evaluator_on_tasks(ctx.org_uuid, [task_uuid])
     return {"updated_count": updated_count}
 
 
@@ -2300,7 +2276,11 @@ class EvaluatorRunRequestEntry(BaseModel):
 
 class EvaluatorRunStartRequest(BaseModel):
     evaluators: List[EvaluatorRunRequestEntry] = Field(
-        description="The evaluators to run. Each must be linked to the task"
+        description=(
+            "The evaluators to run. Each must be linked to the task. "
+            "Items that none of the chosen evaluators can judge are left out, and so are evaluators "
+            "that can judge none of the chosen items, so `item_count` and `evaluator_count` can be lower than what you sent"
+        )
     )
     item_ids: List[str] = Field(
         default=[],
@@ -2367,7 +2347,6 @@ def start_evaluator_run(
             )
         items_by_id = {it["uuid"]: it for it in all_items}
         items = [items_by_id[i] for i in target_ids]
-        item_ids_persisted: List[str] = target_ids
     else:
         if not payload.item_ids:
             raise HTTPException(
@@ -2393,34 +2372,43 @@ def start_evaluator_run(
                 ordered_subset_ids.append(i)
         items_by_id = {it["uuid"]: it for it in all_items}
         items = [items_by_id[i] for i in ordered_subset_ids]
-        item_ids_persisted = ordered_subset_ids
 
-    # Tool-call rows (agent output is a tool call, no text) can't be scored by
-    # an LLM judge, so they never enter the run at all — not in `items`, not
-    # in `item_ids_persisted`, not in the item count. A caller that picks
-    # explicit rows already leaves these out; this catches `select_all` and
-    # any other path the frontend can't filter itself.
-    items = [it for it in items if not is_tool_call_row(it)]
+    linked = {
+        e["uuid"] for e in get_evaluators_for_annotation_task(task_uuid)
+    }
+    requested = [e.dict() for e in payload.evaluators]
+    try:
+        resolved = _resolve_evaluator_dicts(requested, linked)
+    except EvaluatorResolutionError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+    # Rows no chosen evaluator pairs with never enter the run, and evaluators
+    # no chosen row pairs with are not recorded as having run.
+    fits = {
+        it["uuid"]: evaluators_fitting_row(resolved, is_tool_call_row(it))
+        for it in items
+    }
+    items = [it for it in items if fits[it["uuid"]]]
     item_ids_persisted = [it["uuid"] for it in items]
     if not items:
         raise HTTPException(
             status_code=400,
             detail=(
-                "The chosen items evaluate one or more tool calls, which "
-                "only supports human review today. Evaluators do not run "
-                "on them."
+                "None of the selected evaluators fit the chosen items. "
+                "Tool-call items need a tool-call evaluator, and every other "
+                "item needs an evaluator that is not a tool-call evaluator."
             ),
         )
-
-    linked = {
-        e["uuid"] for e in get_evaluators_for_annotation_task(task_uuid)
-    }
-    try:
-        resolved = _resolve_evaluator_dicts(
-            [e.dict() for e in payload.evaluators], linked
-        )
-    except EvaluatorResolutionError as e:
-        raise HTTPException(status_code=400, detail=str(e))
+    paired = {ev["uuid"] for it in items for ev in fits[it["uuid"]]}
+    if len(paired) < len(resolved):
+        # Resolved again so the stored names are deduped over the kept
+        # evaluators only, matching what a queued job resolves later.
+        try:
+            resolved = _resolve_evaluator_dicts(
+                [r for r in requested if r["evaluator_id"] in paired], linked
+            )
+        except EvaluatorResolutionError as e:
+            raise HTTPException(status_code=400, detail=str(e))
 
     enforce_max_rows_per_eval(ctx.org_uuid, len(items), "labelling_evaluator_run")
 
@@ -3656,6 +3644,15 @@ def unlink_evaluator_from_task(
 ):
     """Unlink an evaluator from a task without changing existing job snapshots"""
     _ensure_owned_task(task_uuid, ctx.org_uuid)
+    linked = get_evaluators_for_annotation_task(task_uuid)
+    tool_call_ids = {e["uuid"] for e in linked if is_tool_call_evaluator(e)}
+    if tool_call_ids == {evaluator_uuid} and any(
+        is_tool_call_row(item) for item in get_annotation_items_for_task(task_uuid)
+    ):
+        raise HTTPException(
+            status_code=400,
+            detail="This task's tool call items need a tool call evaluator. Link another one before unlinking this one",
+        )
     removed = remove_evaluator_from_annotation_task(task_uuid, evaluator_uuid)
     if not removed:
         raise HTTPException(

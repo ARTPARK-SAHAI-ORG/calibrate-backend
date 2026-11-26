@@ -32,6 +32,7 @@ from pydantic import BaseModel, Field, model_validator
 
 from auth_utils import get_current_org, get_current_user_id, get_org_jwt_or_api_key, OrgContext
 from db import (
+    ensure_tool_call_evaluator_on_tasks,
     DEFAULT_PROMPTS_BY_PURPOSE,
     TOOL_CALL_EVALUATOR_SLUG,
     create_evaluator,
@@ -52,6 +53,8 @@ from db import (
 from shared_enums import EvaluatorType
 from utils import (
     DataTypeLiteral,
+    is_tool_call_evaluator,
+    NonBlankStr,
     EVALUATOR_TYPE_DESCRIPTION,
     DATA_TYPE_DESCRIPTION,
     OUTPUT_TYPE_DESCRIPTION,
@@ -153,8 +156,8 @@ class VariableSpec(BaseModel):
 class EvaluatorVersionCreate(BaseModel):
     """One version of an evaluator: its judge prompt, model, variables, and rubric."""
 
-    judge_model: str = Field(description=_JUDGE_MODEL_DESCRIPTION)
-    system_prompt: str = Field(description="Judge system prompt. May contain `{{variable}}` placeholders")
+    judge_model: NonBlankStr = Field(description=_JUDGE_MODEL_DESCRIPTION)
+    system_prompt: NonBlankStr = Field(description="Judge system prompt. May contain `{{variable}}` placeholders")
     output_config: Optional[OutputConfig] = Field(
         None,
         description=_RUBRIC_DESCRIPTION,
@@ -599,7 +602,7 @@ class DefaultPromptResponse(BaseModel):
  create-evaluator form. The `name` field is null for `purpose=conversation` because there's
  no built-in default conversation evaluator. The prompt is just a template."""
 
-    purpose: Literal["llm", "llm-general", "stt", "tts", "conversation"] = Field(
+    purpose: EvaluatorType = Field(
         description="Evaluation purpose this default prompt targets"
     )
     name: Optional[str] = Field(
@@ -617,14 +620,12 @@ class DefaultPromptResponse(BaseModel):
 
 @router.get("/default-prompt", response_model=DefaultPromptResponse, summary="Get default prompt")
 def get_default_prompt(
-    purpose: Literal["llm", "llm-general", "stt", "tts", "conversation"] = Query(
-        description="Evaluation purpose whose canonical default prompt + config to return"
+    purpose: EvaluatorType = Query(
+        description="Evaluation purpose whose canonical default prompt and config to return"
     ),
     _user_id: str = Depends(get_current_user_id),
 ):
     """Get the canonical default prompt and suggested config for prefilling the create-evaluator form"""
-    if purpose not in DEFAULT_PROMPTS_BY_PURPOSE:
-        raise HTTPException(status_code=404, detail=f"Unknown purpose: {purpose}")
     p = DEFAULT_PROMPTS_BY_PURPOSE[purpose]
     return DefaultPromptResponse(
         purpose=purpose,
@@ -737,6 +738,8 @@ def update_evaluator_endpoint(
         raise HTTPException(status_code=400, detail=str(e))
     if not updated:
         raise HTTPException(status_code=400, detail="No fields to update")
+    if payload.evaluator_type is not None and is_tool_call_evaluator(existing):
+        ensure_tool_call_evaluator_on_tasks(ctx.org_uuid)
     return _evaluator_response(get_evaluator(evaluator_uuid))
 
 
@@ -757,6 +760,8 @@ def delete_evaluator_endpoint(
         )
     if not delete_evaluator(evaluator_uuid):
         raise HTTPException(status_code=404, detail="Evaluator not found")
+    if is_tool_call_evaluator(existing):
+        ensure_tool_call_evaluator_on_tasks(ctx.org_uuid)
     return {"message": "Evaluator deleted"}
 
 

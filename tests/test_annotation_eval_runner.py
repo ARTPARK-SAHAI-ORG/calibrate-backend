@@ -221,6 +221,37 @@ def test_build_llm_dataset_bad_payload():
         )
 
 
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {"actual_tool_calls": "not-a-list", "tool_calls": [{"tool": "t"}]},
+        {"actual_tool_calls": [], "expected_tool_calls": {}},
+        {"tool_calls": ["search"]},
+        {"actual_tool_calls": [{"tool": "t"}], "expected_tool_calls": [None]},
+    ],
+)
+def test_tool_call_lists_rejects_a_present_non_list(payload):
+    with pytest.raises(runner.DatasetBuildError):
+        runner._tool_call_lists("i1", payload)
+
+
+def test_build_llm_dataset_reply_row_ignores_a_non_list_expected_value():
+    out = runner._build_llm_dataset(
+        [
+            {
+                "uuid": "i1",
+                "payload": {
+                    "chat_history": [],
+                    "agent_response": "r",
+                    "expected_tool_calls": "not-a-list",
+                },
+            }
+        ],
+        [{"uuid": "e1", "name": "judge"}],
+    )
+    assert out[0]["output"]["tool_calls"] == []
+
+
 def test_build_llm_dataset_happy():
     evs = [{"uuid": "e1", "name": "judge"}]
     out = runner._build_llm_dataset(
@@ -328,7 +359,7 @@ def test_is_tool_call_row():
     assert not runner.is_tool_call_row({"payload": {"tool_calls": "search(x)"}})
 
 
-def test_build_llm_dataset_skips_tool_call_rows():
+def test_build_llm_dataset_skips_tool_call_rows_without_a_tool_call_evaluator():
     evs = [{"uuid": "e1", "name": "judge"}]
     out = runner._build_llm_dataset(
         [
@@ -343,46 +374,57 @@ def test_build_llm_dataset_skips_tool_call_rows():
         ],
         evs,
     )
-    # Only the response row makes it into the judge dataset.
+    # No evaluator pairs with the tool-call row, so only the response row runs.
     assert [row["test_case"]["id"] for row in out] == ["resp"]
 
 
 # ---------------------------------------------------------------------------
-# tool-call evaluator (human-answered only)
+# tool-call evaluator
 # ---------------------------------------------------------------------------
 
 TC_ROW = {"uuid": "tc", "payload": {"tool_calls": [{"tool": "t", "arguments": {}}]}}
 TEXT_ROW = {"uuid": "resp", "payload": {"agent_response": "hi"}}
 
 
+EV_TEXT = {"uuid": "ev-1", "evaluator_type": "llm"}
+EV_TC = {"uuid": "ev-tc", "evaluator_type": "tool-call"}
+
+
 def test_required_evaluator_ids_for_item_tool_call_row():
-    assert runner.required_evaluator_ids_for_item(
-        TC_ROW, ["ev-1", "ev-tc"], {"ev-tc"}
-    ) == {"ev-tc"}
-    # No tool-call evaluator on the job → nothing is required on the row.
-    assert runner.required_evaluator_ids_for_item(TC_ROW, ["ev-1"], set()) == set()
+    assert runner.required_evaluator_ids_for_item(TC_ROW, [EV_TEXT, EV_TC]) == {"ev-tc"}
+    # No required tool-call evaluator on the job → nothing is required on the row.
+    assert runner.required_evaluator_ids_for_item(TC_ROW, [EV_TEXT]) == set()
 
 
 def test_required_evaluator_ids_for_item_normal_row():
-    assert runner.required_evaluator_ids_for_item(
-        TEXT_ROW, ["ev-1", "ev-tc"], {"ev-tc"}
-    ) == {"ev-1"}
+    assert runner.required_evaluator_ids_for_item(TEXT_ROW, [EV_TEXT, EV_TC]) == {"ev-1"}
     # Job carries only the tool-call evaluator → nothing is required here.
-    assert (
-        runner.required_evaluator_ids_for_item(TEXT_ROW, ["ev-tc"], {"ev-tc"}) == set()
-    )
+    assert runner.required_evaluator_ids_for_item(TEXT_ROW, [EV_TC]) == set()
 
 
-def _resolve_with_tool_call_evaluator(requested):
+def test_tool_call_row_missing_context_error_asks_only_for_context():
+    ev = {**_ev_resolved("ev-tc", "Tool"), "evaluator_type": "tool-call"}
+    with pytest.raises(runner.DatasetBuildError) as llm_err:
+        runner._build_llm_dataset([TC_ROW], [ev])
+    assert str(llm_err.value) == "Item tc: LLM items need `chat_history` (list) in payload"
+    with pytest.raises(runner.DatasetBuildError) as general_err:
+        runner._build_llm_general_dataset([TC_ROW], [ev])
+    assert str(general_err.value) == "Item tc: llm-general items need `input` in payload"
+
+
+def _resolve_with_tool_call_evaluator(requested, **tc):
     """Resolve `requested` where ev-tc is a tool-call evaluator and ev-1 is a
     normal LLM judge."""
     evaluators = {
         "ev-1": _ev_record(evaluator_type="llm"),
         "ev-tc": _ev_record(
-            uuid="ev-tc",
-            name="Tool call",
-            live_version_id="ver-tc",
-            evaluator_type=runner.TOOL_CALL_EVALUATOR_TYPE,
+            **{
+                "uuid": "ev-tc",
+                "name": "Tool call",
+                "live_version_id": "ver-tc",
+                "evaluator_type": "tool-call",
+                **tc,
+            }
         ),
     }
     versions = {
@@ -400,16 +442,285 @@ def _resolve_with_tool_call_evaluator(requested):
         )
 
 
-def test_tool_call_evaluator_never_reaches_calibrate_payload():
+def test_resolve_rejects_tool_call_evaluator_with_no_version():
+    with pytest.raises(runner.EvaluatorResolutionError) as e:
+        _resolve_with_tool_call_evaluator(["ev-tc"], live_version_id=None)
+    assert str(e.value) == (
+        "Evaluator ev-tc has no live version; pass evaluator_version_id"
+    )
+
+
+def test_resolve_keeps_tool_call_evaluator_with_a_prompt():
     resolved = _resolve_with_tool_call_evaluator(["ev-1", "ev-tc"])
-    assert [ev["uuid"] for ev in resolved] == ["ev-1"]
-    payload = runner.build_evaluator_cli_payload_unrendered(resolved)
-    assert [p["name"] for p in payload] == ["Safety"]
+    assert [ev["uuid"] for ev in resolved] == ["ev-1", "ev-tc"]
+    assert [ev["evaluator_type"] for ev in resolved] == ["llm", "tool-call"]
+    for build in (
+        runner.build_evaluator_cli_payload,
+        runner.build_evaluator_cli_payload_unrendered,
+    ):
+        assert all("evaluator_type" not in p for p in build(resolved))
 
 
-def test_resolve_rejects_only_tool_call_evaluators():
-    with pytest.raises(runner.EvaluatorResolutionError):
-        _resolve_with_tool_call_evaluator(["ev-tc"])
+REPLY_EV = {"uuid": "ev-1", "name": "Reply judge", "evaluator_type": "llm"}
+TOOL_EV = {"uuid": "ev-tc", "name": "Tool judge", "evaluator_type": "tool-call"}
+CALL_X = {"tool": "search", "arguments": {"q": "x"}}
+CALL_Y = {"tool": "search", "arguments": {"q": "y"}}
+
+
+def _llm_tool_row(**payload):
+    row = runner._build_llm_dataset(
+        [{"uuid": "tc", "payload": {"chat_history": [], **payload}}], [TOOL_EV]
+    )
+    assert len(row) == 1
+    return row[0]
+
+
+def test_build_llm_tool_call_row_goes_to_the_tool_call_judge():
+    assert runner._build_llm_dataset(
+        [
+            {
+                "uuid": "tc",
+                "payload": {
+                    "chat_history": [
+                        {"role": "user", "content": "find x", "label": "en", "versions": {}},
+                        {"role": "assistant", "content": "", "tool_calls": [CALL_X]},
+                        {"role": "tool", "content": "found", "tool_call_id": "1"},
+                    ],
+                    "agent_response": "",
+                    "actual_tool_calls": [CALL_X],
+                    "expected_tool_calls": [CALL_Y],
+                },
+            }
+        ],
+        [REPLY_EV, TOOL_EV],
+    ) == [
+        {
+            "test_case": {
+                "id": "tc",
+                "history": [
+                    {"role": "user", "content": "find x"},
+                    {"role": "assistant", "content": "", "tool_calls": [CALL_X]},
+                    {"role": "tool", "content": "found", "tool_call_id": "1"},
+                ],
+                "evaluation": {
+                    "type": "tool_call_judge",
+                    "criteria": [{"name": "Tool judge"}],
+                    "expected_tool_calls": [CALL_Y],
+                },
+            },
+            "output": {"response": "", "tool_calls": [CALL_X]},
+        }
+    ]
+
+
+def test_build_llm_tool_call_row_keeps_the_reply_and_omits_missing_expected_calls():
+    row = _llm_tool_row(agent_response={"content": "let me look"}, actual_tool_calls=[CALL_X])
+    assert "expected_tool_calls" not in row["test_case"]["evaluation"]
+    assert row["output"] == {"response": "let me look", "tool_calls": [CALL_X]}
+
+
+def test_build_llm_tool_call_row_with_tool_calls_only_and_no_reply():
+    row = _llm_tool_row(tool_calls=[CALL_X])
+    assert row["output"] == {"response": "", "tool_calls": [CALL_X]}
+
+
+def test_build_llm_tool_call_row_where_the_agent_made_no_calls():
+    row = _llm_tool_row(
+        agent_response="I cannot",
+        actual_tool_calls=[],
+        expected_tool_calls=[CALL_Y],
+        tool_calls=[CALL_X],
+    )
+    assert row["output"] == {"response": "I cannot", "tool_calls": []}
+    assert row["test_case"]["evaluation"]["expected_tool_calls"] == [CALL_Y]
+
+
+def test_build_llm_tool_call_row_needs_history():
+    with pytest.raises(runner.DatasetBuildError):
+        runner._build_llm_dataset(
+            [{"uuid": "tc", "payload": {"actual_tool_calls": [CALL_X]}}], [TOOL_EV]
+        )
+
+
+@pytest.mark.parametrize(
+    "calls",
+    [
+        {"expected_tool_calls": [], "tool_calls": "search(x)"},
+        {"actual_tool_calls": [], "expected_tool_calls": "search(x)"},
+    ],
+)
+def test_build_llm_tool_call_row_rejects_calls_that_are_not_a_list(calls):
+    with pytest.raises(runner.DatasetBuildError):
+        _llm_tool_row(**calls)
+
+
+def test_build_llm_reply_row_is_unchanged_beside_a_tool_call_evaluator():
+    tool_calls = [{"tool": "t"}]
+    assert runner._build_llm_dataset(
+        [
+            {
+                "uuid": "r",
+                "payload": {
+                    "chat_history": [
+                        {"role": "assistant", "content": "", "tool_calls": [CALL_X]}
+                    ],
+                    "agent_response": "hi",
+                    "tool_calls": tool_calls,
+                },
+            }
+        ],
+        [REPLY_EV, TOOL_EV],
+    ) == [
+        {
+            "test_case": {
+                "id": "r",
+                "history": [
+                    {"role": "assistant", "content": "", "tool_calls": [CALL_X]}
+                ],
+                "evaluation": {"type": "response", "criteria": [{"name": "Reply judge"}]},
+            },
+            "output": {"response": "hi", "tool_calls": tool_calls},
+        }
+    ]
+
+
+def test_build_llm_mixed_task_gives_each_row_only_its_evaluators():
+    variables = {"ev-1": {"a": 1}, "ev-tc": {"b": 2}}
+    out = runner._build_llm_dataset(
+        [
+            {
+                "uuid": "r",
+                "payload": {
+                    "chat_history": [],
+                    "agent_response": "hi",
+                    "evaluator_variables": variables,
+                },
+            },
+            {
+                "uuid": "tc",
+                "payload": {
+                    "chat_history": [],
+                    "actual_tool_calls": [CALL_X],
+                    "evaluator_variables": variables,
+                },
+            },
+        ],
+        [REPLY_EV, TOOL_EV],
+    )
+    assert {r["test_case"]["id"]: r["test_case"]["evaluation"]["criteria"] for r in out} == {
+        "r": [{"name": "Reply judge", "arguments": {"a": 1}}],
+        "tc": [{"name": "Tool judge", "arguments": {"b": 2}}],
+    }
+
+
+def test_build_llm_general_tool_call_row_carries_its_calls():
+    assert runner._build_llm_general_dataset(
+        [
+            {
+                "uuid": "tc",
+                "payload": {
+                    "input": "find x",
+                    "output": "let me look",
+                    "actual_tool_calls": [CALL_X],
+                    "expected_tool_calls": [CALL_Y],
+                },
+            }
+        ],
+        [TOOL_EV],
+    ) == [
+        {
+            "id": "tc",
+            "input": "find x",
+            "output": "let me look",
+            "evaluators": ["Tool judge"],
+            "tool_calls": [CALL_X],
+            "expected_tool_calls": [CALL_Y],
+        }
+    ]
+
+
+def test_build_llm_general_tool_call_row_without_output_sends_an_empty_one():
+    out = runner._build_llm_general_dataset(
+        [{"uuid": "tc", "payload": {"input": "i", "tool_calls": [CALL_X]}}], [TOOL_EV]
+    )
+    assert out == [
+        {"id": "tc", "input": "i", "output": "", "evaluators": ["Tool judge"], "tool_calls": [CALL_X]}
+    ]
+
+
+def test_build_llm_general_tool_call_row_rejects_calls_that_are_not_a_list():
+    with pytest.raises(runner.DatasetBuildError):
+        runner._build_llm_general_dataset(
+            [{"uuid": "tc", "payload": {"input": "i", "actual_tool_calls": [], "expected_tool_calls": "x"}}],
+            [TOOL_EV],
+        )
+
+
+def test_build_llm_general_tool_call_row_still_needs_input():
+    with pytest.raises(runner.DatasetBuildError):
+        runner._build_llm_general_dataset(
+            [{"uuid": "tc", "payload": {"actual_tool_calls": [CALL_X]}}], [TOOL_EV]
+        )
+
+
+def test_build_llm_general_mixed_task_names_only_the_rows_evaluators():
+    variables = {"ev-1": {"a": 1}, "ev-tc": {"b": 2}}
+    out = runner._build_llm_general_dataset(
+        [
+            {
+                "uuid": "r",
+                "payload": {"input": "i", "output": "o", "evaluator_variables": variables},
+            },
+            {
+                "uuid": "tc",
+                "payload": {
+                    "input": "i",
+                    "tool_calls": [CALL_X],
+                    "evaluator_variables": variables,
+                },
+            },
+        ],
+        [REPLY_EV, TOOL_EV],
+    )
+    assert {r["id"]: (r["evaluators"], r["arguments"]) for r in out} == {
+        "r": (["Reply judge"], {"Reply judge": {"a": 1}}),
+        "tc": (["Tool judge"], {"Tool judge": {"b": 2}}),
+    }
+
+
+def test_build_llm_general_skips_rows_with_no_evaluator():
+    assert runner._build_llm_general_dataset([TC_ROW], [REPLY_EV]) == []
+
+
+def test_parse_llm_general_blank_cell_fails_only_where_the_evaluator_was_sent(tmp_path):
+    # calibrate general leaves blank an evaluator a row was not sent, and also
+    # an evaluator whose judge call failed on a row it was sent.
+    (tmp_path / "config.json").write_text(
+        json.dumps({"evaluators_map": {"ev-1": "Reply", "ev-tc": "Tool"}})
+    )
+    (tmp_path / "results.csv").write_text(
+        "id,input,output,Reply,Reply_reasoning,Tool,Tool_reasoning\n"
+        "r,i,o,1,ok,,\n"
+        "tc,i,,,,0,no\n"
+        "broken,i,o,,,,\n"
+    )
+    evs = [
+        {**_ev_resolved("ev-1", "Reply"), "evaluator_type": "llm"},
+        {**_ev_resolved("ev-tc", "Tool"), "evaluator_type": "tool-call"},
+    ]
+    items = [
+        {"uuid": "r", "payload": {"input": "i", "output": "o"}},
+        {**TC_ROW, "uuid": "tc"},
+        {"uuid": "broken", "payload": {"input": "i", "output": "o"}},
+    ]
+    runs = runner.parse_results_for_task_type(
+        "llm-general", tmp_path, evs, "job-1", items=items
+    )
+    assert sorted((r["item_id"], r["evaluator_id"], r["status"]) for r in runs) == [
+        ("broken", "ev-1", "failed"),
+        ("r", "ev-1", "completed"),
+        ("tc", "ev-tc", "completed"),
+    ]
 
 
 def test_build_llm_general_dataset_no_evaluators():
@@ -457,9 +768,9 @@ def test_build_llm_general_dataset_happy():
         ],
         evs,
     )
-    # Flat `calibrate general` shape: {id, input, output}. No vars → no arguments.
+    # Flat `calibrate general` shape: {id, input, output, evaluators}. No vars → no arguments.
     assert out == [
-        {"id": "i1", "input": "summarize this", "output": "a summary"}
+        {"id": "i1", "input": "summarize this", "output": "a summary", "evaluators": ["judge"]}
     ]
 
 
@@ -481,7 +792,9 @@ def test_build_llm_general_dataset_judge_sees_only_default_text():
         ],
         evs,
     )
-    assert out == [{"id": "i1", "input": "summarize this", "output": "a summary"}]
+    assert out == [
+        {"id": "i1", "input": "summarize this", "output": "a summary", "evaluators": ["judge"]}
+    ]
 
 
 def test_build_llm_general_dataset_object_without_content():
@@ -535,7 +848,7 @@ def test_build_dataset_dispatch_llm_general():
         [{"uuid": "i1", "payload": {"input": "i", "output": "o"}}],
         [{"uuid": "e1", "name": "judge"}],
     )
-    assert out == [{"id": "i1", "input": "i", "output": "o"}]
+    assert out == [{"id": "i1", "input": "i", "output": "o", "evaluators": ["judge"]}]
 
 
 def test_build_tts_dataset():
@@ -956,7 +1269,7 @@ def test_parse_results_for_task_type_dispatch(tmp_path):
     # Unknown task type → []
     assert (
         runner.parse_results_for_task_type(
-            "unknown", tmp_path, [_ev_resolved()], "job-1"
+            "unknown", tmp_path, [_ev_resolved()], "job-1", items=[]
         )
         == []
     )
@@ -973,7 +1286,10 @@ def test_parse_results_general(tmp_path):
         "i1,in1,out1,1,ok\n"
         "i2,in2,out2,0,not ok\n"
     )
-    runs = runner._parse_results_general(tmp_path, [_ev_resolved()], "job-1")
+    items = [
+        {"uuid": i, "payload": {"input": "in", "output": "out"}} for i in ("i1", "i2")
+    ]
+    runs = runner._parse_results_general(tmp_path, [_ev_resolved()], "job-1", items)
     assert len(runs) == 2
     assert runs[0]["evaluator_id"] == "ev-1"
     assert runs[0]["value"]["value"] is True
@@ -989,7 +1305,11 @@ def test_parse_results_for_task_type_dispatch_llm_general(tmp_path):
         "id,input,output,Safety,Safety_reasoning\ni1,in1,out1,1,ok\n"
     )
     runs = runner.parse_results_for_task_type(
-        "llm-general", tmp_path, [_ev_resolved()], "job-1"
+        "llm-general",
+        tmp_path,
+        [_ev_resolved()],
+        "job-1",
+        items=[{"uuid": "i1", "payload": {"input": "in1", "output": "out1"}}],
     )
     assert len(runs) == 1
     assert runs[0]["value"]["value"] is True
@@ -1006,7 +1326,7 @@ def test_parse_results_for_task_type_dispatch_conversation(tmp_path):
         "name,type,value,reasoning,evaluator_id\nSafety,binary,1,ok,ev-1\n"
     )
     runs = runner.parse_results_for_task_type(
-        "conversation", tmp_path, [_ev_resolved()], "job-1", items=None
+        "conversation", tmp_path, [_ev_resolved()], "job-1", items=[]
     )
     assert runs[0]["item_id"] == "from-name"
 

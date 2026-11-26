@@ -117,7 +117,6 @@ from routers.annotation_tasks import (
 )
 from annotation_eval_runner import (
     ANNOTATION_EVAL_JOB_TYPE,
-    TOOL_CALL_EVALUATOR_TYPE,
     required_evaluator_ids_for_item,
 )
 
@@ -966,8 +965,8 @@ def _build_annotation_job_payload(
     labels they're looking at.
 
     Each item carries `is_tool_call` (stamped by `get_job_items`): true when
-    the row's agent output is a tool call rather than text. The form draws the
-    tool-call evaluator only on those rows and every other evaluator only on
+    the row's agent output is a tool call rather than text. The form draws
+    tool-call evaluators only on those rows and every other evaluator only on
     the rest, pairing this flag against each entry's `evaluator_type`."""
     task = get_annotation_task(job["task_id"])
     if not task:
@@ -1152,8 +1151,8 @@ def upsert_public_annotations(
 
     # Auto-complete: every required slot each item actually shows must have a
     # row, and every item must carry at least one judgement. A tool-call row
-    # shows only the tool-call evaluator, every other row shows everything
-    # except it (required_evaluator_ids_for_item). The second condition is
+    # shows only tool-call evaluators, every other row shows every other
+    # evaluator (required_evaluator_ids_for_item). The second condition is
     # what makes a job whose evaluators are all optional still
     # require the annotator to visit each item, rather than completing on the
     # first save. We re-check on every save (including post-completion edits)
@@ -1164,14 +1163,9 @@ def upsert_public_annotations(
     # so post-creation link/unlink on the parent task can't shift the
     # completion bar under the annotator.
     job_items = get_job_items(job["uuid"])
-    required_evaluator_ids = get_evaluator_ids_for_job(
-        job["uuid"], required_only=True
-    )
-    tool_call_evaluator_ids = {
-        ev["uuid"]
-        for ev in get_evaluators_for_job(job["uuid"])
-        if ev.get("evaluator_type") == TOOL_CALL_EVALUATOR_TYPE
-    }
+    required_evaluators = [
+        ev for ev in get_evaluators_for_job(job["uuid"]) if not ev["is_optional"]
+    ]
     job_annotations = get_annotations_for_job(job["uuid"])
     annotated_pairs = {
         (a["item_id"], a.get("evaluator_id"))
@@ -1181,9 +1175,7 @@ def upsert_public_annotations(
     expected_pairs = {
         (it["uuid"], ev_id)
         for it in job_items
-        for ev_id in required_evaluator_ids_for_item(
-            it, required_evaluator_ids, tool_call_evaluator_ids
-        )
+        for ev_id in required_evaluator_ids_for_item(it, required_evaluators)
     }
     items_touched = {a["item_id"] for a in job_annotations}
     completed = (

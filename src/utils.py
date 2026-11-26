@@ -281,8 +281,9 @@ EVALUATOR_TYPE_DESCRIPTION = (
     "- `llm`: a reply with its conversation history\n"
     "- `llm-general`: a standalone input and output pair\n"
     "- `conversation`: a full conversation\n"
-    "- `tool-call`: whether the agent called the right tool, labelled by a person\n"
+    "- `tool-call`: the tool calls an agent made\n"
 )
+TOOL_CALL_EVALUATOR_TYPE = "tool-call"
 DATA_TYPE_DESCRIPTION = (
     "The modality the judge reads:\n\n"
     "- `text`\n"
@@ -301,6 +302,7 @@ EvalJobType = Literal["stt-eval", "tts-eval", "annotation-eval"]
 AnnotationTaskTypeLiteral = Literal["stt", "llm", "llm-general", "conversation", "tts"]
 MemberRoleLiteral = Literal["owner", "admin"]  # mirrors DB CHECK(role IN ('owner','admin'))
 EvaluatorUuid = Annotated[str, StringConstraints(min_length=36, max_length=36)]
+NonBlankStr = Annotated[str, StringConstraints(pattern=r"\S")]
 TestUuid = Annotated[str, StringConstraints(min_length=36, max_length=36)]
 
 # Evaluator names that collide with reserved bulk-CSV output columns (an
@@ -1069,6 +1071,17 @@ def judge_turn(turn: Any) -> Any:
     return {k: v for k, v in turn.items() if k in JUDGE_TURN_KEYS}
 
 
+def is_tool_call_evaluator(ev: Dict[str, Any]) -> bool:
+    return ev.get("evaluator_type") == TOOL_CALL_EVALUATOR_TYPE
+
+
+def evaluators_fitting_row(
+    evaluators: List[Dict[str, Any]], row_is_tool_call: bool
+) -> List[Dict[str, Any]]:
+    """Tool-call evaluators judge only tool-call rows, every other evaluator only the rest."""
+    return [ev for ev in evaluators if is_tool_call_evaluator(ev) == row_is_tool_call]
+
+
 def is_tool_call_row(item: Dict[str, Any]) -> bool:
     """True when an annotation item is judged on the tool call it made rather
     than on a text reply. Safe on any item — returns False for stt/tts/
@@ -1077,8 +1090,8 @@ def is_tool_call_row(item: Dict[str, Any]) -> bool:
     Two shapes qualify. An item built from a tool-call test or trace carries
     `expected_tool_calls` / `actual_tool_calls`, and the mere presence of
     either list settles it whatever the agent produced: an agent that answered
-    in words instead of calling the tool is the failure a person is there to
-    mark, and the empty list it leaves behind must not read as a text row.
+    in words instead of calling the tool is the failure being judged, and the
+    empty list it leaves behind must not read as a text row.
     Any other item qualifies only the original way — a tool call in place of a
     reply: no `agent_response` / `output` text and a non-empty `tool_calls`
     list.

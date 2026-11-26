@@ -2306,8 +2306,8 @@ def test_annotation_eval_llm_general_run_launches(client):
 
 def test_annotation_eval_supported_task_types_match_creatable():
     """Every creatable annotation task type has a wired evaluator-run path.
-    (Tool-call rows are filtered out of a run per-row — see the runner's
-    `is_tool_call_row` — but that is not a task type.)"""
+    (A tool-call row is paired with its evaluators per row — see the runner's
+    `evaluators_fitting_row` — but that is not a task type.)"""
     import db as db_mod
     from annotation_eval_runner import SUPPORTED_EVAL_TASK_TYPES
 
@@ -3626,6 +3626,12 @@ def test_tool_call_row_links_tool_call_evaluator_once(client):
     assert first.status_code == 200
     links = _tool_call_links(client, h, task_uuid)
     assert len(links) == 1
+    detail = client.get(f"/annotation-tasks/{task_uuid}", headers=h).json()
+    assert [
+        e["source_default_slug"]
+        for e in detail["evaluators"]
+        if e["evaluator_type"] == "tool-call"
+    ] == ["default-tool-call-correctness"]
     order_after_first = [e["uuid"] for e in _task_evaluators(client, h, task_uuid)]
 
     # A later batch with another tool-call row neither duplicates the link
@@ -3660,6 +3666,121 @@ def test_normal_rows_do_not_link_tool_call_evaluator(client):
     )
     assert resp.status_code == 200
     assert _tool_call_links(client, h, task_uuid) == []
+
+
+def _custom_tool_call_evaluator(client, h):
+    resp = client.post(
+        "/evaluators",
+        json={
+            "name": f"tc-{uuid.uuid4().hex[:6]}",
+            "evaluator_type": "tool-call",
+            "version": {"judge_model": "openai/gpt-4.1", "system_prompt": "Right call?"},
+        },
+        headers=h,
+    )
+    assert resp.status_code == 200, resp.text
+    return resp.json()["uuid"]
+
+
+def _tool_call_link_slugs(client, h, task_uuid):
+    return [
+        e.get("source_default_slug") or e["uuid"]
+        for e in _tool_call_links(client, h, task_uuid)
+    ]
+
+
+def _task_with_a_tool_call_item_and_custom_evaluator(client, h):
+    llm_ev = _llm_evaluator(client, h)
+    task_uuid = _llm_task(client, h, llm_ev)
+    client.post(
+        f"/annotation-tasks/{task_uuid}/items",
+        json={"items": [{"payload": _tool_call_payload("tc1")}]},
+        headers=h,
+    )
+    custom = _custom_tool_call_evaluator(client, h)
+    resp = client.put(
+        f"/annotation-tasks/{task_uuid}/evaluators",
+        json={"evaluator_ids": [llm_ev["uuid"], custom]},
+        headers=h,
+    )
+    assert resp.status_code == 200
+    assert _tool_call_link_slugs(client, h, task_uuid) == [custom]
+    return task_uuid, llm_ev, custom
+
+
+def test_deleting_the_last_tool_call_evaluator_puts_tool_call_correctness_back(client):
+    h = _signup(client)["headers"]
+    task_uuid, _llm_ev, custom = _task_with_a_tool_call_item_and_custom_evaluator(client, h)
+    plain_task = _llm_task(client, h, _llm_ev)
+
+    assert client.delete(f"/evaluators/{custom}", headers=h).status_code == 200
+
+    assert _tool_call_link_slugs(client, h, task_uuid) == ["default-tool-call-correctness"]
+    assert _tool_call_links(client, h, plain_task) == []
+
+
+def test_retyping_the_last_tool_call_evaluator_puts_tool_call_correctness_back(client):
+    h = _signup(client)["headers"]
+    task_uuid, _llm_ev, custom = _task_with_a_tool_call_item_and_custom_evaluator(client, h)
+
+    resp = client.put(f"/evaluators/{custom}", json={"evaluator_type": "llm"}, headers=h)
+    assert resp.status_code == 200, resp.text
+
+    assert _tool_call_link_slugs(client, h, task_uuid) == ["default-tool-call-correctness"]
+
+
+def test_removing_every_tool_call_evaluator_from_a_task_keeps_one(client):
+    h = _signup(client)["headers"]
+    task_uuid, llm_ev, _custom = _task_with_a_tool_call_item_and_custom_evaluator(client, h)
+
+    resp = client.put(
+        f"/annotation-tasks/{task_uuid}/evaluators",
+        json={"evaluator_ids": [llm_ev["uuid"]]},
+        headers=h,
+    )
+    assert resp.status_code == 200
+    assert _tool_call_link_slugs(client, h, task_uuid) == ["default-tool-call-correctness"]
+    body = resp.json()
+    put_back = _tool_call_links(client, h, task_uuid)[0]["uuid"]
+    assert put_back in body["evaluator_ids"]
+    assert put_back in body["linked"]
+    assert put_back not in body["unlinked"]
+    assert _custom in body["unlinked"]
+
+
+def test_unlinking_the_last_tool_call_evaluator_is_refused(client):
+    h = _signup(client)["headers"]
+    task_uuid, llm_ev, custom = _task_with_a_tool_call_item_and_custom_evaluator(client, h)
+
+    resp = client.delete(f"/annotation-tasks/{task_uuid}/evaluators/{custom}", headers=h)
+    assert resp.status_code == 400
+    assert "need a tool call evaluator" in resp.json()["detail"]
+    assert _tool_call_link_slugs(client, h, task_uuid) == [custom]
+
+    # A reply evaluator can still be unlinked.
+    resp = client.delete(
+        f"/annotation-tasks/{task_uuid}/evaluators/{llm_ev['uuid']}", headers=h
+    )
+    assert resp.status_code == 200, resp.text
+
+
+def test_editing_an_item_into_a_tool_call_item_links_tool_call_correctness(client):
+    h = _signup(client)["headers"]
+    task_uuid = _llm_task(client, h, _llm_evaluator(client, h))
+    item_uuid = client.post(
+        f"/annotation-tasks/{task_uuid}/items",
+        json={"items": [{"payload": llm_item_payload("n1")}]},
+        headers=h,
+    ).json()["item_ids"][0]
+    assert _tool_call_links(client, h, task_uuid) == []
+
+    resp = client.put(
+        f"/annotation-tasks/{task_uuid}/items",
+        json={"updates": [{"uuid": item_uuid, "payload": _tool_call_payload("n1")}]},
+        headers=h,
+    )
+    assert resp.status_code == 200, resp.text
+    assert _tool_call_link_slugs(client, h, task_uuid) == ["default-tool-call-correctness"]
 
 
 def _job_status(client, h, task_uuid, job_uuid):

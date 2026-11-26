@@ -17,7 +17,7 @@ import shutil
 import subprocess
 import tempfile
 from collections.abc import Callable, Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime, timedelta
 from enum import Enum
 from pathlib import Path
@@ -30,13 +30,23 @@ from shared_enums import (
     AgentInteractionType,
     EvaluatorType,
 )
-from utils import get_calibrate_agent_cli, kill_process_group, utc_now
+from utils import (
+    TOOL_CALL_EVALUATOR_TYPE,
+    evaluators_fitting_row,
+    get_calibrate_agent_cli,
+    is_tool_call_evaluator,
+    kill_process_group,
+    utc_now,
+)
 
 logger = logging.getLogger(__name__)
 
 # Stored on a skipped `trace_eval_runs.error`.
 TraceEvalSkipReason = Literal[
-    "unsupported_interaction_type", "no_usable_evaluators", "over_limit"
+    "unsupported_interaction_type",
+    "no_usable_evaluators",
+    "no_tool_call_evaluator",
+    "over_limit",
 ]
 
 
@@ -135,18 +145,8 @@ class TraceScoringIneligible:
 @dataclass(frozen=True)
 class TraceScoringResolution:
     evaluation_type: TraceScorableEvaluationType | None
-    evaluator_type: EvaluatorType | None
     eligible: list[TraceScoringEligible] = field(default_factory=list)
     ineligible: list[TraceScoringIneligible] = field(default_factory=list)
-
-    @property
-    def skip_reason(self) -> TraceEvalSkipReason | None:
-        """Why nothing can score, or None when the eligible list is runnable."""
-        if self.evaluation_type is None:
-            return "unsupported_interaction_type"
-        if not self.eligible:
-            return "no_usable_evaluators"
-        return None
 
 
 def resolve_trace_scoring(
@@ -156,15 +156,12 @@ def resolve_trace_scoring(
     """Partition linked evaluators for this interaction type.
 
     `live_evaluators` is `(evaluators row, live evaluator_versions row or None)`
-    from `resolve_live_evaluators`. Type is checked before live-version /
-    variable checks so a mixed set never reaches `_validate_evaluators`.
-    Never raises.
+    from `resolve_live_evaluators`. Never raises.
     """
     mode = TRACE_SCORING_MODE_BY_INTERACTION_TYPE.get(interaction_type) if interaction_type is not None else None
     if mode is None:
         return TraceScoringResolution(
             evaluation_type=None,
-            evaluator_type=None,
             eligible=[],
             ineligible=[
                 TraceScoringIneligible(
@@ -181,7 +178,8 @@ def resolve_trace_scoring(
     ineligible: list[TraceScoringIneligible] = []
     for ev, version in live_evaluators:
         name = ev.get("name") or ev["uuid"]
-        if ev.get("evaluator_type") != required_evaluator_type:
+        evaluator_type = ev.get("evaluator_type")
+        if evaluator_type not in (required_evaluator_type, TOOL_CALL_EVALUATOR_TYPE):
             ineligible.append(
                 TraceScoringIneligible(
                     evaluator_uuid=ev["uuid"],
@@ -216,6 +214,7 @@ def resolve_trace_scoring(
                 execution={
                     "uuid": ev["uuid"],
                     "name": name,
+                    "evaluator_type": evaluator_type,
                     "output_type": ev.get("output_type") or "binary",
                     "judge_model": version.get("judge_model"),
                     "system_prompt": version.get("system_prompt") or "",
@@ -226,7 +225,6 @@ def resolve_trace_scoring(
         )
     return TraceScoringResolution(
         evaluation_type=evaluation_type,
-        evaluator_type=required_evaluator_type,
         eligible=eligible,
         ineligible=ineligible,
     )
@@ -277,15 +275,19 @@ class EvalOnlyCliResult:
 
 @dataclass(frozen=True)
 class PreparedRun:
-    """A claimed run whose trace and agent are still live."""
+    """A claimed run whose trace and agent are still live, with the evaluators
+    that fit its trace once the batch's evaluators are known."""
 
     run: dict[str, Any]
     trace: dict[str, Any]
+    evaluators: list[dict[str, Any]] = field(default_factory=list)
+    is_tool_call: bool = False
 
 
 @dataclass(frozen=True)
 class BatchEvaluators:
-    """What every run in one claimed batch is scored against.
+    """Every evaluator the runs in one claimed batch can be scored against.
+    `evaluators_fitting_row` picks each run's own from `hydrated`.
 
     A claim only ever returns runs of a single agent, so the agent's evaluators
     are resolved once for the batch rather than once for each run.
@@ -293,6 +295,8 @@ class BatchEvaluators:
 
     evaluation_type: TraceScorableEvaluationType
     hydrated: list[dict[str, Any]]
+    has_tool_call_evaluator: bool
+
 
 def resolve_batch_evaluators(
     agent_id: str,
@@ -309,15 +313,32 @@ def resolve_batch_evaluators(
     # leaves a pending run the off-switch found nothing to delete.
     if not trace_scoring_enabled(agent):
         return TraceEvalSettleSkipReason.SCORING_DISABLED
-    resolution = resolve_trace_scoring(
-        agent.get("interaction_type"), resolve_live_evaluators(agent["uuid"])
-    )
-    skip = resolution.skip_reason
-    if skip is not None:
-        return skip
-    hydrated = [item.execution for item in resolution.eligible]
+    live = resolve_live_evaluators(agent["uuid"])
+    resolution = resolve_trace_scoring(agent.get("interaction_type"), live)
+    if resolution.evaluation_type is None:
+        return "unsupported_interaction_type"
+    # An agent with no usable evaluator still resolves, so each trace settles
+    # with its own skip reason.
     return BatchEvaluators(
-        evaluation_type=resolution.evaluation_type, hydrated=hydrated
+        evaluation_type=resolution.evaluation_type,
+        hydrated=[item.execution for item in resolution.eligible],
+        has_tool_call_evaluator=any(
+            is_tool_call_evaluator(ev) for ev, _ in live
+        ),
+    )
+
+
+def is_tool_call_trace(trace: dict[str, Any]) -> bool:
+    """A trace with no reply and at least one named tool call. Must agree with
+    `db.TRACE_OUTPUT_TYPE_SQL["tool_call"]`: a reply of only spaces, tabs and
+    line breaks is no reply."""
+    output = trace.get("output") if isinstance(trace.get("output"), dict) else {}
+    response = output.get("response")
+    if response is not None and str(response).strip(" \t\n\r"):
+        return False
+    calls = output.get("tool_calls")
+    return isinstance(calls, list) and any(
+        isinstance(call, dict) and call.get("tool") for call in calls
     )
 
 
@@ -326,40 +347,38 @@ def build_dataset_item(
     evaluation_type: TraceScorableEvaluationType,
     trace: dict[str, Any],
     criteria_refs: list[dict[str, Any]],
+    tool_call_trace: bool,
 ) -> dict[str, Any]:
     """One eval-only dataset item. `test_case.id` is the run uuid, which the
     runner echoes back as `test_case_id` — the only thing results are mapped
     by, so a reordered or partial results file still lands correctly."""
     output = trace.get("output") if isinstance(trace.get("output"), dict) else {}
     response = output.get("response")
+    tool_calls = output.get("tool_calls")
     test_case: dict[str, Any] = {
         "id": run_uuid,
-        "evaluation": {"type": evaluation_type, "criteria": criteria_refs},
+        "evaluation": {
+            "type": "tool_call_judge" if tool_call_trace else evaluation_type,
+            "criteria": criteria_refs,
+        },
     }
     if evaluation_type == "general":
         raw_input = trace.get("input")
         test_case["input"] = (
             raw_input if isinstance(raw_input, str) else str(raw_input or "")
         )
-        return {
-            "test_case": test_case,
-            "output": {"response": "" if response is None else str(response)},
-        }
-    history = trace.get("input")
-    test_case["history"] = history if isinstance(history, list) else []
-    tool_calls = output.get("tool_calls")
-    return {
-        "test_case": test_case,
-        "output": {
-            "response": "" if response is None else str(response),
-            "tool_calls": tool_calls if isinstance(tool_calls, list) else [],
-        },
-    }
+    else:
+        history = trace.get("input")
+        test_case["history"] = history if isinstance(history, list) else []
+    item_output: dict[str, Any] = {"response": "" if response is None else str(response)}
+    if evaluation_type != "general" or tool_call_trace:
+        item_output["tool_calls"] = tool_calls if isinstance(tool_calls, list) else []
+    return {"test_case": test_case, "output": item_output}
 
 
 def build_eval_only_batch(
     prepared: Sequence[PreparedRun],
-    evaluators: BatchEvaluators,
+    evaluation_type: TraceScorableEvaluationType,
 ) -> tuple[dict[str, Any], list[dict[str, Any]], dict[str, str]]:
     """Assemble one invocation covering the whole batch.
 
@@ -369,16 +388,20 @@ def build_eval_only_batch(
     """
     top_level, criteria_per_run = build_test_evaluators_payload(
         [
-            {"test_uuid": item.run["uuid"], "evaluators": evaluators.hydrated}
+            {
+                "test_uuid": item.run["uuid"],
+                "evaluators": item.evaluators,
+            }
             for item in prepared
         ]
     )
     dataset = [
         build_dataset_item(
             item.run["uuid"],
-            evaluators.evaluation_type,
+            evaluation_type,
             item.trace,
             criteria_per_run.get(item.run["uuid"]) or [],
+            item.is_tool_call,
         )
         for item in prepared
     ]
@@ -726,8 +749,8 @@ def _swallow_settle(fn: Callable[..., Any], run: dict[str, Any], **kwargs: Any) 
 
 
 def _settle_or_defer_terminal(
-    run: dict[str, Any], *, reason: str, now: str, rng: random.Random | None,
-    max_attempts: int,
+    run: dict[str, Any], *, reason: TraceEvalSkipReason | TraceEvalSettleSkipReason,
+    now: str, rng: random.Random | None, max_attempts: int,
 ) -> None:
     from db import settle_trace_eval_run_terminal
 
@@ -752,7 +775,7 @@ def _prepare_claimed_run(run: dict[str, Any], now: str) -> PreparedRun | None:
         settle_trace_eval_run_terminal(
             run["uuid"],
             status=TraceEvalRunStatus.SKIPPED,
-            error=reason.value,
+            error=reason,
             now=now,
             attempts=run.get("attempts"),
         )
@@ -828,20 +851,37 @@ def process_claimed_runs(
             )
         return
     if not isinstance(evaluators, BatchEvaluators):
-        reason = (
-            evaluators.value
-            if isinstance(evaluators, TraceEvalSettleSkipReason)
-            else evaluators
-        )
         for item in prepared:
             _settle_or_defer_terminal(
-                item.run, reason=reason, now=prepare_now, rng=rng,
+                item.run, reason=evaluators, now=prepare_now, rng=rng,
                 max_attempts=max_attempts,
             )
         return
 
+    scorable: list[PreparedRun] = []
+    for item in prepared:
+        tool_call = is_tool_call_trace(item.trace)
+        fitting = evaluators_fitting_row(evaluators.hydrated, tool_call)
+        if fitting:
+            scorable.append(replace(item, evaluators=fitting, is_tool_call=tool_call))
+        else:
+            _settle_or_defer_terminal(
+                item.run,
+                reason=(
+                    "no_tool_call_evaluator"
+                    if tool_call and not evaluators.has_tool_call_evaluator
+                    else "no_usable_evaluators"
+                ),
+                now=prepare_now, rng=rng, max_attempts=max_attempts,
+            )
+    prepared = scorable
+    if not prepared:
+        return
+
     try:
-        config, dataset, manifest = build_eval_only_batch(prepared, evaluators)
+        config, dataset, manifest = build_eval_only_batch(
+            prepared, evaluators.evaluation_type
+        )
     except Exception as exc:
         logger.exception("trace-scoring: building the batch raised")
         build_now = utc_now()
@@ -869,7 +909,6 @@ def process_claimed_runs(
         return
 
     indexed = index_cli_results(cli_result.results)
-    hydrated_by_uuid = {ev["uuid"]: ev for ev in evaluators.hydrated}
     scored: dict[str, list[dict[str, Any]]] = {}
     for item in prepared:
         entry = indexed.get(item.run["uuid"])
@@ -878,7 +917,7 @@ def process_claimed_runs(
         scores = map_item_scores(
             entry,
             name_to_uuid=manifest,
-            hydrated_by_uuid=hydrated_by_uuid,
+            hydrated_by_uuid={ev["uuid"]: ev for ev in item.evaluators},
         )
         if scores is not None:
             scored[item.run["uuid"]] = scores
