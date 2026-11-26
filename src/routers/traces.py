@@ -1623,7 +1623,7 @@ def score_trace_endpoint(
     ),
     ctx: OrgContext = Depends(get_current_org),
 ):
-    """Run the agent's evaluators on a stored trace again, such as one skipped before a fitting evaluator was linked"""
+    """Run the agent's evaluators on a trace that was skipped, such as one sent before a fitting evaluator was linked"""
     trace = get_trace(ctx.org_uuid, trace_uuid)
     if not trace:
         raise HTTPException(status_code=404, detail="Trace not found")
@@ -1641,6 +1641,10 @@ def score_trace_endpoint(
     if refusal == "open_run":
         raise HTTPException(
             status_code=409, detail="This trace is already being scored"
+        )
+    if refusal == "not_skipped":
+        raise HTTPException(
+            status_code=409, detail="Only a trace that was skipped can be scored again"
         )
     if refusal == "over_limit":
         raise HTTPException(

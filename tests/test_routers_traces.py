@@ -4189,6 +4189,29 @@ def test_score_trace_refuses_while_a_run_is_open(client):
     assert len(_runs_for_trace(trace["uuid"])) == 1
 
 
+def test_score_trace_refuses_a_trace_that_was_not_skipped(client):
+    h, agent_id = _signup_with_agent(client)
+    _enable_auto_score(client, h, agent_id)
+    trace = _post_trace(client, h, _payload(agent_id, _mid()))
+    with db.get_db_connection() as conn:
+        conn.execute(
+            "UPDATE trace_eval_runs SET status = 'completed' WHERE trace_uuid = ?",
+            (trace["uuid"],),
+        )
+        conn.commit()
+
+    res = client.post(f"/traces/{trace['uuid']}/score", headers=h)
+    assert res.status_code == 409
+    assert res.json()["detail"] == "Only a trace that was skipped can be scored again"
+    assert len(_runs_for_trace(trace["uuid"])) == 1
+
+    _disable_auto_score(client, h, agent_id)
+    never_scored = _post_trace(client, h, _payload(agent_id, _mid()))
+    _set_trace_scoring(client, h, agent_id, True)
+    assert client.post(f"/traces/{never_scored['uuid']}/score", headers=h).status_code == 409
+    assert _runs_for_trace(never_scored["uuid"]) == []
+
+
 def test_score_trace_refuses_when_scoring_is_off(client):
     h, agent_id = _signup_with_agent(client)
     _disable_auto_score(client, h, agent_id)
