@@ -53,7 +53,7 @@ from db import (
 from shared_enums import EvaluatorType
 from utils import (
     DataTypeLiteral,
-    TOOL_CALL_EVALUATOR_TYPE,
+    is_tool_call_evaluator,
     NonBlankStr,
     EVALUATOR_TYPE_DESCRIPTION,
     DATA_TYPE_DESCRIPTION,
@@ -738,7 +738,7 @@ def update_evaluator_endpoint(
         raise HTTPException(status_code=400, detail=str(e))
     if not updated:
         raise HTTPException(status_code=400, detail="No fields to update")
-    if existing.get("evaluator_type") == TOOL_CALL_EVALUATOR_TYPE:
+    if payload.evaluator_type is not None and is_tool_call_evaluator(existing):
         ensure_tool_call_evaluator_on_tasks(ctx.org_uuid)
     return _evaluator_response(get_evaluator(evaluator_uuid))
 
@@ -760,7 +760,7 @@ def delete_evaluator_endpoint(
         )
     if not delete_evaluator(evaluator_uuid):
         raise HTTPException(status_code=404, detail="Evaluator not found")
-    if existing.get("evaluator_type") == TOOL_CALL_EVALUATOR_TYPE:
+    if is_tool_call_evaluator(existing):
         ensure_tool_call_evaluator_on_tasks(ctx.org_uuid)
     return {"message": "Evaluator deleted"}
 

@@ -612,7 +612,7 @@ class EvaluatorOrderRequest(BaseModel):
 
 class EvaluatorSetRequest(BaseModel):
     evaluator_ids: List[str] = Field(
-        description="The full ordered set of evaluators the task should end up linked to, in display order. Missing ones are unlinked, new ones are linked, and the order sets their position. Send an empty list to unlink all. Each must be one you created or a built-in default",
+        description="The full ordered set of evaluators the task should end up linked to, in display order. Missing ones are unlinked, new ones are linked, and the order sets their position. Send an empty list to unlink all. A task holding tool-call items always keeps one tool-call evaluator, so Tool call correctness is linked back if none is left. Each must be one you created or a built-in default",
         examples=[["f47ac10b-58cc-4372-a567-0e02b2c3d479"]],
     )
     optional_evaluator_ids: Optional[List[str]] = Field(
@@ -935,7 +935,8 @@ def set_task_evaluators(
     # Validate the whole set up front so a bad id links/unlinks nothing.
     for evaluator_id in payload.evaluator_ids:
         ensure_owned_evaluator(evaluator_id, ctx.org_uuid)
-    changed = set_evaluators_for_annotation_task(
+    before_ids = [e["uuid"] for e in get_evaluators_for_annotation_task(task_uuid)]
+    set_evaluators_for_annotation_task(
         task_uuid, payload.evaluator_ids, payload.optional_evaluator_ids
     )
     ensure_tool_call_evaluator_on_tasks(ctx.org_uuid, [task_uuid])
@@ -943,8 +944,8 @@ def set_task_evaluators(
     return EvaluatorSetResponse(
         message="Task evaluators updated",
         evaluator_ids=current_ids,
-        linked=changed["linked"],
-        unlinked=changed["unlinked"],
+        linked=[i for i in current_ids if i not in before_ids],
+        unlinked=[i for i in before_ids if i not in current_ids],
     )
 
 
@@ -3648,4 +3649,5 @@ def unlink_evaluator_from_task(
         raise HTTPException(
             status_code=404, detail="Evaluator is not linked to this task"
         )
+    ensure_tool_call_evaluator_on_tasks(ctx.org_uuid, [task_uuid])
     return {"message": "Evaluator unlinked from annotation task"}
