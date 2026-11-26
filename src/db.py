@@ -11097,19 +11097,6 @@ _LATEST_TRACE_RUN_SQL = (
 )
 
 
-def _evaluator_still_linked_sql(agent_column: str) -> str:
-    """Scores stay stored when an evaluator is unlinked, and are hidden from
-    every read until it is linked again. Deleting an agent also soft-deletes its
-    links but leaves its traces live, so that alone must not hide their scores."""
-    return (
-        "(EXISTS (SELECT 1 FROM agent_evaluators ae "
-        f"WHERE ae.agent_id = {agent_column} "
-        "AND ae.evaluator_id = ts.evaluator_uuid AND ae.deleted_at IS NULL) "
-        "OR EXISTS (SELECT 1 FROM agents a "
-        f"WHERE a.uuid = {agent_column} AND a.deleted_at IS NOT NULL))"
-    )
-
-
 # Highest value in the rubric the score was written under, not the evaluator's
 # current one, so a later edit cannot change what a stored score means.
 _TRACE_SCORE_SCALE_MAX_SQL = (
@@ -11136,8 +11123,7 @@ TRACE_SCORE_COMPARISONS = ("=", "!=", "<", "<=", ">", ">=")
 _TRACE_SCORE_VALUE_SQL = (
     "(SELECT ts.value FROM trace_eval_scores ts "
     f"WHERE ts.run_uuid = {_LATEST_TRACE_RUN_SQL} "
-    "AND ts.evaluator_uuid = ? "
-    f"AND {_evaluator_still_linked_sql('traces.agent_id')})"
+    "AND ts.evaluator_uuid = ?)"
 )
 
 # One score condition: the evaluator, the operator, and the number to compare
@@ -11175,8 +11161,7 @@ def _trace_score_clause(condition: TraceScoreFilter) -> Tuple[str, List[Any]]:
     return (
         "EXISTS (SELECT 1 FROM trace_eval_scores ts "
         f"WHERE ts.run_uuid = {_LATEST_TRACE_RUN_SQL} "
-        f"AND ts.evaluator_uuid = ? AND ({test}) "
-        f"AND {_evaluator_still_linked_sql('traces.agent_id')})",
+        f"AND ts.evaluator_uuid = ? AND ({test}))",
         [evaluator_uuid] + params,
     )
 
@@ -11989,7 +11974,6 @@ def _hydrate_trace_score_row(row: sqlite3.Row) -> Dict[str, Any]:
 _TRACE_SCORE_JOIN_SQL = f"""
 LEFT JOIN trace_eval_scores ts
   ON ts.run_uuid = runs.uuid
- AND {_evaluator_still_linked_sql('runs.agent_id')}
 LEFT JOIN evaluators e
   ON e.uuid = ts.evaluator_uuid
 LEFT JOIN evaluator_versions ev
@@ -12056,7 +12040,6 @@ def average_trace_scores(
           LEFT JOIN evaluator_versions live ON live.uuid = e.live_version_id
          WHERE latest.rn = 1
            AND ts.output_type = COALESCE(e.output_type, ts.output_type)
-           AND {_evaluator_still_linked_sql('latest.agent_id')}
          GROUP BY ts.evaluator_uuid
          ORDER BY MAX(e.name), ts.evaluator_uuid
     """
