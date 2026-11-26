@@ -10,6 +10,8 @@ import logging
 import re
 from typing import Any, Dict, List, Optional
 
+from utils import TOOL_CALL_EVALUATOR_TYPE
+
 logger = logging.getLogger(__name__)
 
 _VARIABLE_PATTERN = re.compile(r"\{\{\s*([a-zA-Z_][a-zA-Z0-9_]*)\s*\}\}")
@@ -129,6 +131,8 @@ def _calibrate_evaluator_def(
     }
     if ev.get("uuid"):
         out["id"] = ev["uuid"]
+    if ev.get("evaluator_type") == TOOL_CALL_EVALUATOR_TYPE:
+        out["tool_call"] = True
     if out["type"] == "rating":
         scale_min, scale_max = _scale_bounds(ev.get("output_config"))
         if scale_min is not None and scale_max is not None:
