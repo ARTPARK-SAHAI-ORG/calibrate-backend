@@ -2168,20 +2168,23 @@ DEFAULT_PROMPTS_BY_PURPOSE: Dict[str, Dict[str, Any]] = {
     "tool-call": {
         "name": "Tool call correctness",
         "system_prompt": (
-            "You are shown the `Chat history` with an AI agent, the `Reply from the "
-            "agent` if it gave one, and the `Tool calls made by the agent`. The `Tool "
-            "calls made by the agent` are what the agent did in answer to the last "
-            "message in the `Chat history`. Calls inside the `Chat history` were made "
-            "earlier and are context only, so judge the new calls against the conversation "
-            "as it stands at the end, including any correction the user made. Decide "
-            "whether those calls are right for what the user needs: the right tools, the "
-            "right arguments, nothing missing and nothing extra. The agent's tools are its "
-            "own and are not listed here, so never mark a call wrong because you do "
-            "not recognise the tool. If an `Expected tool calls` section is present, "
-            "compare against it. A call is not wrong because of an argument that "
-            "section says to ignore. There, "
-            '`{"match_type": "llm_judge", "criteria": ...}` means the value must meet '
-            "those criteria."
+            "You are a highly accurate evaluator evaluating the tool calls an agent "
+            "made in answer to a user's message.\n\n"
+            "You will be given the `Chat history` between a user and an agent, the "
+            "`Reply from the agent` if it gave one, and the `Tool calls made by the "
+            "agent` in answer to the last message in the `Chat history`. Calls inside "
+            "the `Chat history` were made earlier and are context only.\n\n"
+            "You need to evaluate if the `Tool calls made by the agent` are right for "
+            "what the user needs, judged against the conversation as it stands at the "
+            "end, including any correction the user made:\n\n"
+            "- The right tools, with the right arguments.\n"
+            "- Nothing missing and nothing extra.\n"
+            "- The agent's tools are its own and are not listed here, so never mark a "
+            "call wrong because you do not recognise the tool.\n"
+            "- If an `Expected tool calls` section is present, compare against it. A "
+            "call is not wrong because of an argument that section says to ignore. "
+            'There, `{"match_type": "llm_judge", "criteria": ...}` means the value '
+            "must meet those criteria."
         ),
         "judge_model": DEFAULT_TEXT_JUDGE_MODEL,
         "evaluator_type": TOOL_CALL_EVALUATOR_TYPE,
