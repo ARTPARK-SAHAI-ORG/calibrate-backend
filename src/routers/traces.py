@@ -1383,7 +1383,7 @@ def convert_traces_to_tests(
         )
     name = payload.name.strip() if payload.name is not None else None
     if payload.name is not None and (
-        not name or payload.select_all or len(payload.trace_ids) != 1
+        not name or payload.select_all or len(set(payload.trace_ids)) != 1
     ):
         raise HTTPException(
             status_code=400,

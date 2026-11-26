@@ -1168,7 +1168,8 @@ def test_convert_uses_the_name_given_for_one_trace(client):
     traces = [_post_trace(client, h, _payload(agent_id, _mid())) for _ in range(2)]
     one = [traces[0]["uuid"]]
 
-    res = _convert(client, h, trace_ids=one, type="tool_call", name="  Skipped rotavirus  ")
+    # The same trace listed twice is still one trace.
+    res = _convert(client, h, trace_ids=one * 2, type="tool_call", name="  Skipped rotavirus  ")
     assert res.status_code == 200, res.text
     test_uuid = res.json()["test_uuids"][0]
     assert client.get(f"/tests/{test_uuid}", headers=h).json()["name"] == "Skipped rotavirus"
@@ -1177,6 +1178,14 @@ def test_convert_uses_the_name_given_for_one_trace(client):
     res = _convert(client, h, trace_ids=one, type="tool_call", name="Skipped rotavirus")
     test_uuid = res.json()["test_uuids"][0]
     assert client.get(f"/tests/{test_uuid}", headers=h).json()["name"] == "Skipped rotavirus (2)"
+
+    evaluator = _create_evaluator(client, h, "llm")
+    res = _convert(
+        client, h, trace_ids=one, type="response", evaluators=[evaluator["uuid"]], name="A reply"
+    )
+    assert res.status_code == 200, res.text
+    test_uuid = res.json()["test_uuids"][0]
+    assert client.get(f"/tests/{test_uuid}", headers=h).json()["name"] == "A reply"
 
     for body in (
         {"trace_ids": [t["uuid"] for t in traces], "name": "x"},
