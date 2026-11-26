@@ -13,6 +13,7 @@ import json
 import logging
 import os
 import random
+import re
 import shutil
 import subprocess
 import tempfile
@@ -24,6 +25,7 @@ from pathlib import Path
 from typing import Any, Literal
 
 from llm_judge import _scale_bounds, build_test_evaluators_payload
+from read_calibrate_run_output import cli_error_line
 from shared_enums import (
     REQUIRED_EVALUATOR_TYPE_BY_TEST_TYPE,
     AgentInteractionType,
@@ -517,6 +519,28 @@ def backoff_available_at(
     return add_seconds(now, delay + roller.randint(0, max(delay // 2, 1)))
 
 
+def errored_row_reason(entry: Any) -> str | None:
+    """The one line saying why calibrate could not judge this row, or None.
+
+    calibrate marks such a row `error: true` and puts the provider's error in
+    `metrics.reasoning`, wrapped in tags (`<last_exception>...`) when the judge
+    retried. The last line naming an error is the provider's own message.
+    """
+    if not isinstance(entry, dict) or not entry.get("error"):
+        return None
+    metrics = entry.get("metrics")
+    reasoning = metrics.get("reasoning") if isinstance(metrics, dict) else None
+    lines = [
+        line.strip()
+        for line in str(reasoning or "").splitlines()
+        if line.strip() and not line.strip().startswith("<")
+    ]
+    for line in reversed(lines):
+        if re.search(r"\berror\b", line, re.I):
+            return line
+    return lines[-1] if lines else None
+
+
 def _truncate_error(detail: str) -> str:
     text = (detail or "").strip() or "scoring failed"
     if len(text) <= ERROR_MAX_CHARS:
@@ -634,11 +658,14 @@ def invoke_eval_only_cli(
         if timed_out:
             error = f"calibrate-agent llm --eval-only timed out after {timeout_seconds}s"
         elif returncode != 0:
-            error = (
-                stderr.splitlines()[-1]
-                if stderr
-                else f"calibrate-agent llm --eval-only exited {returncode}"
-            )
+            if stderr:
+                error = stderr.splitlines()[-1]
+            else:
+                try:
+                    stdout = stdout_path.read_text(encoding="utf-8")
+                except OSError:
+                    stdout = ""
+                error = cli_error_line(stdout, "", returncode)
         return EvalOnlyCliResult(
             returncode=returncode,
             timed_out=timed_out,
@@ -863,7 +890,9 @@ def process_claimed_runs(
         scores = scored.get(item.run["uuid"])
         if scores is None:
             _swallow_settle(
-                _defer_or_fail, item.run, now=settle_now, error=leftover_error,
+                _defer_or_fail, item.run, now=settle_now,
+                error=errored_row_reason(indexed.get(item.run["uuid"]))
+                or leftover_error,
                 rng=rng, max_attempts=max_attempts,
             )
             continue
