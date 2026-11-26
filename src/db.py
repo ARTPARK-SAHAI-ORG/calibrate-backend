@@ -11465,6 +11465,13 @@ def _scored_trace_count(cur: sqlite3.Cursor, org_uuid: str, cap: int) -> int:
     ).fetchone()[0]
 
 
+def _at_scored_trace_limit(
+    cur: sqlite3.Cursor, org_uuid: str, cap: Optional[int]
+) -> bool:
+    """Whether the workspace holds `cap` scored traces already (None: no limit)."""
+    return cap is not None and _scored_trace_count(cur, org_uuid, cap) >= cap
+
+
 def create_trace_with_eval_run(
     *,
     org_uuid: str,
@@ -11523,12 +11530,7 @@ def create_trace_with_eval_run(
             feedback,
         )
         if scoring_on:
-            over_limit = (
-                max_scored_traces is not None
-                and _scored_trace_count(cur, org_uuid, max_scored_traces)
-                >= max_scored_traces
-            )
-            if over_limit:
+            if _at_scored_trace_limit(cur, org_uuid, max_scored_traces):
                 _insert_trace_eval_run(
                     cur,
                     trace_uuid=row["uuid"],
@@ -11581,26 +11583,30 @@ def create_trace_rescore_run(
 ) -> Tuple[Optional[str], Optional[str]]:
     """Queue one more scoring run for a stored trace, claimable at once.
 
-    Returns `(run_uuid, None)`, or `(None, reason)` with nothing written:
-    `open_run` when the trace already has a pending or processing run,
-    `over_limit` when the workspace holds `max_scored_traces` (None: no limit).
+    Only a trace whose latest run was skipped qualifies, so a scored trace is
+    never counted against the limit twice. Returns `(run_uuid, None)`, or
+    `(None, reason)` with nothing written: `open_run` when the latest run is
+    pending or processing, `not_skipped` when it is anything else but skipped
+    (or there is none), `over_limit` when the workspace holds
+    `max_scored_traces` (None: no limit).
     """
     now = trace_scoring.utc_now()
     with get_db_connection() as conn:
         cur = conn.cursor()
         cur.execute("BEGIN IMMEDIATE")
-        if cur.execute(
-            "SELECT 1 FROM trace_eval_runs WHERE trace_uuid = ? "
-            "AND status IN ('pending', 'processing')",
+        latest = cur.execute(
+            "SELECT status FROM trace_eval_runs WHERE trace_uuid = ? "
+            "ORDER BY created_at DESC, id DESC LIMIT 1",
             (trace_uuid,),
-        ).fetchone():
+        ).fetchone()
+        status = latest["status"] if latest else None
+        if status in ("pending", "processing"):
             conn.rollback()
             return None, "open_run"
-        if (
-            max_scored_traces is not None
-            and _scored_trace_count(cur, org_uuid, max_scored_traces)
-            >= max_scored_traces
-        ):
+        if status != "skipped":
+            conn.rollback()
+            return None, "not_skipped"
+        if _at_scored_trace_limit(cur, org_uuid, max_scored_traces):
             conn.rollback()
             return None, "over_limit"
         run_uuid = _insert_trace_eval_run(
