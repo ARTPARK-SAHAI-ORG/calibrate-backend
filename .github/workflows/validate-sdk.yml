@@ -11,6 +11,7 @@ on:
       - "fern/**"
       - "openapi/overlay.yaml"
       - ".github/actions/fetch-public-spec/**"
+      - ".github/scripts/fetch-public-openapi.sh"
       - ".github/workflows/validate-sdk.yml"
       - ".github/workflows/publish-sdk.yml"
       - ".github/workflows/auto-publish-sdk.yml"

@@ -21,7 +21,10 @@ if [ -z "${PUBLIC_API_BASE_URL:-}" ]; then
   export PUBLIC_API_BASE_URL="http://localhost:8000"
 fi
 
-(cd src && uv run uvicorn main:app --port 8000 --log-level warning &)
+(cd src && exec uv run uvicorn main:app --port 8000 --log-level warning) &
+SERVER_PID=$!
+# A server left running holds uv's cache lock, so setup-uv's end-of-job cache prune waits on it and fails.
+trap 'kill "${SERVER_PID}" 2>/dev/null || true; wait "${SERVER_PID}" 2>/dev/null || true' EXIT
 for _ in $(seq 1 30); do
   curl -sf http://localhost:8000/public-api/openapi.json -o /dev/null && break
   sleep 2
