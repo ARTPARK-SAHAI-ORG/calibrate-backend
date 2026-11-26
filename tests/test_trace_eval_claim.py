@@ -860,7 +860,7 @@ class _FakePopen:
         self.returncode = -9
 
 
-def _patch_popen(monkeypatch, proc, *, results=None, stderr=""):
+def _patch_popen(monkeypatch, proc, *, results=None, stderr="", stdout=""):
     def fake_popen(cmd, **kwargs):
         proc.args = cmd
         proc.kwargs = kwargs
@@ -869,6 +869,8 @@ def _patch_popen(monkeypatch, proc, *, results=None, stderr=""):
             (output_dir / "results.json").write_text(json.dumps(results))
         if stderr:
             (output_dir / "stderr.log").write_text(stderr)
+        if stdout:
+            (output_dir / "stdout.log").write_text(stdout)
         return proc
 
     monkeypatch.setattr(ts.subprocess, "Popen", fake_popen)
@@ -949,18 +951,141 @@ def test_the_temp_dir_is_kept_while_the_child_is_still_running(monkeypatch):
 
 
 
-def test_unreadable_stderr_does_not_mask_the_exit_code(monkeypatch):
+def test_unreadable_logs_do_not_mask_the_exit_code(monkeypatch):
     _patch_popen(monkeypatch, _FakePopen(returncode=4), results=[])
     original = Path.read_text
 
     def flaky(self, *args, **kwargs):
-        if self.name == "stderr.log":
+        if self.name in ("stderr.log", "stdout.log"):
             raise OSError("gone")
         return original(self, *args, **kwargs)
 
     monkeypatch.setattr(Path, "read_text", flaky)
 
-    assert "exited 4" in ts.invoke_eval_only_cli({"evaluators": []}, []).error
+    assert ts.invoke_eval_only_cli({"evaluators": []}, []).error == (
+        "calibrate-agent exited with code 4"
+    )
+
+
+def test_a_nonzero_exit_with_empty_stderr_reports_calibrates_own_line(monkeypatch):
+    _patch_popen(
+        monkeypatch,
+        _FakePopen(returncode=1),
+        results=[],
+        stdout="loading\n\x1b[91m❌ config is missing evaluators\x1b[0m\nbye\n",
+    )
+
+    result = ts.invoke_eval_only_cli({"evaluators": []}, [])
+
+    assert result.error == "❌ config is missing evaluators"
+
+
+# How calibrate writes a row whose judge could not be reached.
+_CREDITS_ERROR = (
+    "Error code: 402 - {'error': {'message': \"This request's maximum cost "
+    "exceeds your available credits\", 'code': 402}}"
+)
+
+
+def _errored(run_uuid: str, reasoning: str) -> dict:
+    return {
+        "test_case_id": run_uuid,
+        "output": {"response": None, "tool_calls": []},
+        "metrics": {"passed": False, "reasoning": reasoning},
+        "error": True,
+    }
+
+
+_RETRIED_REASONING = (
+    "<failed_attempts>\n\n<generation number=\"1\">\n<exception>\n    "
+    f"{_CREDITS_ERROR}\n</exception>\n<completion>\n    None\n</completion>\n"
+    "</generation>\n\n</failed_attempts>\n\n<last_exception>\n    "
+    f"{_CREDITS_ERROR}\n</last_exception>"
+)
+
+
+def test_a_run_the_judge_could_not_reach_keeps_the_providers_error():
+    org = _org()
+    agent = _agent(org)
+    evaluator_uuid, version_uuid = _evaluator(org, name="Correctness")
+    failed = _run(org, agent, _trace(org, agent), [(evaluator_uuid, version_uuid)])
+    other = _run(org, agent, _trace(org, agent), [(evaluator_uuid, version_uuid)])
+
+    ts.claim_and_score_batch(
+        now=_at(1000),
+        invoke=_invoker(
+            [_errored(failed, _RETRIED_REASONING)],
+            returncode=1,
+            error="❌ 1/2 test cases could not be run",
+        ),
+        rng=random.Random(1),
+    )
+
+    assert db.get_trace_eval_run(failed)["error"] == _CREDITS_ERROR
+    assert db.get_trace_eval_run(other)["error"] == "❌ 1/2 test cases could not be run"
+
+
+def test_a_run_failing_at_the_ceiling_stores_the_providers_error():
+    org = _org()
+    agent = _agent(org)
+    run = _run(
+        org, agent, _trace(org, agent), [_evaluator(org)],
+        attempts=ts.MAX_ATTEMPTS - 1,
+    )
+
+    ts.claim_and_score_batch(
+        now=_at(1000), invoke=_invoker([_errored(run, _RETRIED_REASONING)])
+    )
+
+    row = db.get_trace_eval_run(run)
+    assert row["status"] == RunStatus.FAILED.value
+    assert row["error"] == _CREDITS_ERROR
+
+
+def test_errored_row_reason_reads_only_rows_calibrate_marked_errored():
+    assert ts.errored_row_reason(None) is None
+    assert ts.errored_row_reason({"metrics": {"reasoning": "fine"}}) is None
+    assert ts.errored_row_reason({"error": True, "metrics": "x"}) is None
+    assert ts.errored_row_reason({"error": True, "metrics": {}}) is None
+    assert (
+        ts.errored_row_reason(
+            {
+                "error": True,
+                "metrics": {
+                    "reasoning": "<last_exception>\n    Request timed out.\n</last_exception>"
+                },
+            }
+        )
+        == "Request timed out."
+    )
+
+
+def test_errored_row_reason_keeps_a_judge_parse_error_and_drops_the_docs_link():
+    import pydantic
+
+    class Verdict(pydantic.BaseModel):
+        match: bool
+
+    try:
+        Verdict.model_validate_json("not json")
+    except pydantic.ValidationError as exc:
+        message = str(exc)
+    reasoning = (
+        f"<failed_attempts>\n<exception>\n    first try\n</exception>\n"
+        f"</failed_attempts>\n\n<last_exception>\n    {message}\n</last_exception>"
+    )
+
+    reason = ts.errored_row_reason({"error": True, "metrics": {"reasoning": reasoning}})
+
+    assert reason.startswith("1 validation error for Verdict Invalid JSON:")
+    assert "first try" not in reason
+    assert "errors.pydantic.dev" not in reason
+    assert (
+        ts.errored_row_reason(
+            {"error": True, "metrics": {"reasoning": "Agent request timed out (60s)"}}
+        )
+        == "Agent request timed out (60s)"
+    )
 
 
 # --- driver -----------------------------------------------------------------
