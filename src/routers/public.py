@@ -1368,6 +1368,14 @@ class PublicAgentChatResponse(BaseModel):
     interaction_type: Literal["conversation", "general"] = Field(
         description="`conversation` for an agent that talks back and forth, `general` for one that answers each message on its own"
     )
+    agent_id: Optional[str] = Field(
+        None,
+        description="ID of the agent. Only filled in when you are signed in as a member of the agent's workspace",
+    )
+    org_uuid: Optional[str] = Field(
+        None,
+        description="ID of the agent's workspace. Only filled in when you are signed in as a member of that workspace",
+    )
 
 
 class ChatToolCall(BaseModel):
@@ -1411,9 +1419,12 @@ def get_public_agent_chat(
 ):
     """Get the agent a chat link lets you talk to"""
     agent = _chat_link_agent(token, user_id)
+    is_member = bool(user_id and get_member_role(agent["org_uuid"], user_id))
     return PublicAgentChatResponse(
         agent_name=agent["name"],
         interaction_type=agent.get("interaction_type") or DEFAULT_AGENT_INTERACTION_TYPE,
+        agent_id=agent["uuid"] if is_member else None,
+        org_uuid=agent["org_uuid"] if is_member else None,
     )
 
 

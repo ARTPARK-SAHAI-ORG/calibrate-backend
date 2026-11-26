@@ -122,10 +122,19 @@ CONNECTION = {"agent_url": "https://example.com/a", "connection_verified": True,
 
 
 def test_get_names_the_agent(client):
-    _, agent, token = _chat_agent(client, interaction_type="general")
-    assert client.get(f"/public/agent-chat/{token}").json() == {
+    h, agent, token = _chat_agent(client, interaction_type="general")
+    hidden = {
         "agent_name": agent["name"],
         "interaction_type": "general",
+        "agent_id": None,
+        "org_uuid": None,
+    }
+    assert client.get(f"/public/agent-chat/{token}").json() == hidden
+    assert client.get(f"/public/agent-chat/{token}", headers=_signup(client)).json() == hidden
+    assert client.get(f"/public/agent-chat/{token}", headers=h).json() == {
+        **hidden,
+        "agent_id": agent["uuid"],
+        "org_uuid": agent["org_uuid"],
     }
 
 
