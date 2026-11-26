@@ -3363,38 +3363,6 @@ def test_item_reads_stamp_is_tool_call_and_has_reply():
     assert (single["is_tool_call"], single["has_reply"]) == (True, True)
 
 
-def test_tool_call_prompt_update_rewrites_only_untouched_copies():
-    _u1, org_old = _fresh_org()
-    _u2, org_edited = _fresh_org()
-    old_fork = db.get_tool_call_evaluator_for_org(org_old)
-    edited_fork = db.get_tool_call_evaluator_for_org(org_edited)
-    edited_prompt = db._TOOL_CALL_OLD_PROMPT + "\nAlso check the dates."
-    assert "Reply from the agent" in db._TOOL_CALL_OLD_PROMPT
-    with db.get_db_connection() as conn:
-        for fork, prompt in (
-            (old_fork, db._TOOL_CALL_OLD_PROMPT),
-            (edited_fork, edited_prompt),
-        ):
-            conn.execute(
-                "UPDATE evaluator_versions SET system_prompt = ? WHERE uuid = ?",
-                (prompt, fork["live_version_id"]),
-            )
-        conn.execute(
-            "DELETE FROM _schema_migrations WHERE name = ?",
-            (db.DROP_REPLY_FROM_TOOL_CALL_PROMPT_MIGRATION,),
-        )
-        conn.commit()
-
-    db.init_db()
-
-    updated = db.get_evaluator_version(old_fork["live_version_id"])
-    assert updated["system_prompt"] == db._TOOL_CALL_SEED["version"]["system_prompt"]
-    assert "Reply from the agent" not in updated["system_prompt"]
-    assert len(db.get_evaluator_versions(old_fork["uuid"])) == 1
-    kept = db.get_evaluator_version(edited_fork["live_version_id"])
-    assert kept["system_prompt"] == edited_prompt
-
-
 def test_update_organization_refuses_a_name_that_is_only_spaces(user):
     """A name of nothing but spaces is not a name. The API rejects an empty
     one before it gets here, so this is the layer's own last word on it."""

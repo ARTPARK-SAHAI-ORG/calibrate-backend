@@ -2029,20 +2029,6 @@ def init_db():
                     "evaluator version(s)"
                 )
 
-        if not _schema_migration_applied(
-            cursor, DROP_REPLY_FROM_TOOL_CALL_PROMPT_MIGRATION
-        ):
-            rewritten = _backfill_drop_reply_from_tool_call_prompt(cursor)
-            _mark_schema_migration_applied(
-                cursor, DROP_REPLY_FROM_TOOL_CALL_PROMPT_MIGRATION
-            )
-            conn.commit()
-            if rewritten:
-                logger.info(
-                    f"Updated the tool-call correctness prompt on {rewritten} "
-                    "evaluator version(s)"
-                )
-
         # Re-point pre-existing evaluator links from the shared default templates
         # to each org's fork (one-time). Runs after the fork backfill so the
         # forks exist. Finished-run job snapshots stay frozen.
@@ -3556,7 +3542,6 @@ RENAME_TOOL_CALL_EVALUATOR_DESCRIPTION_MIGRATION = (
     "rename_tool_call_evaluator_description_v1"
 )
 FILL_TOOL_CALL_EVALUATOR_JUDGE_MIGRATION = "fill_tool_call_evaluator_judge_v1"
-DROP_REPLY_FROM_TOOL_CALL_PROMPT_MIGRATION = "drop_reply_from_tool_call_prompt_v1"
 _TOOL_CALL_EVALUATOR_OLD_DESCRIPTION = (
     "Records whether the agent made the right tool call, judged by a person"
 )
@@ -3645,32 +3630,6 @@ def _backfill_fill_tool_call_evaluator_judge(cursor: sqlite3.Cursor) -> int:
         )
         """,
         (version["system_prompt"], version["judge_model"], TOOL_CALL_EVALUATOR_TYPE),
-    )
-    return cursor.rowcount
-
-
-# The shipped prompt while the tool-call judge was also shown the reply.
-_TOOL_CALL_OLD_PROMPT = DEFAULT_PROMPTS_BY_PURPOSE["tool-call"]["system_prompt"].replace(
-    "agent, and the `Tool calls",
-    "agent, the `Reply from the agent` if it gave one, and the `Tool calls",
-)
-
-
-def _backfill_drop_reply_from_tool_call_prompt(cursor: sqlite3.Cursor) -> int:
-    """One-time migration: rewrite, in place, every tool-call evaluator version
-    whose prompt is still exactly `_TOOL_CALL_OLD_PROMPT`. Edited copies stay."""
-    cursor.execute(
-        """
-        UPDATE evaluator_versions SET system_prompt = ?
-        WHERE system_prompt = ? AND evaluator_id IN (
-            SELECT uuid FROM evaluators WHERE evaluator_type = ?
-        )
-        """,
-        (
-            DEFAULT_PROMPTS_BY_PURPOSE["tool-call"]["system_prompt"],
-            _TOOL_CALL_OLD_PROMPT,
-            TOOL_CALL_EVALUATOR_TYPE,
-        ),
     )
     return cursor.rowcount
 
