@@ -11274,15 +11274,16 @@ def _insert_trace_eval_run(
     now: str,
     available_at: Optional[str] = None,
     completed_at: Optional[str] = None,
-) -> None:
-    """Insert one trace_eval_runs row. Caller owns the transaction."""
+) -> str:
+    """Insert one trace_eval_runs row and return its uuid. Caller owns the transaction."""
+    run_uuid = str(uuid.uuid4())
     cur.execute(
         "INSERT INTO trace_eval_runs "
         "(uuid, trace_uuid, org_uuid, agent_id, status, "
         "error, available_at, created_at, updated_at, completed_at) "
         "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         (
-            str(uuid.uuid4()),
+            run_uuid,
             trace_uuid,
             org_uuid,
             agent_id,
@@ -11294,6 +11295,7 @@ def _insert_trace_eval_run(
             completed_at,
         ),
     )
+    return run_uuid
 
 
 def _hold_waiting_trace_eval_runs(
@@ -11508,6 +11510,54 @@ def create_trace_with_eval_run(
         # row, which an idle worker re-checks on its own poll.
         trace_scoring_nudge.set()
     return row
+
+
+def create_trace_rescore_run(
+    *,
+    org_uuid: str,
+    trace_uuid: str,
+    agent_id: str,
+    max_scored_traces: Optional[int],
+) -> Tuple[Optional[str], Optional[str]]:
+    """Queue one more scoring run for a stored trace, claimable at once.
+
+    Returns `(run_uuid, None)`, or `(None, reason)` with nothing written:
+    `open_run` when the trace already has a pending or processing run,
+    `over_limit` when the workspace holds `max_scored_traces` (None: no limit).
+    """
+    now = trace_scoring.utc_now()
+    with get_db_connection() as conn:
+        cur = conn.cursor()
+        cur.execute("BEGIN IMMEDIATE")
+        if cur.execute(
+            "SELECT 1 FROM trace_eval_runs WHERE trace_uuid = ? "
+            "AND status IN ('pending', 'processing')",
+            (trace_uuid,),
+        ).fetchone():
+            conn.rollback()
+            return None, "open_run"
+        if (
+            max_scored_traces is not None
+            and _scored_trace_count(cur, org_uuid, max_scored_traces)
+            >= max_scored_traces
+        ):
+            conn.rollback()
+            return None, "over_limit"
+        run_uuid = _insert_trace_eval_run(
+            cur,
+            trace_uuid=trace_uuid,
+            org_uuid=org_uuid,
+            agent_id=agent_id,
+            status=trace_scoring.TraceEvalRunStatus.PENDING,
+            error=None,
+            now=now,
+        )
+        conn.commit()
+
+    import trace_scoring_nudge
+
+    trace_scoring_nudge.set()
+    return run_uuid, None
 
 
 def list_traces(
