@@ -54,7 +54,6 @@ from utils import (
     get_s3_client,
     get_s3_output_config,
     is_job_timed_out,
-    is_tool_call_evaluator,
     is_tool_call_row,
     item_has_reply,
     judge_turn,
@@ -371,12 +370,12 @@ def _build_llm_dataset(
     _require_evaluators(evaluators_resolved, "LLM --eval-only")
     out: List[Dict[str, Any]] = []
     for it in items:
+        row_is_tool_call = is_tool_call_row(it)
         row_evaluators = evaluators_fitting_row(
-            evaluators_resolved, is_tool_call_row(it), item_has_reply(it)
+            evaluators_resolved, row_is_tool_call, item_has_reply(it)
         )
         if not row_evaluators:
             continue
-        row_is_tool_call = any(is_tool_call_evaluator(ev) for ev in row_evaluators)
         payload = _payload_dict(it)
         history = payload.get("chat_history")
         response = message_text(payload.get("agent_response"))
@@ -489,12 +488,12 @@ def _build_llm_general_dataset(
     _require_evaluators(evaluators_resolved, "general eval")
     out: List[Dict[str, Any]] = []
     for it in items:
+        row_is_tool_call = is_tool_call_row(it)
         row_evaluators = evaluators_fitting_row(
-            evaluators_resolved, is_tool_call_row(it), item_has_reply(it)
+            evaluators_resolved, row_is_tool_call, item_has_reply(it)
         )
         if not row_evaluators:
             continue
-        row_is_tool_call = any(is_tool_call_evaluator(ev) for ev in row_evaluators)
         payload = _payload_dict(it)
         input_text = message_text(payload.get("input"))
         output_text = message_text(payload.get("output"))

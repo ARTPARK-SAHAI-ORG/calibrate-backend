@@ -540,7 +540,7 @@ def test_a_trace_with_a_reply_and_tool_calls_is_scored_by_both_kinds():
     }
 
 
-def test_a_reply_and_tool_calls_with_only_a_reply_evaluator_goes_as_a_normal_row():
+def test_a_reply_and_tool_calls_with_only_a_reply_evaluator_still_sends_the_calls():
     org = _org()
     agent = _agent(org)
     output = {**_TOOL_ONLY, "response": "Week 14."}
@@ -550,7 +550,8 @@ def test_a_reply_and_tool_calls_with_only_a_reply_evaluator_goes_as_a_normal_row
     ts.claim_and_score_batch(now=_at(1000), invoke=invoke)
 
     [item] = invoke.captured["dataset"]
-    assert item["test_case"]["evaluation"]["type"] != "tool_call_judge"
+    assert item["test_case"]["evaluation"]["type"] == "tool_call_judge"
+    assert item["output"]["tool_calls"]
     assert _status(run) == RunStatus.COMPLETED.value
 
 

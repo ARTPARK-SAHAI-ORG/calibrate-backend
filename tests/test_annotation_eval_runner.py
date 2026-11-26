@@ -587,10 +587,10 @@ def test_build_llm_reply_with_tool_calls_goes_to_both_kinds():
     ]
 
 
-def test_build_llm_reply_with_tool_calls_and_only_a_reply_evaluator_is_unchanged():
+def test_build_llm_reply_with_tool_calls_and_only_a_reply_evaluator_still_sends_the_calls():
     [row] = _llm_reply_with_calls([REPLY_EV])
     assert row["test_case"]["evaluation"] == {
-        "type": "response", "criteria": [{"name": "Reply judge"}],
+        "type": "tool_call_judge", "criteria": [{"name": "Reply judge"}],
     }
     assert row["output"] == {"response": "hi", "tool_calls": [CALL_Y]}
 
@@ -656,6 +656,15 @@ def test_build_llm_general_tool_call_row_carries_its_calls():
             "expected_tool_calls": [CALL_Y],
         }
     ]
+
+
+def test_build_llm_general_reply_with_calls_and_only_a_reply_evaluator_still_sends_the_calls():
+    [row] = runner._build_llm_general_dataset(
+        [{"uuid": "r", "payload": {"input": "find x", "output": "found", "tool_calls": [CALL_X]}}],
+        [REPLY_EV],
+    )
+    assert row["evaluators"] == ["Reply judge"]
+    assert row["tool_calls"] == [CALL_X]
 
 
 def test_build_llm_general_test_built_row_with_a_reply_goes_to_both_kinds():

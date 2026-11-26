@@ -842,8 +842,7 @@ def process_claimed_runs(
         fitting = evaluators_fitting_row(evaluators.hydrated, tool_call, reply)
         if fitting:
             scorable.append(replace(
-                item, evaluators=fitting,
-                is_tool_call=any(is_tool_call_evaluator(ev) for ev in fitting),
+                item, evaluators=fitting, is_tool_call=tool_call,
             ))
         else:
             _settle_or_defer_terminal(
