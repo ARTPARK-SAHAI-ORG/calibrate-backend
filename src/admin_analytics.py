@@ -21,10 +21,11 @@ EVAL_FIELDS = {
 }
 EVAL_KINDS = tuple(EVAL_FIELDS.values())
 # What makes a workspace count as active on a day.
-ACTIVE_METRICS = set(EVAL_KINDS) | {"traces_received", "labels_collected"}
+ACTIVE_METRICS = set(EVAL_KINDS) | {"traces_received", "chat_messages", "labels_collected"}
 DAY_METRICS = EVAL_KINDS + (
     "failed_evaluations",
     "traces_received",
+    "chat_messages",
     "traces_scored",
     "labels_collected",
     "labelling_jobs_finished",
@@ -85,7 +86,9 @@ _EVENTS = """
 events AS (
     SELECT org_uuid, ts, kind AS metric, cost FROM evals
     UNION ALL SELECT org_uuid, ts, 'failed_evaluations', NULL FROM evals WHERE status = 'failed'
-    UNION ALL SELECT org_uuid, created_at, 'traces_received', NULL
+    UNION ALL SELECT org_uuid, created_at,
+                     CASE WHEN source = 'chat' THEN 'chat_messages' ELSE 'traces_received' END,
+                     NULL
                 FROM traces WHERE deleted_at IS NULL
     UNION ALL SELECT r.org_uuid, r.completed_at, 'traces_scored', NULL
                 FROM trace_eval_runs r JOIN traces tr ON tr.uuid = r.trace_uuid
