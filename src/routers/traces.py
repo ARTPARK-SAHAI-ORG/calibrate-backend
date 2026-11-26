@@ -65,7 +65,7 @@ from shared_enums import (
     EvaluatorType,
     required_agent_interaction_type,
 )
-from trace_scoring import TraceEvalRunStatus
+from trace_scoring import MAX_METADATA_KEY_CHARS, TraceEvalRunStatus
 from routers.tests import (
     EvaluatorRef,
     _validate_evaluators,
@@ -308,11 +308,11 @@ class TraceMetadataEntry(BaseModel):
 
     key: str = Field(
         min_length=1,
-        max_length=256,
+        max_length=MAX_METADATA_KEY_CHARS,
         description="Name of the metadata entry",
     )
     value: str = Field(
-        max_length=8192,
+        max_length=MAX_TURN_CONTENT_CHARS,
         description="Value of the metadata entry",
     )
 
@@ -509,6 +509,23 @@ class TraceScoreResult(BaseModel):
     )
 
 
+class TraceUnconfiguredEvaluator(BaseModel):
+    evaluator_uuid: str = Field(
+        min_length=36,
+        max_length=36,
+        description="ID of the evaluator that did not score this trace",
+        examples=[_EXAMPLE_TRACE_UUID],
+    )
+    name: str = Field(
+        description="Name of the evaluator. Uses the last stored name if it has been deleted"
+    )
+
+
+class TraceMissingValue(TraceUnconfiguredEvaluator):
+    variable: str = Field(description="The evaluator variable that had no value")
+    source: str = Field(description="The part of the trace chosen to fill the variable")
+
+
 class TraceScoringRun(BaseModel):
     run_uuid: str = Field(
         min_length=36,
@@ -535,6 +552,12 @@ class TraceScoringRun(BaseModel):
     )
     results: List[TraceScoreResult] = Field(
         description="Results on this run from the evaluators linked to the agent"
+    )
+    missing_values: List[TraceMissingValue] = Field(
+        description="Variables this trace had no value for, so their evaluators did not score it"
+    )
+    unconfigured_evaluators: List[TraceUnconfiguredEvaluator] = Field(
+        description="Evaluators that did not score this trace because a variable had no part of the trace chosen to fill it"
     )
 
 
@@ -1616,6 +1639,8 @@ def get_trace_scores_endpoint(
                 "completed_at": _trace_iso(run["completed_at"]),
                 "error": run["error"],
                 "results": run["results"],
+                "missing_values": run["missing_values"],
+                "unconfigured_evaluators": run["unconfigured_evaluators"],
             }
             for run in runs
         ]

@@ -156,11 +156,12 @@ def _render_with_rubric(
     for k, v in variable_values.items():
         render_vars.setdefault(k, v)
 
-    rendered = render_template(ev.get("system_prompt", ""), render_vars)
+    return _with_rubric(render_template(ev.get("system_prompt", ""), render_vars), ev)
+
+
+def _with_rubric(prompt: str, ev: Dict[str, Any]) -> str:
     rubric = _format_scale_rubric(ev.get("output_config"))
-    if rubric:
-        rendered = rendered.rstrip() + rubric
-    return rendered
+    return prompt.rstrip() + rubric if rubric else prompt
 
 
 def build_evaluator_cli_payload(
@@ -233,6 +234,12 @@ def refresh_evaluators_to_live(
     return refreshed
 
 
+def _unrendered_prompt(ev: Dict[str, Any]) -> str:
+    """The prompt with `{{variable}}` placeholders left for calibrate and the rubric appended."""
+    # Calibrate fills only the exact `{{name}}`, so `{{ name }}` is tidied to that form.
+    return _with_rubric(_VARIABLE_PATTERN.sub(r"{{\1}}", ev.get("system_prompt") or ""), ev)
+
+
 def build_evaluator_cli_payload_unrendered(
     evaluators: List[Dict[str, Any]],
 ) -> List[Dict[str, Any]]:
@@ -245,14 +252,7 @@ def build_evaluator_cli_payload_unrendered(
     `payload.evaluator_variables[<evaluator_uuid>] = {var: value}` and those
     values become per-test `criteria[].arguments`.
     """
-    payload = []
-    for ev in evaluators:
-        rendered_prompt = ev.get("system_prompt", "")
-        rubric = _format_scale_rubric(ev.get("output_config"))
-        if rubric:
-            rendered_prompt = rendered_prompt.rstrip() + rubric
-        payload.append(_calibrate_evaluator_def(ev, rendered_prompt))
-    return payload
+    return [_calibrate_evaluator_def(ev, _unrendered_prompt(ev)) for ev in evaluators]
 
 
 def build_test_evaluators_payload(
@@ -299,15 +299,8 @@ def build_test_evaluators_payload(
                 used_names.add(name)
                 name_for_uuid[evaluator_uuid] = name
 
-                # Top-level definition: leave {{variable}} placeholders unrendered so calibrate
-                # can substitute per-test arguments. Rubric block IS appended.
-                rendered_prompt = ev.get("system_prompt", "")
-                rubric = _format_scale_rubric(ev.get("output_config"))
-                if rubric:
-                    rendered_prompt = rendered_prompt.rstrip() + rubric
-
                 ev_with_name = {**ev, "name": name}
-                top_level.append(_calibrate_evaluator_def(ev_with_name, rendered_prompt))
+                top_level.append(_calibrate_evaluator_def(ev_with_name, _unrendered_prompt(ev)))
 
             ref: Dict[str, Any] = {"name": name_for_uuid[evaluator_uuid]}
             arguments = ev.get("variable_values") or {}

@@ -3590,3 +3590,33 @@ def test_ensure_tool_call_evaluator_links_nothing_when_the_org_has_no_fork():
     fork = db.get_tool_call_evaluator_for_org(org_uuid)
     assert db.delete_evaluator(fork["uuid"]) is True
     assert db.ensure_tool_call_evaluator_on_tasks(org_uuid) == []
+
+
+def test_agent_evaluator_trace_variables_round_trip(user):
+    agent = db.create_agent(
+        name=_u("tv-agent"), user_id=user["uuid"], org_uuid=user["org_uuid"],
+        link_default_evaluator=False,
+    )
+    ev = db.create_evaluator(
+        name=_u("tv-ev"), owner_user_id=user["uuid"], org_uuid=user["org_uuid"]
+    )
+
+    db.set_agent_evaluator_trace_variables(agent, ev, {"a": "input"})
+
+    db.add_evaluator_to_agent(agent, ev)
+    assert db.get_evaluators_for_agent(agent)[0]["trace_variables"] == {}
+
+    mapping = {"a": "metadata.expert", "b": "output.response"}
+    db.set_agent_evaluator_trace_variables(agent, ev, mapping)
+    assert db.get_evaluators_for_agent(agent)[0]["trace_variables"] == mapping
+
+    db.set_agent_evaluator_trace_variables(agent, ev, {})
+    assert db.get_evaluators_for_agent(agent)[0]["trace_variables"] == {}
+
+    db.set_agent_evaluator_trace_variables(agent, ev, mapping)
+    db.remove_evaluator_from_agent(agent, ev)
+    assert db.get_evaluators_for_agent(agent) == []
+    db.set_agent_evaluator_trace_variables(agent, ev, {"a": "input"})
+
+    db.add_evaluator_to_agent(agent, ev)
+    assert db.get_evaluators_for_agent(agent)[0]["trace_variables"] == mapping

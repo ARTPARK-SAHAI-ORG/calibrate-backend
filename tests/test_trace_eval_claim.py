@@ -626,6 +626,143 @@ def test_a_result_naming_another_kinds_evaluator_is_not_settled():
     assert db.get_trace_eval_scores(run) == []
 
 
+def _nurse_evaluator(org: str, agent: dict) -> tuple[str, str]:
+    """An evaluator whose `{{nurse_reply}}` comes from the trace's `expert_answer`."""
+    ev = db.create_evaluator(
+        name="Matches nurse",
+        evaluator_type="llm",
+        org_uuid=org,
+        owner_user_id=str(uuid.uuid4()),
+        output_type="binary",
+    )
+    version = db.create_evaluator_version(
+        ev, "openai/gpt-4.1", "Compare {{nurse_reply}}.", variables=[{"name": "nurse_reply"}]
+    )
+    db.set_evaluator_live_version(ev, version["uuid"])
+    db.add_evaluator_to_agent(agent["uuid"], ev)
+    db.set_agent_evaluator_trace_variables(
+        agent["uuid"], ev, {"nurse_reply": "metadata.expert_answer"}
+    )
+    return ev, version["uuid"]
+
+
+_EXPERT_ANSWER = [{"key": "expert_answer", "value": "Give fluids."}]
+
+
+def _scored_evaluators(run_uuid: str) -> set[str]:
+    return {s["evaluator_uuid"] for s in db.get_trace_eval_scores(run_uuid)}
+
+
+def test_an_evaluator_left_out_of_one_trace_does_not_hold_that_run_open():
+    org = _org()
+    agent = _agent(org)
+    nurse, nurse_version = _nurse_evaluator(org, agent)
+    polite, polite_version = _evaluator(org, name="Polite")
+    pins = [(nurse, nurse_version), (polite, polite_version)]
+    full = _run(org, agent, _trace(org, agent, metadata=_EXPERT_ANSWER), pins, available_at=1)
+    partial = _run(org, agent, _trace(org, agent), pins, available_at=2)
+
+    def results(dataset):
+        return [
+            _judged(
+                row["test_case"]["id"],
+                {
+                    ref["name"]: {"match": True}
+                    for ref in row["test_case"]["evaluation"]["criteria"]
+                },
+            )
+            for row in dataset
+        ]
+
+    ts.claim_and_score_batch(now=_at(1000), invoke=_invoker(results))
+
+    assert _status(full) == RunStatus.COMPLETED.value
+    assert _scored_evaluators(full) == {nurse, polite}
+    assert _status(partial) == RunStatus.COMPLETED.value
+    assert _scored_evaluators(partial) == {polite}
+
+
+def test_a_run_with_every_evaluator_left_out_is_skipped_and_sends_no_row():
+    org = _org()
+    agent = _agent(org)
+    pins = [_nurse_evaluator(org, agent)]
+    filled = _run(org, agent, _trace(org, agent, metadata=_EXPERT_ANSWER), pins, available_at=1)
+    empty = _run(org, agent, _trace(org, agent), pins, available_at=2)
+
+    invoke = _invoker(lambda ds: [_judged(filled, {"Matches nurse": {"match": True}})])
+    ts.claim_and_score_batch(now=_at(1000), invoke=invoke)
+
+    assert [row["test_case"]["id"] for row in invoke.captured["dataset"]] == [filled]
+    assert _status(filled) == RunStatus.COMPLETED.value
+    settled = db.get_trace_eval_run(empty)
+    assert settled["status"] == RunStatus.SKIPPED.value
+    assert settled["error"] == "missing_trace_values"
+
+
+def test_a_retry_skipped_early_drops_what_an_earlier_attempt_recorded(monkeypatch):
+    monkeypatch.setattr(ts, "utc_now", lambda: _at(1000))
+    org = _org()
+    agent = _agent(org)
+    nurse = _nurse_evaluator(org, agent)
+    polite = _evaluator(org, name="Polite")
+    run = _run(org, agent, _trace(org, agent), [nurse, polite], available_at=1)
+
+    ts.claim_and_score_batch(now=_at(1000), invoke=_invoker([], error="judge down"))
+    recorded = json.loads(db.get_trace_eval_run(run)["missing_values"])
+    assert [entry["variable"] for entry in recorded] == ["nurse_reply"]
+
+    for evaluator_uuid, _version in (nurse, polite):
+        db.remove_evaluator_from_agent(agent["uuid"], evaluator_uuid)
+    ts.claim_and_score_batch(now=_at(100_000), invoke=_invoker([]))
+
+    settled = db.get_trace_eval_run(run)
+    assert (settled["status"], settled["missing_values"]) == (RunStatus.SKIPPED.value, None)
+
+
+def test_a_reclaim_clears_the_unconfigured_evaluators_an_earlier_attempt_recorded(monkeypatch):
+    monkeypatch.setattr(ts, "utc_now", lambda: _at(1000))
+    org = _org()
+    agent = _agent(org)
+    polite = _evaluator(org, name="Polite")
+    unmapped = db.create_evaluator(
+        name="Unmapped", evaluator_type="llm", org_uuid=org,
+        owner_user_id=str(uuid.uuid4()), output_type="binary",
+    )
+    version = db.create_evaluator_version(
+        unmapped, "openai/gpt-4.1", "Compare {{nurse_reply}}.",
+        variables=[{"name": "nurse_reply"}],
+    )
+    db.set_evaluator_live_version(unmapped, version["uuid"])
+    run = _run(org, agent, _trace(org, agent), [polite, (unmapped, version["uuid"])], available_at=1)
+
+    ts.claim_and_score_batch(now=_at(1000), invoke=_invoker([], error="judge down"))
+    assert json.loads(db.get_trace_eval_run(run)["unconfigured_evaluators"]) == [unmapped]
+
+    assert [row["uuid"] for row in _claim(now=_at(100_000))] == [run]
+    assert db.get_trace_eval_run(run)["unconfigured_evaluators"] is None
+
+
+def test_a_batch_with_every_run_skipped_never_calls_the_cli():
+    org = _org()
+    agent = _agent(org)
+    pins = [_nurse_evaluator(org, agent)]
+    tool_only = _run(
+        org,
+        agent,
+        _trace(org, agent, output={"tool_calls": [{"tool": "t"}]}, metadata=_EXPERT_ANSWER),
+        pins,
+        available_at=1,
+    )
+    no_value = _run(org, agent, _trace(org, agent), pins, available_at=2)
+
+    invoke = _invoker([])
+    ts.claim_and_score_batch(now=_at(1000), invoke=invoke)
+
+    assert invoke.captured == {}
+    assert db.get_trace_eval_run(tool_only)["error"] == "no_tool_call_evaluator"
+    assert db.get_trace_eval_run(no_value)["error"] == "missing_trace_values"
+
+
 def test_results_map_by_id_so_a_reordered_file_still_lands():
     org = _org()
     agent = _agent(org)

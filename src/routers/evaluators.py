@@ -8,7 +8,7 @@ Replaces the legacy `metrics` router. Adds:
  - API-key-authenticated invocation endpoint
 """
 
-from typing import Any, Dict, List, Literal, Optional
+from typing import Any, Dict, List, Literal, Optional, Type
 
 from fastapi import APIRouter, Depends, HTTPException, Path, Query
 from pagination import (
@@ -349,6 +349,12 @@ class EvaluatorResponse(EvaluatorResponseBase):
     )
 
 
+class AgentEvaluatorResponse(EvaluatorResponse):
+    trace_variables: Dict[str, str] = Field(
+        description="Which part of a trace fills each variable of the evaluator when it scores an agent's traces",
+    )
+
+
 class EvaluatorDetailResponse(EvaluatorResponseBase):
     # Detail shape: `versions[]` is the full history; `live_version_index`
     # is the direct array position of the live version (None when the
@@ -487,6 +493,7 @@ def _live_version_index(
 def _evaluator_response(
     evaluator: Dict[str, Any],
     version_by_id: Optional[Dict[str, Dict[str, Any]]] = None,
+    response_class: Type[EvaluatorResponse] = EvaluatorResponse,
 ) -> EvaluatorResponse:
     """Shape one evaluator row into the list/summary response.
 
@@ -509,7 +516,11 @@ def _evaluator_response(
                 judge_model=v["judge_model"],
                 variables=v.get("variables"),
             )
-    return EvaluatorResponse(
+    extra = {
+        name: evaluator[name]
+        for name in response_class.model_fields.keys() - EvaluatorResponse.model_fields.keys()
+    }
+    return response_class(
         uuid=evaluator["uuid"],
         name=evaluator["name"],
         description=evaluator.get("description"),
@@ -533,6 +544,7 @@ def _evaluator_response(
         created_at=evaluator["created_at"],
         updated_at=evaluator["updated_at"],
         live_version=live_version,
+        **extra,
     )
 
 
@@ -540,6 +552,7 @@ def build_evaluator_page(
     page: List[Dict[str, Any]],
     total: int,
     pagination,
+    response_class: Type[EvaluatorResponse] = EvaluatorResponse,
 ) -> PaginatedResponse:
     """Shape an already-sliced page of evaluator rows into the paginated slim
     response envelope, resolving every row's live version in ONE batched query
@@ -550,7 +563,7 @@ def build_evaluator_page(
         [e["live_version_id"] for e in page if e.get("live_version_id")]
     )
     return page_envelope(
-        [_evaluator_response(e, version_by_id=version_by_id) for e in page],
+        [_evaluator_response(e, version_by_id, response_class) for e in page],
         total,
         pagination,
     )
