@@ -390,6 +390,7 @@ def test_a_verdict_maps_by_evaluator_id_ahead_of_its_runtime_name():
         {
             "evaluator_uuid": "ev-1",
             "evaluator_version_id": "ev-1-version",
+            "variable_values": None,
             "value": 1,
             "output_type": "binary",
             "reasoning": "ok",
@@ -408,6 +409,7 @@ def test_a_verdict_falls_back_to_the_runtime_name_when_the_runner_sends_no_id():
         {
             "evaluator_uuid": "ev-1",
             "evaluator_version_id": "ev-1-version",
+            "variable_values": None,
             "value": 3.0,
             "output_type": "rating",
             "reasoning": None,
@@ -835,6 +837,7 @@ _FULL_TRACE = {
     "labels": ["prod", "hindi"],
     "conversation_id": "conv-1",
     "message_id": "msg-1",
+    "feedback": {"is_correct": False, "comment": "  Should say fluids.  ", "at": None},
     "metadata": [
         {"key": "expert_answer", "value": "Give fluids."},
         {"key": "expert_answer", "value": "A later entry."},
@@ -853,6 +856,7 @@ _FULL_TRACE = {
         ("labels", "prod, hindi"),
         ("conversation_id", "conv-1"),
         ("message_id", "msg-1"),
+        ("feedback.comment", "Should say fluids."),
         ("metadata.expert_answer", "Give fluids."),
         ("metadata.a.b", "dotted"),
         ("metadata.blank", None),
@@ -877,6 +881,7 @@ def test_trace_variable_value_keeps_a_string_input():
         "labels",
         "conversation_id",
         "message_id",
+        "feedback.comment",
         "metadata.expert_answer",
     ],
 )
@@ -884,8 +889,10 @@ def test_trace_variable_value_keeps_a_string_input():
     "trace",
     [
         {},
+        {"feedback": {"is_correct": True, "comment": None}},
         {
             "input": "  ",
+            "feedback": {"is_correct": False, "comment": "   "},
             "output": {"response": " \n", "tool_calls": []},
             "labels": [],
             "conversation_id": None,

@@ -1856,6 +1856,15 @@ def init_db():
             )
             """
         )
+        # JSON {variable: value} the evaluator was judged on, NULL when it
+        # declares none. Kept on the score so a later mapping change does not
+        # rewrite what an old score was given.
+        try:
+            cursor.execute(
+                "ALTER TABLE trace_eval_scores ADD COLUMN variable_values TEXT DEFAULT NULL"
+            )
+        except sqlite3.OperationalError:
+            pass
         conn.commit()
 
         # ============ org_limits (renamed from user_limits) ============
@@ -11639,8 +11648,13 @@ def create_trace_rescore_run(
     trace_uuid: str,
     agent_id: str,
     max_scored_traces: Optional[int],
+    only_evaluators: Optional[List[str]] = None,
 ) -> Tuple[Optional[str], Optional[str]]:
     """Queue one more scoring run for a stored trace, claimable at once.
+
+    With `only_evaluators`, a trace whose latest run completed is scored again
+    by those evaluators alone, on a copy of that run's scores. A skipped or
+    failed one is scored again by every evaluator as usual.
 
     A trace whose latest run was skipped or failed is scored again by every
     evaluator. One whose latest run completed is scored again only by the
@@ -11667,7 +11681,9 @@ def create_trace_rescore_run(
             conn.rollback()
             return None, "open_run"
         only: Optional[List[str]] = None
-        if status == "completed":
+        if only_evaluators and status == "completed":
+            only = only_evaluators
+        elif status == "completed":
             only = _newly_eligible_evaluators(
                 agent_id, json.loads(latest["unconfigured_evaluators"] or "[]")
             )
@@ -11693,9 +11709,11 @@ def create_trace_rescore_run(
         if only:
             cur.execute(
                 "INSERT INTO trace_eval_scores (run_uuid, evaluator_uuid, "
-                "evaluator_version_id, value, output_type, reasoning, completed_at) "
+                "evaluator_version_id, value, output_type, reasoning, completed_at, "
+                "variable_values) "
                 "SELECT ?, evaluator_uuid, evaluator_version_id, value, output_type, "
-                "reasoning, completed_at FROM trace_eval_scores WHERE run_uuid = ?",
+                "reasoning, completed_at, variable_values FROM trace_eval_scores "
+                "WHERE run_uuid = ?",
                 (run_uuid, latest["uuid"]),
             )
         conn.commit()
@@ -11722,16 +11740,22 @@ def _newly_eligible_evaluators(agent_id: str, recorded: List[str]) -> List[str]:
     return [ev for ev in recorded if ev in eligible]
 
 
-def get_previous_unconfigured_evaluators(run_uuid: str) -> List[str]:
-    """What the run before this one on the same trace recorded as unconfigured."""
+def get_previous_run_gaps(
+    run_uuid: str,
+) -> Tuple[List[str], List[Dict[str, str]]]:
+    """What the run before this one on the same trace recorded as unconfigured,
+    and as missing a value."""
     with get_db_connection() as conn:
         row = conn.execute(
-            "SELECT prev.unconfigured_evaluators FROM trace_eval_runs cur "
+            "SELECT prev.unconfigured_evaluators, prev.missing_values "
+            "FROM trace_eval_runs cur "
             "JOIN trace_eval_runs prev ON prev.trace_uuid = cur.trace_uuid "
             "AND prev.id < cur.id WHERE cur.uuid = ? ORDER BY prev.id DESC LIMIT 1",
             (run_uuid,),
         ).fetchone()
-    return json.loads(row[0] or "[]") if row else []
+    if not row:
+        return [], []
+    return json.loads(row[0] or "[]"), json.loads(row[1] or "[]")
 
 
 def list_traces(
@@ -12055,6 +12079,9 @@ def _hydrate_trace_score_row(row: sqlite3.Row) -> Dict[str, Any]:
         "value": row["value"],
         "reasoning": row["reasoning"],
         "evaluator_version_id": row["evaluator_version_id"],
+        "variable_values": (
+            json.loads(row["variable_values"]) if row["variable_values"] else None
+        ),
         "passed": trace_scoring.trace_evaluator_passed(
             output_type, row["value"], scale_max
         ),
@@ -12086,6 +12113,7 @@ _TRACE_SCORE_SELECT_SQL = """
     ts.output_type AS output_type,
     ts.reasoning AS reasoning,
     ts.evaluator_version_id AS evaluator_version_id,
+    ts.variable_values AS variable_values,
     e.name AS evaluator_name,
     e.evaluator_type AS evaluator_type,
     ev.output_config AS output_config
@@ -12452,14 +12480,15 @@ def _upsert_trace_eval_scores(
             """
             INSERT INTO trace_eval_scores
                 (run_uuid, evaluator_uuid, evaluator_version_id,
-                 value, output_type, reasoning, completed_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?)
+                 value, output_type, reasoning, completed_at, variable_values)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT (run_uuid, evaluator_uuid) DO UPDATE SET
                 evaluator_version_id = excluded.evaluator_version_id,
                 value = excluded.value,
                 output_type = excluded.output_type,
                 reasoning = excluded.reasoning,
-                completed_at = excluded.completed_at
+                completed_at = excluded.completed_at,
+                variable_values = excluded.variable_values
             """,
             (
                 run_uuid,
@@ -12469,6 +12498,9 @@ def _upsert_trace_eval_scores(
                 score["output_type"],
                 score.get("reasoning"),
                 now,
+                json.dumps(score["variable_values"])
+                if score.get("variable_values")
+                else None,
             ),
         )
 
@@ -12750,9 +12782,10 @@ def trim_pending_trace_runs_over_cap(org_uuid: str, cap: int) -> int:
         cur.execute(
             "UPDATE trace_eval_runs SET status = 'skipped', error = 'over_limit', "
             "updated_at = ?, completed_at = ? "
-            "WHERE uuid IN (SELECT uuid FROM trace_eval_runs "
-            "WHERE org_uuid = ? AND status = 'pending' "
-            "ORDER BY created_at ASC, id ASC LIMIT -1 OFFSET ?)",
+            "WHERE uuid IN (SELECT r.uuid FROM trace_eval_runs r "
+            "JOIN traces t ON t.uuid = r.trace_uuid AND t.deleted_at IS NULL "
+            "WHERE r.org_uuid = ? AND r.status = 'pending' "
+            "ORDER BY r.created_at ASC, r.id ASC LIMIT -1 OFFSET ?)",
             (now, now, org_uuid, max(0, cap - used)),
         )
         skipped = cur.rowcount

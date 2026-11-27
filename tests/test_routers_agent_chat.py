@@ -574,6 +574,18 @@ def test_feedback_is_set_and_cleared(client):
     assert _feedback(client, token, trace_uuid, True, "x" * 2001).status_code == 422
 
 
+def test_feedback_on_a_chat_reply_scores_it_again_for_a_new_comment(client):
+    _, agent, token = _chat_agent(client)
+    with patch.object(public, "agent_reply", _llm()):
+        trace_uuid = _send(client, token).json()["trace_uuid"]
+
+    with patch.object(public, "rescore_for_new_feedback_comment") as rescore:
+        assert _feedback(client, token, trace_uuid, False, "Wrong date").status_code == 200
+    (org_uuid, trace, body), _ = rescore.call_args
+    assert org_uuid == agent["org_uuid"] and trace["uuid"] == trace_uuid
+    assert body.comment == "Wrong date"
+
+
 def test_feedback_is_refused_for_another_agents_trace_and_an_api_trace(client):
     h, agent, token = _chat_agent(client)
     _, _, other_token = _chat_agent(client, h=h)

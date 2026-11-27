@@ -1262,9 +1262,10 @@ def test_convert_response_requires_evaluators(client):
     assert client.get("/tests", headers=h).json()["total"] == 0
 
 
-def test_convert_rejects_an_evaluator_with_variables(client):
+def test_convert_rejects_an_evaluator_whose_variables_are_not_chosen_on_the_agent(client):
     h, agent_id = _signup_with_agent(client)
-    evaluator = _create_evaluator(
+    unmapped = _unmapped_evaluator(client, h, agent_id, ["criteria"])
+    unlinked = _create_evaluator(
         client, h, variables=[{"name": "criteria", "description": "What to judge"}]
     )
     trace = _post_trace(client, h, _payload(agent_id, _mid()))
@@ -1274,17 +1275,204 @@ def test_convert_rejects_an_evaluator_with_variables(client):
         h,
         trace_ids=[trace["uuid"]],
         type="response",
-        evaluators=[evaluator["uuid"]],
+        evaluators=[unmapped, unlinked["uuid"]],
     )
     assert res.status_code == 400, res.text
     detail = res.json()["detail"]
     assert set(detail) == {"error", "evaluators"}
-    assert len(detail["evaluators"]) == 1
-    message = detail["evaluators"][0]
-    # The parenthesised list names the actual variable, and the static tail
-    # also contains the word "criteria", so match the parenthesised form.
-    assert evaluator["name"] in message and "(criteria)" in message
+    not_chosen, not_linked = detail["evaluators"]
+    assert _ev_name(client, h, unmapped) in not_chosen
+    assert not_chosen.endswith("for: criteria.")
+    assert unlinked["name"] in not_linked and "is not linked" in not_linked
     assert client.get("/tests", headers=h).json()["total"] == 0
+
+
+def _variable_values_by_test(test_uuids):
+    from db import get_evaluators_for_test
+
+    return [
+        {ev["uuid"]: ev.get("variable_values") for ev in get_evaluators_for_test(t)}
+        for t in test_uuids
+    ]
+
+
+def _two_traces_with_mapped_evaluator(client, h, agent_id, second_metadata):
+    mapped = _mapped_evaluator(
+        client, h, agent_id, {"nurse": "metadata.expert", "why": "feedback.comment"}
+    )
+    plain = _create_evaluator(client, h)["uuid"]
+    first = _post_trace(
+        client,
+        h,
+        _payload(
+            agent_id,
+            _mid(),
+            metadata=[{"key": "expert", "value": "Week 14"}],
+            feedback=_INCORRECT,
+        ),
+    )
+    second = _post_trace(
+        client,
+        h,
+        _payload(agent_id, _mid(), metadata=second_metadata, feedback=_INCORRECT),
+    )
+    return mapped, plain, first["uuid"], second["uuid"]
+
+
+def test_convert_stores_the_values_each_trace_holds(client):
+    h, agent_id = _signup_with_agent(client)
+    mapped, plain, first, second = _two_traces_with_mapped_evaluator(
+        client, h, agent_id, [{"key": "expert", "value": "Week 10"}]
+    )
+
+    res = _convert(
+        client, h, trace_ids=[first, second], type="response", evaluators=[mapped, plain]
+    )
+    assert res.status_code == 200, res.text
+    assert res.json()["warnings"] is None
+    assert _variable_values_by_test(res.json()["test_uuids"]) == [
+        {mapped: {"nurse": "Week 14", "why": "Wrong date"}, plain: None},
+        {mapped: {"nurse": "Week 10", "why": "Wrong date"}, plain: None},
+    ]
+
+
+def test_convert_with_select_all_stores_the_values(client):
+    h, agent_id = _signup_with_agent(client)
+    mapped, _, first, second = _two_traces_with_mapped_evaluator(
+        client, h, agent_id, [{"key": "expert", "value": "Week 10"}]
+    )
+
+    res = _convert(
+        client, h, select_all=True, agent_id=agent_id, type="response", evaluators=[mapped]
+    )
+    assert res.status_code == 200, res.text
+    values = sorted(
+        v[mapped]["nurse"] for v in _variable_values_by_test(res.json()["test_uuids"])
+    )
+    assert values == ["Week 10", "Week 14"]
+
+
+def test_convert_refuses_a_trace_missing_a_value_and_names_it(client):
+    h, agent_id = _signup_with_agent(client)
+    mapped, plain, first, second = _two_traces_with_mapped_evaluator(
+        client, h, agent_id, []
+    )
+
+    res = _convert(
+        client, h, trace_ids=[first, second], type="response", evaluators=[mapped, plain]
+    )
+    assert res.status_code == 400, res.text
+    detail = res.json()["detail"]
+    assert set(detail) == {"error", "missing"}
+    assert detail["missing"] == [
+        {
+            "trace_id": second,
+            "evaluator_id": mapped,
+            "evaluator_name": _ev_name(client, h, mapped),
+            "variable": "nurse",
+            "source": "metadata.expert",
+        }
+    ]
+    assert client.get("/tests", headers=h).json()["total"] == 0
+
+
+def test_convert_skip_missing_values_leaves_the_evaluator_off_only_those_tests(client):
+    h, agent_id = _signup_with_agent(client)
+    mapped, plain, first, second = _two_traces_with_mapped_evaluator(
+        client, h, agent_id, []
+    )
+
+    res = _convert(
+        client,
+        h,
+        trace_ids=[first, second],
+        type="response",
+        evaluators=[mapped, plain],
+        skip_missing_values=True,
+    )
+    assert res.status_code == 200, res.text
+    assert _variable_values_by_test(res.json()["test_uuids"]) == [
+        {mapped: {"nurse": "Week 14", "why": "Wrong date"}, plain: None},
+        {plain: None},
+    ]
+    body = res.json()
+    # The caller asked to leave it off, so it is reported apart from warnings.
+    assert body["warnings"] is None
+    assert body["evaluators_left_off"] == [
+        {
+            "evaluator_id": mapped,
+            "evaluator_name": _ev_name(client, h, mapped),
+            "test_uuids": [body["test_uuids"][1]],
+        }
+    ]
+
+
+def test_convert_skip_missing_values_leaves_out_a_trace_left_with_no_evaluator(client):
+    h, agent_id = _signup_with_agent(client)
+    mapped, _, first, second = _two_traces_with_mapped_evaluator(
+        client, h, agent_id, []
+    )
+    second_name = client.get(f"/traces/{second}", headers=h).json()["message_id"]
+
+    res = _convert(
+        client,
+        h,
+        trace_ids=[first, second],
+        type="response",
+        evaluators=[mapped],
+        skip_missing_values=True,
+    )
+    assert res.status_code == 200, res.text
+    assert res.json()["created"] == 1
+    assert _variable_values_by_test(res.json()["test_uuids"]) == [
+        {mapped: {"nurse": "Week 14", "why": "Wrong date"}},
+    ]
+    (warning,) = res.json()["warnings"]
+    assert warning.startswith("1 of the 2 traces was left out, because it holds") and second_name in warning
+    assert client.get("/tests", headers=h).json()["total"] == 1
+
+
+def test_convert_skip_missing_values_refuses_when_every_trace_is_left_out(client):
+    h, agent_id = _signup_with_agent(client)
+    mapped = _mapped_evaluator(client, h, agent_id, {"nurse": "metadata.expert"})
+    trace = _post_trace(client, h, _payload(agent_id, _mid()))
+
+    res = _convert(
+        client,
+        h,
+        trace_ids=[trace["uuid"]],
+        type="response",
+        evaluators=[mapped],
+        skip_missing_values=True,
+    )
+    assert res.status_code == 400, res.text
+    assert res.json()["detail"] == ("No test was added, because no trace holds a value for the variables of any chosen evaluator.")
+    assert client.get("/tests", headers=h).json()["total"] == 0
+
+
+def test_convert_with_variables_skips_a_trace_whose_agent_is_gone(client):
+    h, agent_id = _signup_with_agent(client)
+    mapped = _mapped_evaluator(client, h, agent_id, {"nurse": "metadata.expert"})
+    expert = [{"key": "expert", "value": "Week 14"}]
+    kept = _post_trace(client, h, _payload(agent_id, _mid(), metadata=expert))
+    gone_agent = _create_agent(client, h)["uuid"]
+    gone = _post_trace(client, h, _payload(gone_agent, _mid(), metadata=expert))
+    assert client.delete(f"/agents/{gone_agent}", headers=h).status_code == 200
+
+    res = _convert(
+        client,
+        h,
+        trace_ids=[kept["uuid"], gone["uuid"]],
+        type="response",
+        evaluators=[mapped],
+    )
+    assert res.status_code == 200, res.text
+    assert _variable_values_by_test(res.json()["test_uuids"]) == [
+        {mapped: {"nurse": "Week 14"}},
+    ]
+    (warning,) = res.json()["warnings"]
+    assert "1 of the 2 traces could not be added" in warning
+    assert client.get("/tests", headers=h).json()["total"] == 1
 
 
 def test_convert_rejects_an_evaluator_the_workspace_cannot_see(client):
@@ -4533,6 +4721,48 @@ def test_a_retried_run_replaces_what_it_recorded(client):
     assert _scores_run(client, h, trace)["missing_values"] == []
 
 
+def _values_by_evaluator(run):
+    return {r["evaluator_uuid"]: r["variable_values"] for r in run["results"]}
+
+
+def test_a_score_keeps_the_values_its_evaluator_was_given(client):
+    h, agent_id = _signup_with_agent(client)
+    clean, _ = _enable_auto_score(client, h, agent_id)
+    mapped = _mapped_evaluator(client, h, agent_id, {"nurse": "output.response"})
+    trace = _post_trace(client, h, _payload(agent_id, _mid()))["uuid"]
+    assert _score_trace(trace, _judge_passing(clean, mapped))["status"] == "completed"
+    expected = {
+        clean: None,
+        mapped: {"nurse": "Aapki beti ka agla vaccination 14 weeks pe hai."},
+    }
+
+    assert _values_by_evaluator(_scores_run(client, h, trace)) == expected
+    [row] = client.get(f"/traces?agent_id={agent_id}", headers=h).json()["items"]
+    assert _values_by_evaluator(row) == expected
+
+    _map_variables(client, h, agent_id, mapped, {"nurse": "conversation_id"})
+    assert _values_by_evaluator(_scores_run(client, h, trace)) == expected
+
+
+def test_a_rescore_copies_the_values_of_the_scores_it_keeps(client):
+    h, agent_id = _signup_with_agent(client)
+    _enable_auto_score(client, h, agent_id)
+    _unlink_all_evaluators(client, h, agent_id)
+    mapped = _mapped_evaluator(client, h, agent_id, {"nurse": "conversation_id"})
+    unmapped = _unmapped_evaluator(client, h, agent_id, ["doctor"])
+    trace = _post_trace(client, h, _payload(agent_id, _mid()))["uuid"]
+    assert _score_trace(trace, _judge_passing(mapped))["status"] == "completed"
+    _map_variables(client, h, agent_id, unmapped, {"doctor": "message_id"})
+    _map_variables(client, h, agent_id, mapped, {"nurse": "output.response"})
+
+    assert client.post(f"/traces/{trace}/score", headers=h).status_code == 200
+    _score_open_run(trace, _judge_passing(unmapped))
+
+    values = _values_by_evaluator(_scores_run(client, h, trace))
+    assert values[mapped] == {"nurse": "conv-1"}
+    assert set(values[unmapped]) == {"doctor"}
+
+
 def test_a_run_that_has_moved_on_is_not_written_by_a_stale_worker(client):
     h, agent_id = _signup_with_agent(client)
     _enable_auto_score(client, h, agent_id)
@@ -4876,3 +5106,182 @@ def test_scoring_only_newly_configured_evaluators_that_cannot_settle_is_handed_b
     settled = _score_open_run(trace, _judge_passing(unmapped))
 
     assert (settled["status"], settled["error"]) == ("pending", "busy")
+
+
+# ---------------------------------------------------------------------------
+# A new feedback comment scores the trace again with the evaluators reading it
+# ---------------------------------------------------------------------------
+
+
+def _scored_trace_with_comment_evaluator(client, h, agent_id):
+    """A trace whose completed run scored `clean`, with `why` reading the comment."""
+    clean, _ = _enable_auto_score(client, h, agent_id)
+    why = _mapped_evaluator(client, h, agent_id, {"why": "feedback.comment"})
+    trace = _post_trace(client, h, _payload(agent_id, _mid()))["uuid"]
+    assert _score_trace(trace, _judge_passing(clean))["status"] == "completed"
+    return trace, clean, why
+
+
+def _put_feedback(client, h, trace, **body):
+    r = client.put(f"/traces/{trace}/feedback", json=body, headers=h)
+    assert r.status_code == 200, r.text
+
+
+def test_new_feedback_comment_scores_again_with_only_the_evaluators_reading_it(client):
+    h, agent_id = _signup_with_agent(client)
+    trace, _, why = _scored_trace_with_comment_evaluator(client, h, agent_id)
+
+    _put_feedback(client, h, trace, is_correct=False, comment="It should say 5 mg")
+
+    pending = [r for r in _runs_for_trace(trace) if r["status"] == "pending"]
+    assert len(pending) == 1
+    assert json.loads(pending[0]["only_evaluators"]) == [why]
+
+
+def test_scoring_again_for_a_comment_keeps_the_other_missing_values(client):
+    h, agent_id = _signup_with_agent(client)
+    clean, _ = _enable_auto_score(client, h, agent_id)
+    why = _mapped_evaluator(client, h, agent_id, {"why": "feedback.comment"})
+    nurse = _mapped_evaluator(client, h, agent_id, {"nurse": "metadata.expert"})
+    trace = _post_trace(client, h, _payload(agent_id, _mid()))["uuid"]
+    assert _score_trace(trace, _judge_passing(clean))["status"] == "completed"
+
+    _put_feedback(client, h, trace, is_correct=False, comment="It should say 5 mg")
+    assert _score_open_run(trace, _judge_passing(why))["status"] == "completed"
+
+    assert [
+        (entry["evaluator_uuid"], entry["variable"])
+        for entry in _scores_run(client, h, trace)["missing_values"]
+    ] == [(nurse, "nurse")]
+
+
+def test_feedback_comment_with_no_evaluator_reading_it_scores_nothing(client):
+    h, agent_id = _signup_with_agent(client)
+    trace, _, _ = _scored_with_one_unconfigured(client, h, agent_id)
+
+    _put_feedback(client, h, trace, is_correct=False, comment="It should say 5 mg")
+
+    assert len(_runs_for_trace(trace)) == 1
+
+
+def test_feedback_comment_read_by_an_evaluator_that_cannot_score_scores_nothing(client):
+    h, agent_id = _signup_with_agent(client)
+    trace, _, _ = _scored_with_one_unconfigured(client, h, agent_id)
+    # It reads the comment, but judges a basic agent, not this one.
+    r = client.post(
+        "/evaluators",
+        json={
+            "name": f"ev-{uuid.uuid4().hex[:6]}",
+            "evaluator_type": "llm-general",
+            "output_type": "binary",
+            "version": {
+                "judge_model": "openai/gpt-4.1",
+                "system_prompt": "{{why}}",
+                "variables": [{"name": "why"}],
+            },
+        },
+        headers=h,
+    )
+    assert r.status_code == 200, r.text
+    other = r.json()["uuid"]
+    r = client.post(
+        f"/agents/{agent_id}/evaluators",
+        json={"evaluator_ids": [other]},
+        headers=h,
+    )
+    assert r.status_code == 200, r.text
+    _map_variables(client, h, agent_id, other, {"why": "feedback.comment"})
+
+    _put_feedback(client, h, trace, is_correct=False, comment="It should say 5 mg")
+
+    assert len(_runs_for_trace(trace)) == 1
+
+
+def test_changed_or_cleared_feedback_comment_scores_nothing(client):
+    h, agent_id = _signup_with_agent(client)
+    trace, _, why = _scored_trace_with_comment_evaluator(client, h, agent_id)
+    _put_feedback(client, h, trace, is_correct=False, comment="It should say 5 mg")
+    assert _score_open_run(trace, _judge_passing(why))["status"] == "completed"
+    runs = len(_runs_for_trace(trace))
+
+    _put_feedback(client, h, trace, is_correct=True, comment=" It should say 5 mg ")
+    _put_feedback(client, h, trace, is_correct=False, comment="It should say 10 mg")
+    _put_feedback(client, h, trace, is_correct=True, comment="")
+    _put_feedback(client, h, trace, is_correct=None)
+
+    assert len(_runs_for_trace(trace)) == runs
+
+
+def test_feedback_comment_adds_no_run_while_one_is_open(client):
+    h, agent_id = _signup_with_agent(client)
+    trace, _, _ = _scored_trace_with_comment_evaluator(client, h, agent_id)
+    _put_feedback(client, h, trace, is_correct=False, comment="first")
+
+    _put_feedback(client, h, trace, is_correct=False, comment="second")
+
+    assert [r["status"] for r in _runs_for_trace(trace)].count("pending") == 1
+
+
+def test_feedback_is_saved_when_scoring_again_fails(client, monkeypatch):
+    import routers.traces as traces_router
+
+    h, agent_id = _signup_with_agent(client)
+    trace, _, _ = _scored_trace_with_comment_evaluator(client, h, agent_id)
+
+    def _boom(**kwargs):
+        raise RuntimeError("db down")
+
+    monkeypatch.setattr(traces_router, "create_trace_rescore_run", _boom)
+    _put_feedback(client, h, trace, is_correct=False, comment="It should say 5 mg")
+
+    feedback = client.get(f"/traces/{trace}", headers=h).json()["feedback"]
+    assert feedback["comment"] == "It should say 5 mg"
+
+
+def _pending_runs(trace_uuid):
+    return [r for r in _runs_for_trace(trace_uuid) if r["status"] == "pending"]
+
+
+def test_new_feedback_comment_scores_a_skipped_trace_again_in_full(client):
+    h, agent_id = _signup_with_agent(client)
+    _set_trace_scoring(client, h, agent_id, True)
+    _unlink_all_evaluators(client, h, agent_id)
+    why = _mapped_evaluator(client, h, agent_id, {"why": "feedback.comment"})
+    trace = _post_trace(client, h, _payload(agent_id, _mid()))["uuid"]
+    assert _score_trace(trace, _judge_passing(why))["status"] == "skipped"
+
+    _put_feedback(client, h, trace, is_correct=False, comment="It should say 5 mg")
+
+    [run] = _pending_runs(trace)
+    assert run["only_evaluators"] is None
+
+
+def test_new_feedback_comment_scores_a_failed_trace_again_in_full(client):
+    h, agent_id = _signup_with_agent(client)
+    _enable_auto_score(client, h, agent_id)
+    _mapped_evaluator(client, h, agent_id, {"why": "feedback.comment"})
+    trace = _post_trace(client, h, _payload(agent_id, _mid()))["uuid"]
+    with db.get_db_connection() as conn:
+        conn.execute(
+            "UPDATE trace_eval_runs SET status = 'failed', completed_at = updated_at "
+            "WHERE trace_uuid = ?",
+            (trace,),
+        )
+        conn.commit()
+
+    _put_feedback(client, h, trace, is_correct=False, comment="It should say 5 mg")
+
+    [run] = _pending_runs(trace)
+    assert run["only_evaluators"] is None
+
+
+def test_new_feedback_comment_scores_nothing_on_a_trace_never_scored(client):
+    h, agent_id = _signup_with_agent(client)
+    _disable_auto_score(client, h, agent_id)
+    trace = _post_trace(client, h, _payload(agent_id, _mid()))["uuid"]
+    _enable_auto_score(client, h, agent_id)
+    _mapped_evaluator(client, h, agent_id, {"why": "feedback.comment"})
+
+    _put_feedback(client, h, trace, is_correct=False, comment="It should say 5 mg")
+
+    assert _runs_for_trace(trace) == []

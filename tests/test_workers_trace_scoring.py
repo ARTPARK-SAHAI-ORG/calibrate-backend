@@ -170,6 +170,28 @@ def test_nudge_reset_works_across_event_loops():
     asyncio.run(second())
 
 
+def test_nudge_from_another_thread_wakes_the_waiting_loop():
+    import threading
+
+    async def main():
+        ev = trace_scoring_nudge.reset()
+        start = time.monotonic()
+        threading.Timer(0.2, trace_scoring_nudge.set).start()
+        await asyncio.wait_for(ev.wait(), timeout=3)
+        return time.monotonic() - start
+
+    assert asyncio.run(main()) < 1
+
+
+def test_nudge_after_its_loop_closed_sets_the_event():
+    async def main():
+        return trace_scoring_nudge.reset()
+
+    ev = asyncio.run(main())
+    trace_scoring_nudge.set()
+    assert ev.is_set()
+
+
 def _agent_row(org, config):
     agent_uuid = str(uuid.uuid4())
     with db.get_db_connection() as conn:
