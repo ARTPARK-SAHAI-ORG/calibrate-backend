@@ -2221,18 +2221,21 @@ def test_values_reads_each_trace_for_each_evaluator_in_request_order(client):
 
     assert r.status_code == 200, r.text
     entry = {"variable": "criteria", "source": "feedback.comment"}
-    assert r.json() == {
-        "items": [
-            {"trace_id": without, "evaluator_id": ev, "values": [{**entry, "value": None}]},
-            {"trace_id": without, "evaluator_id": plain, "values": []},
-            {
-                "trace_id": with_comment,
-                "evaluator_id": ev,
-                "values": [{**entry, "value": "Too much"}],
-            },
-            {"trace_id": with_comment, "evaluator_id": plain, "values": []},
-        ]
-    }
+    # The same preview GET /traces rows carry: the last user message.
+    assert {i["input_preview"] for i in r.json()["items"]} == {"A child"}
+    assert [
+        {k: v for k, v in item.items() if k != "input_preview"}
+        for item in r.json()["items"]
+    ] == [
+        {"trace_id": without, "evaluator_id": ev, "values": [{**entry, "value": None}]},
+        {"trace_id": without, "evaluator_id": plain, "values": []},
+        {
+            "trace_id": with_comment,
+            "evaluator_id": ev,
+            "values": [{**entry, "value": "Too much"}],
+        },
+        {"trace_id": with_comment, "evaluator_id": plain, "values": []},
+    ]
 
 
 def test_values_refuses_an_evaluator_unlinked_or_without_sources(client):

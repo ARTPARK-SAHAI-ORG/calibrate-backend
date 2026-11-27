@@ -1399,6 +1399,74 @@ def test_convert_skip_missing_values_leaves_the_evaluator_off_only_those_tests(c
     assert _ev_name(client, h, mapped) in warning and "1 of the 2" in warning
 
 
+def test_convert_skip_missing_values_leaves_out_a_trace_left_with_no_evaluator(client):
+    h, agent_id = _signup_with_agent(client)
+    mapped, _, first, second = _two_traces_with_mapped_evaluator(
+        client, h, agent_id, []
+    )
+    second_name = client.get(f"/traces/{second}", headers=h).json()["message_id"]
+
+    res = _convert(
+        client,
+        h,
+        trace_ids=[first, second],
+        type="response",
+        evaluators=[mapped],
+        skip_missing_values=True,
+    )
+    assert res.status_code == 200, res.text
+    assert res.json()["created"] == 1
+    assert _variable_values_by_test(res.json()["test_uuids"]) == [
+        {mapped: {"nurse": "Week 14", "why": "Wrong date"}},
+    ]
+    (warning,) = res.json()["warnings"]
+    assert warning.startswith("1 of the 2 traces were left out") and second_name in warning
+    assert client.get("/tests", headers=h).json()["total"] == 1
+
+
+def test_convert_skip_missing_values_refuses_when_every_trace_is_left_out(client):
+    h, agent_id = _signup_with_agent(client)
+    mapped = _mapped_evaluator(client, h, agent_id, {"nurse": "metadata.expert"})
+    trace = _post_trace(client, h, _payload(agent_id, _mid()))
+
+    res = _convert(
+        client,
+        h,
+        trace_ids=[trace["uuid"]],
+        type="response",
+        evaluators=[mapped],
+        skip_missing_values=True,
+    )
+    assert res.status_code == 400, res.text
+    assert res.json()["detail"].startswith("1 of the 1 traces were left out")
+    assert client.get("/tests", headers=h).json()["total"] == 0
+
+
+def test_convert_with_variables_skips_a_trace_whose_agent_is_gone(client):
+    h, agent_id = _signup_with_agent(client)
+    mapped = _mapped_evaluator(client, h, agent_id, {"nurse": "metadata.expert"})
+    expert = [{"key": "expert", "value": "Week 14"}]
+    kept = _post_trace(client, h, _payload(agent_id, _mid(), metadata=expert))
+    gone_agent = _create_agent(client, h)["uuid"]
+    gone = _post_trace(client, h, _payload(gone_agent, _mid(), metadata=expert))
+    assert client.delete(f"/agents/{gone_agent}", headers=h).status_code == 200
+
+    res = _convert(
+        client,
+        h,
+        trace_ids=[kept["uuid"], gone["uuid"]],
+        type="response",
+        evaluators=[mapped],
+    )
+    assert res.status_code == 200, res.text
+    assert _variable_values_by_test(res.json()["test_uuids"]) == [
+        {mapped: {"nurse": "Week 14"}},
+    ]
+    (warning,) = res.json()["warnings"]
+    assert "1 of the 2 traces could not be added" in warning
+    assert client.get("/tests", headers=h).json()["total"] == 1
+
+
 def test_convert_rejects_an_evaluator_the_workspace_cannot_see(client):
     h, agent_id = _signup_with_agent(client)
     other = _signup(client)

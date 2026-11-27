@@ -72,6 +72,8 @@ from org_scope import ensure_owned_agent, ensure_owned_evaluator
 # `response_model` references `AgentEvaluatorResponse` and it shares that router's
 # page-shaping helper.
 from routers.evaluators import AgentEvaluatorResponse, build_evaluator_page
+# Traces imports only org_limits and tests, neither of which imports a router.
+from routers.traces import _last_user_content, _preview
 from routers.org_limits import (
     daily_message_limit,
     effective_max_chat_replies_per_day,
@@ -697,6 +699,10 @@ class TraceVariableValuesRequest(BaseModel):
 
 class TraceVariableValues(BaseModel):
     trace_id: str = Field(description="The trace the values were read from")
+    input_preview: Optional[str] = Field(
+        None,
+        description="The standalone prompt or the last user message of the trace, truncated for display",
+    )
     evaluator_id: str = Field(description="The evaluator whose variables they fill")
     values: List[TraceVariablePreview] = Field(
         description="What the trace holds for each variable of the evaluator"
@@ -1567,6 +1573,7 @@ def read_trace_variable_values(
         items=[
             TraceVariableValues(
                 trace_id=trace["uuid"],
+                input_preview=_preview(_last_user_content(trace["input"])),
                 evaluator_id=evaluator_id,
                 values=[
                     TraceVariablePreview(

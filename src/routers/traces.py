@@ -1273,7 +1273,7 @@ class ConvertTracesToTestsRequest(_TraceSelection):
     )
     skip_missing_values: bool = Field(
         False,
-        description="Leave an evaluator off the tests whose trace holds no value for one of its variables. Omit to create nothing when any trace is missing a value",
+        description="Leave an evaluator off the tests whose trace holds no value for one of its variables, and leave out a trace that is left with no evaluator at all. Omit to create nothing when any trace is missing a value",
     )
     accept_any_arguments: bool = Field(
         False,
@@ -1345,17 +1345,22 @@ def _evaluator_refs_per_trace(
     names: Dict[str, str],
     with_variables: List[str],
     skip_missing_values: bool,
+    agents: Dict[str, Optional[Dict[str, Any]]],
 ) -> Dict[str, List[Dict[str, Any]]]:
     """Each trace's evaluator refs. An evaluator with variables carries the values
     its trace holds, read through the parts of a trace chosen on that trace's
-    agent, and is left off a trace missing one when `skip_missing_values` is on."""
+    agent, and is left off a trace missing one when `skip_missing_values` is on.
+    A trace whose agent is gone (None in `agents`) keeps `refs` as they are: its
+    test cannot be linked and is dropped with a warning later."""
     if not with_variables:
         return {trace["uuid"]: refs for trace in traces}
     sources_by_agent: Dict[str, List[Dict[str, Any]]] = {}
     problems: List[str] = []
     for agent_id in dict.fromkeys(trace["agent_id"] for trace in traces):
+        if not agents[agent_id]:
+            continue
         linked = {ev["uuid"]: (ev, v) for ev, v in resolve_live_evaluators(agent_id)}
-        agent_name = (get_agent(agent_id) or {}).get("name") or agent_id
+        agent_name = agents[agent_id].get("name") or agent_id
         sources_by_agent[agent_id] = []
         for evaluator_uuid in with_variables:
             name = names[evaluator_uuid]
@@ -1379,6 +1384,9 @@ def _evaluator_refs_per_trace(
     out: Dict[str, List[Dict[str, Any]]] = {}
     missing: List[Dict[str, str]] = []
     for trace in traces:
+        if trace["agent_id"] not in sources_by_agent:
+            out[trace["uuid"]] = refs
+            continue
         included, gaps = trace_evaluators(trace, sources_by_agent[trace["agent_id"]])
         values = {ev["uuid"]: ev["variable_values"] for ev in included}
         missing.extend(
@@ -1593,13 +1601,37 @@ def convert_traces_to_tests(
                 ),
             )
 
+    # The agent each trace came from, or None once it is deleted or moved to
+    # another workspace. Read once here for the variable values and the linking.
+    agents_seen: Dict[str, Optional[Dict[str, Any]]] = {}
+    for agent_id in dict.fromkeys(trace["agent_id"] for trace in traces):
+        found = get_agent(agent_id)
+        agents_seen[agent_id] = (
+            found if found and found["org_uuid"] == ctx.org_uuid else None
+        )
+
     refs_by_trace = _evaluator_refs_per_trace(
         traces,
         resolved_refs,
         evaluator_names,
         with_variables,
         payload.skip_missing_values,
+        agents_seen,
     )
+
+    # calibrate refuses a response or general test with no evaluator, so a trace
+    # whose every chosen evaluator was left off for a missing value is left out.
+    no_evaluator = [t for t in traces if resolved_refs and not refs_by_trace[t["uuid"]]]
+    if no_evaluator:
+        traces = [t for t in traces if refs_by_trace[t["uuid"]]]
+        left_out_line = (
+            f"{len(no_evaluator)} of the {len(traces) + len(no_evaluator)} traces "
+            "were left out, because they hold no value for the variables of any "
+            "chosen evaluator: "
+            f"{_test_names_line([_test_name_for_trace(t) for t in no_evaluator])}."
+        )
+        if not traces:
+            raise HTTPException(status_code=400, detail=left_out_line)
 
     existing_names = {t["name"] for t in get_all_tests_summary(org_uuid=ctx.org_uuid)}
     names = _dedupe_test_names(
@@ -1647,7 +1679,6 @@ def convert_traces_to_tests(
     # be linked (its agent deleted since ingest, switched to an interaction_type
     # the test no longer fits, or a failed write) would sit in the workspace
     # where no screen lists it, so it is deleted and the reader is told to retry.
-    agents_seen: Dict[str, Optional[Dict[str, Any]]] = {}
     unlinked: List[str] = []
     unlinked_uuids: List[str] = []
     kept: List[Tuple[str, str]] = []
@@ -1655,11 +1686,6 @@ def convert_traces_to_tests(
     for trace, test_uuid, db_test in zip(traces, test_uuids, db_tests):
         refs_by_test[test_uuid] = refs_by_trace[trace["uuid"]]
         agent_id = trace["agent_id"]
-        if agent_id not in agents_seen:
-            found = get_agent(agent_id)
-            agents_seen[agent_id] = (
-                found if found and found["org_uuid"] == ctx.org_uuid else None
-            )
         agent = agents_seen[agent_id]
         linked = bool(agent) and required_agent_interaction_type(
             payload.type, db_test["config"]
@@ -1685,7 +1711,7 @@ def convert_traces_to_tests(
 
     # The kept tests are committed and linked, so a failed evaluator link must
     # not 500 and lose them: name them so the reader can add one in place.
-    warnings: List[str] = []
+    warnings: List[str] = [left_out_line] if no_evaluator else []
     if unlinked:
         warnings.append(
             f"{len(unlinked)} of the {len(test_uuids)} traces could not be added "
