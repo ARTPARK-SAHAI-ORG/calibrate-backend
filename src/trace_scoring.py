@@ -103,6 +103,7 @@ TRACE_VARIABLE_SOURCES = (
     "labels",
     "conversation_id",
     "message_id",
+    "feedback.comment",
 )
 METADATA_SOURCE_PREFIX = "metadata."
 MAX_METADATA_KEY_CHARS = 256
@@ -112,6 +113,19 @@ def is_trace_variable_source(source: str) -> bool:
     return source in TRACE_VARIABLE_SOURCES or (
         source.startswith(METADATA_SOURCE_PREFIX)
         and 0 < len(source) - len(METADATA_SOURCE_PREFIX) <= MAX_METADATA_KEY_CHARS
+    )
+
+
+def evaluator_trace_sources(
+    evaluator: dict[str, Any], live_version: dict[str, Any] | None
+) -> tuple[dict[str, str], list[str]]:
+    """The saved trace source for each variable the live version declares, and
+    the declared variables with no source saved on the agent."""
+    mapping = evaluator.get("trace_variables") or {}
+    declared = [v["name"] for v in (live_version or {}).get("variables") or []]
+    return (
+        {name: mapping[name] for name in declared if name in mapping},
+        [name for name in declared if name not in mapping],
     )
 
 
@@ -136,6 +150,8 @@ def trace_variable_value(trace: dict[str, Any], source: str) -> str | None:
         value = ", ".join(trace.get("labels") or [])
     elif source in ("conversation_id", "message_id"):
         value = trace.get(source)
+    elif source == "feedback.comment":
+        value = ((trace.get("feedback") or {}).get("comment") or "").strip()
     elif is_trace_variable_source(source):
         key = source[len(METADATA_SOURCE_PREFIX) :]
         value = next(
@@ -232,14 +248,13 @@ def resolve_trace_scoring(
     ineligible: list[TraceScoringIneligible] = []
     for ev, version in live_evaluators:
         name = ev.get("name") or ev["uuid"]
-        mapping = ev.get("trace_variables") or {}
-        variables = (version or {}).get("variables") or []
+        sources, unset = evaluator_trace_sources(ev, version)
         evaluator_type = ev.get("evaluator_type")
         if evaluator_type not in (required_evaluator_type, TOOL_CALL_EVALUATOR_TYPE):
             reason = IneligibleReason.WRONG_TYPE
         elif not version:
             reason = IneligibleReason.NO_LIVE_VERSION
-        elif any(v["name"] not in mapping for v in variables):
+        elif unset:
             reason = IneligibleReason.DECLARES_VARIABLES
         else:
             reason = None
@@ -264,9 +279,7 @@ def resolve_trace_scoring(
                     "system_prompt": version.get("system_prompt") or "",
                     "output_config": version.get("output_config"),
                     "evaluator_version_id": version["uuid"],
-                    "trace_variables": {
-                        v["name"]: mapping[v["name"]] for v in variables
-                    },
+                    "trace_variables": sources,
                 },
             )
         )
@@ -587,6 +600,7 @@ def map_item_scores(
         mapped[evaluator_uuid] = {
             "evaluator_uuid": evaluator_uuid,
             "evaluator_version_id": hydrated["evaluator_version_id"],
+            "variable_values": hydrated.get("variable_values") or None,
             **score,
         }
     if set(mapped) != set(expected):
@@ -894,12 +908,14 @@ def _prepare_claimed_run(run: dict[str, Any], now: str) -> PreparedRun | None:
         skip(TraceEvalSettleSkipReason.TRACE_DELETED)
         return None
     if run.get("only_evaluators"):
-        from db import get_previous_unconfigured_evaluators
+        from db import get_previous_run_gaps
 
+        unconfigured, missing = get_previous_run_gaps(run["uuid"])
         run = {
             **run,
             "only_evaluators": json.loads(run["only_evaluators"]),
-            "previous_unconfigured": get_previous_unconfigured_evaluators(run["uuid"]),
+            "previous_unconfigured": unconfigured,
+            "previous_missing": missing,
         }
     return PreparedRun(run=run, trace=trace)
 
@@ -985,12 +1001,19 @@ def process_claimed_runs(
             unconfigured = [
                 ev for ev in item.run["previous_unconfigured"] if ev not in judged
             ]
+            kept_missing = [
+                m for m in item.run["previous_missing"]
+                if m["evaluator_uuid"] not in judged
+            ]
         else:
+            kept_missing = []
             unconfigured = [
                 ev["uuid"]
                 for ev in evaluators_fitting_row(evaluators.unconfigured, tool_call)
             ]
         included, missing = trace_evaluators(item.trace, fitting)
+        # A rescore keeps what the last run said about the evaluators it skips.
+        missing = kept_missing + missing
         if missing or unconfigured:
             _swallow_settle(
                 lambda run: set_trace_eval_run_missing_values(

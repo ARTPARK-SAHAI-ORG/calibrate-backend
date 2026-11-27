@@ -70,6 +70,14 @@ from org_scope import ensure_owned_agent, ensure_owned_evaluator
 # `response_model` references `AgentEvaluatorResponse` and it shares that router's
 # page-shaping helper.
 from routers.evaluators import AgentEvaluatorResponse, build_evaluator_page
+# Traces imports only org_limits and tests, neither of which imports a router.
+from routers.traces import (
+    _last_user_content,
+    _preview,
+    agent_evaluator_sources,
+    unfillable_evaluator_problem,
+    traces_or_404,
+)
 from routers.org_limits import (
     daily_message_limit,
     effective_max_chat_replies_per_day,
@@ -631,6 +639,7 @@ _TRACE_VARIABLES_DESCRIPTION = (
     "- `labels`: the trace's labels\n"
     "- `conversation_id`: the conversation ID sent with the trace\n"
     "- `message_id`: the message ID sent with the trace\n"
+    "- `feedback.comment`: the comment given by the user along with the feedback for the trace\n"
     "- `metadata.<key>`: the metadata entry with that key"
 )
 _TRACE_VARIABLES_EXAMPLE = {"nurse_reply": "metadata.expert_answer", "ai_reply": "output.response"}
@@ -674,6 +683,39 @@ class TraceVariablePreview(BaseModel):
 class TraceVariablesPreviewResponse(BaseModel):
     values: List[TraceVariablePreview] = Field(
         description="What the trace holds for each variable, in the order you sent them"
+    )
+
+
+class TraceVariableValuesRequest(BaseModel):
+    trace_ids: List[str] = Field(
+        min_length=1,
+        max_length=500,
+        description="The traces to read the values from",
+        examples=[["f47ac10b-58cc-4372-a567-0e02b2c3d479"]],
+    )
+    evaluator_ids: List[str] = Field(
+        min_length=1,
+        max_length=20,
+        description="The evaluators whose variables to fill, each linked to the agent",
+        examples=[["f47ac10b-58cc-4372-a567-0e02b2c3d479"]],
+    )
+
+
+class TraceVariableValues(BaseModel):
+    trace_id: str = Field(description="The trace the values were read from")
+    input_preview: Optional[str] = Field(
+        None,
+        description="The standalone prompt or the last user message of the trace, truncated for display",
+    )
+    evaluator_id: str = Field(description="The evaluator whose variables they fill")
+    values: List[TraceVariablePreview] = Field(
+        description="What the trace holds for each variable of the evaluator"
+    )
+
+
+class TraceVariableValuesResponse(BaseModel):
+    items: List[TraceVariableValues] = Field(
+        description="One entry per trace and evaluator, by trace in the order you sent them, then by evaluator"
     )
 
 
@@ -1476,5 +1518,61 @@ def preview_trace_variables(
                 value=trace_variable_value(trace, source),
             )
             for variable, source in payload.trace_variables.items()
+        ]
+    )
+
+
+@router.post(
+    "/{agent_uuid}/trace-variables/values",
+    response_model=TraceVariableValuesResponse,
+    summary="Read trace variable values",
+)
+def read_trace_variable_values(
+    agent_uuid: str = Path(
+        description="The agent the traces belong to",
+        examples=["f47ac10b-58cc-4372-a567-0e02b2c3d479"],
+    ),
+    payload: TraceVariableValuesRequest = ...,
+    ctx: OrgContext = Depends(get_current_org),
+):
+    """Read what each trace holds for each variable of the evaluators, using the parts of a trace chosen on the agent"""
+    ensure_owned_agent(agent_uuid, ctx.org_uuid)
+    evaluator_ids = list(dict.fromkeys(payload.evaluator_ids))
+    sources, unfillable = agent_evaluator_sources(agent_uuid, evaluator_ids)
+    if unfillable:
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "error": "Some evaluators cannot be filled from this agent's traces",
+                "evaluators": [
+                    unfillable_evaluator_problem(
+                        evaluator_id if ev is None
+                        else f'"{ev.get("name") or evaluator_id}"',
+                        "this agent",
+                        ev,
+                        unset,
+                    )
+                    for evaluator_id, ev, unset in unfillable
+                ],
+            },
+        )
+    traces = traces_or_404(ctx.org_uuid, payload.trace_ids, agent_uuid)
+    return TraceVariableValuesResponse(
+        items=[
+            TraceVariableValues(
+                trace_id=trace["uuid"],
+                input_preview=_preview(_last_user_content(trace["input"])),
+                evaluator_id=evaluator_id,
+                values=[
+                    TraceVariablePreview(
+                        variable=variable,
+                        source=source,
+                        value=trace_variable_value(trace, source),
+                    )
+                    for variable, source in sources[evaluator_id].items()
+                ],
+            )
+            for trace in traces
+            for evaluator_id in evaluator_ids
         ]
     )
