@@ -1401,13 +1401,14 @@ def traces_or_404(
 ) -> List[Dict[str, Any]]:
     """The traces with these ids (of `agent_id` only, when given), or a 404
     naming the ones not found."""
+    requested = list(dict.fromkeys(trace_ids))
     traces = [
         trace
-        for trace in get_traces_by_uuids(org_uuid, trace_ids)
+        for trace in get_traces_by_uuids(org_uuid, requested)
         if agent_id is None or trace["agent_id"] == agent_id
     ]
     found = {trace["uuid"] for trace in traces}
-    missing = list(dict.fromkeys(t for t in trace_ids if t not in found))
+    missing = [trace_id for trace_id in requested if trace_id not in found]
     if missing:
         raise HTTPException(
             status_code=404,
@@ -1684,14 +1685,20 @@ def convert_traces_to_tests(
     no_evaluator = [t for t in traces if resolved_refs and not refs_by_trace[t["uuid"]]]
     if no_evaluator:
         traces = [t for t in traces if refs_by_trace[t["uuid"]]]
+        if not traces:
+            raise HTTPException(
+                status_code=400,
+                detail="No test was added, because no trace holds a value for "
+                "the variables of any chosen evaluator.",
+            )
+        left_out = len(no_evaluator)
         left_out_line = (
-            f"{len(no_evaluator)} of the {len(traces) + len(no_evaluator)} traces "
-            "were left out, because they hold no value for the variables of any "
-            "chosen evaluator: "
+            f"{left_out} of the {len(traces) + left_out} traces "
+            f"{'was' if left_out == 1 else 'were'} left out, because "
+            f"{'it holds' if left_out == 1 else 'they hold'} no value for the "
+            "variables of any chosen evaluator: "
             f"{_test_names_line([_test_name_for_trace(t) for t in no_evaluator])}."
         )
-        if not traces:
-            raise HTTPException(status_code=400, detail=left_out_line)
 
     existing_names = {t["name"] for t in get_all_tests_summary(org_uuid=ctx.org_uuid)}
     names = _dedupe_test_names(
@@ -1940,6 +1947,45 @@ def set_trace_feedback_endpoint(
     ctx: OrgContext = Depends(get_org_jwt_or_api_key),
 ):
     """Set whether the agent's output on a trace was correct, replacing any earlier feedback, or clear it"""
-    if not set_trace_feedback(ctx.org_uuid, trace_uuid, body.is_correct, body.comment):
+    trace = get_trace(ctx.org_uuid, trace_uuid)
+    if not trace or not set_trace_feedback(
+        ctx.org_uuid, trace_uuid, body.is_correct, body.comment
+    ):
         raise HTTPException(status_code=404, detail="Trace not found")
+    rescore_for_new_feedback_comment(ctx.org_uuid, trace, body)
     return {"feedback": get_trace(ctx.org_uuid, trace_uuid)["feedback"]}
+
+
+def rescore_for_new_feedback_comment(
+    org_uuid: str, trace: Dict[str, Any], body: TraceFeedbackUpdate
+) -> None:
+    """Score `trace` again, with only the evaluators that read `feedback.comment`
+    on its agent when its latest run completed, or in full when it was skipped
+    or failed, when the feedback just saved gave the trace its first comment
+    and the agent scores its traces. Changing or clearing a comment later
+    scores nothing. Never raises: the feedback
+    is already saved, and a rescore that cannot be queued is not a reason to
+    report it as failed."""
+    new = (body.comment or "").strip() if body.is_correct is not None else ""
+    old = ((trace.get("feedback") or {}).get("comment") or "").strip()
+    if not new or old:
+        return
+    try:
+        agent = get_agent(trace["agent_id"])
+        if not agent or not trace_scoring_enabled(agent):
+            return
+        dependent = [
+            ev["uuid"]
+            for ev, version in resolve_live_evaluators(agent["uuid"])
+            if "feedback.comment" in evaluator_trace_sources(ev, version)[0].values()
+        ]
+        if dependent:
+            create_trace_rescore_run(
+                org_uuid=org_uuid,
+                trace_uuid=trace["uuid"],
+                agent_id=agent["uuid"],
+                max_scored_traces=effective_limits(org_uuid)["max_scored_traces"],
+                only_evaluators=dependent,
+            )
+    except Exception as e:
+        logger.warning(f"Could not score trace {trace['uuid']} again after feedback: {e}")
