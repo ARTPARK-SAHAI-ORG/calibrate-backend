@@ -849,6 +849,27 @@ def _settle_or_defer_terminal(
         )
 
 
+def _settle_completed_or_defer(
+    run: dict[str, Any], scores: list[dict[str, Any]], *,
+    now: str, rng: random.Random | None, max_attempts: int,
+) -> None:
+    """A settle failure (a busy write, say) must not raise through the batch:
+    the run would stay `processing`, invisible to the attempt ceiling until its
+    lease expires, and strand every run after it."""
+    from db import settle_trace_eval_run_completed
+
+    try:
+        settle_trace_eval_run_completed(
+            run["uuid"], scores, now=now, attempts=run.get("attempts"),
+        )
+    except Exception as exc:
+        logger.exception("trace-scoring: settling run %s raised", run["uuid"])
+        _swallow_settle(
+            _defer_or_fail, run, now=now, error=str(exc), rng=rng,
+            max_attempts=max_attempts,
+        )
+
+
 def _prepare_claimed_run(run: dict[str, Any], now: str) -> PreparedRun | None:
     """Settle everything a claimed run can be settled by without a judge call."""
     from db import get_trace, settle_trace_eval_run_terminal, trace_scoring_skip_reason
@@ -902,7 +923,6 @@ def process_claimed_runs(
     import provider_keys
     from db import (
         set_trace_eval_run_missing_values,
-        settle_trace_eval_run_completed,
         settle_trace_eval_run_terminal,
     )
 
@@ -985,17 +1005,9 @@ def process_claimed_runs(
             )
             continue
         if only:
-            try:
-                settle_trace_eval_run_completed(
-                    item.run["uuid"], [], now=prepare_now,
-                    attempts=item.run.get("attempts"),
-                )
-            except Exception as exc:
-                logger.exception("trace-scoring: settling run %s raised", item.run["uuid"])
-                _swallow_settle(
-                    _defer_or_fail, item.run, now=prepare_now, error=str(exc),
-                    rng=rng, max_attempts=max_attempts,
-                )
+            _settle_completed_or_defer(
+                item.run, [], now=prepare_now, rng=rng, max_attempts=max_attempts,
+            )
             continue
         if fitting:
             reason = TraceEvalSettleSkipReason.MISSING_TRACE_VALUES.value
@@ -1067,22 +1079,9 @@ def process_claimed_runs(
                 rng=rng, max_attempts=max_attempts,
             )
             continue
-        try:
-            settle_trace_eval_run_completed(
-                item.run["uuid"], scores, now=settle_now,
-                attempts=item.run.get("attempts"),
-            )
-        except Exception as exc:
-            # A settle failure (a busy write, say) must not raise through the
-            # batch: the run would stay `processing` -- invisible to the attempt
-            # ceiling until its lease expires -- and strand every run after it.
-            logger.exception(
-                "trace-scoring: settling run %s raised", item.run["uuid"]
-            )
-            _swallow_settle(
-                _defer_or_fail, item.run, now=settle_now, error=str(exc),
-                rng=rng, max_attempts=max_attempts,
-            )
+        _settle_completed_or_defer(
+            item.run, scores, now=settle_now, rng=rng, max_attempts=max_attempts,
+        )
 
 
 def claim_and_score_batch(

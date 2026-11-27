@@ -12232,15 +12232,6 @@ def set_trace_eval_run_missing_values(
         conn.commit()
 
 
-def _evaluator_names(conn: sqlite3.Connection, evaluator_uuids: List[str]) -> Dict[str, str]:
-    placeholders = ",".join("?" * len(evaluator_uuids))
-    rows = conn.execute(
-        f"SELECT uuid, name FROM evaluators WHERE uuid IN ({placeholders})",
-        evaluator_uuids,
-    ).fetchall()
-    return {row["uuid"]: row["name"] for row in rows}
-
-
 def list_trace_scoring_runs(org_uuid: str, trace_uuid: str) -> List[Dict[str, Any]]:
     """Every run for a trace, newest first, each with hydrated per-evaluator results."""
     sql = f"""
@@ -12270,16 +12261,15 @@ def list_trace_scoring_runs(org_uuid: str, trace_uuid: str) -> List[Dict[str, An
                     row["unconfigured_evaluators"] or "[]"
                 )
                 limited[row["run_uuid"]] = json.loads(row["only_evaluators"] or "[]")
-        evaluator_uuids = sorted(
-            {entry["evaluator_uuid"] for entries in stored.values() for entry in entries}
-            | {ev for evs in unconfigured.values() for ev in evs}
-            | {ev for evs in limited.values() for ev in evs}
-        )
-        names = (
-            _evaluator_names(conn, evaluator_uuids)
-            if evaluator_uuids
-            else {}
-        )
+    evaluator_uuids = (
+        {entry["evaluator_uuid"] for entries in stored.values() for entry in entries}
+        | {ev for evs in unconfigured.values() for ev in evs}
+        | {ev for evs in limited.values() for ev in evs}
+    )
+    names = {
+        uuid: ev["name"]
+        for uuid, ev in get_evaluators_by_uuids(list(evaluator_uuids), include_deleted=True).items()
+    }
 
     runs: List[Dict[str, Any]] = []
     index: Dict[str, Dict[str, Any]] = {}

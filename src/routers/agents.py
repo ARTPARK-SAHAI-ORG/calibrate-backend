@@ -1330,7 +1330,12 @@ def list_agent_evaluators(
     evaluators = get_evaluators_for_agent(agent_uuid)
     evaluators = search.apply(evaluators)
     page, total = count_and_page(evaluators, pagination)
-    return build_evaluator_page(page, total, pagination, AgentEvaluatorResponse)
+    body = build_evaluator_page(page, total, pagination)
+    body["items"] = [
+        AgentEvaluatorResponse(**resp.model_dump(), trace_variables=row["trace_variables"])
+        for resp, row in zip(body["items"], page)
+    ]
+    return body
 
 
 @router.post(

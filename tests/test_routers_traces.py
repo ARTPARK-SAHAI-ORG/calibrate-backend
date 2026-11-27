@@ -4624,6 +4624,19 @@ def test_a_missing_value_shows_the_evaluators_current_name(client):
     assert _scores_run(client, h, trace)["missing_values"][0]["name"] == new_name
 
 
+def test_a_missing_value_keeps_a_deleted_evaluators_name(client):
+    h, agent_id = _signup_with_agent(client)
+    clean, _ = _enable_auto_score(client, h, agent_id)
+    mapped = _mapped_evaluator(client, h, agent_id, {"nurse": "metadata.expert"})
+    name = _ev_name(client, h, mapped)
+    trace = _post_trace(client, h, _payload(agent_id, _mid()))["uuid"]
+    _score_trace(trace, _judge_passing(clean))
+
+    r = client.delete(f"/evaluators/{mapped}", headers=h)
+    assert r.status_code == 200, r.text
+    assert _scores_run(client, h, trace)["missing_values"][0]["name"] == name
+
+
 def test_run_completing_with_an_unconfigured_evaluator_records_it(client):
     h, agent_id = _signup_with_agent(client)
     clean, _ = _enable_auto_score(client, h, agent_id)
