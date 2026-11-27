@@ -1339,6 +1339,47 @@ def _raise_evaluator_problems(problems: List[str]) -> None:
         )
 
 
+def agent_evaluator_sources(
+    agent_id: str, evaluator_ids: List[str]
+) -> Tuple[Dict[str, Dict[str, str]], List[Tuple[str, Optional[Dict[str, Any]], List[str]]]]:
+    """The part of a trace chosen on the agent for each variable of each linked
+    evaluator, and the evaluators that cannot be filled, as (evaluator id, the
+    evaluator or None when it is not linked, the variables with no part chosen)."""
+    linked = {ev["uuid"]: (ev, v) for ev, v in resolve_live_evaluators(agent_id)}
+    sources: Dict[str, Dict[str, str]] = {}
+    unfillable: List[Tuple[str, Optional[Dict[str, Any]], List[str]]] = []
+    for evaluator_id in evaluator_ids:
+        if evaluator_id not in linked:
+            unfillable.append((evaluator_id, None, []))
+            continue
+        ev, version = linked[evaluator_id]
+        sources[evaluator_id], unset = evaluator_trace_sources(ev, version)
+        if unset:
+            unfillable.append((evaluator_id, ev, unset))
+    return sources, unfillable
+
+
+def traces_or_404(
+    org_uuid: str, trace_ids: List[str], agent_id: Optional[str] = None
+) -> List[Dict[str, Any]]:
+    """The traces with these ids (of `agent_id` only, when given), or a 404
+    naming the ones not found."""
+    requested = list(dict.fromkeys(trace_ids))
+    traces = [
+        trace
+        for trace in get_traces_by_uuids(org_uuid, requested)
+        if agent_id is None or trace["agent_id"] == agent_id
+    ]
+    found = {trace["uuid"] for trace in traces}
+    missing = [trace_id for trace_id in requested if trace_id not in found]
+    if missing:
+        raise HTTPException(
+            status_code=404,
+            detail={"error": "Some traces were not found", "trace_ids": missing},
+        )
+    return traces
+
+
 def _evaluator_refs_per_trace(
     traces: List[Dict[str, Any]],
     refs: List[Dict[str, Any]],
@@ -1359,26 +1400,20 @@ def _evaluator_refs_per_trace(
     for agent_id in dict.fromkeys(trace["agent_id"] for trace in traces):
         if not agents[agent_id]:
             continue
-        linked = {ev["uuid"]: (ev, v) for ev, v in resolve_live_evaluators(agent_id)}
         agent_name = agents[agent_id].get("name") or agent_id
-        sources_by_agent[agent_id] = []
-        for evaluator_uuid in with_variables:
+        sources, unfillable = agent_evaluator_sources(agent_id, with_variables)
+        for evaluator_uuid, ev, unset in unfillable:
             name = names[evaluator_uuid]
-            if evaluator_uuid not in linked:
-                problems.append(
-                    f'Evaluator "{name}" is not linked to agent "{agent_name}". Link '
-                    "it and choose which part of a trace fills each of its variables."
-                )
-                continue
-            sources, unset = evaluator_trace_sources(*linked[evaluator_uuid])
-            if unset:
-                problems.append(
-                    f'Evaluator "{name}" has no part of a trace chosen on agent '
-                    f'"{agent_name}" for: {", ".join(unset)}.'
-                )
-            sources_by_agent[agent_id].append(
-                {"uuid": evaluator_uuid, "trace_variables": sources}
+            problems.append(
+                f'Evaluator "{name}" is not linked to agent "{agent_name}". Link '
+                "it and choose which part of a trace fills each of its variables."
+                if ev is None
+                else f'Evaluator "{name}" has no part of a trace chosen on agent '
+                f'"{agent_name}" for: {", ".join(unset)}.'
             )
+        sources_by_agent[agent_id] = [
+            {"uuid": uuid, "trace_variables": s} for uuid, s in sources.items()
+        ]
     _raise_evaluator_problems(problems)
 
     out: Dict[str, List[Dict[str, Any]]] = {}
@@ -1536,15 +1571,7 @@ def convert_traces_to_tests(
                 status_code=400, detail="No traces matched the filters"
             )
     else:
-        requested = list(dict.fromkeys(payload.trace_ids))
-        traces = get_traces_by_uuids(ctx.org_uuid, requested)
-        found = {trace["uuid"] for trace in traces}
-        missing = [trace_uuid for trace_uuid in requested if trace_uuid not in found]
-        if missing:
-            raise HTTPException(
-                status_code=404,
-                detail={"error": "Some traces were not found", "trace_ids": missing},
-            )
+        traces = traces_or_404(ctx.org_uuid, payload.trace_ids)
 
     # `general` tests carry a standalone `input` and `response` tests a
     # `history`; calibrate refuses a row holding the wrong one. Since ingest ties
@@ -1681,10 +1708,8 @@ def convert_traces_to_tests(
     # where no screen lists it, so it is deleted and the reader is told to retry.
     unlinked: List[str] = []
     unlinked_uuids: List[str] = []
-    kept: List[Tuple[str, str]] = []
-    refs_by_test: Dict[str, List[Dict[str, Any]]] = {}
+    kept: List[Tuple[str, str, List[Dict[str, Any]]]] = []
     for trace, test_uuid, db_test in zip(traces, test_uuids, db_tests):
-        refs_by_test[test_uuid] = refs_by_trace[trace["uuid"]]
         agent_id = trace["agent_id"]
         agent = agents_seen[agent_id]
         linked = bool(agent) and required_agent_interaction_type(
@@ -1697,7 +1722,7 @@ def convert_traces_to_tests(
                 linked = False
                 logger.warning(f"Failed to link test {test_uuid} to agent {agent_id}: {e}")
         if linked:
-            kept.append((test_uuid, db_test["name"]))
+            kept.append((test_uuid, db_test["name"], refs_by_trace[trace["uuid"]]))
         else:
             unlinked.append(db_test["name"])
             unlinked_uuids.append(test_uuid)
@@ -1720,11 +1745,9 @@ def convert_traces_to_tests(
         )
     unjudged: List[str] = []
     if resolved_refs:
-        for test_uuid, name in kept:
-            if not refs_by_test[test_uuid]:
-                continue
+        for test_uuid, name, refs in kept:
             try:
-                set_test_evaluators(test_uuid, refs_by_test[test_uuid])
+                set_test_evaluators(test_uuid, refs)
             except Exception as e:
                 unjudged.append(name)
                 logger.warning(f"Failed to link evaluators to test {test_uuid}: {e}")
@@ -1737,8 +1760,8 @@ def convert_traces_to_tests(
     for evaluator_uuid in with_variables:
         left_off = [
             name
-            for test_uuid, name in kept
-            if all(r["evaluator_id"] != evaluator_uuid for r in refs_by_test[test_uuid])
+            for _, name, refs in kept
+            if all(r["evaluator_id"] != evaluator_uuid for r in refs)
         ]
         if left_off:
             warnings.append(
@@ -1749,7 +1772,7 @@ def convert_traces_to_tests(
 
     return {
         "created": len(kept),
-        "test_uuids": [test_uuid for test_uuid, _ in kept],
+        "test_uuids": [test_uuid for test_uuid, _, _ in kept],
         "warnings": warnings or None,
     }
 

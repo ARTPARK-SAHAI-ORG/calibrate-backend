@@ -248,14 +248,13 @@ def resolve_trace_scoring(
     ineligible: list[TraceScoringIneligible] = []
     for ev, version in live_evaluators:
         name = ev.get("name") or ev["uuid"]
-        mapping = ev.get("trace_variables") or {}
-        variables = (version or {}).get("variables") or []
+        sources, unset = evaluator_trace_sources(ev, version)
         evaluator_type = ev.get("evaluator_type")
         if evaluator_type not in (required_evaluator_type, TOOL_CALL_EVALUATOR_TYPE):
             reason = IneligibleReason.WRONG_TYPE
         elif not version:
             reason = IneligibleReason.NO_LIVE_VERSION
-        elif any(v["name"] not in mapping for v in variables):
+        elif unset:
             reason = IneligibleReason.DECLARES_VARIABLES
         else:
             reason = None
@@ -280,9 +279,7 @@ def resolve_trace_scoring(
                     "system_prompt": version.get("system_prompt") or "",
                     "output_config": version.get("output_config"),
                     "evaluator_version_id": version["uuid"],
-                    "trace_variables": {
-                        v["name"]: mapping[v["name"]] for v in variables
-                    },
+                    "trace_variables": sources,
                 },
             )
         )

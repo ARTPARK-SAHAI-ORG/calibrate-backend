@@ -55,13 +55,11 @@ from db import (
     count_chat_replies_today,
     set_agent_evaluator_trace_variables,
     get_trace,
-    get_traces_by_uuids,
 )
 from trace_scoring import (
     IneligibleReason,
     is_trace_variable_source,
     resolve_trace_scoring,
-    evaluator_trace_sources,
     trace_variable_value,
 )
 from auth_utils import get_current_org, get_org_jwt_or_api_key, OrgContext
@@ -73,7 +71,12 @@ from org_scope import ensure_owned_agent, ensure_owned_evaluator
 # page-shaping helper.
 from routers.evaluators import AgentEvaluatorResponse, build_evaluator_page
 # Traces imports only org_limits and tests, neither of which imports a router.
-from routers.traces import _last_user_content, _preview
+from routers.traces import (
+    _last_user_content,
+    _preview,
+    agent_evaluator_sources,
+    traces_or_404,
+)
 from routers.org_limits import (
     daily_message_limit,
     effective_max_chat_replies_per_day,
@@ -1534,41 +1537,22 @@ def read_trace_variable_values(
     """Read what each trace holds for each variable of the evaluators, using the parts of a trace chosen on the agent"""
     ensure_owned_agent(agent_uuid, ctx.org_uuid)
     evaluator_ids = list(dict.fromkeys(payload.evaluator_ids))
-    linked = {ev["uuid"]: (ev, version) for ev, version in resolve_live_evaluators(agent_uuid)}
-    problems: List[str] = []
-    sources: Dict[str, Dict[str, str]] = {}
-    for evaluator_id in evaluator_ids:
-        if evaluator_id not in linked:
-            problems.append(f"Evaluator {evaluator_id} is not linked to this agent.")
-            continue
-        ev, version = linked[evaluator_id]
-        sources[evaluator_id], unset = evaluator_trace_sources(ev, version)
-        if unset:
-            problems.append(
-                f'Evaluator "{ev.get("name") or evaluator_id}" has no part of a trace '
-                f"chosen for: {', '.join(unset)}."
-            )
-    if problems:
+    sources, unfillable = agent_evaluator_sources(agent_uuid, evaluator_ids)
+    if unfillable:
         raise HTTPException(
             status_code=400,
             detail={
                 "error": "Some evaluators cannot be filled from this agent's traces",
-                "evaluators": problems,
+                "evaluators": [
+                    f"Evaluator {evaluator_id} is not linked to this agent."
+                    if ev is None
+                    else f'Evaluator "{ev.get("name") or evaluator_id}" has no part '
+                    f"of a trace chosen for: {', '.join(unset)}."
+                    for evaluator_id, ev, unset in unfillable
+                ],
             },
         )
-    requested = list(dict.fromkeys(payload.trace_ids))
-    traces = [
-        trace
-        for trace in get_traces_by_uuids(ctx.org_uuid, requested)
-        if trace["agent_id"] == agent_uuid
-    ]
-    found = {trace["uuid"] for trace in traces}
-    missing = [trace_id for trace_id in requested if trace_id not in found]
-    if missing:
-        raise HTTPException(
-            status_code=404,
-            detail={"error": "Some traces were not found", "trace_ids": missing},
-        )
+    traces = traces_or_404(ctx.org_uuid, payload.trace_ids, agent_uuid)
     return TraceVariableValuesResponse(
         items=[
             TraceVariableValues(
