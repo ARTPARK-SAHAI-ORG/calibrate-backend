@@ -872,6 +872,14 @@ def _prepare_claimed_run(run: dict[str, Any], now: str) -> PreparedRun | None:
     if trace is None:
         skip(TraceEvalSettleSkipReason.TRACE_DELETED)
         return None
+    if run.get("only_evaluators"):
+        from db import get_previous_unconfigured_evaluators
+
+        run = {
+            **run,
+            "only_evaluators": json.loads(run["only_evaluators"]),
+            "previous_unconfigured": get_previous_unconfigured_evaluators(run["uuid"]),
+        }
     return PreparedRun(run=run, trace=trace)
 
 
@@ -948,10 +956,20 @@ def process_claimed_runs(
     for item in prepared:
         tool_call = is_tool_call_trace(item.trace)
         fitting = evaluators_fitting_row(evaluators.hydrated, tool_call)
-        unconfigured = [
-            ev["uuid"]
-            for ev in evaluators_fitting_row(evaluators.unconfigured, tool_call)
-        ]
+        only = item.run.get("only_evaluators")
+        if only:
+            # A limited rescore judges only the listed evaluators. The run
+            # already holds the previous run's scores for the rest.
+            fitting = [ev for ev in fitting if ev["uuid"] in only]
+            judged = {ev["uuid"] for ev in fitting}
+            unconfigured = [
+                ev for ev in item.run["previous_unconfigured"] if ev not in judged
+            ]
+        else:
+            unconfigured = [
+                ev["uuid"]
+                for ev in evaluators_fitting_row(evaluators.unconfigured, tool_call)
+            ]
         included, missing = trace_evaluators(item.trace, fitting)
         if missing or unconfigured:
             _swallow_settle(
@@ -965,6 +983,19 @@ def process_claimed_runs(
             scorable.append(
                 replace(item, evaluators=included, is_tool_call=tool_call)
             )
+            continue
+        if only:
+            try:
+                settle_trace_eval_run_completed(
+                    item.run["uuid"], [], now=prepare_now,
+                    attempts=item.run.get("attempts"),
+                )
+            except Exception as exc:
+                logger.exception("trace-scoring: settling run %s raised", item.run["uuid"])
+                _swallow_settle(
+                    _defer_or_fail, item.run, now=prepare_now, error=str(exc),
+                    rng=rng, max_attempts=max_attempts,
+                )
             continue
         if fitting:
             reason = TraceEvalSettleSkipReason.MISSING_TRACE_VALUES.value

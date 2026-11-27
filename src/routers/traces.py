@@ -559,6 +559,9 @@ class TraceScoringRun(BaseModel):
     unconfigured_evaluators: List[TraceUnconfiguredEvaluator] = Field(
         description="Evaluators that did not score this trace because a variable had no part of the trace chosen to fill it"
     )
+    limited_to_evaluators: List[TraceUnconfiguredEvaluator] = Field(
+        description="Evaluators this run was limited to, because an earlier run could not use them. The run also carries that earlier run's scores. Empty when every evaluator ran"
+    )
 
 
 class TraceScoresResponse(BaseModel):
@@ -1641,6 +1644,7 @@ def get_trace_scores_endpoint(
                 "results": run["results"],
                 "missing_values": run["missing_values"],
                 "unconfigured_evaluators": run["unconfigured_evaluators"],
+                "limited_to_evaluators": run["limited_to_evaluators"],
             }
             for run in runs
         ]
@@ -1671,7 +1675,7 @@ def score_trace_endpoint(
     ),
     ctx: OrgContext = Depends(get_current_org),
 ):
-    """Run the agent's evaluators again on a trace that was skipped or whose scoring failed"""
+    """Score a trace again: with every evaluator when it was skipped or failed, or with only the evaluators that were not set up when it was scored"""
     trace = get_trace(ctx.org_uuid, trace_uuid)
     if not trace:
         raise HTTPException(status_code=404, detail="Trace not found")
@@ -1693,7 +1697,7 @@ def score_trace_endpoint(
     if refusal == "not_retryable":
         raise HTTPException(
             status_code=409,
-            detail="Only a trace that was skipped or failed can be scored again",
+            detail="Only a trace that was skipped or failed, or that has an evaluator set up since it was scored, can be scored again",
         )
     if refusal == "over_limit":
         raise HTTPException(
