@@ -4345,8 +4345,9 @@ def mark_email_verified(user_uuid: str, password_hash: Optional[str] = None) -> 
 # Every workspace setting and the value it holds until someone changes it.
 # `run_models_in_parallel` True runs the models of a comparison at the same
 # time, False runs them one after another, which is what every comparison did
-# before a workspace could remember a choice. `default_messages_per_day` is
-# the daily chat reply limit of an agent that sets none of its own.
+# before a workspace could remember a choice. `show_likely_ranges` is read
+# only by the frontend. `default_messages_per_day` is the daily chat reply
+# limit of an agent that sets none of its own.
 # The highest daily message limit a workspace may set, unless an admin sets
 # another for it. A new workspace's default starts at it.
 DEFAULT_MAX_CHAT_REPLIES_PER_DAY = env_int("DEFAULT_MAX_CHAT_REPLIES_PER_DAY", 200)
@@ -4355,7 +4356,7 @@ DEFAULT_MAX_CHAT_REPLIES_PER_DAY = env_int("DEFAULT_MAX_CHAT_REPLIES_PER_DAY", 2
 TALK_TO_AGENT_KEY = "talk_to_agent"
 
 ORG_SETTINGS_DEFAULTS: Dict[str, Dict[str, Any]] = {
-    "model_benchmarking": {"run_models_in_parallel": True},
+    "model_benchmarking": {"run_models_in_parallel": True, "show_likely_ranges": False},
     TALK_TO_AGENT_KEY: {"default_messages_per_day": DEFAULT_MAX_CHAT_REPLIES_PER_DAY},
 }
 

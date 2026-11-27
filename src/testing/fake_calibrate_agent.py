@@ -19,6 +19,7 @@ screenshots) wherever an input matches it; everything else stays canned.
 
 import csv
 import json
+import math
 import os
 import statistics
 import sys
@@ -173,6 +174,26 @@ def _write_config_json(output_dir: Path, evaluators: List[Dict[str, Any]]) -> No
         json.dump({"evaluators_map": _evaluators_map(evaluators)}, f)
 
 
+# Copies of calibrate_agent.llm.summary's ranges, since this script must run
+# without calibrate installed; tests/test_fake_calibrate_agent.py checks they agree.
+def _wilson_range(passed: int, n: int) -> Optional[Dict[str, float]]:
+    if n <= 0:
+        return None
+    p, z2 = passed / n, 1.96**2
+    denom = 1 + z2 / n
+    center = (p + z2 / (2 * n)) / denom
+    half = 1.96 * math.sqrt(p * (1 - p) / n + z2 / (4 * n * n)) / denom
+    return {"low": max(0.0, (center - half) * 100), "high": min(100.0, (center + half) * 100)}
+
+
+def _mean_range(scores: List[float], lo: float, hi: float) -> Optional[Dict[str, float]]:
+    if len(scores) < 2 or len(set(scores)) == 1:
+        return None
+    half = 1.96 * statistics.stdev(scores) / math.sqrt(len(scores))
+    mean = statistics.fmean(scores)
+    return {"low": max(lo, mean - half), "high": min(hi, mean + half)}
+
+
 def _metrics_aggregate(
     ev: Dict[str, Any], n: int, pass_rate: float = 100.0
 ) -> Dict[str, Any]:
@@ -193,6 +214,11 @@ def _metrics_aggregate(
             "count": n,
             "scale_min": _ev_scale_min(ev),
             "scale_max": sm,
+            "ci": _mean_range(
+                [sm] * round(n * pass_rate / 100) + [low] * (n - round(n * pass_rate / 100)),
+                _ev_scale_min(ev),
+                sm,
+            ),
         }
     return {
         "type": "binary",
@@ -201,6 +227,7 @@ def _metrics_aggregate(
         "evaluator_id": uid,
         "passed": round(n * pass_rate / 100),
         "total": n,
+        "ci": _wilson_range(round(n * pass_rate / 100), n),
     }
 
 
@@ -307,6 +334,8 @@ def _write_llm_model_dir(
             {
                 "total": n,
                 "passed": passed,
+                "pass_rate": pass_rate if n else None,
+                "pass_rate_ci": _wilson_range(passed, n),
                 # Aggregate perf blocks are dicts, not scalars: latency is
                 # percentiles {p50,p95,p99,count}; cost/tokens are
                 # {mean,min,max,count}. The run-status/benchmark readers pass
