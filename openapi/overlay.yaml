@@ -201,6 +201,24 @@ actions:
           Link one or more evaluators to an agent, skipping any already linked.
           Each evaluator must be one you created or a built-in default, and the
           agent must be in your workspace.
+  - target: $.paths['/agents/{agent_uuid}/evaluators/{evaluator_uuid}/trace-variables'].put
+    update:
+      x-speakeasy-group: agents
+      x-speakeasy-name-override: update_evaluator_trace_variables
+      x-speakeasy-mcp:
+        name: update-agent-evaluator-trace-variables
+        title: Choose which part of a trace fills each evaluator variable
+        scopes: [write]
+        readOnlyHint: false
+        destructiveHint: false
+        idempotentHint: true
+        openWorldHint: true
+        description: |
+          Choose which part of a trace fills each variable of an evaluator linked
+          to an agent, replacing any earlier choices. Each value is input,
+          output.response, output.tool_calls, labels, conversation_id, message_id,
+          or metadata.<key>. Traces are scored by the evaluator once every variable
+          has a value.
   - target: $.paths['/tests'].post
     update:
       x-speakeasy-group: tests

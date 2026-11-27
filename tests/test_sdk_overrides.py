@@ -151,3 +151,17 @@ def test_public_surface_has_only_api_key_security():
             assert sec == [{"ApiKeyAuth": []}], (
                 f"{method.upper()} {path}: public op must require only ApiKeyAuth, got {sec}"
             )
+
+
+def test_trace_variable_source_descriptions_name_every_source():
+    from routers.agents import _TRACE_VARIABLES_DESCRIPTION
+    from trace_scoring import METADATA_SOURCE_PREFIX, TRACE_VARIABLE_SOURCES
+
+    overlay = next(
+        op["x-speakeasy-mcp"]["description"]
+        for (path, method), op in _speakeasy_overlay_ops().items()
+        if path.endswith("/trace-variables") and method == "put"
+    )
+    for source in (*TRACE_VARIABLE_SOURCES, METADATA_SOURCE_PREFIX):
+        assert f"`{source}" in _TRACE_VARIABLES_DESCRIPTION, source
+        assert re.search(rf"(?<![\w.]){re.escape(source)}(?![\w])", overlay), source

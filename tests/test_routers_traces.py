@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import uuid
 from unittest.mock import patch
 
@@ -272,6 +273,15 @@ def test_ingest_rejects_oversized_payloads(client):
         agent_id, _mid(), metadata=[{"key": "k", "value": "v"}] * 101
     )
     assert client.post("/traces", json=too_much_metadata, headers=h).status_code == 422
+
+    longest_value = _payload(
+        agent_id, _mid(), metadata=[{"key": "expert_answer", "value": "x" * 50_000}]
+    )
+    assert client.post("/traces", json=longest_value, headers=h).status_code == 200
+    too_long_value = _payload(
+        agent_id, _mid(), metadata=[{"key": "expert_answer", "value": "x" * 50_001}]
+    )
+    assert client.post("/traces", json=too_long_value, headers=h).status_code == 422
 
 
 def test_ingest_cap_returns_429(client, monkeypatch):
@@ -4278,7 +4288,10 @@ def test_score_trace_refuses_a_trace_that_was_scored(client):
 
     res = client.post(f"/traces/{trace['uuid']}/score", headers=h)
     assert res.status_code == 409
-    assert res.json()["detail"] == "Only a trace that was skipped or failed can be scored again"
+    assert res.json()["detail"] == (
+        "Only a trace that was skipped or failed, or that has an evaluator set up "
+        "since it was scored, can be scored again"
+    )
     assert len(_runs_for_trace(trace["uuid"])) == 1
 
     _disable_auto_score(client, h, agent_id)
@@ -4336,3 +4349,530 @@ def test_score_trace_is_jwt_only(client):
     res = client.post(f"/traces/{trace['uuid']}/score", headers=_api_key_headers(client, h))
     assert res.status_code in (401, 403)
     assert len(_runs_for_trace(trace["uuid"])) == 1
+
+
+
+
+def _mapped_evaluator(client, h, agent_uuid, mapping):
+    """An evaluator linked to the agent with each of `mapping`'s variables chosen."""
+    ev_uuid = _unmapped_evaluator(client, h, agent_uuid, list(mapping))
+    _map_variables(client, h, agent_uuid, ev_uuid, mapping)
+    return ev_uuid
+
+
+def _unmapped_evaluator(client, h, agent_uuid, variables):
+    """An evaluator linked to the agent with no trace part chosen for its variables."""
+    prompt = " ".join(f"{{{{{name}}}}}" for name in variables)
+    resp = client.post(
+        "/evaluators",
+        json={
+            "name": f"ev-{uuid.uuid4().hex[:6]}",
+            "evaluator_type": "llm",
+            "output_type": "binary",
+            "version": {
+                "judge_model": "openai/gpt-4.1",
+                "system_prompt": prompt,
+                "variables": [{"name": name} for name in variables],
+            },
+        },
+        headers=h,
+    )
+    assert resp.status_code == 200, resp.text
+    ev_uuid = resp.json()["uuid"]
+    r = client.post(
+        f"/agents/{agent_uuid}/evaluators",
+        json={"evaluator_ids": [ev_uuid]},
+        headers=h,
+    )
+    assert r.status_code == 200, r.text
+    return ev_uuid
+
+
+def _map_variables(client, h, agent_uuid, ev_uuid, mapping):
+    r = client.put(
+        f"/agents/{agent_uuid}/evaluators/{ev_uuid}/trace-variables",
+        json={"trace_variables": mapping},
+        headers=h,
+    )
+    assert r.status_code == 200, r.text
+
+
+def _judge_passing(*evaluator_uuids):
+    """A judge call that answers for exactly these evaluators, on every run sent."""
+
+    def invoke(config, dataset, **kwargs):
+        return ts.EvalOnlyCliResult(
+            returncode=0,
+            timed_out=False,
+            results=[
+                {
+                    "test_case_id": item["test_case"]["id"],
+                    "metrics": {
+                        "judge_results": {
+                            ev: {"evaluator_id": ev, "match": True, "reasoning": "ok"}
+                            for ev in evaluator_uuids
+                        }
+                    },
+                }
+                for item in dataset
+            ]
+        )
+
+    return invoke
+
+
+def _judge_down(config, dataset, **kwargs):
+    return ts.EvalOnlyCliResult(returncode=1, timed_out=False, results=[], error="judge down")
+
+
+def _score_trace(trace_uuid, invoke, attempts=1):
+    """Hand the trace's open run to the scoring engine as attempt `attempts`,
+    the way the claim does."""
+    run = dict(_runs_for_trace(trace_uuid)[0])
+    with db.get_db_connection() as conn:
+        conn.execute(
+            "UPDATE trace_eval_runs SET status = 'processing', attempts = ?, "
+            "missing_values = NULL, unconfigured_evaluators = NULL WHERE uuid = ?",
+            (attempts, run["uuid"]),
+        )
+        conn.commit()
+    ts.process_claimed_runs([{**run, "attempts": attempts}], invoke=invoke)
+    return db.get_trace_eval_run(run["uuid"])
+
+
+def _scores_run(client, h, trace_uuid):
+    r = client.get(f"/traces/{trace_uuid}/scores", headers=h)
+    assert r.status_code == 200, r.text
+    return r.json()["runs"][0]
+
+
+def _ev_name(client, h, ev_uuid):
+    return client.get(f"/evaluators/{ev_uuid}", headers=h).json()["name"]
+
+
+def test_run_completing_with_an_evaluator_left_out_records_it(client):
+    h, agent_id = _signup_with_agent(client)
+    clean, _ = _enable_auto_score(client, h, agent_id)
+    mapped = _mapped_evaluator(client, h, agent_id, {"nurse": "metadata.expert"})
+    trace = _post_trace(client, h, _payload(agent_id, _mid()))["uuid"]
+
+    assert _score_trace(trace, _judge_passing(clean))["status"] == "completed"
+
+    run = _scores_run(client, h, trace)
+    assert [result["evaluator_uuid"] for result in run["results"]] == [clean]
+    assert run["missing_values"] == [
+        {
+            "evaluator_uuid": mapped,
+            "name": _ev_name(client, h, mapped),
+            "variable": "nurse",
+            "source": "metadata.expert",
+        }
+    ]
+
+
+def test_run_skipped_for_missing_values_records_every_evaluator(client):
+    h, agent_id = _signup_with_agent(client)
+    _enable_auto_score(client, h, agent_id)
+    _unlink_all_evaluators(client, h, agent_id)
+    first = _mapped_evaluator(client, h, agent_id, {"nurse": "metadata.expert"})
+    second = _mapped_evaluator(client, h, agent_id, {"doctor": "metadata.doctor"})
+    trace = _post_trace(client, h, _payload(agent_id, _mid()))["uuid"]
+
+    settled = _score_trace(trace, _judge_passing())
+
+    assert (settled["status"], settled["error"]) == ("skipped", "missing_trace_values")
+    assert {
+        (entry["evaluator_uuid"], entry["variable"], entry["source"])
+        for entry in _scores_run(client, h, trace)["missing_values"]
+    } == {(first, "nurse", "metadata.expert"), (second, "doctor", "metadata.doctor")}
+
+
+def test_an_evaluator_with_two_missing_variables_gets_two_entries(client):
+    h, agent_id = _signup_with_agent(client)
+    clean, _ = _enable_auto_score(client, h, agent_id)
+    mapped = _mapped_evaluator(
+        client,
+        h,
+        agent_id,
+        {"nurse": "metadata.expert", "doctor": "metadata.doctor", "reply": "output.response"},
+    )
+    trace = _post_trace(client, h, _payload(agent_id, _mid()))["uuid"]
+
+    _score_trace(trace, _judge_passing(clean))
+
+    assert [
+        (entry["evaluator_uuid"], entry["variable"], entry["source"])
+        for entry in _scores_run(client, h, trace)["missing_values"]
+    ] == [
+        (mapped, "nurse", "metadata.expert"),
+        (mapped, "doctor", "metadata.doctor"),
+    ]
+
+
+def test_a_retried_run_replaces_what_it_recorded(client):
+    h, agent_id = _signup_with_agent(client)
+    clean, _ = _enable_auto_score(client, h, agent_id)
+    mapped = _mapped_evaluator(client, h, agent_id, {"nurse": "metadata.expert"})
+    trace = _post_trace(client, h, _payload(agent_id, _mid()))["uuid"]
+
+    assert _score_trace(trace, _judge_down)["status"] == "pending"
+    assert len(_scores_run(client, h, trace)["missing_values"]) == 1
+
+    assert _score_trace(trace, _judge_down, attempts=2)["status"] == "pending"
+    assert len(_scores_run(client, h, trace)["missing_values"]) == 1
+
+    _map_variables(client, h, agent_id, mapped, {"nurse": "metadata.doctor"})
+    _score_trace(trace, _judge_down, attempts=3)
+    assert [
+        entry["source"] for entry in _scores_run(client, h, trace)["missing_values"]
+    ] == ["metadata.doctor"]
+
+    _map_variables(client, h, agent_id, mapped, {"nurse": "output.response"})
+    settled = _score_trace(trace, _judge_passing(clean, mapped), attempts=4)
+    assert settled["status"] == "completed"
+    assert _scores_run(client, h, trace)["missing_values"] == []
+
+
+def test_a_run_that_has_moved_on_is_not_written_by_a_stale_worker(client):
+    h, agent_id = _signup_with_agent(client)
+    _enable_auto_score(client, h, agent_id)
+    _mapped_evaluator(client, h, agent_id, {"nurse": "metadata.expert"})
+    trace = _post_trace(client, h, _payload(agent_id, _mid()))["uuid"]
+    run_uuid = _runs_for_trace(trace)[0]["uuid"]
+    with db.get_db_connection() as conn:
+        conn.execute(
+            "UPDATE trace_eval_runs SET status = 'processing', attempts = 2 WHERE uuid = ?",
+            (run_uuid,),
+        )
+        conn.commit()
+
+    entry = {"evaluator_uuid": "x", "variable": "y", "source": "input"}
+    db.set_trace_eval_run_missing_values(run_uuid, [entry], ["x"], attempts=1)
+    stale = db.get_trace_eval_run(run_uuid)
+    assert (stale["missing_values"], stale["unconfigured_evaluators"]) == (None, None)
+
+
+def test_a_failed_record_does_not_stop_the_run_settling(client, monkeypatch):
+    h, agent_id = _signup_with_agent(client)
+    clean, _ = _enable_auto_score(client, h, agent_id)
+    _mapped_evaluator(client, h, agent_id, {"nurse": "metadata.expert"})
+    trace = _post_trace(client, h, _payload(agent_id, _mid()))["uuid"]
+
+    def boom(*args, **kwargs):
+        raise RuntimeError("busy")
+
+    monkeypatch.setattr(db, "set_trace_eval_run_missing_values", boom)
+    assert _score_trace(trace, _judge_passing(clean))["status"] == "completed"
+    assert _scores_run(client, h, trace)["missing_values"] == []
+
+
+def test_a_fully_filled_run_records_nothing(client):
+    h, agent_id = _signup_with_agent(client)
+    clean, _ = _enable_auto_score(client, h, agent_id)
+    mapped = _mapped_evaluator(client, h, agent_id, {"model": "metadata.gen_ai.request.model"})
+    trace = _post_trace(client, h, _payload(agent_id, _mid()))["uuid"]
+
+    assert _score_trace(trace, _judge_passing(clean, mapped))["status"] == "completed"
+    assert _scores_run(client, h, trace)["missing_values"] == []
+
+
+def test_a_tool_call_turn_with_no_tool_call_evaluator_records_nothing(client):
+    h, agent_id = _signup_with_agent(client)
+    _enable_auto_score(client, h, agent_id)
+    _mapped_evaluator(client, h, agent_id, {"nurse": "metadata.expert"})
+    trace = _post_trace(
+        client,
+        h,
+        _payload(
+            agent_id,
+            _mid(),
+            output={"tool_calls": [{"tool": "get_schedule", "arguments": {}}]},
+        ),
+    )["uuid"]
+
+    settled = _score_trace(trace, _judge_passing())
+
+    assert (settled["status"], settled["error"]) == ("skipped", "no_tool_call_evaluator")
+    assert settled["missing_values"] is None
+    assert _scores_run(client, h, trace)["missing_values"] == []
+
+
+def test_an_unlinked_evaluators_missing_value_stays_on_the_trace(client):
+    h, agent_id = _signup_with_agent(client)
+    clean, _ = _enable_auto_score(client, h, agent_id)
+    mapped = _mapped_evaluator(client, h, agent_id, {"nurse": "metadata.expert"})
+    trace = _post_trace(client, h, _payload(agent_id, _mid()))["uuid"]
+    _score_trace(trace, _judge_passing(clean))
+
+    r = client.delete(f"/agents/{agent_id}/evaluators/{mapped}", headers=h)
+    assert r.status_code == 200, r.text
+    assert [
+        entry["evaluator_uuid"] for entry in _scores_run(client, h, trace)["missing_values"]
+    ] == [mapped]
+
+
+def test_a_missing_value_shows_the_evaluators_current_name(client):
+    h, agent_id = _signup_with_agent(client)
+    clean, _ = _enable_auto_score(client, h, agent_id)
+    mapped = _mapped_evaluator(client, h, agent_id, {"nurse": "metadata.expert"})
+    trace = _post_trace(client, h, _payload(agent_id, _mid()))["uuid"]
+    _score_trace(trace, _judge_passing(clean))
+
+    new_name = f"renamed-{uuid.uuid4().hex[:6]}"
+    r = client.put(f"/evaluators/{mapped}", json={"name": new_name}, headers=h)
+    assert r.status_code == 200, r.text
+    assert _scores_run(client, h, trace)["missing_values"][0]["name"] == new_name
+
+
+def test_a_missing_value_keeps_a_deleted_evaluators_name(client):
+    h, agent_id = _signup_with_agent(client)
+    clean, _ = _enable_auto_score(client, h, agent_id)
+    mapped = _mapped_evaluator(client, h, agent_id, {"nurse": "metadata.expert"})
+    name = _ev_name(client, h, mapped)
+    trace = _post_trace(client, h, _payload(agent_id, _mid()))["uuid"]
+    _score_trace(trace, _judge_passing(clean))
+
+    r = client.delete(f"/evaluators/{mapped}", headers=h)
+    assert r.status_code == 200, r.text
+    assert _scores_run(client, h, trace)["missing_values"][0]["name"] == name
+
+
+def test_run_completing_with_an_unconfigured_evaluator_records_it(client):
+    h, agent_id = _signup_with_agent(client)
+    clean, _ = _enable_auto_score(client, h, agent_id)
+    unmapped = _unmapped_evaluator(client, h, agent_id, ["nurse"])
+    trace = _post_trace(client, h, _payload(agent_id, _mid()))["uuid"]
+
+    assert _score_trace(trace, _judge_passing(clean))["status"] == "completed"
+
+    run = _scores_run(client, h, trace)
+    assert [result["evaluator_uuid"] for result in run["results"]] == [clean]
+    assert run["unconfigured_evaluators"] == [
+        {"evaluator_uuid": unmapped, "name": _ev_name(client, h, unmapped)}
+    ]
+    assert run["missing_values"] == []
+
+
+def test_run_with_every_evaluator_unconfigured_is_skipped_and_records_them(client):
+    h, agent_id = _signup_with_agent(client)
+    _enable_auto_score(client, h, agent_id)
+    _unlink_all_evaluators(client, h, agent_id)
+    unmapped = _unmapped_evaluator(client, h, agent_id, ["nurse"])
+    trace = _post_trace(client, h, _payload(agent_id, _mid()))["uuid"]
+
+    settled = _score_trace(trace, _judge_passing())
+
+    assert (settled["status"], settled["error"]) == ("skipped", "no_usable_evaluators")
+    assert [
+        entry["evaluator_uuid"]
+        for entry in _scores_run(client, h, trace)["unconfigured_evaluators"]
+    ] == [unmapped]
+
+
+def test_an_unconfigured_evaluator_is_recorded_only_on_the_traces_it_would_score(client):
+    h, agent_id = _signup_with_agent(client)
+    _enable_auto_score(client, h, agent_id)
+    _unmapped_evaluator(client, h, agent_id, ["nurse"])
+    trace = _post_trace(
+        client,
+        h,
+        _payload(
+            agent_id,
+            _mid(),
+            output={"tool_calls": [{"tool": "get_schedule", "arguments": {}}]},
+        ),
+    )["uuid"]
+
+    settled = _score_trace(trace, _judge_passing())
+
+    assert settled["error"] == "no_tool_call_evaluator"
+    assert _scores_run(client, h, trace)["unconfigured_evaluators"] == []
+
+
+def test_configuring_an_evaluator_later_leaves_an_earlier_run_as_it_was(client):
+    h, agent_id = _signup_with_agent(client)
+    clean, _ = _enable_auto_score(client, h, agent_id)
+    unmapped = _unmapped_evaluator(client, h, agent_id, ["nurse"])
+    old_trace = _post_trace(client, h, _payload(agent_id, _mid()))["uuid"]
+    _score_trace(old_trace, _judge_passing(clean))
+
+    _map_variables(client, h, agent_id, unmapped, {"nurse": "output.response"})
+    new_trace = _post_trace(client, h, _payload(agent_id, _mid()))["uuid"]
+    _score_trace(new_trace, _judge_passing(clean, unmapped))
+
+    assert [
+        entry["evaluator_uuid"]
+        for entry in _scores_run(client, h, old_trace)["unconfigured_evaluators"]
+    ] == [unmapped]
+    assert _scores_run(client, h, new_trace)["unconfigured_evaluators"] == []
+
+
+def test_an_unconfigured_evaluator_shows_its_current_name_and_stays_once_unlinked(client):
+    h, agent_id = _signup_with_agent(client)
+    clean, _ = _enable_auto_score(client, h, agent_id)
+    unmapped = _unmapped_evaluator(client, h, agent_id, ["nurse"])
+    trace = _post_trace(client, h, _payload(agent_id, _mid()))["uuid"]
+    _score_trace(trace, _judge_passing(clean))
+
+    new_name = f"renamed-{uuid.uuid4().hex[:6]}"
+    r = client.put(f"/evaluators/{unmapped}", json={"name": new_name}, headers=h)
+    assert r.status_code == 200, r.text
+    assert _scores_run(client, h, trace)["unconfigured_evaluators"][0]["name"] == new_name
+
+    r = client.delete(f"/agents/{agent_id}/evaluators/{unmapped}", headers=h)
+    assert r.status_code == 200, r.text
+    assert [
+        entry["evaluator_uuid"]
+        for entry in _scores_run(client, h, trace)["unconfigured_evaluators"]
+    ] == [unmapped]
+
+
+def test_missing_values_stay_off_the_trace_list(client):
+    h, agent_id = _signup_with_agent(client)
+    clean, _ = _enable_auto_score(client, h, agent_id)
+    _mapped_evaluator(client, h, agent_id, {"nurse": "metadata.expert"})
+    trace = _post_trace(client, h, _payload(agent_id, _mid()))["uuid"]
+    _score_trace(trace, _judge_passing(clean))
+
+    assert "missing_values" not in _list_item(client, h, trace)
+
+
+# Scoring again with only the evaluators set up since the last run
+
+
+def _scored_with_one_unconfigured(client, h, agent_id):
+    """A trace whose completed run scored `clean` and recorded `unmapped` as unconfigured."""
+    clean, _ = _enable_auto_score(client, h, agent_id)
+    unmapped = _unmapped_evaluator(client, h, agent_id, ["nurse"])
+    trace = _post_trace(client, h, _payload(agent_id, _mid()))["uuid"]
+    assert _score_trace(trace, _judge_passing(clean))["status"] == "completed"
+    return trace, clean, unmapped
+
+
+def _score_open_run(trace_uuid, invoke):
+    run = next(
+        dict(r) for r in _runs_for_trace(trace_uuid) if r["status"] == "pending"
+    )
+    with db.get_db_connection() as conn:
+        conn.execute(
+            "UPDATE trace_eval_runs SET status = 'processing', attempts = 1 WHERE uuid = ?",
+            (run["uuid"],),
+        )
+        conn.commit()
+    ts.process_claimed_runs([{**run, "attempts": 1}], invoke=invoke)
+    return db.get_trace_eval_run(run["uuid"])
+
+
+def _recording(invoke, calls):
+    def wrapped(config, dataset, **kwargs):
+        calls.append((config, dataset))
+        return invoke(config, dataset, **kwargs)
+
+    return wrapped
+
+
+def test_score_trace_refuses_a_completed_trace_with_nothing_newly_set_up(client):
+    h, agent_id = _signup_with_agent(client)
+    trace, _, _ = _scored_with_one_unconfigured(client, h, agent_id)
+
+    res = client.post(f"/traces/{trace}/score", headers=h)
+    assert res.status_code == 409
+    assert len(_runs_for_trace(trace)) == 1
+
+
+def test_score_trace_limits_a_completed_trace_to_the_evaluators_set_up_since(client):
+    h, agent_id = _signup_with_agent(client)
+    trace, clean, unmapped = _scored_with_one_unconfigured(client, h, agent_id)
+    _map_variables(client, h, agent_id, unmapped, {"nurse": "output.response"})
+
+    res = client.post(f"/traces/{trace}/score", headers=h)
+    assert res.status_code == 200, res.text
+    new_uuid = res.json()["run_uuid"]
+    new = db.get_trace_eval_run(new_uuid)
+    assert new["status"] == "pending"
+    assert json.loads(new["only_evaluators"]) == [unmapped]
+    with db.get_db_connection() as conn:
+        copied = conn.execute(
+            "SELECT evaluator_uuid, value, reasoning FROM trace_eval_scores WHERE run_uuid = ?",
+            (new_uuid,),
+        ).fetchall()
+    assert [tuple(row) for row in copied] == [(clean, 1, "ok")]
+
+    runs = client.get(f"/traces/{trace}/scores", headers=h).json()["runs"]
+    assert runs[0]["newly_scored_evaluators"] == [
+        {"evaluator_uuid": unmapped, "name": _ev_name(client, h, unmapped)}
+    ]
+    assert runs[1]["newly_scored_evaluators"] == []
+
+    calls = []
+    settled = _score_open_run(trace, _recording(_judge_passing(unmapped), calls))
+    assert settled["status"] == "completed"
+    [(config, _)] = calls
+    assert [ev["id"] for ev in config["evaluators"]] == [unmapped]
+    run = _scores_run(client, h, trace)
+    assert sorted(r["evaluator_uuid"] for r in run["results"]) == sorted([clean, unmapped])
+    assert run["unconfigured_evaluators"] == []
+    assert sorted(
+        r["evaluator_uuid"] for r in _list_item(client, h, trace)["results"]
+    ) == sorted([clean, unmapped])
+
+
+def test_scoring_only_newly_configured_evaluators_with_no_value_completes_on_the_copied_scores(client):
+    h, agent_id = _signup_with_agent(client)
+    trace, clean, unmapped = _scored_with_one_unconfigured(client, h, agent_id)
+    _map_variables(client, h, agent_id, unmapped, {"nurse": "metadata.expert"})
+    assert client.post(f"/traces/{trace}/score", headers=h).status_code == 200
+
+    calls = []
+    settled = _score_open_run(trace, _recording(_judge_passing(unmapped), calls))
+
+    assert (settled["status"], settled["error"]) == ("completed", None)
+    assert calls == []
+    run = _scores_run(client, h, trace)
+    assert [r["evaluator_uuid"] for r in run["results"]] == [clean]
+    assert run["missing_values"] == [
+        {
+            "evaluator_uuid": unmapped,
+            "name": _ev_name(client, h, unmapped),
+            "variable": "nurse",
+            "source": "metadata.expert",
+        }
+    ]
+    assert run["unconfigured_evaluators"] == []
+
+
+def test_scoring_only_newly_configured_evaluators_keeps_the_evaluators_still_not_set_up(client):
+    h, agent_id = _signup_with_agent(client)
+    clean, _ = _enable_auto_score(client, h, agent_id)
+    first = _unmapped_evaluator(client, h, agent_id, ["nurse"])
+    second = _unmapped_evaluator(client, h, agent_id, ["doctor"])
+    trace = _post_trace(client, h, _payload(agent_id, _mid()))["uuid"]
+    _score_trace(trace, _judge_passing(clean))
+    _map_variables(client, h, agent_id, first, {"nurse": "output.response"})
+    assert client.post(f"/traces/{trace}/score", headers=h).status_code == 200
+
+    settled = _score_open_run(trace, _judge_passing(first))
+
+    assert settled["status"] == "completed"
+    run = _scores_run(client, h, trace)
+    assert [e["evaluator_uuid"] for e in run["newly_scored_evaluators"]] == [first]
+    assert [e["evaluator_uuid"] for e in run["unconfigured_evaluators"]] == [second]
+
+
+def test_newly_eligible_evaluators_is_empty_for_an_unknown_agent():
+    assert db._newly_eligible_evaluators(str(uuid.uuid4()), ["x"]) == []
+
+
+def test_scoring_only_newly_configured_evaluators_that_cannot_settle_is_handed_back(client, monkeypatch):
+    h, agent_id = _signup_with_agent(client)
+    trace, _, unmapped = _scored_with_one_unconfigured(client, h, agent_id)
+    _map_variables(client, h, agent_id, unmapped, {"nurse": "metadata.expert"})
+    assert client.post(f"/traces/{trace}/score", headers=h).status_code == 200
+
+    def boom(*args, **kwargs):
+        raise RuntimeError("busy")
+
+    monkeypatch.setattr(db, "settle_trace_eval_run_completed", boom)
+    settled = _score_open_run(trace, _judge_passing(unmapped))
+
+    assert (settled["status"], settled["error"]) == ("pending", "busy")
