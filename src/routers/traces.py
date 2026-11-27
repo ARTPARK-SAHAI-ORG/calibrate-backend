@@ -1379,6 +1379,23 @@ def agent_evaluator_sources(
     return sources, unfillable
 
 
+def unfillable_evaluator_problem(
+    evaluator: str, agent: str, ev: Optional[Dict[str, Any]], unset: List[str]
+) -> str:
+    """The sentence naming why one entry of `agent_evaluator_sources`'
+    unfillable list cannot be filled, with the evaluator and agent as the
+    caller can name them."""
+    if ev is None:
+        return (
+            f"Evaluator {evaluator} is not linked to {agent}. Link it and choose "
+            "which part of a trace fills each of its variables."
+        )
+    return (
+        f"Evaluator {evaluator} has no part of a trace chosen on {agent} for: "
+        f"{', '.join(unset)}."
+    )
+
+
 def traces_or_404(
     org_uuid: str, trace_ids: List[str], agent_id: Optional[str] = None
 ) -> List[Dict[str, Any]]:
@@ -1422,15 +1439,12 @@ def _evaluator_refs_per_trace(
             continue
         agent_name = agents[agent_id].get("name") or agent_id
         sources, unfillable = agent_evaluator_sources(agent_id, with_variables)
-        for evaluator_uuid, ev, unset in unfillable:
-            name = names[evaluator_uuid]
-            problems.append(
-                f'Evaluator "{name}" is not linked to agent "{agent_name}". Link '
-                "it and choose which part of a trace fills each of its variables."
-                if ev is None
-                else f'Evaluator "{name}" has no part of a trace chosen on agent '
-                f'"{agent_name}" for: {", ".join(unset)}.'
+        problems.extend(
+            unfillable_evaluator_problem(
+                f'"{names[evaluator_uuid]}"', f'agent "{agent_name}"', ev, unset
             )
+            for evaluator_uuid, ev, unset in unfillable
+        )
         sources_by_agent[agent_id] = [
             {"uuid": uuid, "trace_variables": s} for uuid, s in sources.items()
         ]
@@ -1466,7 +1480,7 @@ def _evaluator_refs_per_trace(
         raise HTTPException(
             status_code=400,
             detail={
-                "message": (
+                "error": (
                     "Some traces hold no value for an evaluator's variables, so "
                     "nothing was created. Pass skip_missing_values to leave the "
                     "evaluator off those tests"
@@ -1779,17 +1793,17 @@ def convert_traces_to_tests(
         )
     left_off = []
     for evaluator_uuid in with_variables:
-        test_uuids = [
+        without = [
             test_uuid
             for test_uuid, _, refs in kept
             if all(r["evaluator_id"] != evaluator_uuid for r in refs)
         ]
-        if test_uuids:
+        if without:
             left_off.append(
                 {
                     "evaluator_id": evaluator_uuid,
                     "evaluator_name": evaluator_names[evaluator_uuid],
-                    "test_uuids": test_uuids,
+                    "test_uuids": without,
                 }
             )
 
@@ -1927,6 +1941,44 @@ def set_trace_feedback_endpoint(
     ctx: OrgContext = Depends(get_org_jwt_or_api_key),
 ):
     """Set whether the agent's output on a trace was correct, replacing any earlier feedback, or clear it"""
-    if not set_trace_feedback(ctx.org_uuid, trace_uuid, body.is_correct, body.comment):
+    trace = get_trace(ctx.org_uuid, trace_uuid)
+    if not trace or not set_trace_feedback(
+        ctx.org_uuid, trace_uuid, body.is_correct, body.comment
+    ):
         raise HTTPException(status_code=404, detail="Trace not found")
+    rescore_for_new_feedback_comment(ctx.org_uuid, trace, body)
     return {"feedback": get_trace(ctx.org_uuid, trace_uuid)["feedback"]}
+
+
+def rescore_for_new_feedback_comment(
+    org_uuid: str, trace: Dict[str, Any], body: TraceFeedbackUpdate
+) -> None:
+    """Score `trace` again, with only the evaluators that read `feedback.comment`
+    on its agent when its latest run completed, or in full when it was skipped
+    or failed, when the feedback just saved changed the comment to a
+    non-empty one and the agent scores its traces. Never raises: the feedback
+    is already saved, and a rescore that cannot be queued is not a reason to
+    report it as failed."""
+    new = (body.comment or "").strip() if body.is_correct is not None else ""
+    old = ((trace.get("feedback") or {}).get("comment") or "").strip()
+    if not new or new == old:
+        return
+    try:
+        agent = get_agent(trace["agent_id"])
+        if not agent or not trace_scoring_enabled(agent):
+            return
+        dependent = [
+            ev["uuid"]
+            for ev, version in resolve_live_evaluators(agent["uuid"])
+            if "feedback.comment" in evaluator_trace_sources(ev, version)[0].values()
+        ]
+        if dependent:
+            create_trace_rescore_run(
+                org_uuid=org_uuid,
+                trace_uuid=trace["uuid"],
+                agent_id=agent["uuid"],
+                max_scored_traces=effective_limits(org_uuid)["max_scored_traces"],
+                only_evaluators=dependent,
+            )
+    except Exception as e:
+        logger.warning(f"Could not score trace {trace['uuid']} again after feedback: {e}")

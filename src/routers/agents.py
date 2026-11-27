@@ -75,6 +75,7 @@ from routers.traces import (
     _last_user_content,
     _preview,
     agent_evaluator_sources,
+    unfillable_evaluator_problem,
     traces_or_404,
 )
 from routers.org_limits import (
@@ -1544,10 +1545,13 @@ def read_trace_variable_values(
             detail={
                 "error": "Some evaluators cannot be filled from this agent's traces",
                 "evaluators": [
-                    f"Evaluator {evaluator_id} is not linked to this agent."
-                    if ev is None
-                    else f'Evaluator "{ev.get("name") or evaluator_id}" has no part '
-                    f"of a trace chosen for: {', '.join(unset)}."
+                    unfillable_evaluator_problem(
+                        evaluator_id if ev is None
+                        else f'"{ev.get("name") or evaluator_id}"',
+                        "this agent",
+                        ev,
+                        unset,
+                    )
                     for evaluator_id, ev, unset in unfillable
                 ],
             },
