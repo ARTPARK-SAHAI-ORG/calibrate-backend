@@ -279,7 +279,7 @@ _AGENT_CONFIG_DESCRIPTION = """Agent behavioral config. The keys depend on `type
 - `settings.agent_speaks_first`, `settings.max_assistant_turns`
 - `system_tools.end_call`: let the agent end the call
 - `data_extraction_fields`: `[{name, type, description, required}]`
-- `knowledge_base.text`: information the agent reads before every reply, added after `system_prompt`. At most 5000 characters
+- `knowledge_base.text`: information the agent reads before every reply, added after `system_prompt`. At most {knowledge_base_max_chars} characters
 
 ```json
 {
@@ -319,7 +319,9 @@ _AGENT_CONFIG_DESCRIPTION = """Agent behavioral config. The keys depend on `type
 
 Every request Calibrate makes to your endpoint carries the header
 `X-Calibrate-Eval: 1`. Read it to tell a test run from a real user, for example
-to tag the trace you send back or to skip sending one."""
+to tag the trace you send back or to skip sending one.""".replace(
+    "{knowledge_base_max_chars}", f"{KNOWLEDGE_BASE_MAX_CHARS:,}"
+)
 
 
 class AgentCreate(BaseModel):

@@ -28,7 +28,7 @@ from db import (
 from auth_utils import get_current_org, OrgContext, require_superadmin, is_superadmin_user
 import provider_keys
 from admin_analytics import EVAL_FIELDS
-from utils import env_int
+from utils import KNOWLEDGE_BASE_MAX_CHARS, env_int
 
 logger = logging.getLogger(__name__)
 
@@ -160,6 +160,10 @@ class OwnLimitsResponse(BaseModel):
     )
     uses_own_provider_keys: bool = Field(
         description="Whether your workspace's runs use only its own AI provider keys instead of Calibrate's"
+    )
+    max_knowledge_base_chars: int = Field(
+        description="Maximum characters in an agent's knowledge base",
+        examples=[KNOWLEDGE_BASE_MAX_CHARS],
     )
 
 
@@ -308,6 +312,7 @@ def get_own_limits(ctx: OrgContext = Depends(get_current_org)):
     return {
         **effective_limits(ctx.org_uuid),
         "uses_own_provider_keys": provider_keys.org_uses_own_keys(ctx.org_uuid),
+        "max_knowledge_base_chars": KNOWLEDGE_BASE_MAX_CHARS,
     }
 
 

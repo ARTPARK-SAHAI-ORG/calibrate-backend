@@ -2344,3 +2344,11 @@ def test_a_config_update_without_the_key_keeps_the_knowledge_base(client):
     )
     assert cleared.status_code == 200, cleared.text
     assert _knowledge_base(client, h, agent["uuid"]) == {"text": ""}
+
+
+def test_the_config_docs_state_the_knowledge_base_limit_from_the_constant():
+    from routers.agents import _AGENT_CONFIG_DESCRIPTION
+    from utils import KNOWLEDGE_BASE_MAX_CHARS
+
+    assert f"At most {KNOWLEDGE_BASE_MAX_CHARS:,} characters" in _AGENT_CONFIG_DESCRIPTION
+    assert "{knowledge_base_max_chars}" not in _AGENT_CONFIG_DESCRIPTION
