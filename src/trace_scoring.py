@@ -600,6 +600,7 @@ def map_item_scores(
         mapped[evaluator_uuid] = {
             "evaluator_uuid": evaluator_uuid,
             "evaluator_version_id": hydrated["evaluator_version_id"],
+            "variable_values": hydrated.get("variable_values") or None,
             **score,
         }
     if set(mapped) != set(expected):

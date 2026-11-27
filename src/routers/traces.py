@@ -507,6 +507,14 @@ class TraceScoreResult(BaseModel):
         description="ID of the evaluator version that produced this result",
         examples=[_EXAMPLE_TRACE_UUID],
     )
+    variable_values: Optional[Dict[str, str]] = Field(
+        None,
+        description=(
+            "The value each variable of the evaluator was given for this trace, by variable name. "
+            "Kept as it was when the trace was scored, even if the agent later fills the variable from another part of the trace"
+        ),
+        examples=[{"language": "Hindi"}],
+    )
     passed: bool = Field(
         description=(
             "Whether this evaluator passed. A binary result passes on 1. "

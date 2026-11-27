@@ -378,6 +378,7 @@ def test_a_verdict_maps_by_evaluator_id_ahead_of_its_runtime_name():
         {
             "evaluator_uuid": "ev-1",
             "evaluator_version_id": "ev-1-version",
+            "variable_values": None,
             "value": 1,
             "output_type": "binary",
             "reasoning": "ok",
@@ -396,6 +397,7 @@ def test_a_verdict_falls_back_to_the_runtime_name_when_the_runner_sends_no_id():
         {
             "evaluator_uuid": "ev-1",
             "evaluator_version_id": "ev-1-version",
+            "variable_values": None,
             "value": 3.0,
             "output_type": "rating",
             "reasoning": None,

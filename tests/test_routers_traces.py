@@ -4721,6 +4721,48 @@ def test_a_retried_run_replaces_what_it_recorded(client):
     assert _scores_run(client, h, trace)["missing_values"] == []
 
 
+def _values_by_evaluator(run):
+    return {r["evaluator_uuid"]: r["variable_values"] for r in run["results"]}
+
+
+def test_a_score_keeps_the_values_its_evaluator_was_given(client):
+    h, agent_id = _signup_with_agent(client)
+    clean, _ = _enable_auto_score(client, h, agent_id)
+    mapped = _mapped_evaluator(client, h, agent_id, {"nurse": "output.response"})
+    trace = _post_trace(client, h, _payload(agent_id, _mid()))["uuid"]
+    assert _score_trace(trace, _judge_passing(clean, mapped))["status"] == "completed"
+    expected = {
+        clean: None,
+        mapped: {"nurse": "Aapki beti ka agla vaccination 14 weeks pe hai."},
+    }
+
+    assert _values_by_evaluator(_scores_run(client, h, trace)) == expected
+    [row] = client.get(f"/traces?agent_id={agent_id}", headers=h).json()["items"]
+    assert _values_by_evaluator(row) == expected
+
+    _map_variables(client, h, agent_id, mapped, {"nurse": "conversation_id"})
+    assert _values_by_evaluator(_scores_run(client, h, trace)) == expected
+
+
+def test_a_rescore_copies_the_values_of_the_scores_it_keeps(client):
+    h, agent_id = _signup_with_agent(client)
+    _enable_auto_score(client, h, agent_id)
+    _unlink_all_evaluators(client, h, agent_id)
+    mapped = _mapped_evaluator(client, h, agent_id, {"nurse": "conversation_id"})
+    unmapped = _unmapped_evaluator(client, h, agent_id, ["doctor"])
+    trace = _post_trace(client, h, _payload(agent_id, _mid()))["uuid"]
+    assert _score_trace(trace, _judge_passing(mapped))["status"] == "completed"
+    _map_variables(client, h, agent_id, unmapped, {"doctor": "message_id"})
+    _map_variables(client, h, agent_id, mapped, {"nurse": "output.response"})
+
+    assert client.post(f"/traces/{trace}/score", headers=h).status_code == 200
+    _score_open_run(trace, _judge_passing(unmapped))
+
+    values = _values_by_evaluator(_scores_run(client, h, trace))
+    assert values[mapped] == {"nurse": "conv-1"}
+    assert set(values[unmapped]) == {"doctor"}
+
+
 def test_a_run_that_has_moved_on_is_not_written_by_a_stale_worker(client):
     h, agent_id = _signup_with_agent(client)
     _enable_auto_score(client, h, agent_id)

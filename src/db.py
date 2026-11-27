@@ -1855,6 +1855,15 @@ def init_db():
             )
             """
         )
+        # JSON {variable: value} the evaluator was judged on, NULL when it
+        # declares none. Kept on the score so a later mapping change does not
+        # rewrite what an old score was given.
+        try:
+            cursor.execute(
+                "ALTER TABLE trace_eval_scores ADD COLUMN variable_values TEXT DEFAULT NULL"
+            )
+        except sqlite3.OperationalError:
+            pass
         conn.commit()
 
         # ============ org_limits (renamed from user_limits) ============
@@ -11703,9 +11712,11 @@ def create_trace_rescore_run(
         if only:
             cur.execute(
                 "INSERT INTO trace_eval_scores (run_uuid, evaluator_uuid, "
-                "evaluator_version_id, value, output_type, reasoning, completed_at) "
+                "evaluator_version_id, value, output_type, reasoning, completed_at, "
+                "variable_values) "
                 "SELECT ?, evaluator_uuid, evaluator_version_id, value, output_type, "
-                "reasoning, completed_at FROM trace_eval_scores WHERE run_uuid = ?",
+                "reasoning, completed_at, variable_values FROM trace_eval_scores "
+                "WHERE run_uuid = ?",
                 (run_uuid, latest["uuid"]),
             )
         conn.commit()
@@ -12065,6 +12076,9 @@ def _hydrate_trace_score_row(row: sqlite3.Row) -> Dict[str, Any]:
         "value": row["value"],
         "reasoning": row["reasoning"],
         "evaluator_version_id": row["evaluator_version_id"],
+        "variable_values": (
+            json.loads(row["variable_values"]) if row["variable_values"] else None
+        ),
         "passed": trace_scoring.trace_evaluator_passed(
             output_type, row["value"], scale_max
         ),
@@ -12096,6 +12110,7 @@ _TRACE_SCORE_SELECT_SQL = """
     ts.output_type AS output_type,
     ts.reasoning AS reasoning,
     ts.evaluator_version_id AS evaluator_version_id,
+    ts.variable_values AS variable_values,
     e.name AS evaluator_name,
     e.evaluator_type AS evaluator_type,
     ev.output_config AS output_config
@@ -12462,14 +12477,15 @@ def _upsert_trace_eval_scores(
             """
             INSERT INTO trace_eval_scores
                 (run_uuid, evaluator_uuid, evaluator_version_id,
-                 value, output_type, reasoning, completed_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?)
+                 value, output_type, reasoning, completed_at, variable_values)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT (run_uuid, evaluator_uuid) DO UPDATE SET
                 evaluator_version_id = excluded.evaluator_version_id,
                 value = excluded.value,
                 output_type = excluded.output_type,
                 reasoning = excluded.reasoning,
-                completed_at = excluded.completed_at
+                completed_at = excluded.completed_at,
+                variable_values = excluded.variable_values
             """,
             (
                 run_uuid,
@@ -12479,6 +12495,9 @@ def _upsert_trace_eval_scores(
                 score["output_type"],
                 score.get("reasoning"),
                 now,
+                json.dumps(score["variable_values"])
+                if score.get("variable_values")
+                else None,
             ),
         )
 
