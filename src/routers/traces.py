@@ -559,8 +559,8 @@ class TraceScoringRun(BaseModel):
     unconfigured_evaluators: List[TraceUnconfiguredEvaluator] = Field(
         description="Evaluators that did not score this trace because a variable had no part of the trace chosen to fill it"
     )
-    limited_to_evaluators: List[TraceUnconfiguredEvaluator] = Field(
-        description="Evaluators this run was limited to, because an earlier run could not use them. The run also carries that earlier run's scores. Empty when every evaluator ran"
+    newly_scored_evaluators: List[TraceUnconfiguredEvaluator] = Field(
+        description="The only evaluators this run scored, because they were not configured for traces when the trace was scored before. Every other score was copied from that earlier run. Empty when the run scored with every evaluator"
     )
 
 
@@ -1644,7 +1644,7 @@ def get_trace_scores_endpoint(
                 "results": run["results"],
                 "missing_values": run["missing_values"],
                 "unconfigured_evaluators": run["unconfigured_evaluators"],
-                "limited_to_evaluators": run["limited_to_evaluators"],
+                "newly_scored_evaluators": run["newly_scored_evaluators"],
             }
             for run in runs
         ]

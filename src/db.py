@@ -11655,7 +11655,7 @@ def create_trace_rescore_run(
     A trace whose latest run was skipped or failed is scored again by every
     evaluator. One whose latest run completed is scored again only by the
     evaluators that run recorded as unconfigured and that can now score it:
-    the new run is limited to those (`only_evaluators`) and starts with a copy
+    the new run scores only those (`only_evaluators`) and starts with a copy
     of the completed run's scores, so its results are the old ones plus the
     new. Returns `(run_uuid, None)`, or `(None, reason)` with nothing written:
     `open_run` when the latest run is pending or processing, `not_retryable`
@@ -12253,18 +12253,18 @@ def list_trace_scoring_runs(org_uuid: str, trace_uuid: str) -> List[Dict[str, An
         rows = conn.execute(sql, (org_uuid, trace_uuid)).fetchall()
         stored: Dict[str, List[Dict[str, Any]]] = {}
         unconfigured: Dict[str, List[str]] = {}
-        limited: Dict[str, List[str]] = {}
+        newly_scored: Dict[str, List[str]] = {}
         for row in rows:
             if row["run_uuid"] not in stored:
                 stored[row["run_uuid"]] = json.loads(row["missing_values"] or "[]")
                 unconfigured[row["run_uuid"]] = json.loads(
                     row["unconfigured_evaluators"] or "[]"
                 )
-                limited[row["run_uuid"]] = json.loads(row["only_evaluators"] or "[]")
+                newly_scored[row["run_uuid"]] = json.loads(row["only_evaluators"] or "[]")
     evaluator_uuids = (
         {entry["evaluator_uuid"] for entries in stored.values() for entry in entries}
         | {ev for evs in unconfigured.values() for ev in evs}
-        | {ev for evs in limited.values() for ev in evs}
+        | {ev for evs in newly_scored.values() for ev in evs}
     )
     names = {
         uuid: ev["name"]
@@ -12293,9 +12293,9 @@ def list_trace_scoring_runs(org_uuid: str, trace_uuid: str) -> List[Dict[str, An
                     for ev in unconfigured[run_uuid]
                     if ev in names
                 ],
-                "limited_to_evaluators": [
+                "newly_scored_evaluators": [
                     {"evaluator_uuid": ev, "name": names[ev]}
-                    for ev in limited[run_uuid]
+                    for ev in newly_scored[run_uuid]
                     if ev in names
                 ],
             }

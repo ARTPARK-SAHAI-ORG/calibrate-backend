@@ -978,7 +978,7 @@ def process_claimed_runs(
         fitting = evaluators_fitting_row(evaluators.hydrated, tool_call)
         only = item.run.get("only_evaluators")
         if only:
-            # A limited rescore judges only the listed evaluators. The run
+            # A rescore with only_evaluators judges only the listed evaluators. The run
             # already holds the previous run's scores for the rest.
             fitting = [ev for ev in fitting if ev["uuid"] in only]
             judged = {ev["uuid"] for ev in fitting}

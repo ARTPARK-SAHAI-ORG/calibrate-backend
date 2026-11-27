@@ -4799,10 +4799,10 @@ def test_score_trace_limits_a_completed_trace_to_the_evaluators_set_up_since(cli
     assert [tuple(row) for row in copied] == [(clean, 1, "ok")]
 
     runs = client.get(f"/traces/{trace}/scores", headers=h).json()["runs"]
-    assert runs[0]["limited_to_evaluators"] == [
+    assert runs[0]["newly_scored_evaluators"] == [
         {"evaluator_uuid": unmapped, "name": _ev_name(client, h, unmapped)}
     ]
-    assert runs[1]["limited_to_evaluators"] == []
+    assert runs[1]["newly_scored_evaluators"] == []
 
     calls = []
     settled = _score_open_run(trace, _recording(_judge_passing(unmapped), calls))
@@ -4817,7 +4817,7 @@ def test_score_trace_limits_a_completed_trace_to_the_evaluators_set_up_since(cli
     ) == sorted([clean, unmapped])
 
 
-def test_a_limited_rescore_with_no_value_completes_on_the_copied_scores(client):
+def test_scoring_only_newly_configured_evaluators_with_no_value_completes_on_the_copied_scores(client):
     h, agent_id = _signup_with_agent(client)
     trace, clean, unmapped = _scored_with_one_unconfigured(client, h, agent_id)
     _map_variables(client, h, agent_id, unmapped, {"nurse": "metadata.expert"})
@@ -4841,7 +4841,7 @@ def test_a_limited_rescore_with_no_value_completes_on_the_copied_scores(client):
     assert run["unconfigured_evaluators"] == []
 
 
-def test_a_limited_rescore_keeps_the_evaluators_still_not_set_up(client):
+def test_scoring_only_newly_configured_evaluators_keeps_the_evaluators_still_not_set_up(client):
     h, agent_id = _signup_with_agent(client)
     clean, _ = _enable_auto_score(client, h, agent_id)
     first = _unmapped_evaluator(client, h, agent_id, ["nurse"])
@@ -4855,7 +4855,7 @@ def test_a_limited_rescore_keeps_the_evaluators_still_not_set_up(client):
 
     assert settled["status"] == "completed"
     run = _scores_run(client, h, trace)
-    assert [e["evaluator_uuid"] for e in run["limited_to_evaluators"]] == [first]
+    assert [e["evaluator_uuid"] for e in run["newly_scored_evaluators"]] == [first]
     assert [e["evaluator_uuid"] for e in run["unconfigured_evaluators"]] == [second]
 
 
@@ -4863,7 +4863,7 @@ def test_newly_eligible_evaluators_is_empty_for_an_unknown_agent():
     assert db._newly_eligible_evaluators(str(uuid.uuid4()), ["x"]) == []
 
 
-def test_a_limited_rescore_that_cannot_settle_is_handed_back(client, monkeypatch):
+def test_scoring_only_newly_configured_evaluators_that_cannot_settle_is_handed_back(client, monkeypatch):
     h, agent_id = _signup_with_agent(client)
     trace, _, unmapped = _scored_with_one_unconfigured(client, h, agent_id)
     _map_variables(client, h, agent_id, unmapped, {"nurse": "metadata.expert"})
