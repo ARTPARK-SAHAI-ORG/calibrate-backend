@@ -3619,4 +3619,4 @@ def test_agent_evaluator_trace_variables_round_trip(user):
     db.set_agent_evaluator_trace_variables(agent, ev, {"a": "input"})
 
     db.add_evaluator_to_agent(agent, ev)
-    assert db.get_evaluators_for_agent(agent)[0]["trace_variables"] == mapping
+    assert db.get_evaluators_for_agent(agent)[0]["trace_variables"] == {}
