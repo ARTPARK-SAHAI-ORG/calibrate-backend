@@ -93,6 +93,7 @@ from utils import (
     compute_share_token_toggle,
     job_slot,
     with_calibrate_eval_header,
+    agent_system_prompt,
     TaskStatus,
     InitialTaskStatus,
     TaskCreateResponse,
@@ -1894,7 +1895,7 @@ def _build_calibrate_config(
 
     config = {
         "params": {"model": model},
-        "system_prompt": agent_config.get("system_prompt", ""),
+        "system_prompt": agent_system_prompt(agent_config),
         "tools": tool_configs,
         "test_cases": all_test_cases,
     }

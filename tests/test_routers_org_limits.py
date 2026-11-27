@@ -158,6 +158,7 @@ def test_me_returns_every_effective_limit(client, monkeypatch):
         "max_concurrent_trace_scoring_batches": org_limits.DEFAULT_MAX_CONCURRENT_TRACE_SCORING_BATCHES,
         "max_chat_replies_per_day": org_limits.DEFAULT_MAX_CHAT_REPLIES_PER_DAY,
         "uses_own_provider_keys": False,
+        "max_knowledge_base_chars": 5000,
     }
 
     created = client.post(
@@ -184,6 +185,7 @@ def test_me_returns_every_effective_limit(client, monkeypatch):
         "max_concurrent_trace_scoring_batches": 15,
         "max_chat_replies_per_day": 16,
         "uses_own_provider_keys": False,
+        "max_knowledge_base_chars": 5000,
     }
 
 
@@ -205,6 +207,7 @@ def test_own_provider_keys_lift_only_the_spend_limits(client, monkeypatch):
     assert me["trace_scoring_batch_size"] == org_limits.DEFAULT_TRACE_SCORING_BATCH_SIZE
     assert me["max_chat_replies_per_day"] is None
     assert me["uses_own_provider_keys"] is True
+    assert me["max_knowledge_base_chars"] == 5000
     assert client.get("/org-limits/me/max-rows-per-eval", headers=h).json() == {
         "max_rows_per_eval": None
     }

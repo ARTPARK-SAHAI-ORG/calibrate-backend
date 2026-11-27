@@ -2265,3 +2265,97 @@ def test_values_lists_traces_it_cannot_find(client):
 
     assert r.status_code == 404, r.text
     assert r.json()["detail"]["trace_ids"] == [sibling_trace, unknown]
+
+
+def _knowledge_base(client, h, agent_uuid):
+    config = client.get(f"/agents/{agent_uuid}", headers=h).json()["config"]
+    return config.get("knowledge_base")
+
+
+def test_an_agent_saves_its_knowledge_base(client):
+    h = _signup(client)
+    created = client.post(
+        "/agents",
+        json={
+            "name": f"kb-{uuid.uuid4().hex[:6]}",
+            "type": "agent",
+            "config": {"knowledge_base": {"text": "Open 9 to 5."}},
+        },
+        headers=h,
+    )
+    assert created.status_code == 200, created.text
+    assert _knowledge_base(client, h, created.json()["uuid"]) == {"text": "Open 9 to 5."}
+
+
+def test_a_knowledge_base_over_the_limit_is_refused(client):
+    from utils import KNOWLEDGE_BASE_MAX_CHARS
+
+    h = _signup(client)
+    too_long = {"knowledge_base": {"text": "a" * (KNOWLEDGE_BASE_MAX_CHARS + 1)}}
+    created = client.post(
+        "/agents",
+        json={"name": f"kb-{uuid.uuid4().hex[:6]}", "type": "agent", "config": too_long},
+        headers=h,
+    )
+    assert created.status_code == 422
+    assert created.json()["detail"] == (
+        f"The knowledge base is 1 character over the limit of {KNOWLEDGE_BASE_MAX_CHARS:,}. Shorten it to save."
+    )
+
+    agent = _create_agent(client, h, f"kb-{uuid.uuid4().hex[:6]}")
+    at_limit = {"knowledge_base": {"text": "a" * KNOWLEDGE_BASE_MAX_CHARS}}
+    assert client.put(f"/agents/{agent['uuid']}", json={"config": at_limit}, headers=h).status_code == 200
+    refused = client.put(f"/agents/{agent['uuid']}", json={"config": too_long}, headers=h)
+    assert refused.status_code == 422
+    much_too_long = {"knowledge_base": {"text": "a" * (KNOWLEDGE_BASE_MAX_CHARS + 1249)}}
+    detail = client.put(
+        f"/agents/{agent['uuid']}", json={"config": much_too_long}, headers=h
+    ).json()["detail"]
+    assert detail.startswith("The knowledge base is 1,249 characters over the limit")
+    assert _knowledge_base(client, h, agent["uuid"]) == at_limit["knowledge_base"]
+
+
+@pytest.mark.parametrize("bad", ["Open 9 to 5.", 5, [], {"text": 5}, {"text": None}])
+def test_a_knowledge_base_that_is_not_an_object_with_text_is_refused(client, bad):
+    h = _signup(client)
+    agent = _create_agent(client, h, f"kb-{uuid.uuid4().hex[:6]}")
+    r = client.put(
+        f"/agents/{agent['uuid']}",
+        json={"config": {"knowledge_base": bad}},
+        headers=h,
+    )
+    assert r.status_code == 422, (bad, r.text)
+
+
+def test_a_config_update_without_the_key_keeps_the_knowledge_base(client):
+    """A config body replaces the stored config, so a client that does not know
+    the key must not wipe the knowledge base by saving something else."""
+    h = _signup(client)
+    agent = _create_agent(client, h, f"kb-{uuid.uuid4().hex[:6]}")
+    client.put(
+        f"/agents/{agent['uuid']}",
+        json={"config": {"system_prompt": "Be brief.", "knowledge_base": {"text": "Open 9 to 5."}}},
+        headers=h,
+    )
+
+    moved = client.put(
+        f"/agents/{agent['uuid']}", json={"config": {"system_prompt": "Be kind."}}, headers=h
+    )
+    assert moved.status_code == 200, moved.text
+    assert _knowledge_base(client, h, agent["uuid"]) == {"text": "Open 9 to 5."}
+
+    cleared = client.put(
+        f"/agents/{agent['uuid']}",
+        json={"config": {"system_prompt": "Be kind.", "knowledge_base": {"text": ""}}},
+        headers=h,
+    )
+    assert cleared.status_code == 200, cleared.text
+    assert _knowledge_base(client, h, agent["uuid"]) == {"text": ""}
+
+
+def test_the_config_docs_state_the_knowledge_base_limit_from_the_constant():
+    from routers.agents import _AGENT_CONFIG_DESCRIPTION
+    from utils import KNOWLEDGE_BASE_MAX_CHARS
+
+    assert f"At most {KNOWLEDGE_BASE_MAX_CHARS:,} characters" in _AGENT_CONFIG_DESCRIPTION
+    assert "{knowledge_base_max_chars}" not in _AGENT_CONFIG_DESCRIPTION

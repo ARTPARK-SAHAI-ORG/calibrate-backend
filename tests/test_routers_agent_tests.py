@@ -5505,3 +5505,18 @@ def test_build_calibrate_config_model_fallback_is_the_default_agent_model(monkey
     monkeypatch.setenv("DEFAULT_AGENT_LLM_MODEL", "openai/gpt-5.4-mini")
     config, _ = _build_calibrate_config({"type": "agent", "uuid": "a", "config": {}}, [])
     assert config["params"]["model"] == "openai/gpt-5.4-mini"
+
+
+def test_build_calibrate_config_gives_the_model_the_knowledge_base():
+    """A run freezes this config, so the run keeps the knowledge base it used."""
+    import uuid as _uuid
+    from routers.agent_tests import _build_calibrate_config
+
+    agent = {
+        "uuid": str(_uuid.uuid4()),
+        "type": "agent",
+        "config": {"system_prompt": "Be brief.", "knowledge_base": {"text": "Open 9 to 5."}},
+    }
+    config, _ = _build_calibrate_config(agent, [])
+    assert config["system_prompt"].startswith("Be brief.\n\n# Knowledge base")
+    assert config["system_prompt"].endswith("Open 9 to 5.")

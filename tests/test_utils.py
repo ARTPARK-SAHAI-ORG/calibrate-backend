@@ -1251,3 +1251,39 @@ def test_public_url_error_edge_cases(url, resolved, expected):
 
     with patch("utils.socket.getaddrinfo", return_value=resolved):
         assert public_url_error(url) == expected
+
+
+def test_agent_system_prompt_adds_the_knowledge_base_after_the_prompt():
+    from utils import agent_system_prompt
+
+    combined = agent_system_prompt(
+        {"system_prompt": "You answer clinic questions.", "knowledge_base": {"text": "  Open 9 to 5.  "}}
+    )
+    assert combined.startswith("You answer clinic questions.\n\n# Knowledge base\n\n")
+    assert combined.endswith("\n\nOpen 9 to 5.")
+
+
+def test_agent_system_prompt_without_a_prompt_is_the_knowledge_base_alone():
+    from utils import agent_system_prompt
+
+    combined = agent_system_prompt({"knowledge_base": {"text": "Open 9 to 5."}})
+    assert combined.startswith("# Knowledge base")
+    assert combined.endswith("Open 9 to 5.")
+
+
+@pytest.mark.parametrize(
+    "knowledge_base",
+    [None, {}, {"text": ""}, {"text": "   \n "}, {"text": 5}, "Open 9 to 5.", ["x"]],
+)
+def test_agent_system_prompt_leaves_the_prompt_alone_without_usable_text(knowledge_base):
+    from utils import agent_system_prompt
+
+    config = {"system_prompt": "Be brief.", "knowledge_base": knowledge_base}
+    assert agent_system_prompt(config) == "Be brief."
+
+
+def test_agent_system_prompt_keeps_the_old_default_for_a_missing_prompt():
+    from utils import agent_system_prompt
+
+    assert agent_system_prompt({}) == ""
+    assert agent_system_prompt(None) == ""
