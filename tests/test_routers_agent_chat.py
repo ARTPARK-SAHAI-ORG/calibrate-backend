@@ -637,3 +637,15 @@ def test_an_agent_with_no_model_saved_chats_on_the_default_agent_model(client, m
     with patch.object(public, "agent_reply", _llm()) as llm:
         _send(client, token)
     assert llm.call_args.kwargs["model"] == "google/gemini-3.5-flash-lite"
+
+
+def test_built_agent_reads_its_knowledge_base_in_chat(client):
+    _, _, token = _chat_agent(
+        client,
+        config={"system_prompt": "Be brief.", "knowledge_base": {"text": "Open 9 to 5."}},
+    )
+    with patch.object(public, "agent_reply", _llm()) as llm:
+        assert _send(client, token).status_code == 200
+    prompt = llm.call_args.kwargs["system_prompt"]
+    assert prompt.startswith("Be brief.\n\n# Knowledge base")
+    assert prompt.endswith("Open 9 to 5.")

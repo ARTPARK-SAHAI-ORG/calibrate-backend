@@ -2111,6 +2111,33 @@ def utc_now() -> str:
     return datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
 
 
+KNOWLEDGE_BASE_CONFIG_KEY = "knowledge_base"
+KNOWLEDGE_BASE_MAX_CHARS = 5000
+
+
+def knowledge_base_text(config: Optional[Dict[str, Any]]) -> str:
+    knowledge_base = (config or {}).get(KNOWLEDGE_BASE_CONFIG_KEY)
+    if not isinstance(knowledge_base, dict):
+        return ""
+    text = knowledge_base.get("text")
+    return text.strip() if isinstance(text, str) else ""
+
+
+def agent_system_prompt(config: Optional[Dict[str, Any]]) -> Any:
+    """The system prompt a built agent's model reads: its own prompt, followed by
+    its knowledge base when it has one."""
+    prompt = (config or {}).get("system_prompt", "")
+    knowledge_base = knowledge_base_text(config)
+    if not knowledge_base:
+        return prompt
+    section = (
+        "# Knowledge base\n\n"
+        "Use the information below to answer the user's questions.\n\n"
+        f"{knowledge_base}"
+    )
+    return f"{prompt}\n\n{section}" if prompt else section
+
+
 TRACES_CONFIG_KEY = "traces"
 TRACE_SCORING_CONFIG_KEY = "scoring"
 

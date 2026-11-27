@@ -71,6 +71,7 @@ from utils import (
     env_int,
     public_url_error,
     with_calibrate_eval_header,
+    agent_system_prompt,
     TaskStatus,
     AnnotationStatus,
     SimulationRunType,
@@ -1357,7 +1358,7 @@ def _prepare_chat_reply(
         if org_env is not None and not api_key:
             raise _chat_error(503, "agent_unavailable")
         chat["llm"] = {
-            "system_prompt": config.get("system_prompt", ""),
+            "system_prompt": agent_system_prompt(config),
             "tools": build_tool_configs(get_tools_for_agent(agent["uuid"])),
             "model": llm.get("model", default_agent_llm_model()),
             "provider": provider,

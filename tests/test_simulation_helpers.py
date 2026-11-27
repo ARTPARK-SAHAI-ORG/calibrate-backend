@@ -247,3 +247,22 @@ def test_voice_persona_sends_sensitivity_inside_interruption_config():
     persona = config["personas"][0]
     assert persona["interruption_config"] == {"sensitivity": "high"}
     assert "interruption_sensitivity" not in persona
+
+
+@pytest.mark.parametrize("simulation_type", ["text", "voice"])
+def test_simulation_config_gives_the_agent_its_knowledge_base(simulation_type):
+    from routers.simulations import _build_calibrate_simulation_config
+
+    config = _build_calibrate_simulation_config(
+        {
+            "type": "agent",
+            "uuid": "a",
+            "config": {"system_prompt": "Be brief.", "knowledge_base": {"text": "Open 9 to 5."}},
+        },
+        personas=[{"description": "p", "config": {}}],
+        scenarios=[{"description": "s"}],
+        evaluators=[],
+        simulation_type=simulation_type,
+    )
+    assert config["system_prompt"].startswith("Be brief.\n\n# Knowledge base")
+    assert config["system_prompt"].endswith("Open 9 to 5.")

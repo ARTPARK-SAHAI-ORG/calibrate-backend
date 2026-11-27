@@ -51,6 +51,7 @@ from utils import (
     compute_share_token_toggle,
     job_slot,
     with_calibrate_eval_header,
+    agent_system_prompt,
     AGENT_TYPE_DESCRIPTION,
     TaskStatus,
     TaskCreateResponse,
@@ -1286,7 +1287,7 @@ def _build_calibrate_simulation_config(
     tool_configs = build_tool_configs(agent_tools)
 
     config = {
-        "system_prompt": agent_config.get("system_prompt", ""),
+        "system_prompt": agent_system_prompt(agent_config),
         "tools": tool_configs,
         "personas": persona_list,
         "scenarios": scenario_list,

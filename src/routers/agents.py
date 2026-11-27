@@ -31,6 +31,8 @@ from utils import (
     EvaluatorUuid,
     TRACES_CONFIG_KEY,
     TRACE_SCORING_CONFIG_KEY,
+    KNOWLEDGE_BASE_CONFIG_KEY,
+    KNOWLEDGE_BASE_MAX_CHARS,
     trace_scoring_enabled,
     trace_scoring_settings,
 )
@@ -277,6 +279,7 @@ _AGENT_CONFIG_DESCRIPTION = """Agent behavioral config. The keys depend on `type
 - `settings.agent_speaks_first`, `settings.max_assistant_turns`
 - `system_tools.end_call`: let the agent end the call
 - `data_extraction_fields`: `[{name, type, description, required}]`
+- `knowledge_base.text`: information the agent reads before every reply, added after `system_prompt`. At most 5000 characters
 
 ```json
 {
@@ -932,6 +935,23 @@ def resolve_agent_names(
     return ResolveAgentNamesResponse(resolved=resolved, not_found=not_found)
 
 
+def _check_knowledge_base(config: Optional[Dict[str, Any]]) -> None:
+    knowledge_base = (config or {}).get(KNOWLEDGE_BASE_CONFIG_KEY)
+    if knowledge_base is None:
+        return
+    text = knowledge_base.get("text", "") if isinstance(knowledge_base, dict) else None
+    if not isinstance(text, str):
+        raise HTTPException(
+            status_code=422,
+            detail="knowledge_base must be an object with a text string",
+        )
+    if len(text) > KNOWLEDGE_BASE_MAX_CHARS:
+        raise HTTPException(
+            status_code=422,
+            detail=f"knowledge_base.text has {len(text)} characters, more than the {KNOWLEDGE_BASE_MAX_CHARS} allowed",
+        )
+
+
 def _check_daily_message_limit(config: Optional[Dict[str, Any]], org_uuid: str) -> None:
     section = (config or {}).get(TALK_TO_AGENT_KEY)
     if section is None:
@@ -955,6 +975,7 @@ def create_agent_endpoint(
 ):
     """Create an agent to test inside Calibrate or connect your existing agent to Calibrate"""
     _check_daily_message_limit(agent.config, ctx.org_uuid)
+    _check_knowledge_base(agent.config)
     if agent.type == "agent":
         merged_config = _deep_merge(_default_agent_config(), agent.config or {})
     else:
@@ -1178,6 +1199,10 @@ def update_agent_endpoint(
         elif TALK_TO_AGENT_KEY in (existing_agent.get("config") or {}):
             # A config body replaces the stored one; keep the chat limit.
             agent.config[TALK_TO_AGENT_KEY] = existing_agent["config"][TALK_TO_AGENT_KEY]
+        if KNOWLEDGE_BASE_CONFIG_KEY in agent.config:
+            _check_knowledge_base(agent.config)
+        elif KNOWLEDGE_BASE_CONFIG_KEY in (existing_agent.get("config") or {}):
+            agent.config[KNOWLEDGE_BASE_CONFIG_KEY] = existing_agent["config"][KNOWLEDGE_BASE_CONFIG_KEY]
 
     was_scoring = trace_scoring_enabled(existing_agent)
     now_scoring = was_scoring
