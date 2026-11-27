@@ -674,14 +674,14 @@ def test_bulk_tool_call_rejects_both_input_and_history(client):
         ),
     )
     assert r.status_code == 422, r.text
-    assert "exactly one of 'input' or 'conversation_history'" in r.text
+    assert "exactly one of 'input' or 'history'" in r.text
 
 
 def test_bulk_tool_call_rejects_neither_input_nor_history(client):
     jwt = _signup(client)
     r = _bulk_tool_call(client, jwt, _tool_call_item(f"tc-{uuid.uuid4().hex[:6]}"))
     assert r.status_code == 422, r.text
-    assert "exactly one of 'input' or 'conversation_history'" in r.text
+    assert "exactly one of 'input' or 'history'" in r.text
 
 
 def test_bulk_tool_call_with_input_links_to_general_agent(client):
@@ -750,3 +750,37 @@ def test_bulk_tool_call_with_input_rejects_conversation_agent(client):
         agent_uuids=[agent_uuid],
     )
     assert r.status_code == 400, r.text
+
+
+def test_bulk_accepts_history_as_the_conversation_key(client):
+    jwt = _signup(client)
+    r = _bulk_tool_call(
+        client,
+        jwt,
+        {
+            "name": f"tc-{uuid.uuid4().hex[:6]}",
+            "tool_calls": [{"tool": "search", "arguments": {"q": "x"}}],
+            "history": [{"role": "user", "content": "hi"}],
+        },
+    )
+    assert r.status_code == 200, r.text
+    test = client.get(f"/tests/{r.json()['uuids'][0]}", headers=jwt).json()
+    assert test["config"]["history"] == [{"role": "user", "content": "hi"}]
+
+
+def test_bulk_rejects_history_and_conversation_history_together(client):
+    jwt = _signup(client)
+    item = _tool_call_item(
+        f"tc-{uuid.uuid4().hex[:6]}", history=[{"role": "user", "content": "hi"}]
+    )
+    item["history"] = [{"role": "user", "content": "yo"}]
+    r = _bulk_tool_call(client, jwt, item)
+    assert r.status_code == 422, r.text
+    assert "only one of 'history' or 'conversation_history'" in r.text
+
+
+def test_bulk_item_ignores_a_null_conversation_history():
+    from routers.tests import BulkTestItem
+
+    item = BulkTestItem(name="a", conversation_history=None, history=[{"role": "user", "content": "hi"}])
+    assert item.history[0].content == "hi"
