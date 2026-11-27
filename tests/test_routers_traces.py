@@ -1395,8 +1395,16 @@ def test_convert_skip_missing_values_leaves_the_evaluator_off_only_those_tests(c
         {mapped: {"nurse": "Week 14", "why": "Wrong date"}, plain: None},
         {plain: None},
     ]
-    (warning,) = res.json()["warnings"]
-    assert _ev_name(client, h, mapped) in warning and "1 of the 2" in warning
+    body = res.json()
+    # The caller asked to leave it off, so it is reported apart from warnings.
+    assert body["warnings"] is None
+    assert body["evaluators_left_off"] == [
+        {
+            "evaluator_id": mapped,
+            "evaluator_name": _ev_name(client, h, mapped),
+            "test_uuids": [body["test_uuids"][1]],
+        }
+    ]
 
 
 def test_convert_skip_missing_values_leaves_out_a_trace_left_with_no_evaluator(client):

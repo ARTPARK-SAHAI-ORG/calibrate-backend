@@ -1285,6 +1285,14 @@ class ConvertTracesToTestsRequest(_TraceSelection):
     )
 
 
+class ConvertedEvaluatorLeftOff(BaseModel):
+    evaluator_id: str = Field(description="ID of the evaluator left off")
+    evaluator_name: str = Field(description="Name of the evaluator left off")
+    test_uuids: List[str] = Field(
+        description="IDs of the new tests created without this evaluator"
+    )
+
+
 class ConvertTracesToTestsResponse(BaseModel):
     created: int = Field(description="Number of tests created")
     test_uuids: List[str] = Field(
@@ -1294,6 +1302,10 @@ class ConvertTracesToTestsResponse(BaseModel):
     warnings: Optional[List[str]] = Field(
         None,
         description="Traces that could not be added to tests, and tests created without an evaluator, named with what to do about them",
+    )
+    evaluators_left_off: Optional[List[ConvertedEvaluatorLeftOff]] = Field(
+        None,
+        description="With `skip_missing_values`, each evaluator left off some of the new tests because their traces hold no value for its variables",
     )
 
 
@@ -1757,23 +1769,27 @@ def convert_traces_to_tests(
             f"{len(kept)} new tests: {_test_names_line(unjudged)}. Open each one "
             "on the agent's Tests tab and add the evaluators again."
         )
+    left_off = []
     for evaluator_uuid in with_variables:
-        left_off = [
-            name
-            for _, name, refs in kept
+        test_uuids = [
+            test_uuid
+            for test_uuid, _, refs in kept
             if all(r["evaluator_id"] != evaluator_uuid for r in refs)
         ]
-        if left_off:
-            warnings.append(
-                f'Evaluator "{evaluator_names[evaluator_uuid]}" was left off '
-                f"{len(left_off)} of the {len(kept)} new tests, because their traces "
-                f"hold no value for its variables: {_test_names_line(left_off)}."
+        if test_uuids:
+            left_off.append(
+                {
+                    "evaluator_id": evaluator_uuid,
+                    "evaluator_name": evaluator_names[evaluator_uuid],
+                    "test_uuids": test_uuids,
+                }
             )
 
     return {
         "created": len(kept),
         "test_uuids": [test_uuid for test_uuid, _, _ in kept],
         "warnings": warnings or None,
+        "evaluators_left_off": left_off or None,
     }
 
 
