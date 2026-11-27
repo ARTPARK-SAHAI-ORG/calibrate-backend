@@ -5391,10 +5391,11 @@ def get_tools_for_agent(agent_id: str) -> List[Dict[str, Any]]:
 
 def _restore_agent_evaluator_link(cursor: sqlite3.Cursor, link_id: int) -> None:
     """Un-soft-delete an `agent_evaluators` row, refreshing `created_at` so the
-    re-link sorts as recently-added rather than inheriting its first-add time.
+    re-link sorts as recently-added rather than inheriting its first-add time,
+    and clearing `trace_variables` so a re-added evaluator starts unconfigured.
     Caller commits."""
     cursor.execute(
-        "UPDATE agent_evaluators SET deleted_at = NULL, "
+        "UPDATE agent_evaluators SET deleted_at = NULL, trace_variables = NULL, "
         "created_at = CURRENT_TIMESTAMP WHERE id = ?",
         (link_id,),
     )

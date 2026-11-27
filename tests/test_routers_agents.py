@@ -1918,6 +1918,16 @@ def test_trace_variables_saved_read_back_and_cleared(client):
     assert _listed_trace_variables(client, h, agent_uuid, ev) == {}
 
 
+def test_removing_an_evaluator_clears_its_trace_variables(client):
+    h = _signup(client)
+    agent_uuid, ev = _agent_with_variable_evaluator(client, h)
+    _put_trace_variables(client, h, agent_uuid, ev, {"criteria": "input"})
+
+    client.delete(f"/agents/{agent_uuid}/evaluators/{ev}", headers=h)
+    client.post(f"/agents/{agent_uuid}/evaluators", json={"evaluator_ids": [ev]}, headers=h)
+    assert _listed_trace_variables(client, h, agent_uuid, ev) == {}
+
+
 def test_trace_variables_rejects_unknown_source(client):
     h = _signup(client)
     agent_uuid, ev = _agent_with_variable_evaluator(client, h)
