@@ -2298,13 +2298,20 @@ def test_a_knowledge_base_over_the_limit_is_refused(client):
         headers=h,
     )
     assert created.status_code == 422
-    assert str(KNOWLEDGE_BASE_MAX_CHARS + 1) in created.json()["detail"]
+    assert created.json()["detail"] == (
+        f"The knowledge base is 1 character over the limit of {KNOWLEDGE_BASE_MAX_CHARS:,}. Shorten it to save."
+    )
 
     agent = _create_agent(client, h, f"kb-{uuid.uuid4().hex[:6]}")
     at_limit = {"knowledge_base": {"text": "a" * KNOWLEDGE_BASE_MAX_CHARS}}
     assert client.put(f"/agents/{agent['uuid']}", json={"config": at_limit}, headers=h).status_code == 200
     refused = client.put(f"/agents/{agent['uuid']}", json={"config": too_long}, headers=h)
     assert refused.status_code == 422
+    much_too_long = {"knowledge_base": {"text": "a" * (KNOWLEDGE_BASE_MAX_CHARS + 1249)}}
+    detail = client.put(
+        f"/agents/{agent['uuid']}", json={"config": much_too_long}, headers=h
+    ).json()["detail"]
+    assert detail.startswith("The knowledge base is 1,249 characters over the limit")
     assert _knowledge_base(client, h, agent["uuid"]) == at_limit["knowledge_base"]
 
 

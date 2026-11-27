@@ -947,10 +947,12 @@ def _check_knowledge_base(config: Optional[Dict[str, Any]]) -> None:
             status_code=422,
             detail="knowledge_base must be an object with a text string",
         )
-    if len(text) > KNOWLEDGE_BASE_MAX_CHARS:
+    over = len(text) - KNOWLEDGE_BASE_MAX_CHARS
+    if over > 0:
+        characters = "character" if over == 1 else "characters"
         raise HTTPException(
             status_code=422,
-            detail=f"knowledge_base.text has {len(text)} characters, more than the {KNOWLEDGE_BASE_MAX_CHARS} allowed",
+            detail=f"The knowledge base is {over:,} {characters} over the limit of {KNOWLEDGE_BASE_MAX_CHARS:,}. Shorten it to save.",
         )
 
 
