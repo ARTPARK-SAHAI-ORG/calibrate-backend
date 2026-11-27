@@ -908,12 +908,14 @@ def _prepare_claimed_run(run: dict[str, Any], now: str) -> PreparedRun | None:
         skip(TraceEvalSettleSkipReason.TRACE_DELETED)
         return None
     if run.get("only_evaluators"):
-        from db import get_previous_unconfigured_evaluators
+        from db import get_previous_run_gaps
 
+        unconfigured, missing = get_previous_run_gaps(run["uuid"])
         run = {
             **run,
             "only_evaluators": json.loads(run["only_evaluators"]),
-            "previous_unconfigured": get_previous_unconfigured_evaluators(run["uuid"]),
+            "previous_unconfigured": unconfigured,
+            "previous_missing": missing,
         }
     return PreparedRun(run=run, trace=trace)
 
@@ -999,12 +1001,19 @@ def process_claimed_runs(
             unconfigured = [
                 ev for ev in item.run["previous_unconfigured"] if ev not in judged
             ]
+            kept_missing = [
+                m for m in item.run["previous_missing"]
+                if m["evaluator_uuid"] not in judged
+            ]
         else:
+            kept_missing = []
             unconfigured = [
                 ev["uuid"]
                 for ev in evaluators_fitting_row(evaluators.unconfigured, tool_call)
             ]
         included, missing = trace_evaluators(item.trace, fitting)
+        # A rescore keeps what the last run said about the evaluators it skips.
+        missing = kept_missing + missing
         if missing or unconfigured:
             _swallow_settle(
                 lambda run: set_trace_eval_run_missing_values(

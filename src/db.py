@@ -11750,16 +11750,22 @@ def _newly_eligible_evaluators(agent_id: str, recorded: List[str]) -> List[str]:
     return [ev for ev in recorded if ev in eligible]
 
 
-def get_previous_unconfigured_evaluators(run_uuid: str) -> List[str]:
-    """What the run before this one on the same trace recorded as unconfigured."""
+def get_previous_run_gaps(
+    run_uuid: str,
+) -> Tuple[List[str], List[Dict[str, str]]]:
+    """What the run before this one on the same trace recorded as unconfigured,
+    and as missing a value."""
     with get_db_connection() as conn:
         row = conn.execute(
-            "SELECT prev.unconfigured_evaluators FROM trace_eval_runs cur "
+            "SELECT prev.unconfigured_evaluators, prev.missing_values "
+            "FROM trace_eval_runs cur "
             "JOIN trace_eval_runs prev ON prev.trace_uuid = cur.trace_uuid "
             "AND prev.id < cur.id WHERE cur.uuid = ? ORDER BY prev.id DESC LIMIT 1",
             (run_uuid,),
         ).fetchone()
-    return json.loads(row[0] or "[]") if row else []
+    if not row:
+        return [], []
+    return json.loads(row[0] or "[]"), json.loads(row[1] or "[]")
 
 
 def list_traces(

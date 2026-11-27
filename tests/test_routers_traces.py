@@ -5138,6 +5138,23 @@ def test_new_feedback_comment_scores_again_with_only_the_evaluators_reading_it(c
     assert json.loads(pending[0]["only_evaluators"]) == [why]
 
 
+def test_scoring_again_for_a_comment_keeps_the_other_missing_values(client):
+    h, agent_id = _signup_with_agent(client)
+    clean, _ = _enable_auto_score(client, h, agent_id)
+    why = _mapped_evaluator(client, h, agent_id, {"why": "feedback.comment"})
+    nurse = _mapped_evaluator(client, h, agent_id, {"nurse": "metadata.expert"})
+    trace = _post_trace(client, h, _payload(agent_id, _mid()))["uuid"]
+    assert _score_trace(trace, _judge_passing(clean))["status"] == "completed"
+
+    _put_feedback(client, h, trace, is_correct=False, comment="It should say 5 mg")
+    assert _score_open_run(trace, _judge_passing(why))["status"] == "completed"
+
+    assert [
+        (entry["evaluator_uuid"], entry["variable"])
+        for entry in _scores_run(client, h, trace)["missing_values"]
+    ] == [(nurse, "nurse")]
+
+
 def test_feedback_comment_with_no_evaluator_reading_it_scores_nothing(client):
     h, agent_id = _signup_with_agent(client)
     trace, _, _ = _scored_with_one_unconfigured(client, h, agent_id)
