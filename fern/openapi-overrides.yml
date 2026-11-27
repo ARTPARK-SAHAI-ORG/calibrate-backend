@@ -38,6 +38,10 @@ paths:
     post:
       x-fern-sdk-group-name: agents
       x-fern-sdk-method-name: link_evaluators
+  /agents/{agent_uuid}/evaluators/{evaluator_uuid}/trace-variables:
+    put:
+      x-fern-sdk-group-name: agents
+      x-fern-sdk-method-name: update_evaluator_trace_variables
   /tests:
     post:
       x-fern-sdk-group-name: tests

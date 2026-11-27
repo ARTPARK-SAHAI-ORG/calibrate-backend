@@ -65,7 +65,7 @@ from shared_enums import (
     EvaluatorType,
     required_agent_interaction_type,
 )
-from trace_scoring import TraceEvalRunStatus
+from trace_scoring import MAX_METADATA_KEY_CHARS, TraceEvalRunStatus
 from routers.tests import (
     EvaluatorRef,
     _validate_evaluators,
@@ -308,11 +308,11 @@ class TraceMetadataEntry(BaseModel):
 
     key: str = Field(
         min_length=1,
-        max_length=256,
+        max_length=MAX_METADATA_KEY_CHARS,
         description="Name of the metadata entry",
     )
     value: str = Field(
-        max_length=8192,
+        max_length=MAX_TURN_CONTENT_CHARS,
         description="Value of the metadata entry",
     )
 
@@ -509,6 +509,23 @@ class TraceScoreResult(BaseModel):
     )
 
 
+class TraceUnconfiguredEvaluator(BaseModel):
+    evaluator_uuid: str = Field(
+        min_length=36,
+        max_length=36,
+        description="ID of the evaluator that did not score this trace",
+        examples=[_EXAMPLE_TRACE_UUID],
+    )
+    name: str = Field(
+        description="Name of the evaluator. Uses the last stored name if it has been deleted"
+    )
+
+
+class TraceMissingValue(TraceUnconfiguredEvaluator):
+    variable: str = Field(description="The evaluator variable that had no value")
+    source: str = Field(description="The part of the trace chosen to fill the variable")
+
+
 class TraceScoringRun(BaseModel):
     run_uuid: str = Field(
         min_length=36,
@@ -535,6 +552,15 @@ class TraceScoringRun(BaseModel):
     )
     results: List[TraceScoreResult] = Field(
         description="Results on this run from the evaluators linked to the agent"
+    )
+    missing_values: List[TraceMissingValue] = Field(
+        description="Variables this trace had no value for, so their evaluators did not score it"
+    )
+    unconfigured_evaluators: List[TraceUnconfiguredEvaluator] = Field(
+        description="Evaluators that did not score this trace because a variable had no part of the trace chosen to fill it"
+    )
+    newly_scored_evaluators: List[TraceUnconfiguredEvaluator] = Field(
+        description="The only evaluators this run scored, because they were not configured for traces when the trace was scored before. Every other score was copied from that earlier run. Empty when the run scored with every evaluator"
     )
 
 
@@ -1616,6 +1642,9 @@ def get_trace_scores_endpoint(
                 "completed_at": _trace_iso(run["completed_at"]),
                 "error": run["error"],
                 "results": run["results"],
+                "missing_values": run["missing_values"],
+                "unconfigured_evaluators": run["unconfigured_evaluators"],
+                "newly_scored_evaluators": run["newly_scored_evaluators"],
             }
             for run in runs
         ]
@@ -1646,7 +1675,7 @@ def score_trace_endpoint(
     ),
     ctx: OrgContext = Depends(get_current_org),
 ):
-    """Run the agent's evaluators again on a trace that was skipped or whose scoring failed"""
+    """Score a trace again: with every evaluator when it was skipped or failed, or with only the evaluators that were not set up when it was scored"""
     trace = get_trace(ctx.org_uuid, trace_uuid)
     if not trace:
         raise HTTPException(status_code=404, detail="Trace not found")
@@ -1668,7 +1697,7 @@ def score_trace_endpoint(
     if refusal == "not_retryable":
         raise HTTPException(
             status_code=409,
-            detail="Only a trace that was skipped or failed can be scored again",
+            detail="Only a trace that was skipped or failed, or that has an evaluator set up since it was scored, can be scored again",
         )
     if refusal == "over_limit":
         raise HTTPException(

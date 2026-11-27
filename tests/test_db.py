@@ -3605,5 +3605,34 @@ def test_tool_call_item_condition_matches_python_rule():
         item = items_by_uuid[item_uuid]
         assert sql_result[item_uuid] == is_tool_call_row(item) == item["is_tool_call"], (
             payload,
-            payload,
         )
+
+
+def test_agent_evaluator_trace_variables_round_trip(user):
+    agent = db.create_agent(
+        name=_u("tv-agent"), user_id=user["uuid"], org_uuid=user["org_uuid"],
+        link_default_evaluator=False,
+    )
+    ev = db.create_evaluator(
+        name=_u("tv-ev"), owner_user_id=user["uuid"], org_uuid=user["org_uuid"]
+    )
+
+    db.set_agent_evaluator_trace_variables(agent, ev, {"a": "input"})
+
+    db.add_evaluator_to_agent(agent, ev)
+    assert db.get_evaluators_for_agent(agent)[0]["trace_variables"] == {}
+
+    mapping = {"a": "metadata.expert", "b": "output.response"}
+    db.set_agent_evaluator_trace_variables(agent, ev, mapping)
+    assert db.get_evaluators_for_agent(agent)[0]["trace_variables"] == mapping
+
+    db.set_agent_evaluator_trace_variables(agent, ev, {})
+    assert db.get_evaluators_for_agent(agent)[0]["trace_variables"] == {}
+
+    db.set_agent_evaluator_trace_variables(agent, ev, mapping)
+    db.remove_evaluator_from_agent(agent, ev)
+    assert db.get_evaluators_for_agent(agent) == []
+    db.set_agent_evaluator_trace_variables(agent, ev, {"a": "input"})
+
+    db.add_evaluator_to_agent(agent, ev)
+    assert db.get_evaluators_for_agent(agent)[0]["trace_variables"] == {}

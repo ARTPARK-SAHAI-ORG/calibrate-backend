@@ -73,6 +73,14 @@ def test_calibrate_evaluator_def_rating_with_bounds_and_uuid():
     out = _calibrate_evaluator_def(bin_ev, rendered_prompt="p")
     assert "scale_min" not in out and "scale_max" not in out
     assert "id" not in out
+    assert "tool_call" not in out
+
+
+def test_calibrate_evaluator_def_marks_tool_call_evaluator():
+    ev = {"name": "t", "judge_model": "m", "output_type": "binary", "evaluator_type": "tool-call"}
+    assert _calibrate_evaluator_def(ev, rendered_prompt="p")["tool_call"] is True
+    llm_ev = {**ev, "evaluator_type": "llm"}
+    assert "tool_call" not in _calibrate_evaluator_def(llm_ev, rendered_prompt="p")
 
 
 def test_render_with_rubric_substitutes_variables_and_appends_rubric():

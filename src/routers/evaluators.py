@@ -349,6 +349,12 @@ class EvaluatorResponse(EvaluatorResponseBase):
     )
 
 
+class AgentEvaluatorResponse(EvaluatorResponse):
+    trace_variables: Dict[str, str] = Field(
+        description="Which part of a trace fills each variable of the evaluator when it scores an agent's traces",
+    )
+
+
 class EvaluatorDetailResponse(EvaluatorResponseBase):
     # Detail shape: `versions[]` is the full history; `live_version_index`
     # is the direct array position of the live version (None when the
@@ -550,7 +556,7 @@ def build_evaluator_page(
         [e["live_version_id"] for e in page if e.get("live_version_id")]
     )
     return page_envelope(
-        [_evaluator_response(e, version_by_id=version_by_id) for e in page],
+        [_evaluator_response(e, version_by_id) for e in page],
         total,
         pagination,
     )

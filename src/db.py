@@ -538,6 +538,12 @@ def init_db():
             )
         """
         )
+        try:
+            cursor.execute(
+                "ALTER TABLE agent_evaluators ADD COLUMN trace_variables TEXT DEFAULT NULL"
+            )
+        except sqlite3.OperationalError:
+            pass
 
         cursor.execute(
             """
@@ -1808,6 +1814,24 @@ def init_db():
             "CREATE INDEX IF NOT EXISTS ix_trace_eval_org_status "
             "ON trace_eval_runs (org_uuid, status)"
         )
+        try:
+            cursor.execute(
+                "ALTER TABLE trace_eval_runs ADD COLUMN missing_values TEXT DEFAULT NULL"
+            )
+        except sqlite3.OperationalError:
+            pass
+        try:
+            cursor.execute(
+                "ALTER TABLE trace_eval_runs ADD COLUMN unconfigured_evaluators TEXT DEFAULT NULL"
+            )
+        except sqlite3.OperationalError:
+            pass
+        try:
+            cursor.execute(
+                "ALTER TABLE trace_eval_runs ADD COLUMN only_evaluators TEXT DEFAULT NULL"
+            )
+        except sqlite3.OperationalError:
+            pass
 
         # One score per (run, evaluator). Keyed on the run so a same-version
         # rescore never overwrites earlier history.
@@ -5356,10 +5380,11 @@ def get_tools_for_agent(agent_id: str) -> List[Dict[str, Any]]:
 
 def _restore_agent_evaluator_link(cursor: sqlite3.Cursor, link_id: int) -> None:
     """Un-soft-delete an `agent_evaluators` row, refreshing `created_at` so the
-    re-link sorts as recently-added rather than inheriting its first-add time.
+    re-link sorts as recently-added rather than inheriting its first-add time,
+    and clearing `trace_variables` so a re-added evaluator starts unconfigured.
     Caller commits."""
     cursor.execute(
-        "UPDATE agent_evaluators SET deleted_at = NULL, "
+        "UPDATE agent_evaluators SET deleted_at = NULL, trace_variables = NULL, "
         "created_at = CURRENT_TIMESTAMP WHERE id = ?",
         (link_id,),
     )
@@ -5449,14 +5474,31 @@ def get_evaluators_for_agent(agent_id: str) -> List[Dict[str, Any]]:
         cursor = conn.cursor()
         cursor.execute(
             """
-            SELECT e.* FROM evaluators e
+            SELECT e.*, ae.trace_variables FROM evaluators e
             INNER JOIN agent_evaluators ae ON e.uuid = ae.evaluator_id
             WHERE ae.agent_id = ? AND ae.deleted_at IS NULL AND e.deleted_at IS NULL
             ORDER BY ae.created_at DESC, ae.id DESC
             """,
             (agent_id,),
         )
-        return [_parse_evaluator_row(row) for row in cursor.fetchall()]
+        evaluators = [_parse_evaluator_row(row) for row in cursor.fetchall()]
+    for evaluator in evaluators:
+        evaluator["trace_variables"] = json.loads(evaluator["trace_variables"] or "{}")
+    return evaluators
+
+
+def set_agent_evaluator_trace_variables(
+    agent_id: str, evaluator_id: str, trace_variables: Dict[str, str]
+) -> None:
+    """Replace the live link's variable-to-trace-field map. No-op when there is no live link."""
+    with get_db_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            "UPDATE agent_evaluators SET trace_variables = ? "
+            "WHERE agent_id = ? AND evaluator_id = ? AND deleted_at IS NULL",
+            (json.dumps(trace_variables), agent_id, evaluator_id),
+        )
+        conn.commit()
 
 
 def resolve_live_evaluators(
@@ -11349,14 +11391,15 @@ def _insert_trace_eval_run(
     now: str,
     available_at: Optional[str] = None,
     completed_at: Optional[str] = None,
+    only_evaluators: Optional[List[str]] = None,
 ) -> str:
     """Insert one trace_eval_runs row and return its uuid. Caller owns the transaction."""
     run_uuid = str(uuid.uuid4())
     cur.execute(
         "INSERT INTO trace_eval_runs "
         "(uuid, trace_uuid, org_uuid, agent_id, status, "
-        "error, available_at, created_at, updated_at, completed_at) "
-        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        "error, available_at, created_at, updated_at, completed_at, only_evaluators) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         (
             run_uuid,
             trace_uuid,
@@ -11368,6 +11411,7 @@ def _insert_trace_eval_run(
             now,
             now,
             completed_at,
+            json.dumps(only_evaluators) if only_evaluators is not None else None,
         ),
     )
     return run_uuid
@@ -11598,27 +11642,39 @@ def create_trace_rescore_run(
 ) -> Tuple[Optional[str], Optional[str]]:
     """Queue one more scoring run for a stored trace, claimable at once.
 
-    Only a trace whose latest run was skipped or failed qualifies, so a scored
-    trace is never counted against the limit twice. Returns `(run_uuid, None)`,
-    or `(None, reason)` with nothing written: `open_run` when the latest run is
-    pending or processing, `not_retryable` when it completed (or there is
-    none), `over_limit` when the workspace holds `max_scored_traces` (None: no
-    limit).
+    A trace whose latest run was skipped or failed is scored again by every
+    evaluator. One whose latest run completed is scored again only by the
+    evaluators that run recorded as unconfigured and that can now score it:
+    the new run scores only those (`only_evaluators`) and starts with a copy
+    of the completed run's scores, so its results are the old ones plus the
+    new. Returns `(run_uuid, None)`, or `(None, reason)` with nothing written:
+    `open_run` when the latest run is pending or processing, `not_retryable`
+    when there is no run, or the latest completed with nothing newly
+    eligible, `over_limit` when the workspace holds `max_scored_traces` (None:
+    no limit).
     """
     now = trace_scoring.utc_now()
     with get_db_connection() as conn:
         cur = conn.cursor()
         cur.execute("BEGIN IMMEDIATE")
         latest = cur.execute(
-            "SELECT status FROM trace_eval_runs WHERE trace_uuid = ? "
-            "ORDER BY created_at DESC, id DESC LIMIT 1",
+            "SELECT uuid, status, unconfigured_evaluators FROM trace_eval_runs "
+            "WHERE trace_uuid = ? ORDER BY created_at DESC, id DESC LIMIT 1",
             (trace_uuid,),
         ).fetchone()
         status = latest["status"] if latest else None
         if status in ("pending", "processing"):
             conn.rollback()
             return None, "open_run"
-        if status not in ("skipped", "failed"):
+        only: Optional[List[str]] = None
+        if status == "completed":
+            only = _newly_eligible_evaluators(
+                agent_id, json.loads(latest["unconfigured_evaluators"] or "[]")
+            )
+            if not only:
+                conn.rollback()
+                return None, "not_retryable"
+        elif status not in ("skipped", "failed"):
             conn.rollback()
             return None, "not_retryable"
         if _at_scored_trace_limit(cur, org_uuid, max_scored_traces):
@@ -11632,13 +11688,50 @@ def create_trace_rescore_run(
             status=trace_scoring.TraceEvalRunStatus.PENDING,
             error=None,
             now=now,
+            only_evaluators=only,
         )
+        if only:
+            cur.execute(
+                "INSERT INTO trace_eval_scores (run_uuid, evaluator_uuid, "
+                "evaluator_version_id, value, output_type, reasoning, completed_at) "
+                "SELECT ?, evaluator_uuid, evaluator_version_id, value, output_type, "
+                "reasoning, completed_at FROM trace_eval_scores WHERE run_uuid = ?",
+                (run_uuid, latest["uuid"]),
+            )
         conn.commit()
 
     import trace_scoring_nudge
 
     trace_scoring_nudge.set()
     return run_uuid, None
+
+
+def _newly_eligible_evaluators(agent_id: str, recorded: List[str]) -> List[str]:
+    """The recorded unconfigured evaluators that can now score this agent's traces."""
+    if not recorded:
+        return []
+    agent = get_agent(agent_id)
+    if agent is None:
+        return []
+    eligible = {
+        item.evaluator_uuid
+        for item in trace_scoring.resolve_trace_scoring(
+            agent.get("interaction_type"), resolve_live_evaluators(agent_id)
+        ).eligible
+    }
+    return [ev for ev in recorded if ev in eligible]
+
+
+def get_previous_unconfigured_evaluators(run_uuid: str) -> List[str]:
+    """What the run before this one on the same trace recorded as unconfigured."""
+    with get_db_connection() as conn:
+        row = conn.execute(
+            "SELECT prev.unconfigured_evaluators FROM trace_eval_runs cur "
+            "JOIN trace_eval_runs prev ON prev.trace_uuid = cur.trace_uuid "
+            "AND prev.id < cur.id WHERE cur.uuid = ? ORDER BY prev.id DESC LIMIT 1",
+            (run_uuid,),
+        ).fetchone()
+    return json.loads(row[0] or "[]") if row else []
 
 
 def list_traces(
@@ -12111,22 +12204,62 @@ def get_latest_trace_run_summaries(
     return grouped
 
 
+def set_trace_eval_run_missing_values(
+    run_uuid: str,
+    entries: List[Dict[str, str]],
+    unconfigured: List[str],
+    *,
+    attempts: Optional[int],
+) -> None:
+    """Replace what the run records as missing and as unconfigured, unless the
+    run has moved on."""
+    with get_db_connection() as conn:
+        conn.execute(
+            "UPDATE trace_eval_runs SET missing_values = ?, unconfigured_evaluators = ? "
+            "WHERE uuid = ? AND status = 'processing' AND attempts = ?",
+            (json.dumps(entries), json.dumps(unconfigured), run_uuid, attempts),
+        )
+        conn.commit()
+
+
 def list_trace_scoring_runs(org_uuid: str, trace_uuid: str) -> List[Dict[str, Any]]:
     """Every run for a trace, newest first, each with hydrated per-evaluator results."""
     sql = f"""
         WITH runs AS (
             SELECT uuid, trace_uuid, org_uuid, agent_id, status, error,
-                   created_at, completed_at, id
+                   created_at, completed_at, id, missing_values, unconfigured_evaluators,
+                   only_evaluators
             FROM trace_eval_runs
             WHERE org_uuid = ? AND trace_uuid = ?
         )
-        SELECT {_TRACE_SCORE_SELECT_SQL}
+        SELECT {_TRACE_SCORE_SELECT_SQL}, runs.missing_values AS missing_values,
+               runs.unconfigured_evaluators AS unconfigured_evaluators,
+               runs.only_evaluators AS only_evaluators
         FROM runs
         {_TRACE_SCORE_JOIN_SQL}
         ORDER BY runs.created_at DESC, runs.id DESC, ts.evaluator_uuid
     """
     with get_db_connection() as conn:
         rows = conn.execute(sql, (org_uuid, trace_uuid)).fetchall()
+        stored: Dict[str, List[Dict[str, Any]]] = {}
+        unconfigured: Dict[str, List[str]] = {}
+        newly_scored: Dict[str, List[str]] = {}
+        for row in rows:
+            if row["run_uuid"] not in stored:
+                stored[row["run_uuid"]] = json.loads(row["missing_values"] or "[]")
+                unconfigured[row["run_uuid"]] = json.loads(
+                    row["unconfigured_evaluators"] or "[]"
+                )
+                newly_scored[row["run_uuid"]] = json.loads(row["only_evaluators"] or "[]")
+    evaluator_uuids = (
+        {entry["evaluator_uuid"] for entries in stored.values() for entry in entries}
+        | {ev for evs in unconfigured.values() for ev in evs}
+        | {ev for evs in newly_scored.values() for ev in evs}
+    )
+    names = {
+        uuid: ev["name"]
+        for uuid, ev in get_evaluators_by_uuids(list(evaluator_uuids), include_deleted=True).items()
+    }
 
     runs: List[Dict[str, Any]] = []
     index: Dict[str, Dict[str, Any]] = {}
@@ -12140,6 +12273,21 @@ def list_trace_scoring_runs(org_uuid: str, trace_uuid: str) -> List[Dict[str, An
                 "completed_at": row["completed_at"],
                 "error": row["error"],
                 "results": [],
+                "missing_values": [
+                    {**entry, "name": names[entry["evaluator_uuid"]]}
+                    for entry in stored[run_uuid]
+                    if entry["evaluator_uuid"] in names
+                ],
+                "unconfigured_evaluators": [
+                    {"evaluator_uuid": ev, "name": names[ev]}
+                    for ev in unconfigured[run_uuid]
+                    if ev in names
+                ],
+                "newly_scored_evaluators": [
+                    {"evaluator_uuid": ev, "name": names[ev]}
+                    for ev in newly_scored[run_uuid]
+                    if ev in names
+                ],
             }
             index[run_uuid] = run
             runs.append(run)
@@ -12266,10 +12414,12 @@ def claim_trace_eval_runs(
                SET status = 'processing',
                    available_at = ?,
                    attempts = attempts + 1,
+                   missing_values = NULL,
+                   unconfigured_evaluators = NULL,
                    updated_at = ?
              WHERE id IN (SELECT id FROM batch)
             RETURNING uuid, trace_uuid, org_uuid, agent_id, attempts,
-                      status, available_at
+                      status, available_at, only_evaluators
             """,
             (
                 now,

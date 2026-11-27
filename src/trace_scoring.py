@@ -57,6 +57,7 @@ class TraceEvalSettleSkipReason(str, Enum):
     TRACE_DELETED = "trace_deleted"
     AGENT_DELETED = "agent_deleted"
     SCORING_DISABLED = "scoring_disabled"
+    MISSING_TRACE_VALUES = "missing_trace_values"
 
 
 # Subset of TestType that traces can score.
@@ -94,6 +95,59 @@ OPEN_TRACE_EVAL_RUN_STATUSES: tuple[TraceEvalRunStatus, ...] = (
     TraceEvalRunStatus.PENDING,
     TraceEvalRunStatus.PROCESSING,
 )
+
+
+TRACE_VARIABLE_SOURCES = (
+    "input",
+    "output.response",
+    "output.tool_calls",
+    "labels",
+    "conversation_id",
+    "message_id",
+)
+METADATA_SOURCE_PREFIX = "metadata."
+MAX_METADATA_KEY_CHARS = 256
+
+
+def is_trace_variable_source(source: str) -> bool:
+    return source in TRACE_VARIABLE_SOURCES or (
+        source.startswith(METADATA_SOURCE_PREFIX)
+        and 0 < len(source) - len(METADATA_SOURCE_PREFIX) <= MAX_METADATA_KEY_CHARS
+    )
+
+
+def trace_variable_value(trace: dict[str, Any], source: str) -> str | None:
+    """The text a trace holds at `source`, or None when it holds none."""
+    output = trace.get("output") or {}
+    value: Any = None
+    if source == "input":
+        value = trace.get("input")
+        if isinstance(value, list):
+            value = "\n".join(
+                f"{turn.get('role')}: {turn['content']}"
+                for turn in value
+                if turn.get("content")
+            )
+    elif source == "output.response":
+        value = output.get("response")
+    elif source == "output.tool_calls":
+        calls = output.get("tool_calls")
+        value = json.dumps(calls, ensure_ascii=False) if calls else None
+    elif source == "labels":
+        value = ", ".join(trace.get("labels") or [])
+    elif source in ("conversation_id", "message_id"):
+        value = trace.get(source)
+    elif is_trace_variable_source(source):
+        key = source[len(METADATA_SOURCE_PREFIX) :]
+        value = next(
+            (
+                entry["value"]
+                for entry in trace.get("metadata") or []
+                if entry["key"] == key
+            ),
+            None,
+        )
+    return value if isinstance(value, str) and value.strip() else None
 
 
 def scale_bounds_from_output_config(raw: Any) -> tuple[float | None, float | None]:
@@ -179,31 +233,21 @@ def resolve_trace_scoring(
     ineligible: list[TraceScoringIneligible] = []
     for ev, version in live_evaluators:
         name = ev.get("name") or ev["uuid"]
+        mapping = ev.get("trace_variables") or {}
+        variables = (version or {}).get("variables") or []
         evaluator_type = ev.get("evaluator_type")
         if evaluator_type not in (required_evaluator_type, TOOL_CALL_EVALUATOR_TYPE):
+            reason = IneligibleReason.WRONG_TYPE
+        elif not version:
+            reason = IneligibleReason.NO_LIVE_VERSION
+        elif any(v["name"] not in mapping for v in variables):
+            reason = IneligibleReason.DECLARES_VARIABLES
+        else:
+            reason = None
+        if reason is not None:
             ineligible.append(
                 TraceScoringIneligible(
-                    evaluator_uuid=ev["uuid"],
-                    name=name,
-                    reason=IneligibleReason.WRONG_TYPE,
-                )
-            )
-            continue
-        if not version:
-            ineligible.append(
-                TraceScoringIneligible(
-                    evaluator_uuid=ev["uuid"],
-                    name=name,
-                    reason=IneligibleReason.NO_LIVE_VERSION,
-                )
-            )
-            continue
-        if version.get("variables"):
-            ineligible.append(
-                TraceScoringIneligible(
-                    evaluator_uuid=ev["uuid"],
-                    name=name,
-                    reason=IneligibleReason.DECLARES_VARIABLES,
+                    evaluator_uuid=ev["uuid"], name=name, reason=reason
                 )
             )
             continue
@@ -221,6 +265,9 @@ def resolve_trace_scoring(
                     "system_prompt": version.get("system_prompt") or "",
                     "output_config": version.get("output_config"),
                     "evaluator_version_id": version["uuid"],
+                    "trace_variables": {
+                        v["name"]: mapping[v["name"]] for v in variables
+                    },
                 },
             )
         )
@@ -297,6 +344,9 @@ class BatchEvaluators:
     evaluation_type: TraceScorableEvaluationType
     hydrated: list[dict[str, Any]]
     has_tool_call_evaluator: bool
+    # Linked evaluators of a fitting type with a variable no trace part was
+    # chosen for, each as {uuid, evaluator_type}.
+    unconfigured: list[dict[str, Any]] = field(default_factory=list)
 
 
 def resolve_batch_evaluators(
@@ -318,6 +368,7 @@ def resolve_batch_evaluators(
     resolution = resolve_trace_scoring(agent.get("interaction_type"), live)
     if resolution.evaluation_type is None:
         return "unsupported_interaction_type"
+    types = {ev["uuid"]: ev.get("evaluator_type") for ev, _ in live}
     # An agent with no usable evaluator still resolves, so each trace settles
     # with its own skip reason.
     return BatchEvaluators(
@@ -326,6 +377,11 @@ def resolve_batch_evaluators(
         has_tool_call_evaluator=any(
             is_tool_call_evaluator(ev) for ev, _ in live
         ),
+        unconfigured=[
+            {"uuid": item.evaluator_uuid, "evaluator_type": types[item.evaluator_uuid]}
+            for item in resolution.ineligible
+            if item.reason == IneligibleReason.DECLARES_VARIABLES
+        ],
     )
 
 
@@ -344,6 +400,32 @@ def trace_has_tool_call(trace: dict[str, Any]) -> bool:
 
 def trace_has_reply(trace: dict[str, Any]) -> bool:
     return not is_blank(_trace_output(trace).get("response"))
+
+
+def trace_evaluators(
+    trace: dict[str, Any], hydrated: list[dict[str, Any]]
+) -> tuple[list[dict[str, Any]], list[dict[str, str]]]:
+    """The evaluators this trace can be judged by, each carrying its values, and
+    one entry for each variable the trace has no value for. An evaluator missing
+    any value is left out."""
+    included: list[dict[str, Any]] = []
+    missing: list[dict[str, str]] = []
+    for ev in hydrated:
+        sources = ev.get("trace_variables") or {}
+        values = {
+            name: trace_variable_value(trace, source)
+            for name, source in sources.items()
+        }
+        gaps = [
+            {"evaluator_uuid": ev["uuid"], "variable": name, "source": sources[name]}
+            for name, value in values.items()
+            if value is None
+        ]
+        if gaps:
+            missing.extend(gaps)
+        else:
+            included.append({**ev, "variable_values": values})
+    return included, missing
 
 
 def build_dataset_item(
@@ -771,6 +853,27 @@ def _settle_or_defer_terminal(
         )
 
 
+def _settle_completed_or_defer(
+    run: dict[str, Any], scores: list[dict[str, Any]], *,
+    now: str, rng: random.Random | None, max_attempts: int,
+) -> None:
+    """A settle failure (a busy write, say) must not raise through the batch:
+    the run would stay `processing`, invisible to the attempt ceiling until its
+    lease expires, and strand every run after it."""
+    from db import settle_trace_eval_run_completed
+
+    try:
+        settle_trace_eval_run_completed(
+            run["uuid"], scores, now=now, attempts=run.get("attempts"),
+        )
+    except Exception as exc:
+        logger.exception("trace-scoring: settling run %s raised", run["uuid"])
+        _swallow_settle(
+            _defer_or_fail, run, now=now, error=str(exc), rng=rng,
+            max_attempts=max_attempts,
+        )
+
+
 def _prepare_claimed_run(run: dict[str, Any], now: str) -> PreparedRun | None:
     """Settle everything a claimed run can be settled by without a judge call."""
     from db import get_trace, settle_trace_eval_run_terminal, trace_scoring_skip_reason
@@ -794,6 +897,14 @@ def _prepare_claimed_run(run: dict[str, Any], now: str) -> PreparedRun | None:
     if trace is None:
         skip(TraceEvalSettleSkipReason.TRACE_DELETED)
         return None
+    if run.get("only_evaluators"):
+        from db import get_previous_unconfigured_evaluators
+
+        run = {
+            **run,
+            "only_evaluators": json.loads(run["only_evaluators"]),
+            "previous_unconfigured": get_previous_unconfigured_evaluators(run["uuid"]),
+        }
     return PreparedRun(run=run, trace=trace)
 
 
@@ -814,7 +925,10 @@ def process_claimed_runs(
     time would write a backoff `available_at` that is already in the past.
     """
     import provider_keys
-    from db import settle_trace_eval_run_completed, settle_trace_eval_run_terminal
+    from db import (
+        set_trace_eval_run_missing_values,
+        settle_trace_eval_run_terminal,
+    )
 
     prepare_now = now or utc_now()
     prepared: list[PreparedRun] = []
@@ -866,20 +980,49 @@ def process_claimed_runs(
     for item in prepared:
         tool_call, reply = trace_has_tool_call(item.trace), trace_has_reply(item.trace)
         fitting = evaluators_fitting_row(evaluators.hydrated, tool_call, reply)
-        if fitting:
-            scorable.append(replace(
-                item, evaluators=fitting, is_tool_call=tool_call,
-            ))
+        only = item.run.get("only_evaluators")
+        if only:
+            # A rescore with only_evaluators judges only the listed evaluators. The run
+            # already holds the previous run's scores for the rest.
+            fitting = [ev for ev in fitting if ev["uuid"] in only]
+            judged = {ev["uuid"] for ev in fitting}
+            unconfigured = [
+                ev for ev in item.run["previous_unconfigured"] if ev not in judged
+            ]
         else:
-            _settle_or_defer_terminal(
-                item.run,
-                reason=(
-                    "no_tool_call_evaluator"
-                    if tool_call and not reply and not evaluators.has_tool_call_evaluator
-                    else "no_usable_evaluators"
+            unconfigured = [
+                ev["uuid"]
+                for ev in evaluators_fitting_row(evaluators.unconfigured, tool_call, reply)
+            ]
+        included, missing = trace_evaluators(item.trace, fitting)
+        if missing or unconfigured:
+            _swallow_settle(
+                lambda run: set_trace_eval_run_missing_values(
+                    run["uuid"], missing, unconfigured,
+                    attempts=run.get("attempts"),
                 ),
-                now=prepare_now, rng=rng, max_attempts=max_attempts,
+                item.run,
             )
+        if included:
+            scorable.append(
+                replace(item, evaluators=included, is_tool_call=tool_call)
+            )
+            continue
+        if only:
+            _settle_completed_or_defer(
+                item.run, [], now=prepare_now, rng=rng, max_attempts=max_attempts,
+            )
+            continue
+        if fitting:
+            reason = TraceEvalSettleSkipReason.MISSING_TRACE_VALUES.value
+        elif tool_call and not reply and not evaluators.has_tool_call_evaluator:
+            reason = "no_tool_call_evaluator"
+        else:
+            reason = "no_usable_evaluators"
+        _settle_or_defer_terminal(
+            item.run, reason=reason, now=prepare_now, rng=rng,
+            max_attempts=max_attempts,
+        )
     prepared = scorable
     if not prepared:
         return
@@ -940,22 +1083,9 @@ def process_claimed_runs(
                 rng=rng, max_attempts=max_attempts,
             )
             continue
-        try:
-            settle_trace_eval_run_completed(
-                item.run["uuid"], scores, now=settle_now,
-                attempts=item.run.get("attempts"),
-            )
-        except Exception as exc:
-            # A settle failure (a busy write, say) must not raise through the
-            # batch: the run would stay `processing` -- invisible to the attempt
-            # ceiling until its lease expires -- and strand every run after it.
-            logger.exception(
-                "trace-scoring: settling run %s raised", item.run["uuid"]
-            )
-            _swallow_settle(
-                _defer_or_fail, item.run, now=settle_now, error=str(exc),
-                rng=rng, max_attempts=max_attempts,
-            )
+        _settle_completed_or_defer(
+            item.run, scores, now=settle_now, rng=rng, max_attempts=max_attempts,
+        )
 
 
 def claim_and_score_batch(
