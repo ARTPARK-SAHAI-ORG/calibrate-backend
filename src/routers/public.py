@@ -54,11 +54,7 @@ from db import (
 from provider_keys import provider_env
 from provider_status import PROVIDER_ENV_VARS
 from routers.agents import _sanitize_headers
-from routers.traces import (
-    TraceFeedbackResponse,
-    TraceFeedbackUpdate,
-    rescore_for_new_feedback_comment,
-)
+from routers.traces import TraceFeedbackResponse, TraceFeedbackUpdate
 from auth_utils import get_optional_user_id
 from routers.org_limits import daily_message_limit, effective_limits, record_limit_hit
 from shared_enums import DEFAULT_AGENT_INTERACTION_TYPE, EvaluatorType
@@ -1517,5 +1513,4 @@ def set_public_agent_chat_feedback(
         or not set_trace_feedback(agent["org_uuid"], trace_uuid, body.is_correct, body.comment)
     ):
         raise _chat_error(404, "not_found")
-    rescore_for_new_feedback_comment(agent["org_uuid"], trace, body)
     return {"feedback": get_trace(agent["org_uuid"], trace_uuid)["feedback"]}

@@ -11658,13 +11658,8 @@ def create_trace_rescore_run(
     trace_uuid: str,
     agent_id: str,
     max_scored_traces: Optional[int],
-    only_evaluators: Optional[List[str]] = None,
 ) -> Tuple[Optional[str], Optional[str]]:
     """Queue one more scoring run for a stored trace, claimable at once.
-
-    With `only_evaluators`, a trace whose latest run completed is scored again
-    by those evaluators alone, on a copy of that run's scores. A skipped or
-    failed one is scored again by every evaluator as usual.
 
     A trace whose latest run was skipped or failed is scored again by every
     evaluator. One whose latest run completed is scored again only by the
@@ -11691,12 +11686,7 @@ def create_trace_rescore_run(
             conn.rollback()
             return None, "open_run"
         only: Optional[List[str]] = None
-        if only_evaluators is not None and status == "completed":
-            if not only_evaluators:
-                conn.rollback()
-                return None, "not_retryable"
-            only = only_evaluators
-        elif status == "completed":
+        if status == "completed":
             only = _newly_eligible_evaluators(
                 agent_id, json.loads(latest["unconfigured_evaluators"] or "[]")
             )
