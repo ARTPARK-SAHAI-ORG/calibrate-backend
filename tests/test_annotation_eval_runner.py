@@ -325,8 +325,8 @@ def test_is_tool_call_row():
     assert runner.is_tool_call_row(
         {"payload": {"actual_tool_calls": [{"tool": "t", "arguments": {}}]}}
     )
-    # Text output present → False, even with tool calls alongside.
-    assert not runner.is_tool_call_row(
+    # Tool calls beside a reply still count: both kinds judge that row.
+    assert runner.is_tool_call_row(
         {"payload": {"agent_response": "hi", "tool_calls": [{"tool": "t"}]}}
     )
     assert not runner.is_tool_call_row({"payload": {"output": "o"}})
@@ -554,34 +554,53 @@ def test_build_llm_tool_call_row_rejects_calls_that_are_not_a_list(calls):
         _llm_tool_row(**calls)
 
 
-def test_build_llm_reply_row_is_unchanged_beside_a_tool_call_evaluator():
-    tool_calls = [{"tool": "t"}]
-    assert runner._build_llm_dataset(
+def _llm_reply_with_calls(evaluators):
+    history = [{"role": "assistant", "content": "", "tool_calls": [CALL_X]}]
+    return runner._build_llm_dataset(
         [
             {
                 "uuid": "r",
                 "payload": {
-                    "chat_history": [
-                        {"role": "assistant", "content": "", "tool_calls": [CALL_X]}
-                    ],
+                    "chat_history": history,
                     "agent_response": "hi",
-                    "tool_calls": tool_calls,
+                    "tool_calls": [CALL_Y],
                 },
             }
         ],
-        [REPLY_EV, TOOL_EV],
-    ) == [
+        evaluators,
+    )
+
+
+def test_build_llm_reply_with_tool_calls_goes_to_both_kinds():
+    assert _llm_reply_with_calls([REPLY_EV, TOOL_EV]) == [
         {
             "test_case": {
                 "id": "r",
-                "history": [
-                    {"role": "assistant", "content": "", "tool_calls": [CALL_X]}
-                ],
-                "evaluation": {"type": "response", "criteria": [{"name": "Reply judge"}]},
+                "history": [{"role": "assistant", "content": "", "tool_calls": [CALL_X]}],
+                "evaluation": {
+                    "type": "tool_call_judge",
+                    "criteria": [{"name": "Reply judge"}, {"name": "Tool judge"}],
+                },
             },
-            "output": {"response": "hi", "tool_calls": tool_calls},
+            "output": {"response": "hi", "tool_calls": [CALL_Y]},
         }
     ]
+
+
+def test_build_llm_reply_with_tool_calls_and_only_a_reply_evaluator_still_sends_the_calls():
+    [row] = _llm_reply_with_calls([REPLY_EV])
+    assert row["test_case"]["evaluation"] == {
+        "type": "tool_call_judge", "criteria": [{"name": "Reply judge"}],
+    }
+    assert row["output"] == {"response": "hi", "tool_calls": [CALL_Y]}
+
+
+def test_build_llm_blank_reply_with_tool_calls_goes_to_the_tool_call_evaluator_only():
+    out = runner._build_llm_dataset(
+        [{"uuid": "r", "payload": {"chat_history": [], "agent_response": " \n", "tool_calls": [CALL_X]}}],
+        [REPLY_EV, TOOL_EV],
+    )
+    assert out[0]["test_case"]["evaluation"]["criteria"] == [{"name": "Tool judge"}]
 
 
 def test_build_llm_mixed_task_gives_each_row_only_its_evaluators():
@@ -637,6 +656,34 @@ def test_build_llm_general_tool_call_row_carries_its_calls():
             "expected_tool_calls": [CALL_Y],
         }
     ]
+
+
+def test_build_llm_general_reply_with_calls_and_only_a_reply_evaluator_still_sends_the_calls():
+    [row] = runner._build_llm_general_dataset(
+        [{"uuid": "r", "payload": {"input": "find x", "output": "found", "tool_calls": [CALL_X]}}],
+        [REPLY_EV],
+    )
+    assert row["evaluators"] == ["Reply judge"]
+    assert row["tool_calls"] == [CALL_X]
+
+
+def test_build_llm_general_test_built_row_with_a_reply_goes_to_both_kinds():
+    [row] = runner._build_llm_general_dataset(
+        [
+            {
+                "uuid": "tc",
+                "payload": {
+                    "input": "find x",
+                    "output": "I cannot",
+                    "actual_tool_calls": [],
+                    "expected_tool_calls": [CALL_Y],
+                },
+            }
+        ],
+        [REPLY_EV, TOOL_EV],
+    )
+    assert row["evaluators"] == ["Reply judge", "Tool judge"]
+    assert row["tool_calls"] == [] and row["expected_tool_calls"] == [CALL_Y]
 
 
 def test_build_llm_general_tool_call_row_without_output_sends_an_empty_one():

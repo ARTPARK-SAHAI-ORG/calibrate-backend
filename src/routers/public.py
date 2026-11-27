@@ -968,10 +968,10 @@ def _build_annotation_job_payload(
     identity is included in both modes — the viewer is meant to see *whose*
     labels they're looking at.
 
-    Each item carries `is_tool_call` (stamped by `get_job_items`): true when
-    the row's agent output is a tool call rather than text. The form draws
-    tool-call evaluators only on those rows and every other evaluator only on
-    the rest, pairing this flag against each entry's `evaluator_type`."""
+    Each item carries `is_tool_call` and `has_reply` (stamped by
+    `get_job_items`). The form draws a tool-call evaluator on a row with
+    `is_tool_call`, and any other evaluator on a row without it or with
+    `has_reply`, the rule `evaluator_fits_row` applies."""
     task = get_annotation_task(job["task_id"])
     if not task:
         raise HTTPException(status_code=404, detail="Job not found")
@@ -1154,10 +1154,9 @@ def upsert_public_annotations(
         update_annotation_job_status(job["uuid"], "in_progress")
 
     # Auto-complete: every required slot each item actually shows must have a
-    # row, and every item must carry at least one judgement. A tool-call row
-    # shows only tool-call evaluators, every other row shows every other
-    # evaluator (required_evaluator_ids_for_item). The second condition is
-    # what makes a job whose evaluators are all optional still
+    # row, and every item must carry at least one judgement. Each row shows
+    # the evaluators `required_evaluator_ids_for_item` fits to it. The second
+    # condition is what makes a job whose evaluators are all optional still
     # require the annotator to visit each item, rather than completing on the
     # first save. We re-check on every save (including post-completion edits)
     # so the status remains accurate: removing a required answer moves a

@@ -687,6 +687,8 @@ def test_public_annotation_job_marks_tool_call_items(client):
     by_uuid = {it["uuid"]: it for it in body["items"]}
     assert by_uuid[item_uuids[0]]["is_tool_call"] is True
     assert by_uuid[item_uuids[1]]["is_tool_call"] is False
+    assert by_uuid[item_uuids[0]]["has_reply"] is False
+    assert by_uuid[item_uuids[1]]["has_reply"] is True
     # The evaluator entries carry the type the browser pairs the flag against.
     assert [ev["evaluator_type"] for ev in body["evaluators"]] == [
         "tool-call",
@@ -706,6 +708,16 @@ def test_mixed_job_completes_on_the_evaluator_each_row_shows(client):
     # there leaves the row's own tool-call slot open.
     assert _save(client, token, tool_item, llm_ev) == "in_progress"
     assert _save(client, token, tool_item, tool_ev) == "completed"
+
+
+def test_a_reply_with_tool_calls_needs_both_kinds_to_complete(client):
+    token, item_uuids, evaluator_uuids = _labelling_job(
+        client, [{**_TOOL_CALL_PAYLOAD, "agent_response": "Booked."}], ["tool-call", "llm"]
+    )
+    tool_ev, llm_ev = evaluator_uuids
+
+    assert _save(client, token, item_uuids[0], tool_ev) == "in_progress"
+    assert _save(client, token, item_uuids[0], llm_ev) == "completed"
 
 
 def test_tool_call_answer_does_not_substitute_on_a_text_row(client):

@@ -14,6 +14,7 @@ from utils import (
     TOOL_CALL_EVALUATOR_TYPE,
     env_int,
     is_tool_call_row,
+    item_has_reply,
     trace_scoring_enabled,
     utc_now,
 )
@@ -2203,10 +2204,10 @@ DEFAULT_PROMPTS_BY_PURPOSE: Dict[str, Dict[str, Any]] = {
         "system_prompt": (
             "You are a highly accurate evaluator evaluating the tool calls an agent "
             "made in answer to a user's message.\n\n"
-            "You will be given the `Chat history` between a user and an agent, the "
-            "`Reply from the agent` if it gave one, and the `Tool calls made by the "
-            "agent` in answer to the last message in the `Chat history`. Calls inside "
-            "the `Chat history` were made earlier and are context only.\n\n"
+            "You will be given the `Chat history` between a user and an agent, and "
+            "the `Tool calls made by the agent` in answer to the last message in the "
+            "`Chat history`. Calls inside the `Chat history` were made earlier and "
+            "are context only.\n\n"
             "You need to evaluate if the `Tool calls made by the agent` are right for "
             "what the user needs, judged against the conversation as it stands at the "
             "end, including any correction the user made:\n\n"
@@ -3578,14 +3579,10 @@ _TOOL_CALL_EVALUATOR_OLD_DESCRIPTION = (
     "Records whether the agent made the right tool call, judged by a person"
 )
 
-# Mirrors `is_tool_call_row` in utils.py: an expected_tool_calls or
-# actual_tool_calls list, whatever it holds and whatever the agent produced;
-# otherwise no agent_response / output text and a non-empty tool_calls list.
-# A reply may be a string or `{content, ...}`; the CASE reads an object's text
-# the way `message_text` does, and an object with no `content` falls through.
-# Repeated here in SQL — unlike the Python function, this one runs inside a
-# migration's WHERE clause over the whole table, so it can't call out per row.
-# The json_type guards are load-bearing: json_array_length raises "malformed
+# Mirrors `is_tool_call_row` in utils.py for a WHERE clause, which cannot
+# call it per row: an expected_tool_calls or actual_tool_calls list, whatever
+# it holds, or a non-empty tool_calls list. A reply beside them does not matter.
+# The json_type guard is load-bearing: json_array_length raises "malformed
 # JSON" on a value that is not an array, and one such payload anywhere in the
 # table would abort init_db and stop the service from starting.
 # test_db.py::test_tool_call_item_condition_matches_python_rule checks the two
@@ -3594,15 +3591,7 @@ _TOOL_CALL_ITEM_CONDITION = """
     json_type(i.payload, '$.expected_tool_calls') = 'array'
     OR json_type(i.payload, '$.actual_tool_calls') = 'array'
     OR (
-        COALESCE(
-            CASE WHEN json_type(i.payload, '$.agent_response') = 'object'
-                 THEN json_extract(i.payload, '$.agent_response.content')
-                 ELSE json_extract(i.payload, '$.agent_response') END,
-            CASE WHEN json_type(i.payload, '$.output') = 'object'
-                 THEN json_extract(i.payload, '$.output.content')
-                 ELSE json_extract(i.payload, '$.output') END,
-            '') = ''
-        AND json_type(i.payload, '$.tool_calls') = 'array'
+        json_type(i.payload, '$.tool_calls') = 'array'
         AND json_array_length(json_extract(i.payload, '$.tool_calls')) > 0
     )
 """
@@ -9815,10 +9804,11 @@ def _parse_annotation_item_row(row: sqlite3.Row) -> Dict[str, Any]:
         except (TypeError, ValueError):
             pass
     item["metadata"] = _metadata_list(item.get("metadata"))
-    # Every item read stamps `is_tool_call` here, at the one place both
+    # Every item read stamps these here, at the one place both
     # `get_annotation_item` and `get_annotation_items_for_task` parse a row,
     # so no caller has to remember to do it.
     item["is_tool_call"] = is_tool_call_row(item)
+    item["has_reply"] = item_has_reply(item)
     return item
 
 

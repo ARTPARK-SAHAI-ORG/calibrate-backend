@@ -515,6 +515,57 @@ def test_a_mixed_batch_scores_each_trace_with_only_its_own_evaluators():
     assert [s["evaluator_uuid"] for s in db.get_trace_eval_scores(tool_run)] == [tool_ev[0]]
 
 
+def test_a_trace_with_a_reply_and_tool_calls_is_scored_by_both_kinds():
+    org = _org()
+    agent = _agent(org)
+    reply_ev = _evaluator(org, name="Correctness")
+    tool_ev = _evaluator(org, name="Tools", evaluator_type="tool-call")
+    output = {**_TOOL_ONLY, "response": "Week 14."}
+    run = _run(org, agent, _trace(org, agent, output=output), [reply_ev, tool_ev])
+
+    invoke = _invoker(
+        [_judged(run, {"Correctness": {"match": True}, "Tools": {"match": False}})]
+    )
+    ts.claim_and_score_batch(now=_at(1000), invoke=invoke)
+
+    [item] = invoke.captured["dataset"]
+    assert item["test_case"]["evaluation"]["type"] == "tool_call_judge"
+    assert sorted(_criteria_names(item)) == ["Correctness", "Tools"]
+    assert item["output"] == output
+    flags = {ev["name"]: ev.get("tool_call") for ev in invoke.captured["config"]["evaluators"]}
+    assert flags == {"Correctness": None, "Tools": True}
+    assert _status(run) == RunStatus.COMPLETED.value
+    assert {s["evaluator_uuid"] for s in db.get_trace_eval_scores(run)} == {
+        reply_ev[0], tool_ev[0],
+    }
+
+
+def test_a_reply_and_tool_calls_with_only_a_reply_evaluator_still_sends_the_calls():
+    org = _org()
+    agent = _agent(org)
+    output = {**_TOOL_ONLY, "response": "Week 14."}
+    run = _run(org, agent, _trace(org, agent, output=output), [_evaluator(org, name="Correctness")])
+
+    invoke = _invoker([_judged(run, {"Correctness": {"match": True}})])
+    ts.claim_and_score_batch(now=_at(1000), invoke=invoke)
+
+    [item] = invoke.captured["dataset"]
+    assert item["test_case"]["evaluation"]["type"] == "tool_call_judge"
+    assert item["output"]["tool_calls"]
+    assert _status(run) == RunStatus.COMPLETED.value
+
+
+def test_a_blank_reply_with_tool_calls_and_only_reply_evaluators_is_skipped():
+    org = _org()
+    agent = _agent(org)
+    output = {**_TOOL_ONLY, "response": " \n\t"}
+    run = _run(org, agent, _trace(org, agent, output=output), [_evaluator(org)])
+
+    ts.claim_and_score_batch(now=_at(1000), invoke=_never_invoked)
+
+    assert db.get_trace_eval_run(run)["error"] == "no_tool_call_evaluator"
+
+
 def test_a_tool_call_trace_with_only_reply_evaluators_is_skipped_without_a_judge_call():
     org = _org()
     agent = _agent(org)

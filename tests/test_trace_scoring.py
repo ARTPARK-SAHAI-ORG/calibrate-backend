@@ -147,47 +147,59 @@ _NAMED_CALL = {"tool": "get_schedule", "arguments": {"weeks": 14}}
 
 
 @pytest.mark.parametrize(
-    ("output", "expected"),
+    ("output", "tool_call", "reply"),
     [
-        ({"tool_calls": [_NAMED_CALL]}, True),
-        ({"response": None, "tool_calls": [_NAMED_CALL]}, True),
-        ({"response": "", "tool_calls": [_NAMED_CALL]}, True),
-        ({"response": "   ", "tool_calls": [_NAMED_CALL]}, True),
-        ({"response": "\n", "tool_calls": [_NAMED_CALL]}, True),
-        ({"response": " \t\r\n", "tool_calls": [_NAMED_CALL]}, True),
-        ({"response": "\tok\n", "tool_calls": [_NAMED_CALL]}, False),
-        ({"response": "Week 14.", "tool_calls": [_NAMED_CALL]}, False),
-        ({"response": "", "tool_calls": [{"tool": ""}]}, False),
-        ({"response": "", "tool_calls": [{"arguments": {}}]}, False),
-        ({"response": "", "tool_calls": [{"tool": ""}, _NAMED_CALL]}, True),
-        ({"response": "", "tool_calls": []}, False),
-        ({"response": "", "tool_calls": None}, False),
-        ({"response": "Week 14."}, False),
+        ({"tool_calls": [_NAMED_CALL]}, True, False),
+        ({"response": None, "tool_calls": [_NAMED_CALL]}, True, False),
+        ({"response": "", "tool_calls": [_NAMED_CALL]}, True, False),
+        ({"response": "   ", "tool_calls": [_NAMED_CALL]}, True, False),
+        ({"response": "\n", "tool_calls": [_NAMED_CALL]}, True, False),
+        ({"response": " \t\r\n", "tool_calls": [_NAMED_CALL]}, True, False),
+        ({"response": "\tok\n", "tool_calls": [_NAMED_CALL]}, True, True),
+        ({"response": "Week 14.", "tool_calls": [_NAMED_CALL]}, True, True),
+        ({"response": "", "tool_calls": [{"tool": ""}]}, False, False),
+        ({"response": "", "tool_calls": [{"arguments": {}}]}, False, False),
+        ({"response": "", "tool_calls": [{"tool": ""}, _NAMED_CALL]}, True, False),
+        ({"response": "", "tool_calls": []}, False, False),
+        ({"response": "", "tool_calls": None}, False, False),
+        ({"response": "Week 14."}, False, True),
     ],
 )
-def test_is_tool_call_trace_agrees_with_the_output_type_filter(output, expected):
-    assert ts.is_tool_call_trace({"output": output}) is expected
+def test_trace_tool_call_and_reply_agree_with_the_output_type_filter(
+    output, tool_call, reply
+):
+    trace = {"output": output}
+    assert ts.trace_has_tool_call(trace) is tool_call
+    assert ts.trace_has_reply(trace) is reply
     with sqlite3.connect(":memory:") as conn:
         in_sql = conn.execute(
             f"SELECT {db.TRACE_OUTPUT_TYPE_SQL['tool_call']} FROM (SELECT ? AS output)",
             (json.dumps(output),),
         ).fetchone()[0]
-    assert bool(in_sql) is expected
+    assert bool(in_sql) is (tool_call and not reply)
 
 
 @pytest.mark.parametrize("trace", [{}, {"output": None}, {"output": "text"}])
-def test_is_tool_call_trace_reads_a_trace_with_no_output_object(trace):
-    assert ts.is_tool_call_trace(trace) is False
+def test_trace_with_no_output_object_has_no_tool_call_or_reply(trace):
+    assert ts.trace_has_tool_call(trace) is False
+    assert ts.trace_has_reply(trace) is False
 
 
-def test_each_trace_gets_only_the_evaluators_for_its_kind():
+def test_each_trace_gets_the_evaluators_for_what_it_holds():
     tool_ev = {"uuid": "t", "evaluator_type": "tool-call"}
     llm_ev = {"uuid": "l", "evaluator_type": "llm"}
-    tool_trace = {"output": {"tool_calls": [_NAMED_CALL]}}
-    reply_trace = {"output": {"response": "Week 14.", "tool_calls": [_NAMED_CALL]}}
     evs = [tool_ev, llm_ev]
-    assert ts.evaluators_fitting_row(evs, ts.is_tool_call_trace(tool_trace)) == [tool_ev]
-    assert ts.evaluators_fitting_row(evs, ts.is_tool_call_trace(reply_trace)) == [llm_ev]
+
+    def fitting(output):
+        trace = {"output": output}
+        return ts.evaluators_fitting_row(
+            evs, ts.trace_has_tool_call(trace), ts.trace_has_reply(trace)
+        )
+
+    assert fitting({"tool_calls": [_NAMED_CALL]}) == [tool_ev]
+    assert fitting({"response": " \n", "tool_calls": [_NAMED_CALL]}) == [tool_ev]
+    assert fitting({"response": "Week 14.", "tool_calls": [_NAMED_CALL]}) == evs
+    assert fitting({"response": "Week 14."}) == [llm_ev]
 
 
 def test_a_conversation_tool_call_trace_goes_to_the_tool_call_judge():

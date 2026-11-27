@@ -79,9 +79,11 @@ from annotation_eval_runner import (
 from annotation_metrics import KappaFields
 from utils import (
     utc_now,
+    evaluator_fits_row,
     evaluators_fitting_row,
     is_tool_call_evaluator,
     is_tool_call_row,
+    item_has_reply,
     job_slot,
     TaskStatus,
     AnnotationTaskTypeLiteral,
@@ -586,7 +588,7 @@ class AnnotationTaskResponse(BaseModel):
     # empty (use the dedicated /items and /jobs endpoints for those views).
     items: List[Dict[str, Any]] = Field(
         default=[],
-        description="The task's items, each with its agreement stats and an `is_tool_call` flag that says whether the item is judged on tool calls rather than a text reply. You get these when you fetch one task by ID, not when you list tasks",
+        description="The task's items, each with its agreement stats, an `is_tool_call` flag that says whether tool-call evaluators judge the item, and a `has_reply` flag that says whether it has a text reply. Any other evaluator judges an item without `is_tool_call` or with `has_reply`. You get these when you fetch one task by ID, not when you list tasks",
     )
     jobs: List[Dict[str, Any]] = Field(
         default=[],
@@ -1064,7 +1066,7 @@ class AnnotationItemPayload(BaseModel):
     )
     evaluator_results: Optional[Dict[str, Any]] = Field(
         None,
-        description="Evaluator scores to record, keyed by evaluator ID. Each evaluator ID must be linked to the task. Put the score in `value`, a bool for binary or a number within the scale for rating, with optional `reasoning` and `version_number`. Omit `version_number` to record against the evaluator's live version. An item recording a tool call takes only tool-call evaluators, and every other item takes any evaluator that is not a tool-call evaluator",
+        description="Evaluator scores to record, keyed by evaluator ID. Each evaluator ID must be linked to the task. Put the score in `value`, a bool for binary or a number within the scale for rating, with optional `reasoning` and `version_number`. Omit `version_number` to record against the evaluator's live version. An item recording a tool call takes tool-call evaluators, and an item with a text reply or no tool call takes any other evaluator",
         examples=[{_EXAMPLE_ID: {"value": True, "reasoning": "meets the bar", "version_number": 2}}],
     )
 
@@ -1222,17 +1224,19 @@ def _resolve_evaluator_results(
                 raise HTTPException(
                     status_code=400, detail=f"Evaluator {ev_id} not found"
                 )
-            row_is_tool_call = is_tool_call_row({"payload": payloads[idx]})
-            if is_tool_call_evaluator(evaluator) != row_is_tool_call:
+            row = {"payload": payloads[idx]}
+            if not evaluator_fits_row(
+                evaluator, is_tool_call_row(row), item_has_reply(row)
+            ):
                 raise HTTPException(
                     status_code=400,
                     detail=(
-                        f"items[{idx}] records a tool call, which only a "
+                        f"Evaluator {ev_id} scores tool calls, and items[{idx}] "
+                        f"records no tool call."
+                        if is_tool_call_evaluator(evaluator)
+                        else f"items[{idx}] records only a tool call, which only a "
                         f"tool-call evaluator scores. Evaluator {ev_id} is not a "
                         f"tool-call evaluator."
-                        if row_is_tool_call
-                        else f"Evaluator {ev_id} scores tool calls, and items[{idx}] "
-                        f"records a reply rather than a tool call."
                     ),
                 )
             version_number = raw.get("version_number")
@@ -1650,10 +1654,9 @@ def bulk_create_items(
         # Auto-complete contract: every REQUIRED slot an item actually shows
         # must have a row, and every item must carry at least one judgement
         # (so a job whose evaluators are all optional still needs the
-        # annotator to visit each item). A tool-call row shows only tool-call
-        # evaluators, every other row shows every other evaluator
-        # (required_evaluator_ids_for_item). Same source of truth as the
-        # public-form auto-complete path — see also the snapshot-mismatch gate
+        # annotator to visit each item). Each row shows the evaluators
+        # `required_evaluator_ids_for_item` fits to it. Same source of truth as
+        # the public-form auto-complete path — see also the snapshot-mismatch gate
         # above, which measures against the full snapshot instead.
         required_evaluators = [ev for ev in job_evaluators if not ev["is_optional"]]
         items_fully_annotated = all(
@@ -2385,7 +2388,9 @@ def start_evaluator_run(
     # Rows no chosen evaluator pairs with never enter the run, and evaluators
     # no chosen row pairs with are not recorded as having run.
     fits = {
-        it["uuid"]: evaluators_fitting_row(resolved, is_tool_call_row(it))
+        it["uuid"]: evaluators_fitting_row(
+            resolved, is_tool_call_row(it), item_has_reply(it)
+        )
         for it in items
     }
     items = [it for it in items if fits[it["uuid"]]]
@@ -2395,8 +2400,9 @@ def start_evaluator_run(
             status_code=400,
             detail=(
                 "None of the selected evaluators fit the chosen items. "
-                "Tool-call items need a tool-call evaluator, and every other "
-                "item needs an evaluator that is not a tool-call evaluator."
+                "Items with tool calls need a tool-call evaluator, and items "
+                "with a reply or no tool calls need an evaluator that is not a "
+                "tool-call evaluator."
             ),
         )
     paired = {ev["uuid"] for it in items for ev in fits[it["uuid"]]}
