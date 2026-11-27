@@ -11691,10 +11691,7 @@ def create_trace_rescore_run(
             conn.rollback()
             return None, "open_run"
         only: Optional[List[str]] = None
-        if only_evaluators is not None and status == "completed":
-            if not only_evaluators:
-                conn.rollback()
-                return None, "not_retryable"
+        if only_evaluators and status == "completed":
             only = only_evaluators
         elif status == "completed":
             only = _newly_eligible_evaluators(

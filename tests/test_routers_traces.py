@@ -5147,6 +5147,39 @@ def test_feedback_comment_with_no_evaluator_reading_it_scores_nothing(client):
     assert len(_runs_for_trace(trace)) == 1
 
 
+def test_feedback_comment_read_by_an_evaluator_that_cannot_score_scores_nothing(client):
+    h, agent_id = _signup_with_agent(client)
+    trace, _, _ = _scored_with_one_unconfigured(client, h, agent_id)
+    # It reads the comment, but judges a basic agent, not this one.
+    r = client.post(
+        "/evaluators",
+        json={
+            "name": f"ev-{uuid.uuid4().hex[:6]}",
+            "evaluator_type": "llm-general",
+            "output_type": "binary",
+            "version": {
+                "judge_model": "openai/gpt-4.1",
+                "system_prompt": "{{why}}",
+                "variables": [{"name": "why"}],
+            },
+        },
+        headers=h,
+    )
+    assert r.status_code == 200, r.text
+    other = r.json()["uuid"]
+    r = client.post(
+        f"/agents/{agent_id}/evaluators",
+        json={"evaluator_ids": [other]},
+        headers=h,
+    )
+    assert r.status_code == 200, r.text
+    _map_variables(client, h, agent_id, other, {"why": "feedback.comment"})
+
+    _put_feedback(client, h, trace, is_correct=False, comment="It should say 5 mg")
+
+    assert len(_runs_for_trace(trace)) == 1
+
+
 def test_changed_or_cleared_feedback_comment_scores_nothing(client):
     h, agent_id = _signup_with_agent(client)
     trace, _, why = _scored_trace_with_comment_evaluator(client, h, agent_id)

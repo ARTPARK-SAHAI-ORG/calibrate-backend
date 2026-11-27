@@ -70,6 +70,7 @@ from trace_scoring import (
     MAX_METADATA_KEY_CHARS,
     TraceEvalRunStatus,
     evaluator_trace_sources,
+    resolve_trace_scoring,
     trace_evaluators,
 )
 from routers.tests import (
@@ -1974,10 +1975,19 @@ def rescore_for_new_feedback_comment(
         agent = get_agent(trace["agent_id"])
         if not agent or not trace_scoring_enabled(agent):
             return
+        live = resolve_live_evaluators(agent["uuid"])
+        # Only the ones scoring can use, or the run copies the old scores.
+        eligible = {
+            item.evaluator_uuid
+            for item in resolve_trace_scoring(
+                agent.get("interaction_type"), live
+            ).eligible
+        }
         dependent = [
             ev["uuid"]
-            for ev, version in resolve_live_evaluators(agent["uuid"])
-            if "feedback.comment" in evaluator_trace_sources(ev, version)[0].values()
+            for ev, version in live
+            if ev["uuid"] in eligible
+            and "feedback.comment" in evaluator_trace_sources(ev, version)[0].values()
         ]
         if dependent:
             create_trace_rescore_run(
