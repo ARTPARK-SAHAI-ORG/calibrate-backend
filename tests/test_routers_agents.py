@@ -2196,3 +2196,69 @@ def test_preview_writes_nothing(client):
         r = _preview(client, h, agent_uuid, trace, {"criteria": "input"})
     assert r.status_code == 200, r.text
     assert snapshot() == before
+
+
+def _values(client, h, agent_uuid, trace_ids, evaluator_ids):
+    return client.post(
+        f"/agents/{agent_uuid}/trace-variables/values",
+        json={"trace_ids": trace_ids, "evaluator_ids": evaluator_ids},
+        headers=h,
+    )
+
+
+def test_values_reads_each_trace_for_each_evaluator_in_request_order(client):
+    h = _signup(client)
+    agent_uuid, ev = _agent_with_variable_evaluator(client, h)
+    _put_trace_variables(client, h, agent_uuid, ev, {"criteria": "feedback.comment"})
+    plain = _create_evaluator(client, h)
+    client.post(f"/agents/{agent_uuid}/evaluators", json={"evaluator_ids": [plain]}, headers=h)
+    with_comment = _post_trace(
+        client, h, agent_uuid, feedback={"is_correct": False, "comment": " Too much "}
+    )
+    without = _post_trace(client, h, agent_uuid)
+
+    r = _values(client, h, agent_uuid, [without, with_comment], [ev, plain])
+
+    assert r.status_code == 200, r.text
+    entry = {"variable": "criteria", "source": "feedback.comment"}
+    assert r.json() == {
+        "items": [
+            {"trace_id": without, "evaluator_id": ev, "values": [{**entry, "value": None}]},
+            {"trace_id": without, "evaluator_id": plain, "values": []},
+            {
+                "trace_id": with_comment,
+                "evaluator_id": ev,
+                "values": [{**entry, "value": "Too much"}],
+            },
+            {"trace_id": with_comment, "evaluator_id": plain, "values": []},
+        ]
+    }
+
+
+def test_values_refuses_an_evaluator_unlinked_or_without_sources(client):
+    h = _signup(client)
+    agent_uuid, ev = _agent_with_variable_evaluator(client, h)
+    unlinked = _create_evaluator(client, h)
+    trace = _post_trace(client, h, agent_uuid)
+
+    r = _values(client, h, agent_uuid, [trace], [ev, unlinked])
+
+    assert r.status_code == 400, r.text
+    unset, not_linked = r.json()["detail"]["evaluators"]
+    assert unset.endswith("for: criteria.")
+    assert unlinked in not_linked
+
+
+def test_values_lists_traces_it_cannot_find(client):
+    h = _signup(client)
+    agent_uuid, ev = _agent_with_variable_evaluator(client, h)
+    _put_trace_variables(client, h, agent_uuid, ev, {"criteria": "input"})
+    sibling = _create_agent(client, h, f"pv-{uuid.uuid4().hex[:6]}")["uuid"]
+    own = _post_trace(client, h, agent_uuid)
+    sibling_trace = _post_trace(client, h, sibling)
+    unknown = str(uuid.uuid4())
+
+    r = _values(client, h, agent_uuid, [own, sibling_trace, unknown], [ev])
+
+    assert r.status_code == 404, r.text
+    assert r.json()["detail"]["trace_ids"] == [sibling_trace, unknown]

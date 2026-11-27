@@ -1262,9 +1262,10 @@ def test_convert_response_requires_evaluators(client):
     assert client.get("/tests", headers=h).json()["total"] == 0
 
 
-def test_convert_rejects_an_evaluator_with_variables(client):
+def test_convert_rejects_an_evaluator_whose_variables_are_not_chosen_on_the_agent(client):
     h, agent_id = _signup_with_agent(client)
-    evaluator = _create_evaluator(
+    unmapped = _unmapped_evaluator(client, h, agent_id, ["criteria"])
+    unlinked = _create_evaluator(
         client, h, variables=[{"name": "criteria", "description": "What to judge"}]
     )
     trace = _post_trace(client, h, _payload(agent_id, _mid()))
@@ -1274,17 +1275,128 @@ def test_convert_rejects_an_evaluator_with_variables(client):
         h,
         trace_ids=[trace["uuid"]],
         type="response",
-        evaluators=[evaluator["uuid"]],
+        evaluators=[unmapped, unlinked["uuid"]],
     )
     assert res.status_code == 400, res.text
     detail = res.json()["detail"]
     assert set(detail) == {"error", "evaluators"}
-    assert len(detail["evaluators"]) == 1
-    message = detail["evaluators"][0]
-    # The parenthesised list names the actual variable, and the static tail
-    # also contains the word "criteria", so match the parenthesised form.
-    assert evaluator["name"] in message and "(criteria)" in message
+    not_chosen, not_linked = detail["evaluators"]
+    assert _ev_name(client, h, unmapped) in not_chosen
+    assert not_chosen.endswith("for: criteria.")
+    assert unlinked["name"] in not_linked and "is not linked" in not_linked
     assert client.get("/tests", headers=h).json()["total"] == 0
+
+
+def _variable_values_by_test(test_uuids):
+    from db import get_evaluators_for_test
+
+    return [
+        {ev["uuid"]: ev.get("variable_values") for ev in get_evaluators_for_test(t)}
+        for t in test_uuids
+    ]
+
+
+def _two_traces_with_mapped_evaluator(client, h, agent_id, second_metadata):
+    mapped = _mapped_evaluator(
+        client, h, agent_id, {"nurse": "metadata.expert", "why": "feedback.comment"}
+    )
+    plain = _create_evaluator(client, h)["uuid"]
+    first = _post_trace(
+        client,
+        h,
+        _payload(
+            agent_id,
+            _mid(),
+            metadata=[{"key": "expert", "value": "Week 14"}],
+            feedback=_INCORRECT,
+        ),
+    )
+    second = _post_trace(
+        client,
+        h,
+        _payload(agent_id, _mid(), metadata=second_metadata, feedback=_INCORRECT),
+    )
+    return mapped, plain, first["uuid"], second["uuid"]
+
+
+def test_convert_stores_the_values_each_trace_holds(client):
+    h, agent_id = _signup_with_agent(client)
+    mapped, plain, first, second = _two_traces_with_mapped_evaluator(
+        client, h, agent_id, [{"key": "expert", "value": "Week 10"}]
+    )
+
+    res = _convert(
+        client, h, trace_ids=[first, second], type="response", evaluators=[mapped, plain]
+    )
+    assert res.status_code == 200, res.text
+    assert res.json()["warnings"] is None
+    assert _variable_values_by_test(res.json()["test_uuids"]) == [
+        {mapped: {"nurse": "Week 14", "why": "Wrong date"}, plain: None},
+        {mapped: {"nurse": "Week 10", "why": "Wrong date"}, plain: None},
+    ]
+
+
+def test_convert_with_select_all_stores_the_values(client):
+    h, agent_id = _signup_with_agent(client)
+    mapped, _, first, second = _two_traces_with_mapped_evaluator(
+        client, h, agent_id, [{"key": "expert", "value": "Week 10"}]
+    )
+
+    res = _convert(
+        client, h, select_all=True, agent_id=agent_id, type="response", evaluators=[mapped]
+    )
+    assert res.status_code == 200, res.text
+    values = sorted(
+        v[mapped]["nurse"] for v in _variable_values_by_test(res.json()["test_uuids"])
+    )
+    assert values == ["Week 10", "Week 14"]
+
+
+def test_convert_refuses_a_trace_missing_a_value_and_names_it(client):
+    h, agent_id = _signup_with_agent(client)
+    mapped, plain, first, second = _two_traces_with_mapped_evaluator(
+        client, h, agent_id, []
+    )
+
+    res = _convert(
+        client, h, trace_ids=[first, second], type="response", evaluators=[mapped, plain]
+    )
+    assert res.status_code == 400, res.text
+    detail = res.json()["detail"]
+    assert set(detail) == {"message", "missing"}
+    assert detail["missing"] == [
+        {
+            "trace_id": second,
+            "evaluator_id": mapped,
+            "evaluator_name": _ev_name(client, h, mapped),
+            "variable": "nurse",
+            "source": "metadata.expert",
+        }
+    ]
+    assert client.get("/tests", headers=h).json()["total"] == 0
+
+
+def test_convert_skip_missing_values_leaves_the_evaluator_off_only_those_tests(client):
+    h, agent_id = _signup_with_agent(client)
+    mapped, plain, first, second = _two_traces_with_mapped_evaluator(
+        client, h, agent_id, []
+    )
+
+    res = _convert(
+        client,
+        h,
+        trace_ids=[first, second],
+        type="response",
+        evaluators=[mapped, plain],
+        skip_missing_values=True,
+    )
+    assert res.status_code == 200, res.text
+    assert _variable_values_by_test(res.json()["test_uuids"]) == [
+        {mapped: {"nurse": "Week 14", "why": "Wrong date"}, plain: None},
+        {plain: None},
+    ]
+    (warning,) = res.json()["warnings"]
+    assert _ev_name(client, h, mapped) in warning and "1 of the 2" in warning
 
 
 def test_convert_rejects_an_evaluator_the_workspace_cannot_see(client):

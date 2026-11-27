@@ -103,6 +103,7 @@ TRACE_VARIABLE_SOURCES = (
     "labels",
     "conversation_id",
     "message_id",
+    "feedback.comment",
 )
 METADATA_SOURCE_PREFIX = "metadata."
 MAX_METADATA_KEY_CHARS = 256
@@ -112,6 +113,19 @@ def is_trace_variable_source(source: str) -> bool:
     return source in TRACE_VARIABLE_SOURCES or (
         source.startswith(METADATA_SOURCE_PREFIX)
         and 0 < len(source) - len(METADATA_SOURCE_PREFIX) <= MAX_METADATA_KEY_CHARS
+    )
+
+
+def evaluator_trace_sources(
+    evaluator: dict[str, Any], live_version: dict[str, Any] | None
+) -> tuple[dict[str, str], list[str]]:
+    """The saved trace source for each variable the live version declares, and
+    the declared variables with no source saved on the agent."""
+    mapping = evaluator.get("trace_variables") or {}
+    declared = [v["name"] for v in (live_version or {}).get("variables") or []]
+    return (
+        {name: mapping[name] for name in declared if name in mapping},
+        [name for name in declared if name not in mapping],
     )
 
 
@@ -136,6 +150,8 @@ def trace_variable_value(trace: dict[str, Any], source: str) -> str | None:
         value = ", ".join(trace.get("labels") or [])
     elif source in ("conversation_id", "message_id"):
         value = trace.get(source)
+    elif source == "feedback.comment":
+        value = ((trace.get("feedback") or {}).get("comment") or "").strip()
     elif is_trace_variable_source(source):
         key = source[len(METADATA_SOURCE_PREFIX) :]
         value = next(

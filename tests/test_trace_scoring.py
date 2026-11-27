@@ -823,6 +823,7 @@ _FULL_TRACE = {
     "labels": ["prod", "hindi"],
     "conversation_id": "conv-1",
     "message_id": "msg-1",
+    "feedback": {"is_correct": False, "comment": "  Should say fluids.  ", "at": None},
     "metadata": [
         {"key": "expert_answer", "value": "Give fluids."},
         {"key": "expert_answer", "value": "A later entry."},
@@ -841,6 +842,7 @@ _FULL_TRACE = {
         ("labels", "prod, hindi"),
         ("conversation_id", "conv-1"),
         ("message_id", "msg-1"),
+        ("feedback.comment", "Should say fluids."),
         ("metadata.expert_answer", "Give fluids."),
         ("metadata.a.b", "dotted"),
         ("metadata.blank", None),
@@ -865,6 +867,7 @@ def test_trace_variable_value_keeps_a_string_input():
         "labels",
         "conversation_id",
         "message_id",
+        "feedback.comment",
         "metadata.expert_answer",
     ],
 )
@@ -872,8 +875,10 @@ def test_trace_variable_value_keeps_a_string_input():
     "trace",
     [
         {},
+        {"feedback": {"is_correct": True, "comment": None}},
         {
             "input": "  ",
+            "feedback": {"is_correct": False, "comment": "   "},
             "output": {"response": " \n", "tool_calls": []},
             "labels": [],
             "conversation_id": None,

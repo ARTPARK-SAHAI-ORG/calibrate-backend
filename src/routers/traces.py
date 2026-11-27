@@ -36,6 +36,7 @@ from db import (
     create_trace_rescore_run,
     create_trace_with_eval_run,
     get_agent,
+    resolve_live_evaluators,
     get_all_tests_summary,
     get_evaluator_versions_by_uuids,
     get_evaluators_by_uuids,
@@ -65,7 +66,12 @@ from shared_enums import (
     EvaluatorType,
     required_agent_interaction_type,
 )
-from trace_scoring import MAX_METADATA_KEY_CHARS, TraceEvalRunStatus
+from trace_scoring import (
+    MAX_METADATA_KEY_CHARS,
+    TraceEvalRunStatus,
+    evaluator_trace_sources,
+    trace_evaluators,
+)
 from routers.tests import (
     EvaluatorRef,
     _validate_evaluators,
@@ -1263,7 +1269,11 @@ class ConvertTracesToTestsRequest(_TraceSelection):
     )
     evaluators: Optional[List[EvaluatorUuid]] = Field(
         None,
-        description="IDs of the evaluators to link to every created test. **Required for `response` and `general`**, rejected for `tool_call`, which compares the recorded calls instead of judging. Each evaluator must match the created tests: `llm` for `response`, `llm-general` for `general`. Each must also judge on its prompt alone, with no `{{placeholder}}` variables to fill in",
+        description="IDs of the evaluators to link to every created test. **Required for `response` and `general`**, rejected for `tool_call`, which compares the recorded calls instead of judging. Each evaluator must match the created tests: `llm` for `response`, `llm-general` for `general`. An evaluator with `{{placeholder}}` variables needs a part of a trace chosen for each of them on the agent of every trace, and each test keeps the values its own trace holds",
+    )
+    skip_missing_values: bool = Field(
+        False,
+        description="Leave an evaluator off the tests whose trace holds no value for one of its variables. Omit to create nothing when any trace is missing a value",
     )
     accept_any_arguments: bool = Field(
         False,
@@ -1289,10 +1299,10 @@ class ConvertTracesToTestsResponse(BaseModel):
 
 def _resolve_evaluators(
     evaluator_uuids: List[str], org_uuid: str, test_type: str
-) -> List[Dict[str, Any]]:
-    """Validate as POST /tests does, then reject any evaluator whose prompt needs
-    variables filled in. A conversion has no per-test place to supply them, and a
-    half-rendered prompt would reach the judge with `{{placeholders}}` intact."""
+) -> Tuple[List[Dict[str, Any]], Dict[str, str], List[str]]:
+    """Validate as POST /tests does and reject an evaluator with no live version.
+    Returns the refs, each evaluator's name, and the evaluators whose live
+    version declares variables, which `_evaluator_refs_per_trace` fills."""
     refs = _validate_evaluators(
         [EvaluatorRef(evaluator_uuid=u) for u in evaluator_uuids], org_uuid, test_type
     )
@@ -1303,21 +1313,22 @@ def _resolve_evaluators(
     versions = get_evaluator_versions_by_uuids([v for v in live_ids.values() if v])
 
     problems: List[str] = []
+    names: Dict[str, str] = {}
+    with_variables: List[str] = []
     for evaluator_uuid in evaluator_uuids:
         # Deleted between the two reads: report it rather than raising KeyError.
         name = (evaluators.get(evaluator_uuid) or {}).get("name", evaluator_uuid)
+        names[evaluator_uuid] = name
         version = versions.get(live_ids[evaluator_uuid] or "")
         if not version:
             problems.append(f'Evaluator "{name}" has no live version to run.')
-            continue
-        variables = version.get("variables") or []
-        if variables:
-            declared = ", ".join(v["name"] for v in variables)
-            problems.append(
-                f'Evaluator "{name}" defines variables ({declared}). Converting '
-                "traces cannot fill them in. Use an evaluator with no variables, "
-                "or add a version with the criteria written into the prompt."
-            )
+        elif version.get("variables"):
+            with_variables.append(evaluator_uuid)
+    _raise_evaluator_problems(problems)
+    return refs, names, with_variables
+
+
+def _raise_evaluator_problems(problems: List[str]) -> None:
     if problems:
         raise HTTPException(
             status_code=400,
@@ -1326,7 +1337,81 @@ def _resolve_evaluators(
                 "evaluators": problems,
             },
         )
-    return refs
+
+
+def _evaluator_refs_per_trace(
+    traces: List[Dict[str, Any]],
+    refs: List[Dict[str, Any]],
+    names: Dict[str, str],
+    with_variables: List[str],
+    skip_missing_values: bool,
+) -> Dict[str, List[Dict[str, Any]]]:
+    """Each trace's evaluator refs. An evaluator with variables carries the values
+    its trace holds, read through the parts of a trace chosen on that trace's
+    agent, and is left off a trace missing one when `skip_missing_values` is on."""
+    if not with_variables:
+        return {trace["uuid"]: refs for trace in traces}
+    sources_by_agent: Dict[str, List[Dict[str, Any]]] = {}
+    problems: List[str] = []
+    for agent_id in dict.fromkeys(trace["agent_id"] for trace in traces):
+        linked = {ev["uuid"]: (ev, v) for ev, v in resolve_live_evaluators(agent_id)}
+        agent_name = (get_agent(agent_id) or {}).get("name") or agent_id
+        sources_by_agent[agent_id] = []
+        for evaluator_uuid in with_variables:
+            name = names[evaluator_uuid]
+            if evaluator_uuid not in linked:
+                problems.append(
+                    f'Evaluator "{name}" is not linked to agent "{agent_name}". Link '
+                    "it and choose which part of a trace fills each of its variables."
+                )
+                continue
+            sources, unset = evaluator_trace_sources(*linked[evaluator_uuid])
+            if unset:
+                problems.append(
+                    f'Evaluator "{name}" has no part of a trace chosen on agent '
+                    f'"{agent_name}" for: {", ".join(unset)}.'
+                )
+            sources_by_agent[agent_id].append(
+                {"uuid": evaluator_uuid, "trace_variables": sources}
+            )
+    _raise_evaluator_problems(problems)
+
+    out: Dict[str, List[Dict[str, Any]]] = {}
+    missing: List[Dict[str, str]] = []
+    for trace in traces:
+        included, gaps = trace_evaluators(trace, sources_by_agent[trace["agent_id"]])
+        values = {ev["uuid"]: ev["variable_values"] for ev in included}
+        missing.extend(
+            {
+                "trace_id": trace["uuid"],
+                "evaluator_id": gap["evaluator_uuid"],
+                "evaluator_name": names[gap["evaluator_uuid"]],
+                "variable": gap["variable"],
+                "source": gap["source"],
+            }
+            for gap in gaps
+        )
+        out[trace["uuid"]] = [
+            {**ref, "variable_values": values[ref["evaluator_id"]]}
+            if ref["evaluator_id"] in values
+            else ref
+            for ref in refs
+            if ref["evaluator_id"] not in with_variables
+            or ref["evaluator_id"] in values
+        ]
+    if missing and not skip_missing_values:
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "message": (
+                    "Some traces hold no value for an evaluator's variables, so "
+                    "nothing was created. Pass skip_missing_values to leave the "
+                    "evaluator off those tests"
+                ),
+                "missing": missing,
+            },
+        )
+    return out
 
 
 # How many offending IDs a conflict lists before it just reports the count. A
@@ -1416,8 +1501,10 @@ def convert_traces_to_tests(
             detail="A name can only be given when converting exactly one trace, and cannot be blank",
         )
     resolved_refs: List[Dict[str, Any]] = []
+    evaluator_names: Dict[str, str] = {}
+    with_variables: List[str] = []
     if payload.evaluators:
-        resolved_refs = _resolve_evaluators(
+        resolved_refs, evaluator_names, with_variables = _resolve_evaluators(
             list(dict.fromkeys(payload.evaluators)), ctx.org_uuid, payload.type
         )
 
@@ -1506,6 +1593,14 @@ def convert_traces_to_tests(
                 ),
             )
 
+    refs_by_trace = _evaluator_refs_per_trace(
+        traces,
+        resolved_refs,
+        evaluator_names,
+        with_variables,
+        payload.skip_missing_values,
+    )
+
     existing_names = {t["name"] for t in get_all_tests_summary(org_uuid=ctx.org_uuid)}
     names = _dedupe_test_names(
         [name or _test_name_for_trace(trace) for trace in traces], existing_names
@@ -1556,7 +1651,9 @@ def convert_traces_to_tests(
     unlinked: List[str] = []
     unlinked_uuids: List[str] = []
     kept: List[Tuple[str, str]] = []
+    refs_by_test: Dict[str, List[Dict[str, Any]]] = {}
     for trace, test_uuid, db_test in zip(traces, test_uuids, db_tests):
+        refs_by_test[test_uuid] = refs_by_trace[trace["uuid"]]
         agent_id = trace["agent_id"]
         if agent_id not in agents_seen:
             found = get_agent(agent_id)
@@ -1598,8 +1695,10 @@ def convert_traces_to_tests(
     unjudged: List[str] = []
     if resolved_refs:
         for test_uuid, name in kept:
+            if not refs_by_test[test_uuid]:
+                continue
             try:
-                set_test_evaluators(test_uuid, resolved_refs)
+                set_test_evaluators(test_uuid, refs_by_test[test_uuid])
             except Exception as e:
                 unjudged.append(name)
                 logger.warning(f"Failed to link evaluators to test {test_uuid}: {e}")
@@ -1609,6 +1708,18 @@ def convert_traces_to_tests(
             f"{len(kept)} new tests: {_test_names_line(unjudged)}. Open each one "
             "on the agent's Tests tab and add the evaluators again."
         )
+    for evaluator_uuid in with_variables:
+        left_off = [
+            name
+            for test_uuid, name in kept
+            if all(r["evaluator_id"] != evaluator_uuid for r in refs_by_test[test_uuid])
+        ]
+        if left_off:
+            warnings.append(
+                f'Evaluator "{evaluator_names[evaluator_uuid]}" was left off '
+                f"{len(left_off)} of the {len(kept)} new tests, because their traces "
+                f"hold no value for its variables: {_test_names_line(left_off)}."
+            )
 
     return {
         "created": len(kept),
